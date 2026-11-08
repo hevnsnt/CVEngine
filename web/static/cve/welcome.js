@@ -2,6 +2,9 @@
 // Step 1 asks only what a discovery needs (organization, project, ONE seed domain) and starts it in the background; steps 2 to 4 are answered
 // while it runs; step 5 shows it building, then opens the dashboard with the findings. Everything is saved on the server step by step, so the
 // page resumes where you left it from any browser, and what you typed is kept in this tab until it is saved.
+import { readyToFetch } from '/staticfiles/cve/ai-models-logic.js';
+import { autoLoad, connectionStatus, modelPicker, newSource } from '/staticfiles/cve/ai-models.js';
+
 const root = document.getElementById('wizard');
 const csrf = root.querySelector('[name=csrfmiddlewaretoken]').value;
 const stepBox = document.getElementById('step');
@@ -300,23 +303,49 @@ const steps = {
       const pickField = field('Provider', pick, 'Many vendors issue keys that start with sk- (OpenAI, DeepSeek and others), so choose the one this key belongs to: the key is sent only there.');
       pickField.style.display = 'none';
       const detect = () => api('POST', '/cve/api/setup/detect', { key: key.value }).catch(() => ({}));
+      // The model is a drop-down filled from the provider (the same component as Settings > AI model), loaded as soon as the key is known.
+      let detected = '';
+      let selectable = [];
+      const source = newSource();
+      const providerNow = () => pick.value || detected || (state.ai.connected ? state.ai.provider : '');
+      const context = () => {
+        const p = providerNow();
+        const ready = p ? readyToFetch({ provider: p, typedKey: key.value, hasKey: !!state.ai.connected, baseUrl: '', keyless: [], needsUrl: [], sameAsSaved: state.ai.provider === p }) : { ok: false, needsKey: true };
+        return { provider: p, baseUrl: '', selectable, label: NAMES[p] || 'the provider', needsKey: !!ready.needsKey, needsAddress: false };
+      };
+      const read = () => {
+        const c = context();
+        const ready = c.provider ? readyToFetch({ provider: c.provider, typedKey: key.value, hasKey: !!state.ai.connected, baseUrl: '', keyless: [], needsUrl: [], sameAsSaved: state.ai.provider === c.provider }) : { ok: false };
+        return { ok: !!ready.ok, provider: c.provider, api_key: key.value.trim(), base_url: '' };
+      };
+      const modelPick = modelPicker({ source, context, job: 'default', saved: '' });
+      const status = connectionStatus(source, context);
+      const loader = autoLoad(source, read, [{ el: pick }]);
+      if (state.ai.connected) loader.ask(true);
+      api('GET', '/cve/api/settings/ai').then((cfg) => { selectable = cfg.selectable || []; modelPick.draw(); }).catch(() => {});
       let t;
       key.addEventListener('input', () => {
         clearTimeout(t);
         t = setTimeout(async () => {
-          if (!key.value.trim()) { pickField.style.display = 'none'; return; }
+          if (!key.value.trim()) { pickField.style.display = 'none'; detected = ''; loader.ask(true); return; }
           const r = await detect();
           pickField.style.display = r.provider ? 'none' : '';
+          detected = r.provider || '';
           if (r.provider) pick.value = '';
           hint.textContent = r.provider ? `That looks like an ${NAMES[r.provider]} key.`
             : r.ambiguous ? 'More than one vendor issues keys like this one. Choose the provider below.' : 'We do not recognize that key. Choose the provider below, or pick one in Settings.';
+          loader.ask(false);
         }, 250);
       });
       const kf = el('div', 'field'); kf.append(el('label', '', 'API key', { for: 'ai-key' }), key, hint); key.id = 'ai-key';
-      holder.append(card('ai', 'Connect an AI model', 'It reads the CVE feed, checks your inventory, and writes and runs checks.', [kf, pickField], async () => {
+      const mf = el('div', 'field'); modelPick.select.id = 'ai-model'; mf.append(el('label', '', 'Model', { for: 'ai-model' }), modelPick.wrap, status.node);
+      holder.append(card('ai', 'Connect an AI model', 'It reads the CVE feed, checks your inventory, and writes and runs checks.', [kf, pickField, mf], async () => {
         if (!key.value.trim()) throw new Error('Paste a key, or choose "Skip".');
         if (!pick.value && !(await detect()).provider) { pickField.style.display = ''; throw new Error('Choose which provider this key belongs to. Nothing was sent anywhere.'); }
-        const r = await api('POST', '/cve/api/setup/save', { key: key.value, provider: pick.value || undefined });
+        if (modelPick.error) { modelPick.focus(); throw new Error(modelPick.error); }
+        const needsPick = selectable.includes(providerNow()) && !modelPick.value;
+        if (needsPick) { modelPick.focus(); throw new Error(`${NAMES[providerNow()] || 'This provider'} serves many models: choose one.`); }
+        const r = await api('POST', '/cve/api/setup/save', { key: key.value, provider: pick.value || undefined, model: modelPick.value || undefined });
         key.value = '';
         if (r.needs_model) hint.textContent = `Connected to ${NAMES[r.provider] || r.provider}. Choose its model in Settings > AI model, then turn it on.`;
         state.ai = { connected: !r.needs_model, provider: r.provider };

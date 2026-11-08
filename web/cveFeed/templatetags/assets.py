@@ -47,3 +47,29 @@ def importmap():
     imports = {static(f'cve/{n}'): asset(f'cve/{n}') for n in names}
     body = json.dumps({'imports': imports}).replace('</', '<\\/')
     return mark_safe(f'<script type="importmap">{body}</script>')
+
+
+# The first rules a page needs, inlined in <head> BEFORE the stylesheet link, so a stylesheet that arrives late (a slow or lossy link, a CDN
+# revalidation) can never leave the page showing an unsized glyph or a layout that jumps when it lands. Rules of equal specificity in cve.css
+# come later and win, so this is only a floor. It holds layout-neutral rules and no design decision of its own: every colour is the SAME custom
+# property cve.css defines, with that property's value as the fallback (web/tests/test_critical_style.py fails if a fallback drifts from cve.css),
+# and the sizes mirror cve.css (--rail 260px from 1024px, --tab 60px, the 20px icon).
+CRITICAL_CSS = (
+    'body{margin:0;background:var(--bg,#f4f4f5);color:var(--ink,#0a0a0b);font-family:var(--font,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif);'
+    'padding-bottom:calc(var(--tab,60px) + env(safe-area-inset-bottom,0px))}'
+    'html[data-theme="dark"] body{background:var(--bg,#0e0f11);color:var(--ink,#f2f2f4)}'
+    '.skip{position:absolute;left:-999px;top:8px}.skip:focus{left:8px}'
+    'svg{flex:none}:where(svg[viewBox="0 0 24 24"]){fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}'
+    '.rail{display:none}'
+    '.tabbar{position:fixed;left:0;right:0;bottom:0;display:flex;height:var(--tab,60px)}.tabbar>*{flex:1}'
+    '@media (min-width:1024px){body{padding-bottom:0}'
+    '.app{display:grid;grid-template-columns:var(--rail,260px) minmax(0,1fr)}'
+    '.rail{display:flex;flex-direction:column;position:sticky;top:0;height:100dvh;overflow:auto}.tabbar{display:none}}'
+    '.stage{min-width:0}'
+)
+
+
+@register.simple_tag
+def critical_style():
+    """The inline <style> block; the text is a constant with no user input, so it is safe to mark."""
+    return mark_safe(f'<style>{CRITICAL_CSS}</style>')

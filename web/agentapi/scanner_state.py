@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 CACHE_SECONDS = 15
 CACHE_KEY = 'cvengine:scanner-state:'
 INTERNAL_ONLY = ('discover',)  # internal ranges are Sentinel-only by design and have no stage that waits: never reported as waiting
+OPTIONAL_KINDS = ('openvas',)  # add-ons that are off by default: no scanner for one of these is a choice, not a fault, until something wants it
 NO_STAGE = ()  # contract kinds no server stage dispatches yet: nothing waits for them, so a Sentinel without them is not "offline" (empty since 1.4: every kind has a stage)
 
 
@@ -162,6 +163,25 @@ def skip_note(kind, now=None):
     return f'no scanner is online for {kind}; the targets stay due'
 
 
+def _wanted(kind):
+    """Whether anything is waiting for an optional add-on's scanner: a queued task of that kind, or (OpenVAS) the add-on switched on for a project or an
+    organization. A deliberately absent add-on is not a fault, so it is only worth a sentence once something asks for it."""
+    from agentapi.models import SentinelTask
+    if SentinelTask.objects.filter(kind=kind, status='queued').exists():
+        return True
+    if kind == 'openvas':
+        from cveFeed.models import OpenvasOrg, OpenvasProject, OpenvasSettings
+        return bool(OpenvasSettings.current().enabled
+                    and (OpenvasProject.objects.filter(enabled=True).exists() or OpenvasOrg.objects.filter(enabled=True).exists()))
+    return False
+
+
+def quiet_kinds(snapshot):
+    """The optional add-on kinds that no scanner ever registered for and nothing is waiting for: left out of every sentence and problem. One that was
+    registered and went offline is never quiet (it is not in ``never_seen``)."""
+    return [k for k in snapshot.get('never_seen', []) if k in OPTIONAL_KINDS and not _wanted(k)]
+
+
 def _join(kinds):
     return ', '.join(kinds)
 
@@ -196,6 +216,8 @@ def messages(snapshot=None):
     registered for; the third the kinds a live Sentinel has and the capability policy turns off on every Sentinel that has it (a setting to change, not a scanner
     to bring back)."""
     snapshot = state() if snapshot is None else snapshot
+    quiet = quiet_kinds(snapshot)
+    snapshot = {**snapshot, 'kinds': [k for k in snapshot.get('kinds', []) if k not in quiet], 'never_seen': [k for k in snapshot.get('never_seen', []) if k not in quiet]}
     never = [k for k in snapshot.get('never_seen', [])]
     paused = [k for k in snapshot.get('cooling', {}) if k in snapshot.get('kinds', [])]
     disabled = [k for k in snapshot.get('disabled', []) if k not in never and k not in paused]
@@ -218,6 +240,14 @@ def status(admin=True, snapshot=None):
     """The ``scanner`` block of the system status and the stats poll: the state plus the wording. The ``never_seen`` part describes a server setup, so it is
     for an App Admin (``admin``); anyone else sees the waiting kinds and the first sentence only."""
     snapshot = dict(state() if snapshot is None else snapshot)
+    quiet = quiet_kinds(snapshot)  # an optional add-on nobody asked for is not reported anywhere (the strip, the banner, the status)
+    if quiet:
+        snapshot['kinds'] = [k for k in snapshot['kinds'] if k not in quiet]
+        snapshot['never_seen'] = [k for k in snapshot['never_seen'] if k not in quiet]
+        snapshot['disabled'] = [k for k in snapshot.get('disabled', []) if k not in quiet]
+        if not snapshot['disabled']:
+            snapshot.pop('disabled', None)
+        snapshot['offline'] = bool(snapshot['kinds'])
     text = messages(snapshot)
     if not admin:
         snapshot['kinds'] = [k for k in snapshot['kinds'] if k not in snapshot['never_seen']]

@@ -27,7 +27,7 @@
     </div>
     <div class="field">
       <label for="model">Model <span class="note">(optional)</span></label>
-      <input id="model" placeholder="provider default" value="{{ ai_usage_model }}">
+      <div id="model-slot" data-saved="{{ ai_usage_model }}" data-connected="{% if ai_usage_connected %}1{% endif %}"></div>
     </div>
     <button class="btn" id="go" type="submit">Verify and enable</button>
     <div id="out" role="status"></div>
@@ -41,38 +41,64 @@
 </div>
 {% endblock %}
 {% block scripts %}
-<script>
-(function () {
-  var key = document.getElementById('key'), prov = document.getElementById('provider'), model = document.getElementById('model'),
-      out = document.getElementById('out'), go = document.getElementById('go'), det = document.getElementById('detected'),
-      csrf = document.querySelector('[name=csrfmiddlewaretoken]').value, t;
-  var NAMES = {anthropic: 'Anthropic', openai: 'OpenAI', openrouter: 'OpenRouter'};
-  function post(url, body) {
-    return fetch(url, {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf}, body: JSON.stringify(body)});
-  }
-  key.addEventListener('input', function () {
-    clearTimeout(t);
-    t = setTimeout(function () {
-      if (!key.value.trim()) return;
-      post('/cve/api/setup/detect', {key: key.value}).then(function (r) { return r.json(); }).then(function (d) {
-        det.textContent = d.provider ? 'Looks like an ' + NAMES[d.provider] + ' key.' : d.ambiguous ? 'More than one vendor issues keys like this one: choose the provider below, the key is sent only there.' : 'Not a recognised key format. Choose a provider below.';
-        if (d.provider && !prov.value) prov.dataset.auto = d.provider;
-      });
-    }, 250);
-  });
-  document.getElementById('f').addEventListener('submit', function (e) {
-    e.preventDefault();
-    go.disabled = true; out.className = 'msg'; out.textContent = 'Checking the key...';
-    post('/cve/api/setup/save', {key: key.value, provider: prov.value || null, model: model.value})
-      .then(function (r) { return r.json().then(function (d) { return {ok: r.ok, d: d}; }); })
-      .then(function (x) {
-        if (x.ok) { out.className = 'msg ok'; out.textContent = 'Connection verified. Loading usage…'; key.value = ''; window.location.reload(); }
-        else { out.className = 'msg err'; out.textContent = x.d.error || 'Something went wrong.'; }
-      })
-      .catch(function () { out.className = 'msg err'; out.textContent = 'Could not reach the server.'; })
-      .then(function () { go.disabled = false; });
-  });
-})();
+<script type="module">
+import { readyToFetch } from '/staticfiles/cve/ai-models-logic.js';
+import { autoLoad, connectionStatus, modelPicker, newSource } from '/staticfiles/cve/ai-models.js';
+var key = document.getElementById('key'), prov = document.getElementById('provider'), slot = document.getElementById('model-slot'),
+    out = document.getElementById('out'), go = document.getElementById('go'), det = document.getElementById('detected'),
+    csrf = document.querySelector('[name=csrfmiddlewaretoken]').value, t;
+var NAMES = {anthropic: 'Anthropic', openai: 'OpenAI', openrouter: 'OpenRouter', ollama: 'Ollama', vllm: 'vLLM', lmstudio: 'LM Studio'};
+var connected = slot.dataset.connected === '1';
+var selectable = [];
+function post(url, body) {
+  return fetch(url, {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf}, body: JSON.stringify(body)});
+}
+// The model is the shared drop-down (static/cve/ai-models.js), filled from the provider as soon as the key and provider are known.
+var source = newSource({csrf: csrf});
+var providerNow = function () { return prov.value || prov.dataset.auto || ''; };
+var context = function () {
+  var p = providerNow();
+  var ready = p ? readyToFetch({provider: p, typedKey: key.value, hasKey: connected, baseUrl: '', keyless: ['ollama', 'vllm', 'lmstudio'], needsUrl: [], sameAsSaved: true}) : {ok: false, needsKey: true};
+  return {provider: p, baseUrl: '', selectable: selectable, label: NAMES[p] || 'the provider', needsKey: !!ready.needsKey, needsAddress: false};
+};
+var read = function () {
+  var c = context();
+  var ready = c.provider ? readyToFetch({provider: c.provider, typedKey: key.value, hasKey: connected, baseUrl: '', keyless: ['ollama', 'vllm', 'lmstudio'], needsUrl: [], sameAsSaved: true}) : {ok: false};
+  return {ok: !!ready.ok, provider: c.provider, api_key: key.value.trim(), base_url: ''};
+};
+var modelPick = modelPicker({source: source, context: context, job: 'default', saved: slot.dataset.saved || ''});
+modelPick.select.id = 'model';
+var status = connectionStatus(source, context);
+slot.append(modelPick.wrap, status.node);
+var loader = autoLoad(source, read, [{el: prov}]);
+fetch('/cve/api/settings/ai', {credentials: 'same-origin'}).then(function (r) { return r.ok ? r.json() : {}; })
+  .then(function (cfg) { selectable = cfg.selectable || []; modelPick.draw(); }).catch(function () {});
+loader.ask(true);
+key.addEventListener('input', function () {
+  clearTimeout(t);
+  t = setTimeout(function () {
+    if (!key.value.trim()) { prov.dataset.auto = ''; loader.ask(true); return; }
+    post('/cve/api/setup/detect', {key: key.value}).then(function (r) { return r.json(); }).then(function (d) {
+      det.textContent = d.provider ? 'Looks like an ' + NAMES[d.provider] + ' key.' : d.ambiguous ? 'More than one vendor issues keys like this one: choose the provider below, the key is sent only there.' : 'Not a recognised key format. Choose a provider below.';
+      prov.dataset.auto = d.provider || '';
+      loader.ask(false);
+    });
+  }, 250);
+});
+document.getElementById('f').addEventListener('submit', function (e) {
+  e.preventDefault();
+  if (modelPick.error) { out.className = 'msg err'; out.textContent = modelPick.error; modelPick.focus(); return; }
+  if (selectable.indexOf(providerNow()) >= 0 && !modelPick.value) { out.className = 'msg err'; out.textContent = (NAMES[providerNow()] || 'This provider') + ' serves many models: choose one.'; modelPick.focus(); return; }
+  go.disabled = true; out.className = 'msg'; out.textContent = 'Checking the key...';
+  post('/cve/api/setup/save', {key: key.value, provider: prov.value || null, model: modelPick.value})
+    .then(function (r) { return r.json().then(function (d) { return {ok: r.ok, d: d}; }); })
+    .then(function (x) {
+      if (x.ok) { out.className = 'msg ok'; out.textContent = 'Connection verified. Loading usage\u2026'; key.value = ''; window.location.reload(); }
+      else { out.className = 'msg err'; out.textContent = x.d.error || 'Something went wrong.'; }
+    })
+    .catch(function () { out.className = 'msg err'; out.textContent = 'Could not reach the server.'; })
+    .then(function () { go.disabled = false; });
+});
 </script>
 {% if ai_usage_connected %}<script type="module" src="{% asset 'cve/ai-usage.js' %}"></script>{% endif %}
 {% endblock %}

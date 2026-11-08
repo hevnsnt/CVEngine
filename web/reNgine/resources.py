@@ -92,6 +92,12 @@ class AddressExcluded(ScannerUnavailable):
         MemoryBusy.__init__(self, f'{kind} work was not started: {refusal}')
 
 
+class ScannerReportedNothing(ScannerUnavailable):
+    """A Sentinel took the work and finished it, but its report is unusable for the address (empty, cut short, or naming other addresses
+    only). Unlike a plain ``ScannerUnavailable`` (no scanner was there), asking again at once cannot help when the scanner keeps returning
+    the same, so a caller may cap how often it asks (``cveFeed.udp_scan.MAX_EMPTY_PER_DAY``)."""
+
+
 class ScanAborted(RuntimeError):
     """The scan this work belongs to was stopped by a person; the work stops and the pipeline exits cleanly."""
 

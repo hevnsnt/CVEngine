@@ -71,9 +71,7 @@ def run_udp(runner=None, **kwargs):
 
     def try_nmap_udp(project, address, scan=None, timeout=None):
         text = runner([address], [], '20m')
-        host = next((h for h in port_inventory.parse_xml(text or '') if h.get('ip') == address), None)
-        if host is None:
-            raise ScannerUnavailable('nmap_udp', 'a Sentinel scanned the address but its report named no host for it')
+        host = udp_scan.host_from_report(text or '', address)
         return host
     with mock.patch('agentapi.sentinel_dispatch.try_nmap_udp', try_nmap_udp):
         return udp_scan.run(**kwargs)

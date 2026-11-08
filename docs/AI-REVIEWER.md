@@ -13,7 +13,7 @@ no model call for them.
 | **Operations check** | `claude-haiku-5-5` | Four times a day (by default at 03:00, 09:00, 15:00 and 21:00 UTC); it replaces the three-hourly AI assessment review of 1.3, which is retired | Reads the work queue, Sentinel load and errors, the share of scanning done locally, nuclei template freshness, AI-written templates waiting for review, failed scans and the server's own problems. It writes the admin an alert that diagnoses each problem and says what to do. It may also start a fix from a short fixed list: give idle Sentinels work, or fetch new nuclei templates. |
 
 With another provider (OpenAI, OpenRouter, vLLM, LM Studio, Ollama), both jobs use the provider's configured model unless a model is named for the
-job in **Settings > AI model > AI reviewer**.
+job in **Settings > AI model**, in the table **Which model does which job**.
 
 ## Why it exists
 
@@ -194,13 +194,22 @@ involved in that request.
 
 ## Settings
 
-**Settings > AI model > AI reviewer** (also `GET`/`PATCH /cve/api/settings/reviewer`):
+**Settings > AI model** (the reviewer's models are chosen in the table **Which model does which job**; the rest is in the **AI reviewer** card; the API is `GET`/`PUT /cve/api/settings/reviewer`, unchanged):
+
+The page has one **Connection** block (provider, API key, address, and a status line such as "Connected: 13 models available" or "Could not reach Anthropic: the key was refused") and then the table below. Every model is a drop-down filled from the provider's own list, which the page asks for when it opens and when the provider, key or address changes (`POST /cve/api/settings/ai/models`; the server uses the saved key when none is typed, never sends it to the browser, caches the list for five minutes and a failure for thirty seconds). A model that is saved but not in the list stays an option, and **Other (type a model name)...** is there for your own servers, gateways, and a list that could not be loaded. One **Save AI settings** button saves the connection, the three models and the reviewer settings.
+
+| Row | Setting | Used for | What it costs in practice |
+| --- | --- | --- | --- |
+| **Everything else** | `model` (AI model settings) | Triage of every finding, CVE match confirmation, validation and Nuclei planning, CVE guidance, template drafts. The pipeline's AI jobs run in the reviewer container but use this model. | Many small requests on every scan: most of the spend, so a cheap model. Empty: the newest cheapest model of the provider (a provider you host yourself must have one chosen). |
+| **Finding review** | `review_model` | The finding review job. | One larger request per finding, up to the daily cap: a stronger model costs the most here. |
+| **Operations check** | `ops_model` | The operations check job. | A few small requests a day. |
+
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | Enabled | on | The reviewer works only when an AI provider is configured and this is on. |
-| Review model | empty: `claude-sonnet-5-5` on Anthropic, else the provider's model | The model for finding review. |
-| Operations model | empty: `claude-haiku-5-5` on Anthropic, else the provider's model | The model for the operations check. |
+| Review model | empty: `claude-sonnet-5-5` on Anthropic, else the default model | The model for finding review. The page offers it as "Same as the default model" (on Anthropic: "Built-in: claude-sonnet-5-5", because that is what empty means there). |
+| Operations model | empty: `claude-haiku-5-5` on Anthropic, else the default model | The model for the operations check. |
 | Close false positives | on | Off: the reviewer records its verdicts and closes nothing. |
 | Reviews per day | 300 | The most findings reviewed in one UTC day. |
 | Operations hours (UTC) | 3, 9, 15, 21 | When the operations check runs. |

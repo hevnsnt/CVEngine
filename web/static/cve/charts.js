@@ -98,6 +98,8 @@ export function areaChart({
   stage.tabIndex = 0;
   stage.setAttribute("role", "img");
   const svg = s("svg", {
+    width: W,
+    height: H,
     viewBox: `0 0 ${W} ${H}`,
     preserveAspectRatio: "none",
     "aria-hidden": "true",
@@ -291,6 +293,8 @@ export function sparkline(values) {
   const W = 120;
   const H = 24;
   const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("width", String(W));
+  svg.setAttribute("height", String(H));
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.setAttribute("preserveAspectRatio", "none");
   svg.setAttribute("class", "spark");
