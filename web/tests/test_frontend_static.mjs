@@ -233,7 +233,7 @@ test('Sentinel page shows the OpenVAS idle state without a deferred list', () =>
 const settingsSource = read('sentinel-settings.js').replace(/^import[\s\S]*?from "[^"]*";\n/gm, '');
 globalThis.__sentinelUi.button = (label, _fn, cls) => sentinelEl('button', cls, label);
 globalThis.__sentinelUi.text = (value = '', attrs = {}) => Object.assign(sentinelEl('input', '', null, attrs), {value});
-const {versionBlock, newestLine, kindState, kindNote, kindChips, kindsChange, modesOffered, canReset, capProblem, defaultHint, kindsPanel} = await import(`data:text/javascript,${encodeURIComponent(
+const {versionBlock, newestLine, waitingLines, kindState, kindNote, kindChips, kindsChange, modesOffered, canReset, capProblem, defaultHint, kindsPanel} = await import(`data:text/javascript,${encodeURIComponent(
   `const {el, badge, button, text} = globalThis.__sentinelUi;\n${settingsSource}`,
 )}`);
 const buttonLabels = (node) => (node.tag === 'button' ? [node.text] : []).concat(...node.children.filter((c) => typeof c !== 'string').map(buttonLabels));
@@ -259,6 +259,20 @@ test('a card says whether the build is the newest the server saw, since when it 
   const old = versionBlock({...base, contract: {version: 1, state: 'unsupported', note: 'This scanner is older than this server needs, update it'}}, {onChange() {}});
   assert.match(sentinelText(old), /This scanner is older than this server needs, update it/);
   assert.equal(old.children.some((c) => c.cls === 'msg err ss-detail'), true);
+});
+
+test('a card says which kind waits for memory and what holds it, and a task that is still stopping', () => {
+  const base = {id: 7, name: 'CVEngine Scanner', version: 'abc1234', update: {requested_at: null}, settings: {}};
+  assert.deepEqual(waitingLines({...base, waiting: []}), []);
+  assert.deepEqual(waitingLines(base), []);
+  const lines = waitingLines({...base, waiting: [
+    {kind: 'web_screenshot', need_mb: 400, free_mb: 140, budget_mb: 1540, seconds: 840, held_by: [{task: 3534, kind: 'naabu', mb: 80, seconds: 1800}]},
+    {kind: 'naabu', task: 3534, seconds: 45, stopping: true},
+  ]});
+  assert.equal(lines.length, 2);
+  assert.equal(sentinelText(lines[0]), 'web_screenshot waiting 14 min: needs 400 MB, 140 MB free of 1540 MB, held by task 3534 naabu (80 MB, 30 min).');
+  assert.match(sentinelText(lines[1]), /Task 3534 \(naabu\) was taken back by the server and is still stopping, 45 s later/);
+  assert.match(sentinelText(versionBlock({...base, waiting: [{kind: 'web_screenshot', need_mb: 400, free_mb: 0, budget_mb: 1540, seconds: 5, held_by: []}]}, {onChange() {}})), /web_screenshot waiting 5 s: needs 400 MB/);
 });
 
 test('the Built-in chip is drawn from the live row flag, and only for the built-in scanner', () => {
