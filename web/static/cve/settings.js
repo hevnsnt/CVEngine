@@ -715,8 +715,9 @@ const sections = {
           button("Cancel approval", async () => { draw(await api("POST", "updates/cancel")); toast("Approval cancelled"); }, "btn ghost"),
         );
       } else if (["available", "dismissed"].includes(s.status)) {
-        kids.push(
-          button("Approve update", async () => {
+        // Not enough disk for this update (measured by the host): say so in plain words and keep the button off, with the reason on it
+        if (s.disk && s.disk.short) kids.push(el("p", "msg err", s.disk.text, { id: "update-disk-short", role: "alert" }));
+        const approveButton = button("Approve update", async () => {
             // the question worth asking first (which scanners run), asked by the server's facts; no question, no dialog: the button just updates
             const fresh = await api("GET", "updates");
             if (fresh.scanner_choice && fresh.scanner_choice.needs_choice) {
@@ -732,8 +733,13 @@ const sections = {
             if (!(await ask(note, { title: `Update CVEngine to ${s.latest}?`, ok: "Approve update", danger: false }))) return;
             draw(await api("POST", "updates/approve"));
             toast("Approved");
-          }),
-        );
+        });
+        if (s.disk && s.disk.short) {
+          approveButton.disabled = true;
+          approveButton.title = s.disk.text;
+          approveButton.setAttribute("aria-describedby", "update-disk-short");
+        }
+        kids.push(approveButton);
         if (s.status === "available")
           kids.push(document.createTextNode(" "), button("Dismiss", async () => { draw(await api("POST", "updates/dismiss")); }, "btn ghost"));
       }
