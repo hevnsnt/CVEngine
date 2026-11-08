@@ -769,7 +769,9 @@ def scheduler_health(request, actor):
                  f"in {WORKER_MISS_EVALUATIONS} checks in a row, and no consumer on the queue.")
         detail = ''.join([f" No reply from: {', '.join(silent)}." if silent else '',
                           f" Replied without its queue: {', '.join(without_queue)}." if without_queue else '', tried])
-        if missing:
+        if missing and not queues:  # nothing replied at all, probe after probe
+            worker_state, worker_note = 'unknown', 'No worker replied to the inspection (all busy, or none running).' + tried + active_warning
+        elif missing:
             worker_note = 'Missing or unconfirmed required queue consumers: ' + ', '.join(missing) + '.' + detail + active_warning
         else:
             worker_note = ('Required queue names were reported by workers; this does not prove scheduled tasks executed.'
