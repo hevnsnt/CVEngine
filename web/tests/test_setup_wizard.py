@@ -508,6 +508,61 @@ class PlanAndKindsTests(WizardBase):
         names = {f['id'] for f in state['families']}
         self.assertEqual(names, {'discovery', 'web', 'network', 'tls_mail', 'ssh', 'secrets', 'screenshots', 'wordpress', 'nuclei'})
 
+    def _scanner_state(self, memory):
+        with mock.patch.object(setup_flow, 'memory_gb', return_value=memory):
+            return self.c.get('/cve/api/welcome/state').json()
+
+    def _kinds(self, state):
+        return {k['kind']: k for f in state['families'] for k in f['kinds']}
+
+    def test_small_host_shows_heavy_kinds_off_with_the_reason_and_everything_else_on(self):
+        state = self._scanner_state(setup_flow.SMALL_MEMORY_GB - 0.1)
+        kinds = self._kinds(state)
+        self.assertTrue(state['small_host'])
+        self.assertEqual(state['heavy_off_reason'], setup_flow.HEAVY_OFF_REASON)
+        self.assertIn('turn on if you have the capacity', setup_flow.HEAVY_OFF_REASON)
+        for name in ('nmap_full', 'nmap_udp'):
+            self.assertFalse(kinds[name]['on'], name)
+            self.assertEqual(kinds[name]['off_reason'], setup_flow.HEAVY_OFF_REASON)
+        for name, k in kinds.items():
+            if name in setup_flow.HEAVY:
+                self.assertFalse(k['on'], name)
+            else:
+                self.assertTrue(k['on'], name)
+                self.assertEqual(k['off_reason'], '')
+        self.assertEqual(state['openvas']['enabled'], False)
+
+    def test_big_host_shows_everything_on_and_no_reason(self):
+        state = self._scanner_state(setup_flow.SMALL_MEMORY_GB)
+        self.assertFalse(state['small_host'])
+        self.assertEqual(state['heavy_off_reason'], '')
+        self.assertTrue(all(k['on'] and not k['off_reason'] for k in self._kinds(state).values()))
+        self.assertFalse(state['openvas']['enabled'])
+
+    def test_the_threshold_is_defined_once(self):
+        self.assertTrue(setup_flow.small_host(setup_flow.SMALL_MEMORY_GB - 0.1))
+        self.assertFalse(setup_flow.small_host(setup_flow.SMALL_MEMORY_GB))
+        self.assertTrue(setup_flow.small_host(None) if setup_flow.memory_gb() is None else True)
+        for memory in (1.0, 5.9, 6.0, 125.0):
+            self.assertEqual(setup_flow.suggested_off(memory) != [], setup_flow.small_host(memory))
+
+    def test_a_user_can_tick_a_heavy_kind_on_a_small_host_and_it_is_recorded_like_any_choice(self):
+        post(self.c, 'plan', {'plan': 'both'})
+        with mock.patch.object(setup_flow, 'memory_gb', return_value=2.0):
+            self.assertEqual(post(self.c, 'scanners', {'kinds': {'nmap_full': True}}).status_code, 200)
+            state = self.c.get('/cve/api/welcome/state').json()
+        self.assertEqual(SetupWizard.objects.get().data['off_kinds'], sorted(set(setup_flow.HEAVY) - {'nmap_full'}))
+        self.assertTrue(self._kinds(state)['nmap_full']['on'])
+        self.assertFalse(self._kinds(state)['nmap_udp']['on'])
+        d = self.defaults()
+        self.assertNotIn('nmap_full', d['external_kinds'])
+        self.assertEqual(d['external_kinds']['nmap_udp']['mode'], 'deny')
+
+    def test_a_user_can_tick_a_heavy_kind_off_on_a_big_host(self):
+        with mock.patch.object(setup_flow, 'memory_gb', return_value=64.0):
+            post(self.c, 'scanners', {'kinds': {'nmap_udp': False}})
+        self.assertEqual(SetupWizard.objects.get().data['off_kinds'], ['nmap_udp'])
+
     def test_every_family_kind_is_a_real_kind_and_none_is_listed_twice(self):
         kinds = setup_flow.family_kinds()
         self.assertEqual(len(kinds), len(set(kinds)))

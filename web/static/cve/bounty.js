@@ -272,12 +272,12 @@ function renderWorkbench(box, w) {
 // ------------------------------------------------------------------------------ programs
 function programFilters(state, onChange) {
   const q = text(state.q || "", { type: "search", placeholder: "Search name, handle or domain" });
-  const plat = selectOf([["", "All platforms"], ...Object.entries(PLATFORMS)], state.platform || "");
-  const pays = selectOf([["", "Any reward"], ["1", "Pays a bounty"]], state.bounty || "");
-  const harbor = selectOf([["", "Any safe harbor"], ["full", "Full safe harbor (Bugcrowd data only)"], ["any", "Full or partial (Bugcrowd data only)"]], state.harbor || "");
-  const fresh = selectOf([["", "Any age"], ["7", "New in 7 days"], ["30", "New in 30 days"]], state.new_days || "");
-  const moved = selectOf([["", "Any scope change"], ["7", "Scope changed in 7 days"], ["30", "Scope changed in 30 days"]], state.scope_days || "");
-  const sort = selectOf([["changed", "Latest scope change"], ["payout", "Highest payout"], ["scope", "Largest scope"], ["response", "Fastest first response"], ["name", "Name"]], state.sort || "changed");
+  const plat = selectOf([["", "All platforms"], ...Object.entries(PLATFORMS)], state.platform || "", "Platform");
+  const pays = selectOf([["", "Any reward"], ["1", "Pays a bounty"]], state.bounty || "", "Reward");
+  const harbor = selectOf([["", "Any safe harbor"], ["full", "Full safe harbor (Bugcrowd data only)"], ["any", "Full or partial (Bugcrowd data only)"]], state.harbor || "", "Safe harbor");
+  const fresh = selectOf([["", "Any age"], ["7", "New in 7 days"], ["30", "New in 30 days"]], state.new_days || "", "Program age");
+  const moved = selectOf([["", "Any scope change"], ["7", "Scope changed in 7 days"], ["30", "Scope changed in 30 days"]], state.scope_days || "", "Scope change");
+  const sort = selectOf([["changed", "Latest scope change"], ["payout", "Highest payout"], ["scope", "Largest scope"], ["response", "Fastest first response"], ["name", "Name"]], state.sort || "changed", "Sort by");
   const go = () => onChange({ q: q.value.trim(), platform: plat.value, bounty: pays.value, harbor: harbor.value === "any" ? "partial" : harbor.value, new_days: fresh.value, scope_days: moved.value, sort: sort.value });
   [plat, pays, harbor, fresh, moved, sort].forEach((s) => s.addEventListener("change", go));
   q.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
@@ -364,11 +364,11 @@ async function openProgram(id) {
 async function changesTab(panel) {
   const state = { days: "7" };
   const list = el("div");
-  const days = selectOf([["1", "Last day"], ["7", "Last 7 days"], ["30", "Last 30 days"], ["90", "Last 90 days"]], "7");
-  const kind = selectOf([["", "All changes"], ["asset_added", "Scope added"], ["asset_flipped", "Scope moved"], ["asset_removed", "Scope removed"], ["program_added", "New programs"], ["program_removed", "Programs removed"]], "");
-  const plat = selectOf([["", "All platforms"], ...Object.entries(PLATFORMS)], "");
-  const pays = selectOf([["", "Any reward"], ["1", "Pays a bounty"]], "");
-  const mine = selectOf([["", "All programs"], ["1", "Only programs I work"]], "");
+  const days = selectOf([["1", "Last day"], ["7", "Last 7 days"], ["30", "Last 30 days"], ["90", "Last 90 days"]], "7", "Period");
+  const kind = selectOf([["", "All changes"], ["asset_added", "Scope added"], ["asset_flipped", "Scope moved"], ["asset_removed", "Scope removed"], ["program_added", "New programs"], ["program_removed", "Programs removed"]], "", "Change type");
+  const plat = selectOf([["", "All platforms"], ...Object.entries(PLATFORMS)], "", "Platform");
+  const pays = selectOf([["", "Any reward"], ["1", "Pays a bounty"]], "", "Reward");
+  const mine = selectOf([["", "All programs"], ["1", "Only programs I work"]], "", "Programs shown");
   async function load() {
     loading(list);
     const r = await get("changes", { days: days.value, kind: kind.value, platform: plat.value, bounty: pays.value, mine: mine.value, in_scope: kind.value === "asset_added" ? "1" : "" });
@@ -430,7 +430,7 @@ function engagementCard(e, done) {
   const lab = el("label", "note"); lab.style.cssText = "display:flex;gap:8px;align-items:center";
   lab.append(auto, document.createTextNode("The policy allows automated scanning (starts discovery when I import)"));
   c.append(acts, lab);
-  const status = selectOf([["watching", "Watching"], ["active", "Active"], ["paused", "Paused"], ["done", "Done"]], e.status);
+  const status = selectOf([["watching", "Watching"], ["active", "Active"], ["paused", "Paused"], ["done", "Done"]], e.status, "Engagement status");
   status.addEventListener("change", async () => { try { await send("PATCH", `engagements/${e.id}`, { status: status.value }); done(); } catch (err) { toast(err.message, true); status.value = e.status; } });
   const notes = el("textarea", "", null, { rows: "3", maxlength: "20000", placeholder: "Notes: accounts, rules, ideas" });
   notes.value = e.notes;
@@ -586,7 +586,7 @@ async function openReport(panel, id, known) {
     r.next_states.filter((s) => !["submitted"].includes(s)).forEach((s) => acts.append(button(s === "ready" ? "Mark ready" : `Set ${STATUSES(s)}`, async () => { await save(); const x = await send("PATCH", `reports/${r.id}`, { status: s }); openReport(panel, r.id, x); }, "btn ghost sm")));
     acts.append(button("Delete draft", async () => { if (!(await ask("The draft is deleted for good.", { title: "Delete this draft?", ok: "Delete" }))) return; await api("DELETE", url(`reports/${r.id}`)); reportsTab(reset(panel)); }, "btn ghost sm"));
   } else {
-    const st = selectOf([["", "Move to..."], ...r.next_states.map((s) => [s, STATUSES(s)])], "");
+    const st = selectOf([["", "Move to..."], ...r.next_states.map((s) => [s, STATUSES(s)])], "", "Move the report to");
     const amount = text(r.bounty_amount || "", { placeholder: "Bounty amount", inputmode: "decimal" }); const cur = text(r.bounty_currency || "", { placeholder: "USD", maxlength: "8" });
     const note = text("", { placeholder: "Note for the timeline" });
     acts.append(st, button("Update", async () => { const b = {}; if (st.value) b.status = st.value; if (amount.value !== (r.bounty_amount || "")) b.bounty_amount = amount.value; b.bounty_currency = cur.value; if (note.value.trim()) b.note = note.value; const x = await send("PATCH", `reports/${r.id}`, b); openReport(panel, r.id, x); }, "btn sm"));
