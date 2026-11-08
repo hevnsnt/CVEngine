@@ -60,3 +60,30 @@ class CoolingMessageInTheStripTests(SimpleTestCase):
         line = [l for l in SCANNER.splitlines() if 'kind: "cooling"' in l][0]
         self.assertNotIn('dismissible', line)
         self.assertIn('.scannerbar .sb-cooling{', CSS)
+
+
+class WaitingForASlotNoteTests(SimpleTestCase):
+    """#530's 'Sentinel tasks are waiting for a free slot' is an info alert (cveFeed.reviewer, severity info) with the count by kind in its detail.
+    In the one strip it is a calm note, not an error: the ice (informational) style, never the fire or smoke one, and its sentence is the server's."""
+
+    def test_an_info_alert_is_drawn_in_the_calm_info_style_with_its_detail(self):
+        self.assertIn('["info", "warning", "critical"].includes(a.severity)', ALERTS)
+        self.assertIn('ab-${', ALERTS)
+        self.assertIn('a.detail', ALERTS)
+        self.assertNotIn('free slot', ALERTS + STRIP)  # the wording lives on the server only
+        info = [l for l in CSS.splitlines() if l.startswith('.scannerbar .ab-info{')]
+        self.assertEqual(len(info), 1)
+        self.assertIn('var(--ice-bg)', info[0])
+        self.assertNotIn('--fire', info[0])
+        self.assertNotIn('--smoke', info[0])
+
+    def test_only_a_critical_alert_ranks_above_a_calm_note(self):
+        self.assertIn('rank: a.severity === "critical" ? 0 : 2', ALERTS)
+
+    def test_the_server_raises_it_as_info_with_the_count_by_kind(self):
+        src = (STATIC.parent.parent / 'cveFeed' / 'reviewer.py').read_text()
+        i = src.index("'sentinel_waiting'")
+        block = src[i:i + 900]
+        self.assertIn('Sentinel tasks are waiting for a free slot', block)
+        self.assertIn("severity='info'", block)
+        self.assertIn("r['n']) + ' ' + r['kind']", block)
