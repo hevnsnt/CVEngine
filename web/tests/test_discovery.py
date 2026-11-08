@@ -594,6 +594,30 @@ class NucleiStageTests(TestCase):
 		self._pipeline(provider=Provider(), targeted_stream=targeted)
 		self.assertEqual(seen, [(['nginx', 'php'], ['high'])])  # the static tag stays, the unknown ones are gone
 
+	def test_a_model_that_answers_with_no_text_leaves_the_scan_on_the_standard_templates_and_says_why(self):
+		from reNgine import ai_providers
+		from django.core.cache import cache
+
+		from cveFeed import nuclei_templates
+		from tests.anthropic_fake import SHAPES, FakeAnthropic
+		cache.clear()  # a failed request is remembered for minutes, in the shared cache too
+		nuclei_templates._failed.clear()
+		self.addCleanup(cache.clear)
+		self.addCleanup(nuclei_templates._failed.clear)
+		seen = []
+
+		def targeted(path, **kwargs):
+			seen.append(sorted(kwargs['tags']))
+			return iter([])
+		with FakeAnthropic([SHAPES['thinking_only_max_tokens']()]) as fake, self.assertLogs('cveFeed.nuclei_templates', 'WARNING'):
+			provider = ai_providers.get_provider('anthropic', api_key='not-a-real-key', model='claude-haiku-5-5', base_url=fake.url)
+			scan, out = self._pipeline(provider=provider, targeted_stream=targeted)
+		self.assertEqual(seen, [['nginx']])  # the static table's tag: the targeted pass ran
+		scan.refresh_from_db()
+		self.assertEqual(scan.scan_status, 2)
+		names = list(AgentActivity.objects.order_by('id').values_list('message', flat=True))
+		self.assertTrue(any('The model answered with no text (it stopped at the token limit); the scan used the standard templates' in m for m in names), names)
+
 	def test_a_fire_cve_match_runs_its_template_test(self):
 		from cveFeed import nuclei_scan
 		from cveFeed.models import CVEEntry, CVEMatch

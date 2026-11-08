@@ -29,6 +29,8 @@ class Isolated(TestCase):
         patcher = mock.patch.dict(os.environ, {k: v for k, v in os.environ.items() if k not in ('CVENGINE_AI_MAX_TOKENS', 'CVENGINE_AI_REASONING')}, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.addCleanup(cache.clear)
+        self.addCleanup(nt._failed.clear)
 
 
 class ResponseShapeTests(Isolated):
