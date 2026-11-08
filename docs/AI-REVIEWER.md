@@ -181,7 +181,7 @@ Size of each system prompt, in characters (about 3.5 characters a token), before
 | `validation_plan` | 2238 | 2826 |
 | `local_check_suggestion` | 1759 | 2067 |
 | `cve_detection` | 7093 | 7468 |
-| `template_generation` | 1145 | 1588 |
+| `template_generation` | 1145 | 1581 |
 | `autotune_advisor` | 844 | 1239 |
 | `rdp_screenshot` | 160 | 554 |
 | `operations_check` (container) | 1179 | 1537 |
