@@ -117,17 +117,6 @@ def _networks_overlap(project_id, cidr):
     return exclusions.Refusal(f"{wanted} overlaps {net}, which is on the organization's do-not-scan list", entry=str(net)) if net else None
 
 
-def _lookup_names(target):
-    """The names a target only asks DNS about (``LOOKUP_KEYS``: an email-authentication name, a record read): not connected to, so an unknown address is no reason to wait."""
-    out = set()
-    for key in LOOKUP_KEYS:
-        for item in (target or {}).get(key) or []:
-            name = item.get('name') if isinstance(item, dict) else item
-            if isinstance(name, str):
-                out.add(name.strip())
-    return out
-
-
 def _refusals(project_id, values, resolved=None, unknown=()):
     """``{value: Refusal}`` for the values the rule refuses: networks (a sweep of a range) by overlap, everything else by ``address_refusals``."""
     from cveFeed import exclusions
@@ -165,8 +154,8 @@ def task_refusals(project, kind, target, host='', ips=None, resolved=None, wait_
     values = task_values(kind, target, host, ips)
     unknown = ()
     if wait_for_unknown and kind not in FINDS_NAMES and kind not in LOOKUP_ONLY:  # work that connects to a name needs its address known: a name nothing resolved yet waits for the lookup
-        lookups = _lookup_names(target)
-        unknown = {v for v in values if v not in lookups and not _is_address_like(v)}
+        stripped = {k: v for k, v in (target or {}).items() if k not in LOOKUP_KEYS}  # a name that is ALSO connected to (a TLS endpoint) stays in
+        unknown = {v for v in task_values(kind, stripped, '', ips) if not _is_address_like(v)}
     return _refusals(project_id, values, resolved, unknown=unknown)
 
 

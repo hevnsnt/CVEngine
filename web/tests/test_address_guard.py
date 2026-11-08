@@ -209,6 +209,8 @@ class Dispatch(World):
         self.assertFalse(SentinelTask.objects.exists())
         # work that only asks DNS, and the runs that find where names point, are not held back by it
         self.assertIsNone(address_guard.dispatch_refusal(self.project, 'hygiene_check', {'mail': [{'name': 'new.example.com'}]}))
+        with self.assertRaises(AddressExcluded):  # the same name as a TLS endpoint is a connection, whatever else the task asks about it
+            dispatch.dispatch_or_none(self.project, 'hygiene_check', {'tls': [{'host': 'new.example.com', 'port': 443}], 'mail': [{'name': 'new.example.com'}]}, host='new.example.com')
         self.assertIsNone(address_guard.dispatch_refusal(self.project, 'dns_resolve', {'names': ['new.example.com']}))
         self.assertIsNone(address_guard.dispatch_refusal(self.project, 'bbot_discovery', {'domain': 'new.example.com', 'scope': {'in_scope_domains': ['new.example.com']}}))
         self.host('known.example.com', OUT)  # a name that resolved somewhere else is fine
