@@ -315,6 +315,7 @@ a.cve-link{font-family:var(--mono)}
 .badge.success,.badge.fixed{background:var(--ok-bg);color:var(--ok-ink)}
 .badge.low,.badge.ice,.tier.ice{background:var(--ice-bg);color:var(--ice-ink);box-shadow:inset 0 0 0 1px var(--ring-ice)}
 .badge.queued,.badge.info,.badge.aborted{background:var(--sunk);color:var(--muted)}
+.sel .badge.queued,.sel .badge.info,.sel .badge.aborted{color:var(--ink-2)} /* the selected row re-points --muted at its own ink: the badge keeps its sunk fill, so it takes the dark text */
 .badge.fp{background:transparent;color:var(--muted);box-shadow:inset 0 0 0 1px var(--line-2)}  /* likely false positive, not applicable, not triaged: outlined, never hidden */
 @keyframes blink{50%{opacity:.2}}
 .tier{align-self:start}
@@ -489,6 +490,7 @@ a.cell{cursor:pointer;transition:background .12s}@media (hover:hover) and (point
 .hx.enter{animation:cellin .35s var(--ease) backwards}
 .hx.enter.new{animation:cellin .35s var(--ease) backwards,flash 1.2s var(--ease) .3s 2}
 .hx.unscanned{background:repeating-linear-gradient(135deg,var(--sunk) 0 4px,var(--hatch) 4px 7px);color:var(--ink-2)}
+.hx.unscanned .score{color:var(--ink-2)} /* the hatched tile is light in both themes: the white score text of the filled tiles vanished on it */
 .map[data-size="xl"] .hx.unscanned{background:var(--surface-2)}
 .map[data-size="xl"] .hx.unscanned::before{background:repeating-linear-gradient(0deg,var(--line-2) 0 3px,transparent 3px 6px)}
 @keyframes cellin{from{transform:scale(.92);opacity:0}}
