@@ -158,6 +158,7 @@ function card(s, reload, detail, group) {
   c.append(beat);
   const version = versionBlock(detail, { onChange: reload, builtin: s.builtin });
   if (version) c.append(version);
+  if (s.contract_note) c.append(el("p", s.contract_state === "unsupported" ? "sl-note msg err" : "sl-note", s.contract_note));
   if (s.problem) c.append(el("p", "sl-note", s.problem));
   else if (s.status_note && s.state !== "suspended") c.append(el("p", "sl-note", s.status_note)); // a suspension's reason is on the state line
 

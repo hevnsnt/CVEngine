@@ -1,7 +1,7 @@
 # One scanner for cvENGINE: the plan for 1.4
 
 Status: built on the `1.4-develop` branch (every phase below is done). Built: the result contract (`cvengine_scanner/contract/sentinel_contract.json` in the scanner library), the Sentinel image
-published by digest, the built-in scanner as a default compose service that enrols, re-enrols, updates and rolls back with nobody running
+published (the built-in scanner follows its newest build), the built-in scanner as a default compose service that enrols, re-enrols, updates and rolls back with nobody running
 anything, no local path for any kind (`CVENGINE_LOCAL_FALLBACK` is ignored since 1.4) with the derived
 "scanner offline" state and non-fatal waiting, signed-in nuclei through the secure read, and the server's vantage point delivered to the
 built-in scanner. The phases below say what each one moved. How the built-in scanner works for an operator is in [BUILTIN-SCANNER.md](BUILTIN-SCANNER.md).
@@ -125,7 +125,7 @@ which send nothing to the target and need no vantage point.
 - **Scanner library** (`cvengine_scanner`, in the Sentinel repo, pip-installable): runners, parsers, flags, policy constants, the
   scope floor, the contract schema and fixtures. cvENGINE pins it by commit sha (`web/requirements.txt`) and imports what it needs (policy constants to build
   targets, fixtures in tests). One copy.
-- **Scanner service**: the Sentinel image, published to a registry by digest with an SBOM, amd64 and arm64.
+- **Scanner service**: the Sentinel image, published to a registry with an SBOM and build provenance, amd64 and arm64: `main` is the newest build of the Sentinel's main branch, `sha-<12>` each build.
   It contains the tools, the daemon and the library. It does not contain the GVM stack, git, Go or a docker socket.
 - **Built-in scanner**: a compose service with `restart: unless-stopped`, a healthcheck, a memory limit, `NET_RAW`, automatic
   enrolment at instance scope from a bootstrap secret in a shared volume, `self_update` off, and re-enrolment when its token
@@ -161,8 +161,12 @@ which send nothing to the target and need no vantage point.
     `secret_read` feature (`SentinelEff.reads_secrets`); the task the scanner receives says `signed_in: true`. The client reads the credential
     once, runs nuclei with a 0600 secrets file on a memory file system (`-sf`, `-dr`), wipes it and redacts any echo (cvENGINE-sentinel
     `client/signed_in.py`); any other Sentinel refuses such a task. Without such a scanner the pass waits: nuclei has no local path. The signed-in CVE template check is the `nuclei_validate` kind, built-in scanner only.
-- **Updates**: the release manifest pins `(server tag, scanner digest)` and the updater swaps the pair with rollback. The
-  built-in never updates itself. The version check compares against the digest the server expects, not GitHub's head.
+- **Updates**: the built-in scanner follows the newest published image (`ghcr.io/hevnsnt/cvengine-sentinel:main`) and is no longer paired with a
+  digest by the release (owner decision, 2026-11-08: a fix merged to the Sentinel must reach an install without a person re-pinning). The server's update
+  scripts and a daily Scanner update pull it, start it and keep it only once it is healthy and checked in with a contract version the server accepts, else put the
+  previous image back. `scanner.lock.json` is the known-good floor (commit, contract version, an optional digest for provenance). The built-in never updates
+  itself from inside; the host does. The version check compares against GitHub's head of the Sentinel's main branch (`agentapi.sentinel_version`). An operator
+  who wants to hold a version sets `CVENGINE_SCANNER_IMAGE` to a digest or tag.
 - **Contract**: the file gains a `targets` half (server to scanner) next to `results`, a `contract_version` declared at
   registration and heartbeat, and a minimum contract version per kind. The server supports the current and previous
   contract for external Sentinels and sends a kind only to a Sentinel that can run it.
@@ -171,8 +175,8 @@ which send nothing to the target and need no vantage point.
 
 0. Result contract, fixtures and tests. Done in PR 276.
 1. This inventory, kept current as work lands.
-2. Publish the Sentinel image by digest with an SBOM. Add the `targets` half and `contract_version` to the contract. Done. The image: the Sentinel repository's `publish.yml` pushes `ghcr.io/hevnsnt/cvengine-sentinel` for amd64 and arm64 with an SBOM and provenance on every push to `main` and every tag, prints the digest, and checks the image has no git, Go, GVM stack or docker socket; WPScan and its gems are installed from a lockfile with checksums and nothing is updated at build time. cvENGINE pins it by digest in `scanner.lock.json` (`scripts/scanner_lock.py`). The contract: the `targets` half, `contract_version` declared at registration and heartbeat, `kind_since` and `min_supported_contract_version`, and the server offers a kind only to a Sentinel whose version can run it. The Sentinel client sends `info.contract_version` (2) and runs the `waf` kind (hevnsnt/cvENGINE-sentinel#25, #28: it asks a server for `waf` only when the server's contract has it, so a 1.3 server is unaffected). Contract version 2 adds the `waf` kind (schema, fixtures, a server-side `persist_waf_result`), offered only to a Sentinel that declares 2; the wafw00f stage dispatches it since 1.4. Contract version 3 adds `nmap_full`, `nmap_verify`, `node2shell`, `rdp_shot`, `db_probe`, `path_probe` and `nuclei_validate` (section B); the frozen fixtures of version 2 are in `tests/fixtures/sentinel_results/v2/`.
-3. The built-in scanner service in compose, enrolled automatically, shown in system status. Done, on by default (`CVENGINE_BUILTIN_SCANNER=0` turns it off and revokes it): a default compose service on the pinned image, sharing celery's network namespace, with a health check on its heartbeats and a watchdog that restarts it; it reads its enrollment from the shared volume and re-enrols by itself when its token is refused; `install.sh`, `make up`, `scripts/update.sh`, the web updater and `apply-update.sh` pull the pinned image, start it after celery and roll back to the previous image when it sends no heartbeat ([UPDATES.md](UPDATES.md#the-built-in-scanner)); the upgrade rehearsal checks it comes up and enrols. System status carries `scanning.builtin_scanner` and the Sentinels page marks its card Built-in.
+2. Publish the Sentinel image with an SBOM. Add the `targets` half and `contract_version` to the contract. Done. The image: the Sentinel repository's `publish.yml` pushes `ghcr.io/hevnsnt/cvengine-sentinel` for amd64 and arm64 with an SBOM and provenance on every push to `main` and every tag, prints the digest, and checks the image has no git, Go, GVM stack or docker socket; WPScan and its gems are installed from a lockfile with checksums and nothing is updated at build time. cvENGINE follows its `main` tag, with `scanner.lock.json` (`scripts/scanner_lock.py`) as the known-good floor. The contract: the `targets` half, `contract_version` declared at registration and heartbeat, `kind_since` and `min_supported_contract_version`, and the server offers a kind only to a Sentinel whose version can run it. The Sentinel client sends `info.contract_version` (2) and runs the `waf` kind (hevnsnt/cvENGINE-sentinel#25, #28: it asks a server for `waf` only when the server's contract has it, so a 1.3 server is unaffected). Contract version 2 adds the `waf` kind (schema, fixtures, a server-side `persist_waf_result`), offered only to a Sentinel that declares 2; the wafw00f stage dispatches it since 1.4. Contract version 3 adds `nmap_full`, `nmap_verify`, `node2shell`, `rdp_shot`, `db_probe`, `path_probe` and `nuclei_validate` (section B); the frozen fixtures of version 2 are in `tests/fixtures/sentinel_results/v2/`.
+3. The built-in scanner service in compose, enrolled automatically, shown in system status. Done, on by default (`CVENGINE_BUILTIN_SCANNER=0` turns it off and revokes it): a default compose service on the newest published image, sharing celery's network namespace, with a health check on its heartbeats and a watchdog that restarts it; it reads its enrollment from the shared volume and re-enrols by itself when its token is refused; `install.sh`, `make up`, `scripts/update.sh`, the web updater and `apply-update.sh` pull the newest image, start it after celery and roll back to the previous image when it is not healthy and checked in ([UPDATES.md](UPDATES.md#the-built-in-scanner)); the upgrade rehearsal checks it comes up and enrols. System status carries `scanning.builtin_scanner` and the Sentinels page marks its card Built-in.
 4. Make waiting non-fatal before any fallback is deleted. Done. A stage whose kind may not run here and that no scanner took waits
    (`resources.ScannerUnavailable`): nothing is marked failed or recorded, the strip on every page says the scanner is offline, and the
    hosts of a scan or host run during which a stage waited are queued again as a deferred re-test (`cveFeed.scanner_wait`, due
@@ -210,8 +214,8 @@ drops the table). `sentinel_dispatch._no_local` now only raises `ScannerUnavaila
 
 1. The scanner becomes a hard dependency. Addressed: a health check on its heartbeats, a watchdog restart, the status line and strip, non-fatal waiting with re-queueing (phase 4), a rollback of a new image that does not heartbeat, and the default taking kinds off the server only once the built-in scanner has enrolled (a host whose image never came up keeps scanning locally). `CVENGINE_LOCAL_FALLBACK=all` is the escape hatch.
 2. The kinds list is longer than the eight that exist (section B). Deleting a local path before its kind exists breaks it.
-3. Version coupling: two updaters must not exist, and "behind" must mean "not the digest this release expects". Addressed: the built-in scanner's self-update is forced off, and the server's update scripts swap the digest `scanner.lock.json` pins.
-4. The image was not reproducible (it installed WPScan and updated it at build time). Addressed: WPScan and its gems come from a lockfile with checksums, nothing is updated at build time, and the image is published and pinned by digest.
+3. Version coupling: two updaters must not exist. Addressed: the built-in scanner's self-update is forced off, and the server's update scripts and the Scanner update replace its image (the newest published one), gated by the contract version the server reads (`web/agentapi/sentinel_contract.py`: a scanner below the floor is offered nothing, a newer one keeps the kinds this server knows). A moving tag removes the human review gate, so the rails are: the Sentinel's `main` only receives code after its checks pass, the update keeps a new image only once it is healthy and checked in, the previous image is the rollback, and `CVENGINE_SCANNER_IMAGE` holds a version.
+4. The image was not reproducible (it installed WPScan and updated it at build time). Addressed: WPScan and its gems come from a lockfile with checksums, nothing is updated at build time, and the image is published with an SBOM and build provenance (a digest per build, which the lock records for the floor).
 5. Per-task overhead at 10,000 hosts: testssl, UDP and WPScan are one task per target, each with rows and an activity line.
    Batch them in contract version 2.
 6. Egress proxy, Tailscale and `CVENGINE_ALLOW_PRIVATE_TARGETS` lab installs applied to local scans and not to dispatched ones. Addressed:
@@ -265,8 +269,8 @@ file at its next run, and writes a new blob if the scanner is later lost (token 
 setting or the AI reviewer is on, because both reach the server as `http://web:8000` (`CVENGINE_SCANNER_SERVER_URL` overrides; the host network overlay sets
 `http://127.0.0.1:8000`). Celery writes the first blob at start-up instead of waiting for beat, and the installer writes it right after the admin account
 exists. The scanner reads the blob from the file itself (`CVENGINE_SENTINEL_BLOB_FILE`) and waits for it with no token; when the server refuses its token
-later it forgets it and enrols again with the next blob, never trying a spent one twice. The image is the digest `scanner.lock.json` pins
-(`CVENGINE_SCANNER_IMAGE` runs another; `make scanner-build` builds the pinned commit from source).
+later it forgets it and enrols again with the next blob, never trying a spent one twice. The image is the moving tag `main` that `scanner.lock.json` names
+(`CVENGINE_SCANNER_IMAGE` holds another; `make scanner-build` builds the floor commit from source).
 
 It is shown in System status as `scanning.builtin_scanner` (`builtin_scanner.status()`: `enabled`, `enrolled`, `live`, `agent_id`, `name`,
 `last_seen`; just `{'enabled': False}` while the switch is off), with a `problems` line for an App Admin when it is on and not enrolled ten minutes after the

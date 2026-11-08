@@ -68,6 +68,7 @@ class CachedNumbersEqualARecountTests(World):
             row.delete()
 
     def hygiene(self):
+        self.n += 1  # a second hygiene write on the same host must not reuse the check name (unique per domain, host and check)
         HygieneFinding.objects.create(domain=self.domain, host=self.some_host().name, check_name=f'c{self.n}', severity=self.rng.randint(0, 3), title='t',
                                       status=self.rng.choice(('open', 'open', 'fixed')))
 

@@ -1,5 +1,6 @@
 """Whether a Sentinel runs the current Sentinel client: the cached check of GitHub, the states, and that nothing asks GitHub while a page is built."""
 import os
+from datetime import timedelta
 from unittest import mock
 
 from django.core.cache import cache
@@ -161,3 +162,87 @@ class SurfaceTests(Base):
         with mock.patch('agentapi.sentinel_version.updater.fetch_latest', return_value={'sha': HEAD, 'message': 'm', 'url': '', 'date': '', 'behind_by': None, 'commits': []}):
             out = tasks.refresh_sentinel_version()
         self.assertEqual(out['latest'], HEAD[:12])
+
+
+class StaleVerdictTests(Base):
+    """The live defect: a scanner that updated to the newest build was shown as behind the (older) head cached before it updated."""
+
+    def set_since(self, agent, when):
+        agent.info = {**agent.info, 'version_since': when.isoformat()}
+        agent.save(update_fields=['info'])
+
+    def test_after_an_update_the_verdict_for_the_old_commit_is_not_shown_for_the_new_one(self):
+        agent = self.agent(OLD)
+        sv.refresh(get=github(behind=3))
+        self.assertEqual(sv.state(agent)['status'], 'behind')
+        from agentapi import sentinel_settings
+        sentinel_settings.record_info(agent, {'version': 'c' * 12})
+        agent.refresh_from_db()
+        out = sv.state(agent)
+        self.assertEqual((out['status'], out['behind_by']), ('unknown', None))
+        self.assertIsNone(cache.get(sv.verdict_key(OLD)), 'the verdict of the commit it left is dropped at once')
+        self.asked.assert_called()
+
+    def test_a_build_newer_than_the_cached_head_is_not_behind_whatever_was_cached(self):
+        agent = self.agent(OLD)
+        sv.refresh(get=github(head=HEAD, behind=3))  # cached head HEAD; OLD behind by 3
+        newer = 'e' * 12
+        Agent.objects.filter(pk=agent.pk).update(info={'version': newer, 'version_since': (timezone.now() + timedelta(minutes=5)).isoformat()})
+        out = sv.state(Agent.objects.get(pk=agent.pk))
+        self.assertNotEqual(out['status'], 'behind')
+        self.assertIsNone(out['behind_by'])
+        # the background refresh then compares exactly this commit: the cached head is a parent of it, so it is current
+        sv.refresh(get=github(head=HEAD, compare_status='behind', behind=0), now=timezone.now() + timedelta(minutes=10))
+        self.assertEqual(sv.state(Agent.objects.get(pk=agent.pk))['status'], 'current')
+
+    def test_a_head_checked_before_the_version_changed_asks_for_a_new_check(self):
+        agent = self.agent(OLD)
+        sv.refresh(get=github(behind=3), now=timezone.now() - timedelta(hours=2))
+        self.set_since(agent, timezone.now())
+        self.asked.reset_mock()
+        out = sv.state(Agent.objects.get(pk=agent.pk))
+        self.assertEqual(out['status'], 'unknown')
+        self.asked.assert_called()
+
+    def test_installed_equal_to_the_head_is_current(self):
+        self.agent(HEAD[:12])
+        sv.refresh(get=github())
+        self.assertEqual(sv.state(Agent.objects.get())['status'], 'current')
+
+    def test_the_verdict_is_per_installed_commit_and_per_branch(self):
+        self.assertNotEqual(sv.verdict_key(OLD), sv.verdict_key('d' * 12))
+        self.assertNotEqual(sv.verdict_key(OLD), sv.verdict_key(OLD, branch_name='other'))
+        self.assertNotEqual(sv.latest_key(), sv.latest_key(branch_name='other'))
+
+    def test_an_unknown_remote_stays_unknown(self):
+        self.agent(OLD)
+        sv.refresh(get=github(status=500))
+        self.assertEqual(sv.state(Agent.objects.get())['status'], 'unknown')
+
+    def test_a_compare_error_is_not_behind(self):
+        self.agent(OLD)
+
+        def get(url, **kw):
+            if '/compare/' in url:
+                return Resp(500)
+            return github()(url, **kw)
+        sv.refresh(get=get)
+        out = sv.state(Agent.objects.get())
+        self.assertEqual((out['status'], out['behind_by']), ('unknown', None))
+
+    def test_a_commit_github_never_saw_or_a_diverged_one_is_not_behind(self):
+        self.agent(OLD)
+        self.agent('d' * 12)
+
+        def get(url, **kw):
+            if '/compare/' in url:
+                return Resp(404) if 'd' * 12 in url else Resp(200, {'status': 'diverged', 'ahead_by': 2, 'commits': []})
+            return github()(url, **kw)
+        sv.refresh(get=get)
+        for agent in Agent.objects.all():
+            self.assertEqual(sv.state(agent)['status'], 'unknown')
+
+    def test_the_time_the_head_was_checked_is_reported(self):
+        self.agent(OLD)
+        sv.refresh(get=github())
+        self.assertTrue(sv.state(Agent.objects.get())['checked_at'])

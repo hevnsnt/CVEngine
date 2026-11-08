@@ -134,25 +134,34 @@ For the development stack use `CVENGINE_COMPOSE_FILES=docker-compose.dev.yml`. `
 Every path that updates the server updates the built-in scanner too ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)): `scripts/update.sh`, an update
 approved in the app (`scripts/update-deploy.sh`, run by `scripts/apply-update.sh`), and `make up`. They all use `scripts/scanner.sh`:
 
-1. **Before anything is stopped**, the image the release pins in `scanner.lock.json` is pulled by digest (`ghcr.io/hevnsnt/cvengine-sentinel@sha256:...`).
-   While the lock names no published digest, it is built from the Sentinel commit the lock names instead, once. A pull that fails (an offline
-   host, a registry that refuses) is logged and the scanner keeps the image it has.
+1. **Before anything is stopped**, the newest published image is pulled: the moving tag `ghcr.io/hevnsnt/cvengine-sentinel:main`, which the Sentinel
+   repository's publish workflow re-points at every build of its `main` branch (a branch that only receives code after its checks pass; the images
+   carry an SBOM and build provenance). A pull that fails (an offline host, a registry that refuses) is logged and the scanner keeps the image it has.
 2. **After the server is back** (celery recreated, the site answering), the scanner is recreated, after celery, because it shares celery's
-   network namespace. The update then waits up to five minutes (`CVENGINE_SCANNER_READY_SECONDS`) for a heartbeat of the new scanner to reach
-   the server.
-3. **If none does, it rolls back** to the image the scanner ran before: it writes `CVENGINE_SCANNER_ROLLBACK_IMAGE=<that image>` to the env file
-   Compose reads (and `.env`) and recreates the scanner on it. The next update removes the line and tries its own pin again. A first start (an
+   network namespace. Before that, the image that works is kept under a name of its own (`cvengine-sentinel-rollback:previous`), because the moving
+   tag will name the new one. The update then waits up to five minutes (`CVENGINE_SCANNER_READY_SECONDS`) for the new scanner to be healthy **and** to
+   check in with a contract version the server accepts (not below the floor in `scanner.lock.json`, not older than the server still speaks).
+3. **If it does not, it rolls back** to the image the scanner ran before: it writes `CVENGINE_SCANNER_ROLLBACK_IMAGE=cvengine-sentinel-rollback:previous`
+   to the env file Compose reads (and `.env`), recreates the scanner on it (from this host, never from the registry) and reports the reason to the server
+   through the restored scanner, so the Sentinels page shows it. The next update removes the line and pulls the newest image again. A first start (an
    update from 1.3, a new install) has no previous image: the scanner keeps trying, and the work that needs it waits.
 
 None of this ever fails an update: the scanner is retried at the next one, and until it runs the scans that need it wait (nothing is marked
 failed). `CVENGINE_BUILTIN_SCANNER=0` makes every path remove the container instead. An image an administrator set with `CVENGINE_SCANNER_IMAGE`
-is used as it is: never pulled over and never rolled back. `make up` starts the scanner but does not wait for it or roll it back.
+is used as it is: never pulled over and never rolled back. `make up` starts the scanner; on a first start it does not wait, and when the image
+changes it checks the new one like an update does.
 
-The scanner never updates itself: its self-update setting is always off and its card on the Sentinels page has no **Update now** button.
-What it should run is what the release pins, so "behind" for the built-in scanner means "not the digest this release expects", never "not the
-newest Sentinel commit". To move a release to a new scanner image, take the digest from the Sentinel repository's *Publish* run (its summary prints
-it) and run `python3 scripts/scanner_lock.py pin --digest sha256:... --version <12-character commit>` (it rewrites `scanner.lock.json` and the
-default in `docker-compose.yml` together; a test keeps them equal).
+**Between server updates** the scanner is brought to the newest image by the *Scanner update* (`scripts/scanner-update.sh`, `make scanner-update`):
+the same pull, and only when the image is a new one, a wait for the scanner to finish its tasks, the same start, check-in wait and rollback. The updater timer
+(`scripts/install-auto-deploy.sh`) runs it about daily whatever the update mode (`CVENGINE_SCANNER_UPDATE_HOURS`, `0` to turn it off); a host without the
+updater runs the one cron line in [BUILTIN-SCANNER.md](BUILTIN-SCANNER.md#keeping-it-current-the-scanner-update).
+
+The scanner's own self-update stays off, and its card on the Sentinels page has no **Update now** button: the host does the update, so there is one
+updater. "Behind" for the built-in scanner means "the newest build of the Sentinel's main branch the server saw is a descendant of the one that runs" (a build equal to or ahead of that head is current; a failed compare or a commit GitHub never saw is unknown, not behind). The verdict is cached per installed commit and branch, dropped when the scanner reports another version, redone by the background refresh when the head was checked before that, and shown with when the head was last checked. Nobody re-pins a digest for a
+Sentinel fix to reach an install. **To hold the scanner at one version,** set `CVENGINE_SCANNER_IMAGE` in `.env` to a digest or a tag; nothing here then
+pulls over it. `scanner.lock.json` is the known-good floor the release was tested with (its commit, the contract version it speaks, and the digest it was
+published as, for provenance); `python3 scripts/scanner_lock.py raise-floor --commit C --contract N` moves it up, which a release does when it needs a
+newer Sentinel, and CI checks that the floor commit exists on the Sentinel's `main` and that the compose default is the moving tag.
 
 ## Branches and releases
 

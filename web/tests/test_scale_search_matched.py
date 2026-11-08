@@ -45,6 +45,7 @@ class MatchedReasonsTests(TestCase):
         with CaptureQueriesContext(connection) as queries:
             status, data = call(self.token, 'GET', f'/api/v1/projects/sm/search?q={q}&facets=none&page_size=50')
         self.assertEqual(status, 200, data)
+        self.last_sql = [q['sql'][:160] for q in queries.captured_queries]
         return data, len(queries)
 
     def test_the_reasons_name_the_route_headers_cookies_and_the_archive(self):
@@ -63,11 +64,14 @@ class MatchedReasonsTests(TestCase):
         # add no queries.
         self.search('nginx')
         _, base = self.search('nginx')
+        base_sql = self.last_sql
         for i in range(self.HOSTS, self.HOSTS + 20):
             self.add(i)
         cache.clear()
         self.search('nginx')
         data, more = self.search('nginx')
         self.assertEqual(data['count'], self.HOSTS + 20)
-        self.assertEqual(base, more)
+        from collections import Counter
+        extra = list((Counter(self.last_sql) - Counter(base_sql)).elements())
+        self.assertEqual(base, more, f'queries only the second reading made: {extra}')
 
