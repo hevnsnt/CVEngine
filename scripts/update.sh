@@ -80,6 +80,7 @@ forward_args=()
 from_commit=${CVENGINE_UPDATE_FROM:-unknown}
 from_sha=${CVENGINE_UPDATE_FROM_SHA:-}
 database_migrated=0
+images_built=0  # 1 once this update's images exist: from then on the commands that load the application run in them (celery_cli, web_python)
 # The fetched script runs preflight again before it reaches the migration path. If any of those
 # checks fail, put the checkout back before the old containers read new bind-mounted code.
 revert_unmigrated() {
@@ -201,8 +202,19 @@ docker compose version >/dev/null
 web_python() {
     local code=$1; shift
     [[ -n $("${compose[@]}" ps -q --status running web 2>/dev/null) ]] || return 0
-    "${compose[@]}" exec -T "$@" web python3 manage.py shell -c "$code" 2>>"${diagnostic_log:-/dev/null}" || true
+    if (( images_built )); then
+        "${compose[@]}" run --rm --no-deps -T "$@" --entrypoint python3 web manage.py shell -c "$code" 2>>"${diagnostic_log:-/dev/null}" || true
+    else
+        "${compose[@]}" exec -T "$@" web python3 manage.py shell -c "$code" 2>>"${diagnostic_log:-/dev/null}" || true
+    fi
 }
+
+# Celery's command line, run in a throwaway container of the image built for this update. The checkout is fast-forwarded before the build and ./web is
+# bind-mounted, so the running (old) containers already read the NEW code on their old image; the CLI imports the whole application (reNgine.tasks
+# loads every installed app), so inside a running old container it dies on whatever the new code needs and the old image lacks (1.3.x to 1.4:
+# ModuleNotFoundError cvengine_scanner) and every inspection reads as "worker state unknown". The one-off container has an image and code that agree,
+# and asks the same broker, so it sees the same workers. A worker that cannot be inspected still fails the command: nothing here hides an error.
+celery_cli() { "${compose[@]}" run --rm --no-deps -T --entrypoint celery celery -A reNgine.tasks "$@"; }
 
 # consumer_control add_consumer|cancel_consumer WORKER QUEUE. A worker busy with CPU work (the correlation and template passes right
 # after it starts) can miss a short reply window, so it is asked up to three times with a longer wait each time. Both commands are safe
@@ -210,7 +222,7 @@ web_python() {
 consumer_control() {
     local verb=$1 worker=$2 queue=$3 wait
     for wait in 5 15 30; do
-        "${compose[@]}" exec -T celery celery -A reNgine.tasks control -j -t "$wait" -d "$worker" "$verb" "$queue" \
+        celery_cli control -j -t "$wait" -d "$worker" "$verb" "$queue" \
             >/dev/null 2>>"${diagnostic_log:-/dev/null}" && return 0
         echo "No reply from $worker to $verb $queue within ${wait}s." >>"${diagnostic_log:-/dev/null}"
     done
@@ -491,15 +503,6 @@ if legacy_database_volume; then
     die "Legacy PostgreSQL volume exists without a PostgreSQL 18 volume. Run and verify $upgrade_command before this routine update."
 fi
 
-scans=$(web_python "$scan_count_code" | grep '^SCANS ' || true)
-if [[ -n $scans ]]; then
-    read -r _ running_scans queued_scans <<< "$scans"
-    echo "Scans: $running_scans running, $queued_scans queued."
-    if (( running_scans > 0 && ! stop_scans )); then
-        echo "The drain waits for running scans to finish. Use --stop-scans to stop them now and queue them again after the update."
-    fi
-fi
-
 # Do the expensive, fallible build while the old workers are still processing work.
 # Only then pause dispatch and perform a bounded drain before migration/recreation.
 step 'Building application images while everything keeps running'
@@ -516,6 +519,17 @@ export SENTINEL_SHA
 if "${compose[@]}" config --services 2>/dev/null | grep -qx reviewer; then
     "${compose[@]}" build reviewer || echo 'Could not build the AI reviewer image; scanning is not affected (the next update tries again).' >&2
 fi
+images_built=1
+# Counted after the build, in the new image: the running containers read the new code on the old image (see celery_cli), so they cannot count.
+scans=$(web_python "$scan_count_code" | grep '^SCANS ' || true)
+if [[ -n $scans ]]; then
+    read -r _ running_scans queued_scans <<< "$scans"
+    echo "Scans: $running_scans running, $queued_scans queued."
+    if (( running_scans > 0 && ! stop_scans )); then
+        echo "The drain waits for running scans to finish. Use --stop-scans to stop them now and queue them again after the update."
+    fi
+fi
+
 # What fits this host, before anything is stopped and before the scanner's image is fetched (it removes the scanner when the answer is external): scripts/host-fit.sh,
 # the rules the Update button's dialog and install.sh use too. After the build because the count of Sentinels is read with the new image. An answer given
 # with --sentinels is applied; otherwise the host-size rule and the automatic default, which never removes a scanner and never asks.
@@ -535,7 +549,7 @@ fi
 # the restarted workers. Each worker's original queues are captured so a failed update can
 # restore precisely its prior routing. Beat is stopped before the drain to prevent new sweeps.
 step 'Checking the workers'
-if ! queue_snapshot=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 5 active_queues 2>>"$diagnostic_log"); then
+if ! queue_snapshot=$(celery_cli inspect -j -t 5 active_queues 2>>"$diagnostic_log"); then
     # An absent managed worker can be repaired by recreating it. A running container
     # whose workers cannot be inspected is different: its active jobs are unknown.
     running_celery=$("${compose[@]}" ps -q --status running celery) || die 'Could not inspect the Celery container.'
@@ -725,13 +739,13 @@ else
         fi
         # Busy workers (a gevent worker parsing templates, a long CPU step) can miss a broadcast reply, and a worker that restarted
         # resumes its queues: one poll proves neither "gone" nor "still consuming", so both must persist before the update stops.
-        activity=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 10 active 2>>"$diagnostic_log") ||
+        activity=$(celery_cli inspect -j -t 10 active 2>>"$diagnostic_log") ||
             die 'Could not inspect active tasks during drain.'
-        reserved=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 10 reserved 2>>"$diagnostic_log") ||
+        reserved=$(celery_cli inspect -j -t 10 reserved 2>>"$diagnostic_log") ||
             die 'Could not inspect reserved tasks during drain.'
-        scheduled=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 10 scheduled 2>>"$diagnostic_log") ||
+        scheduled=$(celery_cli inspect -j -t 10 scheduled 2>>"$diagnostic_log") ||
             die 'Could not inspect scheduled tasks during drain.'
-        queue_state=$("${compose[@]}" exec -T celery celery -A reNgine.tasks inspect -j -t 10 active_queues 2>>"$diagnostic_log") ||
+        queue_state=$(celery_cli inspect -j -t 10 active_queues 2>>"$diagnostic_log") ||
             die 'Could not inspect queue consumers during drain.'
         worker_list=$(IFS=,; echo "${worker_names[*]}")
         drain_state=$(printf '%s\0' "$activity" "$reserved" "$scheduled" "$queue_state" "$worker_list" | python3 -c '
