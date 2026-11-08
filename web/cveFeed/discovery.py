@@ -364,8 +364,8 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
         activity.settle(running, 'failed', message=f'Discovery of {scan.domain.name} was stopped')
         return {'scan_id': scan.id, 'status': ABORTED, 'error': 'stopped'}
     except ScannerUnavailable as exc:  # no Sentinel could take it and it may not run here: nothing ran, the target stays due
-        status, error = FAILED, f'waiting for a scanner: {exc}'[:290]
-        logger.warning('discovery of scan %s is waiting for a scanner: %s', scan_id, exc)
+        status, error = FAILED, (f'not scanned: {exc.refusal}' if hasattr(exc, 'refusal') else f'waiting for a scanner: {exc}')[:290]  # a do-not-scan refusal is not a wait
+        logger.warning('discovery of scan %s did not run: %s', scan_id, exc)
     except Exception as exc:  # the scan must end in a visible state, never stay "running"
         logger.exception('discovery failed for scan %s', scan_id)
         status, error = FAILED, str(exc)[:290]
@@ -630,7 +630,7 @@ def _waiting_for_scanner(scan, what, exc, result):
     """A stage no scanner could take, and whose kind never runs on this server: nothing ran, nothing is recorded in
     the ledger (the targets stay due) and the stage is not a failure. ``result`` (no ``error``) is what the stage reports, plus why it did not run."""
     from cveFeed import activity
-    message = f'no scanner could take this work ({exc.kind}); the targets stay due until one can'
+    message = (f'not scanned: {exc.refusal}' if hasattr(exc, 'refusal') else f'no scanner could take this work ({exc.kind}); the targets stay due until one can')
     logger.warning('%s of scan %s is waiting for a scanner: %s', what, scan.id, exc)
     activity.log('run_check', f'{what} for {scan.domain.name} is waiting: {message}', project=scan.domain.project_id, scan_id=scan.id)
     return {**result, 'skipped': message}
