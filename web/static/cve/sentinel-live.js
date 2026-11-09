@@ -8,6 +8,7 @@ import { api, badge, button, el, toast } from "/staticfiles/cve/ui.js";
 import { thinkingOrb } from "/staticfiles/cve/thinking-orb.js";
 import { detailCache, kindChips, versionBlock } from "/staticfiles/cve/sentinel-settings.js";
 import { createGet, createPace, every, staleRows } from "/staticfiles/cve/poll.js";
+import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
 
 const LIVE = "/api/v1/sentinels/live";
 const POLL_MS = 5000;
@@ -47,6 +48,7 @@ function orbFor(s, group) {
   o.setState(busy, `${s.name}: ${WORDS[s.state] || s.state}`);
   o.setPaused(s.state === "offline" || s.state === "suspended");
   o.node.classList.toggle("asleep", s.state === "offline" || s.state === "suspended");
+  o.node.setAttribute("data-keep-ignore", ""); // the orb animates by itself: it is not part of what "the card changed" means (static/cve/keep-state.js)
   return o.node;
 }
 
@@ -107,8 +109,8 @@ export function actionsFor(s) {
 }
 
 function card(s, reload, detail, group) {
-  const c = el("article", `sl-card sl-${s.state}`, null, { "data-id": s.id });
-  const head = el("header", "sl-head");
+  const c = el("article", `sl-card sl-${s.state}`, null, { "data-id": s.id, "data-keep-key": `card:${group}:${s.id}` });
+  const head = el("header", "sl-head", null, { "data-orb-key": `${group}:${s.id}` });
   head.append(orbFor(s, group));
   const title = el("div", "sl-title");
   const state = el("p", "sl-state", stateLine(s));
@@ -201,7 +203,7 @@ function summary(data) {
   const rows = data.results;
   const live = rows.filter((r) => r.live && r.status === "active").length;
   const working = rows.filter((r) => r.state === "working").length;
-  const bar = el("div", "sl-sum");
+  const bar = el("div", "sl-sum", null, { "data-keep-key": "summary" });
   const cell = (n, label) => {
     const d = el("div");
     d.append(el("b", "", String(n)), el("span", "", label));
@@ -245,7 +247,7 @@ export function stageRunsText(m) {
 }
 
 function openvasQueue(queue) {
-  const box = el("section", "sl-openvas", null, { "aria-label": "OpenVAS queue", "aria-live": "off" });
+  const box = el("section", "sl-openvas", null, { "aria-label": "OpenVAS queue", "aria-live": "off", "data-keep-key": "openvas" });
   const head = el("div", "sl-openvas-head");
   head.append(el("h3", "", "OpenVAS queue"), el("span", "sl-openvas-count", `${queue.counts.next} due · ${queue.counts.not_due} not due`));
   box.append(head);
@@ -277,7 +279,7 @@ function openvasQueue(queue) {
   if (queue.counts.not_due) {
     // the server counted every host and grouped the reasons ("33 not due: 20 not Fire or Smoke, 8 scanned this week"): shown as it came, above the list
     if (queue.not_due_summary) box.append(el("p", "note sl-openvas-summary", queue.not_due_summary));
-    const deferred = el("details", "sl-openvas-deferred");
+    const deferred = el("details", "sl-openvas-deferred", null, { "data-keep-key": "openvas-not-due" });
     deferred.append(el("summary", "", `Not due (${queue.counts.not_due})`));
     const list = el("ul");
     queue.not_due.forEach((row) => {
@@ -363,10 +365,10 @@ function remember() {
 }
 
 function section(g, reload, details) {
-  const grid = el("div", "sl-grid");
+  const grid = el("div", "sl-grid", null, { "data-keep-key": `grid:${g.key}` });
   g.sentinels.forEach((s) => grid.append(card(s, reload, details.get(s.id), g.key)));
   if (!g.title) return grid;
-  const box = el("details", "sl-org");
+  const box = el("details", "sl-org", null, { "data-keep-key": `org:${g.key}` });
   box.open = !folded.has(g.key);
   box.addEventListener("toggle", () => {
     if (box.open) folded.delete(g.key);
@@ -411,30 +413,43 @@ export function sentinelLive(mount) {
     const stamp = Date.now();
     if (await details.refresh(ids(), want.map((s) => s.id))) want.forEach((s) => seen.set(s.id, { key: detailKey(s), at: stamp }));
   };
-  const paint = () => {
-    mount.textContent = "";
-    if (!data) return;
+  // The blocks of the page, built from the newest data. renderKeepingState draws them without taking away what the person opened, scrolled or typed, and
+  // leaves a block whose markup did not change alone; it waits while the person is using the page (static/cve/keep-state.js).
+  const blocks = () => {
+    const built = el("div");
+    if (!data) return [];
     if (!data.results.length) {
-      mount.append(el("p", "empty", "No Sentinel has registered yet. Generate an enrollment secret for a project and give it to a Sentinel's setup."));
-      if (!(data.orgs || []).some((o) => o.networks.length) && !data.openvas) return;
+      built.append(el("p", "empty", "No Sentinel has registered yet. Generate an enrollment secret for a project and give it to a Sentinel's setup."));
+      if (!(data.orgs || []).some((o) => o.networks.length) && !data.openvas) return Array.from(built.childNodes);
     } else {
-      mount.append(summary(data));
+      built.append(summary(data));
       const route = routingText(data.routing);
-      if (route) mount.append(el("p", "note sl-routing", route));
+      if (route) built.append(el("p", "note sl-routing", route, { "data-keep-key": "routing" }));
       const waits = stageRunsText(data.stage_runs);
-      if (waits) mount.append(el("p", "note sl-stage-runs", waits));
+      if (waits) built.append(el("p", "note sl-stage-runs", waits, { "data-keep-key": "stage-runs" }));
     }
-    if (data.openvas) mount.append(openvasQueue(data.openvas));
-    const drawn = groups(data);
-    drawn.forEach((g) => mount.append(section(g, reload, details)));
-    const kept = new Set(drawn.flatMap((g) => g.sentinels.map((s) => `${g.key}:${s.id}`)));
+    if (data.openvas) built.append(openvasQueue(data.openvas));
+    groups(data).forEach((g) => built.append(section(g, reload, details)));
+    return Array.from(built.childNodes);
+  };
+  // after a draw: forget the orbs of Sentinels that are gone, give each card its orb back (the card that was built and then not used took it), age the text
+  const settle = () => {
+    if (!data) return;
+    const kept = new Set(groups(data).flatMap((g) => g.sentinels.map((s) => `${g.key}:${s.id}`)));
     orbs.forEach((o, key) => {
       if (!kept.has(key)) {
         o.destroy();
         orbs.delete(key);
       }
     });
+    mount.querySelectorAll("[data-orb-key]").forEach((head) => {
+      const o = orbs.get(head.dataset.orbKey);
+      if (o && o.node.parentNode !== head) head.prepend(o.node);
+    });
     tick();
+  };
+  const paint = () => {
+    renderKeepingState(mount, blocks, { after: settle });
   };
   // ages the "seen 12s ago" and "running for 40s" text between polls without asking the server
   const tick = () => {

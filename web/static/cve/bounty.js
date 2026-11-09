@@ -3,6 +3,7 @@
 // textContent; every link has to be https. The server decides who may use this page and what each action may do.
 import { ask, api, badge, button, dialog, el, field, selectOf, shortDate, table, tabs, text, toast } from "/staticfiles/cve/ui.js";
 import { findingHref, hostAnchor, needsValidation } from "/staticfiles/cve/links.js";
+import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
 
 // a host of this project, named in a line of text, links to its record
 const hostLine = (name, rest) => {
@@ -155,7 +156,7 @@ function mountWorkbench(box) {
     busy = true;
     try {
       const w = await get("workbench");
-      if (box.isConnected) renderWorkbench(box, w);
+      if (box.isConnected) renderWorkbench(box, w, first);
     } catch (err) {
       if (!box.childElementCount) box.append(para(`The status could not be read: ${err.message}`, "msg err"));
     } finally {
@@ -167,7 +168,8 @@ function mountWorkbench(box) {
   document.addEventListener("visibilitychange", () => { if (!document.hidden && box.isConnected) draw(false); });
 }
 
-function renderWorkbench(box, w) {
+// force: the first draw and a draw after an action; the 8 second poll waits while the person is using the panel (static/cve/keep-state.js)
+function renderWorkbench(box, w, force = false) {
   const t = w.totals;
   const here = `/cve/${encodeURIComponent(project)}`;
   const out = [];
@@ -176,7 +178,7 @@ function renderWorkbench(box, w) {
   out.push(head);
   if (!w.engagements.length) {
     out.push(card("", para("No engagement yet. Open a program under Programs and choose Work this program; its imported targets, scans, hosts and findings show up here.", "msg busy")));
-    box.replaceChildren(...out);
+    renderKeepingState(box, () => out, { force });
     return;
   }
   const tile = (label, value, hint, href) => {
@@ -266,7 +268,7 @@ function renderWorkbench(box, w) {
     ], w.matches));
     out.push(c);
   }
-  box.replaceChildren(...out);
+  renderKeepingState(box, () => out, { force });
 }
 
 // ------------------------------------------------------------------------------ programs

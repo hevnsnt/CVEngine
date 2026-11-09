@@ -1,4 +1,5 @@
 import { api, button, el, shortDate, table, toast } from "/staticfiles/cve/ui.js";
+import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
 
 const mount = document.getElementById("ai-usage");
 if (mount) {
@@ -32,18 +33,19 @@ if (mount) {
     return card;
   };
   const section = (title, content) => {
-    const box = el("section", "ai-usage-section");
+    const box = el("section", "ai-usage-section", null, { "data-keep-key": `section:${title}` });
     box.append(el("h2", "", title), content);
     return box;
   };
-  const expandable = (title, content) => {
-    const box = el("details", "card ai-usage-details");
+  // key: the stable name of the disclosure (its summary has no number today, but the key must not depend on the words)
+  const expandable = (key, title, content) => {
+    const box = el("details", "card ai-usage-details", null, { "data-keep-key": key });
     box.append(el("summary", "", title), content);
     return box;
   };
 
   function priceEditor(data) {
-    const details = el("details", "card ai-usage-rate");
+    const details = el("details", "card ai-usage-rate", null, { "data-keep-key": "price-editor" });
     details.append(el("summary", "", "Set operator supplied pricing for an exact model"),
       el("p", "note", "Rates are operator supplied, in USD per million tokens. CVEngine never fetches pricing or treats estimates as invoices."));
     const form = el("form", "ai-usage-rate-form");
@@ -61,7 +63,7 @@ if (mount) {
     ]) {
       const field = el("label", "field");
       field.append(el("span", "", label));
-      const input = el("input", "", null, { name, type });
+      const input = el("input", "", null, { name, type, "data-keep-key": `price:${name}` });
       input.value = value;
       if (type === "number") { input.min = "0"; input.step = "0.000001"; }
       if (["provider", "model", "input_per_million_usd", "output_per_million_usd", "source_url", "as_of"].includes(name)) input.required = true;
@@ -91,10 +93,12 @@ if (mount) {
     try {
       const data = await api("GET", `/cve/api/settings/ai/usage?days=${days.value}`);
       if (current !== requestNumber || !mount.isConnected) return;
-      output.textContent = "";
+      // the blocks are built aside and handed to renderKeepingState: what the person opened, scrolled or typed in the last draw stays, and a block whose
+      // markup did not change is not touched (static/cve/keep-state.js)
+      const built = el("div");
       status.textContent = `Live · updated ${shortDate(new Date().toISOString())} · refreshes every 15 seconds while this tab is open`;
       const model = data.observed_model || data.configured_model || data.verified_model;
-      const hero = el("section", "card ai-usage-hero");
+      const hero = el("section", "card ai-usage-hero", null, { "data-keep-key": "hero" });
       const identity = el("div", "ai-usage-identity");
       identity.append(el("p", "ai-usage-eyebrow", "CONNECTED MODEL"),
         el("h2", "", model || "Model not observed yet"),
@@ -109,8 +113,8 @@ if (mount) {
         el("span", "", data.last_success ? `Last successful call ${shortDate(data.last_success)}` :
           data.verified_at ? `Connection tested ${shortDate(data.verified_at)}` : "No successful call recorded"));
       hero.append(identity, signal);
-      output.append(hero);
-      const cards = el("div", "ai-usage-grid");
+      built.append(hero);
+      const cards = el("div", "ai-usage-grid", null, { "data-keep-key": "metrics" });
       const successRate = data.attempts ? `${Math.round(data.successes / data.attempts * 100)}%` : "-";
       const inputTokens = data.models.reduce((sum, row) => sum + (row.input_sum || 0), 0);
       const outputTokens = data.models.reduce((sum, row) => sum + (row.output_sum || 0), 0);
@@ -122,9 +126,9 @@ if (mount) {
         metric("Tokens returned", count(inputTokens + outputTokens), `${count(inputTokens)} input · ${count(outputTokens)} output`),
         metric("Average response", latency(data.avg_latency_ms), "Per provider call"),
         metric("Estimated cost", costLabel, costDetail));
-      output.append(cards);
-      if (!data.attempts) output.append(el("p", "empty", "No provider attempts recorded for this period. Earlier usage cannot be reconstructed."));
-      if (!data.priced_attempts && data.attempts) output.append(el("p", "ai-usage-price-hint", "Cost is unavailable until an exact model price is saved below. Token counts and provider billing may differ."));
+      built.append(cards);
+      if (!data.attempts) built.append(el("p", "empty", "No provider attempts recorded for this period. Earlier usage cannot be reconstructed."));
+      if (!data.priced_attempts && data.attempts) built.append(el("p", "ai-usage-price-hint", "Cost is unavailable until an exact model price is saved below. Token counts and provider billing may differ."));
       if (data.templates) {
         const t = data.templates;
         const rows = el("div", "ai-usage-templates");
@@ -134,9 +138,9 @@ if (mount) {
           t.reasons.forEach((r) => list.append(el("li", "", `${r.reason} (${count(r.count)})`)));
           rows.append(el("p", "note", "Why checks were rejected, last 30 days:"), list);
         }
-        output.append(section("AI-written checks", rows));
+        built.append(section("AI-written checks", rows));
       }
-      output.append(section("Model breakdown", wrap([
+      built.append(section("Model breakdown", wrap([
         { label: "Provider / model", render: (r) => `${r.provider} · ${r.billed_model || "unknown model"}` },
         { label: "Attempts", render: (r) => `${count(r.attempts)} (${count(r.errors)} errors)` },
         { label: "Input / output", render: (r) => `${count(r.input_sum)} / ${count(r.output_sum)}` },
@@ -144,19 +148,19 @@ if (mount) {
         { label: "Estimate", render: (r) => money(r.estimated_usd) },
         { label: "Rate source", render: (r) => r.rate_source ? `${r.rate_source} (${r.rate_as_of})` : "not configured" },
       ], data.models)));
-      output.append(expandable("Daily usage", wrap([
+      built.append(expandable("daily", "Daily usage", wrap([
         { label: "Day (UTC)", render: (r) => r.day },
         { label: "Attempts", render: (r) => count(r.attempts) },
         { label: "Errors", render: (r) => count(r.errors) },
       ], data.daily)));
-      output.append(expandable("Call stages", wrap([
+      built.append(expandable("stages", "Call stages", wrap([
         { label: "Stage", render: (r) => r.stage },
         { label: "Attempts", render: (r) => count(r.attempts) },
         { label: "Errors", render: (r) => count(r.errors) },
         { label: "Answered by", render: (r) => ((r.models || []).length ? r.models.map((m) => `${m.model} (${count(m.successes)} of ${count(m.attempts)})`).join(", ") : "no recorded model")
           + ((r.failed_reasons || []).length ? ` | Not answered: ${r.failed_reasons.map((f) => `${count(f.count)} ${f.recovered ? "cut off, answered by the automatic retry" : f.category}${f.stop_reason && !f.recovered ? ` [${f.stop_reason}]` : ""}`).join(", ")}` : "") },
       ], data.stages)));
-      output.append(expandable("Recent attempts and errors", wrap([
+      built.append(expandable("recent", "Recent attempts and errors", wrap([
         { label: "When (UTC)", render: (r) => shortDate(r.at) },
         { label: "Provider / model", render: (r) => `${r.provider} · ${r.actual_model || r.model || "unknown"}` },
         { label: "Stage", render: (r) => r.stage },
@@ -164,11 +168,12 @@ if (mount) {
         { label: "Input / output", render: (r) => `${count(r.input_tokens)} / ${count(r.output_tokens)}` },
         { label: "Latency", render: (r) => latency(r.duration_ms) },
       ], data.recent)));
-      const about = el("details", "ai-usage-about");
+      const about = el("details", "ai-usage-about", null, { "data-keep-key": "about" });
       about.append(el("summary", "", "About this data"), el("p", "note", data.coverage_note),
         el("p", "note", `Explicit connection test: ${data.verified_at ? shortDate(data.verified_at) : "not recorded"}. Successful provider calls above show observed transport activity, not a new connection test.`));
-      output.append(about);
-      output.append(priceEditor(data));
+      built.append(about);
+      built.append(priceEditor(data));
+      renderKeepingState(output, () => Array.from(built.childNodes));
     } catch (error) {
       if (current === requestNumber) status.textContent = `Usage unavailable: ${error.message}`;
     }

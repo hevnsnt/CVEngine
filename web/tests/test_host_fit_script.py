@@ -367,7 +367,7 @@ class InAppPathTests(unittest.TestCase):
     def test_the_deploy_script_calls_the_shared_function_before_the_scanner_is_fetched(self):
         text = (SCRIPTS / 'update-deploy.sh').read_text()
         self.assertLess(text.index('build web celery celery-beat'), text.index('cvengine_fit_run "$fit_plan"'))
-        self.assertLess(text.index('cvengine_fit_run "$fit_plan"'), text.index('deploy_scanner_fetch once'))  # the fetch that is left for the deploy steps; the early one skips an off scanner
+        self.assertLess(text.index('cvengine_fit_run "$fit_plan"'), text.index('  deploy_scanner_fetch once\n'))  # the fetch that is left for the deploy steps (the call, not the comments)
         self.assertLess(text.index('cvengine_scanner_start'), text.index('cvengine_fit_budget'))
         self.assertIn('sentinels-choice', text)
         self.assertIn('cvengine_fit_run', (SCRIPTS / 'update.sh').read_text())

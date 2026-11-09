@@ -1,6 +1,7 @@
 // CVEngine project pages: targets, scans, hosts, vulnerabilities, CVE matches (the last two as list plus detail, like hosts).
 // Plain ES module over the REST API (/api/v1). DOM is built with textContent only.
 import { areaChart, displayZone, heatmap } from "/staticfiles/cve/charts.js";
+import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
 import { readParam, savedViews, writeParams } from "/staticfiles/cve/views.js";
 import { savedSearches } from "/staticfiles/cve/saved-searches.js";
 import { createBulk, undoNotice } from "/staticfiles/cve/bulk.js";
@@ -364,10 +365,21 @@ function createList({
       lastCount = data.count;
       lastSize = data.page_size || size;
       failures = 0;
-      if (reset) body.textContent = "";
       body.removeAttribute("aria-busy");
-      if (reset && !items.length) body.append(emptyNode(empty));
-      else render(body, items, reset);
+      if (reset && quiet) {
+        // A refresh nobody asked for: the rows are drawn aside and handed to renderKeepingState, so a row the reader opened, a list they scrolled, a field
+        // they typed in or a menu they have open is still there after it (static/cve/keep-state.js). The render function closes over the table it drew (a later
+        // "Load more" appends to it), so these blocks are always replaced, never kept.
+        const aside = el("div");
+        if (!items.length) aside.append(emptyNode(empty));
+        else render(aside, items, true, true);
+        aside.childNodes.forEach((n) => n.setAttribute && n.setAttribute("data-keep-fresh", ""));
+        renderKeepingState(body, () => Array.from(aside.childNodes));
+      } else {
+        if (reset) body.textContent = "";
+        if (reset && !items.length) body.append(emptyNode(empty));
+        else render(body, items, reset);
+      }
       if (onLoaded) onLoaded(data, reset, quiet);
       paintMore(data, reset ? 0 : items.length, hadFocus);
       disarm();
@@ -1021,7 +1033,7 @@ const runzeroLine = (rz) => {
 const runzeroReports = (rz) => {
   const vulns = (rz && rz.vulns) || [];
   if (!vulns.length) return null;
-  const box = el("details", "nse");
+  const box = el("details", "nse", null, { "data-keep-key": "runzero-reports" });
   box.append(el("summary", "", `runZero reports (${vulns.length})`));
   box.append(el("p", "note", "runZero's own scan lists these CVEs for this address. They are evidence, not a confirmed finding: a CVE cvENGINE also matched on the same port is ranked higher."));
   vulns.forEach((v) => {
@@ -2418,9 +2430,12 @@ function findingPage(mount, cfg) {
       if (cfg.onLoaded) cfg.onLoaded(data, reset, quiet);
     },
     prepare: (items) => Promise.all([...new Set(items.map(projectOf))].map(loadSla)),
-    render: (_, items, reset) => {
+    // quiet: a refresh nobody asked for. The rows are drawn aside and handed to renderKeepingState, so a disclosure the reader opened in a row (the hosts of a
+    // finding group) and the scroll of the list survive it (static/cve/keep-state.js)
+    render: (_, items, reset, quiet) => {
+      const target = reset && quiet ? el("div") : rows;
       if (reset) {
-        rows.textContent = "";
+        if (target === rows) rows.textContent = "";
         byId.clear();
       }
       items.forEach((item) => {
@@ -2504,8 +2519,9 @@ function findingPage(mount, cfg) {
           revealPane(pane);
         };
         if (bulk) bulk.decorate(row, item, keyOf(item));
-        rows.append(row);
+        target.append(row);
       });
+      if (target !== rows) keepRows(rows, target);
       settleRows(rows);
       fresh.update();
       updateOverdue();
@@ -2539,6 +2555,13 @@ const FINDING_KINDS = { match: 1, vulnerability: 1, hygiene: 1, route: 1 };
 // is invalid HTML that browsers handle inconsistently. Keyboard use matches a button's.
 // A selectable row is one control (role=button); the links inside it (host, address) stay clickable but leave the tab order,
 // so the row never nests focusable content. Run after a page of rows is drawn.
+// The rows of a quiet refresh (built in ``aside``) go into ``rows`` through renderKeepingState: each row is replaced (a row's handlers close over its item),
+// keeping what the reader did in them and the scroll of the list.
+const keepRows = (rows, aside) => {
+  aside.childNodes.forEach((n) => n.setAttribute && n.setAttribute("data-keep-fresh", ""));
+  renderKeepingState(rows, () => Array.from(aside.childNodes), { after: () => settleRows(rows) });
+};
+
 const settleRows = (container) => container.querySelectorAll(".host-row a").forEach((a) => a.setAttribute("tabindex", "-1"));
 
 function selectableRow(id, heat, attr = "id") {
@@ -3952,7 +3975,7 @@ const pages = {
           if (p.cpe) card.append(el("div", "note mono", p.cpe));
           if (p.banner) card.append(el("pre", "banner", p.banner));
           Object.entries(p.scripts || {}).forEach(([id, text]) => {
-            const det = el("details", "nse");
+            const det = el("details", "nse", null, { "data-keep-key": `nse:${id}` });
             det.append(el("summary", "mono", id), el("pre", "banner", text));
             card.append(det);
           });
@@ -4084,9 +4107,10 @@ const pages = {
         if (data.facets && data.facets.heat) heatFacets = { ...data.facets.heat, truncated: Boolean(data.facets.truncated) };
         paintHeat();
       },
-      render: (m, items, reset) => {
+      render: (m, items, reset, quiet) => {
+        const target = reset && quiet ? el("div") : rows;
         if (reset) {
-          rows.textContent = "";
+          if (target === rows) rows.textContent = "";
           byId.clear();
         }
         items.forEach((h) => {
@@ -4132,8 +4156,9 @@ const pages = {
             showHost(h);
             revealPane(pane);
           };
-          rows.append(row);
+          target.append(row);
         });
+        if (target !== rows) keepRows(rows, target);
         settleRows(rows);
         paintHeat();
         markNewHosts();
@@ -4253,7 +4278,7 @@ const pages = {
         reload();
       },
     });
-    const hint = el("details", "how-filter");
+    const hint = el("details", "how-filter", null, { "data-keep-key": "how-filter" });
     hint.append(el("summary", "", "What does Actionable mean?"), el("p", "", "Actionable is what makes a host hot on its card: CVE matches the AI has not ruled out, and open scanner and hygiene findings above info. Everything adds informational, closed and ruled-out findings."));
     mount.append(hint);
     function reload() {
@@ -4277,7 +4302,7 @@ const pages = {
     // a group row: how many hosts, their own statuses, and the hosts themselves (each opens its own finding here)
     const groupHosts = (f) => {
       const g = f.group;
-      const box = el("details", "group-hosts");
+      const box = el("details", "group-hosts", null, { "data-keep-key": `group-hosts:${g.registrable_domain || f.id}` });
       const heat = FG.heatSplit(g);
       box.append(el("summary", "", `${FG.hostsText(g)} · ${FG.statusSplit(g)}${heat ? ` · ${heat}` : ""}`));
       const list = el("ul", "group-members");
@@ -4934,7 +4959,7 @@ pages.scan = async function scanDetail(mount) {
       meta.append(fact("Started", shortDate(s.started))[0], durBox);
       if (s.finished) meta.append(fact("Finished", shortDate(s.finished))[0]);
       // report downloads: a PDF built by the server from this scan's results and the branding in Settings > Reports
-      const pop = el("details", "pop");
+      const pop = el("details", "pop", null, { "data-keep-key": "report-menu", "data-keep-popover": "" }); // an open menu holds a refresh back (static/cve/keep-state.js)
       pop.append(el("summary", "btn ghost sm", "Download report"));
       const menu = el("div", "pop-menu");
       [

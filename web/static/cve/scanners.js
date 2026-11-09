@@ -4,6 +4,7 @@
 //   /cve/api/admin/health      workers, scheduler heartbeat, scanning pause and scan counts (App Admin only; a short live inspection)
 // Nothing is hidden by this page: the server decides what each person may read. Text is set with textContent only.
 import { api, el } from "/staticfiles/cve/ui.js";
+import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
 
 const root = document.getElementById("health");
 const isAdmin = root.dataset.appAdmin === "1";
@@ -62,7 +63,10 @@ function paint(cells) {
   if (problems.length) head.append(el("span", "note", problems.join(" ")));
   const grid = el("div", "health-grid");
   cells.forEach((c) => grid.append(c.node));
-  root.replaceChildren(head, grid);
+  head.setAttribute("data-keep-key", "health-line");
+  grid.setAttribute("data-keep-key", "health-grid");
+  // the page asks again every few seconds: a refresh that changed nothing touches nothing, and one that did keeps what the person selected or scrolled
+  renderKeepingState(root, () => [head, grid]);
 }
 
 // The Sentinel answers come back at once and are drawn at once; the worker inspection waits up to five seconds for the workers to reply,
