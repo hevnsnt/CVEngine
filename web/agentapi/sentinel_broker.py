@@ -2335,6 +2335,7 @@ _SEVERITY_ORDER = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1, 'info': 0, '
 
 
 MAX_CVE_IDS = 20
+MAX_REFERENCES = 20
 _CVE_ID = re.compile(r'CVE-\d{4}-\d{4,7}', re.IGNORECASE)  # bounded: a longer one would overflow CveId.name and fail the whole stage
 MAX_EVIDENCE = 4096  # characters of a finding's matched request and of its response kept from a Sentinel's result (500 findings: ~4 MB)
 _NUCLEI_TYPES = ('http', 'tcp', 'network', 'javascript', 'dns', 'ssl', 'headless', 'file', 'whois', 'code', 'websocket')
@@ -2388,6 +2389,16 @@ def _clean_findings(findings):
             ids = item.get('cve_ids')
             finding['cve_ids'] = list(dict.fromkeys(v.strip().upper() for v in (ids if isinstance(ids, list) else [])[:MAX_CVE_IDS]
                                                     if isinstance(v, str) and _CVE_ID.fullmatch(v.strip())))
+        # what a CVE template says about itself, optional like ``cve_ids``: the CVSS score, the references and the remediation text (a client that
+        # does not send them gets its result back unchanged)
+        score = item.get('cvss_score')
+        if isinstance(score, (int, float)) and not isinstance(score, bool) and 0 <= score <= 10:
+            finding['cvss_score'] = round(float(score), 1)
+        refs = item.get('references')
+        if isinstance(refs, list):
+            finding['references'] = [_text(r, 500) for r in refs[:MAX_REFERENCES] if isinstance(r, str) and r.strip().lower().startswith(('http://', 'https://'))]
+        if isinstance(item.get('remediation'), str) and item['remediation'].strip():
+            finding['remediation'] = _text(item['remediation'], 500)
         out.append(finding)
     return out, dropped
 

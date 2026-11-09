@@ -45,3 +45,28 @@ class OpenvasUnreachedTests(SimpleTestCase):
         out = broker._clean_openvas_result({'results': [], 'scanned_addresses': ['192.0.2.10']})
         self.assertNotIn('unreached_hosts', out)
         self.assertEqual(openvas_scan.scanned_hosts(out), {'192.0.2.10'})
+
+
+class NucleiFindingDetailTests(SimpleTestCase):
+    FINDING = {'template_id': 'CVE-2021-41773', 'name': 'Apache path traversal', 'severity': 'critical', 'host': 'a.example.com', 'matched_at': 'https://a.example.com/x',
+               'cve_ids': ['CVE-2021-41773'], 'cvss_score': 7.5, 'references': ['https://example.com/advisory', 'javascript:alert(1)', 7],
+               'remediation': 'Upgrade.', 'request': 'GET /x', 'response': 'HTTP/1.1 200 OK'}
+
+    def test_cvss_references_and_remediation_survive_cleaning_and_reach_the_result_line(self):
+        from agentapi import sentinel_dispatch
+        findings, _ = broker._clean_findings([self.FINDING])
+        self.assertEqual((findings[0]['cvss_score'], findings[0]['references'], findings[0]['remediation']), (7.5, ['https://example.com/advisory'], 'Upgrade.'))
+        line = sentinel_dispatch._finding_to_nuclei_line(findings[0])
+        self.assertEqual(line['info']['classification'], {'cve-id': ['CVE-2021-41773'], 'cvss-score': 7.5})
+        self.assertEqual((line['info']['reference'], line['info']['remediation'], line['request']), (['https://example.com/advisory'], 'Upgrade.', 'GET /x'))
+
+    def test_a_finding_without_them_reads_as_before(self):
+        from agentapi import sentinel_dispatch
+        findings, _ = broker._clean_findings([{'template_id': 't', 'name': 'n', 'severity': 'info', 'host': 'a.example.com', 'matched_at': 'https://a.example.com/'}])
+        self.assertNotIn('cvss_score', findings[0])
+        line = sentinel_dispatch._finding_to_nuclei_line(findings[0])
+        self.assertEqual((line['info']['classification'], line['info']['reference']), ({'cve-id': []}, []))
+
+    def test_a_score_out_of_range_is_dropped(self):
+        findings, _ = broker._clean_findings([{**self.FINDING, 'cvss_score': 11}])
+        self.assertNotIn('cvss_score', findings[0])

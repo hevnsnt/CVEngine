@@ -1103,7 +1103,9 @@ def _finding_to_nuclei_line(finding):
             'template-url': [], 'matcher-name': finding.get('matcher_name') or '', 'curl-command': None, 'request': finding.get('request'),
             'response': finding.get('response'), 'extracted-results': finding.get('extracted_results') or [],
             'info': {'name': finding.get('name') or '', 'severity': finding.get('severity') or 'unknown',
-                     'description': finding.get('description') or '', 'classification': {'cve-id': list(finding.get('cve_ids') or [])}, 'reference': [],
+                     'description': finding.get('description') or '',
+                     'classification': {'cve-id': list(finding.get('cve_ids') or []), **({'cvss-score': finding['cvss_score']} if 'cvss_score' in finding else {})},
+                     'reference': list(finding.get('references') or []), 'remediation': finding.get('remediation') or '',
                      'tags': finding.get('tags') or []}}
 
 
