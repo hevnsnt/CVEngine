@@ -9,6 +9,7 @@ from django.http import JsonResponse
 from django.http.response import HttpResponseBase
 
 from agentapi import agent_broker as broker
+from agentapi import db_timeout
 from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
 from agentapi import inventory
@@ -644,6 +645,11 @@ def dispatch(request, path):
         except Exception as exc:  # noqa: BLE001 - a bug is not the caller's mistake: the traceback goes to the error log, the caller gets a JSON 500
             if schema_guard.behind(exc):  # an update is between its new files and its migration: ask again shortly
                 return schema_guard.unavailable(request)
+            if db_timeout.hit(exc):  # the statement ran past the web timeout: not a bug, and the caller can narrow the request and ask again
+                logger.warning('API request cut off by the database statement timeout: %s %s', request.method, path)
+                response = JsonResponse({'error': db_timeout.MESSAGE}, status=503)
+                response['Retry-After'] = '30'
+                return response
             logger.exception('API request failed: %s %s', request.method, path)
             return JsonResponse({'error': 'internal error'}, status=500)
         if isinstance(result, HttpResponseBase):  # a file (a report PDF), not JSON
