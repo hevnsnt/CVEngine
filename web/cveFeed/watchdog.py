@@ -293,12 +293,12 @@ def act_feed(ctx, chk):
     from cveFeed import coverage_topup
     out = coverage_topup.feed_sentinels() or {}
     queued = int(out.get('hosts_queued') or 0) + int(out.get('batches_queued') or 0) + int(((out.get('refresh') or {}).get('refreshed')) or 0)
-    parts = [f'feed_sentinels: {json.dumps(out, default=str)[:200]}']
+    parts = [f'Ran the Sentinel feed: {queued} item(s) queued for {out.get("slots", "the")} Sentinel slots']
     try:
         from cveFeed import work_planner  # the work planner (when this build has it) plans the due secrets and ssh work too
         planned = work_planner.run() if hasattr(work_planner, 'run') else None
         if planned is not None:
-            parts.append(f'work planner: {json.dumps(planned, default=str)[:160]}')
+            parts.append('ran the work planner')
     except ImportError:
         pass
     if not queued and not out.get('refresh'):
