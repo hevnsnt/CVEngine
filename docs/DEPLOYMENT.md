@@ -337,7 +337,7 @@ docker compose -f docker-compose.dev.yml exec web python3 manage.py createsuperu
 
 ## The watchdog
 
-The host process that picks up approved updates (`scripts/update-watch.sh`, started by cron every minute) also runs the **watchdog** every 30 seconds: a pass of `manage.py watchdog_tick` in the `web` container that restarts a worker lane that has gone quiet, lifts a discovery pool that `.env` holds too low, and tells you on **Scanners, Health** and in the notice strip what it did or could not fix. It needs nothing installed beyond the updater (`scripts/install-updater.sh`), stands aside while an update runs, and is switched off with `CVENGINE_WATCHDOG=0`. See [WATCHDOG.md](WATCHDOG.md).
+The host process that picks up approved updates (`scripts/update-watch.sh`, started by cron every minute) also runs the **watchdog** every 30 seconds: a pass of `manage.py watchdog_tick` in the `web` container that restarts a worker lane that has gone quiet, lifts a discovery pool that `.env` holds too low, and tells you on **Administration, Watchdog** and in the notice strip what it did or could not fix. It needs nothing installed beyond the updater (`scripts/install-updater.sh`), stands aside while an update runs, and is switched off with `CVENGINE_WATCHDOG=0`. See [WATCHDOG.md](WATCHDOG.md).
 
 ## Updating
 

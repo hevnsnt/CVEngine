@@ -307,7 +307,7 @@ A PDF report of a project or a host ([Front end](FRONTEND.md#pdf-reports), [API]
 
 ## Watchdog
 
-The outer watchdog ([WATCHDOG.md](WATCHDOG.md)) is on by default. **Watchdog** is an instance setting (Scanners, Health: Switch off / Switch on, and one switch per rule). `CVENGINE_WATCHDOG=0` in `.env` switches it off for the host side and the web container alike; `CVENGINE_WATCHDOG_SECONDS` (default 30) is the host watcher's tick interval and is for tests. It saves one value on your behalf: `discovery_concurrency` raised to 4 when `DISCOVERY_CONCURRENCY` in `.env` is below it and work waits for a slot, recorded as set by `watchdog`, never over a value you saved yourself, released when `.env` stops holding it down.
+The outer watchdog ([WATCHDOG.md](WATCHDOG.md)) is on by default. **Watchdog** is an instance setting (Administration, Watchdog: Switch off / Switch on, and one switch per rule). `CVENGINE_WATCHDOG=0` in `.env` switches it off for the host side and the web container alike; `CVENGINE_WATCHDOG_SECONDS` (default 30) is the host watcher's tick interval and is for tests. It saves one value on your behalf: `discovery_concurrency` raised to 4 when `DISCOVERY_CONCURRENCY` in `.env` is below it and work waits for a slot, recorded as set by `watchdog`, never over a value you saved yourself, released when `.env` stops holding it down.
 
 ## Updates
 
