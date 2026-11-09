@@ -22,24 +22,18 @@ maintenance_failed() { : >"$MAINTENANCE_FLAG" 2>/dev/null && chmod 644 "$MAINTEN
 # the page's live status (scripts/update-status.py); the update script defines it too and wins
 declare -F cv_status >/dev/null || cv_status() { [ -f scripts/update-status.py ] && CV_STATUS_LOG="${LOG:-}" python3 scripts/update-status.py "$@" >/dev/null 2>&1; return 0; }
 
-# The built-in scanner's image (scanner.lock.json; about 5 GB) is fetched ONCE per update, and while the site is still up wherever that can be: a pull changes
-# nothing the running containers read, so doing it under the maintenance page only lengthens the outage (minutes on a small host).
-#   early  before the page goes up. scripts/apply-update.sh (this repository's copy) does this before the merge itself; a host whose copy of it is older
-#          has this done by deploy_current, right before it puts the page up. Skipped when the scanner is off (the fetch would remove it: that is for
-#          the step below, after the host-fit answer). The answer is remembered in CV_SCANNER_PREFETCHED (the image it was for).
+# The built-in scanner's image (scanner.lock.json; about 5 GB) is fetched ONCE per update. Where the files have not changed yet, the site is still up and
+# a pull changes nothing the running containers read, so it is better made before the page goes up (minutes on a small host). That is only
+# scripts/apply-update.sh (this repository's copy), which does it before the merge and says so in CV_SCANNER_PREFETCHED (the image it was for).
+# A host whose copy of apply-update.sh is older has merged already when deploy_current runs: ./web (a bind mount) then holds the new code under the
+# old image, so nothing may come before the page, and the fetch is made from the deploy steps, under it.
 #   once   from the deploy steps, after the host-fit decision: fetches only when no early fetch was made for the image the new files name (the lock changed,
-#          the scanner was off then and is on now, the early fetch could not be made). It never fails the update (scripts/scanner.sh).
+#          the scanner was off then and is on now, there was none, or the host's script is older). It never fails the update (scripts/scanner.sh).
 CV_SCANNER_PREFETCHED=${CV_SCANNER_PREFETCHED:-}
-deploy_scanner_fetch() {  # early|once
+deploy_scanner_fetch() {  # once
   local ref
   [ -f scripts/scanner.sh ] || return 0
   . scripts/scanner.sh
-  if [ "$1" = early ]; then
-    cvengine_scanner_enabled "${COMPOSE[@]}" || return 0
-    cvengine_scanner_fetch "${COMPOSE[@]}"
-    CV_SCANNER_PREFETCHED=$(cvengine_scanner_wanted_image "${COMPOSE[@]}" 2>/dev/null) || CV_SCANNER_PREFETCHED=''
-    return 0
-  fi
   ref=$(cvengine_scanner_wanted_image "${COMPOSE[@]}" 2>/dev/null) || ref=''
   if [ -n "$ref" ] && [ "$ref" = "$CV_SCANNER_PREFETCHED" ]; then
     log "the built-in scanner image ($ref) was already fetched before the maintenance page went up"
@@ -58,7 +52,9 @@ deploy_current() {
     deploy_steps || status=$?
     return "$status"
   fi
-  deploy_scanner_fetch early  # the image pull changes nothing the site reads: before the page, not under it
+  # This host's apply-update.sh is older than this file: it has already merged, so ./web (a bind mount) holds the new code under the old image
+  # and the page goes up NOW, as the very first step. The scanner image is fetched under the page (deploy_scanner_fetch once, in the steps), never
+  # before it: a 5 GB pull takes minutes on a small host and the visitor would see the old image on new files the whole time.
   maintenance_on
   deploy_steps || status=$?
   if [ "$status" = 0 ]; then
