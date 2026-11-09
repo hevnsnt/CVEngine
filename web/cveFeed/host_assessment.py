@@ -230,8 +230,31 @@ def _require_capacity(project):
     active_scans = ScanHistory._base_manager.filter(Q(scan_status=-1) | Q(scan_status=1,
                                                                           start_scan_date__gte=timezone.now() - timedelta(hours=11)))
     global_cap, project_cap = caps(project)
-    if active_slots() >= global_cap or active_slots(project) >= project_cap or active_scans.count() >= max(20, global_cap):
-        raise RuntimeError('host assessment queue is at capacity; retry later')
+    held, mine, scans = active_slots(), active_slots(project), active_scans.count()
+    if held >= global_cap or mine >= project_cap or scans >= max(20, global_cap):
+        raise RuntimeError(capacity_message(held, global_cap, mine, project_cap, scans))
+
+
+def capacity_message(held, global_cap, mine, project_cap, scans):
+    """Which limit refused the host, with its numbers, and what an administrator can do about it. It starts with the sentence callers have always
+    matched on. It used to say only "retry later" while the Sentinels showed nothing waiting: a limit that is hit with idle Sentinels is a pool of
+    discovery workers too small to start the work that is queued (``DISCOVERY_CONCURRENCY``), and the text says so when that is the case."""
+    if held >= global_cap:
+        which = f'{held} host assessments are queued or running across the installation (limit {global_cap})'
+    elif mine >= project_cap:
+        which = f'{mine} host assessments of this project are queued or running (limit {project_cap})'
+    else:
+        which = f'{scans} scans are running or starting across the installation (limit {max(20, global_cap)})'
+    text = f'host assessment queue is at capacity: {which}. Retry when some finish.'
+    try:
+        from cveFeed import autotune
+        pin = autotune.discovery_pin()
+    except Exception:  # noqa: BLE001 - the message is never worth a failed request
+        pin = None
+    if pin:
+        text += (f' Only {pin["value"]} can run at once because {pin["env"]} is set in the environment (.env), so the queue drains slowly even when the '
+                 'Sentinels are idle: remove that line, or set it to 4 or more, and restart.')
+    return text
 
 
 def enqueue(project, sub, *, source='manual', user=None):
