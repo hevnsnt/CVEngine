@@ -133,7 +133,7 @@ class QueueTests(CapacityBase):
         self.assertEqual(task.status, 'expired')
         self.assertIn('no Sentinel slot freed up', task.error)
         from cveFeed.models import AgentActivity
-        self.assertIn('No Sentinel slot freed up', AgentActivity.objects.filter(project=self.project).order_by('id').last().message)
+        self.assertIn('is waiting for a free Sentinel slot', AgentActivity.objects.filter(project=self.project).order_by('id').last().message)
 
     def test_the_completion_budget_counts_from_the_claim_not_from_the_queueing(self):
         agent = self.make_sentinel(['openvas'])

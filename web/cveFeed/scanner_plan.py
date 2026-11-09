@@ -209,6 +209,16 @@ def notice():
             'text': f'{kept}. {who}: switch to Sentinels only in Settings > Sentinels to free the memory.'}
 
 
+def discovery_pin_notice():
+    """The text for a DISCOVERY_CONCURRENCY in the environment that holds the whole instance to a few hosts at a time (``autotune.discovery_pin``), or None."""
+    try:
+        from cveFeed import autotune
+        pin = autotune.discovery_pin()
+    except Exception:  # noqa: BLE001 - a notice is never worth a failed page
+        return None
+    return pin['text'] if pin else None
+
+
 def state():
-    return {**decision(), 'applied': applied(), 'notice': notice(),
+    return {**decision(), 'applied': applied(), 'notice': notice(), 'discovery_pin_notice': discovery_pin_notice(),
             'waiting': bool(_pending(PENDING_PLAN)), 'pending_plan': _pending(PENDING_PLAN)}

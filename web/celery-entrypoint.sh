@@ -131,25 +131,79 @@ commands+="$(generate_worker_command "cve_feed_queue" "4" "cve_feed_worker")"$'\
 # Redis priority 0 is highest; this worker reserves one task for future severity-aware dispatch.
 commands+="$(generate_worker_command "validation_priority_queue" "1" "validation_priority_worker")"$'\n'
 commands+="$(generate_worker_command "$classic_queues" "${CLASSIC_CONCURRENCY:-10}" "classic_worker")"$'\n'
-commands="${commands%&}"
 
-eval "$commands"
+# --- start_lanes: the four workers, each its own background job, with its pid and name recorded ---------------------------------------------
+# Every line of $commands is one `celery ... -n <node> &`. The pid of each is kept next to the lane's name, so the supervisor below can say WHICH lane
+# is gone and check each one itself (waiting for any one child to exit says that something exited, and nothing about which).
+lane_names=()
+lane_pids=()
+start_lanes() {
+    local line name
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        name=$(printf '%s\n' "$line" | sed -n 's/.* -n \([a-z_]*\).*/\1/p')
+        eval "$line"
+        lane_names+=("${name:-lane$((${#lane_pids[@]} + 1))}")
+        lane_pids+=("$!")
+    done <<<"$commands"
+}
+start_lanes
+
+# alive: the process exists and is not a zombie that nobody has reaped yet.
+lane_alive() {
+    kill -0 "$1" 2>/dev/null || return 1
+    local state
+    state=$(sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -c1-1) || return 0
+    [ "$state" != "Z" ]
+}
+
+# stop_lanes: a warm stop (SIGTERM: the worker takes no new task and finishes or re-queues what it holds), but BOUNDED. A discovery worker holds host
+# assessments that wait on a Sentinel for hours, so an unbounded `wait` here is how a container with ONE dead lane stayed "up" for good with the
+# other lanes stopped and the restart policy never reached: it never exits. After CELERY_STOP_GRACE seconds (default 45, under the 60 s of
+# stop_grace_period in docker-compose.yml) what is still there is killed; the tasks it held are returned to their queues at the next start
+# (manage.py requeue_unacked above).
+stop_lanes() {
+    trap - TERM INT
+    local pid waited=0 grace="${CELERY_STOP_GRACE:-45}"
+    for pid in "${lane_pids[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
+    while [ "$waited" -lt "$grace" ]; do
+        local any=0
+        for pid in "${lane_pids[@]}"; do lane_alive "$pid" && any=1; done
+        [ "$any" = 0 ] && break
+        sleep 1
+        waited=$((waited + 1))
+    done
+    for pid in "${lane_pids[@]}"; do
+        if lane_alive "$pid"; then
+            echo "Worker process $pid did not stop within ${grace}s; killing it."
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+    wait 2>/dev/null || true
+}
 
 # This shell is the container's main process and the parent of the four workers. As PID 1 (or the child of Docker's init) it only receives
-# SIGTERM if a trap asks for it, so without one `docker stop` waited out the grace period and killed the workers mid-task. Pass the stop on as a
-# warm shutdown (celery finishes or re-queues what it holds), and when ANY worker exits, stop the rest and exit non-zero: `restart: always`
-# then brings all four lanes back, where a plain `wait` kept the container "up" with a lane (discovery, the CVE feed) no longer consumed.
-stop_workers() {
-    trap - TERM INT
-    local pids
-    pids=$(jobs -p) || true
-    # shellcheck disable=SC2086
-    [ -z "$pids" ] || kill -TERM $pids 2>/dev/null || true
-    wait || true
+# SIGTERM if a trap asks for it, so without one `docker stop` waited out the grace period and killed the workers mid-task.
+trap 'echo "Stop requested; stopping the Celery workers."; stop_lanes; exit 143' TERM INT
+
+# The supervisor. Every CELERY_SUPERVISE_INTERVAL seconds (default 2) each lane's process is checked; when ANY is gone (it crashed, it was killed for
+# memory, it failed to start) the others are stopped (bounded, above) and the container EXITS non-zero, so `restart: always` brings all four lanes back
+# together: a container must never stay up with a lane that no longer consumes (discovery, the CVE feed, validation or the classic queues).
+supervise() {
+    local i status
+    while true; do
+        for i in "${!lane_pids[@]}"; do
+            if ! lane_alive "${lane_pids[$i]}"; then
+                status=0
+                wait "${lane_pids[$i]}" 2>/dev/null || status=$?
+                echo "The Celery worker '${lane_names[$i]}' (pid ${lane_pids[$i]}) is gone (status $status); stopping the other workers so the container restarts with all four lanes."
+                stop_lanes
+                return "$(( status == 0 ? 1 : status ))"
+            fi
+        done
+        sleep "${CELERY_SUPERVISE_INTERVAL:-2}" &
+        wait $! 2>/dev/null || true
+    done
 }
-trap 'stop_workers; exit 143' TERM INT
-status=0
-wait -n || status=$?
-echo "A Celery worker exited (status $status); stopping the other workers so the container restarts with all of them."
-stop_workers
-exit "$(( status == 0 ? 1 : status ))"
+supervise
+exit "$?"
