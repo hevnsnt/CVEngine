@@ -208,7 +208,7 @@ test('Sentinel page renders OpenVAS running, due and deferred hosts with reasons
     assert.ok(content.includes(expected), expected);
   }
   assert.equal(panel.tag, 'section');
-  assert.match(sentinelSource, /if \(data\.openvas\) mount\.append\(openvasQueue\(data\.openvas\)\)/);
+  assert.match(sentinelSource, /if \(data\.openvas\) built\.append\(openvasQueue\(data\.openvas\)\)/);
 });
 
 test('the Sentinel card shows how busy its slots were in the last hour', () => {

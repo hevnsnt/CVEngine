@@ -1,6 +1,8 @@
 // One status strip for every page: scannerbar.js (what the scanners are doing) and alertbar.js (an App Admin's open alerts) both report here, and
 // this draws a single 40px line above the page: the first notice, how many there are, and a Details button that opens every notice in full.
 // Every word is set with textContent (a notice can quote a Sentinel's error or what a scanned host said, and none of it is ever HTML).
+import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
+
 const el = (tag, cls, text, attrs) => {
   const n = document.createElement(tag);
   if (cls) n.className = cls;
@@ -26,10 +28,11 @@ function dismiss(text) {
   } catch (_) {
     /* storage blocked: the note stays until the page is reloaded */
   }
-  paint();
+  paint(true);
 }
 
-function paint() {
+// force: a person pressed a button (dismiss, Details), which is not a poll and is drawn at once; a notice that arrived by polling waits while they use the strip
+function paint(force = false) {
   const gone = dismissed();
   const items = [...sources.values()]
     .flat()
@@ -47,10 +50,10 @@ function paint() {
     layout.parentNode.insertBefore(strip, layout);
   }
   const lead = el("span", "sb-lead", items[0].text, { title: items[0].text });
-  const bar = el("div", "sb-strip");
+  const bar = el("div", "sb-strip", null, { "data-keep-key": "bar" });
   bar.append(lead);
   if (items.length > 1) bar.append(el("span", "sb-count", `${items.length} notices`));
-  const details = el("div", "sb-details", null, { id: "sb-details" });
+  const details = el("div", "sb-details", null, { id: "sb-details", "data-keep-key": "details", "data-keep-fresh": "" });
   details.hidden = !open;
   for (const i of items) {
     if (i.node) {
@@ -69,7 +72,7 @@ function paint() {
   const toggle = el("button", "sb-toggle", open ? "Hide details" : "Details", { type: "button", "aria-expanded": String(open), "aria-controls": "sb-details" });
   toggle.addEventListener("click", () => {
     open = !open;
-    paint();
+    paint(true);
     const again = strip && strip.querySelector(".sb-toggle");
     if (again) again.focus();
   });
@@ -78,7 +81,7 @@ function paint() {
   bar.addEventListener("click", (e) => {
     if (!e.target.closest("button")) toggle.click();
   });
-  strip.replaceChildren(bar, details);
+  renderKeepingState(strip, () => [bar, details], { force });
 }
 
 // source: "scanner" or "alerts"; items: [{kind, text, rank, dismissible?, node?}]. An empty list takes the source's notices away.
