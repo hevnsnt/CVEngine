@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-maint="__MAINT_STATE__">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -458,13 +458,15 @@
       <div class="head">
         <div>
           <div class="brand"><b>cv</b>ENGINE</div>
-          <h1>We are rebuilding cvENGINE.</h1>
-          <p>
-            A new version is going in right now. This page comes back by itself
-            the moment the site answers, and scans pick up where they left off.
+          <h1 id="maint-h1">We are rebuilding cvENGINE.</h1>
+          <p id="maint-p">
+            A new version is going in right now. The site is paused so that
+            nothing runs on a half-updated build. This page comes back by itself
+            the moment the site answers, however long that takes, and scans pick
+            up where they left off.
           </p>
         </div>
-        <div class="eta">Usually<b>2 to 5 min</b></div>
+        <div class="eta" id="maint-eta">Usually<b>2 to 5 min</b></div>
       </div>
 
       <div class="stage">
@@ -603,6 +605,20 @@
         }
         say();
         setInterval(say, EVERY);
+      })();
+    </script>
+    <script>
+      // The proxy fills data-maint (sub_filter, config/nginx/rengine.conf): "failed" when the update did not finish. Anything else, including the
+      // unreplaced placeholder of a file opened by hand, is the ordinary "we are rebuilding" text above.
+      (function () {
+        if (document.documentElement.getAttribute("data-maint") !== "failed") return;
+        document.title = "cvENGINE update did not finish";
+        document.getElementById("maint-h1").textContent = "The update did not finish.";
+        document.getElementById("maint-p").textContent =
+          "Something went wrong while cvENGINE was being updated. The administrator is fixing it. Nothing is lost, scanning is paused, and this page comes back by itself the moment the site answers again.";
+        document.getElementById("maint-eta").textContent = "";
+        var st = document.getElementById("state");
+        if (st) st.textContent = "Waiting for the administrator. Checking again every few seconds.";
       })();
     </script>
     <script>
