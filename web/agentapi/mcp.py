@@ -17,6 +17,7 @@ from agentapi import inventory
 from agentapi import reports
 from agentapi import sentinel_broker as sentinels
 from agentapi import sentinel_settings
+from agentapi import settings_bridge
 from agentapi import sentinel_dispatch
 from reNgine import schema_guard
 from agentapi import services as svc
@@ -511,6 +512,14 @@ TOOLS = [
      _schema({'decision_id': {'type': 'integer'}}, ['decision_id']), lambda c, a: tuning.revert_decision(c, a['decision_id']), True),
     ('release_tuning_pin', 'App Admin only, auto mode. Let auto-tuning manage a setting a person pinned: the saved value is removed and the same number becomes the tuned one.',
      _schema({'setting': {'type': 'string'}}, ['setting']), lambda c, a: tuning.release(c, a['setting']), True),
+    ('list_settings', 'App Admin. Every instance setting that can be read or changed here, as in the Settings and Administration pages: name, what it is, whether it can be read, changed or removed, and what the id means. Secrets are never returned.',
+     _schema(), lambda c, a: settings_bridge.list_settings(c), False),
+    ('get_setting', 'App Admin (administrator for audit, activity, health, org keys and excluded addresses). Read one setting by name (see list_settings). id is for the entries that name one object, for example "3/shodan". query is for paged ones (page, page_size).',
+     _schema({'name': {'type': 'string'}, 'id': {'type': 'string'}, 'query': {'type': 'object'}}, ['name']),
+     lambda c, a: settings_bridge.get_setting(c, a['name'], a.get('id'), a.get('query')), False),
+    ('change_setting', 'App Admin (administrator for the admin ones). Change one setting, or run one action, by name (see list_settings): values is what the page would send, and the same limits, checks and audit entry apply. remove=true deletes the object an entry names. Needs a token that is not read only. Send only the keys to change.',
+     _schema({'name': {'type': 'string'}, 'values': {'type': 'object'}, 'id': {'type': 'string'}, 'remove': {'type': 'boolean'}}, ['name']),
+     lambda c, a: settings_bridge.change_setting(c, a['name'], a.get('values'), a.get('id'), bool(a.get('remove'))), True),
     ('get_sentinel_defaults', 'The instance-wide Sentinel defaults: self_update (off, manual, automatic or null to follow the instance\'s own Automatic or Manual update choice) and what is effective now, and the capability policy defaults builtin_kinds (for the built-in scanner; OpenVAS denied until changed) and external_kinds (every other Sentinel; empty allows every declared kind), each {kind: {mode: allow|deny|prefer, max_concurrent}}. They apply to every Sentinel with no value of its own.',
      _schema(), lambda c, a: sentinel_settings.get_defaults(), False),
     ('set_sentinel_defaults', 'App Admin only. Set instance-wide Sentinel defaults, any of: self_update (off never updates a Sentinel, manual only when an administrator presses Update now (update_agent with update=now), automatic when a new version is out; null follows the instance\'s own update choice); builtin_kinds and external_kinds, the capability policy {kind: {mode: allow|deny|prefer, max_concurrent: 1-10|null}} that applies to the built-in scanner and to every other Sentinel for a kind it has no policy of its own for (deny never offers the kind, prefer holds work for a Sentinel that prefers it, max_concurrent caps the kind at once). A map replaces the whole map; builtin_kinds null restores the shipped default (OpenVAS denied on the built-in scanner), external_kinds null or {} means every declared kind is allowed.',
