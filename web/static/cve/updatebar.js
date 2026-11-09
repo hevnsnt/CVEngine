@@ -65,13 +65,24 @@ function watchUpdate(first) {
   };
   const tick = async () => {
     let now = null;
+    let didNotFinish = false;
     try {
       const r = await fetch("/cve/api/settings/updates", { credentials: "same-origin", cache: "no-store" });
-      if (!r.ok) throw new Error(String(r.status));
+      // while the update runs the proxy answers every request with its maintenance page (503, from its own container), so this poll is
+      // expected to fail: that is "down", not an error. The page says when the update did not finish (header set by config/nginx/rengine.conf).
+      if (!r.ok) {
+        didNotFinish = r.status === 503 && r.headers.get("X-CVE-Maintenance") === "failed";
+        throw new Error(String(r.status));
+      }
       now = await r.json();
     } catch (_) {
       unreachable += 1;
       sawDown = true;
+      if (didNotFinish) {
+        grey(true, "The update did not finish. The administrator is fixing it.");
+        paint(2, "The update did not finish", "The administrator is fixing it. This page returns by itself when the site answers again.", false);
+        return setTimeout(tick, POLL_MS);
+      }
       grey(true, "Waiting for the site to answer. Usually 2 to 5 minutes.");
       paint(2, "Rebuilding CVEngine", "The page is paused and returns when the services are back. Usually 2 to 5 minutes.");
       return setTimeout(tick, POLL_MS);
