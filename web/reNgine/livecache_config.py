@@ -27,6 +27,13 @@ def refresh_enabled(environ=None):
     return str((os.environ if environ is None else environ).get('CVENGINE_LIVE_REFRESH', '1')).strip().lower() not in OFF
 
 
+def dashboard_snapshots_enabled(environ=None):
+    """``CVENGINE_DASHBOARD_SNAPSHOTS`` (on): ``0``, ``false``, ``no`` or ``off`` is the kill switch of the per-project dashboard snapshots
+    (``cveFeed.dashboard_snapshot``): the headline counts, the ticker's counts, the map and the search's coverage counts are then computed by the request
+    behind the per-scope cache, as before 1.4.1."""
+    return str((os.environ if environ is None else environ).get('CVENGINE_DASHBOARD_SNAPSHOTS', '1')).strip().lower() not in OFF
+
+
 def refresh_seconds(environ=None):
     return _int('CVENGINE_LIVE_REFRESH_SECONDS', 5, 2, 60, environ)
 

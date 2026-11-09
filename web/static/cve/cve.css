@@ -2593,3 +2593,9 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 @media (pointer:coarse){.api-keys-page .seg-btn,.api-keys-page .code .copy{min-height:44px}}
 .visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 .api-keys-page #secret[hidden]{display:none}
+/* the dashboard's numbers come from stored snapshots: a number that is on its way shows as such, never as a dash */
+.snap-note{margin:0 0 var(--s-2);font:var(--fw-medium) var(--fs-1)/1.3 var(--mono);color:var(--muted)}
+html[data-snap="pending"] .ticks b,html[data-snap="pending"] .tile b{color:transparent;background:linear-gradient(90deg,var(--line) 25%,var(--surface) 50%,var(--line) 75%) 0 0/200% 100%;border-radius:4px;animation:snap-shimmer 1.4s linear infinite;min-width:2.2ch;display:inline-block}
+html[data-snap="updating"] .ticks b,html[data-snap="updating"] .tile b{opacity:.7;transition:opacity .2s var(--ease)}
+@keyframes snap-shimmer{to{background-position:-200% 0}}
+@media (prefers-reduced-motion:reduce){html[data-snap="pending"] .ticks b,html[data-snap="pending"] .tile b{animation:none}}

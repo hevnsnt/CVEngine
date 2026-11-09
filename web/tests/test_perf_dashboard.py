@@ -14,9 +14,11 @@ from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
+from tests.legacy_snapshots import legacy_snapshots
 from tests.test_tenancy import client_for
 
 
+@legacy_snapshots
 class GraphPollingTests(TestCase):
 	def setUp(self):
 		cache.clear()

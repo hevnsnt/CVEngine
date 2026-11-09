@@ -27,14 +27,22 @@ def clear():
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument('--explain', action='store_true'); ap.add_argument('--runs', type=int, default=2)
-    ap.add_argument('--slow-ms', type=float, default=150); ap.add_argument('--json'); ap.add_argument('--page', action='store_true', help='load the page: the four heavy calls at once, cold, as the overview does'); ap.add_argument('--user', default='scale-admin')
+    ap.add_argument('--slow-ms', type=float, default=150); ap.add_argument('--json'); ap.add_argument('--refresh', action='store_true', help='build every project snapshot first (timed) so the calls below find them'); ap.add_argument('--page', action='store_true', help='load the page: the four heavy calls at once, cold, as the overview does'); ap.add_argument('--user', default='scale-admin')
     a = ap.parse_args()
+    if a.refresh:
+        from cveFeed import dashboard_snapshot as ds
+        from dashboard.models import Project
+        clear(); tot = time.perf_counter()
+        for pid in Project.objects.order_by('id').values_list('id', flat=True):
+            t = time.perf_counter(); r = ds.refresh_project(pid); print(f'  snapshot project {pid}: {r} {time.perf_counter() - t:.2f} s', flush=True)
+        print(f'all snapshots built in {time.perf_counter() - tot:.1f} s')
     c = Client(HTTP_HOST='localhost'); c.force_login(User.objects.get(username=a.user))
     if a.page:
         import threading
         from django.db import connections
         names = ('stats', 'graph', 'discovery', 'search'); urls = dict(CALLS); res = {}
-        clear()
+        if not a.refresh:
+            clear()
         def go(n):
             cl = Client(HTTP_HOST='localhost'); cl.force_login(User.objects.get(username=a.user)); t = time.perf_counter()
             r = cl.get(urls[n]); res[n] = (round((time.perf_counter() - t) * 1000), r.status_code); connections.close_all()
@@ -45,7 +53,7 @@ def main():
     for name, url in CALLS:
         rows = []
         for phase in ['cold'] + ['warm'] * (a.runs - 1):
-            if phase == 'cold':
+            if phase == 'cold' and not a.refresh:
                 clear()
             with CaptureQueriesContext(connection) as ctx:
                 t = time.perf_counter(); r = c.get(url); ms = (time.perf_counter() - t) * 1000

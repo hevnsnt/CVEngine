@@ -128,6 +128,23 @@ def refresh_live_snapshots():
     return live_refresh.refresh_hot_scopes()
 
 
+@app.task(name='refresh_dashboard_snapshots', bind=False, queue='live_cache_queue', ignore_result=True)
+def refresh_dashboard_snapshots():
+    """Every minute: bring the per-project dashboard snapshots (headline counts, ticker counts, coverage, the map) up to date, the oldest first, for every
+    project whose snapshot is older than ``dashboard_snapshot.REFRESH_AFTER`` or marked dirty. Stops starting new ones after ``BEAT_BUDGET`` seconds; the
+    next run continues. Reads and writes the database and the cache only."""
+    from cveFeed import dashboard_snapshot as snap
+    return snap.refresh_due()
+
+
+@app.task(name='refresh_dashboard_snapshot', bind=False, queue='live_cache_queue', ignore_result=True)
+def refresh_dashboard_snapshot(project_id):
+    """One project's dashboard snapshot, asked for by a Sentinel result, a change, or a viewer that found it missing or old (debounced: see
+    ``dashboard_snapshot.schedule``)."""
+    from cveFeed import dashboard_snapshot as snap
+    return snap.refresh_project(int(project_id))
+
+
 @app.task(name='openvas_sweep', bind=False, queue='openvas_queue')
 def openvas_sweep():
     """Every 15 minutes while the OpenVAS add-on is switched on (the beat entry is disabled otherwise): one step of the slow GVM sweep, which

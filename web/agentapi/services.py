@@ -14,7 +14,8 @@ from datetime import datetime, timezone as dt_timezone
 from typing import Optional
 
 from django.contrib.postgres.expressions import ArraySubquery
-from django.db.models import AutoField, Lookup
+from django.contrib.postgres.fields import ArrayField
+from django.db.models import AutoField, IntegerField, Lookup, Value
 from django.utils import timezone
 
 from cveFeed import match_policy
@@ -1957,8 +1958,18 @@ def _one_per_host(qs, per_project=False):
     hostname): the same name in two projects is two hosts."""
     from django.db.models import Case, Count, F, IntegerField, OuterRef, Subquery, Value, Window, When
     from django.db.models.functions import Coalesce, Length, RowNumber
-    from cveFeed.counts import with_host_key
+    from cveFeed.counts import _WALK, with_host_key
     from startScan.models import OPEN_PORT_STATES, Port, Subdomain
+    memo = _WALK.get()  # inside ``counts.walk_memo`` (a snapshot build) the same walk is run once
+    memo_key = None
+    if memo is not None:
+        sql, params = qs.order_by().values('id').query.sql_with_params()
+        from tenancy import scope as tenancy_scope
+        allowed = tenancy_scope.current_allowed()
+        # under a scope of exactly one project every row has that project, so per_project changes nothing: one walk serves both
+        memo_key = (per_project and not (allowed is not None and len(allowed) == 1), sql, tuple(map(repr, params)))
+        if memo_key in memo:
+            return Subdomain.objects.filter(id__in_array=Value(memo[memo_key], output_field=ArrayField(IntegerField())))
     ports = Port.objects.filter(state__in=OPEN_PORT_STATES, ports__ip_addresses=OuterRef('pk')).order_by() \
         .values('ports__ip_addresses').annotate(c=Count('id', distinct=True)).values('c')
     ips = Subdomain.ip_addresses.through.objects.filter(subdomain_id=OuterRef('pk')).order_by() \
@@ -1975,6 +1986,9 @@ def _one_per_host(qs, per_project=False):
     ).filter(_rank=1).values('id')
     # the ids are gathered into an array once and looked up in it (``id = ANY(ARRAY(...))``). ``id IN (subquery)`` let Postgres guess one row for the
     # window query and rescan its 8,000 rows for each of 10,000 hosts: 4.8 s at that size, 0.1 s with the array
+    if memo_key is not None:
+        memo[memo_key] = list(rep.values_list('id', flat=True))
+        return Subdomain.objects.filter(id__in_array=Value(memo[memo_key], output_field=ArrayField(IntegerField())))
     return Subdomain.objects.filter(id__in_array=ArraySubquery(rep))
 
 
@@ -2604,6 +2618,22 @@ def _cached_facets(project, qs, terms, params, facet_names, facet_size, with_uns
     return snapshot_cache.snapshot('search-facets', scope, compute, fresh)['payload']
 
 
+def _facets_from_snapshots(project, terms, params, facet_names, heat):
+    """The heat chips and the unscannable split of a plain search (no terms, no heat filter, no extra facets, no internal or exposed filter) read from the
+    stored per-project snapshots (``cveFeed.dashboard_snapshot``) instead of walking up to HEAT_FACET_CAP hosts in the request: the all-projects answer is the
+    sum of the projects', a project's its own. ``None`` when the search is anything else, or a project has no snapshot yet (the walk answers and the
+    refresh is asked for)."""
+    from cveFeed import dashboard_snapshot as snap
+    from reNgine import livecache_config
+    if not livecache_config.dashboard_snapshots_enabled() or terms or heat or facet_names or str(params.get('internal', '')).strip() or str(params.get('exposed') or '').strip().lower() in ('1', 'true', 'yes'):
+        return None
+    ids = list(project.ids) if _is_all(project) else [project.pk]
+    entries, meta = snap.collect(ids)
+    if meta['partial'] or not entries:
+        return None
+    return snap.merge_coverage(entries)
+
+
 def _unscannable_facet(qs, heat_by_id):
     """``{count, private, no_dns, unknown}``: the hosts counted as ``unscanned`` that have no address a scanner can use, so "never scanned" can say
     which are waiting their turn and which have nothing to scan. ``private`` points inside a private network (only a Sentinel inside it can scan
@@ -2755,7 +2785,10 @@ def search_hosts(ctx, slug, params):
     if counts_only and not heat:
         return {'count': qs.count(), 'page': 1, 'page_size': 0, 'results': [], 'facets': None, 'has_internal': _any_internal()}
     qs_all = qs  # the whole match of q, before the heat filter narrows it
-    if heat or not no_facets:
+    fast = None if no_facets else _facets_from_snapshots(project, terms, params, facet_names, heat)
+    if fast is not None:
+        heat_counts, heat_by_id, heat_truncated, unscannable, search_facets = fast['heat'], {}, fast['truncated'], fast['unscannable'], {}
+    elif heat or not no_facets:
         bundle = _cached_facets(project, qs, terms, params, facet_names, facet_size, with_unscannable=not no_facets)
         heat_counts, heat_by_id, heat_truncated, unscannable, search_facets = bundle['heat'], bundle['by_id'], bundle['truncated'], bundle['unscannable'], bundle['facets']
     else:

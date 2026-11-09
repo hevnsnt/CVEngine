@@ -2730,6 +2730,9 @@ def report_result(ctx, task_id, body):
             audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
                          agent_id=agent.pk, agent=agent.name, outcome='rejected')
     _ended(task, agent.pk)
+    if rejected is None and not dropped:
+        from cveFeed import dashboard_snapshot
+        dashboard_snapshot.mark_dirty([task.project_id])  # a result landed: the dashboard snapshot of its project is refreshed soon (debounced, in the background)
     if rejected is not None:
         raise rejected
     task.refresh_from_db()

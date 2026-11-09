@@ -28,6 +28,7 @@ from startScan.models import Subdomain
 from tenancy import membership_cache, roles, scope
 from tests.test_live_cache import World, steady_caches
 from tests.test_tenancy import client_for
+from tests.legacy_snapshots import legacy_snapshots
 
 REAL_BACKLOG = live_refresh.backlog  # before any test patches it
 START = 1_000_000.0
@@ -49,6 +50,7 @@ class Clock:
         self.now += seconds
 
 
+@legacy_snapshots
 class Fresh(World):
     """The two tenants of the stage 0 tests, a fake clock, and nothing hot, cached or registered when each test starts."""
 
@@ -93,6 +95,7 @@ class Fresh(World):
         return [q['sql'][:120] for q in ctx.captured_queries if any(table in q['sql'] for table in HEAVY)]
 
 
+@legacy_snapshots
 class Counting(contextlib.ExitStack):
     """Wraps the computations a poll can run, so a test can say how often each ran."""
 
@@ -114,6 +117,7 @@ class Counting(contextlib.ExitStack):
 # --- (a) a warm cache means no heavy query in a request --------------------------------------------------------------------
 
 
+@legacy_snapshots
 class WarmCacheTests(Fresh):
     def warm(self, client):
         """The first poll of each endpoint (computed by the request, which registers the scope as hot), then one refresher run that finds them due."""
@@ -201,6 +205,7 @@ class WarmCacheTests(Fresh):
 # --- (b) the refresher repopulates only hot scopes ---------------------------------------------------------------------------
 
 
+@legacy_snapshots
 class HotScopeTests(Fresh):
     def test_only_the_scopes_asked_for_lately_are_recomputed(self):
         alpha, root = client_for(self.a1), client_for(self.root)
@@ -287,6 +292,7 @@ class HotScopeTests(Fresh):
 # --- (c) scope isolation ----------------------------------------------------------------------------------------------------
 
 
+@legacy_snapshots
 class IsolationTests(Fresh):
     def test_users_with_different_projects_read_only_their_own_numbers_before_and_after_the_refresher(self):
         both = User.objects.create_user('lc-both', password='x')
@@ -364,6 +370,7 @@ class IsolationTests(Fresh):
 # --- the per-user cache of the projects a user may see ---------------------------------------------------------------------
 
 
+@legacy_snapshots
 class MembershipCacheTests(Fresh):
     def test_the_polls_look_a_users_projects_up_once_and_everything_else_every_time(self):
         client = client_for(self.a1)
@@ -496,6 +503,7 @@ class MembershipCacheTests(Fresh):
 # --- (e) a cold cache falls back to the single flight compute -------------------------------------------------------------
 
 
+@legacy_snapshots
 class ColdCacheTests(Fresh):
     def test_a_cold_poll_computes_once_and_the_next_is_served(self):
         client = client_for(self.a1)
@@ -572,6 +580,7 @@ class ColdCacheTests(Fresh):
 # --- metrics, the schedule, the lane ---------------------------------------------------------------------------------------
 
 
+@legacy_snapshots
 class MetricsTests(Fresh):
     def test_hits_stale_answers_misses_and_refreshes_are_counted_and_reach_the_status(self):
         client = client_for(self.a1)
@@ -626,6 +635,7 @@ class MetricsTests(Fresh):
         self.assertIn('live_cache_queue', admin['system']['queues']['waiting'])
 
 
+@legacy_snapshots
 class ScheduleAndLaneTests(SimpleTestCase):
     def test_the_environment_sets_the_cadence_the_kill_switch_and_the_hot_window(self):
         env = livecache_config
@@ -661,6 +671,7 @@ class ScheduleAndLaneTests(SimpleTestCase):
             self.assertNotIn(scan_worker, consumers[0], 'a worker whose slots scan, feed or validation work holds for hours')
 
 
+@legacy_snapshots
 class BeatTableTests(Fresh):
     def test_beat_writes_the_row_from_the_environment_and_a_switched_off_one_is_disabled(self):
         """What ``DatabaseScheduler.update_from_dict`` does with each ``CELERY_BEAT_SCHEDULE`` entry when beat starts."""
@@ -677,6 +688,7 @@ class BeatTableTests(Fresh):
 # --- review fixes: made-up scopes, graph payload lifetime, a small polite refresher, the run lock, the commit-time bump ---------------
 
 
+@legacy_snapshots
 class MadeUpScopeTests(Fresh):
     def register(self, user, name, scope_id, ids):
         tokens = scope.set_scope(set(ids), user)
@@ -734,6 +746,7 @@ class MadeUpScopeTests(Fresh):
         self.assertEqual(len(snapshot_cache.hot_recipes()), snapshot_cache.MAX_HOT_PER_USER + 1)
 
 
+@legacy_snapshots
 class GraphPayloadLifetimeTests(Fresh):
     def test_a_prebuilt_graph_is_kept_as_long_as_one_a_request_builds_and_only_when_the_version_moved(self):
         client = client_for(self.a1)
@@ -757,6 +770,7 @@ class GraphPayloadLifetimeTests(Fresh):
         self.assertEqual(graph_writes, [views.GRAPH_CACHE_SECONDS])
 
 
+@legacy_snapshots
 class PoliteRefresherTests(Fresh):
     def test_the_budget_is_small_and_never_more_than_half_an_interval(self):
         self.assertEqual([live_refresh.budget_seconds(i) for i in (2, 5, 6, 8, 60)], [1.0, 2.5, 3.0, 3.0, 3.0])
@@ -865,6 +879,7 @@ class PoliteRefresherTests(Fresh):
         self.assertIsNone(cache.get(live_refresh.RUN_LOCK), 'a run releases its own lock')
 
 
+@legacy_snapshots
 class CommitTimeBumpTests(Fresh):
     def test_a_poll_that_cached_the_old_answer_before_the_commit_is_dropped_at_the_commit(self):
         both = User.objects.create_user('lc-commit', password='x')
@@ -902,6 +917,7 @@ class CommitTimeBumpTests(Fresh):
         self.assertEqual(client.get(STATS).json()['targets'], 2)
 
 
+@legacy_snapshots
 class CounterTests(Fresh):
     def test_a_count_is_one_round_trip_after_the_first(self):
         snapshot_cache.count('stats', 'hit')

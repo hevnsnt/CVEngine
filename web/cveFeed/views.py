@@ -19,7 +19,8 @@ from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET, require_POST
 from rolepermissions.decorators import has_permission_decorator
 
-from cveFeed import snapshot_cache
+from cveFeed import dashboard_snapshot, snapshot_cache, timing
+from reNgine import livecache_config
 from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
 from cveFeed.models import (AgentActivity, AutoFireRun, CVEEntry, CVEMatch, DiscoveryEvent, GeneratedTemplate, HygieneFinding,
                             TlsCertificate)
@@ -858,6 +859,7 @@ def bump_stats_revision():
     """Make every dashboard snapshot (headline counts, discovery counts, the graph's version) stale in every web worker after a finding is
     closed: the next poll of each scope rebuilds it."""
     snapshot_cache.bump_revision()
+    dashboard_snapshot.mark_dirty()  # the per-project snapshots are refreshed soon (debounced, in the background); until then the last one is served
 
 
 def clear_stats_cache():
@@ -900,13 +902,32 @@ def api_scanner(request):
     return response
 
 
+def _snapshot_meta(entries, meta):
+    """What a response says about the snapshots it was summed from: ``ready`` (there is something to show), ``as_of`` (when the oldest one was built),
+    ``stale`` (older than ``dashboard_snapshot.STALE_AFTER``: the page says how old) and ``partial`` (a project has none yet). Also the Server-Timing note."""
+    from datetime import datetime, timezone as tz
+    ready = bool(entries) or meta['projects'] == 0
+    as_of = datetime.fromtimestamp(meta['as_of'], tz.utc).isoformat() if meta['as_of'] else None
+    timing.note('snap', f"{len(entries)} of {meta['projects']} project snapshots" + (f", oldest {meta['age']} s" if meta['age'] is not None else ''))
+    return {'ready': ready, 'as_of': as_of, 'stale': meta['stale'], 'partial': meta['partial'], 'missing': meta['missing']}
+
+
 @require_GET
 @project_scoped
 def api_stats(request):
-    snap = cached_stats_snapshot((request.GET.get('project', ''), _live_org(request)))
-    live = live_scan_counts()  # fresh on every poll: five cheap counts, and the first thing a person watches
-    # the ETag is the snapshot's (computed once, when it was built) and the live counts: a poll that finds both unchanged gets a 304 and no body
-    return snapshot_cache.respond(request, snapshot_cache.token_of([snap['etag'], live]), lambda: {**snap['payload'], **live})
+    """The headline counts and the coverage counts of the dashboard: the sum of the stored per-project snapshots (``cveFeed.dashboard_snapshot``), answered
+    at once however old they are and never computed here. ``snapshot`` says how old (``as_of``) and whether a project has none yet (``partial``); the
+    running and queued scan counts are the only part read fresh (a few cheap counts). ``CVENGINE_DASHBOARD_SNAPSHOTS=0`` computes them per request instead."""
+    if not livecache_config.dashboard_snapshots_enabled():
+        snap = cached_stats_snapshot((request.GET.get('project', ''), _live_org(request)))
+        live = live_scan_counts()  # fresh on every poll: five cheap counts, and the first thing a person watches
+        return snapshot_cache.respond(request, snapshot_cache.token_of([snap['etag'], live]), lambda: {**snap['payload'], **live})
+    entries, meta = dashboard_snapshot.collect()
+    live = live_scan_counts()
+    snapshot = _snapshot_meta(entries, meta)
+    body = {**dashboard_snapshot.merge_stats(entries), 'coverage': dashboard_snapshot.merge_coverage(entries)} if snapshot['ready'] else {}
+    # the ETag is of the numbers and of what the snapshots say about themselves (not of the clock): a poll that finds nothing new gets a 304 and no body
+    return snapshot_cache.respond(request, snapshot_cache.token_of([body, live, snapshot]), lambda: {**body, **live, 'snapshot': snapshot})
 
 
 GRAPH_CACHE_SECONDS = 30
@@ -967,6 +988,8 @@ def api_graph(request):
     from django.http import HttpResponseNotModified
     domain, scan = request.GET.get('domain', ''), request.GET.get('scan', '')
     domain_id, scan_id = int(domain) if domain.isdigit() else None, int(scan) if scan.isdigit() else None
+    if not domain_id and not scan_id and livecache_config.dashboard_snapshots_enabled():
+        return _graph_from_snapshots(request)
     params = (request.GET.get('project', ''), _live_org(request), domain_id, scan_id)
     scope = snapshot_cache.scope_hash(*params)
     version = snapshot_cache.snapshot('graph-version', scope, lambda: graph_version(domain_id, scan_id), GRAPH_VERSION_SECONDS,
@@ -985,6 +1008,32 @@ def api_graph(request):
         except Exception:  # noqa: BLE001
             pass
     return JsonResponse(payload)
+
+
+def _graph_from_snapshots(request):
+    """The map of everything the caller sees (or of the one project selected): the stored per-project graphs, merged. The version is a token of which
+    snapshots were built when, so ``?v=`` equal to it is a 304 and a poll costs one cache read; a changed one is merged once and kept under its version."""
+    from django.core.cache import cache
+    from django.http import HttpResponseNotModified
+    entries, meta = dashboard_snapshot.collect()
+    snapshot = _snapshot_meta(entries, meta)
+    if not snapshot['ready']:
+        return JsonResponse({'nodes': [], 'edges': [], 'hosts': {'drawn': 0, 'total': 0, 'projects': {}}, 'projects': {}, 'version': 'pending', 'snapshot': snapshot})
+    version = dashboard_snapshot.graph_version(entries)
+    if request.GET.get('v') == version:
+        return HttpResponseNotModified()
+    key = f'cve:dash:graph:{version}'
+    try:
+        payload = cache.get(key)
+    except Exception:  # noqa: BLE001
+        payload = None
+    if payload is None:
+        payload = dashboard_snapshot.merge_graph(entries, GRAPH_NODE_CAP)
+        try:
+            cache.set(key, payload, 600)
+        except Exception:  # noqa: BLE001
+            pass
+    return JsonResponse({**payload, 'version': version, 'snapshot': snapshot})
 
 
 @require_GET
@@ -1215,12 +1264,14 @@ def _chunks(ids, size=_COUNT_CHUNK):
         yield ids[start:start + size]
 
 
-def discovery_counts():
-    """The three counts under the live ticker: live hosts, their IP addresses and open ports, over everything the caller can see.
+def discovery_sets():
+    """``(live host ids, ip address ids, open port ids)`` of everything the caller can see: the sets behind the ticker's three counts.
 
     The live hosts are read once (the one expensive part: the current inventory collapsed to a row per host), and the addresses and ports
     are then looked up through the link tables by id. The three counts used to be three nested queries that each repeated the whole host walk
-    inside it; the ports one took 6 to 18 s on a 4,000-scan install, and several of them ran at once whenever the snapshot went cold."""
+    inside it; the ports one took 6 to 18 s on a 4,000-scan install, and several of them ran at once whenever the snapshot went cold. The sets (not
+    only their sizes) are what a dashboard snapshot stores per project, so the all-projects count of addresses and ports is a union and an address
+    two projects share is counted once, as a single walk over everything would."""
     from cveFeed.counts import LIVE_HOST_Q, host_reps
     from startScan.models import IpAddress, Subdomain
     live = set(host_reps().filter(LIVE_HOST_Q).values_list('pk', flat=True))
@@ -1230,6 +1281,12 @@ def discovery_counts():
     ports = set()
     for chunk in _chunks(sorted(ips)):
         ports.update(IpAddress.ports.through.objects.filter(ipaddress_id__in=chunk, port__state__in=OPEN_PORT_STATES).values_list('port_id', flat=True))
+    return live, ips, ports
+
+
+def discovery_counts():
+    """The three counts under the live ticker: live hosts, their IP addresses and open ports, over everything the caller can see."""
+    live, ips, ports = discovery_sets()
     return {'hosts': len(live), 'ips': len(ips), 'ports': len(ports)}
 
 
@@ -1239,6 +1296,13 @@ def cached_discovery_counts(params=()):
     counts by ``bump_stats_revision``. Run it inside ``project_scoped``."""
     return snapshot_cache.snapshot('discovery-counts', snapshot_cache.scope_hash(*params), discovery_counts, STATS_CACHE_SECONDS,
                                    hot={'params': params, 'args': {}})['payload']
+
+
+def _discovery_counts_from_snapshots():
+    """The ticker's three counts: the sum of the stored per-project snapshots (``{}`` while none exists yet, which the page shows as a placeholder)."""
+    entries, meta = dashboard_snapshot.collect()
+    _snapshot_meta(entries, meta)
+    return dashboard_snapshot.merge_discovery(entries) if entries else {}
 
 
 @require_GET
@@ -1266,7 +1330,8 @@ def api_discovery(request):
                  'status': scan.scan_status, 'started': scan.start_scan_date.isoformat(), 'error': _public_error(scan.error_message),
                  'queue_position': queue_position(scan.id) if scan.scan_status == -1 else None},
         'events': [{'id': e.id, 'type': e.type, 'label': e.label, 'host': e.host, 'module': e.module} for e in events],
-        'counts': cached_discovery_counts((request.GET.get('project', ''), _live_org(request))),
+        'counts': (_discovery_counts_from_snapshots() if livecache_config.dashboard_snapshots_enabled()
+                   else cached_discovery_counts((request.GET.get('project', ''), _live_org(request)))),
     })
 
 

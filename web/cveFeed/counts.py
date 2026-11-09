@@ -24,6 +24,8 @@ Definitions (also shown to the user as the tooltip of each dashboard tile):
 * **Oldest open**: the age in whole days of the longest-open critical or high item among the exposed CVE matches, actionable scanner
   findings and open hygiene findings (``oldest_open``).
 """
+import contextlib
+import contextvars
 from datetime import timedelta
 
 from django.db.models import Q
@@ -168,6 +170,22 @@ def exposed_among(reps, project_ids=None):
     return named(with_host_key(reps)).filter(Q(host_key__in=with_host_key(exposed).values('host_key')) | Q(_named__in=named(exposed).values('_named')))
 
 
+_WALK = contextvars.ContextVar('cve_host_walk_memo', default=None)
+
+
+@contextlib.contextmanager
+def walk_memo():
+    """Inside this block each distinct host walk (``agentapi.services._one_per_host``: the one expensive read of the inventory, about 4 s over 250,000 rows)
+    is run once and its ids reused. A snapshot build asks for the same walk a dozen times (host totals, the exposed hosts, the ticker, the heat facets, the
+    map) and each of those used to repeat it. The memo is keyed by the walk's own SQL, which carries the tenancy scope the manager added, so a block that
+    changes the scope never reads another scope's ids; and it lives only as long as the block (one snapshot build), never across requests."""
+    token = _WALK.set({})
+    try:
+        yield
+    finally:
+        _WALK.reset(token)
+
+
 def host_reps(domain_id=None, domain_ids=None, in_scope=False):
     """One row per host (project and name) of the current inventory: the row the Hosts page shows for it. ``domain_id`` (one
     target) or ``domain_ids`` (several) narrow it to those targets' hosts. ``in_scope`` (what a sweep may scan) leaves out the rows kept
@@ -272,19 +290,25 @@ def oldest_open(now=None):
         if at is not None and (best['at'] is None or at < best['at']):
             best.update(at=at, kind=kind, id=row_id)
 
-    first_match = Subquery(CVEMatch.objects.filter(
-        cve_entry=OuterRef('cve_entry'), subdomain__target_domain=OuterRef('subdomain__target_domain'),
-        subdomain__name=OuterRef('subdomain__name')).order_by('created_at').values('created_at')[:1])
-    row = (exposed_matches().filter(cve_entry__cvss__gte=HIGH_CVSS).annotate(first=first_match).order_by('first').values('id', 'first').first())
-    if row:
-        consider('cve', row['first'], row['id'])
-    first_finding = Subquery(Vulnerability.objects.filter(
-        name=OuterRef('name'), subdomain__target_domain=OuterRef('subdomain__target_domain'), subdomain__name=OuterRef('subdomain__name'),
-        discovered_date__isnull=False).order_by('discovered_date').values('discovered_date')[:1])
-    row = (actionable_findings(Vulnerability.objects.filter(severity__gte=3, subdomain__isnull=False)).annotate(first=first_finding)
-           .filter(first__isnull=False).order_by('first').values('id', 'first').first())
-    if row:
-        consider('scanner', row['first'], row['id'])
+    # The oldest candidate of each source, found with one grouped pass over the history instead of a correlated lookup per candidate: that lookup read
+    # every earlier match of the same CVE for every exposed match, so the work grew with (matches x matches per CVE) and took seconds on a large inventory.
+    from django.db.models import Min
+    cands = list(exposed_matches().filter(cve_entry__cvss__gte=HIGH_CVSS).values_list('id', 'cve_entry_id', 'subdomain__target_domain_id', 'subdomain__name'))
+    if cands:
+        first = {(c, d, n): at for c, d, n, at in CVEMatch.objects.filter(cve_entry_id__in={c[1] for c in cands}, subdomain__target_domain_id__in={c[2] for c in cands})
+                 .order_by().values_list('cve_entry_id', 'subdomain__target_domain_id', 'subdomain__name').annotate(at=Min('created_at'))}
+        pick = min(((first.get((c, d, n)), mid) for mid, c, d, n in cands if first.get((c, d, n)) is not None), default=None)
+        if pick:
+            consider('cve', pick[0], pick[1])
+    cands = list(actionable_findings(Vulnerability.objects.filter(severity__gte=3, subdomain__isnull=False))
+                 .values_list('id', 'name', 'subdomain__target_domain_id', 'subdomain__name'))
+    if cands:
+        first = {(nm, d, n): at for nm, d, n, at in Vulnerability.objects.filter(name__in={c[1] for c in cands}, subdomain__target_domain_id__in={c[2] for c in cands},
+                                                                                discovered_date__isnull=False)
+                 .order_by().values_list('name', 'subdomain__target_domain_id', 'subdomain__name').annotate(at=Min('discovered_date'))}
+        pick = min(((first.get((nm, d, n)), vid) for vid, nm, d, n in cands if first.get((nm, d, n)) is not None), default=None)
+        if pick:
+            consider('scanner', pick[0], pick[1])
     row = actionable_hygiene(HygieneFinding.objects.all(), 3).order_by('first_seen').values('id', 'first_seen').first()
     if row:
         consider('hygiene', row['first_seen'], row['id'])

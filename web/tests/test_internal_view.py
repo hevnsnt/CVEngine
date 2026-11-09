@@ -16,6 +16,7 @@ from targetApp.models import Domain
 from tests.test_agentapi import call
 from tests.test_internal_ranges import World
 from tests.test_sentinels import reset_rates
+from tests.legacy_snapshots import prime
 
 
 class ViewBase(World):
@@ -104,6 +105,7 @@ class StatsTests(ViewBase):
     def stats(self, project=''):
         from cveFeed import views
         views.clear_stats_cache()
+        prime()
         client = Client()
         client.force_login(self.admin)
         return client.get('/cve/api/stats', {'project': project} if project else {}).json()
@@ -146,6 +148,7 @@ class StatsTests(ViewBase):
     def test_a_user_of_another_organization_sees_none_of_it(self):
         client = Client()
         client.force_login(self.other)
+        prime()
         out = client.get('/cve/api/stats').json()['internal']
         self.assertFalse(out['has'])
 
@@ -154,6 +157,7 @@ class GraphTests(ViewBase):
     def test_graph_nodes_say_which_hosts_are_internal(self):
         client = Client()
         client.force_login(self.admin)
+        prime()
         nodes = {n['label']: n for n in client.get('/cve/api/graph').json()['nodes'] if n['kind'] == 'subdomain'}
         self.assertEqual((nodes['10.20.0.7']['internal'], nodes['10.20.0.7']['network']), (True, '10.20.0.0/24'))
         self.assertFalse(nodes['203.0.113.7']['internal'])

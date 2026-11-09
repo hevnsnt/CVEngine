@@ -21,6 +21,7 @@ from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests.test_tenancy import client_for
+from tests.legacy_snapshots import prime
 
 SHARED = 'www.shared.example.com'  # the same host name in two projects: two hosts, never one
 
@@ -516,6 +517,7 @@ class OrgAllProjectsTests(AllProjectsBase):
 		self.assertIn('All projects in Acme Corp · 2 you can access', html)
 		self.assertNotIn('<option value="gadgets"', html)  # the project list is that organization's
 		self.assertEqual(self.hosts(c), {'acme', 'widgets'})  # the page's own calls name no organization: the session does
+		prime()
 		self.assertEqual(c.get('/cve/api/stats?project=_all').json()['targets'], 2)
 		self.assertIn('value="acme-corp" data-projects="acme widgets " selected', c.get('/cve/about/').content.decode())
 		html = c.get('/cve/_all/hosts/?org=').content.decode()  # All organizations again

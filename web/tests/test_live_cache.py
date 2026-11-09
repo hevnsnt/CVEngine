@@ -23,6 +23,7 @@ from startScan.models import IpAddress, ScanHistory, Subdomain
 from targetApp.models import Domain
 from tenancy import roles, scope
 from tests.test_tenancy import client_for
+from tests.legacy_snapshots import legacy_snapshots
 
 
 @contextlib.contextmanager
@@ -41,6 +42,7 @@ def steady_caches():
     internal_view.invalidate()
 
 
+@legacy_snapshots
 class World(TestCase):
     """Two tenants. alpha (organization A) has two members, beta (organization B) has one, and there is one App Admin."""
 
@@ -79,6 +81,7 @@ class World(TestCase):
 # --- the scope hash and the snapshot itself ---------------------------------------------------------------------------
 
 
+@legacy_snapshots
 class ScopeHashTests(World):
     def hash_for(self, ids, *params):
         tokens = scope.set_scope(ids, None)
@@ -103,6 +106,7 @@ class ScopeHashTests(World):
         self.assertNotEqual(before, self.hash_for(None))
 
 
+@legacy_snapshots
 class SnapshotTests(SimpleTestCase):
     def setUp(self):
         self.name = f'unit-{time.monotonic_ns()}'
@@ -196,6 +200,7 @@ class SnapshotTests(SimpleTestCase):
 # --- the endpoints ----------------------------------------------------------------------------------------------------
 
 
+@legacy_snapshots
 class SharedScopeTests(World):
     def test_two_members_of_one_project_share_one_stats_computation(self):
         with mock.patch.object(views, 'stats_payload', wraps=views.stats_payload) as compute:
@@ -264,6 +269,7 @@ class SharedScopeTests(World):
         self.assertEqual(json.loads(client.get('/cve/api/stats').content)['targets'], 1)
 
 
+@legacy_snapshots
 class ConditionalGetTests(World):
     def etag_round(self, path, compute_target, client=None):
         """GET ``path`` twice with its ETag the second time; ``compute_target`` (a mock) must not run for the 304."""
@@ -354,6 +360,7 @@ class ConditionalGetTests(World):
         self.assertFalse(response.has_header('ETag'))
 
 
+@legacy_snapshots
 class GraphVersionCacheTests(World):
     def test_the_304_path_stops_paying_for_the_aggregate_queries(self):
         client = client_for(self.a1)
@@ -390,6 +397,7 @@ class GraphVersionCacheTests(World):
 # --- query ceilings ---------------------------------------------------------------------------------------------------
 
 
+@legacy_snapshots
 class QueryCeilingTests(World):
     """Pinned with the clock caches held steady. ``floor`` is what any authenticated request costs before its view runs (the session, the user, the
     memberships, the roles: 9 for a member, 5 for an App Admin), measured on /cve/api/alive, which does nothing else; what a poll adds to it is what
@@ -482,6 +490,7 @@ class QueryCeilingTests(World):
         self.assertFalse(rows[self.hosts['alpha'][2].id]['stalled'])
 
 
+@legacy_snapshots
 class SentinelOverviewTests(World):
     def test_the_viewers_projects_are_looked_up_once_per_request(self):
         with mock.patch.object(roles, 'allowed_project_ids', wraps=roles.allowed_project_ids) as lookup:

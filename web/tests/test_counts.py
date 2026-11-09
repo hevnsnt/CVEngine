@@ -19,6 +19,7 @@ from scanEngine.models import EngineType
 from startScan.models import IpAddress, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests.test_tenancy import client_for
+from tests.legacy_snapshots import prime
 
 
 class CountFixture(TestCase):
@@ -93,6 +94,7 @@ class CountFixture(TestCase):
 		return r.json()
 
 	def stats(self, project=''):
+		prime()  # the numbers the dashboard reads are the stored per-project snapshots: this reads them after the data of the test is in
 		return self.client_.get('/cve/api/stats', {'project': project} if project else {}).json()
 
 

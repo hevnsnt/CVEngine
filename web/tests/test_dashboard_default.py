@@ -7,6 +7,7 @@ from cveFeed import views
 from startScan.models import Vulnerability
 from tests.test_all_projects import AllProjectsBase
 from tests.test_tenancy import client_for
+from tests.legacy_snapshots import prime
 
 
 class DashboardDefaultTests(AllProjectsBase):
@@ -45,6 +46,7 @@ class DashboardDefaultTests(AllProjectsBase):
 
 	def test_stats_endpoint_scopes_to_the_selected_project(self):
 		c = client_for(self.ann)
+		prime()
 		combined = c.get('/cve/api/stats?project=_all').json()
 		acme = c.get('/cve/api/stats?project=acme').json()
 		default = c.get('/cve/api/stats').json()
@@ -56,6 +58,7 @@ class DashboardDefaultTests(AllProjectsBase):
 		Vulnerability.objects.create(name='Informational header', severity=0, target_domain=self.data['acme']['domain'])
 		Vulnerability.objects.create(name='Additional low finding', severity=1, target_domain=self.data['widgets']['domain'])
 		c = client_for(self.ann)
+		prime()
 		stats = c.get('/cve/api/stats?project=_all').json()
 		default_list = c.get('/api/v1/projects/_all/vulnerabilities?severity=actionable&page_size=1').json()
 		all_list = c.get('/api/v1/projects/_all/vulnerabilities?page_size=1').json()

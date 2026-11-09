@@ -8,6 +8,7 @@ import { fmtDateTime, fmtTime } from "/staticfiles/cve/prefs.js";
 import { activityMatrix, displayZone, sparkline } from "/staticfiles/cve/charts.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
 import { createGet, createPace, every } from "/staticfiles/cve/poll.js";
+import { ageText, lastKnown, remember, startWhenIdle, tileState } from "/staticfiles/cve/tile-loader.js";
 import { dialog } from "/staticfiles/cve/ui.js";
 import { scoreList } from "/staticfiles/cve/score-detail.js";
 import { scoreLines } from "/staticfiles/cve/score-detail-logic.js";
@@ -131,35 +132,29 @@ function paintOldest(s) {
   if (kind && slug) tile.href = `/cve/${encodeURIComponent(slug)}/${kind[1]}/${kind[2]}`;
   tile.classList.toggle("old", days >= 30);
 }
-// Scan coverage: the share of hosts a scan has looked at. The host search already counts every temperature, so one request answers it.
-let coverageAt = 0;
-async function paintCoverage() {
-  if (!$("n-coverage") || Date.now() - coverageAt < 30000) return;
-  coverageAt = Date.now();
-  try {
-    const r = await get(`/api/v1/projects/${encodeURIComponent(slug || "_all")}/search?q=&page_size=1`);
-    const heat = (r.facets && r.facets.heat) || {};
-    const capped = Boolean(r.facets && r.facets.truncated); // the server counts at most its first 5000 hosts
-    const all = Object.values(heat).reduce((n, v) => n + v, 0);
-    // a host with no address a scanner can use has nothing to scan: it is counted apart, not as work that was neglected
-    const u = (r.facets && r.facets.unscannable) || {};
-    const noAddress = u.count || 0;
-    const total = all - noAddress;
-    const never = Math.max(0, (heat.unscanned || 0) - noAddress);
-    if (!all) return;
-    // two plain numbers: hosts scanned, out of the hosts that can be scanned. The rest of the story is in the tooltip
-    const approx = capped ? "~" : "";
-    $("s-coverage").textContent = `${approx}${total - never}`;
-    $("s-coverage_of").textContent = `of ${approx}${total}`;
-    // the hosts left out of "of N" are said, with how many, so 29 of 29 and 40 hosts elsewhere reconcile on the tile itself
-    const note = $("s-coverage_note");
-    if (note) note.textContent = noAddress ? `${noAddress} more with no address to scan` : never ? `${never} not scanned yet` : "";
-    const why = [u.private ? `${u.private} inside a private network` : "", u.no_dns ? `${u.no_dns} with no DNS answer` : "", u.unknown ? `${u.unknown} not looked at yet` : ""].filter(Boolean).join(", ");
-    $("n-coverage").title = `${total - never} of the ${total} hosts that can be scanned have been scanned.` +
-      (noAddress ? ` ${noAddress} more have no address to scan (${why}).` : "") + (capped ? ` Approximate: only the first ${all} hosts are counted.` : "");
-  } catch (_) {
-    coverageAt = 0;
-  }
+// Scan coverage: the share of hosts a scan has looked at. The numbers arrive with the headline counts (stats.coverage, the sum of the stored
+// per-project snapshots), so the tile fills with the others and costs no request of its own.
+function paintCoverage(cov) {
+  if (!$("n-coverage") || !cov) return;
+  const heat = cov.heat || {};
+  const capped = Boolean(cov.truncated); // the server counts at most its first 5000 hosts of a project
+  const all = Object.values(heat).reduce((n, v) => n + v, 0);
+  // a host with no address a scanner can use has nothing to scan: it is counted apart, not as work that was neglected
+  const u = cov.unscannable || {};
+  const noAddress = u.count || 0;
+  const total = all - noAddress;
+  const never = Math.max(0, (heat.unscanned || 0) - noAddress);
+  if (!all) return;
+  // two plain numbers: hosts scanned, out of the hosts that can be scanned. The rest of the story is in the tooltip
+  const approx = capped ? "~" : "";
+  $("s-coverage").textContent = `${approx}${total - never}`;
+  $("s-coverage_of").textContent = `of ${approx}${total}`;
+  // the hosts left out of "of N" are said, with how many, so 29 of 29 and 40 hosts elsewhere reconcile on the tile itself
+  const note = $("s-coverage_note");
+  if (note) note.textContent = noAddress ? `${noAddress} more with no address to scan` : never ? `${never} not scanned yet` : "";
+  const why = [u.private ? `${u.private} inside a private network` : "", u.no_dns ? `${u.no_dns} with no DNS answer` : "", u.unknown ? `${u.unknown} not looked at yet` : ""].filter(Boolean).join(", ");
+  $("n-coverage").title = `${total - never} of the ${total} hosts that can be scanned have been scanned.` +
+    (noAddress ? ` ${noAddress} more have no address to scan (${why}).` : "") + (capped ? ` Approximate: only the first ${all} hosts of a project are counted.` : "");
 }
 let hygieneSig = null;
 async function paintHygiene(open, topChecks) {
@@ -219,10 +214,47 @@ function paintInternal(x) {
   });
 }
 
+// What the tiles say about where their numbers came from: "pending" (a skeleton: nothing stored yet), "updating" (a number is shown and a newer one is
+// on its way) or "fresh", and "as of N minutes ago" when the stored snapshot is older than two minutes. The numbers themselves come from the
+// server's per-project snapshots at once; the last answer is also kept in this browser so a repeat visit paints before the first request returns.
+const MEMORY_KEY = `cve.dashboard.last.${slug || "_all"}`;
+let snapTimer = 0;
+let lastSnapshot = null;
+function showSnapshot(snapshot, remembered = false) {
+  if (snapshot) lastSnapshot = snapshot;
+  const state = tileState(snapshot, { remembered });
+  document.documentElement.dataset.snap = state;
+  const note = $("snap-note");
+  if (note) {
+    const text = state === "updating" && snapshot && snapshot.as_of ? ageText(snapshot.as_of) || "updating" : state === "updating" ? "updating" : "";
+    note.textContent = text;
+    note.hidden = !text;
+  }
+  if (!remembered) retryWhileBuilding();
+}
+// nothing stored yet, or a project still missing: ask again soon (the server is building it in the background) instead of waiting for the next poll
+function retryWhileBuilding() {
+  const building = !lastSnapshot || lastSnapshot.ready === false || lastSnapshot.partial;
+  if (!building || snapTimer) return;
+  snapTimer = setTimeout(() => {
+    snapTimer = 0;
+    pollStats();
+  }, 2500);
+}
 async function pollStats() {
   try {
     const s = await get(`/cve/api/stats${projParam ? "?" + projParam : ""}`);
-    if (s === null) return; // 304: the same numbers
+    if (s === null) return retryWhileBuilding(); // 304: the same numbers (and still waiting for a project's snapshot, if it was)
+    showSnapshot(s.snapshot);
+    if (s.snapshot && s.snapshot.ready === false) return; // nothing stored for any project yet: the tiles stay as they are (last known, or a skeleton)
+    paintStats(s);
+    remember(globalThis.localStorage, MEMORY_KEY, s);
+  } catch (_) {
+    /* keep last values */
+  }
+}
+function paintStats(s) {
+  try {
     const flat = {
       hosts: s.hosts,
       exposed_hosts: s.exposed_hosts,
@@ -259,7 +291,7 @@ async function pollStats() {
       stuck.hidden = !(s.scans_queued > 0 && s.scans_running === 0 && !(s.scans_background_running > 0) && running.size === 0);
       setNum("s-scans_queued", s.scans_queued);
     }
-    paintCoverage();
+    paintCoverage(s.coverage);
     paintOldest(s);
     paintInternal(s.internal);
     const pct = s.hosts ? Math.round((100 * s.exposed_hosts) / s.hosts) : 0;
@@ -700,13 +732,25 @@ function tickerLine(e) {
 // status badge, counts and ticker follow one scan (the one just started, else whatever is running or most
 // recent) without ever narrowing what the graph itself draws.
 let graphNodeCount = 0;
+let graphRetry = 0;
 let graphVersion = ""; // the server answers 304 while the graph has not changed, so an idle dashboard costs almost nothing
 
 async function pollGraph() {
   try {
     const g = await get(`/cve/api/graph?v=${encodeURIComponent(graphVersion)}${projParam ? "&" + projParam : ""}`);
-    if (g === null) return; // 304: the graph has not changed
+    if (g === null) {
+      // 304: the graph has not changed (still being built for a project? ask again)
+      if (lastSnapshot && lastSnapshot.partial && !graphRetry) graphRetry = setTimeout(() => ((graphRetry = 0), pollGraph()), 3000);
+      return;
+    }
     graphVersion = g.version || "";
+    // the server is still building a project's map (or all of them): ask again soon, so the map fills in as they arrive
+    if (g.snapshot && (g.snapshot.partial || g.snapshot.ready === false) && !graphRetry) {
+      graphRetry = setTimeout(() => {
+        graphRetry = 0;
+        pollGraph();
+      }, 3000);
+    }
     graphNodeCount = graph.sync(g).nodes;
     $("d-empty").style.display = graphNodeCount ? "none" : "";
     drawMap(g.nodes);
@@ -944,16 +988,15 @@ async function pollFeed() {
 // with scans several requests were in flight with the same cursor, and each one drew the same lines again. A hidden tab does not
 // poll (visibilitychange starts the loop again), every wait is jittered, and it grows while requests keep failing.
 const poll = (fn, ms) => every(fn, ms, { pace });
+// The numbers need one request (the headline counts, with the coverage counts inside): it goes first and alone. Everything else the page shows is
+// started when the browser is idle, one after another, so a slow answer from any of them cannot hold the numbers back.
 poll(pollStats, 6000);
-poll(pollGraph, 10000);
-poll(pollDiscovery, 2500);
-poll(pollAgent, 2000);
-poll(pollFeed, 6000);
+const deferred = [() => poll(pollGraph, 10000), () => poll(pollDiscovery, 2500), () => poll(pollAgent, 2000), () => poll(pollFeed, 6000), () => poll(pollScanning, 3000), () => loadChanges()];
 
 // --- changes since you last looked ---------------------------------------------------------------
 // A one-line strip above the instrument panel: how many inventory changes arrived since this browser last had the Live page
 // open, with a link to the Changes page narrowed to that moment. The baseline is per browser and moves forward when you leave.
-(async () => {
+async function loadChanges() {
   if (!slug) return;
   const baseline = sinceLastVisit("live", slug);
   if (!baseline) return;
@@ -968,7 +1011,7 @@ poll(pollFeed, 6000);
   } catch (_) {
     /* the strip is a convenience: stay hidden when the answer does not come */
   }
-})();
+}
 
 // --- trends ---------------------------------------------------------------------------------------
 // One chart under the counters (new findings per day and inventory changes per day, 90 days) and a small trend line in the CVE matches and
@@ -1081,7 +1124,6 @@ async function pollScanning() {
     /* the next poll tries again */
   }
 }
-poll(pollScanning, 3000);
 
 // The "Group CVEs" toggle: fold each host's CVEs into its bubble (default), or draw every CVE as its own dot.
 {
@@ -1100,3 +1142,16 @@ if (slug && slug !== "_all") {
   const head = document.querySelector(".page-head");
   if (head) head.append(reportButton({ slug }));
 }
+
+// The last numbers this browser saw paint at once (marked as updating), or a skeleton when there are none; the first answer replaces them.
+{
+  const known = lastKnown(globalThis.localStorage, MEMORY_KEY);
+  if (known && known.value && known.value.tiers && !lastSnapshot) {
+    paintStats(known.value);
+    showSnapshot(null, true);
+  } else if (!lastSnapshot) {
+    showSnapshot({ ready: false });
+  }
+}
+setInterval(() => lastSnapshot && showSnapshot(lastSnapshot), 30000); // "as of N minutes ago" keeps counting between answers
+startWhenIdle(deferred);

@@ -146,6 +146,7 @@ INSTALLED_APPS = [
 ]
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'cveFeed.timing.ServerTimingMiddleware',  # Server-Timing on the dashboard's pages and APIs, and a log line for a request over a second
     'reNgine.ip_allowlist.IpAllowlistMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -274,6 +275,9 @@ from reNgine import livecache_config as _livecache  # noqa: E402
 # re-drives what a restart or a lost message left behind. The message expires after two minutes, so a stopped worker gets no backlog of ticks.
 from celery.schedules import schedule as _every  # noqa: E402
 CELERY_BEAT_SCHEDULE = {'cvengine-live-refresh': _livecache.beat_entry(),
+                        # the per-project dashboard snapshots: every project whose snapshot is older than 90 s, once a minute (cveFeed.dashboard_snapshot)
+                        'cvengine-dashboard-snapshots': {'task': 'refresh_dashboard_snapshots', 'schedule': _every(run_every=60),
+                                                         'options': {'queue': 'live_cache_queue', 'expire_seconds': 120}},
                         'cvengine-stage-runs': {'task': 'stage_runs_tick', 'schedule': _every(run_every=60),
                                                 'options': {'queue': 'cve_feed_queue', 'expire_seconds': 120}}}
 
