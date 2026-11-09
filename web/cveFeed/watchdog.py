@@ -285,7 +285,7 @@ def act_feed(ctx, chk):
     parts = [f'feed_sentinels: {json.dumps(out, default=str)[:200]}']
     try:
         from cveFeed import work_planner  # the work planner (when this build has it) plans the due secrets and ssh work too
-        planned = work_planner.plan() if hasattr(work_planner, 'plan') else None
+        planned = work_planner.run() if hasattr(work_planner, 'run') else None
         if planned is not None:
             parts.append(f'work planner: {json.dumps(planned, default=str)[:160]}')
     except ImportError:
