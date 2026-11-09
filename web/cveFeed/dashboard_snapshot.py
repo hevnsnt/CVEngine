@@ -32,6 +32,7 @@ from django.core.cache import cache
 logger = logging.getLogger(__name__)
 
 KEY = 'cve:dash:p:%s'
+GRAPH_KEY = 'cve:dash:g:%s'  # the map of a project, apart from its numbers: the headline and ticker requests never read it (it is most of the bytes)
 LOCK = 'cve:dash:lock:%s'
 QUEUED = 'cve:dash:queued:%s'
 DIRTY = 'cve:dash:dirty:%s'
@@ -110,7 +111,10 @@ def refresh_project(pid, force=True):
         if payload is None:
             cache.delete(key_of(pid))
             return 'gone'
-        cache.set(key_of(pid), {'payload': payload, 'at': _now(), 'started': started}, KEEP_SECONDS)
+        at = _now()
+        graph = payload.pop('graph', None) or {}
+        cache.set(GRAPH_KEY % pid, {'graph': graph, 'at': at}, KEEP_SECONDS)  # the map first: a reader that finds the numbers finds a map at least as new
+        cache.set(key_of(pid), {'payload': payload, 'at': at, 'started': started}, KEEP_SECONDS)
         return 'refreshed'
     except Exception:  # noqa: BLE001
         logger.exception('dashboard snapshot of project %s failed; the previous one stays', pid)
@@ -169,17 +173,24 @@ def mark_dirty(project_ids=None):
 
 # --- reading -----------------------------------------------------------------
 
-def read(ids):
-    """``{id: entry or None}`` for these projects (one cache round trip)."""
+def read(ids, graph=False):
+    """``{id: entry or None}`` for these projects (one cache round trip; two with ``graph``, which puts each project's map under ``entry['payload']['graph']``
+    and treats a project whose map is missing as not stored yet)."""
     ids = list(ids)
     try:
         got = cache.get_many([key_of(i) for i in ids])
+        maps = cache.get_many([GRAPH_KEY % i for i in ids]) if graph else {}
     except Exception:  # noqa: BLE001
-        got = {}
+        got, maps = {}, {}
     out = {}
     for i in ids:
         entry = got.get(key_of(i))
         ok = isinstance(entry, dict) and isinstance(entry.get('payload'), dict) and entry['payload'].get('v') == VERSION
+        if ok and graph:
+            m = maps.get(GRAPH_KEY % i)
+            ok = isinstance(m, dict) and isinstance(m.get('graph'), dict)
+            if ok:
+                entry = {**entry, 'payload': {**entry['payload'], 'graph': m['graph']}}
         out[i] = entry if ok else None
     return out
 
@@ -201,13 +212,13 @@ def visible_ids_all():
         tenancy_scope.reset_scope(tokens)
 
 
-def collect(ids=None, ask=True):
+def collect(ids=None, ask=True, graph=False):
     """``(entries, meta)``: the stored snapshots of ``ids`` (default: every project the request may see) and how complete and how old they are.
     ``meta``: ``as_of`` (epoch seconds of the oldest snapshot), ``age`` (seconds), ``stale`` (older than ``STALE_AFTER``), ``partial`` (some project
     has none yet), ``missing`` (how many), ``projects``. Projects with no snapshot, or one older than ``REFRESH_AFTER``, are scheduled (debounced)
     when ``ask``: this never waits for them."""
     ids = visible_ids() if ids is None else list(ids)
-    entries = read(ids)
+    entries = read(ids, graph=graph)
     now = _now()
     missing = [i for i, e in entries.items() if e is None]
     have = [e for e in entries.values() if e is not None]
@@ -301,13 +312,14 @@ def graph_version(entries):
 def merge_graph(entries, cap):
     """The map of the sum: the riskiest hosts of every project first, each with the nodes it brings (its target, addresses, CVEs), until ``cap`` nodes are
     drawn, which is the cut a single walk over everything makes (``graph_payload`` stops adding nodes at the same ``cap``)."""
-    hosts, nodes_by_id, projects, per_project, edges, cut = [], {}, {}, {}, [], False
+    hosts, nodes_by_id, projects, per_project, edges, cut, total_of_all = [], {}, {}, {}, [], False, 0
     for e in entries:
         g = e['payload'].get('graph') or {}
         projects.update(g.get('projects') or {})
         h = g.get('hosts') or {}
         per_project.update(h.get('projects') or {})
         cut = cut or h.get('drawn', 0) < h.get('total', 0)
+        total_of_all += h.get('total', 0)
         for n in g.get('nodes') or []:
             nodes_by_id.setdefault(n['id'], n)
             if n['kind'] == 'subdomain':
@@ -336,7 +348,7 @@ def merge_graph(entries, cap):
             out_edges.append(x)
     nodes = [nodes_by_id[i] for i in sorted(drawn, key=lambda i: (i not in kept_ids, i)) if i in nodes_by_id]
     n_drawn = len(kept)
-    total = n_drawn if not cut else max(sum(per_project.values()), n_drawn)
+    total = n_drawn if not cut else max(sum(per_project.values()), total_of_all, n_drawn)
     return {'nodes': nodes, 'edges': out_edges, 'hosts': {'drawn': n_drawn, 'total': total, 'projects': per_project if cut else {}}, 'projects': projects}
 
 

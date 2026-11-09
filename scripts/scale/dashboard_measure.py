@@ -24,13 +24,28 @@ from playwright.sync_api import sync_playwright
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.abspath(os.path.join(HERE, '..', '..', 'web', 'static'))
-PANELS = {
-    'tiles': "/^[0-9]/.test(document.getElementById('s-exposed_hosts')?.textContent||'')",
-    'coverage': "/[0-9]/.test(document.getElementById('s-coverage')?.textContent||'')",
-    'map': "document.querySelectorAll('#map a, #map button, #map [data-name]').length>0",
-    'ticker': "/[0-9]/.test(document.querySelector('.ticks b')?.textContent||'')",
-    'feed': "document.querySelectorAll('#feed li, #feed .row, #feed > *').length>0",
-}
+# A panel is "filled" the first time it holds real content, seen by a MutationObserver inside the page (so a long task that blocks the page does not
+# delay the reading), in seconds from the start of the navigation: a tile whose text starts with a digit, the map when it holds a host tile, the ticker's
+# counts, the AI activity feed when it has a line. The page's own placeholders are dashes and empty boxes, so none of them reads as filled.
+WATCH_JS = """
+window.__marks = {};
+(() => {
+  const specs = {
+    tiles: () => /^~?[0-9]/.test(document.querySelector('#s-exposed_hosts')?.textContent || ''),
+    coverage: () => /^~?[0-9]/.test(document.querySelector('#s-coverage')?.textContent || ''),
+    map: () => document.querySelectorAll('#map a.hx').length > 0,
+    ticker: () => /^[0-9]/.test(document.querySelector('#d-counts b')?.textContent || ''),
+    feed: () => document.querySelectorAll('#feed > *:not(#feed-empty)').length > 0,
+  };
+  const check = () => {
+    for (const [name, test] of Object.entries(specs)) {
+      if (!(name in window.__marks) && test()) window.__marks[name] = performance.now() / 1000;
+    }
+  };
+  new MutationObserver(check).observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+  setInterval(check, 50);
+})();
+"""
 ALL = ('tiles', 'coverage', 'map', 'ticker', 'feed')
 
 
@@ -57,7 +72,9 @@ def one_run(pw, a):
                 route.fulfill(status=200, body=open(path, 'rb').read(), content_type=mimetypes.guess_type(path)[0] or 'application/octet-stream')
             else:
                 route.continue_()
-        ctx.route('**/staticfiles/**', static)
+        if not a.proxied:
+            ctx.route('**/staticfiles/**', static)
+        ctx.add_init_script(WATCH_JS)
         page.goto(a.base + '/login/')
         page.fill('[name=username]', a.user)
         page.fill('[name=password]', a.password)
@@ -82,14 +99,12 @@ def one_run(pw, a):
         marks = {}
         end = t0 + a.timeout
         while time.monotonic() < end and not all(k in marks for k in ALL):
-            for k, expr in PANELS.items():
-                if k not in marks:
-                    try:
-                        if page.evaluate(expr):
-                            marks[k] = round(time.monotonic() - t0, 2)
-                    except Exception:  # noqa: BLE001 - mid navigation
-                        pass
+            try:
+                marks = page.evaluate('window.__marks') or {}
+            except Exception:  # noqa: BLE001 - mid navigation
+                pass
             time.sleep(0.05)
+        marks = {k: round(v, 2) for k, v in marks.items()}
         first = min(marks.values()) if marks else None
         alls = max(marks.get(k, a.timeout) for k in ALL)
         return {'first_panel': first, 'all_panels': alls, 'marks': marks, 'slowest_api': max((s for s, _ in slow), default=None),
@@ -102,6 +117,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('base'); ap.add_argument('user'); ap.add_argument('password')
     ap.add_argument('--runs', type=int, default=10); ap.add_argument('--timeout', type=float, default=90)
+    ap.add_argument('--proxied', action='store_true', help='the base serves /staticfiles/ itself (scripts/scale/devproxy.py): no browser-side file interception')
     ap.add_argument('--path', default='/cve/'); ap.add_argument('--json')
     ap.add_argument('--forget', action='store_true', help='clear the browser storage first (a first visit)')
     ap.add_argument('--before', help='shell command run before each measured navigation (e.g. empty the cache for a cold load)')

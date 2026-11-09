@@ -250,6 +250,7 @@ async function pollStats() {
     if (s.snapshot && s.snapshot.ready === false) return; // nothing stored for any project yet: the tiles stay as they are (last known, or a skeleton)
     paintStats(s);
     remember(globalThis.localStorage, MEMORY_KEY, s);
+    requestAnimationFrame(() => setTimeout(startDeferred, 0)); // the numbers are painted: now the rest
   } catch (_) {
     /* keep last values */
   }
@@ -776,6 +777,7 @@ async function pollDiscovery() {
       shownScan = d.scan.id;
       lastEvent = 0;
       $("d-ticker").textContent = "";
+      drawCounts(d.counts); // the ask below answers 304 (nothing new since this answer): the counts of this answer are drawn now, not waited for
       return pollDiscovery();
     }
     // a badge for a scan that is queued, running or went wrong; a finished one is already said by the line below
@@ -992,7 +994,15 @@ const poll = (fn, ms) => every(fn, ms, { pace });
 // The numbers need one request (the headline counts, with the coverage counts inside): it goes first and alone. Everything else the page shows is
 // started when the browser is idle, one after another, so a slow answer from any of them cannot hold the numbers back.
 poll(pollStats, 6000);
+// the map goes first of these, right after the numbers are on screen: drawing it holds the main thread for about a second and a half on a large estate, so the
+// sooner it starts the sooner every panel is there (the ticker, feed and scan pollers run when that task ends)
 const deferred = [() => poll(pollGraph, 10000), () => poll(pollDiscovery, 2500), () => poll(pollAgent, 2000), () => poll(pollFeed, 6000), () => poll(pollScanning, 3000), () => loadChanges()];
+let deferredStarted = false;
+function startDeferred() {
+  if (deferredStarted) return;
+  deferredStarted = true;
+  startWhenIdle(deferred);
+}
 
 // --- changes since you last looked ---------------------------------------------------------------
 // A one-line strip above the instrument panel: how many inventory changes arrived since this browser last had the Live page
@@ -1155,4 +1165,4 @@ if (slug && slug !== "_all") {
   }
 }
 setInterval(() => lastSnapshot && showSnapshot(lastSnapshot), 30000); // "as of N minutes ago" keeps counting between answers
-startWhenIdle(deferred);
+setTimeout(startDeferred, 2500); // whatever happens to the first answer, the rest starts

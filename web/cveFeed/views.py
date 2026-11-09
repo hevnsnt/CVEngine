@@ -1015,7 +1015,7 @@ def _graph_from_snapshots(request):
     snapshots were built when, so ``?v=`` equal to it is a 304 and a poll costs one cache read; a changed one is merged once and kept under its version."""
     from django.core.cache import cache
     from django.http import HttpResponseNotModified
-    entries, meta = dashboard_snapshot.collect()
+    entries, meta = dashboard_snapshot.collect(graph=True)
     snapshot = _snapshot_meta(entries, meta)
     if not snapshot['ready']:
         return JsonResponse({'nodes': [], 'edges': [], 'hosts': {'drawn': 0, 'total': 0, 'projects': {}}, 'projects': {}, 'version': 'pending', 'snapshot': snapshot})
