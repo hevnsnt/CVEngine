@@ -372,3 +372,74 @@ class WaitingReportTests(Base):
         self.assertEqual(len(out[0]['held_by']), 3)
         for bad in ('web_screenshot', {'kind': 'a'}, [1], [{'kind': 1}], [{'kind': 'a'}] * 21):
             self.assertEqual(self.waiting(bad)[0], 400, bad)
+
+
+class WatchdogReportTests(Base):
+    """The optional ``info.watchdog`` of a Sentinel: kept clipped and typed, shown in plain words, never refused, and the notice hook says when it is stale."""
+
+    REPORT = {'last_tick': 1_900_000_000, 'actions_last_hour': 2, 'kills': 1, 'overcommit_active': True, 'overcommit_mb': 120, 'low_disk': False, 'withheld': [],
+              'reasons': ['stopped a hung nuclei deep scan: no output or CPU for 30 minutes'], 'spool': {'count': 2, 'oldest_seconds': 90},
+              'actions': [{'at': 1_899_999_000, 'code': 'stopped_hung', 'kind': 'nuclei_deep', 'minutes': 30}, {'at': 1_899_999_500, 'code': 'overcommit', 'kind': 'nuclei_light', 'minutes': None}]}
+
+    def detail(self, agent):
+        status, out = call(self.tokens['root'], 'GET', f'/api/v1/agents/{agent.pk}')
+        self.assertEqual(status, 200, out)
+        return out
+
+    def beat_info(self, info):
+        return call(self.tokens['alice'], 'POST', '/api/v1/sentinel/heartbeat', {'info': info})
+
+    def beat(self, report):
+        return self.beat_info({'version': 'abc1234', 'watchdog': report})
+
+    def test_a_server_never_told_about_a_watchdog_shows_none(self):
+        agent, _ = self.sentinel()
+        self.assertIsNone(self.detail(agent)['watchdog'])
+        self.assertEqual(self.beat_info({'version': 'abc1234'})[0], 200)  # an old Sentinel's heartbeat is unchanged
+        self.assertIsNone(self.detail(agent)['watchdog'])
+
+    def test_the_report_is_stored_and_shown_as_plain_sentences_newest_first(self):
+        agent, _ = self.sentinel()
+        self.assertEqual(self.beat(self.REPORT)[0], 200)
+        view = self.detail(agent)['watchdog']
+        self.assertEqual([a['text'] for a in view['actions']], ['let a nuclei light scan start ahead of a long scan, within the memory that was really free',
+                                                                'stopped a hung nuclei deep scan: no output or CPU for 30 minutes'])
+        self.assertTrue(view['overcommit_active'])
+        agent.refresh_from_db()
+        self.assertEqual(agent.info['watchdog']['spool'], {'count': 2, 'oldest_seconds': 90})
+
+    def test_a_bad_shape_is_dropped_not_refused_and_text_and_lists_are_clipped(self):
+        agent, _ = self.sentinel()
+        for bad in ('x', 5, [1], None):
+            self.assertEqual(self.beat(bad)[0], 200, bad)
+        self.assertEqual(self.beat({'last_tick': 'now', 'kills': -4, 'actions_last_hour': True, 'reasons': ['r' * 500] * 9, 'withheld': ['k' * 90, 4], 'low_disk': 'yes',
+                                    'actions': [{'code': 'stopped_hung', 'kind': 'k\n' * 40, 'minutes': 5}] * 20 + ['x', {'code': 5}]})[0], 200)
+        stored = (self.sentinel_row(agent).info or {}).get('watchdog') or {}
+        self.assertEqual((stored['last_tick'], stored['kills'], stored['actions_last_hour'], stored['low_disk']), (0, 0, 0, False))
+        self.assertEqual(len(stored['reasons']), 5)
+        self.assertEqual(len(stored['reasons'][0]), 160)
+        self.assertEqual(stored['withheld'], ['k' * 40])
+        self.assertEqual(len(stored['actions']), 8)
+
+    def sentinel_row(self, agent):
+        agent.refresh_from_db()
+        return agent
+
+    def test_a_secret_shaped_extra_key_is_not_stored(self):
+        agent, _ = self.sentinel()
+        self.beat({**self.REPORT, 'token': 'S3cr3t', 'actions': [{**self.REPORT['actions'][0], 'target': 'https://customer.example/x?key=S3cr3t'}]})
+        text = str(self.sentinel_row(agent).info)
+        self.assertNotIn('S3cr3t', text)
+
+    def test_the_notice_hook_names_a_stale_watchdog_and_repeated_stops(self):
+        from agentapi import sentinel_settings as ss
+        agent, _ = self.sentinel()
+        self.assertIsNone(ss.watchdog_problem(agent))  # nothing reported
+        self.beat(self.REPORT)
+        agent = self.sentinel_row(agent)
+        self.assertIsNone(ss.watchdog_problem(agent, now=self.REPORT['last_tick'] + 30))
+        self.assertIn('has not run for 10 minutes', ss.watchdog_problem(agent, now=self.REPORT['last_tick'] + 600))
+        self.beat({**self.REPORT, 'kills': 3})
+        self.assertIn('stopped 3 stuck tasks', ss.watchdog_problem(self.sentinel_row(agent), now=self.REPORT['last_tick'] + 30))
+        view = ss.watchdog_view(self.sentinel_row(agent), now=self.REPORT['last_tick'] + 600)
+        self.assertTrue(view['stale'])
