@@ -12,6 +12,7 @@ from agentapi.models import Agent, SentinelTask
 from cveFeed import activity, reviewer
 from cveFeed.models import AgentActivity
 from reNgine import resources
+from tests.test_reviewer import Fixture
 from tests.test_sentinel_capability_policy import PolicyBase
 
 
@@ -105,13 +106,6 @@ class WaitingIsNotFailureTests(PolicyBase):
         self.assertEqual(AgentActivity.objects.filter(status='waiting').count(), 2)  # another scan keeps its own line
         self.assertFalse(AgentActivity.objects.filter(status='failed').exists())
 
-    def test_waiting_lines_are_not_counted_as_failing_scans(self):
-        for n in range(30):
-            AgentActivity.objects.create(kind='discovery', message=f'Discovery of h{n}.example.test is waiting for a free Sentinel', status='waiting', project=self.project)
-        checks = {c['id']: c for c in reviewer.run_checks()} if hasattr(reviewer, 'run_checks') else {}
-        if checks:
-            self.assertEqual(checks['scan_errors']['status'], 'ok')
-
 
 class BacklogTests(PolicyBase):
     def test_no_note_while_a_slot_is_free_or_the_queue_is_short(self):
@@ -172,3 +166,16 @@ class DiscoveryLineTests(PolicyBase):
                 out, lines = self.run_with(error)
                 self.assertEqual(lines.get().status, 'failed')
                 self.assertIn('failed:', lines.get().message)
+
+
+class ReviewerCountsTests(Fixture):
+    def check(self, code):
+        return {c['code']: c for c in reviewer.ops_checks()}.get(code)
+
+    def test_waiting_lines_are_not_a_scan_error_and_failed_ones_still_are(self):
+        for n in range(30):
+            AgentActivity.objects.create(kind='discovery', message=f'Discovery of h{n}.example.test is waiting for a free Sentinel', status='waiting', project=self.proj)
+        self.assertEqual(self.check('scan_errors')['state'], 'ok')
+        for n in range(30):
+            AgentActivity.objects.create(kind='discovery', message=f'Discovery of f{n}.example.test failed: boom', status='failed', project=self.proj)
+        self.assertEqual(self.check('scan_errors')['state'], 'problem')
