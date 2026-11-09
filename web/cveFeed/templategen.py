@@ -20,6 +20,7 @@ import os
 import re
 
 import yaml
+from django.utils import timezone
 
 from cveFeed.safeyaml import load_template
 from reNgine import ai_prompts
@@ -834,7 +835,7 @@ def _generation_lease(cve):
 def generate_template(cve, project=None, candidate_only=True):
     """Ask the AI for a template: one job queued for the AI reviewer container (cveFeed.ai_jobs). When it lands, ``job_answer`` gates it
     (static check, the syntax check and the benign fixture on a scanner) and keeps it as a draft: an AI template is never installed or run on a host
-    without independently reviewed positive fixture evidence. Raises TemplateBudgetExceeded instead of asking when the generation budget
+    until the automatic validator (``cveFeed.templatevalidate``) has passed it. Raises TemplateBudgetExceeded instead of asking when the generation budget
     does not allow an attempt, and ScannerUnavailable (before the AI is asked) when no scanner could check the template it would write.
     Returns the job."""
     if not candidate_only:
@@ -888,8 +889,11 @@ def job_answer(job, text):
             valid, output = False, f'not validated: no scanner could take this work ({exc.kind}); the CVE is tried again later'
         handle.done_message = f'Check for {cve.cve_id} {"passed" if valid else "failed"} validation'
     tmpl.status = GeneratedTemplate.STATUS_DRAFT if valid else GeneratedTemplate.STATUS_INVALID
-    tmpl.validation_output = (output + '\nRequires a reviewed positive fixture before execution on a customer host.'
+    tmpl.validation_output = (output + '\nPending automatic validation: a positive fixture test and a second-pass review run before it may run on a host.'
                               if valid else output)
+    if not valid:
+        tmpl.validation_reason = (output or 'the scanner did not accept the template')[:400]
+        tmpl.validated_at = timezone.now()
     tmpl.save()
     return None
 
@@ -1007,7 +1011,7 @@ def run_cve_tests(cve, hosts, ai=False, project=None):
             activity.log('write_check', f'Not writing a nuclei check for {cve.cve_id}: {reason}', project=project, cve_id=cve.cve_id)
             return {"source": "none", "template": "", "results": [], "reason": reason}
         return {"source": "candidate", "template": "", "results": [], "job": job.pk,
-                "reason": "an AI draft is being written; it is validated when it lands and is never run on a host before a person reviews it"}
+                "reason": "an AI draft is being written; it is validated automatically when it lands and is never run on a host until every gate has passed"}
     results = []
     evidence = evidence_of_template(path)  # what a hit of this template shows: the flaw, or the version string only
     from targetApp.target_types import scannable_hosts

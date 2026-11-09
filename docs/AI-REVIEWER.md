@@ -106,7 +106,7 @@ when it lands.
 1. **The stage queues a job.** It does everything it did before the call (the budgets, the caps, the deterministic ceilings, the claim on
    the evidence signature) and then queues one job: the stage's fixed system prompt; its parts in order, text cvENGINE wrote itself and
    data that came from a scanned host, a scanner or a feed; the answer schema; the request options (a pinned temperature and seed for a
-   self-hosted server, the stage's own reply limit, whether a reply cut off at the limit is asked once more with twice the limit); and, for
+   self-hosted server, the stage's own reply limit, the answer room of the stage, and the one automatic retry of a reply cut off at the limit, with twice the room plus the thinking room, up to 32768 tokens); and, for
    the RDP reading, one bounded image. Every string is masked for secrets first, as every prompt was. What the continuation needs (the claim,
    the rows, the facts the question was asked on) stays on the server and never leaves it.
 2. **The container takes it.** `GET /api/v1/reviewer/jobs/next` hands out up to 20 queued jobs, most urgent and oldest first, each leased
@@ -148,6 +148,7 @@ Which stages go through the queue in this release:
 | The auto-tuner's advisor (its answer is judged by the next round, against the range in force then) | `autotune_advice` | `autotune_advisor` |
 | The RDP login-screen reading (the screenshot travels in the job, at most 4 MB) | `rdp_screenshot` | `rdp_screenshot` |
 | Nuclei template drafts for a CVE with no installed template (gated when they land, never run on a host) | `template_generation` | `template_generation` |
+| The test fixture and the second-pass review of an AI-written draft (see [the automatic lifecycle](#ai-written-templates-validated-by-the-system-never-by-a-person)); two jobs per draft, both under this stage | `template_validation` | `template_validation` |
 
 ## How every prompt starts
 
@@ -228,8 +229,8 @@ the numbers behind that state, and the actions it allows:
 | `sentinel_waiting` | Tasks that expired waiting for a free Sentinel slot in the last six hours (an informational note: their targets stay due and are asked again) | none |
 | `scan_errors` | Failed lines in the activity feed in the last six hours, by kind | none |
 | `system` | Any problem `system_status` reports (workers, beat, disk, memory, feeds, certificates…) | none |
-| `generated_templates` | AI-written templates have waited more than three days for a person's review | none |
-| `ai_errors` | AI calls failed in the last 24 hours, by error category | none |
+| `generated_templates` | A real problem validating AI-written templates that the system cannot fix itself: drafts waiting more than six hours because no Sentinel that runs template checks is online or the AI provider is off, or every AI-written template rejected for a week (five or more, none valid). It never asks anyone to review a template; with nothing wrong there is no alert | none |
+| `ai_errors` | AI calls that failed in the last 24 hours, by stage and error category. A cut-off reply that the automatic retry answered is not a failure and is not counted (its number is in the facts as `cut_off_answered_by_retry`); `output_truncated` here means the reply was cut off again after the retry, and the alert says which stage and names the next step (lower **Reasoning**, or a model that thinks less). Warns from 10 failures | none |
 
 A check in `problem` opens an **admin alert**, a banner on every page for App Admins similar to the update banner. A check that is `ok` again
 resolves its alert. An admin can dismiss an alert, and it stays dismissed until the problem changes.
@@ -293,3 +294,14 @@ Some models (measured: `claude-sonnet-5-5` and `claude-opus-5-5`) answer the Nuc
 - **Your choice.** A model you pick is kept, and the save refuses a model the provider does not list. Changing the provider clears it (a model belongs to the provider it was chosen from). **Everything else** is never changed by this row. An existing install has no stored value and gets the default through code; there is no data migration.
 - **Safety net.** When a call on the Nuclei jobs ends in a refusal or an empty reply and the haiku default is a different model from the one used, the same request is retried **once** on the haiku default. Both calls are rows of the usage table under their stage ([AI-USAGE.md](AI-USAGE.md)), and the log gets one line: `refused by <model>, retried on <model>` (`empty response from ...` for an empty reply). A retry counts against `CVENGINE_NUCLEI_AI_MAX_PER_DAY`. Only if the retry also fails does the request back off for five minutes as before, and the scan carries on with the standard tags. A request is never retried more than once, and a request already on the haiku default is not retried.
 
+## AI-written templates: validated by the system, never by a person
+
+There is no review page, so nothing waits for one. A draft (`GeneratedTemplate`, status `draft`, shown as "being checked") is taken through every gate by `cveFeed/templatevalidate.py`, a task that runs every five minutes (`validate_template_drafts`, scheduled by migration 0154, which also pushes every draft that was stuck waiting into the validator once):
+
+1. **Static gate** again (protocols, destinations bound to the scanned host, at most six read-only requests, real matchers, nothing generic).
+2. **`nuclei -validate` and the benign loopback control on a Sentinel**, the existing `nuclei_validate` kind (built-in scanner only; the contract is unchanged). With no Sentinel that can run it the draft waits and no try is used.
+3. **A fixture.** A reviewer-container job under the stage `template_validation` sees only the CVE data (not the template) and writes the response an affected host and a fixed host give. The server evaluates the template's matchers against them offline (`cveFeed/templatefixture.py`, pure Python, no tool run): they must match the affected response and must not match the fixed one, a benign page or a 404. A matcher it cannot evaluate (dsl, xpath) rejects the draft with that reason. This is a matcher evaluation, not nuclei itself: the Sentinel contract has no field to hand nuclei a fixture response, and changing the contract is out of this change.
+4. **A second pass.** A second job under the same stage reads the template, the CVE data, both responses and the offline result and must answer `agree`; a `disagree` rejects the draft with the model's reason.
+5. **Promotion.** Only now is the file written, `path` and `positive_fixture_verified_at` / `positive_fixture_source` recorded and the row marked `valid`. `validation.approved_template` hands a host only such a row, with an unchanged file; a draft, rejected or expired row is never sent to a Sentinel.
+
+A failed gate marks the row `invalid` with a plain reason. A failure that can pass next time (an unreadable AI answer, a fixture that missed, a refused call) is retried up to three times, with 15 minute, 1 hour and 4 hour back-off, then rejected. A draft still pending after seven days (`CVENGINE_TEMPLATE_DRAFT_EXPIRY_DAYS`) is closed as `expired` with the reason "expired, not validated" and a line in the activity record, so the queue cannot grow without bound. The AI usage page shows how many checks passed, are being checked, and were rejected (with expired ones counted apart) and the most common plain reasons; both AI jobs appear under the `template_validation` stage with their cost and any refusal.

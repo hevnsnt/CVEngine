@@ -992,7 +992,7 @@ class AgentsPageTests(TestCase):
 		self.assertEqual(Client().get('/cve/agents/').status_code, 302)
 		r = client_for(user).get('/cve/agents/')
 		self.assertEqual(r.status_code, 200)
-		self.assertContains(r, 'Integrations')
+		self.assertContains(r, 'API keys for MCP and agents')
 
 
 class ModernUiTests(TestCase):
