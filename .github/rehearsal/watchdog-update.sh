@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The watchdog beside a real update (docs/WATCHDOG.md): the host watcher (started the way cron starts it, a bare environment) runs the watchdog's tick every
-# 10 seconds while it applies a third update. What is checked:
+# The watchdog beside a real update (runs in the plain job and in the overlay job) (docs/WATCHDOG.md): the host watcher (started the way cron starts it, a bare environment) runs the watchdog's tick every
+# 10 seconds while it applies a further update. What is checked:
 #   1. the watchdog ticks before the update (the tick runs in the web container, driven by the watcher through the install's own Compose layout);
 #   2. the watcher still applies the update with the watchdog running (the approval is cleared, the new commit is running, the site and the workers answer);
 #   3. during the update the watchdog stood down: at least one tick saw "an update is in progress", and it asked the host for nothing (no request file, no
@@ -41,9 +41,9 @@ rm -rf "$third"
 git clone -q "$HOME/origin.git" "$third"
 git -C "$third" config user.name rehearsal
 git -C "$third" config user.email rehearsal@example.invalid
-echo "rehearsal: the third update, with the watchdog running" > "$third/docs/.rehearsal-third-update"
+echo "rehearsal: a further update, with the watchdog running" > "$third/docs/.rehearsal-third-update"
 git -C "$third" add -A
-git -C "$third" commit -q -m "A change that only the third update brings"
+git -C "$third" commit -q -m "A change that only a further update brings"
 git -C "$third" push -q origin HEAD:master
 git -C "$third" rev-parse HEAD > "$HOME/candidate.sha"
 # the scans the conductor started would only make the drain wait: stop them, as the second update does

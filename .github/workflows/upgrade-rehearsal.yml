@@ -56,6 +56,8 @@ jobs:
           scripts/update.sh
       - name: The updated install works and keeps its data
         run: "$GITHUB_WORKSPACE/.github/rehearsal/verify.sh plain"
+      - name: A further update, applied by the host watcher while the watchdog runs (it stands down and does not fight it)
+        run: "$GITHUB_WORKSPACE/.github/rehearsal/watchdog-update.sh"
       - name: Logs
         if: failure()
         run: "$GITHUB_WORKSPACE/.github/rehearsal/logs.sh"
