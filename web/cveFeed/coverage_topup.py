@@ -225,14 +225,20 @@ def stalest_hosts(project, now, limit, gap):
     from django.db.models import F, OuterRef, Q, Subquery
     from django.db.models.functions import Lower
     from cveFeed.correlation import latest_scan_q
-    from cveFeed.models import HostAssessment
+    from django.db.models import Exists
+    from cveFeed.models import HostAssessment, HostState
     from startScan.models import Subdomain
     from targetApp.models import Domain
 
     last = HostAssessment._base_manager.filter(project=project, host=OuterRef('lowered')).order_by('-created_at').values('created_at')[:1]
+    # An archived host is never assessed (host_assessment._admit refuses it), so it never gets a newer assessment and stays the stalest host for ever: left in,
+    # a few hundred of them filled the whole candidate window, every pass queued nothing and logged a line per host, and the Sentinels idled while real hosts
+    # waited (the owner's VPS, 2026-11-09).
+    archived = HostState.objects.filter(project=project, host=OuterRef('lowered'), archived_at__isnull=False)
     rows = (Subdomain.objects.filter(latest_scan_q(), target_domain__project=project).select_related('target_domain')
             .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: never assessed on its own (host_assessment._admit refuses it too)
             .annotate(lowered=Lower('name')).annotate(last_assessed=Subquery(last))
+            .filter(~Exists(archived))
             .filter(Q(last_assessed__isnull=True) | Q(last_assessed__lt=now - gap))
             .order_by(F('last_assessed').asc(nulls_first=True), 'id')[:limit * 4])
     seen, out = set(), []

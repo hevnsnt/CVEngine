@@ -191,6 +191,22 @@ class RefreshTests(Base):
         self.assertEqual(self.queued_hosts(), [never.name, older.name, old.name])  # never assessed, then longest ago; 'fresh' rests
         self.assertEqual(set(HostAssessment.objects.filter(status='queued').values_list('source', flat=True)), {'refresh'})
 
+    def test_archived_hosts_do_not_crowd_the_live_ones_out_of_the_candidates(self):
+        from django.utils import timezone as tz
+
+        from cveFeed.models import HostState
+        for i in range(120):  # never assessed, so the stalest of all: before the fix they filled the whole candidate window
+            sub = self.host(f'gone{i}')
+            HostState.objects.create(project=self.project, domain=self.domain, host=sub.name.lower(), archived_at=tz.now())
+        live = [self.host('live-a'), self.host('live-b')]
+        self.assessed(live[0], 20)
+        self.assessed(live[1], 30)
+        self.sentinel(slots=1)
+        self.assertEqual([s.pk for s in coverage_topup.stalest_hosts(self.project, self.now, 10, timedelta(hours=1))], [live[1].pk, live[0].pk])
+        out = coverage_topup.refresh_for_sentinels(self.now)
+        self.assertEqual(self.queued_hosts(), [live[1].name, live[0].name])
+        self.assertEqual(out['refreshed'], 2)
+
     def test_it_fills_the_sentinel_scaled_cap_and_no_more(self):
         for i in range(20):
             self.host(f'h{i}')
