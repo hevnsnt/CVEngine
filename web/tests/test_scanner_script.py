@@ -482,12 +482,15 @@ class UpdatePathTests(unittest.TestCase):
                 self.assertIn('cvengine_scanner_start', text)
                 self.assertLess(text.index(after), text.index('cvengine_scanner_start'))
 
-    def test_the_web_updater_fetches_before_maintenance(self):
+    def test_the_web_updater_never_fetches_before_the_page_when_it_runs_after_the_merge(self):
         text = self.text('scripts/update-deploy.sh')
-        # the first fetch in the file is the early one (deploy_scanner_fetch, called before maintenance_on); the behavioral proof, in the real order of
-        # execution across apply-update.sh and update-deploy.sh, is in test_apply_update_script (the pull is logged with the site up, before the page and the merge)
-        self.assertLess(text.index('cvengine_scanner_fetch'), text.index('  maintenance_on\n'))
-        self.assertLess(text.index('deploy_scanner_fetch early'), text.index('  maintenance_on\n'))
+        # deploy_current runs after the merge (./web is a bind mount: the old image already reads the new code), so the page is its first act and the fetch
+        # is made from the deploy steps, under it. The early fetch belongs to apply-update.sh, before the merge (test_apply_update_script has the order).
+        self.assertNotIn('deploy_scanner_fetch early', text)
+        body = text[text.index('deploy_current() {'):text.index('deploy_steps() {')]
+        before_the_page = body[:body.index('  maintenance_on\n')]
+        self.assertNotIn('fetch', '\n'.join(l for l in before_the_page.splitlines() if not l.lstrip().startswith('#')))  # nothing slow comes before the page in the deploy of an older host
+        self.assertLess(text.index('  maintenance_on\n'), text.index('deploy_scanner_fetch once'))
         self.assertLess(text.index('cvengine_scanner_start'), text.index('  prune_old_images\n'))
 
     def test_make_up_waits_for_nothing_on_a_first_start(self):

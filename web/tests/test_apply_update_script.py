@@ -1114,8 +1114,10 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse([line for line in self.flag_lines() if ' docker pull -q ' in line])
 
-    def test_a_host_script_without_the_early_fetch_still_fetches_before_the_page_goes_up(self):
-        """The first update that delivers this: the host's own apply-update.sh is older and sources the new update-deploy.sh, which owns the order then."""
+    def test_a_host_script_without_the_early_fetch_gets_the_page_first_and_fetches_under_it(self):
+        """The first update that delivers this: the host's own apply-update.sh is older, has merged already (./web is a bind mount, so the old image reads the new
+        code) and sources the new update-deploy.sh, which owns the order then: the page is its first act and the 5 GB pull happens under it, never before it
+        (a pull before it showed the visitor the site on mismatched files for the length of the pull: the upgrade rehearsal's overlay job, 35 to 46 samples)."""
         work = self.tmp / 'old-host'
         (work / 'scripts').mkdir(parents=True)
         (work / 'config' / 'nginx' / 'state').mkdir(parents=True)
@@ -1133,8 +1135,33 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         lines = self.flag_lines()
         pulls = [line for line in lines if ' docker pull -q ' in line]
         self.assertEqual(len(pulls), 1, lines)
-        self.assertTrue(pulls[0].startswith('off '), pulls)
-        self.assertLess(lines.index(pulls[0]), lines.index('on deploy_steps'))
+        self.assertTrue(pulls[0].startswith('on '), pulls)  # the page was already up when the pull ran
+        self.assertEqual(lines[0].split()[0], 'on', lines)  # and nothing at all ran before it
+
+    def test_an_older_host_script_with_a_scanner_to_fetch_never_pulls_with_the_site_on_the_new_files(self):
+        """The overlay rehearsal's failure: the host's older apply-update.sh merged, then the deploy file pulled the 5 GB scanner image BEFORE putting the page up,
+        so visitors got the old image on the new files for the whole pull. Whatever docker is asked after the merge, the page must already be up."""
+        self.scanner_checkout()
+        text = (SCRIPTS / 'apply-update.sh').read_text()
+        for needle, repl in (('export UPDATE_OWNS_MAINTENANCE=1', ':'),
+                             ('cv_begin_maintenance() {\n', 'cv_begin_maintenance() {\n  return 0\n'),
+                             ('cv_maint_off() {', 'cv_maint_off() { return 0; }\n_unused() {'),
+                             ('cv_maint_failed() {', 'cv_maint_failed() { return 0; }\n_unused2() {'),
+                             ('  if cvengine_scanner_enabled "${COMPOSE[@]}"; then\n    phase applying "fetching the built-in', '  if false; then\n    phase applying "fetching the built-in')):
+            self.assertIn(needle, text)
+            text = text.replace(needle, repl, 1)
+        (self.work / 'scripts' / 'apply-update.sh').write_text(text)
+        self.git('update-index', '--assume-unchanged', 'scripts/apply-update.sh', cwd=self.work)
+        self.hook('post-merge', 'echo "$([ -e config/nginx/state/maintenance ] && echo on || echo off)" > "$STUB_DIR/flag_at_merge"')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        pulls = [line for line in self.flag_lines() if ' docker pull -q ' in line]
+        self.assertEqual(len(pulls), 1, self.flag_lines())
+        self.assertTrue(pulls[0].startswith('on '), pulls)
+        self.assertEqual((self.stub / 'flag_at_merge').read_text().strip(), 'off')  # the older script really did merge with no page: the deploy file is what covers it
+        first = next(line for line in self.flag_lines() if line.startswith(('on ', 'off ')))
+        self.assertTrue(first.startswith('on '), self.flag_lines())
 
     def test_the_page_is_also_up_while_the_services_are_rebuilt_in_place(self):
         """The files were pulled by hand: the running containers already read them, so there is no merge to hang the page on."""
