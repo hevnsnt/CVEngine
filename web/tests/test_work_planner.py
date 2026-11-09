@@ -99,6 +99,15 @@ class IdleTests(Fleet):
         self.assertTrue(all(c.kwargs['queue'] == 'planner_queue' for c in self.sent.call_args_list))
         self.assertEqual(out['due']['ssh_probe'], 30)
 
+    def test_tick_is_the_entry_the_watchdog_calls_it_builds_the_census_itself_and_returns_what_it_queued(self):
+        for i in range(3):
+            self.host(self.project, f'h{i}')
+        self.sentinel(slots=4)
+        out = work_planner.tick(self.now)  # no census was built first
+        self.assertEqual(out['state'], 'queued')
+        self.assertEqual(out['queued'], {'ssh_probe': 3})
+        self.assertEqual(work_planner.tick()['queued'], {})  # the next call finds the work in flight and queues nothing again
+
     def test_one_summary_row_per_run_in_the_activity_feed_not_one_per_task(self):
         from cveFeed.models import AgentActivity
         for i in range(30):

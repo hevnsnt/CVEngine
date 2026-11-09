@@ -366,6 +366,20 @@ def _next_batch(spec, project, entry, ready, fresh_cache):
     return domain, chosen
 
 
+def tick(now=None):
+    """The one clean entry point (the outer watchdog calls it as its action when Sentinels sit idle). Does what the beat task ``work_planner_tick`` does,
+    and builds the census first when none is cached (the beat leaves that to its own five-minute task; a caller that asked for work wants it now).
+    Returns the summary dict: ``state`` (``queued``, ``busy``, ``nothing_due``, ``paused``, ``off``, ``no_sentinel``, ``backing_off``, ``nothing_queued``,
+    ``running``), ``queued`` (``{kind: units}``), ``batches``, ``due``, ``awaiting``, ``reasons``, ``live``. Never raises for an ordinary gate."""
+    now = now or timezone.now()
+    if enabled() and cached_census() is None:
+        try:
+            census(now)
+        except Exception:  # noqa: BLE001 - run() then reports 'warming' and the census task is asked for
+            logger.warning('work planner: the census could not be built for a tick', exc_info=True)
+    return run(now)
+
+
 def run(now=None, kick=False):
     """One tick: measure capacity, and queue due batches where slots are idle. Returns the summary (also kept for the Scanners page). Never raises for an
     ordinary gate (off, paused, no Sentinel, nothing due, busy); a project that cannot be planned is skipped and named in ``reasons``."""
