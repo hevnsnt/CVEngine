@@ -1649,7 +1649,29 @@ def reap_expired(now=None):
         if _end_as_expired(task, reason, now):
             ended.setdefault(task.project.org_id, []).append((task, reason))
     _audit_sweep(ended)
+    scrub_stale_values(now)
     return sum(len(v) for v in ended.values())
+
+
+STALE_VALUES_AFTER = timedelta(minutes=10)  # a finished secrets_scan or route_probe result keeps its secret values this long at most
+STALE_VALUES_BATCH = 200
+
+
+def scrub_stale_values(now=None):
+    """Scrub the secret values of any finished ``secrets_scan`` or ``route_probe`` result older than ``STALE_VALUES_AFTER`` that was not scrubbed when it was
+    filed: filing raised, the stage that waited for the result was gone, or the worker died in between. The values are never meant to outlive the step that
+    fingerprints them. Runs at most once a minute (every broker entry point calls the reaper), ``STALE_VALUES_BATCH`` rows at a time. Returns the number
+    scrubbed."""
+    from django.core.cache import cache
+    now = now or timezone.now()
+    try:
+        if not cache.add('sentinel:scrub-stale-values', 1, 60):
+            return 0
+    except Exception:  # noqa: BLE001 - without the cache it runs every call, bounded by the batch
+        pass
+    ids = list(SentinelTask._base_manager.filter(kind__in=('secrets_scan', 'route_probe'), status='done', finished_at__lt=now - STALE_VALUES_AFTER)
+               .exclude(result__has_key='values_scrubbed').order_by('id').values_list('id', flat=True)[:STALE_VALUES_BATCH])
+    return sum(1 for task_id in ids if scrub_values(task_id))
 
 
 SWEEP_SAMPLE = 20  # task ids named in a sweep's summary row: enough to find the tasks, never a row the size of the sweep
