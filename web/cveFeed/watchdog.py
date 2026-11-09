@@ -92,6 +92,7 @@ class Rule:
     verify: int = VERIFY_SECONDS
     next_step: str = ''        # what to tell a person when the rule could not fix it
     notice_title: str = ''
+    doing: str = ''            # what the watchdog says it is doing while a host action runs
 
 
 class Ctx:
@@ -492,9 +493,9 @@ def act_stalled(ctx, chk):
 RULES = [
     Rule('R1', 'Workers answer', 'Recreates the celery container (through the host) when a lane has not answered for 3 minutes.', 180, 900, 2, 4, check_lanes,
          host_action='restart-celery', next_step='run `docker compose restart celery` on the server, then read `docker compose logs --tail 100 celery`',
-         notice_title='The workers stopped answering'),
+         notice_title='The workers stopped answering', doing='restarting the workers'),
     Rule('R2', 'Workers take their work', 'Recreates the celery container when a lane answers but its queue grows and nothing finishes for 10 minutes.', 60, 900, 2, 4, check_hung,
-         host_action='restart-celery', next_step='run `docker compose restart celery`, then read `docker compose logs --tail 100 celery`', notice_title='A worker lane took no work'),
+         host_action='restart-celery', next_step='run `docker compose restart celery`, then read `docker compose logs --tail 100 celery`', notice_title='A worker lane took no work', doing='restarting the workers'),
     Rule('R3', 'Hosts assessed at once is not starved', 'Raises a too-small discovery pool to the auto-tune minimum while hosts wait and Sentinels idle (never a value a person saved).', 120, 600, 3, 10,
          check_pool, act=act_pool, notice_title='Hosts assessed at once was held too low'),
     Rule('R4', 'Idle Sentinels are fed', 'Runs the Sentinel feed itself when Sentinels sit idle with checks due.', 300, 600, 4, 24, check_idle_sentinels, act=act_feed,
@@ -502,7 +503,7 @@ RULES = [
     Rule('R5', 'No message stuck unacknowledged', 'Returns messages no worker holds, unacknowledged for over 30 minutes, to their queues.', 0, 600, 2, 12, check_unacked, act=act_unacked,
          next_step='run `docker compose restart celery`', notice_title='Messages were stuck unacknowledged'),
     Rule('R6', 'Scheduler ticks', 'Recreates the celery-beat container (through the host) when the scheduler has been silent for over 2 minutes.', 120, 900, 2, 4, check_beat,
-         host_action='restart-celery-beat', next_step='run `docker compose restart celery-beat`, then read `docker compose logs --tail 100 celery-beat`', notice_title='The scheduler went quiet'),
+         host_action='restart-celery-beat', next_step='run `docker compose restart celery-beat`, then read `docker compose logs --tail 100 celery-beat`', notice_title='The scheduler went quiet', doing='restarting the scheduler'),
     Rule('R7', 'Disk and memory have room', 'Pauses the automatic starting of heavy work and, for disk, removes dangling images and build cache (never a tagged image or a volume).', 120, 1800, 2, 6,
          check_pressure, act=act_pressure, next_step='free space on the host (`docker system df`, `df -h`) or raise the memory limit', notice_title='The host is short of disk or memory'),
     Rule('R8', 'Database connections have room', 'Only raises a notice.', 120, 0, 0, 0, check_db, notice_title='The database is near its connection limit'),
@@ -724,7 +725,7 @@ def _act(rule, state, ctx, chk):
         state.verify = {'action': rule.host_action, 'host_id': req['id'], 'requested_at': now_iso, 'symptom_at': symptom_at, 'acted_at': now_iso}
         _set(state, 'acting', f'Asked the host to {rule.host_action.replace("-", " ")}.')
         event(rule.code, 'action', observation=chk.text, action=rule.host_action, result='Asked the host to carry it out.', request=req['id'])
-        notice(rule.code, 'warning', f'{rule.notice_title or rule.title}; the watchdog is restarting it', notice_detail)
+        notice(rule.code, 'warning', f'{rule.notice_title or rule.title}; the watchdog is {rule.doing or "acting"}', notice_detail)
         return True
     if rule.act:
         ok, text = rule.act(ctx, chk)

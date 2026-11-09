@@ -62,11 +62,11 @@ class Probes:
         answer = app.control.inspect(timeout=PING_SECONDS, limit=len(_lane_table())).active_queues()
         return {name: [q.get('name') for q in (queues or [])] for name, queues in (answer or {}).items()}
 
-    def lane_work(self):
+    def lane_work(self, workers=None):
         """{worker name: {'completed': tasks finished since it started, 'active': tasks running, 'capacity': its pool ceiling or None}}: what R2 needs, asked
-        only while a queue has messages waiting."""
+        only while a queue has messages waiting, and only of the workers that answered (so it returns as soon as they have)."""
         from reNgine.celery import app
-        inspector = app.control.inspect(timeout=PING_SECONDS, limit=len(_lane_table()))
+        inspector = app.control.inspect(timeout=PING_SECONDS, destination=list(workers) if workers else None, limit=len(workers) if workers else len(_lane_table()))
         stats, active = inspector.stats() or {}, inspector.active() or {}
         out = {}
         for name, info in stats.items():
@@ -220,9 +220,9 @@ def collect(probes=None, now=None):
             snap[name] = None
             errors[name] = f'{type(exc).__name__}: {str(exc)[:80]}'
     snap['redis_ok'] = snap['queues'] is not None
-    if snap['queues'] and any(snap['queues'].values()):
+    if snap['queues'] and any(snap['queues'].values()) and snap['lanes']:
         try:
-            snap['lane_work'] = probes.lane_work()
+            snap['lane_work'] = probes.lane_work(sorted(snap['lanes']))
         except Exception as exc:  # noqa: BLE001
             snap['lane_work'] = None
             errors['lane_work'] = f'{type(exc).__name__}: {str(exc)[:80]}'

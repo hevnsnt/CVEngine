@@ -78,10 +78,11 @@ if [ "$mode" = tick ]; then
   # `timeout` is the hard bound around the tick's own limit (25 seconds) and its own timer (33): the tick ends itself, and this kills it if it does not
   out=$(timeout -k 5 45 "${COMPOSE[@]}" exec -T web timeout -k 3 40 python3 manage.py watchdog_tick 2>&1 </dev/null 7>&- 8>&-)
   rc=$?
+  summary=$(printf '%s\n' "$out" | grep '^{' | tail -n 1)  # the command prints one JSON line; Django's start-up chatter around it is not for the log
   if [ $rc -ne 0 ]; then
-    log "tick failed (exit $rc): $(printf '%s' "$out" | tail -c 300 | tr '\n' ' ')"
-  elif ! grep -q '"ok": true' <<<"$out" || ! grep -q '"acted": \[\]' <<<"$out"; then
-    log "tick: $(printf '%s' "$out" | tail -c 400 | tr '\n' ' ')"  # only a tick that did something or stopped early is worth a line
+    log "tick failed (exit $rc): $(printf '%s' "${summary:-$out}" | tail -c 300 | tr '\n' ' ')"
+  elif ! grep -q '"ok": true' <<<"$summary" || ! grep -q '"acted": \[\]' <<<"$summary"; then
+    log "tick: ${summary:-no answer}"  # only a tick that did something or stopped early is worth a line
   fi
   exit 0
 fi

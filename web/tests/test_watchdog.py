@@ -77,7 +77,7 @@ class FakeProbes:
         if name.startswith('_') or name not in self.data and name not in snap_mod.SECTIONS + ('lane_work',):
             raise AttributeError(name)
 
-        def probe():
+        def probe(*args, **kwargs):
             value = self.data.get(name)
             if isinstance(value, Exception):
                 raise value
