@@ -917,3 +917,45 @@ class ViewTests(WatchdogCase):
         events = wd.view(T0)['events']
         self.assertEqual(len(events), 20)
         self.assertEqual(events[0]['observation'], 'o24')
+
+
+class AdminApiTests(WatchdogCase):
+    def setUp(self):
+        super().setUp()
+        from dashboard.models import Org, OrgMembership
+        from tests.test_tenancy import client_for
+        self.root = User.objects.create_superuser('wd-root', 'wd@example.test', 'pw')
+        self.admin = User.objects.create_user('wd-org', password='pw')
+        org = Org.objects.create(name='Wd Org', slug='wd-org')
+        OrgMembership.objects.create(user=self.admin, org=org, role='admin')
+        self.client_for = client_for
+
+    def api(self, user, method, body=None):
+        from tests.test_admin import api
+        return api(self.client_for(user), method, 'watchdog', body)
+
+    def test_only_an_app_admin_may_read_or_switch_it(self):
+        self.assertEqual(self.api(self.admin, 'GET')[0], 403)
+        self.assertEqual(self.api(self.admin, 'POST', {'enabled': False})[0], 403)
+
+    def test_read_returns_the_panel_payload(self):
+        self.tick()
+        status, body = self.api(self.root, 'GET')
+        self.assertEqual(status, 200)
+        self.assertEqual(len(body['rules']), 9)
+        self.assertTrue(body['enabled'])
+        self.assertIn('events', body)
+
+    def test_switch_the_watchdog_and_one_rule(self):
+        status, body = self.api(self.root, 'POST', {'enabled': False})
+        self.assertEqual(status, 200)
+        self.assertFalse(body['enabled'])
+        status, body = self.api(self.root, 'POST', {'enabled': True})
+        status, body = self.api(self.root, 'POST', {'rule': 'R3', 'enabled': False})
+        self.assertEqual([r['enabled'] for r in body['rules'] if r['code'] == 'R3'], [False])
+        self.assertTrue(body['enabled'])
+
+    def test_bad_input_is_refused(self):
+        self.assertEqual(self.api(self.root, 'POST', {'enabled': 'yes'})[0], 400)
+        self.assertEqual(self.api(self.root, 'POST', {'rule': 'R99', 'enabled': False})[0], 400)
+        self.assertEqual(self.api(self.root, 'POST', {'rule': ['R1'], 'enabled': False})[0], 400)
