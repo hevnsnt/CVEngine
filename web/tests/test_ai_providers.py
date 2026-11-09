@@ -26,7 +26,7 @@ class ProviderTests(unittest.TestCase):
 		_, kw = post.call_args
 		self.assertEqual(kw['headers']['x-api-key'], 'k')
 		self.assertEqual(kw['json']['system'], 'sys')
-		self.assertEqual(kw['json']['max_tokens'], 2048)
+		self.assertEqual(kw['json']['max_tokens'], 4096)  # 2048 for the answer, 2048 kept apart for the thinking of a model that thinks unless told not to
 
 	def test_anthropic_truncation_and_empty_content_are_provider_errors(self):
 		provider = ai.get_provider('anthropic', api_key='k', model='claude-haiku-5-5')

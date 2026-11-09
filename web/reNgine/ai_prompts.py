@@ -52,6 +52,9 @@ TASKS = {
     'template_generation': (
         'Your task: write one read-only detection template with which the operator can check whether their own hosts are '
         'affected by one CVE.'),
+    'template_validation': (
+        'Your task: check one read-only detection template written for one CVE, first by describing the responses an affected host and a '
+        'fixed host give, then by reviewing the template itself.'),
     'autotune_advisor': (
         'Your task: advise the product\'s auto-tuner how much scanning work to run at once, from the numbers it measured.'),
     'rdp_screenshot': (
@@ -73,6 +76,7 @@ STAGES = {
     'local_check_suggestion': 'Local read-only checks for a CVE match (AI job)',
     'cve_detection': 'Detection record and guidance for one CVE (AI job)',
     'template_generation': 'Template draft for a CVE with no installed template (AI job)',
+    'template_validation': 'Test fixture and second-pass review of an AI-written template draft (AI job)',
     'autotune_advisor': 'The auto-tuner\'s advisor (AI job)',
     'rdp_screenshot': 'Reading an RDP login screenshot (AI job)',
     'operations_check': 'The AI reviewer container\'s operations check',

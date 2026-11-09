@@ -124,9 +124,9 @@ def plan(project_id, row, cve, subject, checks, template, provider=None, observa
                    'safe_template': bool(template[0]), 'template_unavailable_reason': template[1] if not template[0] else ''}
         # templategen's prompt cleaner treats CVE feed text as hostile input. The hostname and IP are excluded.
         safe = templategen._clean_value(context, 500)
-        from reNgine.ai_providers import usage_stage
+        from reNgine.ai_providers import complete_with_headroom, usage_stage
         with usage_stage('validation_plan'):
-            decision = parse_plan(provider.complete(SYSTEM, untrusted_block('VALIDATION_CONTEXT', safe)), checks, can_generate)
+            decision = parse_plan(complete_with_headroom(provider, SYSTEM, untrusted_block('VALIDATION_CONTEXT', safe)), checks, can_generate)
         missing = [kind for kind in probe_kinds if kind not in (decision or {}).get('check_kinds', [])]
         if decision and missing:
             decision['check_kinds'] += missing  # an empty or narrow plan never ends a request while a probe can still find the fact
@@ -160,7 +160,7 @@ def generate_candidate(project_id, cve, provider):
         TriageCall.objects.filter(pk=claim.pk, status='running').update(status='succeeded', finished_at=timezone.now())
         return {'status': 'queued', 'job': job.pk,
                 'reason': 'the AI reviewer container writes the draft; it is validated when it lands and is never run on this host',
-                'provenance': 'AI-authored draft; static, syntax and benign fixture gates only'}
+                'provenance': 'AI-authored draft; static, syntax and benign control gates; automatic fixture test and second-pass review follow'}
     except Exception:
         TriageCall.objects.filter(pk=claim.pk, status='running').update(status='failed', finished_at=timezone.now())
         return {'status': 'failed', 'reason': 'template generation could not be queued'}
