@@ -373,3 +373,17 @@ class WorkersDownNoticeTests(TestCase):
         with mock.patch('agentapi.system_status.system_status', return_value={'problems': [], 'system': {'workers': {'state': 'responding', 'consumers': self.consumers(set(self.LANES))}, 'sentinels': {}}}):
             reviewer.run_ops_checks()
         self.assertFalse(AdminAlert.objects.filter(code='workers_down', resolved_at__isnull=True).exists())
+
+
+class FaultHandlerTests(SimpleTestCase):
+    def test_a_native_crash_of_a_worker_prints_the_python_traceback(self):
+        text = SCRIPT.read_text()
+        self.assertIn('export PYTHONFAULTHANDLER="${PYTHONFAULTHANDLER:-1}"', text)
+        # before the first worker command, so every lane inherits it, and an administrator's own value is kept
+        self.assertLess(text.index('PYTHONFAULTHANDLER'), text.index('manage.py migrate --check'))
+        out = subprocess.run(['bash', '-c', 'unset PYTHONFAULTHANDLER; eval "$(grep ^export.PYTHONFAULTHANDLER %s)"; echo "$PYTHONFAULTHANDLER"' % shlex.quote(str(SCRIPT))],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(out, '1')
+        kept = subprocess.run(['bash', '-c', 'PYTHONFAULTHANDLER=0; eval "$(grep ^export.PYTHONFAULTHANDLER %s)"; echo "$PYTHONFAULTHANDLER"' % shlex.quote(str(SCRIPT))],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(kept, '0')
