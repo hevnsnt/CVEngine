@@ -129,3 +129,4 @@ web/cve-seed*
 
 # set by scripts/update-deploy.sh while an update runs; makes the proxy show the maintenance page
 config/nginx/state/maintenance
+config/nginx/state/maintenance-failed
