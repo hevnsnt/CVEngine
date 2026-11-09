@@ -6,6 +6,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ### Added
 
+- The two engineers on the maintenance page have 112 more lines to trade while an update runs, in the same spirit as the old ones (self-deprecating development jokes).
 - **An API keys item in the account menu, and links on the AI Model Usage page.** The page that creates the keys for MCP and agents (`/cve/agents/`) had no link anywhere after the shell cleanup. It is now **API keys** in the account menu (after Settings, on a phone in the Account sheet, and **g k** and Ctrl K find it), and its heading and title read **API keys for MCP and agents**. Under the heading of **AI Model Usage** (and of **Connect your model**) two links sit at the top: **Adjust AI models and usage** (Settings, AI model) and **Create an API key for MCP**. Discovery API keys (Shodan and other providers, in Settings) are a different thing and are named so on both pages.
 - **Agents in your organizations** is a section of the API keys page for administrators: the table of registered agents with Manage (limits, suspend, revoke, delete, approve), the work no live agent can take, and what is queued or running. It is the Administration Agents tab, moved unchanged.
 
