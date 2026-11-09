@@ -11,6 +11,7 @@ import uuid
 
 MAX_LEGACY_LOG_BYTES = 8 * 1024 * 1024
 PHASE_VALUES = ('idle', 'draining', 'applying', 'done', 'failed')
+WATCHDOG_ACTIONS = ('restart-celery', 'restart-celery-beat', 'prune-docker')  # what the web container's watchdog may ask the host for
 
 
 def regular_fd(path, *, dir_fd=None):
@@ -329,6 +330,33 @@ def main():
                 'checked_at': now, 'result': result, 'error': error, 'not_after': not_after,
                 'renewed_at': now if result == 'issued' else previous.get('renewed_at'),
             }).encode('utf-8')])
+        elif action == 'watchdog-request':
+            # the request the web container's watchdog left (web/.watchdog-action, docs/WATCHDOG.md): read without following a link, only the three
+            # known actions and a plain id accepted, and removed once read so it is carried out once. Prints `ID ACTION RULE`, or nothing.
+            try:
+                with os.fdopen(regular_fd('.watchdog-action', dir_fd=web_fd), 'rb') as source:
+                    raw = source.read(1025)
+            except (FileNotFoundError, OSError, ValueError):
+                raw = b''
+            try:
+                os.unlink('.watchdog-action', dir_fd=web_fd)
+            except OSError:
+                pass
+            try:
+                row = json.loads(raw) if 0 < len(raw) <= 1024 else None
+            except ValueError:
+                row = None
+            if (isinstance(row, dict) and re.fullmatch(r'[0-9a-f]{12}', str(row.get('id'))) and re.fullmatch(r'R[0-9]{1,2}', str(row.get('rule')))
+                    and row.get('action') in WATCHDOG_ACTIONS):
+                print(row['id'], row['action'], row['rule'])
+        elif action == 'watchdog-result':
+            # `watchdog-result ID ACTION ok|failed|standdown DETAIL`: the host's answer to that request (web/.watchdog-result)
+            wid, name, outcome = sys.argv[2], sys.argv[3], sys.argv[4]
+            detail = sys.argv[5] if len(sys.argv) > 5 else ''
+            if not re.fullmatch(r'[0-9a-f]{12}', wid) or name not in WATCHDOG_ACTIONS or outcome not in ('ok', 'failed', 'standdown') or len(detail) > 300:
+                raise ValueError('invalid watchdog answer')
+            publish(web_fd, '.watchdog-result', [json.dumps({'id': wid, 'action': name, 'ok': outcome == 'ok', 'standdown': outcome == 'standdown',
+                                                              'detail': detail, 'at': time.time()}).encode('utf-8') + b'\n'])
         elif action == 'phase':
             value = sys.argv[2]
             if value not in PHASE_VALUES:

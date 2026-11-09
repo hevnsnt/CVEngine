@@ -303,6 +303,10 @@ A PDF report of a project or a host ([Front end](FRONTEND.md#pdf-reports), [API]
 | `CVENGINE_REPORT_RENDER_SECONDS` | `900` | Longest the PDF renderer may run (at least 30). A report that takes longer fails with a message to report one host instead. |
 | `CVENGINE_REPORT_DIR` | `/usr/src/scan_results/.reports` | Where the PDFs are written, a dot-folder of the scan results volume that no media path can name. The web and worker containers must share it. |
 
+## Watchdog
+
+The outer watchdog ([WATCHDOG.md](WATCHDOG.md)) is on by default. **Watchdog** is an instance setting (Scanners, Health: Switch off / Switch on, and one switch per rule). `CVENGINE_WATCHDOG=0` in `.env` switches it off for the host side and the web container alike; `CVENGINE_WATCHDOG_SECONDS` (default 30) is the host watcher's tick interval and is for tests. It saves one value on your behalf: `discovery_concurrency` raised to 4 when `DISCOVERY_CONCURRENCY` in `.env` is below it and work waits for a slot, recorded as set by `watchdog`, never over a value you saved yourself, released when `.env` stops holding it down.
+
 ## Updates
 
 | Variable | Default | Purpose |

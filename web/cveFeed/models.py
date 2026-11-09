@@ -2476,3 +2476,54 @@ class PlannerBatch(models.Model):
 
     def __str__(self):
         return f"planner batch {self.pk}: {self.kind} x{len(self.units or [])} ({self.status})"
+
+
+class WatchdogEvent(models.Model):
+    """One line of what the outer watchdog saw, decided or did (cveFeed.watchdog, docs/WATCHDOG.md): when, which rule, what it observed, what
+    it did and what came of it. Append only: a row is never changed once written (old rows are pruned by age, nothing else removes one).
+    Plain text, no secrets: it is shown on the Health tab of the Scanners page."""
+
+    LEVELS = ("info", "action", "fixed", "problem")
+    at = models.DateTimeField(default=timezone.now, db_index=True)
+    rule = models.CharField(max_length=24)
+    level = models.CharField(max_length=8, default="info")
+    observation = models.CharField(max_length=500, blank=True, default="")
+    action = models.CharField(max_length=80, blank=True, default="")
+    result = models.CharField(max_length=500, blank=True, default="")
+    detail = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-id"]
+        indexes = [models.Index(fields=["rule", "id"], name="wdevent_rule_id_idx")]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None and not self._state.adding:
+            raise RuntimeError("watchdog events are append only")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.at:%Y-%m-%d %H:%M:%S} {self.rule} {self.action or self.observation}"
+
+
+class WatchdogState(models.Model):
+    """The watchdog's memory, one row per rule (and one, rule ``_all``, for the watchdog itself: the global switch, the last tick and the last snapshot),
+    in the database so a decision survives a restart of the web container: how long a symptom has been seen (hysteresis), when the rule last acted
+    (rate limits), the check that follows an action, and the hold that stops it acting again for an hour when it could not fix the problem."""
+
+    rule = models.CharField(max_length=24, unique=True)
+    enabled = models.BooleanField(default=True)
+    status = models.CharField(max_length=16, default="unknown")  # ok | watching | acting | held | problem | unknown | standing_down | off
+    status_text = models.CharField(max_length=400, blank=True, default="")
+    fire_since = models.DateTimeField(null=True, blank=True)  # the symptom has been seen continuously since this moment
+    last_action_at = models.DateTimeField(null=True, blank=True)
+    actions = models.JSONField(default=list, blank=True)  # epoch seconds of the actions of the last day, for the hourly and daily caps
+    verify_due = models.DateTimeField(null=True, blank=True)  # when to check that the last action worked
+    verify = models.JSONField(default=dict, blank=True)  # {action, symptom_at, acted_at}
+    hold_until = models.DateTimeField(null=True, blank=True)  # after an action that did not work: nothing more is done for this rule until then
+    escalated_at = models.DateTimeField(null=True, blank=True)
+    data = models.JSONField(default=dict, blank=True)  # per rule memory (windows, the discovery override); the last snapshot on ``_all``
+    last_tick_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"watchdog {self.rule}: {self.status}"

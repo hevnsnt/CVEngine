@@ -290,6 +290,23 @@ form.inline .field{margin:0;flex:1 1 220px}
 .health-line{display:flex;gap:var(--s-3);align-items:center;flex-wrap:wrap;margin:0 0 var(--s-3)}
 .health-cell .note{overflow-wrap:anywhere}
 .health-links{display:flex;gap:var(--s-2);flex-wrap:wrap}
+/* Scanners: the watchdog panel (what watches this server, in words, and what it did) */
+.watchdog{padding:var(--s-4);margin:0 0 var(--s-4);display:flex;flex-direction:column;gap:var(--s-3)}
+.watchdog h2{margin:0;font:var(--fw-semi) var(--fs-5)/1.2 var(--font)}
+.watchdog h3{margin:var(--s-3) 0 var(--s-2);font:var(--fw-semi) var(--fs-3)/1.2 var(--font)}
+.wd-head{display:flex;gap:var(--s-3);align-items:center;flex-wrap:wrap}
+.wd-head .btn{margin-left:auto}
+.wd-rules{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:var(--s-3);align-items:stretch}
+.wd-rule{display:flex;flex-direction:column;gap:var(--s-1);padding:var(--s-3);border:1px solid var(--line-2);border-radius:var(--r);border-left-width:4px;min-width:0}
+.wd-rule.wd-green{border-left-color:var(--ok)}.wd-rule.wd-amber{border-left-color:var(--ink)}.wd-rule.wd-red{border-left-color:var(--fire-ink)}.wd-rule.wd-grey{border-left-color:var(--line-2)}
+.wd-rule-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:var(--s-2);align-items:start}
+.wd-rule-head strong{min-width:0;overflow-wrap:break-word;padding-top:2px}
+.wd-rule-head .btn{white-space:nowrap;align-self:start}
+@media (max-width:520px){.wd-rule-head{grid-template-columns:auto minmax(0,1fr)}.wd-rule-head .btn{grid-column:1 / -1;justify-self:start}}
+.wd-rule .note,.wd-change .note{overflow-wrap:anywhere;margin:0}
+.wd-change{margin:0 0 var(--s-2)}
+.wd-when{white-space:nowrap}
+
 
 /* filter chips (toggle buttons with a count) */
 .picker{display:flex;gap:var(--s-2);flex-wrap:wrap;margin:0 0 var(--s-4)}

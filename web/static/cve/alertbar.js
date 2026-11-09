@@ -2,6 +2,7 @@
 // diagnosis; docs/AI-REVIEWER.md). Every word is set with textContent: an alert can quote a Sentinel's error or what a scanned host said,
 // and none of it is ever HTML.
 import { setNotices } from "/staticfiles/cve/statusstrip.js";
+import { localTimes } from "/staticfiles/cve/watchdog-text.js";
 
 const csrf = document.querySelector("[name=csrfmiddlewaretoken]");
 const el = (tag, cls, text) => {
@@ -19,8 +20,8 @@ function render(alerts) {
   const items = alerts.slice(0, SHOWN).map((a) => {
     const row = el("div", `ab-row ab-${["info", "warning", "critical"].includes(a.severity) ? a.severity : "warning"}`);
     const text = el("div", "ab-text");
-    text.append(el("strong", "", a.title));
-    if (a.detail) text.append(el("p", "ab-detail", a.detail));
+    text.append(el("strong", "", localTimes(a.title)));
+    if (a.detail) text.append(el("p", "ab-detail", localTimes(a.detail)));
     if (a.ai_detail) {
       const ai = el("p", "ab-ai");
       ai.append(el("span", "ab-label", `AI reviewer${a.ai_model ? ` (${a.ai_model})` : ""}: `), document.createTextNode(a.ai_detail));
@@ -43,7 +44,7 @@ function render(alerts) {
       }
     });
     row.append(text, dismiss);
-    return { kind: "alert", text: a.title, node: row, rank: a.severity === "critical" ? 0 : 2 };
+    return { kind: "alert", text: localTimes(a.title), node: row, rank: a.severity === "critical" ? 0 : 2 };
   });
   if (alerts.length > SHOWN) {
     const more = `${alerts.length - SHOWN} more alert(s): see Settings, AI model.`;

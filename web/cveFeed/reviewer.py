@@ -697,9 +697,19 @@ def run_ops_checks(now=None):
     return sync_alerts(checks, now)
 
 
+def _watchdog_events(limit=10):
+    """What the outer watchdog (cveFeed.watchdog) did lately, for the operations diagnosis to explain in words. Never raises; no rule depends on it."""
+    try:
+        from cveFeed.models import WatchdogEvent
+        return [{'at': e.at.isoformat(), 'rule': e.rule, 'level': e.level, 'action': e.action, 'result': e.result[:300]}
+                for e in WatchdogEvent.objects.exclude(level='info')[:limit]]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def snapshot(now=None, templates_release=None):
     checks = ops_checks(now, templates_release)
-    return {'at': (now or timezone.now()).isoformat(), 'checks': checks,
+    return {'at': (now or timezone.now()).isoformat(), 'checks': checks, 'watchdog': _watchdog_events(),
             'actions': {name: f'at most once every {int(gap.total_seconds() // 60)} minutes' for name, gap in ACTIONS.items()}}
 
 

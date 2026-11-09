@@ -93,6 +93,9 @@ web/exports/
 web/.scanner-update-done
 web/.openvas-log
 web/.openvas-restart
+web/.watchdog-action
+web/.watchdog-action.tmp
+web/.watchdog-result
 web/.openvas-restart.tmp
 web/.openvas-restarted
 backups/

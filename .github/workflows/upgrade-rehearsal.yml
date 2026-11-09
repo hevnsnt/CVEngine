@@ -56,6 +56,8 @@ jobs:
           scripts/update.sh
       - name: The updated install works and keeps its data
         run: "$GITHUB_WORKSPACE/.github/rehearsal/verify.sh plain"
+      - name: A further update, applied by the host watcher while the watchdog runs (it stands down and does not fight it)
+        run: "$GITHUB_WORKSPACE/.github/rehearsal/watchdog-update.sh"
       - name: Logs
         if: failure()
         run: "$GITHUB_WORKSPACE/.github/rehearsal/logs.sh"
@@ -193,6 +195,8 @@ jobs:
           scripts/apply-update.sh
           grep -q 'already at' "$(python3 scripts/update-state.py directory)/update.log" || { echo "::error::the update log does not say 'already at'"; exit 1; }
           [ "$before" = "$(docker images -q --no-trunc | sort | md5sum)" ] || { echo "::error::an update that was already applied built an image"; exit 1; }
+      - name: A third update, applied by the host watcher while the watchdog runs (it stands down and does not fight it)
+        run: "$GITHUB_WORKSPACE/.github/rehearsal/watchdog-update.sh"
       - name: Logs
         if: failure()
         run: "$GITHUB_WORKSPACE/.github/rehearsal/logs.sh"
