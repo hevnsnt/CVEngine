@@ -193,7 +193,7 @@ The server works out three facts before the button starts anything: the host's m
 
 When there is no question, or it cannot be asked (an older server, automatic updates, `scripts/update.sh`), the updater applies the safe default and removes nothing; see below. At the end of every update the memory limits of the running containers are added up against the host, and a warning names the largest one and the setting to change when they pass 90 percent.
 
-**Settings > Sentinels** has the same three choices under **Which scanners run**. The page asks the host to apply it (`web/.scanner-plan-wanted`, picked up by the update watcher within seconds, `scripts/apply-scanner-plan.sh`): the choice is written, the server's processes are recreated once no scan is running, and the scanner container is removed or started. The page shows the result.
+**Settings > Sentinels** has the same three choices under **Which scanners run**. The page asks the host to apply it (`web/.scanner-plan-wanted`, picked up by the update watcher within seconds, `scripts/apply-scanner-plan.sh`): the choice is written, the server's processes are recreated once no scan is running, and the scanner container is removed or started. While the host has not answered, the note under **Apply** says what it waits on: the host helper is not running (read from `web/.updater-heartbeat`, with what to start), the host updater has not picked it up yet, N scans are running, or an update is building. When the host answers it says **Done at** the local time and what changed, then clears itself after a few seconds; a failure shows the host's reason and what to do. If the page cannot reach the server it says so instead of keeping the old words.
 
 ### From the command line
 
