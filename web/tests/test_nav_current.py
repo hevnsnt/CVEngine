@@ -75,7 +75,7 @@ class MenuTests(TestCase):
 			'/cve/alpha/hosts/': 'Assets', '/cve/alpha/targets/': 'Assets', '/cve/alpha/secrets/': 'Assets', '/cve/graph/': 'Assets',
 			'/cve/alpha/suppliers/': 'Suppliers',  # likewise: Assets is not also current
 			'/cve/alpha/scans/': 'Scans', '/cve/alpha/activity/': 'Scans',
-			'/cve/scanners/': 'Scanners', '/cve/sentinels/': 'Scanners', '/cve/agents/': 'Scanners',
+			'/cve/scanners/': 'Scanners', '/cve/sentinels/': 'Scanners',
 		}
 		self.assertGreaterEqual(len(expected), 12)
 		for path, label in expected.items():
@@ -86,7 +86,8 @@ class MenuTests(TestCase):
 		self.assertEqual([l for l, _, c in menu(self.page('/cve/bounty/', self.pentester)) if c], ['Bug bounty'])
 
 	def test_no_entry_is_current_on_a_utility_page_the_account_is(self):
-		for path, item in (('/cve/admin/', 'Administration'), ('/cve/settings/', 'Settings'), ('/cve/about/', 'Help'), ('/cve/account/', 'My account')):
+		for path, item in (('/cve/admin/', 'Administration'), ('/cve/settings/', 'Settings'), ('/cve/about/', 'Help'), ('/cve/account/', 'My account'),
+						  ('/cve/agents/', 'API keys')):
 			html = self.page(path)
 			self.assertEqual([l for l, _, c in menu(html) if c], [], path)
 			self.assertEqual(account(html), (True, [item]), path)

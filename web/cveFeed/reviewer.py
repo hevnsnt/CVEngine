@@ -485,7 +485,6 @@ def review_summary(triage_id):
 ACTIONS = {'feed_sentinels': timedelta(minutes=15), 'refresh_nuclei_templates': timedelta(hours=1)}
 ACTIVITY_ERROR_PROBLEM = 20     # failed activity lines of one kind in six hours
 SENTINEL_FAILED_PROBLEM = 5     # failed or expired Sentinel tasks of one Sentinel and kind in six hours
-DRAFT_WAIT = timedelta(days=3)
 
 
 def _admin():
@@ -515,7 +514,7 @@ def ops_checks(now=None, templates_release=None):
     from agentapi.models import SentinelTask
     from agentapi.services import Ctx
     from agentapi.system_status import system_status
-    from cveFeed.models import AgentActivity, AIUsage, GeneratedTemplate
+    from cveFeed.models import AgentActivity, AIUsage
     from django.db.models import Count
     now = now or timezone.now()
     admin = _admin()
@@ -627,19 +626,37 @@ def ops_checks(now=None, templates_release=None):
     checks.append(_check('system', 'problem' if problems else 'ok', 'cvENGINE reports problems' if problems else 'cvENGINE reports no problems',
                          '\n'.join(problems), {'problems': problems}))
 
-    # AI-written templates waiting for a person
-    drafts = GeneratedTemplate.objects.filter(status=GeneratedTemplate.STATUS_DRAFT, created_at__lte=now - DRAFT_WAIT).count()
-    checks.append(_check('generated_templates', 'warning' if drafts else 'ok', 'AI-written nuclei templates wait for review',
-                         f'{drafts} draft template(s) have waited more than three days for a person to review them.' if drafts else '',
-                         {'waiting': drafts}, severity='info'))
+    # AI-written templates are validated by the system (cveFeed.templatevalidate), never by a person: only a real problem it cannot fix itself is reported
+    from cveFeed import templatevalidate
+    stuck = templatevalidate.problem(now)
+    checks.append(_check('generated_templates', 'warning' if stuck else 'ok',
+                         stuck['title'] if stuck else 'AI-written nuclei templates are validated automatically',
+                         stuck['detail'] if stuck else '', stuck['facts'] if stuck else {}))
 
-    # AI calls failing
-    ai_failed = list(AIUsage.objects.filter(status='failed', started_at__gte=now - timedelta(days=1))
-                     .values('error_category').annotate(n=Count('id')).order_by('-n')[:8])
+    # AI calls failing, by stage and category. A reply that was cut off and then answered by the automatic retry is recorded as
+    # ``truncated_retried`` and is not a failure: only a cut-off that survived the retry counts here, and the stage is named.
+    since = now - timedelta(days=1)
+    ai_failed = list(AIUsage.objects.filter(status='failed', started_at__gte=since).exclude(error_category='truncated_retried')
+                     .values('stage', 'error_category').annotate(n=Count('id')).order_by('-n')[:12])
     total = sum(r['n'] for r in ai_failed)
-    checks.append(_check('ai_errors', 'warning' if total >= 10 else 'ok', 'AI calls are failing',
-                         ', '.join(f"{r['n']} {r['error_category'] or 'unknown'}" for r in ai_failed) + ' in the last 24 hours.' if total >= 10 else '',
-                         {'by_category': {r['error_category'] or 'unknown': r['n'] for r in ai_failed}}))
+    recovered = AIUsage.objects.filter(status='failed', started_at__gte=since, error_category='truncated_retried').count()
+    by_stage = {}
+    for r in ai_failed:
+        by_stage.setdefault(r['stage'] or 'unspecified', {})[r['error_category'] or 'unknown'] = r['n']
+    by_category = {}
+    for r in ai_failed:
+        by_category[r['error_category'] or 'unknown'] = by_category.get(r['error_category'] or 'unknown', 0) + r['n']
+    detail = ''
+    if total >= 10:
+        detail = ', '.join(f"{r['n']} {r['error_category'] or 'unknown'} in {r['stage'] or 'unspecified'}" for r in ai_failed) + ' in the last 24 hours.'
+        if 'output_truncated' in by_category:
+            detail += (' output_truncated: the reply was cut off even after the automatic retry with twice the room (up to 32768 tokens), so the model '
+                       'is spending the room on thinking. Next step: lower Reasoning for this model (Settings, AI model), or choose a model that '
+                       'thinks less; the stage is named above.')
+        if recovered:
+            detail += f' {recovered} other cut-off repl{"y was" if recovered == 1 else "ies were"} answered by the automatic retry and are not counted.'
+    checks.append(_check('ai_errors', 'warning' if total >= 10 else 'ok', 'AI calls are failing', detail,
+                         {'by_category': by_category, 'by_stage': by_stage, 'cut_off_answered_by_retry': recovered, 'automatic_retry': True}))
     return checks
 
 
