@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# A worker that dies with a native crash (a segmentation fault in the interpreter) must say what Python was doing: with this on, the crash prints the
+# traceback of every thread to the container log before the process ends. Off by default in Python, no cost while nothing crashes. A value set by the
+# administrator wins.
+export PYTHONFAULTHANDLER="${PYTHONFAULTHANDLER:-1}"
+
 # web owns migrations; wait until they are applied (avoids concurrent-migrate race)
 until python3 manage.py migrate --check >/dev/null 2>&1; do
     echo "Waiting for web to apply migrations..."
