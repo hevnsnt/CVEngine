@@ -984,3 +984,12 @@ class DiscoveryWorkerNameTests(WatchdogCase):
                 def inspect(timeout=1.5):
                     return mock.Mock(stats=lambda: {'celery@discovery_worker': {'autoscaler': {'max': 1}}, 'celery@cve_feed_worker': {'autoscaler': {'max': 4}}})
         self.assertEqual(sc.discovery_workers(App), {'celery@discovery_worker': 1})
+
+
+class ReviewerSeesTheWatchdogTests(WatchdogCase):
+    def test_the_operations_snapshot_carries_what_the_watchdog_did_for_the_diagnosis(self):
+        from cveFeed import reviewer
+        wd.event('R1', 'action', observation='no answer', action='restart-celery', result='Asked the host.')
+        wd.event('R1', 'info', observation='noise')
+        snap = reviewer.snapshot()
+        self.assertEqual([(e['rule'], e['action']) for e in snap['watchdog']], [('R1', 'restart-celery')])
