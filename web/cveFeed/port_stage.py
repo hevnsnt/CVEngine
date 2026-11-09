@@ -88,7 +88,11 @@ def discover(ips, scan, runner):
                         logger.warning('port discovery failed', exc_info=True)
                         ledger.record(SERVICE, won, project, scan, 'failed')
                         return None
-                    ledger.record(SERVICE, [ip for ip in won if ip not in rejected], project, scan)
+                    unfinished = {ip for ip in getattr(runner, 'unfinished', ()) if ip in won}  # a scan that ran out of time did not look: not "nothing open"
+                    ledger.record(SERVICE, [ip for ip in won if ip not in rejected and ip not in unfinished], project, scan)
+                    if unfinished:
+                        logger.warning('port discovery did not finish %s address(es): they stay due', len(unfinished))
+                        ledger.record(SERVICE, sorted(unfinished), project, scan, 'failed')
                     if rejected:
                         logger.warning('port discovery discarded tarpit results for %s address(es)', len(rejected))
                         ledger.record(SERVICE, rejected, project, scan, 'failed')

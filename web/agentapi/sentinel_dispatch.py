@@ -1022,13 +1022,17 @@ def wrap_naabu_runner(project, scan, timeout=None):
 
     def runner(ips):
         found = {}
+        runner.unfinished = set()  # the addresses a Sentinel ran out of time on (``port_stage.discover`` leaves them due instead of recording "nothing open")
         chunks = _chunks(list(ips))  # a batch of hosts has more addresses than one task takes: every chunk is dispatched, several at once when slots are free
         with contextlib.closing(dispatch_many(project, 'naabu', chunks, scan=scan, timeout=timeout, stop_on_none=True)) as results:
             for index, result in results:
                 if result is None:
                     raise ScannerUnavailable('naabu', 'no scanner finished the work')
                 found.update(dict(result.get('ports') or {}))
+                if result.get('incomplete'):
+                    runner.unfinished.update(result.get('unfinished') or [])
         return found
+    runner.unfinished = set()
     return runner
 
 

@@ -2296,7 +2296,10 @@ def _clean_nmap_result(body):
         ip = _address(item.get('ip')) if isinstance(item, dict) and isinstance(item.get('ip'), str) else None
         if ip is None:  # an address row is only ever made from an IP literal, never from free text
             continue
-        out.append({'ip': ip, 'os_guess': _clip(item.get('os_guess'), 'os_guess'), 'ports': _clean_ports(item.get('ports') or [])})
+        row = {'ip': ip, 'os_guess': _clip(item.get('os_guess'), 'os_guess'), 'ports': _clean_ports(item.get('ports') or [])}
+        if item.get('timed_out') is True:  # nmap gave up on this host: only the explicit True is kept, so a result without the field reads as before
+            row['timed_out'] = True
+        out.append(row)
     # Docker Desktop can make an OS guess describe its gateway instead of the target.
     # Preserve only the explicit boolean opt-out through result sanitization.
     return {'hosts': out, 'os_reliable': body.get('os_reliable') is not False}
@@ -2321,7 +2324,11 @@ def _clean_naabu_result(body):
         clean = sorted({v for v in values[:MAX_PORTS_PER_HOST] if isinstance(v, int) and not isinstance(v, bool) and 0 < v < 65536})
         if clean:
             out[ip] = clean
-    return {'ports': out}
+    cleaned = {'ports': out}
+    if body.get('incomplete') is True:  # the scan ran out of time: ``unfinished`` are the addresses it did not get through, which stay due
+        cleaned['incomplete'] = True
+        cleaned['unfinished'] = sorted({a for a in (_address(v) if isinstance(v, str) else None for v in (body.get('unfinished') or [])[:MAX_ADDRESSES]) if a})
+    return cleaned
 
 
 _SEVERITY_ORDER = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1, 'info': 0, 'unknown': 0}
@@ -2387,7 +2394,13 @@ def _clean_findings(findings):
 
 def _clean_nuclei_result(body):
     findings, dropped = _clean_findings(body.get('findings') or [])
-    return {'findings': findings, **({'dropped_findings': dropped} if dropped else {})}
+    out = {'findings': findings, **({'dropped_findings': dropped} if dropped else {})}
+    unreachable = body.get('unreachable')
+    if isinstance(unreachable, list):  # the hosts the Sentinel could not resolve or connect to: not scanned, whatever the findings say
+        out['unreachable'] = sorted({_text(h, 260).strip().lower() for h in unreachable[:MAX_ADDRESSES * 4] if isinstance(h, str) and h.strip()})
+    if isinstance(body.get('templates_release'), str) and body['templates_release'].strip():
+        out['templates_release'] = _text(body['templates_release'], 40)  # the nuclei template release the run used: a stale run is visible
+    return out
 
 
 MAX_TESTSSL_ITEMS = 300  # a testssl.sh run of one host:port is a few dozen tests; well above any real report
@@ -2408,7 +2421,12 @@ def _clean_testssl_result(body):
         severity = severity.upper() if isinstance(severity, str) and severity.upper() in _TESTSSL_SEVERITIES else ''
         out.append({'id': _text(item['id'], 60), 'severity': severity, 'finding': _text(item.get('finding'), 600),
                     'cve': _text(item.get('cve'), 300)})
-    return {'items': out}
+    cleaned = {'items': out}
+    if isinstance(body.get('returncode'), int) and not isinstance(body.get('returncode'), bool):
+        cleaned['returncode'] = body['returncode']
+    if isinstance(body.get('handshake'), bool):
+        cleaned['handshake'] = body['handshake']
+    return cleaned
 
 
 MAX_NMAP_UDP_XML = 4 * 1024 * 1024  # a one-address, curated-port-list -sU report; generous, still far below a DoS-sized payload

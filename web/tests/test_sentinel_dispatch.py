@@ -240,6 +240,22 @@ class NaabuDispatchTests(DispatchBase):
             found = runner(['192.0.2.10'])
         self.assertEqual(found, {'192.0.2.10': [22, 80]})
 
+    def test_a_scan_that_ran_out_of_time_leaves_its_unfinished_addresses_due(self):
+        """A full-port scan that hit its limit did not look at the addresses it did not reach. They are not recorded as scanned with nothing open: the runner
+        reports them and ``port_stage.discover`` records them failed, so the next pass asks again, while the addresses it did finish are done."""
+        from cveFeed import ledger
+        from cveFeed.models import ServiceRun
+        self.make_sentinel(['naabu'])
+        result = {'outcome': 'done', 'ports': {'192.0.2.10': [22]}, 'incomplete': True, 'unfinished': ['192.0.2.11']}
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)), \
+                mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda ips: list(ips)):
+            runner = dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)
+            found = port_stage.discover(['192.0.2.10', '192.0.2.11'], self.scan, runner)
+        self.assertEqual(runner.unfinished, {'192.0.2.11'})
+        status = dict(ServiceRun.objects.filter(service=port_stage.SERVICE).values_list('asset', 'status'))
+        self.assertEqual(status, {'192.0.2.10': 'done', '192.0.2.11': 'failed'})
+        self.assertEqual(found['192.0.2.10'], [22])
+
     def test_timeout_waits_for_a_scanner_and_never_runs_here(self):
         from reNgine.resources import ScannerUnavailable
         self.make_sentinel(['naabu'])
