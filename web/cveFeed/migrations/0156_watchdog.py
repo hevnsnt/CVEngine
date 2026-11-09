@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('cveFeed', '0153_excluded_address'),
+        ('cveFeed', '0155_detection_ai_backoff'),
     ]
 
     operations = [
