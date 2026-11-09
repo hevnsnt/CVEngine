@@ -217,7 +217,8 @@ function paintInternal(x) {
 // What the tiles say about where their numbers came from: "pending" (a skeleton: nothing stored yet), "updating" (a number is shown and a newer one is
 // on its way) or "fresh", and "as of N minutes ago" when the stored snapshot is older than two minutes. The numbers themselves come from the
 // server's per-project snapshots at once; the last answer is also kept in this browser so a repeat visit paints before the first request returns.
-const MEMORY_KEY = `cve.dashboard.last.${slug || "_all"}`;
+// the last numbers are kept per viewer as well as per project: a shared browser must not paint one person's numbers for the next
+const MEMORY_KEY = `cve.dashboard.last.${dash.dataset.viewer || "anon"}.${slug || "_all"}`;
 let snapTimer = 0;
 let lastSnapshot = null;
 function showSnapshot(snapshot, remembered = false) {

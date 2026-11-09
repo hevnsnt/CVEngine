@@ -61,7 +61,7 @@
 
 
 
-<section class="grid hero" id="dash" data-slug="{{ slug|default:'' }}" data-follow="{{ request.GET.follow }}">
+<section class="grid hero" id="dash" data-slug="{{ slug|default:'' }}" data-viewer="{{ request.user.pk|default:'' }}" data-follow="{{ request.GET.follow }}">
   {% csrf_token %}
   <div class="card discovery">
     <div class="card-head">

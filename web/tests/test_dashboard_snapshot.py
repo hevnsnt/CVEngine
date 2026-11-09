@@ -318,5 +318,5 @@ class MergeTests(TestCase):
         kept = [n['score'] for n in merged['nodes'] if n['kind'] == 'subdomain']
         self.assertEqual(sorted(kept, reverse=True), [95, 90, 50])  # 5 nodes: two domains and the three riskiest hosts; the next one would be the sixth
         self.assertTrue(all(e['from'] in {n['id'] for n in merged['nodes']} and e['to'] in {n['id'] for n in merged['nodes']} for e in merged['edges']))
-        self.assertEqual(merged['hosts']['drawn'], 2)
+        self.assertEqual(merged['hosts']['drawn'], 3)
         self.assertGreater(merged['hosts']['total'], merged['hosts']['drawn'])  # the cap cut something, and the page says so
