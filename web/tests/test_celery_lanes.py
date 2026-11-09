@@ -15,7 +15,9 @@ import tempfile
 import time
 from pathlib import Path
 
-from django.test import SimpleTestCase
+from unittest import mock
+
+from django.test import SimpleTestCase, TestCase
 
 WEB = Path(__file__).resolve().parent.parent
 SCRIPT = WEB / 'celery-entrypoint.sh'
@@ -284,3 +286,90 @@ class UpdateWarningTests(SimpleTestCase):
     def test_the_warning_is_part_of_the_deploy_steps(self):
         text = (SCRIPTS / 'update-deploy.sh').read_text()
         self.assertIn('warn_discovery_pin "${compose[@]}"', text)
+
+
+class DiscoveryPinTests(TestCase):
+    """A DISCOVERY_CONCURRENCY below 4 in the environment (a 1.3 leftover) is said out loud: status, the Scanners page, Settings and the capacity error."""
+
+    def pin(self, value):
+        from cveFeed import autotune
+        env = {k: v for k, v in os.environ.items() if k != 'DISCOVERY_CONCURRENCY'}
+        if value is not None:
+            env['DISCOVERY_CONCURRENCY'] = value
+        with mock.patch.dict(os.environ, env, clear=True):
+            return autotune.discovery_pin()
+
+    def test_one_is_a_pin_and_names_the_variable_and_the_way_out(self):
+        pin = self.pin('1')
+        self.assertEqual(pin['value'], 1)
+        self.assertEqual(pin['env'], 'DISCOVERY_CONCURRENCY=1')
+        self.assertIn('Remove the line', pin['text'])
+
+    def test_four_or_more_unset_and_the_default_are_not_a_pin(self):
+        for value in (None, '8', '4', '16'):
+            self.assertIsNone(self.pin(value), value)
+
+    def test_the_status_the_scanners_page_and_settings_carry_it(self):
+        from agentapi.system_status import _autotune
+        from cveFeed import scanner_plan, settings_api
+        with mock.patch.dict(os.environ, {'DISCOVERY_CONCURRENCY': '2'}):
+            self.assertEqual(_autotune()['discovery_pin']['value'], 2)
+            self.assertIn('held at 2', scanner_plan.state()['discovery_pin_notice'])
+            self.assertIn('held at 2', settings_api._updates_state(settings_api._update_row())['discovery_pin_notice'])
+        with mock.patch.dict(os.environ, {'DISCOVERY_CONCURRENCY': '8'}):
+            self.assertIsNone(scanner_plan.state()['discovery_pin_notice'])
+
+    def test_the_capacity_error_says_which_limit_and_what_pins_it(self):
+        from cveFeed import host_assessment
+        plain = host_assessment.capacity_message(20, 20, 1, 5, 3)
+        self.assertTrue(plain.startswith('host assessment queue is at capacity'))
+        self.assertIn('20 host assessments are queued or running across the installation (limit 20)', plain)
+        self.assertNotIn('DISCOVERY_CONCURRENCY', plain)
+        self.assertIn('of this project', host_assessment.capacity_message(1, 20, 5, 5, 3))
+        self.assertIn('scans are running', host_assessment.capacity_message(1, 20, 1, 5, 25))
+        with mock.patch.dict(os.environ, {'DISCOVERY_CONCURRENCY': '1'}):
+            pinned = host_assessment.capacity_message(20, 20, 1, 5, 3)
+        self.assertIn('DISCOVERY_CONCURRENCY=1 is set in the environment', pinned)
+        self.assertIn('even when the Sentinels are idle', pinned)
+
+
+class WorkersDownNoticeTests(TestCase):
+    """The admin notices strip (alerts) carries a workers-down alert, named by lane, and clears it when they answer."""
+
+    def checks(self, workers):
+        from django.contrib.auth.models import User
+        from cveFeed import reviewer
+        User.objects.create_superuser('opsadmin', 'a@example.com', 'x')
+        with mock.patch('agentapi.system_status.system_status', return_value={'problems': [], 'system': {'workers': workers, 'sentinels': {}}}):
+            return {c['code']: c for c in reviewer.ops_checks()}
+
+    LANES = ['discovery_worker', 'cve_feed_worker', 'validation_priority_worker', 'classic_worker']
+
+    def consumers(self, up):
+        return [{'worker': w, 'consuming': w in up} for w in self.LANES]
+
+    def test_three_of_four_lanes_gone_is_a_problem_naming_them(self):
+        got = self.checks({'state': 'degraded', 'consumers': self.consumers({'discovery_worker'})})['workers_down']
+        self.assertEqual(got['state'], 'problem')
+        self.assertIn('cve_feed_worker, validation_priority_worker, classic_worker', got['detail'])
+        self.assertIn('docker compose restart celery', got['detail'])
+        self.assertEqual(got['facts']['lanes_down'], ['cve_feed_worker', 'validation_priority_worker', 'classic_worker'])
+
+    def test_no_worker_answering_at_all_is_a_problem(self):
+        got = self.checks({'state': 'unknown', 'consumers': self.consumers(set())})['workers_down']
+        self.assertEqual(got['state'], 'problem')
+        self.assertIn('every worker lane', got['detail'])
+
+    def test_all_four_answering_is_ok(self):
+        self.assertEqual(self.checks({'state': 'responding', 'consumers': self.consumers(set(self.LANES))})['workers_down']['state'], 'ok')
+
+    def test_the_alert_reaches_the_strip_and_resolves(self):
+        from cveFeed import reviewer
+        from cveFeed.models import AdminAlert
+        self.checks({'state': 'degraded', 'consumers': self.consumers({'discovery_worker'})})
+        with mock.patch('agentapi.system_status.system_status', return_value={'problems': [], 'system': {'workers': {'state': 'degraded', 'consumers': self.consumers({'discovery_worker'})}, 'sentinels': {}}}):
+            reviewer.run_ops_checks()
+        self.assertTrue(AdminAlert.objects.filter(code='workers_down', resolved_at__isnull=True).exists())
+        with mock.patch('agentapi.system_status.system_status', return_value={'problems': [], 'system': {'workers': {'state': 'responding', 'consumers': self.consumers(set(self.LANES))}, 'sentinels': {}}}):
+            reviewer.run_ops_checks()
+        self.assertFalse(AdminAlert.objects.filter(code='workers_down', resolved_at__isnull=True).exists())

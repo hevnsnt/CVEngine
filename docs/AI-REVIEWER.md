@@ -223,6 +223,7 @@ the numbers behind that state, and the actions it allows:
 | Check | Problem when | Action it can offer |
 | --- | --- | --- |
 | `sentinels_idle` | Live Sentinels finished no task in the last two hours while hosts are due | `feed_sentinels`: queue due hosts for the Sentinels now |
+| `workers_down` | One or more of the four Celery lanes (discovery, CVE feed, validation, classic) did not answer probe after probe, or none did | none (the text says `docker compose restart celery`) |
 | `nuclei_templates` | The last template refresh failed or is older than a day, or a newer nuclei-templates release exists | `refresh_nuclei_templates` |
 | `sentinel_errors` | Sentinel tasks that failed or that a Sentinel stopped reporting in the last six hours, grouped by Sentinel and kind. A task that expired only because no Sentinel slot was free is not counted here | none |
 | `sentinel_waiting` | Tasks that expired waiting for a free Sentinel slot in the last six hours (an informational note: their targets stay due and are asked again) | none |

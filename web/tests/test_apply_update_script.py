@@ -693,6 +693,26 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertNotIn('docker image prune -f', self.calls())
         self.assertIn('exec -T celery python3 celery_healthcheck.py', ' '.join(self.calls()))
 
+    def test_a_discovery_concurrency_left_in_env_from_1_3_is_said_in_the_update_log(self):
+        # DISCOVERY_CONCURRENCY=1 pins "hosts assessed at once" to one for the whole instance on 1.4 (an assessment holds a slot while it waits for a
+        # Sentinel). The update says so in its log and never edits the owner's file.
+        (self.work / '.env').write_text('DISCOVERY_CONCURRENCY=1\n')
+        self.new = self.publish_deploy_file()
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('Hosts assessed at once is held at 1 by DISCOVERY_CONCURRENCY', log)
+        self.assertEqual((self.work / '.env').read_text(), 'DISCOVERY_CONCURRENCY=1\n')
+
+    def test_a_default_or_high_discovery_concurrency_says_nothing(self):
+        for value in ('8', '4'):
+            with self.subTest(value=value):
+                (self.work / '.env').write_text(f'DISCOVERY_CONCURRENCY={value}\n')
+                self.new = self.publish_deploy_file()
+                self.approve()
+                self.assertEqual(self.run_script().returncode, 0)
+                self.assertNotIn('Hosts assessed at once is held', (self.work / 'web' / '.update-log').read_text())
+
     def test_every_worker_answering_is_checked_after_the_web_service_and_before_the_update_is_done(self):
         self.new = self.publish_deploy_file()
         self.approve()

@@ -538,6 +538,21 @@ def ops_checks(now=None, templates_release=None):
     else:
         checks.append(_check('sentinels_idle', 'ok', 'Sentinels are busy', '', {'live': live, 'done_2h': done_2h, 'queued': queued}))
 
+    # the Celery lanes: all four must answer. A container can look up while lanes are gone (the 1.4.0 update incident: three of four stopped, nothing
+    # consumed the CVE feed, validation or classic queues, and no notice said so), and the Sentinels page alone says nothing about them.
+    workers = system.get('workers') or {}
+    lanes = [row for row in (workers.get('consumers') or []) if isinstance(row, dict)]
+    gone = [row['worker'] for row in lanes if row.get('consuming') is not True]
+    if workers.get('state') in ('degraded', 'unknown') or (lanes and gone and workers.get('state') != 'responding'):
+        names = ', '.join(gone) if gone and len(gone) < len(lanes) else 'every worker lane' if lanes else 'the workers'
+        checks.append(_check('workers_down', 'problem', 'Background workers are down',
+                             f'{names} did not answer, probe after probe, so the queues they consume are not being worked: '
+                             'scans, the CVE feed and validation are stalled. Run `docker compose restart celery` on the server; '
+                             'the Update screen and the container health say the same.',
+                             {'state': workers.get('state'), 'lanes_down': gone, 'note': str(workers.get('note') or '')[:300]}))
+    else:
+        checks.append(_check('workers_down', 'ok', 'Background workers answer', '', {'state': workers.get('state')}))
+
     # nuclei templates
     templates = ((system.get('tools') or {}).get('nuclei_templates')) or {}
     refresh = templates.get('last_refresh') or {}

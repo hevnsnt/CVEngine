@@ -55,6 +55,7 @@ export async function mountScannerPlan(host) {
     host.hidden = false;
     host.append(el('h2', '', 'Which scanners run'));
     if (s.notice) host.append(el('p', 'msg', s.notice.text, { role: 'status' }));
+    if (s.discovery_pin_notice) host.append(el('p', 'msg', s.discovery_pin_notice, { role: 'status' }));
     host.append(el('p', 'note', s.memory_line));
     const picked = planChoices(s.options, s.pending_plan || s.plan, 'plan-card');
     host.append(picked.group);
