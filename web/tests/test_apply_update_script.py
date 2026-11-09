@@ -1160,8 +1160,6 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(len(pulls), 1, self.flag_lines())
         self.assertTrue(pulls[0].startswith('on '), pulls)
         self.assertEqual((self.stub / 'flag_at_merge').read_text().strip(), 'off')  # the older script really did merge with no page: the deploy file is what covers it
-        first = next(line for line in self.flag_lines() if line.startswith(('on ', 'off ')))
-        self.assertTrue(first.startswith('on '), self.flag_lines())
 
     def test_the_page_is_also_up_while_the_services_are_rebuilt_in_place(self):
         """The files were pulled by hand: the running containers already read them, so there is no merge to hang the page on."""

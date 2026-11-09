@@ -490,7 +490,7 @@ class UpdatePathTests(unittest.TestCase):
         body = text[text.index('deploy_current() {'):text.index('deploy_steps() {')]
         before_the_page = body[:body.index('  maintenance_on\n')]
         self.assertNotIn('fetch', '\n'.join(l for l in before_the_page.splitlines() if not l.lstrip().startswith('#')))  # nothing slow comes before the page in the deploy of an older host
-        self.assertLess(text.index('  maintenance_on\n'), text.index('deploy_scanner_fetch once'))
+        self.assertLess(text.index('  maintenance_on\n'), text.index('  deploy_scanner_fetch once\n'))
         self.assertLess(text.index('cvengine_scanner_start'), text.index('  prune_old_images\n'))
 
     def test_make_up_waits_for_nothing_on_a_first_start(self):
