@@ -42,8 +42,18 @@ class Entrypoint:
         tail = text[text.index('# --- start_lanes'):]
         commands = ''.join(f'sh -c \'echo $$ > "{tmp}/{name}.pid"; {body}\' -n {name} &\n' for name, body in workers)
         script = f'commands={shlex.quote(commands)}\n' + tail
-        self.process = subprocess.Popen(['bash', '-c', script], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                        env={**os.environ, 'CELERY_SUPERVISE_INTERVAL': '0.2', **env})
+        # the log goes to a file, not a pipe: a stand-in that is killed leaves its `sleep` child behind holding a pipe open, and reading would never end
+        self.log = self.tmp / 'entrypoint.log'
+        self.process = subprocess.Popen(['bash', '-c', script], stdout=(logfile := open(self.log, 'w')), stderr=subprocess.STDOUT, text=True,
+                                        env={**os.environ, 'CELERY_SUPERVISE_INTERVAL': '0.2', **env}, start_new_session=True)
+        logfile.close()  # the child has its own copy
+
+    def cleanup(self):
+        # whatever a test left behind (stand-ins that forked away) dies with the process group, by group id, never by a name pattern
+        try:
+            os.killpg(self.process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
     def pid(self, name):
         path = self.tmp / f'{name}.pid'
@@ -54,8 +64,11 @@ class Entrypoint:
         raise AssertionError(f'worker {name} did not start')
 
     def finish(self, timeout):
-        out, _ = self.process.communicate(timeout=timeout)
-        return self.process.returncode, out
+        try:
+            self.process.wait(timeout=timeout)
+        finally:
+            self.cleanup()
+        return self.process.returncode, self.log.read_text()
 
 
 # a stand-in for a discovery worker that is busy: SIGTERM starts a "warm shutdown" that waits for the task it holds (here, a long sleep)
@@ -76,6 +89,7 @@ class LaneSupervisionTests(SimpleTestCase):
             self.assertIn("'cve_feed_worker'", out)  # the log says which lane
             self.assertIn('did not stop within 2s; killing it', out)
             time.sleep(0.3)
+            ep.cleanup()
             self.assertFalse([n for n, pid in pids.items() if alive(pid)], 'no worker may outlive the container')
 
     def test_three_lanes_killed_at_once_leave_no_container_with_one_lane(self):
@@ -105,7 +119,7 @@ class LaneSupervisionTests(SimpleTestCase):
             code, out = ep.finish(timeout=30)
             self.assertEqual(code, 1, out)
             self.assertIn("'classic_worker'", out)
-            subprocess.run(['pkill', '-f', 'sleep 300$'], check=False)
+            ep.cleanup()
 
     def test_the_supervisor_checks_each_lane_not_a_wait_n(self):
         text = SCRIPT.read_text()
