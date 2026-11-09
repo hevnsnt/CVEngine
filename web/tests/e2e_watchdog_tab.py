@@ -14,7 +14,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 WEB = Path(__file__).resolve().parent.parent
-STATIC_ROOT = (WEB / 'static').resolve()
+ASSETS = {f'cve/{f.name}': f.read_bytes() for f in (WEB / 'static' / 'cve').iterdir() if f.is_file() and f.suffix in ('.js', '.css')}
 HITS = {'watchdog': 0}
 RULES = [{'code': f'R{i}', 'title': t, 'status': st, 'color': 'green', 'enabled': True, 'does': 'x', 'text': 'Fine at 14:10Z.'} for i, (t, st) in enumerate(
     [('Workers answer', 'ok'), ('Workers take their work', 'ok'), ('Hosts assessed at once is not starved', 'ok'), ('Idle Sentinels are fed', 'watching'),
@@ -40,11 +40,10 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == '/cve/admin/':
             return self.send(PAGE, 'text/html')
         if p.startswith('/staticfiles/'):
-            name = p[len('/staticfiles/'):]
-            # only files that sit directly under the static tree: no '..', no absolute path, nothing outside it
-            f = (STATIC_ROOT / name).resolve()
-            if '..' not in name and f.is_file() and STATIC_ROOT in f.parents:
-                return self.send(f.read_bytes(), 'text/javascript' if f.suffix == '.js' else 'text/css')
+            # a fixed table built at start-up from the files on disk: the request path only picks a key, it never reaches the file system
+            body = ASSETS.get(p[len('/staticfiles/'):])
+            if body is not None:
+                return self.send(body, 'text/javascript' if p.endswith('.js') else 'text/css')
         if p == '/cve/api/admin/watchdog':
             HITS['watchdog'] += 1
             return self.send(json.dumps(WD).encode(), 'application/json')
