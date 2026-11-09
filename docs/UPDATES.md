@@ -268,6 +268,10 @@ Why not `@main` in `web/requirements.txt`: three CI places read a 40 character c
 
 See also: [DEPLOYMENT.md](DEPLOYMENT.md), [CONFIGURATION.md](CONFIGURATION.md), [documentation index](README.md).
 
+## The watchdog and updates
+
+The watchdog ([WATCHDOG.md](WATCHDOG.md)) is driven by the same host process as the update (`scripts/update-watch.sh` calls `scripts/watchdog.sh tick` every 30 seconds and `scripts/watchdog.sh act` for the one request it may leave in `web/.watchdog-action`). It **stands down** while an update owns the stack: an approval waiting, the phase `draining` or `applying`, `$STATE/update.lock` or `web/.update-lock` held (both tested without waiting), or the maintenance page on. While it acts it holds `$STATE/update.lock`, so an approval that arrives meanwhile waits a few seconds and the two never recreate containers together. After the update it checks nothing was left half done: a lane that does not come back is the symptom R1 acts on (3 minutes later), though the update itself already waits for all four workers (`verify_workers`).
+
 ## Workers that are missing after an update
 
 The celery container runs four workers (`discovery_worker`, `cve_feed_worker`, `validation_priority_worker`, `classic_worker`), one per group of queues, under `celery-entrypoint.sh`. All four must be there: a container that is up with a lane gone leaves its queues unconsumed and nothing scans.
