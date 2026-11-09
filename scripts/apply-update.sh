@@ -25,10 +25,13 @@
 #
 # The Compose layout is the one the running stack was started with, or CVENGINE_COMPOSE_FILES / CVENGINE_COMPOSE_ENV_FILE /
 # CVENGINE_COMPOSE_PROJECT (environment or .env, the settings scripts/update.sh reads); see resolve_layout below. Ordinary updates
-# deliberately keep db/Redis containers running (db is recreated only when its compose definition changed). A PostgreSQL major-version migration requires a separate maintenance operation. An update
-# waits while recorded scans or targeted jobs are running, up to CVENGINE_UPDATE_DRAIN_SECONDS (environment or .env, default 300); past that it
-#    proceeds and interrupts them (cveFeed.reaper.expire_orphaned_running closes out what the restart leaves behind within one reaper tick).
-#    Operators should drain other worker work as well.
+# deliberately keep db/Redis containers running (db is recreated only when its compose definition changed). A PostgreSQL major-version migration requires a separate maintenance operation.
+# An update does not wait for scans that run on Sentinels: it pauses the queues, waits for work that runs on THIS server (an ingest, an on-demand validation,
+#    a triage call) at most CVENGINE_UPDATE_DRAIN_SECONDS (default 60, never more than 60 unless the administrator turned on "Wait for scans to finish
+#    before updating" in Settings > Updates, web/.update-wait-scans), then rebuilds. A Sentinel that finishes a task meanwhile keeps the result and hands it over
+#    when the server is back (agentapi.sentinel_adopt). With the opt-in on, it waits for every recorded scan or targeted job as before, up to
+#    CVENGINE_UPDATE_DRAIN_SECONDS (default 300); past that it proceeds and interrupts them (cveFeed.reaper.expire_orphaned_running closes out what the
+#    restart leaves behind within one reaper tick). Operators should drain other worker work as well.
 # A dump of the database is taken just before the migrations (scripts/update-deploy.sh, CVENGINE_UPDATE_BACKUPS, default 3 kept). Which branches an
 # approval may name (CVENGINE_UPDATE_BRANCHES, default: any) and whether the commit must be signed (CVENGINE_UPDATE_REQUIRE_SIGNED=1) are set in
 # .env on the host: the web container, which writes the approval, cannot change them. See docs/UPDATES.md, "What the host trusts".
@@ -368,7 +371,22 @@ deploy() {
   fi
 }
 
-RUNNING_QUERY="from django.apps import apps; from startScan.models import ScanHistory; n=ScanHistory.objects.filter(scan_status=1).count(); n+=sum(m.objects.filter(status='running').count() for m in apps.get_models() if m.__name__ in ('OnDemandValidation','DeferredRetest','TriageCall')); print(n)"
+# Everything recorded as running (the opt-in "Wait for scans to finish before updating": the old behaviour).
+RUNNING_QUERY_ALL="from django.apps import apps; from startScan.models import ScanHistory; n=ScanHistory.objects.filter(scan_status=1).count(); n+=sum(m.objects.filter(status='running').count() for m in apps.get_models() if m.__name__ in ('OnDemandValidation','DeferredRetest','TriageCall')); print(n)"
+# Only work that runs on this server: a scan that is waiting on Sentinels (it has an open Sentinel task or an open stage run, which a restart resumes) is not counted. A
+# build that cannot answer for Sentinels (an older one) counts every scan as before.
+RUNNING_QUERY_SERVER="from django.apps import apps; from startScan.models import ScanHistory; q=ScanHistory.objects.filter(scan_status=1)
+try:
+    from agentapi.models import SentinelTask, StageRun
+    held=set(SentinelTask._base_manager.filter(status__in=('queued','claimed','running'),scan__isnull=False).values_list('scan_id',flat=True))|set(StageRun.objects.filter(state__in=('running','waiting','ready'),scan__isnull=False).values_list('scan_id',flat=True))
+    q=q.exclude(pk__in=held)
+except Exception:
+    pass
+n=q.count()+sum(m.objects.filter(status='running').count() for m in apps.get_models() if m.__name__ in ('OnDemandValidation','DeferredRetest','TriageCall')); print(n)"
+RUNNING_QUERY=$RUNNING_QUERY_SERVER
+# "Wait for scans to finish before updating" (Settings > Updates, web/.update-wait-scans): off unless an administrator turned it on. Read once per run.
+WAIT_SCANS=$(python3 "$STATE_HELPER" wait-scans 2>/dev/null || true)
+if [ "$WAIT_SCANS" = 1 ]; then RUNNING_QUERY=$RUNNING_QUERY_ALL; else WAIT_SCANS=0; fi
 
 # A scan stuck "running" whose worker is gone never finishes, and used to cost the whole drain wait (five minutes). Close those first (cveFeed.ghost_scans:
 # no Celery task anywhere, no activity for CVENGINE_UPDATE_GHOST_MINUTES, default 5); a scan that shows progress, or that a worker holds, is not touched and
@@ -560,21 +578,37 @@ DRAIN_SINCE_FILE="$STATE/draining-since"
 # without end (a scan that outlives this, or was never going to finish because the worker holding it is already gone, used to
 # block every later update): default 5 minutes, an administrator may raise or lower it.
 DRAIN_MAX=$(setting CVENGINE_UPDATE_DRAIN_SECONDS)  # the environment or .env; cron's own environment is bare, so .env is where it is set
-[[ $DRAIN_MAX =~ ^[0-9]{1,6}$ ]] && DRAIN_MAX=$((10#$DRAIN_MAX)) || DRAIN_MAX=300  # whole seconds; anything else is the default
+if [ "$WAIT_SCANS" = 1 ]; then
+  [[ $DRAIN_MAX =~ ^[0-9]{1,6}$ ]] && DRAIN_MAX=$((10#$DRAIN_MAX)) || DRAIN_MAX=300  # whole seconds; anything else is the default
+else
+  # Not waiting for scans: only work that runs on this server is given time to settle, 30 seconds in the normal case and 60 at most (a lower
+  # CVENGINE_UPDATE_DRAIN_SECONDS shortens it; a higher one only applies with the opt-in above).
+  [[ $DRAIN_MAX =~ ^[0-9]{1,6}$ ]] && DRAIN_MAX=$((10#$DRAIN_MAX)) || DRAIN_MAX=60
+  (( DRAIN_MAX <= 60 )) || DRAIN_MAX=60
+fi
 if [[ $RUNNING =~ ^[1-9][0-9]*$ ]]; then
   NOW=$(date +%s)
   SINCE=$(cat "$DRAIN_SINCE_FILE" 2>/dev/null || true)
   [[ $SINCE =~ ^[0-9]+$ ]] || { SINCE=$NOW; printf '%s' "$NOW" > "$DRAIN_SINCE_FILE"; }
   ELAPSED=$((NOW - SINCE))
   if (( ELAPSED >= DRAIN_MAX )); then
-    log "forcing ahead: $RUNNING scan(s)/job(s) still running after ${ELAPSED}s (over the ${DRAIN_MAX}s drain limit); the update proceeds and interrupts them now (cveFeed.reaper closes out what the restart leaves behind)"
+    if [ "$WAIT_SCANS" = 1 ]; then
+      log "forcing ahead: $RUNNING scan(s)/job(s) still running after ${ELAPSED}s (over the ${DRAIN_MAX}s drain limit); the update proceeds and interrupts them now (cveFeed.reaper closes out what the restart leaves behind)"
+    else
+      log "forcing ahead: $RUNNING job(s) on this server were still running after ${ELAPSED}s (over the ${DRAIN_MAX}s limit); the update proceeds. Scans on Sentinels are not waited for: the Sentinels keep their results and hand them over when this server is back"
+    fi
     phase draining "forcing the update after ${DRAIN_MAX}s: $RUNNING scan(s)/job(s) interrupted" "$RUNNING"
     rm -f "$DRAIN_SINCE_FILE" "$STATE/last-wait" "$STATE/last-refusal"
     # falls through to the deploy below: not a refusal, and not another wait
   else
     if [ "$(cat "$STATE/last-wait" 2>/dev/null)" != "$RUNNING" ]; then
-      phase draining "waiting for $RUNNING scan(s) to finish (forcing ahead in $((DRAIN_MAX - ELAPSED))s if still running)" "$RUNNING"
-      log "waiting: $RUNNING scan(s) running; forcing ahead in $((DRAIN_MAX - ELAPSED))s if still running (approval kept, will retry)"
+      if [ "$WAIT_SCANS" = 1 ]; then
+        phase draining "waiting for $RUNNING scan(s) to finish (forcing ahead in $((DRAIN_MAX - ELAPSED))s if still running)" "$RUNNING"
+        log "waiting: $RUNNING scan(s) running; forcing ahead in $((DRAIN_MAX - ELAPSED))s if still running (approval kept, will retry)"
+      else
+        phase draining "new work is paused; letting $RUNNING job(s) on this server settle (the rebuild starts in at most $((DRAIN_MAX - ELAPSED))s). Scans on Sentinels are not waited for" "$RUNNING"
+        log "settling: $RUNNING job(s) running on this server; the update proceeds in at most $((DRAIN_MAX - ELAPSED))s (scans on Sentinels are not waited for; approval kept, will retry)"
+      fi
       printf '%s' "$RUNNING" > "$STATE/last-wait"
     fi
     # This is a normal, expected wait, not a failure the ERR trap should narrate ("stopped at line N") on every poll: the two log

@@ -1355,6 +1355,12 @@ class ScanControl(models.Model):
     actor = models.CharField(max_length=150, blank=True, default='')
     last_error = models.CharField(max_length=160, blank=True, default='')
     changed_at = models.DateTimeField(default=timezone.now)
+    # An update does not wait for scans that run on Sentinels (cveFeed.scan_control, docs/UPDATES.md). The window of the last update, written by
+    # request_drain_pause (``update_started_at``) and release_update_pause (``update_ended_at``, and ``update_grace_until``: how long after it
+    # the broker still keeps what the outage left open, so Sentinels that come back with finished work are heard before any lease is judged).
+    update_started_at = models.DateTimeField(null=True, blank=True)
+    update_ended_at = models.DateTimeField(null=True, blank=True)
+    update_grace_until = models.DateTimeField(null=True, blank=True)
 
     @classmethod
     def current(cls):
@@ -2451,3 +2457,79 @@ class SecretScanRules(models.Model):
 
     def __str__(self):
         return "secrets scan rules"
+
+
+class PlannerBatch(models.Model):
+    """One batch of due checks the work planner (``cveFeed.work_planner``) handed to a Sentinel: up to one task's worth of units of one kind of one
+    project's target. The row is the planner's own bookkeeping: what is in flight (so a minute later it does not queue the same units again), what
+    failed (so it backs off), and the audit trail of what it did. ``units`` are the assets (``address:port`` for SSH, a host name for secrets); no
+    credential, secret or finding is ever stored here."""
+
+    STATUSES = ("queued", "running", "done", "failed", "skipped")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+    kind = models.CharField(max_length=32)  # the Sentinel task kind (ssh_probe, secrets_scan)
+    units = models.JSONField(default=list)
+    status = models.CharField(max_length=10, default="queued")
+    detail = models.CharField(max_length=300, blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now, db_default=Now())
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["status", "kind"], name="plannerbatch_status_kind_idx"),
+                   models.Index(fields=["kind", "finished_at"], name="plannerbatch_kind_fin_idx")]
+
+    def __str__(self):
+        return f"planner batch {self.pk}: {self.kind} x{len(self.units or [])} ({self.status})"
+
+
+class WatchdogEvent(models.Model):
+    """One line of what the outer watchdog saw, decided or did (cveFeed.watchdog, docs/WATCHDOG.md): when, which rule, what it observed, what
+    it did and what came of it. Append only: a row is never changed once written (old rows are pruned by age, nothing else removes one).
+    Plain text, no secrets: it is shown on the Health tab of the Scanners page."""
+
+    LEVELS = ("info", "action", "fixed", "problem")
+    at = models.DateTimeField(default=timezone.now, db_index=True)
+    rule = models.CharField(max_length=24)
+    level = models.CharField(max_length=8, default="info")
+    observation = models.CharField(max_length=500, blank=True, default="")
+    action = models.CharField(max_length=80, blank=True, default="")
+    result = models.CharField(max_length=500, blank=True, default="")
+    detail = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-id"]
+        indexes = [models.Index(fields=["rule", "id"], name="wdevent_rule_id_idx")]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None and not self._state.adding:
+            raise RuntimeError("watchdog events are append only")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.at:%Y-%m-%d %H:%M:%S} {self.rule} {self.action or self.observation}"
+
+
+class WatchdogState(models.Model):
+    """The watchdog's memory, one row per rule (and one, rule ``_all``, for the watchdog itself: the global switch, the last tick and the last snapshot),
+    in the database so a decision survives a restart of the web container: how long a symptom has been seen (hysteresis), when the rule last acted
+    (rate limits), the check that follows an action, and the hold that stops it acting again for an hour when it could not fix the problem."""
+
+    rule = models.CharField(max_length=24, unique=True)
+    enabled = models.BooleanField(default=True)
+    status = models.CharField(max_length=16, default="unknown")  # ok | watching | acting | held | problem | unknown | standing_down | off
+    status_text = models.CharField(max_length=400, blank=True, default="")
+    fire_since = models.DateTimeField(null=True, blank=True)  # the symptom has been seen continuously since this moment
+    last_action_at = models.DateTimeField(null=True, blank=True)
+    actions = models.JSONField(default=list, blank=True)  # epoch seconds of the actions of the last day, for the hourly and daily caps
+    verify_due = models.DateTimeField(null=True, blank=True)  # when to check that the last action worked
+    verify = models.JSONField(default=dict, blank=True)  # {action, symptom_at, acted_at}
+    hold_until = models.DateTimeField(null=True, blank=True)  # after an action that did not work: nothing more is done for this rule until then
+    escalated_at = models.DateTimeField(null=True, blank=True)
+    data = models.JSONField(default=dict, blank=True)  # per rule memory (windows, the discovery override); the last snapshot on ``_all``
+    last_tick_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"watchdog {self.rule}: {self.status}"

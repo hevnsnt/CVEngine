@@ -41,7 +41,7 @@ def _body(request):
 
 
 def audit(actor, action, target='', org=None, **detail):
-    AuditLog.objects.create(actor=actor, actor_name=actor.username, action=action, target=target[:300],
+    AuditLog.objects.create(actor=actor if getattr(actor, 'pk', None) else None, actor_name=actor.username, action=action, target=target[:300],
                             org_id=getattr(org, 'pk', org), detail=detail)
 
 
@@ -860,6 +860,29 @@ def scan_control_get(request, actor):
                     'Stopped scans remain stopped; queued jobs resume when scanning resumes.'}
 
 
+def watchdog_get(request, actor):
+    """The outer watchdog for the Health tab (App Admin only): each rule's state in words, the last 20 actions and what it changed (cveFeed.watchdog.view)."""
+    if not actor.is_superuser:
+        raise AdminError(403, 'App Admin only')
+    from cveFeed import watchdog
+    return watchdog.view()
+
+
+def watchdog_set(request, actor):
+    """Switch the watchdog (``{"enabled": bool}``, the Watchdog instance setting) or one rule (``{"rule": "R1", "enabled": bool}``) on or off."""
+    if not actor.is_superuser:
+        raise AdminError(403, 'App Admin only')
+    from cveFeed import watchdog
+    body = _body(request)
+    if not isinstance(body.get('enabled'), bool):
+        raise AdminError(400, 'enabled must be true or false')
+    rule = body.get('rule')
+    if rule is not None and (not isinstance(rule, str) or rule not in watchdog.BY_CODE):
+        raise AdminError(400, 'unknown rule')
+    watchdog.set_enabled(rule, body['enabled'], actor)
+    return watchdog.view()
+
+
 def scan_control_set(request, actor):
     if not actor.is_superuser:
         raise AdminError(403, 'App Admin only')
@@ -881,7 +904,9 @@ def scan_control_set(request, actor):
                 if row.paused:
                     row.paused, row.paused_by_update, row.reason, row.actor, row.changed_at, row.last_error = \
                         False, False, '', actor.username, timezone.now(), ''
-                    row.save(update_fields=['paused', 'paused_by_update', 'reason', 'actor', 'changed_at', 'last_error'])
+                    from cveFeed import scan_control
+                    row.save(update_fields=['paused', 'paused_by_update', 'reason', 'actor', 'changed_at', 'last_error',
+                                            *scan_control.close_update_window(row, row.changed_at)])  # a failed update's open window ends with the pause
                     audit(actor, 'scanning.resume', 'all projects')
         except (OSError, RuntimeError) as exc:
             raise AdminError(409, 'An update is running or its lock is unavailable; scanning cannot resume yet') from exc
@@ -930,6 +955,7 @@ ROUTES = [
     ('GET', r'activity', activity_list),
     ('GET', r'health', scheduler_health),
     ('GET', r'scan-control', scan_control_get), ('POST', r'scan-control', scan_control_set),
+    ('GET', r'watchdog', watchdog_get), ('POST', r'watchdog', watchdog_set),
     ('GET', r'openvas', lambda r, actor, **k: openvas_admin.admin_get(r, actor)), ('PUT', r'openvas', lambda r, actor, **k: openvas_admin.admin_put(r, actor)),
 ]
 COMPILED = [(m, re.compile(f'^{p}/?$'), fn) for m, p, fn in ROUTES]

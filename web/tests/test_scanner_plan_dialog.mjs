@@ -160,3 +160,85 @@ test('the host answer is shown in words', async () => {
   await mountScannerPlan(host);
   assert.match(host.textContent, /Done: Sentinels of your own only/);
 });
+
+// ---- the status line is truthful: what it waits on, "Done at", the reason when it failed, and no stale words ----
+const {planLine} = await import('../static/cve/scanner-plan.js');
+const {fmtTime} = await import('../static/cve/prefs.js');
+const hhmm = (epoch) => fmtTime(new Date(epoch * 1000).toISOString(), false);
+const T0 = 1_800_000_000;
+
+test('while it waits the line says what it waits on, in plain words, and when it was asked', () => {
+  const on = (code, text) => planLine(state({waiting: true, pending_plan: 'external', asked_at: T0, waiting_on: {code, text}}));
+  for (const [code, text] of [
+    ['pickup', 'The host updater has not picked it up yet. It looks every few seconds.'],
+    ['scans', '3 scans are running. The change is applied when they finish, because the server restarts to read it.'],
+    ['update', 'An update is building and restarting this server. The change is applied by the host once it has finished.'],
+    ['host_down', 'The host helper is not running, so nothing will apply this. It has never reported in on this server.'],
+  ]) {
+    const line = on(code, text);
+    assert.equal(line.kind, 'busy');
+    assert.ok(line.text.startsWith('Applying the change. ' + text), line.text);
+    assert.ok(line.text.endsWith(`Asked at ${hhmm(T0)}.`), line.text);
+  }
+});
+
+test('done: "Done at" the local time, what changed, and the host note', () => {
+  const s = state({plan: 'external', applied: {plan: 'external', ok: true, note: 'Sentinels of your own only (the built-in scanner is removed)', at: T0}});
+  const line = planLine(s, {now: (T0 + 3) * 1000, before: 'internal'});
+  assert.equal(line.kind, 'ok');
+  assert.equal(line.text, `Done at ${hhmm(T0)}: changed from the built-in scanner only to your own Sentinels only. The host says: Sentinels of your own only (the built-in scanner is removed).`);
+  assert.match(planLine(s, {now: (T0 + 3) * 1000}).text, /^Done at \d\d:\d\d: now your own Sentinels only\./);
+});
+
+test('a finished answer is not shown again once cleared or after five minutes: the line says what runs now', () => {
+  const s = state({plan: 'external', applied: {plan: 'external', ok: true, note: 'n', at: T0}});
+  assert.equal(planLine(s, {now: (T0 + 20) * 1000, cleared: T0}).text, 'Now: your own Sentinels only.');
+  assert.equal(planLine(s, {now: (T0 + 301) * 1000}).text, 'Now: your own Sentinels only.');
+  assert.equal(planLine(s, {now: (T0 + 299) * 1000}).kind, 'ok');
+});
+
+test('a failure shows the reason and what to do, and stays until the next Apply', () => {
+  const s = state({applied: {plan: 'external', ok: false, note: 'the choice is saved but the services could not be restarted (see /x/scanner-plan.log)', at: T0}});
+  const line = planLine(s, {now: (T0 + 3600) * 1000});
+  assert.equal(line.kind, 'err');
+  assert.match(line.text, /^Not done \(\d\d:\d\d\): the choice is saved but the services could not be restarted/);
+  assert.match(line.text, /What to do: open scanner-plan\.log in the host's update state directory/);
+  assert.match(line.text, /press Apply again\.$/);
+});
+
+test('the page: waiting, then the host answers, shows Done at, and the answer clears itself', async () => {
+  const realNow = Date.now;
+  const at = Math.floor(realNow() / 1000);
+  settings = state({waiting: true, pending_plan: 'external', asked_at: at, waiting_on: {code: 'pickup', text: 'The host updater has not picked it up yet. It looks every few seconds.'}});
+  const host = new Node('div');
+  timers.length = 0;
+  await mountScannerPlan(host);
+  assert.match(host.textContent, /Applying the change\. The host updater has not picked it up yet\./);
+  settings = state({plan: 'external', applied: {plan: 'external', ok: true, note: 'done', at}});
+  timers.shift()();  // the poll
+  await new Promise((r) => setImmediate(r));
+  assert.match(host.textContent, new RegExp(`Done at ${hhmm(at)}: now your own Sentinels only`));
+  assert.doesNotMatch(host.textContent, /Applying the change/);
+  assert.equal(timers.length, 1);  // no more polling, only the clear timer
+  timers.shift()();
+  assert.match(host.textContent, /Now: your own Sentinels only\./);
+  assert.doesNotMatch(host.textContent, /Done at/);
+});
+
+test('the poll does not leave "Applying" up when the server cannot be reached or the person is signed out', async () => {
+  settings = state({waiting: true, pending_plan: 'external', waiting_on: {code: 'pickup', text: 'x'}});
+  const host = new Node('div');
+  timers.length = 0;
+  await mountScannerPlan(host);
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ok: false, status: 502, json: async () => { throw new Error('html'); }});
+  for (let i = 0; i < 2; i++) { timers.shift()(); await new Promise((r) => setImmediate(r)); }
+  assert.match(host.textContent, /Cannot reach the server to see how the change is going/);
+  assert.doesNotMatch(host.textContent, /Applying the change/);
+  assert.equal(timers.length, 1);  // still trying
+  globalThis.fetch = async () => ({ok: true, status: 200, json: async () => { throw new Error('login page'); }});  // a login page: 200 and no JSON
+  timers.shift()(); await new Promise((r) => setImmediate(r));
+  assert.match(host.textContent, /You are signed out/);
+  assert.equal(timers.length, 0);
+  globalThis.fetch = realFetch;
+});

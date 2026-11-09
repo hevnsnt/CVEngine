@@ -276,7 +276,7 @@ All routes are under `/api/v1/reviewer/` and need a `reviewer`-scope token. The 
 | `GET config` | Enabled flag, the provider, base URL, key and model per job, the limits, and whether the operations job is due; `jobs_enabled` and the job block (provider, address, key, model and request settings) for the pipeline's AI jobs |
 | `GET findings/next?limit=N` | Up to N review packets, each leased for 15 minutes |
 | `POST findings/<ref>/verdict` | One verdict. The answer says whether it was applied, recorded, held (and why) or stale |
-| `GET ops/snapshot` | The checks above |
+| `GET ops/snapshot` | The checks above, and (`watchdog`) the last ten things the outer watchdog did, so the diagnosis can explain them ([WATCHDOG.md](WATCHDOG.md)); no check or action depends on it |
 | `POST ops/report` | Diagnoses and requested actions. The answer says what was run |
 | `GET jobs/next?limit=N` | Up to N (at most 20) of the pipeline's queued AI jobs, each leased with a fresh lease token |
 | `POST jobs/<id>/result` | The answer to one job, or its failure category, with the lease token and the calls' token counts |

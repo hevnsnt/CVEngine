@@ -289,8 +289,9 @@ def _discover_on_sentinel(scan, mode, ctx, extra_args, stored, shown):
     target stays due. Returns ``{stored, mode, scan_name, web_events, problems, hard_failures, incomplete}``; ``incomplete`` says why a run stopped
     part way after it found something (empty for a whole run).
 
-    A project's API keys for the scanner's modules are never in the task: such a task names them by reference and only the built-in scanner is
-    offered it (it reads them once through the secure read)."""
+    A project's API keys for the scanner's modules are never in the task: such a task names them by reference and is offered to the built-in scanner and to the
+    instance's own Sentinels that may be sent them (``sentinel_stream.key_delivery_decision``: they report the ``bbot_keys`` feature, the instance setting is on and
+    they have not opted out); each reads them once through the secure read. With none, the stage waits and says why."""
     from agentapi import sentinel_stream
     domain = scan.domain
     api_keys = bool(extra_args and any(a != bbot_lib.TRUFFLEHOG_FLAG for a in extra_args))
@@ -309,7 +310,7 @@ def _discover_on_sentinel(scan, mode, ctx, extra_args, stored, shown):
 
     out = sentinel_stream.dispatch_stream(domain.project, sentinel_stream.KIND, target, scan, on_partial, label=domain.name,
                                           secret_ref=sentinel_stream.keys_ref(domain.project_id) if api_keys and domain.project_id else None,
-                                          builtin_only=api_keys)
+                                          bbot_keys=api_keys)
     if out is None:  # unreachable while the kind is in NEVER_LOCAL (dispatch_stream raises); never let a missing answer read as a finished run
         from reNgine.resources import ScannerUnavailable
         raise ScannerUnavailable(sentinel_stream.KIND)

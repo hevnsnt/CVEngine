@@ -147,7 +147,8 @@ which send nothing to the target and need no vantage point.
     them in order and persists each through `cveFeed.discovery`'s own flush, then the final result closes the run. A stop of the scan ends the task
     at its next batch (409). `run_discovery` hands the run to a Sentinel that declares the kind; the kind is in `NEVER_LOCAL`, so with none able to take it
     the scan waits (`ScannerUnavailable`) and the target stays due. A project's bbot module keys go by reference (`secret_ref` `bbotkeys:<project id>`) to the built-in
-    scanner only, read once through the secure read. See [AGENT-API.md](AGENT-API.md) ("Streamed work").
+    scanner and to the instance's own Sentinels that report `bbot_keys` (instance setting and per-Sentinel opt-out permitting), read once through the secure
+    read; one gate, `sentinel_stream.key_delivery_decision` (see [SENTINELS.md](SENTINELS.md#discovery-api-keys-on-your-sentinels)). See [AGENT-API.md](AGENT-API.md) ("Streamed work").
 - **Signed-in work**: the built-in fetches a stored credential through a single-use read tied to one task, written to the audit
   log, callable only by the trusted built-in agent. The credential is never in a task row, and an external Sentinel is never
   offered a signed-in task.
@@ -209,6 +210,10 @@ Step 5 used to delete a local path only after telemetry showed no fallbacks: `se
 command, the status block, the reviewer's `local_share` check, the per-hour fallback caps (`CVENGINE_LOCAL_FALLBACK_NMAP_PER_HOUR`,
 `CVENGINE_LOCAL_FALLBACK_NAABU_PER_HOUR`) and the fallback warning of the egress status are removed (migration `agentapi.0019_drop_scanner_fallback`
 drops the table). `sentinel_dispatch._no_local` now only raises `ScannerUnavailable`.
+
+## Work no scan asked for (the work planner)
+
+A Sentinel task is created by a Celery job that waits for it and files its result; the dispatch (`agentapi/sentinel_dispatch.py`) has no queue of its own. Every producer was therefore a scan stage, a host assessment or a sweep, and capacity that none of them used sat idle. The work planner (`cveFeed/work_planner.py`, [PIPELINE.md](PIPELINE.md#the-work-planner)) is one more producer, and the only one that starts from what is *due* rather than from a scan: it measures the Sentinels (`sentinel_broker.planner_capacity`), and while slots are idle it queues batches of due `ssh_probe` and `secrets_scan` units through the same stage entry points (`ssh_scan.run_for_hosts`, `secrets_scan.run_for_hosts`) on its own `planner_queue`. It adds no task kind and does not touch the contract: a Sentinel sees an ordinary `ssh_probe` or `secrets_scan` task, with priority 0 (`PLANNER_PRIORITY`), the lowest, so claims still go to validation, smoke and scan stages first. Scanning stays on Sentinels only; a kind nobody can take is not planned and its units stay due. A Sentinel that cannot run a kind (capability, policy, "Paused after repeated failures", contract version) is no capacity for it.
 
 ## Risks
 
@@ -325,6 +330,14 @@ A kind can also wait because it is **turned off**, not because a scanner is gone
 
 `sentinel_broker.effective_capabilities` leaves out every denied kind, so `_claimable`, `refusal`, `capacity_state` and `eligible_sentinels` need no other rule. `_try_claim` then orders: deny, the per-kind cap (a queued task whose kind is at its cap for this Sentinel is skipped, a later task of another kind may be taken), then prefer (a task younger than `prefer_defer_for(kind)`, which is `CVENGINE_SENTINEL_PREFER_DEFER_SECONDS` (default 60, a ceiling) and for every kind but OpenVAS at most the stage claim window less two seconds so a preference never costs a stage its Sentinel, is held back from a Sentinel that does not prefer its kind while another live Sentinel that does is in scope, not updating and has room). `capacity_state` counts the slots of a kind as the sum over the eligible Sentinels of the smaller of their free slots and their headroom under the cap. With `why=True`, a `none` carries `reason` (`disabled`, `offline`, `withheld`, `inactive`, `outdated` or `never`) and a sentence naming each Sentinel that has the kind, which `dispatch_or_none` and the stages pass into the stage message. The OpenVAS tick logs one line per tick naming the state instead of passing silently over a project. The wire format to a Sentinel is unchanged: `settings.disabled_kinds` in the registration and heartbeat replies is derived from the policy (every denied kind), so a client that predates the policy keeps honouring it. After prefer, `_try_claim` balances: a task younger than `balance_defer_for(kind)` (`CVENGINE_SENTINEL_BALANCE_DEFER_SECONDS`, default 60; the same stage-window rule as `prefer_defer_for`, `_stage_window`: at most the claim window less two seconds for every kind but OpenVAS) is passed over by a Sentinel that holds tasks while `_lighter_elsewhere` finds another live Sentinel with a strictly lower `held / max_concurrent` that `_can_take` the task (live, not updating, free slot, per-kind cap, and the same `refusal` as `_preferred_elsewhere`: scope, hosts, credential, internal network, capability). The candidates (`_peers`) and what they hold are read once per `(project, kind)` for one pass (one query for the Sentinels, one for their tasks), with the rights shared with the prefer check, and the answer is memoised like the prefer answer, so a pass over many queued tasks does not query per task; a Sentinel that holds nothing skips the check altogether. A Sentinel that prefers the kind is never held back (prefer wins), the built-in scanner is a symmetric peer (signed-in work is refused to the others by `refusal`), and `CVENGINE_SENTINEL_BALANCE=0` is the kill switch. `activity_metrics` (the last hour's utilisation, finished tasks and queue wait of each Sentinel and kind, and the queue depth by kind) feeds `GET sentinels/live` (`load` per Sentinel, `kinds`) and the system status (`sentinels.load`).
 
+## An update does not wait for Sentinel work
+
+Built. The approval updater (`scripts/apply-update.sh`) counts only work that runs on this server: a scan with an open `SentinelTask` or an open `StageRun` is waiting on a Sentinel and is left out of the drain count, so the update settles for at most 30 seconds (60 hard cap) and rebuilds while Sentinels keep their tasks. The state this needs is on the one `ScanControl` row: `update_started_at` (set when the update's pause is requested, once per update), `update_ended_at` and `update_grace_until` (set when the pause is released, `CVENGINE_UPDATE_GRACE_SECONDS` after it). `scan_control.in_update_grace()` is true from the start of the window until the grace ends (an open window older than 6 hours is not held for ever), and while it is true `sentinel_broker.reap_expired`, `_end_unreported` and the lease check of `report_result` do not expire anything, `extend_leases` takes up a lapsed lease, and `_claim` hands out no work during the pause itself (`scan_control.update_hold()`). The waits of a `StageRun` are restored with the outage taken out (`_Dispatch.restore` adds `scan_control.outage_overlap` to its deadlines once, recorded as `outage_credit`), and an update's pause no longer cancels a stage's chunk tasks (`sentinel_dispatch._stopped` asks for an operator's pause only).
+
+`agentapi/sentinel_adopt.py` is the other half. `report_result` calls it, inside the row lock that moves a task to `done`, when `orphaned(task)` holds: no open stage run lists the task, and either its scan is closed or an update ran after the task was claimed (a stage that blocked in its worker died with it). A late result for a task the reaper had already expired is taken the same way when the reporting Sentinel is the one that claimed it (its claim audit row). `ADOPTERS` maps a kind to the function the stage itself uses: `nmap` to `port_inventory.persist_inventory` and the `nmap-fast` ledger service, `naabu` to `port_stage.persist_open_ports` and the `naabu` service, the three nuclei kinds to `save_vulnerability` (tagged `unscreened-same-body`, the stage's own tag for a result whose catch-all control read could not be made; the ledger is left alone so the hosts are due again at their time), and `bbot_discovery` to the discovery stage's `_flush` for the batches the Sentinel posted, then the `bbot` ledger service. Everything else keeps its result on the task row. An adopter that raises is logged and the task still ends `done` with its result; a second delivery finds the task `done` and answers `duplicate`. The audit log gets `sentinel.task.adopt` per task and the activity feed one line per project and update (*Adopted N results a Sentinel held during the update*).
+
+The Sentinel's side is a spool on disk (`client/spool.py` in the Sentinel repository): a result that cannot be delivered after a few quick tries is written atomically, delivered oldest first with a backoff capped at 60 seconds for `CVENGINE_SENTINEL_SPOOL_HOURS` (default 6), before the first heartbeat after a start or reconnect, and counted in the heartbeat's optional `info.spool` for the Sentinels page. Nothing in the contract or its version changes, and there is no new task kind.
+
 ## Asynchronous stages (queue Q4)
 
 Built. A stage that hands work to a Sentinel no longer holds its Celery worker while the Sentinel works. Before this, the stage created the
@@ -412,3 +425,23 @@ that does something with the result passes `then=('<continuation>', {args})` and
 `stage_runs.remember` / `recall` for a sweep's place in its list (see `tls_audit.sweep`). A job that creates its own tasks (a streamed bbot job)
 uses `stage_runs.watch(adapter, task_ids, context)` to be called back when they end.
 
+
+
+## The Sentinel watchdog and the Sentinels page
+
+A Sentinel runs its own watchdog (Sentinel repository, `docs/WATCHDOG.md`): a thread that stops a hung tool (no CPU and no bytes for 15 to 30 minutes) or one past
+its hard deadline, lets work that waited for memory behind long runs start inside a bounded overcommit while real free memory allows it, kills tool processes
+left behind by a finished task, restarts a stuck heartbeat thread, ends a stuck process so its container restarts, and stops taking work on a full disk. It
+reports itself in the heartbeat's optional `info.watchdog` (last tick, actions in the last hour, kills, overcommit, up to eight recent actions); a server that
+does not know the field would drop it, this one stores it clipped (`agentapi.sentinel_settings.clean_watchdog`, never refused) and the Sentinel's detail carries
+`watchdog` (`watchdog_view`): its recent actions in plain words, whether it still ticks, and `problem`.
+
+A Sentinel that waits for memory is applying back-pressure on purpose (a memory budget stops two long nuclei runs and a third from exhausting a small host). The
+Sentinels page therefore draws that wait as one amber line ("Waiting for memory, 8 min: nuclei (light), ... held by nuclei (deep) on zebra (13 min)") and turns it
+red only after `WAIT_RED_SECONDS` (20 minutes, `web/static/cve/sentinel-settings.js`): longer than the watchdog should ever allow, which means the Sentinel is
+old, has its watchdog off, or really lacks memory. The result contract is not touched.
+
+**Hook for the server-side watchdog.** `sentinel_settings.watchdog_problem(agent)` returns a sentence when a live Sentinel's watchdog has not ticked for 180
+seconds (while its heartbeats arrive) or has stopped three or more tasks in the last hour, else `None`. The server watchdog (`cveFeed/watchdog.py`,
+[WATCHDOG.md](WATCHDOG.md)) calls it for each live Sentinel on every pass and keeps one administrator notice, `watchdog_sentinels`, while any has a problem;
+the notice resolves itself when none has. It changes nothing on the Sentinel.

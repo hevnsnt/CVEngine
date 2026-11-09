@@ -54,6 +54,21 @@ disk_report() {
     ( . scripts/update-disk.sh; cvengine_disk_report ) >/dev/null 2>&1 8>&- </dev/null &  # not holding the watcher's lock, not delaying its heartbeat
   fi
 }
+# The outer watchdog (docs/WATCHDOG.md, scripts/watchdog.sh): every CVENGINE_WATCHDOG_SECONDS (default 30) a pass of `manage.py watchdog_tick` in the web
+# container, in the background with its own lock and log, so a slow or stuck tick never delays the heartbeat or an update; and the one request it may
+# leave in web/.watchdog-action (restart celery or celery-beat, prune dangling images) is carried out, also in the background. The watchdog stands
+# down by itself while an update runs (the tick keeps recording that it does), so none of this fights the update.
+next_watchdog=0
+watchdog() {
+  [ -f scripts/watchdog.sh ] || return 0
+  if (( SECONDS >= next_watchdog )); then
+    next_watchdog=$((SECONDS + ${CVENGINE_WATCHDOG_SECONDS:-30}))  # the setting is for the tests
+    setsid nohup scripts/watchdog.sh tick >/dev/null 2>&1 8>&- </dev/null &
+  fi
+  if [ -e web/.watchdog-action ] || [ -L web/.watchdog-action ]; then
+    setsid nohup scripts/watchdog.sh act >/dev/null 2>&1 8>&- </dev/null &
+  fi
+}
 next_plan=0
 heartbeat() {
   if (( SECONDS >= next_beat )); then
@@ -63,6 +78,7 @@ heartbeat() {
 }
 while :; do
   heartbeat
+  watchdog
   disk_report
   refresh_upstream
   # an OpenVAS switch flipped in the app (web/.openvas-wanted newer than the answer): carry it out in the background, so a first start that pulls
@@ -95,6 +111,7 @@ while :; do
     update_pid=$!
     while kill -0 "$update_pid" 2>/dev/null; do
       heartbeat
+      watchdog
       sleep 1
     done
     wait "$update_pid"

@@ -3,6 +3,8 @@ import json
 import logging
 import re
 
+from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.http import JsonResponse
 from django.http.response import HttpResponseBase
 
@@ -65,27 +67,42 @@ def _session_only(request):
 
 
 def tokens_list(request, ctx, **_):
+    """The caller's tokens, newest first. Only the first 4 and last 2 characters of a token are ever sent (``hint``); ``prefix`` stays for older clients and is cut to 4."""
     _session_only(request)
-    return {'results': [{'id': t.id, 'name': t.name, 'prefix': t.prefix, 'read_only': t.read_only,
+    return {'results': [{'id': t.id, 'name': t.name, 'prefix': t.prefix[:4], 'suffix': t.suffix[-2:], 'hint': t.hint, 'read_only': t.read_only,
                          'scope': t.scope, 'project': t.project.slug if t.project_id else None,
                          'expires': t.expires_at.isoformat() if t.expires_at else None,
                          'created': t.created_at.isoformat(), 'last_used': t.last_used_at.isoformat() if t.last_used_at else None,
-                         'revoked': t.revoked} for t in ctx.user.api_tokens.select_related('project').order_by('-id')]}
+                         'revoked': t.revoked} for t in ctx.user.api_tokens.select_related('project').order_by('-created_at', '-id')]}
+
+
+def _name_taken(user, name):
+    """Whether this user already has a live token with this name (case and surrounding spaces ignored). Revoked tokens free their name; older duplicates are left alone."""
+    return user.api_tokens.filter(revoked=False, name__iexact=name).exists()
 
 
 def tokens_create(request, ctx, **_):
     _session_only(request)
     data = _body(request)
     (name,) = _need(data, 'name')
-    scope = data.get('scope', auth.SCOPE_FULL)
-    if scope not in auth.USER_TOKEN_SCOPES:  # a misspelt scope must never quietly become a full token; a sentinel token only comes from an enrollment
-        raise ApiError(400, f'scope must be one of {", ".join(auth.USER_TOKEN_SCOPES)}')
-    if scope == auth.SCOPE_INVENTORY:  # a host reporter's token: one project, inventory reports only
-        return inventory.create_token(ctx, str(data.get('project') or ''), name), 201
-    token, raw = create_token(ctx.user, str(name), read_only=bool(data.get('read_only')))
-    audit.record_for_user(ctx.user, 'token.create', ctx.user, token=token.prefix, read_only=token.read_only)
-    return {'id': token.id, 'name': token.name, 'read_only': token.read_only,
-            'token': raw, 'note': 'Store this now. It is not shown again.'}, 201
+    name = str(name).strip()[:100]
+    if not name:
+        raise ApiError(400, 'missing field(s): name')
+    with transaction.atomic():
+        # the user's row is the lock, so two requests with one name at once cannot both pass the check
+        get_user_model().objects.select_for_update().filter(pk=ctx.user.pk).first()
+        scope = data.get('scope', auth.SCOPE_FULL)
+        if scope not in auth.USER_TOKEN_SCOPES:  # a misspelt scope must never quietly become a full token; a sentinel token only comes from an enrollment
+            raise ApiError(400, f'scope must be one of {", ".join(auth.USER_TOKEN_SCOPES)}')
+        # a host reporter's token is renewed by making a new one under the same default name, so the rule is for the keys made on the API keys page
+        if scope != auth.SCOPE_INVENTORY and _name_taken(ctx.user, name):  # two keys with one name cannot be told apart in the list, and the one to revoke is then a guess
+            raise ApiError(409, f'You already have an API key named "{name}". Pick another name, or revoke the old one first.')
+        if scope == auth.SCOPE_INVENTORY:  # a host reporter's token: one project, inventory reports only
+            return inventory.create_token(ctx, str(data.get('project') or ''), name), 201
+        token, raw = create_token(ctx.user, name, read_only=bool(data.get('read_only')))
+        audit.record_for_user(ctx.user, 'token.create', ctx.user, token=token.prefix, read_only=token.read_only)
+        return {'id': token.id, 'name': token.name, 'read_only': token.read_only,
+                'token': raw, 'note': 'Store this now. It is not shown again.'}, 201
 
 
 def tokens_revoke(request, ctx, token_id, **_):
@@ -460,7 +477,7 @@ ROUTES = [
      lambda r, c, task_id, **k: broker.release_task(c, task_id, _body(r).get('reason', ''))),
     ('GET', r'agents', 'Agents of your users and your own (administrators see their organizations\' agents); a Sentinel row carries slots {max, in_use, free, by_kind}', lambda r, c, **k: broker.list_agents(c, r.GET)),
     ('GET', r'agents/(?P<agent_id>\d+)', 'One agent with its recent tasks; a Sentinel also has kinds {kind: {declared, effective, mode, source, cap, held, state, note}}, the capability policy per task kind', lambda r, c, agent_id, **k: broker.get_agent(c, agent_id)),
-    ('PATCH', r'agents/(?P<agent_id>\d+)', 'Administrator: set status (active, suspended, revoked), note and/or limits {capabilities, projects, max_concurrent}; for a Sentinel also settings {name, network, profile, kinds: {kind: {mode: allow|deny|prefer, max_concurrent: 1-10|null}|null} (the capability policy, merged per kind; only a kind the Sentinel declares can be allowed or preferred), disabled_kinds (the older list: each kind is deny), max_concurrent, self_update: off|manual|automatic} (null restores the provisioned grant for network and hands other settings back to the Sentinel) and update: "now" (refused while self_update is off)',
+    ('PATCH', r'agents/(?P<agent_id>\d+)', 'Administrator: set status (active, suspended, revoked), note and/or limits {capabilities, projects, max_concurrent}; for a Sentinel also settings {name, network, profile, kinds: {kind: {mode: allow|deny|prefer, max_concurrent: 1-10|null}|null} (the capability policy, merged per kind; only a kind the Sentinel declares can be allowed or preferred), disabled_kinds (the older list: each kind is deny), max_concurrent, self_update: off|manual|automatic, discovery_keys: true|false (false: never send this Sentinel a project\'s discovery API keys; set from here only)} (null restores the provisioned grant for network and hands other settings back to the Sentinel) and update: "now" (refused while self_update is off)',
      lambda r, c, agent_id, **k: broker.update_agent(c, agent_id, _body(r))),
     ('DELETE', r'agents/(?P<agent_id>\d+)', 'Administrator: delete a revoked agent and revoke its API token, so it no longer holds back its user\'s new agents; {deleted, id, token_revoked, released_tasks, still_held: [{id, name}]} (agents it held stay suspended until reinstated); 409 unless revoked',
      lambda r, c, agent_id, **k: broker.delete_agent(c, agent_id)),
@@ -532,7 +549,7 @@ ROUTES = [
      lambda r, c, task_id, **k: sentinels.report_result(c, task_id, _body(r))),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/partial', 'One numbered batch of partial results of a streamed SentinelTask it is running (bbot_discovery, contract version 3): {seq, ...the lists of $defs/partials/<kind>}. Answers {accepted, duplicate, seq}: a batch at or below the last one taken is a duplicate and stored once, any other seq than the next is a 409. A 409 also means stop the run (cancelled, expired or its scan stopped); a 429 means send it again shortly',
      lambda r, c, task_id, **k: sentinel_stream.report_partial(c, task_id, _body(r))),
-    ('POST', r'sentinel/tasks/(?P<task_id>\d+)/secret', 'The built-in scanner only (403 for any other caller): the decrypted stored credential of one signed-in SentinelTask it holds (claimed or running), once: {credential: {headers, cookie, target, host, origins, allow_untrusted_certificate, expires_at, revision}, task_id}, or for a bbot_discovery task {bbot_config: {modules: {...}}, task_id} (the project\'s API keys for bbot modules), Cache-Control: no-store. A second read is a 409. Audited as sentinel.secret.read',
+    ('POST', r'sentinel/tasks/(?P<task_id>\d+)/secret', 'The built-in scanner (stored sign-ins) or, for a bbot_discovery task only, an own Sentinel that reports info.features bbot_keys, has not opted out and is allowed by the instance setting (403 for any other caller): the decrypted stored credential of one signed-in SentinelTask it holds (claimed or running), once: {credential: {headers, cookie, target, host, origins, allow_untrusted_certificate, expires_at, revision}, task_id}, or for a bbot_discovery task {bbot_config: {modules: {...}}, task_id} (the project\'s API keys for bbot modules), Cache-Control: no-store. A second read is a 409. Audited as sentinel.secret.read',
      lambda r, c, task_id, **k: sentinels.read_secret(c, task_id)),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/release', 'Give a SentinelTask back to the queue; body {reason}',
      lambda r, c, task_id, **k: sentinels.release_task(c, task_id, _body(r).get('reason', ''))),

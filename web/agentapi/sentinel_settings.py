@@ -27,8 +27,10 @@ from agentapi.models import Agent, SentinelDefaults, SentinelEnrollment, Sentine
 from agentapi.services import ApiError
 from tenancy import audit
 
-SETTINGS = ('name', 'network', 'profile', 'disabled_kinds', 'kinds', 'max_concurrent', 'self_update')
-MANAGED_ONLY = ('kinds',)  # set from cvENGINE only: a Sentinel never reports a policy (it can only turn a kind off, with ``disabled_kinds``)
+SETTINGS = ('name', 'network', 'profile', 'disabled_kinds', 'kinds', 'max_concurrent', 'self_update', 'discovery_keys')
+# ``kinds`` and ``discovery_keys`` are set from cvENGINE only. ``discovery_keys`` is a boolean: false is this Sentinel's opt-out from being sent the project's discovery API
+# keys (the instance setting ``sentinel_bbot_keys`` is the other switch); absent or true means it follows the instance setting. Never sent to a Sentinel.
+MANAGED_ONLY = ('kinds', 'discovery_keys')  # set from cvENGINE only: a Sentinel never reports a policy (it can only turn a kind off, with ``disabled_kinds``)
 SELF_UPDATE = ('off', 'manual', 'automatic')
 # What an administrator is told to run on the Sentinel's machine when its host updater is missing: fixed text, never something a Sentinel reported.
 INSTALL_COMMAND = 'cd <the Sentinel checkout> && sudo ./scripts/install-updater.sh'
@@ -71,11 +73,20 @@ def clean_settings(raw, managed=True):
             out[key] = sorted(set(value))
         elif key == 'kinds':
             out[key] = policy_lib.clean_kinds(value)
+        elif key == 'discovery_keys':
+            if not isinstance(value, bool):
+                raise ApiError(400, 'discovery_keys must be true or false (false: this Sentinel is never sent a project\'s discovery API keys)')
+            out[key] = value
         elif key == 'max_concurrent':
             if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= broker.MAX_CONCURRENT_CAP:
                 raise ApiError(400, f'max_concurrent must be a whole number from 1 to {broker.MAX_CONCURRENT_CAP}')
             out[key] = value
     return out
+
+
+def discovery_keys_opt_out(agent):
+    """Whether an administrator turned off sending discovery API keys to this one Sentinel (Sentinel settings)."""
+    return ((agent.managed_settings or {}).get('discovery_keys') or {}).get('value') is False
 
 
 def _when(entry):
@@ -268,6 +279,8 @@ def set_managed(agent, raw, actor, now=None):
     grant_change = {'network_grant_before': network_before, 'network_grant_after': agent.network} if 'network' in values else {}
     if kinds_after != kinds_before:
         grant_change.update(kinds_before=kinds_before, kinds_after=kinds_after)  # who changed what in the capability policy: the map before and after
+    if 'discovery_keys' in values:
+        grant_change['discovery_keys_after'] = 'follows the instance setting' if values['discovery_keys'] is None else ('send' if values['discovery_keys'] else 'never send')
     audit.record_for_user(actor, 'agent.settings', agent.token.user, target=agent.name, agent_id=agent.pk,
                           before=before, after=explicit(agent), **grant_change)
     return effective(agent)
@@ -328,11 +341,13 @@ UPDATE_STATUSES = ('idle', 'waiting', 'draining', 'updating', 'done', 'failed')
 # single-use read of a stored credential for a signed-in pass, and ``vantage``, the egress proxy and private ranges of the settings reply. A name this
 # server does not know is dropped. ``info.builtin`` is what the image says it is; whether a Sentinel IS the built-in scanner is decided by its
 # enrollment (``builtin_scanner.builtin_agent``), never by this.
-FEATURES = ('secret_read', 'vantage')
+# ``bbot_keys`` (any Sentinel: the Sentinel client's ``config.EXTERNAL_FEATURES``): it reads a bbot discovery task's API keys through the same single-use read, keeps
+# them in a private file for the run and masks them. A Sentinel that does not say so (every older client) is never sent them; the field is optional.
+FEATURES = ('secret_read', 'vantage', 'bbot_keys')
 
 
 def clean_info(raw):
-    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (cvengine_scanner/contract/sentinel_contract.json), its updater's ``update`` state, whether its own GVM stack can scan (``openvas``), for the built-in scanner image ``builtin`` and its ``features``, and ``waiting`` (kinds held back for memory, tasks still stopping: ``clean_waiting``). Anything else is dropped."""
+    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (cvengine_scanner/contract/sentinel_contract.json), its updater's ``update`` state, whether its own GVM stack can scan (``openvas``), for the built-in scanner image ``builtin`` and its ``features``, and ``waiting`` (kinds held back for memory, tasks still stopping: ``clean_waiting``), and optionally ``spool`` (results held on disk for cvENGINE: ``clean_spool``). Anything else is dropped."""
     if not isinstance(raw, dict):
         raise ApiError(400, 'info must be an object')
     out = {}
@@ -391,7 +406,116 @@ def clean_info(raw):
     waiting = raw.get('waiting')
     if waiting is not None:
         out['waiting'] = clean_waiting(waiting)
+    spool = clean_spool(raw.get('spool'))
+    if spool:
+        out['spool'] = spool
+    watchdog = clean_watchdog(raw.get('watchdog'))
+    if watchdog is not None:
+        out['watchdog'] = watchdog
     return out
+
+
+MAX_SPOOL_COUNT = 1_000_000
+
+
+def clean_spool(raw):
+    """``{count, oldest_seconds}`` of the results a Sentinel holds on disk until cvENGINE takes them (its spool), or ``None`` for none, for a field that is
+    not that, and for a count of zero. Optional and never an error: a Sentinel older than the field sends nothing, a malformed one is ignored (it is a
+    line on the Sentinels page, not something to refuse a heartbeat for)."""
+    if not isinstance(raw, dict):
+        return None
+    count, oldest = raw.get('count'), raw.get('oldest_seconds')
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= MAX_SPOOL_COUNT:
+        return None
+    out = {'count': count}
+    if not isinstance(oldest, bool) and isinstance(oldest, int) and 0 <= oldest <= 10 * 365 * 86400:
+        out['oldest_seconds'] = oldest
+    return out
+
+
+WATCHDOG_WORDS = {
+    'stopped_deadline': 'stopped a {kind} that passed its time limit after {minutes} minutes',
+    'stopped_hung': 'stopped a hung {kind}: no output or CPU for {minutes} minutes',
+    'stopped_memory': 'stopped a {kind} to keep the machine from running out of memory',
+    'overcommit': 'let a {kind} start ahead of a long scan, within the memory that was really free',
+    'orphans': 'ended tool processes that a finished task left behind',
+    'heartbeat_restart': 'restarted its own heartbeat thread, which had stopped',
+    'withheld': 'stopped taking {kind} work for a while after repeated stops',
+    'disk_clean': 'removed its own old temporary files to free disk',
+    'low_disk': 'ran low on disk and stopped taking work',
+}
+WATCHDOG_STALE_SECONDS = 180  # a Sentinel that heartbeats but whose watchdog has not ticked for this long has a stuck watchdog (it ticks every 10 seconds)
+WATCHDOG_KILL_NOTICE = 3  # watchdog stops of one Sentinel in an hour that deserve an administrator's notice (the same number the Sentinel withholds a kind at)
+# How an action line names a kind: the kind's own label read as a scan, except where the line reads better another way. Tool names are never spelled
+# out here (they come through sentinel_policy.label), so the removed-binary guard sees no new server reference.
+_WATCHDOG_KIND_WORDS = {'nmap_full': 'full port scan', 'nmap_udp': 'UDP scan', 'bbot_discovery': 'discovery run'}
+
+
+def _watchdog_kind_text(kind):
+    if kind in _WATCHDOG_KIND_WORDS:
+        return _WATCHDOG_KIND_WORDS[kind]
+    return f'{policy_lib.label(kind)} scan' if isinstance(kind, str) and kind else 'task'
+
+
+def _text(value, limit):
+    return ''.join(c for c in value if c.isprintable())[:limit] if isinstance(value, str) else ''
+
+
+def clean_watchdog(raw):
+    """``info.watchdog``, the Sentinel's own watchdog report (Sentinel ``client/watchdog.py``): ``{last_tick, actions_last_hour, kills, overcommit_active,
+    overcommit_mb, low_disk, withheld, spool, reasons, actions: [{at, code, kind, minutes}]}``. Optional and never refused: a shape this server does not
+    recognise is dropped (``None``), so a Sentinel that changes it cannot lose its heartbeat. Numbers are whole and bounded, text is clipped, lists capped."""
+    if not isinstance(raw, dict):
+        return None
+    out = {'last_tick': _count(raw.get('last_tick'), 4_102_444_800), 'actions_last_hour': _count(raw.get('actions_last_hour'), 10 ** 6),
+           'kills': _count(raw.get('kills'), 10 ** 6), 'overcommit_active': raw.get('overcommit_active') is True, 'overcommit_mb': _count(raw.get('overcommit_mb'), 10 ** 6),
+           'low_disk': raw.get('low_disk') is True}
+    out['withheld'] = [_text(k, 40) for k in (raw.get('withheld') if isinstance(raw.get('withheld'), list) else [])[:10] if isinstance(k, str)]
+    out['reasons'] = [_text(r, 160) for r in (raw.get('reasons') if isinstance(raw.get('reasons'), list) else [])[:5] if isinstance(r, str)]
+    actions = []
+    for item in (raw.get('actions') if isinstance(raw.get('actions'), list) else [])[:8]:
+        if isinstance(item, dict) and isinstance(item.get('code'), str):
+            kind = item.get('kind')
+            actions.append({'at': _count(item.get('at'), 4_102_444_800), 'code': _text(item['code'], 30), 'kind': _text(kind, 40) if isinstance(kind, str) else None,
+                            'minutes': _count(item.get('minutes'), 10 ** 6) if item.get('minutes') is not None else None})
+    out['actions'] = actions
+    spool = raw.get('spool')
+    if isinstance(spool, dict):
+        out['spool'] = {'count': _count(spool.get('count')), 'oldest_seconds': _count(spool.get('oldest_seconds'), 10 ** 9)}
+    return out
+
+
+def watchdog_view(agent, now=None):
+    """What the Sentinels page shows of a Sentinel's watchdog: its recent actions in plain words (newest first), whether its watchdog has stopped ticking, and
+    ``problem``: the sentence an administrator notice would carry (a stuck watchdog, repeated stops), or ``None``. ``None`` for a Sentinel that does not report a
+    watchdog (an older build, or one that switched it off)."""
+    raw = (agent.info or {}).get('watchdog')
+    if not isinstance(raw, dict):
+        return None
+    import time
+    now = now if now is not None else time.time()
+    actions = []
+    for a in reversed(raw.get('actions') or []):
+        word = WATCHDOG_WORDS.get(a.get('code'))
+        if word:
+            kind = _watchdog_kind_text(a.get('kind'))
+            actions.append({'at': a.get('at'), 'text': word.format(kind=kind, minutes=a.get('minutes') or 0)})
+    age = max(0, int(now - raw['last_tick'])) if raw.get('last_tick') else None
+    stale = age is not None and age > WATCHDOG_STALE_SECONDS
+    problem = None
+    if stale:
+        problem = f'its watchdog has not run for {age // 60} minutes (it should run every 10 seconds)'
+    elif (raw.get('kills') or 0) >= WATCHDOG_KILL_NOTICE:
+        problem = f'its watchdog stopped {raw["kills"]} stuck tasks in the last hour'
+    return {'actions': actions[:5], 'stale': stale, 'age_seconds': age, 'overcommit_active': bool(raw.get('overcommit_active')), 'low_disk': bool(raw.get('low_disk')),
+            'withheld': raw.get('withheld') or [], 'problem': problem}
+
+
+def watchdog_problem(agent, now=None):
+    """The administrator-notice hook: a sentence when this Sentinel's watchdog is stale or has stopped repeatedly, else ``None``. The server-side watchdog
+    (``cveFeed.watchdog.sentinel_watchdog_notice``, ``docs/WATCHDOG.md``) calls it for every live Sentinel and raises its notice."""
+    view = watchdog_view(agent, now)
+    return view['problem'] if view else None
 
 
 def _count(value, high=10 ** 7):
@@ -427,6 +551,8 @@ def record_info(agent, raw, now=None):
     if not info:
         return False
     merged = {**(agent.info or {}), **info}
+    if 'contract_version' in info and 'spool' not in info:
+        merged.pop('spool', None)  # a full report that says nothing about a spool says it holds none now
     # when the Sentinel last changed the version it runs (or first reported one): "last updated" on the Sentinels page. Only the server writes it.
     if 'version' in info and (agent.info or {}).get('version') != info['version']:
         from django.utils import timezone

@@ -148,13 +148,13 @@ class HijackTests(MatchBase):
 		ApiToken.objects.filter(pk=old.pk).update(expires_at=timezone.now() - timedelta(days=1))
 		self.assertEqual(self.post(fresh, report(host=machine('a')))[0], 200)
 		row = HostInventory.objects.get()
-		self.assertEqual((row.token_id, row.host), (ApiToken.objects.get(prefix=fresh[:8]).pk, 'web01.example.test'))
+		self.assertEqual((row.token_id, row.host), (ApiToken.objects.get(key_hash=auth.hash_token(fresh)).pk, 'web01.example.test'))
 		self.assertEqual(self.post(old_raw, report(host=machine('a')))[0], 401)  # and the expired one cannot take it back
 		third = create_token(self.alice, 'third', scope='inventory', project=self.project)[1]
 		self.assertEqual(self.post(third, report(host=machine('a')))[0], 409)  # a live token holds it again
-		ApiToken.objects.filter(prefix=fresh[:8]).update(revoked=True)
+		ApiToken.objects.filter(key_hash=auth.hash_token(fresh)).update(revoked=True)
 		self.assertEqual(self.post(third, report(host=machine('a')))[0], 200)
-		ApiToken.objects.filter(prefix=third[:8]).delete()  # a deleted owner owns nothing either
+		ApiToken.objects.filter(key_hash=auth.hash_token(third)).delete()  # a deleted owner owns nothing either
 		last = create_token(self.alice, 'last', scope='inventory', project=self.project)[1]
 		self.assertEqual(self.post(last, report(host=machine('a')))[0], 200)
 
@@ -239,7 +239,7 @@ class TokenScopeTests(Base):
 			self.assertEqual(self.mint(scope).status_code, 400, scope)
 		self.assertEqual(ApiToken.objects.count(), before)
 		self.assertEqual(self.mint('full').status_code, 201)
-		self.assertEqual(client_for(self.alice).post('/api/v1/tokens', json.dumps({'name': 'x'}), content_type='application/json').status_code, 201)
+		self.assertEqual(client_for(self.alice).post('/api/v1/tokens', json.dumps({'name': 'x2'}), content_type='application/json').status_code, 201)  # a second live key may not reuse the name 'x'
 
 	def test_a_token_with_an_unknown_scope_can_do_nothing(self):
 		raw = create_token(self.alice, 'odd')[1]

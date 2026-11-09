@@ -189,14 +189,15 @@ class SavingTests(Isolated, TestCase):
 		send(self.c, 'PUT', 'scan_concurrency', {'values': {'heavy.nmap': 4, 'work_depth': 5, 'discovery_concurrency': 12}})
 		status, data = send(self.c, 'POST', 'config_maxxing/reset', {})
 		self.assertEqual((status, data['cleared']), (200, {'autotune': 0, 'scan_concurrency': 3, 'ai_spend': 0, 'throughput': 0, 'autotune_pace': 0,
-			'retention': 0, 'egress': 0, 'heat': 0}))
+			'retention': 0, 'egress': 0, 'planner': 0, 'heat': 0, 'discovery_keys': 0}))
 		self.assertEqual(ScanConcurrency.current().values, {})
 		self.assertTrue(AuditLog.objects.filter(action='config_maxxing.reset_all', actor=self.root).exists())
 		self.assertTrue(AuditLog.objects.filter(action='config_maxxing.scan_concurrency_reset_all').exists())
 		self.assertEqual(send(self.c, 'GET', 'config_maxxing')[1], {'cards': [{'id': 'autotune', 'title': 'Auto-tuning'},
 			{'id': 'scan_concurrency', 'title': 'Scan concurrency'}, {'id': 'ai_spend', 'title': 'AI spend'},
 			{'id': 'throughput', 'title': 'Scan pacing'}, {'id': 'autotune_pace', 'title': 'Auto-tuning pace'},
-			{'id': 'retention', 'title': 'Data retention'}, {'id': 'egress', 'title': 'Outbound connections'}, {'id': 'heat', 'title': 'Heat policy'}]})
+			{'id': 'retention', 'title': 'Data retention'}, {'id': 'egress', 'title': 'Outbound connections'}, {'id': 'planner', 'title': 'Work planner'}, {'id': 'heat', 'title': 'Heat policy'},
+			{'id': 'discovery_keys', 'title': 'Discovery API keys'}]})
 
 	def test_every_change_is_audited_with_before_and_after_and_a_no_change_is_not(self):
 		os.environ['HEAVY_MAX_NMAP'] = '3'

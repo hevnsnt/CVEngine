@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import timedelta
 from pathlib import Path
 from unittest import mock
@@ -345,3 +346,116 @@ class HostHandOverTests(Env, TestCase):
         self.assertIsNone(scanner_plan.notice())
         self.assertNotEqual(self.host('notice', 'scanner_kept', '1g;x', '2').returncode, 0)
         self.assertNotEqual(self.host('plan-done', 'everything', 'ok').returncode, 0)
+
+
+class WaitingOnTests(Env, TestCase):
+    """What a request that the host has not answered is waiting on, said in plain words (the host side is stubbed with the files the host writes)."""
+
+    URL = '/cve/api/settings/scanner_plan'
+
+    def setUp(self):
+        self.isolate()
+        self.admin = User.objects.create_superuser('wait-root', 'w@x.test', 'x')
+        self.client = client_for(self.admin)
+
+    def ask(self, plan='external', age=2):
+        Path(self.path('.scanner-plan-wanted')).write_text(plan + '\n')
+        t = time.time() - age
+        os.utime(self.path('.scanner-plan-wanted'), (t, t))
+
+    def beat(self, age=5):
+        Path(self.path('.updater-heartbeat')).write_text(json.dumps({'at': time.time() - age}))
+
+    def reason(self, scans=0):
+        with mock.patch.object(scanner_plan, 'scans_running', return_value=scans):
+            return self.client.get(self.URL).json()
+
+    def test_nothing_is_waiting_when_nothing_was_asked(self):
+        data = self.reason()
+        self.assertFalse(data['waiting'])
+        self.assertIsNone(data['waiting_on'])
+        self.assertIsNone(data['asked_at'])
+
+    def test_a_host_helper_that_is_not_running_is_said_first(self):
+        self.ask()
+        data = self.reason(scans=4)  # even with scans running: nothing would apply it
+        self.assertEqual(data['waiting_on']['code'], 'host_down')
+        self.assertIn('never reported in', data['waiting_on']['text'])
+        self.assertIn('scripts/update-watch.sh', data['waiting_on']['text'])
+        self.beat(age=900)
+        data = self.reason()
+        self.assertEqual(data['waiting_on']['code'], 'host_down')
+        self.assertIn('15 minute(s) ago', data['waiting_on']['text'])
+
+    def test_a_live_host_that_has_not_picked_it_up_yet(self):
+        self.ask(age=3)
+        self.beat()
+        data = self.reason()
+        self.assertEqual(data['waiting_on'], {'code': 'pickup', 'text': 'The host updater has not picked it up yet. It looks every few seconds.'})
+        self.assertAlmostEqual(data['asked_at'], time.time() - 3, delta=5)
+
+    def test_running_scans_are_counted(self):
+        self.ask()
+        self.beat()
+        one, many = self.reason(scans=1)['waiting_on'], self.reason(scans=3)['waiting_on']
+        self.assertEqual((one['code'], one['scans_running']), ('scans', 1))
+        self.assertTrue(one['text'].startswith('1 scan is running. The change is applied when it finishes'))
+        self.assertTrue(many['text'].startswith('3 scans are running. The change is applied when they finish'))
+
+    def test_a_build_in_progress_is_said(self):
+        self.ask()
+        self.beat()
+        Path(self.path('.update-phase.json')).write_text(json.dumps({'phase': 'applying', 'detail': 'building', 'changed_at': time.time()}))
+        self.assertEqual(self.reason(scans=2)['waiting_on']['code'], 'update')
+
+    def test_a_live_host_with_no_reason_is_applying_then_stuck(self):
+        self.beat()
+        self.ask(age=60)
+        self.assertEqual(self.reason()['waiting_on']['code'], 'applying')
+        self.ask(age=700)
+        stuck = self.reason()['waiting_on']
+        self.assertEqual(stuck['code'], 'stuck')
+        self.assertIn('Still not applied after 11 minutes', stuck['text'])
+        self.assertIn('scanner-plan.log', stuck['text'])
+
+    def test_the_answer_ends_the_wait(self):
+        self.ask()
+        self.beat()
+        self.assertTrue(self.reason()['waiting'])
+        os.remove(self.path('.scanner-plan-wanted'))
+        Path(self.path('.scanner-plan-applied.json')).write_text(json.dumps({'plan': 'external', 'ok': True, 'note': 'n', 'at': 1.0}))
+        data = self.reason()
+        self.assertFalse(data['waiting'])
+        self.assertIsNone(data['waiting_on'])
+        self.assertTrue(data['applied']['ok'])
+
+    def test_no_text_has_a_long_dash(self):
+        self.ask()
+        for scans in (0, 2):
+            self.assertNotRegex(json.dumps(self.reason(scans=scans)['waiting_on'], ensure_ascii=False), '[\u2013\u2014]')
+
+
+class RunningPlanTests(Env, TestCase):
+    """The plan shown as running is the host's answer when that is newer than the process's environment (internal <-> both recreates nothing)."""
+
+    def setUp(self):
+        self.isolate()
+
+    def answer(self, plan, ok=True, at=None):
+        Path(self.path('.scanner-plan-applied.json')).write_text(json.dumps({'plan': plan, 'ok': ok, 'note': 'n', 'at': time.time() if at is None else at}))
+
+    def test_no_answer_means_the_environment(self):
+        os.environ['CVENGINE_SENTINEL_PLAN'] = 'internal'
+        self.assertEqual(scanner_plan.state()['plan'], 'internal')
+
+    def test_a_newer_ok_answer_is_what_runs(self):
+        os.environ['CVENGINE_SENTINEL_PLAN'] = 'internal'
+        self.answer('both')
+        self.assertEqual(scanner_plan.state()['plan'], 'both')
+
+    def test_an_older_answer_or_a_failed_one_is_not(self):
+        os.environ['CVENGINE_SENTINEL_PLAN'] = 'internal'
+        self.answer('both', at=scanner_plan.STARTED_AT - 100)
+        self.assertEqual(scanner_plan.state()['plan'], 'internal')
+        self.answer('both', ok=False)
+        self.assertEqual(scanner_plan.state()['plan'], 'internal')

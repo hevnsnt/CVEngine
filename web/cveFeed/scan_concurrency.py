@@ -260,7 +260,7 @@ def update(values, user):
                 changed.append(key)
                 audit(user, 'scan_concurrency.set', key, before=before['value'], before_source=before['source'], after=new)
         if changed:
-            row.values, row.meta, row.updated_by = stored, meta, user
+            row.values, row.meta, row.updated_by = stored, meta, (user if getattr(user, 'pk', None) else None)  # None: a system actor (the watchdog) has no account
             row.save()
     if changed:
         after_saved(changed, stored)
@@ -324,7 +324,7 @@ def discovery_workers(app=None, timeout=1.5):
     stats = app.control.inspect(timeout=timeout).stats() or {}
     out = {}
     for name, info in stats.items():
-        if str(name).startswith(DISCOVERY_WORKER_PREFIX):
+        if str(name).startswith(DISCOVERY_WORKER_PREFIX) or 'discovery_worker' in str(name).split('@'):  # celery names a worker `-n discovery_worker` celery@discovery_worker
             ceiling = ((info or {}).get('autoscaler') or {}).get('max')
             out[name] = ceiling if isinstance(ceiling, int) else None
     return out

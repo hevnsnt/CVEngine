@@ -48,14 +48,14 @@ def find(now=None, live=None, idle_minutes=IDLE_MINUTES):
     return found
 
 
-def close(now=None, live=None, idle_minutes=IDLE_MINUTES):
-    """Mark the ghosts failed. Returns the ids closed."""
+def close(now=None, live=None, idle_minutes=IDLE_MINUTES, message=MESSAGE):
+    """Mark the ghosts failed, with ``message`` as the reason. Returns the ids closed."""
     from startScan.models import ScanHistory
     now = now or timezone.now()
     closed = []
     for scan, last in find(now, live, idle_minutes):
-        n = ScanHistory.objects.filter(pk=scan.pk, scan_status=1).update(scan_status=0, stop_scan_date=now, error_message=MESSAGE)
+        n = ScanHistory.objects.filter(pk=scan.pk, scan_status=1).update(scan_status=0, stop_scan_date=now, error_message=message)
         if n:
             closed.append(scan.pk)
-            logger.warning('scan %s closed for the update: no worker holds it and it has shown nothing since %s (%s)', scan.pk, last.isoformat(), MESSAGE)
+            logger.warning('scan %s closed for the update: no worker holds it and it has shown nothing since %s (%s)', scan.pk, last.isoformat(), message)
     return closed

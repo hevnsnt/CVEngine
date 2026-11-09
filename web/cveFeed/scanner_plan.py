@@ -11,6 +11,7 @@ administrator's own are live) it carries the facts and the three options, one of
 import json
 import os
 import re
+import time
 
 from django.conf import settings
 
@@ -219,6 +220,77 @@ def discovery_pin_notice():
     return pin['text'] if pin else None
 
 
+PICKUP_SECONDS = 45  # the host watcher looks every second or so and starts the apply script within ~20 s; after this a live watcher is applying it, or stuck
+STUCK_SECONDS = 600  # a restart of the services takes a minute or two; this long without an answer is something to look at
+
+
+def asked_at():
+    """When the request was written (the mtime of ``.scanner-plan-wanted``, epoch seconds), or ``None``."""
+    try:
+        path = _file(PENDING_PLAN)
+        return None if os.path.islink(path) else os.stat(path).st_mtime
+    except OSError:
+        return None
+
+
+def scans_running():
+    """How many scans are running now (the host script waits for none, because the server's processes are recreated), or ``None`` if it cannot be told."""
+    try:
+        from startScan.models import ScanHistory
+        return ScanHistory.objects.filter(scan_status=1).count()
+    except Exception:  # noqa: BLE001 - a status line is never worth a failed page
+        return None
+
+
+def waiting_on(now=None):
+    """What a request that has not been answered is waiting on, in plain words: ``{code, text}``. Only the facts the web container can see: the host
+    watcher's heartbeat (``.updater-heartbeat``), an update's phase, the scans running and how long ago the request was written. ``None`` when nothing is waiting."""
+    if not _pending(PENDING_PLAN):
+        return None
+    now = time.time() if now is None else now
+    from cveFeed import updater
+    beat = updater.host_updater()
+    if not beat['alive']:
+        heard = (f'The last sign of it was {max(1, beat["age_seconds"] // 60)} minute(s) ago.' if beat['seen']
+                 else 'It has never reported in on this server.')
+        return {'code': 'host_down', 'text': ('The host helper is not running, so nothing will apply this. ' + heard + ' Start it on the host with '
+                                              'scripts/update-watch.sh (the installer sets it up as a service), or run scripts/apply-scanner-plan.sh there by hand.')}
+    try:
+        building = updater.update_in_progress()
+    except Exception:  # noqa: BLE001
+        building = False
+    if building:
+        return {'code': 'update', 'text': 'An update is building and restarting this server. The change is applied by the host once it has finished.'}
+    n = scans_running()
+    if n:
+        return {'code': 'scans', 'scans_running': n,
+                'text': f'{n} scan{"s are" if n != 1 else " is"} running. The change is applied when {"they finish" if n != 1 else "it finishes"}, because the server restarts to read it.'}
+    at = asked_at()
+    age = None if at is None else max(0, now - at)
+    if age is None or age <= PICKUP_SECONDS:
+        return {'code': 'pickup', 'text': 'The host updater has not picked it up yet. It looks every few seconds.'}
+    if age <= STUCK_SECONDS:
+        return {'code': 'applying', 'text': 'The host updater has it and is restarting the services, which takes a minute or two.'}
+    return {'code': 'stuck', 'text': (f'Still not applied after {int(age // 60)} minutes although the host helper is running. Look at scanner-plan.log in the '
+                                      'host\'s update state directory, or run scripts/apply-scanner-plan.sh there by hand.')}
+
+
+STARTED_AT = time.time()  # when this process started: the environment it reads the running plan from is as old as this
+
+
+def effective_plan(answer):
+    """What runs now. The processes read the plan from their environment when they start, and the host recreates them only when the built-in scanner
+    goes on or off, so after a change between ``internal`` and ``both`` the environment is older than the host's answer. An ok answer newer than this
+    process is the later fact."""
+    if answer and answer['ok'] and isinstance(answer['at'], (int, float)) and answer['at'] >= STARTED_AT:
+        return answer['plan']
+    return current_plan()
+
+
 def state():
-    return {**decision(), 'applied': applied(), 'notice': notice(), 'discovery_pin_notice': discovery_pin_notice(),
-            'waiting': bool(_pending(PENDING_PLAN)), 'pending_plan': _pending(PENDING_PLAN)}
+    waiting = bool(_pending(PENDING_PLAN))
+    at = asked_at() if waiting else None
+    answer = applied()
+    return {**decision(), 'plan': effective_plan(answer), 'applied': answer, 'notice': notice(), 'discovery_pin_notice': discovery_pin_notice(),
+            'waiting': waiting, 'pending_plan': _pending(PENDING_PLAN), 'asked_at': at, 'waiting_on': waiting_on() if waiting else None,
+            'now': time.time()}

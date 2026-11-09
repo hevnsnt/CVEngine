@@ -1057,6 +1057,13 @@ def updates_put(request):
             audit(request.user, 'update.mode_changed', mode)
             if mode == 'manual' and row.approved_by == 'automatic':
                 updater.cancel_approval(row)  # an approval nobody gave is withdrawn when the administrator takes control back
+    if 'wait_for_scans' in data:
+        from cveFeed.admin_api import audit
+        if not isinstance(data['wait_for_scans'], bool):
+            raise SettingsError(400, 'wait_for_scans must be true or false')
+        if data['wait_for_scans'] != updater.read_wait_scans():
+            updater.set_wait_scans(data['wait_for_scans'])
+            audit(request.user, 'update.wait_scans_changed', 'on' if data['wait_for_scans'] else 'off')
     row.token = _text(data, 'token', row.token, secret=True)
     if 'enabled' in data:
         row.enabled = bool(data['enabled'])

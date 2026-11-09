@@ -89,15 +89,29 @@ def candidates(scan):
     """``{(address, port): {'subs': [Subdomain], 'fp': fingerprint}}`` for the SSH endpoints of this scan's open ports, leaving out the hosts the
     organization excluded, what a bug bounty program's scope does not name and the addresses a scanner may not reach. Every name that answers at an
     address is listed with it."""
+    from startScan.models import Subdomain
+    return _candidates(scan.domain.project_id, Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports'))
+
+
+def candidates_for_hosts(project_id, names):
+    """``candidates`` for the current inventory rows (``correlation.latest_scan_q``, one per host) of the named hosts of a project, for the work planner,
+    which inspects endpoints without a scan of its own. Each ``subs`` entry is a stored row, so ``sub.scan_history`` is the scan that found it."""
+    from cveFeed.correlation import latest_scan_q
+    from startScan.models import Subdomain
+    rows = (Subdomain.objects.filter(latest_scan_q(), target_domain__project_id=project_id, name__in=sorted({n.lower().rstrip('.') for n in names}))
+            .select_related('scan_history', 'target_domain').prefetch_related('ip_addresses__ports'))
+    return _candidates(project_id, rows)
+
+
+def _candidates(project, subdomains):
     from cveFeed.bounty_gate import Gate
     from cveFeed.exclusions import excluded_names, normalize
-    from startScan.models import Subdomain, open_ports
+    from startScan.models import open_ports
     from targetApp.target_types import is_scannable_ip
-    project = scan.domain.project_id
     banned = excluded_names(project, strict=True)  # an authorization check fails closed
     gate = Gate(blocked=())
     out = {}
-    for sub in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports'):
+    for sub in subdomains:
         if normalize(sub.name) in banned or gate.refusal(project, sub.name, unattended=False):
             continue
         for ip in sub.ip_addresses.all():
@@ -167,7 +181,7 @@ def run_for_scan(scan_id, force=False, dispatch=None):
     Raises ``ScannerUnavailable`` when no scanner can take the kind, and after the answered endpoints are stored when a task ended without an answer:
     those endpoints stay due and the stage waits (nothing runs on this server)."""
     from agentapi import sentinel_dispatch
-    from cveFeed import activity, ledger
+    from cveFeed import activity
     from reNgine.resources import ScannerUnavailable
     from startScan.models import ScanHistory
     scan = ScanHistory.objects.select_related('domain__project').get(pk=scan_id)
@@ -183,6 +197,19 @@ def run_for_scan(scan_id, force=False, dispatch=None):
     if dispatch is None:
         sentinel_dispatch.scanner_or_local(project, KIND)  # raises ScannerUnavailable when none can take it: the kind has no local path
         dispatch = _dispatch
+    _inspect(project, keys, found, lambda key: scan, lambda project_, chunk: dispatch(project_, chunk, scan), summary)
+    activity.log('run_check', f'SSH inspection of {summary["inspected"]} of {len(keys)} endpoint(s) of {scan.domain.name}: {summary["findings"]} compromised host key(s)'
+                 + (f'; {summary["incomplete"]} could not be inspected completely' if summary['incomplete'] else '')
+                 + (f'; {summary["waiting"]} wait for a scanner' if summary['waiting'] else ''), project=project.pk, scan_id=scan.id)
+    if summary['waiting']:
+        raise ScannerUnavailable(KIND, f'a Sentinel returned no result for {summary["waiting"]} SSH endpoint(s): they stay due')
+    return summary
+
+
+def _inspect(project, keys, found, scan_for, send, summary):
+    """Claim ``keys`` (the endpoints to ask), send them in tasks of ``MAX_TARGETS_PER_TASK`` through ``send(project, chunk)`` and file every answer under
+    ``scan_for(key)`` (the scan a finding and the ledger row belong to). Adds to ``summary``; what no Sentinel answered is counted as waiting."""
+    from cveFeed import ledger
     with ledger.claim_many(f'{SERVICE}@{project.pk}', [asset(*k) for k in keys]) as won:
         won = set(won)
         keys = [k for k in keys if ledger._norm(asset(*k)) in won]
@@ -191,13 +218,14 @@ def run_for_scan(scan_id, force=False, dispatch=None):
             chunk = [k for k in chunk if _still_allowed(project.pk, found[k]['subs'])]  # excluded since the plan was made: not sent
             if not chunk:
                 continue
-            answered = dispatch(project, chunk, scan)
+            answered = send(project, chunk)
             for key in chunk:
                 row = (answered or {}).get(key)
                 if row is None:  # no answer for this endpoint: unknown, due again, nothing recorded
                     summary['waiting'] += 1
                     continue
                 subs = _allowed_subs(project.pk, found[key]['subs'])
+                scan = scan_for(key)
                 complete, filed = store_row(project.pk, scan, subs, key[0], key[1], row, found[key]['fp'])
                 summary['findings'] += filed
                 if complete:
@@ -206,9 +234,30 @@ def run_for_scan(scan_id, force=False, dispatch=None):
                 else:
                     summary['incomplete'] += 1
                     ledger.record(FAILED_SERVICE, [asset(*key)], project.pk, scan)
-    activity.log('run_check', f'SSH inspection of {summary["inspected"]} of {len(keys)} endpoint(s) of {scan.domain.name}: {summary["findings"]} compromised host key(s)'
-                 + (f'; {summary["incomplete"]} could not be inspected completely' if summary['incomplete'] else '')
-                 + (f'; {summary["waiting"]} wait for a scanner' if summary['waiting'] else ''), project=project.pk, scan_id=scan.id)
+
+
+def run_for_hosts(project, host_names, keys=None, dispatch=None, priority=1):
+    """Inspect the SSH endpoints of the named hosts' current inventory rows on a Sentinel and file what comes back: the work planner's entry
+    (``cveFeed.work_planner``), the same plan, scope gates, ledger and storage as ``run_for_scan`` with no scan of its own. ``keys`` narrows it to the
+    endpoints the planner chose; what is not due (a fresh ledger row, a changed banner aside) is not sent. ``dispatch(project, chunk)`` replaces the
+    Sentinel call in tests. Returns the summary of ``run_for_scan``; raises ``ScannerUnavailable`` as it does, after filing the answered endpoints."""
+    from agentapi import probe_dispatch, sentinel_dispatch
+    from reNgine.resources import ScannerUnavailable
+    summary = {'endpoints': 0, 'inspected': 0, 'incomplete': 0, 'findings': 0, 'waiting': 0}
+    if not enabled():
+        return {**summary, 'skipped': 'disabled'}
+    found = candidates_for_hosts(project.pk, host_names)
+    if keys is not None:
+        wanted = {(a, int(p)) for a, p in keys}
+        found = {k: v for k, v in found.items() if k in wanted}
+    todo = due(project.pk, found)
+    summary['endpoints'] = len(found)
+    if not todo:
+        return summary
+    if dispatch is None:
+        sentinel_dispatch.scanner_or_local(project, KIND)  # raises ScannerUnavailable when none can take it
+        dispatch = lambda project_, chunk: probe_dispatch.try_ssh_probe(project_, chunk, priority=priority)  # noqa: E731
+    _inspect(project, todo, found, lambda key: found[key]['subs'][0].scan_history, dispatch, summary)
     if summary['waiting']:
         raise ScannerUnavailable(KIND, f'a Sentinel returned no result for {summary["waiting"]} SSH endpoint(s): they stay due')
     return summary

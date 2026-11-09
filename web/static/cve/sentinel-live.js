@@ -209,9 +209,41 @@ function summary(data) {
     d.append(el("b", "", String(n)), el("span", "", label));
     return d;
   };
-  bar.append(cell(`${live} of ${rows.length}`, "checking in"), cell(working, "working now"), cell(data.queued, "tasks waiting for a Sentinel"));
+  bar.append(cell(`${live} of ${rows.length}`, "checking in"), cell(working, "working now"), cell(data.queued, "tasks waiting for a Sentinel, planner work included"));
   if (data.stage_runs) bar.append(cell(data.stage_runs.waiting, "stages waiting, no worker held"));
   return bar;
+}
+
+// GET sentinels/live `planner`: what the work planner (cveFeed/work_planner.py) is doing, in one plain line, with the per-kind count of what is due behind a
+// disclosure. Everything is set with textContent. Returns null when the server sent none.
+export function plannerRows(p) {
+  if (!p || !p.line) return null;
+  const head = ["Check", "Applies to", "Due", "Waiting for the route check", "Queued or running"];
+  const rows = !p.enabled ? [] : (p.kinds || []).map((k) => [k.label, k.applicable, k.due, k.awaiting, k.in_flight].map((v) => (typeof v === "number" ? v.toLocaleString("en-US") : String(v))));
+  return { line: p.line, head, rows };
+}
+
+export function plannerBlock(p) {
+  const data = plannerRows(p);
+  if (!data) return null;
+  const box = el("div", "sl-planner", null, { "data-keep-key": "planner" });
+  box.append(el("p", "note sl-planner-line", data.line));
+  if (data.rows.length) {
+    const d = el("details", "sl-planner-due", null, { "data-keep-key": "planner-due" });
+    d.append(el("summary", "", "What is due, by check"));
+    const table = el("table", "sl-planner-table");
+    const head = el("tr");
+    data.head.forEach((h) => head.append(el("th", "", h)));
+    table.append(head);
+    data.rows.forEach((cells) => {
+      const row = el("tr");
+      cells.forEach((v) => row.append(el("td", "", v)));
+      table.append(row);
+    });
+    d.append(table);
+    box.append(d);
+  }
+  return box;
 }
 
 // GET sentinels/live `routing`: what the built-in scanner is for and how the last day's work was shared. One plain text, or "" when the server sent none.
@@ -277,6 +309,8 @@ function openvasQueue(queue) {
   box.append(due);
 
   if (queue.counts.not_due) {
+    // the server counted every host and grouped the reasons ("33 not due: 20 not Fire or Smoke, 8 scanned this week"): shown as it came, above the list
+    if (queue.not_due_summary) box.append(el("p", "note sl-openvas-summary", queue.not_due_summary));
     const deferred = el("details", "sl-openvas-deferred", null, { "data-keep-key": "openvas-not-due" });
     deferred.append(el("summary", "", `Not due (${queue.counts.not_due})`));
     const list = el("ul");
@@ -423,6 +457,8 @@ export function sentinelLive(mount) {
       built.append(summary(data));
       const route = routingText(data.routing);
       if (route) built.append(el("p", "note sl-routing", route, { "data-keep-key": "routing" }));
+      const planner = plannerBlock(data.planner);
+      if (planner) built.append(planner);
       const waits = stageRunsText(data.stage_runs);
       if (waits) built.append(el("p", "note sl-stage-runs", waits, { "data-keep-key": "stage-runs" }));
     }

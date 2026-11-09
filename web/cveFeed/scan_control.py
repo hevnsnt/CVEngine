@@ -3,6 +3,7 @@ import fcntl
 import os
 import time
 from contextlib import contextmanager
+from datetime import timedelta
 
 from celery import Task
 from django.conf import settings
@@ -14,7 +15,7 @@ from django_celery_beat.schedulers import DatabaseScheduler
 # other bookkeeping. Everything else (discovery, scanners, validation, AI triage and reviews, certificate watching) waits.
 PAUSE_EXEMPT_TASKS = frozenset({
     'sync_cve_now_feed', 'backfill_cve_now_feed', 'sync_distro_fixes', 'sync_bounty_catalogue', 'sync_threat_intel',
-    'check_for_updates', 'refresh_sentinel_version', 'feed_sentinels', 'ensure_builtin_scanner', 'ensure_reviewer_token', 'reviewer_ops_checks', 'update_nuclei_templates', 'prune_asset_changes', 'prune_scan_history', 'report_resources', 'apply_scan_concurrency', 'autotune', 'rescore_all_hosts',
+    'check_for_updates', 'refresh_sentinel_version', 'feed_sentinels', 'work_planner_tick', 'work_planner_census', 'ensure_builtin_scanner', 'ensure_reviewer_token', 'reviewer_ops_checks', 'update_nuclei_templates', 'prune_asset_changes', 'prune_scan_history', 'report_resources', 'apply_scan_concurrency', 'autotune', 'rescore_all_hosts',
     'reconcile_invalid_correlations', 'weekly_maintenance', 'reap_stuck_jobs', 'send_notif',
     'send_task_notif', 'snapshot_daily_stats', 'bootstrap_first_run', 'evaluate_saved_searches',
     'refresh_live_snapshots',  # the Live screen's cache keeps answering while scanning is paused: people watch a pause too
@@ -122,37 +123,133 @@ def updater_idle():
         os.close(fd)
 
 
+GRACE_ENV = 'CVENGINE_UPDATE_GRACE_SECONDS'
+DEFAULT_GRACE_SECONDS = 600  # how long after an update the broker keeps what the outage left open: Sentinels reconnect within a minute, the rest is margin
+OPEN_WINDOW_MAX = timedelta(hours=6)  # a window nobody closed (an update that failed and was never resumed) stops holding leases after this: never for ever
+UPDATE_LEASE = timedelta(minutes=30)  # the lease a held task is given when an update starts, so a Sentinel's task is not judged lost minutes into the outage
+
+
+def grace_seconds():
+    try:
+        return max(0, min(86400, int(os.environ.get(GRACE_ENV, DEFAULT_GRACE_SECONDS))))
+    except ValueError:
+        return DEFAULT_GRACE_SECONDS
+
+
+def update_window():
+    """``(started, ended, grace_until)`` of the last update (``ScanControl``), each a datetime or None; all None when it cannot be read or no
+    update ran. A caller that only wants to know whether leases are to be kept asks ``in_update_grace``."""
+    from cveFeed.models import ScanControl
+
+    try:
+        row = ScanControl.objects.filter(pk=1).values_list('update_started_at', 'update_ended_at', 'update_grace_until').first()
+    except Exception:  # noqa: BLE001 - a control row that cannot be read never judges a lease
+        return None, None, None
+    return row or (None, None, None)
+
+
+def in_update_grace(now=None):
+    """Whether the broker is to keep Sentinel leases and tasks alive because an update is running (its window is open and not older than
+    ``OPEN_WINDOW_MAX``), or ended less than ``grace_seconds`` ago. While true nothing is expired for a missing heartbeat or an unlisted task:
+    the Sentinels were talking to a server that was down, not gone."""
+    from django.utils import timezone as tz
+    now = now or tz.now()
+    started, ended, grace = update_window()
+    if started is None:
+        return False
+    if ended is None or ended < started:
+        return now - started < OPEN_WINDOW_MAX
+    return grace is not None and now < grace
+
+
+def update_hold():
+    """Whether an update's drain pause is on right now: nothing new is handed to a Sentinel, no stage starts (the rest of the queue waits)."""
+    from cveFeed.models import ScanControl
+
+    try:
+        return ScanControl.objects.filter(pk=1, paused=True, paused_by_update=True).exists()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def outage_overlap(since, now=None):
+    """Seconds of the last update's window (started to ended, or to now while it is open) that fall between ``since`` (epoch seconds) and now:
+    what a budget counted in wall-clock time must not charge to a Sentinel's task, since nothing could be heard then."""
+    from django.utils import timezone as tz
+    now = now or tz.now()
+    started, ended, _grace = update_window()
+    if started is None or since is None:
+        return 0.0
+    end = ended if ended is not None and ended >= started else min(now, started + OPEN_WINDOW_MAX)
+    low = max(started.timestamp(), float(since))
+    high = min(end.timestamp(), now.timestamp())
+    return max(0.0, high - low)
+
+
 def request_drain_pause(reason='An update is being applied'):
-    """Pause new scan dispatch for an approved update to drain into (cveFeed.updater), without touching work already
-    running: unlike the operator "Pause all scanning" action, this never calls abort_running_scans. A no-op, safely
-    skipped, if scanning is already paused for any reason (an operator's own pause already stops new dispatch, and
-    must never be silently reinterpreted as ours to release later). Serialized against a manual resume via the same
-    lock updater_idle uses, so the two can never race each other into an inconsistent state."""
+    """Pause new scan dispatch for an approved update (cveFeed.updater), without touching work already running: unlike the operator "Pause all
+    scanning" action, this never calls abort_running_scans. An update does not wait for scans that run on Sentinels: it opens the update window
+    (``update_started_at``: until it ends the broker keeps every Sentinel lease, ``in_update_grace``) and gives the tasks the Sentinels hold a
+    longer lease, so what they finish during the outage is still theirs to report when the server is back. A no-op, safely skipped, for the pause
+    itself if scanning is already paused for any reason (an operator's own pause already stops new dispatch, and must never be silently
+    reinterpreted as ours to release later). Serialized against a manual resume via the same lock updater_idle uses, so the two can never race each
+    other into an inconsistent state."""
     from django.db import transaction
+    from django.utils import timezone as tz
 
     from cveFeed.models import ScanControl
     with updater_idle(), transaction.atomic():
         row = ScanControl.objects.select_for_update().get_or_create(pk=1)[0]
+        now = tz.now()
+        fields = []
+        if row.update_started_at is None or row.update_ended_at is not None or now - row.update_started_at >= OPEN_WINDOW_MAX:  # the host asks again at every poll: one window
+            row.update_started_at, row.update_ended_at, row.update_grace_until = now, None, None
+            fields = ['update_started_at', 'update_ended_at', 'update_grace_until']
         if not row.paused:
-            from django.utils import timezone as tz
             row.paused, row.paused_by_update, row.reason, row.actor, row.changed_at, row.last_error = \
-                True, True, reason[:200], '', tz.now(), ''
-            row.save(update_fields=['paused', 'paused_by_update', 'reason', 'actor', 'changed_at', 'last_error'])
+                True, True, reason[:200], '', now, ''
+            fields += ['paused', 'paused_by_update', 'reason', 'actor', 'changed_at', 'last_error']
+        row.save(update_fields=fields)
+    hold_sentinel_leases()
+
+
+def hold_sentinel_leases(now=None):
+    """Give every Sentinel task that is claimed or running a lease of ``UPDATE_LEASE`` from now (never a shorter one than it has)."""
+    from django.utils import timezone as tz
+    try:
+        from agentapi.models import SentinelTask
+        now = now or tz.now()
+        return SentinelTask._base_manager.filter(status__in=('claimed', 'running'), lease_expires_at__lt=now + UPDATE_LEASE).update(
+            lease_expires_at=now + UPDATE_LEASE)
+    except Exception:  # noqa: BLE001 - the window is what holds the leases; this is a margin
+        return 0
+
+
+def close_update_window(row, now):
+    """End the update window on ``row`` (a locked ScanControl): the grace after it starts now. Returns the fields to save (none when no window is open)."""
+    if row.update_started_at is not None and row.update_ended_at is None:
+        row.update_ended_at, row.update_grace_until = now, now + timedelta(seconds=grace_seconds())
+        return ['update_ended_at', 'update_grace_until']
+    return []
 
 
 def release_update_pause():
     """Undo request_drain_pause once the update it was waiting for has finished, but only a pause this module set:
     an operator's own pause (paused_by_update False) is never cleared here, exactly like request_drain_pause never
-    claims one that already exists."""
+    claims one that already exists. Closes the update window and starts the grace after it."""
     from django.db import transaction
+    from django.utils import timezone as tz
 
     from cveFeed.models import ScanControl
     with updater_idle(), transaction.atomic():
         row = ScanControl.objects.select_for_update().get_or_create(pk=1)[0]
+        now = tz.now()
+        fields = close_update_window(row, now)
         if row.paused and row.paused_by_update:
-            from django.utils import timezone as tz
-            row.paused, row.paused_by_update, row.reason, row.actor, row.changed_at = False, False, '', '', tz.now()
-            row.save(update_fields=['paused', 'paused_by_update', 'reason', 'actor', 'changed_at'])
+            row.paused, row.paused_by_update, row.reason, row.actor, row.changed_at = False, False, '', '', now
+            fields += ['paused', 'paused_by_update', 'reason', 'actor', 'changed_at']
+        if fields:
+            row.save(update_fields=fields)
 
 
 def abort_running_scans(actor):

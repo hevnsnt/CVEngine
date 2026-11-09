@@ -229,7 +229,8 @@ class ApiToken(models.Model):
 	user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='api_tokens')
 	name = models.CharField(max_length=100)
 	key_hash = models.CharField(max_length=64, unique=True)
-	prefix = models.CharField(max_length=12)  # shown in the UI to tell tokens apart
+	prefix = models.CharField(max_length=12)  # the first 4 characters of the token (always the fixed 'cve_' marker): shown in the UI with `suffix`, never more
+	suffix = models.CharField(max_length=2, blank=True, default='')  # the last 2 characters; '' for a token made before they were kept (only a hash of it exists, so they cannot be recovered)
 	read_only = models.BooleanField(default=False)
 	created_at = models.DateTimeField(auto_now_add=True)
 	last_used_at = models.DateTimeField(null=True, blank=True)
@@ -243,7 +244,12 @@ class ApiToken(models.Model):
 	project = models.ForeignKey('Project', null=True, blank=True, on_delete=models.CASCADE, related_name='+')  # the one project an inventory token reports to
 
 	def __str__(self):
-		return f'{self.name} ({self.prefix}...) for {self.user}'
+		return f'{self.name} ({self.hint}) for {self.user}'
+
+	@property
+	def hint(self):
+		"""What the screens show of the token: its first 4 and last 2 characters (just the first 4 when the last are not known), never more."""
+		return f'{self.prefix[:4]}...{self.suffix[-2:]}' if self.suffix else f'{self.prefix[:4]}...'
 
 
 class SystemTimings(models.Model):

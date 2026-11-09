@@ -147,6 +147,8 @@ export function sourceLine(setting) {
 }
 
 const shown = (key, value) => {
+  if (key === "discovery_keys")
+    return value === false ? "Never sent" : "Sent when the instance setting is on";
   if (value == null) return "not set";
   if (key === "network")
     return value === "internal" ? "Internal network" : "External";
@@ -388,16 +390,60 @@ export function updateLine(d) {
   return el("p", a.flagged ? "msg err ss-detail" : "note ss-detail", parts.join(", "));
 }
 
-// Why a kind is not being taken, as the Sentinel itself reports it: a heavy kind waiting for memory (what it needs, what is free, which tasks hold the rest), and
-// a task the server took back that is still stopping. Nothing is drawn when nothing waits.
+// Why a kind is not being taken, as the Sentinel itself reports it: heavy kinds waiting for memory (what they need, what is free, which tasks hold the rest), and
+// a task the server took back that is still stopping. Waiting for memory is back-pressure, not a fault: it is a calm amber line, and turns red only once it has
+// lasted longer than the Sentinel's own watchdog should ever let it (WAIT_RED_SECONDS), which says the watchdog is off, too old, or the machine really lacks
+// memory. Nothing is drawn when nothing waits.
+export const WAIT_RED_SECONDS = 20 * 60;
 const minutesOrSeconds = (s) => (s >= 120 ? `${Math.round(s / 60)} min` : `${s} s`);
+const KIND_PLAIN = { nuclei_light: "nuclei (light)", nuclei_targeted: "nuclei (targeted)", nuclei_deep: "nuclei (deep)", web_screenshot: "screenshots", nmap: "nmap", naabu: "naabu" };
+const kindPlain = (k) => KIND_PLAIN[k] || KIND_WORDS[k] || String(k).replace(/_/g, " ");
 export function waitingLines(d) {
   const rows = Array.isArray(d.waiting) ? d.waiting : [];
-  return rows.map((w) => {
-    if (w.stopping) return el("p", "note ss-detail", `Task ${w.task} (${w.kind}) was taken back by the server and is still stopping, ${minutesOrSeconds(w.seconds)} later. It is killed and its slot freed shortly.`);
-    const holders = (w.held_by || []).map((h) => `task ${h.task} ${h.kind} (${h.mb} MB, ${minutesOrSeconds(h.seconds)})`).join(", ");
-    return el("p", "msg err ss-detail", `${w.kind} waiting ${minutesOrSeconds(w.seconds)}: needs ${w.need_mb} MB, ${w.free_mb} MB free of ${w.budget_mb} MB${holders ? `, held by ${holders}` : ""}.`);
-  });
+  const where = d.name ? ` on ${d.name}` : "";
+  const lines = [];
+  const waits = rows.filter((w) => !w.stopping);
+  if (waits.length) {
+    const seconds = Math.max(...waits.map((w) => w.seconds || 0));
+    const kinds = [...new Set(waits.map((w) => kindPlain(w.kind)))].join(", ");
+    const holders = [];
+    for (const w of waits) for (const h of w.held_by || []) if (!holders.some((x) => x.task === h.task)) holders.push(h);
+    const heldBy = holders.map((h) => `${kindPlain(h.kind)}${where} (${minutesOrSeconds(h.seconds)})`).join(", ");
+    const first = waits[0];
+    const late = seconds >= WAIT_RED_SECONDS;
+    const text = `Waiting for memory, ${minutesOrSeconds(seconds)}: ${kinds}. Needs ${first.need_mb} MB, ${first.free_mb} MB free of ${first.budget_mb} MB${heldBy ? `; held by ${heldBy}` : ""}.` +
+      (late ? " This is longer than the Sentinel's watchdog should allow: check that it is up to date and has enough memory." : "");
+    lines.push(el("p", late ? "msg err ss-detail" : "msg warn ss-detail", text));
+  }
+  for (const w of rows) {
+    if (w.stopping) lines.push(el("p", "note ss-detail", `Task ${w.task} (${w.kind}) was taken back by the server and is still stopping, ${minutesOrSeconds(w.seconds)} later. It is killed and its slot freed shortly.`));
+  }
+  return lines;
+}
+
+// What the Sentinel's own watchdog did lately (``d.watchdog.actions``, plain words from the server, newest first), at most five, and a red line when the
+// watchdog itself has stopped ticking. Nothing is drawn for a Sentinel that reports no watchdog.
+export function watchdogLines(d) {
+  const w = d.watchdog;
+  if (!w || typeof w !== "object") return [];
+  const out = [];
+  if (w.stale) out.push(el("p", "msg err ss-detail", `This Sentinel's watchdog has not run for ${minutesOrSeconds(w.age_seconds || 0)}. It should run every 10 seconds.`));
+  if (w.low_disk) out.push(el("p", "msg warn ss-detail", "Low on disk: taking no new work until space is freed."));
+  const now = Date.now() / 1000;
+  for (const a of (Array.isArray(w.actions) ? w.actions : []).slice(0, 5)) {
+    const ago = a.at ? `${minutesOrSeconds(Math.max(0, Math.round(now - a.at)))} ago: ` : "";
+    out.push(el("p", "note ss-detail", `Watchdog ${ago}${a.text}.`));
+  }
+  return out;
+}
+
+// A Sentinel that finished work while cvENGINE was down keeps the results on disk and hands them over when the server answers again (an update does not
+// wait for scans on Sentinels). It says how many it holds, and since when, in the heartbeat; nothing is drawn when it holds none.
+export function spoolLine(d) {
+  const n = d.spool && Number.isInteger(d.spool.count) ? d.spool.count : 0;
+  if (n < 1) return null;
+  const age = Number.isInteger(d.spool.oldest_seconds) ? ` The oldest has waited ${minutesOrSeconds(d.spool.oldest_seconds)}.` : "";
+  return el("p", "note ss-detail", `Holding ${n} result${n === 1 ? "" : "s"} until cvENGINE is back. It hands them over as soon as the server answers.${age}`);
 }
 
 // The version and update line of one card, and its "Update now" and "Settings" buttons. ``d`` is the agent detail; nothing is drawn
@@ -433,6 +479,9 @@ export function versionBlock(d, { onChange, builtin = false }) {
   if (d.contract && d.contract.note)
     box.append(el("p", d.contract.state === "unsupported" ? "msg err ss-detail" : "note ss-detail", d.contract.note));
   box.append(...waitingLines(d));
+  const held = spoolLine(d);
+  if (held) box.append(held);
+  box.append(...watchdogLines(d));
   const sub =
     u.status === "failed"
       ? u.detail
@@ -505,6 +554,15 @@ function control(key, value) {
     s.value = value || "";
     return s;
   }
+  if (key === "discovery_keys") {
+    const s = el("select");
+    [
+      ["true", "Send them when the instance setting is on (the default)"],
+      ["false", "Never send discovery API keys to this Sentinel"],
+    ].forEach(([v, label]) => s.append(el("option", "", label, { value: v })));
+    s.value = value === false ? "false" : "true";
+    return s;
+  }
   if (key === "max_concurrent")
     return text(value == null ? "" : String(value), {
       type: "number",
@@ -517,6 +575,7 @@ function control(key, value) {
 }
 
 function readControl(key, node) {
+  if (key === "discovery_keys") return node.value !== "false";
   if (key === "max_concurrent")
     return node.value.trim() === "" ? undefined : Number(node.value);
   const v = node.value.trim();
@@ -525,7 +584,11 @@ function readControl(key, node) {
 
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 const controlValue = (key, setting) =>
-  key === "network" ? setting?.server_grant ?? setting?.value : setting?.value;
+  key === "network"
+    ? setting?.server_grant ?? setting?.value
+    : key === "discovery_keys"
+      ? setting?.value ?? true
+      : setting?.value;
 
 const ROWS = [
   ["name", "Name", "How it appears in cvENGINE."],
@@ -535,6 +598,11 @@ const ROWS = [
     "Choose the server grant. Internal Sentinels scan declared private networks only when their machine setting allows it.",
   ],
   ["profile", "Size", "Light never runs OpenVAS."],
+  [
+    "discovery_keys",
+    "Discovery API keys",
+    "Whether this Sentinel may be sent a project's discovery API keys (Shodan and the like), once per discovery task of that project. The instance setting under Settings, configMaxxing, Discovery API keys must also be on, and the Sentinel must be up to date.",
+  ],
   [
     "max_concurrent",
     "Tasks at once",
