@@ -289,13 +289,13 @@ class WatchdogScriptTests(unittest.TestCase):
         self.run_script('act')
         self.assertTrue(self.result()['ok'])
 
-    def test_eight_restarts_in_a_day_is_the_hosts_limit(self):
+    def test_twenty_four_restarts_in_a_day_is_the_hosts_limit(self):
         now = int(time.time())
-        (self.state / 'watchdog-actions.log').write_text(''.join(f'{now - 3000 - i * 100} restart-celery R1\n' for i in range(8)))
+        (self.state / 'watchdog-actions.log').write_text(''.join(f'{now - 3000 - i * 100} restart-celery R1\n' for i in range(24)))
         self.request('restart-celery-beat', 'R6', 'ffffffffffff')
         self.run_script('act')
         self.assertEqual([c for c in self.docker_calls() if '--force-recreate' in c], [])
-        self.assertIn('limit 8', self.result()['detail'])
+        self.assertIn('limit 24', self.result()['detail'])
 
     def test_one_action_at_a_time(self):
         self.hold(self.state / 'watchdog-act.lock')

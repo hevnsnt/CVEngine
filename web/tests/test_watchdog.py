@@ -261,10 +261,11 @@ class R1LanesTests(WatchdogCase):
         self.tick(5)
         self.assertIsNotNone(self.request())
 
-    def test_four_a_day_then_no_more(self):
+    def test_sixteen_a_day_then_no_more(self):
+        """The cap was four: it was spent by 9:28 am on the owner's server and a lane stood silent for 50 minutes. A restart that is verified fixed is a good restart."""
         self.break_lanes()
         state_actions = []
-        for _ in range(4):
+        for _ in range(16):
             self.tick(1000)
             self.tick(1000)
             if self.request():
@@ -272,7 +273,7 @@ class R1LanesTests(WatchdogCase):
                 self.probes.data['lanes'] = dict(LANES)
                 self.tick(200)  # verified
                 self.break_lanes()
-        self.assertEqual(len(state_actions), 4)
+        self.assertEqual(len(state_actions), 16)
         self.tick(1000)
         self.tick(1000)
         self.assertIsNone(self.request())
