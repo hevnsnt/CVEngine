@@ -227,7 +227,8 @@ class ReasoningRequestTests(unittest.TestCase):
 		"""The fields the setting added to the request, as against the same request without it."""
 		_, _, body = self.reasoning(name, level, model, **kwargs)
 		_, _, plain = sent(name, call=kwargs.get('call', 'complete'), model=model, env=kwargs.get('env'), options=kwargs.get('options'), base=kwargs.get('base'))
-		self.assertEqual({k: v for k, v in body.items() if k in plain and body[k] != plain[k]}, {}, 'nothing else changes')
+		reply_limit_keys = ('max_tokens', 'max_completion_tokens', 'options')  # the reply limit grows by the thinking room, never shrinks (tests/test_ai_truncation.py)
+		self.assertEqual({k: v for k, v in body.items() if k in plain and body[k] != plain[k] and k not in reply_limit_keys}, {}, 'nothing else changes')
 		return {k: v for k, v in body.items() if k not in plain}
 
 	def test_openai_gets_reasoning_effort_only_for_a_model_that_has_it(self):
@@ -250,7 +251,7 @@ class ReasoningRequestTests(unittest.TestCase):
 				fields = self.extra('anthropic', level, model)
 				self.assertEqual(fields, {'thinking': {'type': 'adaptive'}, 'output_config': {'effort': level}}, (model, level))
 			_, _, body = self.reasoning('anthropic', 'high', model)
-			self.assertEqual(body['max_tokens'], 2048)  # the reply limit is not touched
+			self.assertEqual(body['max_tokens'], 2048 + 8192)  # the answer room is not touched: the thinking room (high) is added on top
 			for key in self.FORBIDDEN_FOR_ANTHROPIC + ('budget_tokens',):
 				self.assertNotIn(key, body)
 				self.assertNotIn(key, body['thinking'])
@@ -266,8 +267,8 @@ class ReasoningRequestTests(unittest.TestCase):
 
 	def test_a_budget_era_claude_model_gets_a_budget_below_the_reply_limit(self):
 		for model in ('claude-haiku-4-5', 'claude-sonnet-4-5-20250929', 'claude-opus-4-1-20250805', 'claude-3-7-sonnet-latest'):
-			for limit, level, want in ((None, 'low', 1024), (None, 'max', 1024), ('8000', 'medium', 4096), ('8000', 'max', 6976), ('32768', 'max', 16384),
-									   ('2100', 'high', 1076)):
+			for limit, level, want in ((None, 'low', 1024), (None, 'max', 16384), ('8000', 'medium', 4096), ('8000', 'max', 16384), ('32768', 'max', 16384),
+									   ('2100', 'high', 8192)):
 				env = {'CVENGINE_AI_MAX_TOKENS': limit} if limit else {}
 				_, _, body = self.reasoning('anthropic', level, model, env=env)
 				self.assertEqual(body['thinking'], {'type': 'enabled', 'budget_tokens': want}, (model, limit, level))
@@ -276,8 +277,8 @@ class ReasoningRequestTests(unittest.TestCase):
 				self.assertNotIn('output_config', body)
 				for key in self.FORBIDDEN_FOR_ANTHROPIC:
 					self.assertNotIn(key, body)
-		# a limit with no room for a 1024 budget and an answer: the setting is ignored, not sent invalid
-		self.assertEqual(self.extra('anthropic', 'high', 'claude-haiku-4-5', env={'CVENGINE_AI_MAX_TOKENS': '2000'}), {})
+		# the thinking budget is kept apart from the answer room, so a small limit no longer leaves no room for a budget
+		self.assertEqual(self.extra('anthropic', 'high', 'claude-haiku-4-5', env={'CVENGINE_AI_MAX_TOKENS': '2000'}), {'thinking': {'type': 'enabled', 'budget_tokens': 8192}})
 		self.assertEqual(self.extra('anthropic', 'high', 'claude-3-5-haiku-20241022'), {})
 
 	def test_ollama_gets_a_top_level_think_for_a_model_with_the_switch(self):

@@ -397,13 +397,16 @@ class AutoFireRun(models.Model):
 class GeneratedTemplate(models.Model):
     """An AI-authored nuclei template for a CVE no installed template covers.
 
-    Lifecycle: draft -> (static check) -> (nuclei -validate) -> valid | invalid,
-    then tested against hosts: test_results holds the per-host outcome.
+    Lifecycle (``cveFeed.templatevalidate``, no person involved): draft (pending) -> static check -> nuclei -validate and the benign
+    control on a Sentinel -> a fixture the AI writes from the CVE data, matched offline -> the AI's second-pass critique -> valid |
+    invalid, or expired when it could not be validated within the window. Only valid rows are ever run on a host (test_results holds the
+    per-host outcome).
     """
 
     STATUS_DRAFT = "draft"
     STATUS_VALID = "valid"
     STATUS_INVALID = "invalid"
+    STATUS_EXPIRED = "expired"  # still a draft after the window, never validated: closed by the system, with the reason
 
     cve_entry = models.ForeignKey(CVEEntry, on_delete=models.CASCADE, related_name="generated_templates")
     template_id = models.CharField(max_length=128)
@@ -416,6 +419,14 @@ class GeneratedTemplate(models.Model):
     positive_fixture_verified_at = models.DateTimeField(null=True, blank=True)
     positive_fixture_source = models.CharField(max_length=300, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
+    # the automatic validator's bookkeeping (cveFeed.templatevalidate)
+    validation_stage = models.CharField(max_length=24, blank=True, db_default='', default='')  # the next step: '' | fixture | critique | waiting:<step>
+    validation_attempts = models.PositiveSmallIntegerField(db_default=0, default=0)  # failed tries that count (a missing Sentinel does not)
+    validation_started_at = models.DateTimeField(null=True, blank=True)  # when the validator first looked at it: the expiry clock
+    validation_next_at = models.DateTimeField(null=True, blank=True)  # not before this (back-off)
+    validation_reason = models.TextField(blank=True, db_default='', default='')  # the plain-language reason of a rejection, an expiry or a wait
+    validated_at = models.DateTimeField(null=True, blank=True)  # when it became valid, invalid or expired
+    fixture = models.JSONField(null=True, blank=True)  # {vulnerable, not_affected}: the AI-written responses the matchers were tested on
 
     class Meta:
         ordering = ["-created_at"]
@@ -1678,7 +1689,9 @@ class CVEDetection(models.Model):
     rules_at = models.DateTimeField(null=True, blank=True)  # when the rules author last read the CVE's affected data
     ai_model = models.CharField(max_length=128, blank=True, default="")
     ai_attempted_at = models.DateTimeField(null=True, blank=True)  # the model is asked once; a failed ask is retried after a week
-    ai_problems = models.JSONField(default=list, blank=True)  # what validation dropped from the model's answer
+    ai_problems = models.JSONField(default=list, blank=True)  # what validation dropped from the model's answer, or why the model could not be asked
+    ai_failures = models.PositiveSmallIntegerField(default=0, db_default=0)  # failed asks in a row (cveFeed.detection_author.AI_BACKOFF); 0 after an answer
+    ai_retry_at = models.DateTimeField(null=True, blank=True)  # the back-off: not asked again before this; None with failures at the limit means given up
     ai_input_hash = models.CharField(max_length=16, blank=True, default="", db_default="")  # what the CVE said when the model last read it: a change re-asks
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
