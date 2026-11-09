@@ -68,15 +68,22 @@ class Command(BaseCommand):
         parser.add_argument('--secrets', type=int, default=0, help='how many exposed secrets (and 2 occurrences each)')
         parser.add_argument('--history-scans', type=int, default=2, help='older scans of each target that keep a copy of every host')
         parser.add_argument('--reset', action='store_true', help='delete a previous run first')
+        parser.add_argument('--slug', default=SLUG, help='project slug: another slug adds one more project to the same database (shared users, CVE catalogue and tags are reused); names and addresses are prefixed with it')
+        parser.add_argument('--ip-ratio', type=float, default=0.9, help='addresses per host: below 1 many names share one address (virtual hosting, CDNs)')
+        parser.add_argument('--queued', type=int, default=20, help='queued scans')
+        parser.add_argument('--matches-per-host', type=int, default=2, help='CVE matches per host of the current scan')
+        parser.add_argument('--findings-per-host', type=float, default=3.0, help='scanner findings per host in the current scan (half as many in older scans)')
 
-    def handle(self, *args, hosts, seed, history_scans, reset, targets=TARGETS, sentinels=2, tasks=400, task_days=7, secrets=0, **opts):
+    def handle(self, *args, hosts, seed, history_scans, reset, targets=TARGETS, sentinels=2, tasks=400, task_days=7, secrets=0, slug=SLUG, ip_ratio=0.9, queued=20, matches_per_host=2, findings_per_host=3.0, **opts):
         import os
         if not (os.environ.get('CVENGINE_SCALE_FIXTURE') == '1' or 'scale' in settings.DATABASES['default']['NAME']):
             raise CommandError('refusing: this writes thousands of rows; use a throwaway database named *scale* or set CVENGINE_SCALE_FIXTURE=1')
         from dashboard.models import Project
-        if Project.objects.filter(slug=SLUG).exists():
+        self.slug, self.pfx = slug, ('' if slug == SLUG else f'{slug}-')
+        self.matches_per_host, self.findings_per_host, self.queued, self.ip_ratio = matches_per_host, findings_per_host, queued, ip_ratio
+        if Project.objects.filter(slug=slug).exists():
             if not reset:
-                raise CommandError(f'project {SLUG} exists; pass --reset to rebuild it')
+                raise CommandError(f'project {slug} exists; pass --reset to rebuild it')
             self.reset()
         rng = random.Random(seed)
         with transaction.atomic():
@@ -113,10 +120,11 @@ class Command(BaseCommand):
         now = timezone.now()
         out = {}
 
-        admin = User.objects.create_superuser('scale-admin', 'scale-admin@example.com', 'scale-fixture-pw')
-        viewer = User.objects.create_user('scale-viewer', 'scale-viewer@example.com', 'scale-fixture-pw')
-        org = Org.objects.create(name='Scale Fixture', slug=SLUG)
-        project = Project.objects.create(name='Scale Fixture', slug=SLUG, insert_date=now, org=org)
+        SLUG, pfx = self.slug, self.pfx  # shadow the module default: everything below is this project's
+        admin = User.objects.filter(username='scale-admin').first() or User.objects.create_superuser('scale-admin', 'scale-admin@example.com', 'scale-fixture-pw')
+        viewer = User.objects.filter(username='scale-viewer').first() or User.objects.create_user('scale-viewer', 'scale-viewer@example.com', 'scale-fixture-pw')
+        org = Org.objects.create(name='Scale Fixture' if SLUG == 'scale-fixture' else f'Scale {SLUG}', slug=SLUG)
+        project = Project.objects.create(name=f'Scale {SLUG}', slug=SLUG, insert_date=now, org=org)
         for model, kw in ((OrgMembership, {'org': org}), (ProjectMembership, {'project': project})):
             try:
                 model.objects.create(user=admin, **kw)
@@ -125,7 +133,7 @@ class Command(BaseCommand):
         ProjectMembership.objects.create(user=viewer, project=project, role='audit')
         engine = EngineType.objects.get_or_create(engine_name='scale-fixture', defaults={'yaml_configuration': 'x', 'default_engine': False})[0]
 
-        Domain.objects.bulk_create([Domain(name=f't{k}.example.com', project=project, insert_date=now - timedelta(days=120)) for k in range(TARGETS)])
+        Domain.objects.bulk_create([Domain(name=f'{pfx}t{k}.example.com', project=project, insert_date=now - timedelta(days=120)) for k in range(TARGETS)])
         domains = list(Domain.objects.filter(project=project).order_by('id'))
 
         # scans: history_scans older full scans, then the latest; a running and queued scan of a few targets
@@ -140,10 +148,10 @@ class Command(BaseCommand):
         by_dom = {}
         for s in ScanHistory.objects.filter(domain__in=domains).order_by('id'):
             by_dom.setdefault(s.domain_id, []).append(s)
-        extra = [ScanHistory(domain=domains[k], scan_type=engine, scan_status=1, start_scan_date=now - timedelta(minutes=10 + k), tasks=[])
+        extra = [ScanHistory(domain=domains[k % len(domains)], scan_type=engine, scan_status=1, start_scan_date=now - timedelta(minutes=10 + k), tasks=[])
                  for k in range(3)]
         extra += [ScanHistory(domain=domains[k % TARGETS], scan_type=engine, scan_status=-1, start_scan_date=now - timedelta(minutes=k), tasks=[])
-                  for k in range(20)]
+                  for k in range(self.queued)]
         extra += [ScanHistory(domain=domains[k % TARGETS], scan_type=engine, scan_status=0, start_scan_date=now - timedelta(days=2, hours=k),
                               stop_scan_date=now - timedelta(days=2), tasks=[], error_message='synthetic failure') for k in range(10)]
         ScanHistory.objects.bulk_create(extra)
@@ -155,14 +163,14 @@ class Command(BaseCommand):
             for v in ('1.0', '1.1', '2.0', '2.4', '3.1'):
                 name = f'scalefx-{p}:{v}'
                 tech_rows.append(Technology(name=name, version=v, category=categorize(name)))
-        techs = Technology.objects.bulk_create(tech_rows)
-        tags = VulnerabilityTags.objects.bulk_create([VulnerabilityTags(name=f'scalefx-{t}') for t in TAGS])
-        cves = CVEEntry.objects.bulk_create([
+        techs = list(Technology.objects.filter(name__startswith='scalefx-')) or Technology.objects.bulk_create(tech_rows)
+        tags = list(VulnerabilityTags.objects.filter(name__startswith='scalefx-')) or VulnerabilityTags.objects.bulk_create([VulnerabilityTags(name=f'scalefx-{t}') for t in TAGS])
+        cves = list(CVEEntry.objects.filter(cve_id__startswith='CVE-2099-9')) or CVEEntry.objects.bulk_create([
             CVEEntry(cve_id=f'CVE-2099-9{i:04d}', title=f'Synthetic issue {i}', cvss=round(rng.choice((2.1, 4.3, 5.0, 6.8, 7.5, 8.1, 9.0, 9.8, 10.0)), 1),
                      kev=(i % 25 == 0), affected=[], published_at=now - timedelta(days=rng.randint(1, 900))) for i in range(600)])
 
         # addresses: ~0.9 per host, then ports, ~2.7 per host
-        n_ips = int(n_hosts * 0.9)
+        n_ips = max(1, int(n_hosts * self.ip_ratio))
         ips = IpAddress.objects.bulk_create([
             IpAddress(org=org, address=synthetic_address(i), is_cdn=(i % 20 == 0), version=4 if i < 762 else 6, last_seen=now - timedelta(hours=rng.randint(0, 100)))
             for i in range(n_ips)])
@@ -183,7 +191,7 @@ class Command(BaseCommand):
         for h in range(n_hosts):
             k = h % TARGETS
             live = rng.random() > 0.08
-            host_defs.append((f'h{h}.t{k}.example.com', k, ips[h % n_ips].id if live else None, rng.randint(0, 100), rng.random() < .85))
+            host_defs.append((f'h{h}.{pfx}t{k}.example.com', k, ips[h % n_ips].id if live else None, rng.randint(0, 100), rng.random() < .85))
         sub_rows, sub_meta = [], []
         for g in range(gens):
             for name, k, ip_id, score, web in host_defs:
@@ -205,7 +213,7 @@ class Command(BaseCommand):
         rem_mix = (('open', .85), ('in_progress', .05), ('fixed', .04), ('accepted_risk', .03), ('false_positive', .03))
         vuln_rows, taken = [], set()
         for g in range(gens):
-            share = 3.0 if g == gens - 1 else 1.5
+            share = self.findings_per_host if g == gens - 1 else self.findings_per_host / 2
             for s in subs[g * n_hosts:(g + 1) * n_hosts]:
                 for _ in range(int(share) + (1 if rng.random() < share - int(share) else 0)):
                     sev = pick(rng, sev_mix)
@@ -226,7 +234,7 @@ class Command(BaseCommand):
         match_rows = []
         seen = set()
         for s in current:
-            for _ in range(2):
+            for _ in range(self.matches_per_host):
                 cve = rng.choice(cves)
                 product = rng.choice(PRODUCTS)
                 if (cve.id, s.id, product) in seen:
@@ -266,7 +274,7 @@ class Command(BaseCommand):
                 ledger.append(ServiceRun(service=svc, asset=name, project=project, scan=by_dom[domains[k].id][-1], status='done',
                                          finished_at=now - timedelta(hours=rng.randint(0, 24 * 14))))
         for ip in ips:
-            ledger.append(ServiceRun(service='nmap-fast', asset=f'scalefx:{ip.address}', project=None, status='done',
+            ledger.append(ServiceRun(service='nmap-fast', asset=f'scalefx:{pfx}{ip.address}', project=None, status='done',
                                      finished_at=now - timedelta(hours=rng.randint(0, 24 * 10))))
         ServiceRun.objects.bulk_create(ledger, batch_size=5000)
         out['ledger'] = len(ledger)
@@ -276,7 +284,7 @@ class Command(BaseCommand):
                       scan=by_dom[domains[k].id][-1], score=score) for name, k, ip_id, score, web in host_defs], batch_size=2000)
 
         AgentActivity.objects.bulk_create([
-            AgentActivity(kind=rng.choice(('inventory', 'confirm', 'scan', 'hygiene', 'validate', 'changes')), message=f'Synthetic activity {i} on h{i % n_hosts}.t{i % TARGETS}.example.com',
+            AgentActivity(kind=rng.choice(('inventory', 'confirm', 'scan', 'hygiene', 'validate', 'changes')), message=f'Synthetic activity {i} on h{i % n_hosts}.{pfx}t{i % TARGETS}.example.com',
                           status=rng.choice(('done', 'done', 'done', 'running', 'failed')), project=project, detail={}) for i in range(3000)], batch_size=2000)
 
         StatsSnapshot.objects.bulk_create([
