@@ -5,17 +5,22 @@
 let ACTIVE = null;
 export const activeElement = () => ACTIVE;
 
-const SIMPLE = /^([a-z0-9*]*)((?:\[[a-z-]+(?:="?[^"\]]*"?)?\])*)$/i;
-
+// "tag[a][b=v]": the tag, then bracketed attribute tests read one by one (no regular expression over the whole selector)
 function matchesOne(el, selector) {
-  const m = SIMPLE.exec(selector.trim());
-  if (!m) throw new Error(`fake dom: unsupported selector ${selector}`);
-  const [, tag, rest] = m;
+  const text = selector.trim();
+  const open = text.indexOf("[");
+  const tag = open < 0 ? text : text.slice(0, open);
+  if (!/^[a-z0-9*]*$/i.test(tag)) throw new Error(`fake dom: unsupported selector ${selector}`);
   if (el.nodeType !== 1) return false;
   if (tag && tag !== "*" && el.tagName.toLowerCase() !== tag.toLowerCase()) return false;
-  for (const [, name, value] of rest.matchAll(/\[([a-z-]+)(?:="?([^"\]]*)"?)?\]/gi)) {
+  let rest = open < 0 ? "" : text.slice(open);
+  while (rest) {
+    const close = rest.indexOf("]");
+    if (!rest.startsWith("[") || close < 0) throw new Error(`fake dom: unsupported selector ${selector}`);
+    const [name, value] = rest.slice(1, close).split("=");
     if (!el.hasAttribute(name)) return false;
-    if (value !== undefined && el.getAttribute(name) !== value) return false;
+    if (value !== undefined && el.getAttribute(name) !== value.replace(/^"|"$/g, "")) return false;
+    rest = rest.slice(close + 1);
   }
   return true;
 }
