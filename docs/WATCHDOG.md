@@ -40,7 +40,7 @@ Every rule has the same gates, in this order: the switches, standing down, **hys
 
 | Rule | Symptom | After | Action | Gap / caps |
 | --- | --- | --- | --- | --- |
-| **R1 Workers answer** | a lane does not answer, or answers without its queue (any of the four) | 3 min | recreate `celery` (and the scanner and Tailscale sidecar that share its network) through the host; once it is verified, return the unacknowledged messages no worker holds to their queues | 15 min, 2 an hour, 4 a day |
+| **R1 Workers answer** | a lane does not answer, or answers without its queue (any of the four) | 3 min | recreate `celery` (and the scanner and Tailscale sidecar that share its network) through the host; once it is verified, return the unacknowledged messages no worker holds to their queues | 15 min, 2 an hour, 16 a day |
 | **R2 Workers take their work** | a lane answers, its queue grows and no task finishes for 10 min, **and its pool has free slots** (a pool full of long scans is busy, not hung) | 10 min | the same as R1 | same |
 | **R3 Hosts assessed at once is not starved** | the discovery ceiling is below the auto-tune minimum (4) while host assessments wait and Sentinels have free slots and nothing queued | 2 min | raise it to 4 through the saved layer, **only when `.env` pins it** (see below) | 10 min, 3 an hour, 10 a day |
 | **R4 Idle Sentinels are fed** | live Sentinels with free slots, nothing queued for them and checks due | 5 min | run `feed_sentinels` in the tick itself (not through Celery), and `work_planner.tick()` ([the work planner](PIPELINE.md#the-work-planner)), which queues the due SSH and secrets checks; "checks due" counts the planner's ready checks as well | 10 min, 4 an hour |
@@ -82,7 +82,7 @@ Every action is followed by a check. For a host action the clock starts when the
 | `CVENGINE_WATCHDOG=0` | `.env` or the environment of the host and the web container | unset (on) |
 | `CVENGINE_WATCHDOG_SECONDS` | the host watcher's tick interval, for tests | 30 |
 
-The host keeps limits of its own whatever the web side asks: at least 10 minutes between two restarts of one kind (30 for the prune) and 8 restarts a day (`$STATE/watchdog-actions.log`), so a bug in the web side cannot loop restarts. `$STATE/watchdog.log` (private to the host, trimmed to 1 MB) records every action and every failed tick; `$STATE` is `git rev-parse --git-path cvengine-update`.
+The host keeps limits of its own whatever the web side asks: at least 10 minutes between two restarts of one kind (30 for the prune) and 24 restarts a day (`$STATE/watchdog-actions.log`), so a bug in the web side cannot loop restarts. `$STATE/watchdog.log` (private to the host, trimmed to 1 MB) records every action and every failed tick; `$STATE` is `git rev-parse --git-path cvengine-update`.
 
 ## What it does not do
 

@@ -34,6 +34,9 @@ from cveFeed import watchdog_snapshot as snapshot
 logger = logging.getLogger(__name__)
 
 TICK_SECONDS = 25            # a tick ends itself after this long (the command kills the process a little later, the host script a little later still)
+# R1 and R2 may act 16 times a day (not 4): a worker container that crashes every quarter of an hour needs a restart each time it goes silent, and a rule that has
+# used its day leaves a hung lane hung (the owner's server, 2026-11-09: the cap of 4 was spent by 9:28 am and a lane stood silent for 50 minutes). The loop
+# protection is the flap guard (an action that did not fix it holds the rule for an hour), the 15 minute gap and the host's own limit.
 VERIFY_SECONDS = 120         # R10: the check that follows an action
 HOST_WAIT_SECONDS = 600      # a host request nobody carried out in this long is a watchdog that is not running on the host
 HOLD_SECONDS = 3600          # R10: after an action that did not work, nothing more for this rule for this long
@@ -505,10 +508,10 @@ def act_stalled(ctx, chk):
 
 
 RULES = [
-    Rule('R1', 'Workers answer', 'Recreates the celery container (through the host) when a lane has not answered for 3 minutes.', 180, 900, 2, 4, check_lanes,
+    Rule('R1', 'Workers answer', 'Recreates the celery container (through the host) when a lane has not answered for 3 minutes.', 180, 900, 2, 16, check_lanes,
          host_action='restart-celery', next_step='run `docker compose restart celery` on the server, then read `docker compose logs --tail 100 celery`',
          notice_title='The workers stopped answering', doing='restarting the workers'),
-    Rule('R2', 'Workers take their work', 'Recreates the celery container when a lane answers but its queue grows and nothing finishes for 10 minutes.', 60, 900, 2, 4, check_hung,
+    Rule('R2', 'Workers take their work', 'Recreates the celery container when a lane answers but its queue grows and nothing finishes for 10 minutes.', 60, 900, 2, 16, check_hung,
          host_action='restart-celery', next_step='run `docker compose restart celery`, then read `docker compose logs --tail 100 celery`', notice_title='A worker lane took no work', doing='restarting the workers'),
     Rule('R3', 'Hosts assessed at once is not starved', 'Raises a too-small discovery pool to the auto-tune minimum while hosts wait and Sentinels idle (never a value a person saved).', 120, 600, 3, 10,
          check_pool, act=act_pool, notice_title='Hosts assessed at once was held too low'),
