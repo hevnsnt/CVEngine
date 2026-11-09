@@ -43,7 +43,7 @@ def create_token(user, name, read_only=False, expires_at=None, scope=SCOPE_FULL,
         raise ValueError(f'unknown token scope {scope!r}')
     raw = TOKEN_PREFIX + secrets.token_urlsafe(32)
     token = ApiToken.objects.create(
-        user=user, name=name[:100], key_hash=hash_token(raw), prefix=raw[:8],
+        user=user, name=name[:100], key_hash=hash_token(raw), prefix=raw[:4], suffix=raw[-2:],
         read_only=read_only, expires_at=expires_at, scope=scope, project=project)
     return token, raw
 

@@ -211,6 +211,28 @@ test('Sentinel page renders OpenVAS running, due and deferred hosts with reasons
   assert.match(sentinelSource, /if \(data\.openvas\) mount\.append\(openvasQueue\(data\.openvas\)\)/);
 });
 
+test('the OpenVAS queue card shows the server\'s summary line above the collapsed Not due list, and the per-host list stays', () => {
+  const panel = openvasQueue({
+    running: null, next: [],
+    not_due: [{host: 'a.example.test', project: 'north', reason: 'not Fire or Smoke (ice): x'}, {host: 'b.example.test', project: 'north', reason: 'scanned 1 day ago; due again after a week'}],
+    counts: {next: 0, not_due: 33},
+    not_due_summary: '33 not due: 20 not Fire or Smoke, 8 scanned this week, 5 on shared platforms',
+  });
+  const walk = (n, out = []) => { if (typeof n === 'string') return out; out.push(n); (n.children || []).forEach((c) => walk(c, out)); return out; };
+  const nodes = walk(panel);
+  const summary = nodes.find((n) => n.cls === 'note sl-openvas-summary');
+  assert.equal(summary.text, '33 not due: 20 not Fire or Smoke, 8 scanned this week, 5 on shared platforms');
+  const details = nodes.find((n) => n.tag === 'details');
+  assert.ok(nodes.indexOf(summary) < nodes.indexOf(details), 'the summary is above the list');
+  assert.ok(!sentinelText(details).includes('20 not Fire or Smoke'), 'the summary is not inside the collapsed list');
+  assert.match(sentinelText(details), /Not due \(33\)/);
+  assert.match(sentinelText(details), /a\.example\.test.*not Fire or Smoke \(ice\): x/);
+  const none = openvasQueue({running: null, next: [], not_due: [], counts: {next: 0, not_due: 0}, not_due_summary: ''});
+  assert.ok(!walk(none).some((n) => n.cls === 'note sl-openvas-summary'));
+  const old = openvasQueue({running: null, next: [], not_due: [{host: 'c.example.test', project: 'p', reason: 'r'}], counts: {next: 0, not_due: 1}});  // a server that sends no summary
+  assert.ok(!walk(old).some((n) => n.cls === 'note sl-openvas-summary'));
+});
+
 test('the Sentinel card shows how busy its slots were in the last hour', () => {
   const bar = utilisationBar({utilisation_1h: 0.4237, tasks_1h: 7, wait_p50_seconds: 2.4, wait_p95_seconds: 31});
   const meter = bar.children[0];

@@ -2028,6 +2028,7 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .sl-openvas-list li b,.sl-openvas-deferred li b{overflow-wrap:anywhere;font-weight:var(--fw-semi)}
 .sl-openvas-list li>span:not(.badge),.sl-openvas-deferred li>span:not(.badge){color:var(--muted)}
 .sl-openvas-reason{width:100%}
+.sl-openvas .sl-openvas-summary{margin:var(--s-2) 0 var(--s-1);font-weight:var(--fw-semi)}
 .sl-openvas-deferred{border-top:1px solid var(--line);padding-top:var(--s-2)}
 .sl-openvas-deferred summary{cursor:pointer;font:var(--fw-semi) var(--fs-1) var(--mono);margin-bottom:var(--s-2)}
 .sl-openvas .note{margin:var(--s-2) 0 0;font-size:var(--fs-1)}
@@ -2586,7 +2587,7 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 .api-keys-page .api-ro label{margin:0}
 .api-keys-page .api-ro .note{grid-column:1/-1;margin:0}
 .api-keys-page #secret{margin-top:var(--s-3)}
-.api-keys-page .tok-row{display:flex;justify-content:space-between;align-items:center;gap:var(--s-3)}
+.api-keys-page .tok-hint{font-family:var(--mono);white-space:nowrap}
 .api-keys-page .seg{display:flex;gap:var(--s-1);flex-wrap:wrap;margin-bottom:var(--s-3)}
 .api-keys-page .seg-btn{min-height:36px;padding:0 var(--s-3);border:1px solid var(--line);border-radius:var(--r);background:transparent;color:var(--ink);font:inherit;cursor:pointer}
 .api-keys-page .seg-btn[aria-selected="true"]{background:var(--ink);color:var(--on-ink)}
