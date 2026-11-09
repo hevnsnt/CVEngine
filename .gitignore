@@ -69,6 +69,8 @@ web/.update-branch
 web/.update-branch.tmp
 web/.update-mode
 web/.update-mode.tmp
+web/.update-wait-scans
+web/.update-wait-scans.tmp
 web/.update-log
 web/.update-lock
 web/.update-requeue.json

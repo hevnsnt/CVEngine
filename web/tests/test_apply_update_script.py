@@ -143,6 +143,10 @@ class ApplyUpdateScriptTests(unittest.TestCase):
     def approved(self):
         return (self.work / 'web' / '.update-approved').exists()
 
+    def wait_for_scans(self):
+        """Settings > Updates > "Wait for scans to finish before updating" turned on: the old drain, which waits for every running scan."""
+        (self.work / 'web' / '.update-wait-scans').write_text('1\n')
+
     def test_nothing_happens_without_an_approval(self):
         self.assertEqual(self.run_script().returncode, 0)
         self.assertEqual(self.calls(), [])
@@ -455,6 +459,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertFalse([c for c in self.calls() if ' pull ' in c])
 
     def test_waits_while_scans_are_running_and_keeps_the_approval(self):
+        self.wait_for_scans()  # these assert the old drain, which is now the opt-in; the default is tested in NoWaitForSentinelScansTests
         (self.stub / 'running_count').write_text('2\n')
         self.approve()
         result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
@@ -465,6 +470,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertIn('scan(s) running', (self.work / 'web' / '.update-log').read_text())
 
     def test_waiting_past_the_drain_limit_forces_the_update_ahead(self):
+        self.wait_for_scans()  # these assert the old drain, which is now the opt-in; the default is tested in NoWaitForSentinelScansTests
         # CVENGINE_UPDATE_DRAIN_SECONDS=0: the very first wait is already past the limit, so the update proceeds at once
         # instead of exiting 3, the same way it would after really waiting out the default five minutes.
         (self.stub / 'running_count').write_text('2\n')
@@ -478,6 +484,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertIn('2 scan(s)/job(s)', log)
 
     def test_the_drain_timer_does_not_restart_on_every_poll(self):
+        self.wait_for_scans()  # these assert the old drain, which is now the opt-in; the default is tested in NoWaitForSentinelScansTests
         # the watcher calls this script again every few seconds while waiting; the drain clock must not reset each time,
         # or a scan that never finishes would block forever no matter how low the limit is set.
         (self.stub / 'running_count').write_text('2\n')
@@ -492,6 +499,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(since_file.read_text(), recorded)  # unchanged: still counting from the first wait
 
     def test_waiting_for_scans_does_not_log_the_err_trap_line(self):
+        self.wait_for_scans()  # these assert the old drain, which is now the opt-in; the default is tested in NoWaitForSentinelScansTests
         # exit 3 is an expected, normal "still waiting" control-flow exit under `set -e`, not a command that actually
         # failed; the generic ERR-trap narration ("stopped at line N") must not fire for it on every poll.
         (self.stub / 'running_count').write_text('2\n')
@@ -664,6 +672,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertIn('This update needs about', phase['detail'])
 
     def test_ghost_scans_are_closed_before_the_drain_counts_and_a_real_one_still_waits(self):
+        self.wait_for_scans()  # these assert the old drain, which is now the opt-in; the default is tested in NoWaitForSentinelScansTests
         self.approve()
         (self.stub / 'running_count').write_text('2\n')
         result = self.run_script()
@@ -1047,6 +1056,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         first.wait(timeout=30)
 
     def test_waiting_for_scans_exits_with_3_reports_once_and_keeps_the_approval(self):
+        self.wait_for_scans()  # the old drain is the opt-in now
         (self.stub / 'running_count').write_text('2\n')
         self.approve()
         first = self.run_script()
@@ -1575,6 +1585,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertIn('no valid signature', (self.work / 'web' / '.update-log').read_text())
 
     def test_the_drain_limit_is_read_from_dot_env_where_cron_cannot_set_the_environment(self):
+        self.wait_for_scans()  # the old drain is the opt-in now
         (self.work / '.env').write_text('CVENGINE_UPDATE_DRAIN_SECONDS=0\n')
         (self.stub / 'running_count').write_text('2\n')
         self.approve()
@@ -1854,3 +1865,98 @@ class HostUpdaterInstallTests(unittest.TestCase):
         # the watcher is installed before the success exit of the readiness loop, which polls with `sleep 5` or `sleep "$poll_seconds"`
         self.assertLess(update.index('install-updater.sh'), re.search(r'exit 0\n    fi\n    sleep (5|"\$poll_seconds")', update).start())
         self.assertIn('Could not install the update watcher', update)
+
+
+@unittest.skipUnless(SCRIPTS.joinpath('apply-update.sh').is_file() and shutil.which('git') and shutil.which('flock'),
+                     'needs the repository scripts directory, git and flock')
+class NoWaitForSentinelScansTests(unittest.TestCase):
+    """An update does not wait for scans that run on Sentinels: it counts only work on this server, gives it 30 seconds to settle and 60 at most,
+    unless \"Wait for scans to finish before updating\" is on. (The docker stub answers the count; the queries themselves are run against a database in
+    tests.test_update_no_wait.)"""
+
+    # the fixture and helpers of the class above, without its tests
+    setUp, git, approve, run_script, calls, head, approved, wait_for_scans = (
+        ApplyUpdateScriptTests.setUp, ApplyUpdateScriptTests.git, ApplyUpdateScriptTests.approve, ApplyUpdateScriptTests.run_script,
+        ApplyUpdateScriptTests.calls, ApplyUpdateScriptTests.head, ApplyUpdateScriptTests.approved, ApplyUpdateScriptTests.wait_for_scans)
+
+    def drain_file(self):
+        return Path(self.git('rev-parse', '--absolute-git-dir', cwd=self.work)) / 'cvengine-update' / 'draining-since'
+
+    def test_nothing_running_on_this_server_goes_straight_ahead(self):
+        (self.stub / 'running_count').write_text('0\n')  # scans that wait on Sentinels are not in this count
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.head(), self.new)
+        self.assertNotIn('waiting', (self.work / 'web' / '.update-log').read_text())
+
+    def test_the_default_asks_for_the_server_side_count_and_the_opt_in_for_every_scan(self):
+        (self.stub / 'running_count').write_text('0\n')
+        self.approve()
+        self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        asked = ' '.join(self.calls())
+        self.assertIn('SentinelTask', asked)
+        self.assertIn('StageRun', asked)
+
+    def test_the_opt_in_asks_for_every_scan(self):
+        (self.stub / 'running_count').write_text('0\n')
+        self.wait_for_scans()
+        self.approve()
+        self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertNotIn('SentinelTask', ' '.join(self.calls()))
+
+    def test_work_on_this_server_settles_and_the_log_says_sentinel_scans_are_not_waited_for(self):
+        (self.stub / 'running_count').write_text('1\n')
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 3)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('settling: 1 job(s) running on this server', log)
+        self.assertIn('scans on Sentinels are not waited for', log)
+        phase = json.loads((self.work / 'web' / '.update-phase.json').read_text())
+        self.assertEqual((phase['phase'], phase['scans_running']), ('draining', 1))
+        self.assertIn('Scans on Sentinels are not waited for', phase['detail'])
+
+    def test_the_hard_cap_is_sixty_seconds_whatever_the_drain_setting_says(self):
+        (self.stub / 'running_count').write_text('1\n')
+        self.approve()
+        first = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml', CVENGINE_UPDATE_DRAIN_SECONDS='100000')
+        self.assertEqual(first.returncode, 3)
+        import time
+        self.drain_file().write_text(str(int(time.time()) - 61))  # it has settled for 61 seconds
+        second = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml', CVENGINE_UPDATE_DRAIN_SECONDS='100000')
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(self.head(), self.new)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('forcing ahead: 1 job(s) on this server were still running', log)
+        self.assertIn('hand them over when this server is back', log)
+
+    def test_a_lower_setting_shortens_the_settle(self):
+        (self.stub / 'running_count').write_text('1\n')
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml', CVENGINE_UPDATE_DRAIN_SECONDS='0')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_with_the_opt_in_the_same_elapsed_time_is_still_waiting(self):
+        import time
+        (self.stub / 'running_count').write_text('1\n')
+        self.wait_for_scans()
+        self.approve()
+        self.assertEqual(self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml').returncode, 3)
+        self.drain_file().write_text(str(int(time.time()) - 100))  # past the 60 seconds, inside the old five minutes
+        again = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(again.returncode, 3, again.stdout + again.stderr)
+        self.assertEqual(self.head(), self.prev)
+
+    def test_the_state_helper_reads_the_opt_in_without_following_a_link(self):
+        def read():
+            return subprocess.run(['python3', str(SCRIPTS / 'update-state.py'), 'wait-scans'], cwd=self.work, env=self.env, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(read(), '0')
+        self.wait_for_scans()
+        self.assertEqual(read(), '1')
+        flag = self.work / 'web' / '.update-wait-scans'
+        flag.unlink()
+        victim = self.tmp / 'host-file'
+        victim.write_text('1\n')
+        flag.symlink_to(victim)
+        self.assertEqual(read(), '0')  # a link planted by the web container is not read

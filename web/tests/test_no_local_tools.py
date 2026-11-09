@@ -45,6 +45,7 @@ ALLOWED = {
         'agentapi/mcp.py',
         'agentapi/models.py',
         'agentapi/rest.py',
+        'agentapi/sentinel_adopt.py',  # the kind name as a data key of the adopter registry and in its docstring: files a Sentinel's result, runs nothing
         'agentapi/sentinel_broker.py',
         'agentapi/sentinel_dispatch.py',
         'agentapi/services.py',
@@ -183,6 +184,7 @@ ALLOWED = {
         'agentapi/mcp.py',
         'agentapi/models.py',
         'agentapi/rest.py',
+        'agentapi/sentinel_adopt.py',  # the kind name as a data key of the adopter registry and in its docstring: files a Sentinel's result, runs nothing
         'agentapi/sentinel_broker.py',
         'agentapi/sentinel_dispatch.py',
         'agentapi/system_status.py',  # 1.3.4 egress status (develop): a docstring naming the tools counted from their probe plan, runs nothing
@@ -248,6 +250,7 @@ ALLOWED = {
     'bbot': [
         'agentapi/mcp.py',  # 1.4 T8: user-facing tool descriptions that name the discovery tool (share lines with other tool words), runs nothing
         'agentapi/rest.py',  # 1.4 T8: user-facing route descriptions that name the discovery tool (share lines with other tool words), runs nothing
+        'agentapi/sentinel_adopt.py',  # the kind name as a data key of the adopter registry and in its docstring: files a Sentinel's result, runs nothing
         'agentapi/sentinel_broker.py',  # 1.4 bbot on a Sentinel: the run's time budget and the secure read of its module keys, runs nothing
         'agentapi/sentinel_policy.py',  # 1.4 bbot on a Sentinel: the kind's label, runs nothing
         'agentapi/services.py',  # 1.4 T8: finding kind 'bbot' (a stored data value) and text shared with other tool words, runs nothing
