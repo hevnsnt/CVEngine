@@ -421,6 +421,66 @@ def links_for(project_ids):
     return sorted(out, key=lambda l: l.project_id)
 
 
+# Why a host is not due, grouped for the one line above the queue's "Not due" list ("33 not due: 20 not Fire or Smoke, 8 scanned this week").
+# The reasons are the per-host sentences ``assess`` writes; this table maps each to a stable key and the words that follow its count. First match wins.
+# A reason that matches nothing is counted under ``other``, so a new sentence in ``assess`` never goes missing from the totals.
+SHARED_MARKERS = ('a CDN edge', 'a third-party platform', 'a platform other tenants share')
+QUEUE_REASONS = (
+    ('not_fire_smoke', lambda r: r.startswith('not Fire or Smoke'), 'not Fire or Smoke'),
+    ('scanned_this_week', lambda r: r.startswith('scanned ') and 'due again after a week' in r, 'scanned this week'),
+    ('shared_platform', lambda r: r.startswith(SHARED_MARKERS), 'on shared platforms'),
+    ('failed_lately', lambda r: r.startswith((INCONCLUSIVE, 'could not be scanned', 'OpenVAS was interrupted')), 'failed or interrupted lately'),
+    ('excluded', lambda r: r == 'excluded from scanning', 'excluded from scanning'),
+    ('bug_bounty', lambda r: r.startswith('bug bounty:'), 'held back by bug bounty scope'),
+    ('manual_only', lambda r: r.startswith('the target is set to manual only'), 'on manual only targets'),
+    ('single_host_target', lambda r: r.startswith('its target is set to this host only'), 'under a single host target'),
+    ('no_usable_address', lambda r: r.startswith(('a scanner may not be pointed', 'the name does not resolve', 'no address is recorded'))
+     or r.endswith("not the project's to test"), 'with no address a scanner may use'),
+    ('same_address', lambda r: r.startswith('the same address as'), 'sharing an address with another host'),
+    ('not_in_project', lambda r: r == 'not a host of this project', 'not hosts of this project'),
+)
+OTHER_REASON = ('other', 'for other reasons')
+
+
+def reason_group(reason):
+    """``(key, words)`` of the group a not-due reason belongs to (``QUEUE_REASONS``), ``other`` when none matches."""
+    text = str(reason or '').strip()
+    for key, matches, words in QUEUE_REASONS:
+        if matches(text):
+            return key, words
+    return OTHER_REASON
+
+
+def group_reasons(reasons):
+    """``[{'key', 'words', 'count'}]`` for a list of reason strings: the biggest group first, ties in table order, ``other`` last among equals."""
+    counts = {}
+    for reason in reasons:
+        key, words = reason_group(reason)
+        counts.setdefault(key, {'key': key, 'words': words, 'count': 0})['count'] += 1
+    return _biggest_first(counts.values())
+
+
+def _biggest_first(groups):
+    order = {key: i for i, (key, _m, _w) in enumerate(QUEUE_REASONS)}
+    order[OTHER_REASON[0]] = len(order)
+    return sorted(groups, key=lambda g: (-g['count'], order[g['key']]))
+
+
+def not_due_summary(groups):
+    """``33 not due: 20 not Fire or Smoke, 8 scanned this week, 5 on shared platforms``, or ``''`` when nothing is not due."""
+    total = sum(g['count'] for g in groups)
+    return f'{total} not due: ' + ', '.join(f'{g["count"]} {g["words"]}' for g in groups) if total else ''
+
+
+def _explained(link):
+    """One project's explanation as the queue keeps it for a minute: up to 100 ready and 100 refused rows to draw, and the exact totals over ALL rows (a cap on the rows
+    must not become a cap on the counts): ``ready``, ``refused`` and the reasons of the refused ones grouped."""
+    rows = explain(link)
+    refused = [r for r in rows if not r['ready']]
+    ready = [r for r in rows if r['ready']]
+    return {'rows': ready[:100] + refused[:100], 'ready': len(ready), 'refused': len(refused), 'groups': group_reasons(r['reason'] for r in refused)}
+
+
 def overview(project_ids, limit=12):
     """The OpenVAS queue for the Sentinels page, over the projects the viewer may read: the run in progress, the hosts due next in scan order
     and the hosts that are not due, each with the reason in plain words (Fire or Smoke only; never a CDN or a shared platform; scanned three days
@@ -430,17 +490,22 @@ def overview(project_ids, limit=12):
     if not OpenvasSettings.current().enabled:
         return None
     run = OpenvasRun.objects.filter(status='running', project_id__in=project_ids).select_related('project').first()
-    rows = []
+    rows, ready_total, refused_total, groups = [], 0, 0, {}
     for link in links_for(project_ids):
-        found = cache.get_or_set(f'openvas-explain:{link.project_id}', lambda link=link: explain(link)[:100], 60)
-        rows += [{**r, 'project': link.project.slug} for r in found]
+        found = cache.get_or_set(f'openvas-queue:{link.project_id}', lambda link=link: _explained(link), 60)
+        rows += [{**r, 'project': link.project.slug} for r in found['rows']]
+        ready_total, refused_total = ready_total + found['ready'], refused_total + found['refused']
+        for g in found['groups']:
+            groups.setdefault(g['key'], {**g, 'count': 0})['count'] += g['count']
     ready = [r for r in rows if r['ready']]
     refused = [r for r in rows if not r['ready']]
+    summary_groups = _biggest_first(groups.values())
     return {'running': ({'run': run.pk, 'project': run.project.slug, 'hosts': sorted(run.hosts.values()), 'progress': run.progress, 'status': run.gvm_status,
                          'started_at': run.started_at.isoformat(), 'budget_hours': budget_hours(len(run.hosts)), 'via': 'sentinel' if run.sentinel_task_id else 'local'}  # a run with no Sentinel task is a closed one from an earlier version
                         if run else None),
             'hosts_per_task': max_hosts(), 'budget_hours_per_host': max_hours(), 'max_checks': int(task_preferences()['max_checks']),
-            'next': ready[:limit], 'not_due': refused[:limit], 'counts': {'next': len(ready), 'not_due': len(refused)}}
+            'next': ready[:limit], 'not_due': refused[:limit], 'counts': {'next': ready_total, 'not_due': refused_total},
+            'not_due_groups': summary_groups, 'not_due_summary': not_due_summary(summary_groups)}
 
 
 def next_batch(link, resolve=None, blocked=None):

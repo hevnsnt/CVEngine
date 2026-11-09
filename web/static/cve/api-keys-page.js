@@ -1,6 +1,7 @@
 // The API keys page: create a token, connect an agent with it, list and revoke tokens, the agents on them.
 import { api, button, copyText, el, toast } from "/staticfiles/cve/ui.js";
 import { TABS, createCard } from "/staticfiles/cve/connect-card-logic.js";
+import { renderTokenList } from "/staticfiles/cve/api-keys-list.js";
 
 const card = createCard(window.location.origin);
 const $ = (id) => document.getElementById(id);
@@ -67,18 +68,8 @@ function dismiss() {
 }
 
 function renderTokens(items) {
-  const list = $("list");
-  list.textContent = "";
-  const live = items.filter((t) => !t.revoked);
-  $("none").style.display = live.length ? "none" : "";
-  live.forEach((t) => {
-    const li = el("li", "tok-row");
-    const left = el("div");
-    left.append(el("span", "cve-id", t.name));
-    left.append(el("div", "meta", `${t.prefix}...  ${t.scope === "inventory" ? `host reporter for ${t.project}  ` : ""}${t.read_only ? "read only  " : ""}${t.last_used ? `used ${t.last_used.slice(0, 10)}` : "never used"}`));
-    li.append(left, button("Revoke", async () => { await api("DELETE", `/api/v1/tokens/${t.id}`); await loadTokens(); }, "btn ghost"));
-    list.append(li);
-  });
+  const count = renderTokenList($("list"), items, async (t) => { await api("DELETE", `/api/v1/tokens/${t.id}`); await loadTokens(); });
+  $("none").style.display = count ? "none" : "";
 }
 
 async function loadTokens() { renderTokens((await api("GET", "/api/v1/tokens")).results || []); }

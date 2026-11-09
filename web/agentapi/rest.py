@@ -3,6 +3,8 @@ import json
 import logging
 import re
 
+from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.http import JsonResponse
 from django.http.response import HttpResponseBase
 
@@ -65,27 +67,42 @@ def _session_only(request):
 
 
 def tokens_list(request, ctx, **_):
+    """The caller's tokens, newest first. Only the first 4 and last 2 characters of a token are ever sent (``hint``); ``prefix`` stays for older clients and is cut to 4."""
     _session_only(request)
-    return {'results': [{'id': t.id, 'name': t.name, 'prefix': t.prefix, 'read_only': t.read_only,
+    return {'results': [{'id': t.id, 'name': t.name, 'prefix': t.prefix[:4], 'suffix': t.suffix[-2:], 'hint': t.hint, 'read_only': t.read_only,
                          'scope': t.scope, 'project': t.project.slug if t.project_id else None,
                          'expires': t.expires_at.isoformat() if t.expires_at else None,
                          'created': t.created_at.isoformat(), 'last_used': t.last_used_at.isoformat() if t.last_used_at else None,
-                         'revoked': t.revoked} for t in ctx.user.api_tokens.select_related('project').order_by('-id')]}
+                         'revoked': t.revoked} for t in ctx.user.api_tokens.select_related('project').order_by('-created_at', '-id')]}
+
+
+def _name_taken(user, name):
+    """Whether this user already has a live token with this name (case and surrounding spaces ignored). Revoked tokens free their name; older duplicates are left alone."""
+    return user.api_tokens.filter(revoked=False, name__iexact=name).exists()
 
 
 def tokens_create(request, ctx, **_):
     _session_only(request)
     data = _body(request)
     (name,) = _need(data, 'name')
-    scope = data.get('scope', auth.SCOPE_FULL)
-    if scope not in auth.USER_TOKEN_SCOPES:  # a misspelt scope must never quietly become a full token; a sentinel token only comes from an enrollment
-        raise ApiError(400, f'scope must be one of {", ".join(auth.USER_TOKEN_SCOPES)}')
-    if scope == auth.SCOPE_INVENTORY:  # a host reporter's token: one project, inventory reports only
-        return inventory.create_token(ctx, str(data.get('project') or ''), name), 201
-    token, raw = create_token(ctx.user, str(name), read_only=bool(data.get('read_only')))
-    audit.record_for_user(ctx.user, 'token.create', ctx.user, token=token.prefix, read_only=token.read_only)
-    return {'id': token.id, 'name': token.name, 'read_only': token.read_only,
-            'token': raw, 'note': 'Store this now. It is not shown again.'}, 201
+    name = str(name).strip()[:100]
+    if not name:
+        raise ApiError(400, 'missing field(s): name')
+    with transaction.atomic():
+        # the user's row is the lock, so two requests with one name at once cannot both pass the check
+        get_user_model().objects.select_for_update().filter(pk=ctx.user.pk).first()
+        scope = data.get('scope', auth.SCOPE_FULL)
+        if scope not in auth.USER_TOKEN_SCOPES:  # a misspelt scope must never quietly become a full token; a sentinel token only comes from an enrollment
+            raise ApiError(400, f'scope must be one of {", ".join(auth.USER_TOKEN_SCOPES)}')
+        # a host reporter's token is renewed by making a new one under the same default name, so the rule is for the keys made on the API keys page
+        if scope != auth.SCOPE_INVENTORY and _name_taken(ctx.user, name):  # two keys with one name cannot be told apart in the list, and the one to revoke is then a guess
+            raise ApiError(409, f'You already have an API key named "{name}". Pick another name, or revoke the old one first.')
+        if scope == auth.SCOPE_INVENTORY:  # a host reporter's token: one project, inventory reports only
+            return inventory.create_token(ctx, str(data.get('project') or ''), name), 201
+        token, raw = create_token(ctx.user, name, read_only=bool(data.get('read_only')))
+        audit.record_for_user(ctx.user, 'token.create', ctx.user, token=token.prefix, read_only=token.read_only)
+        return {'id': token.id, 'name': token.name, 'read_only': token.read_only,
+                'token': raw, 'note': 'Store this now. It is not shown again.'}, 201
 
 
 def tokens_revoke(request, ctx, token_id, **_):
