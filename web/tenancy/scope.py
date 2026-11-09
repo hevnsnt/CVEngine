@@ -70,6 +70,7 @@ SCOPES = {
     'cveFeed.RdpScreenshot': 'project_id',
     'cveFeed.HostScreenshot': 'project_id',
     'cveFeed.TriageCall': 'project_id',
+    'cveFeed.PlannerBatch': 'project_id',  # the work planner's own bookkeeping of the batches it queued (cveFeed.work_planner)
     'cveFeed.AIJob': 'project_id',  # a pipeline model call the AI reviewer container makes (cveFeed.ai_jobs); a CVE-wide one has none
     'cveFeed.DeferredRetest': 'project_id',
     'cveFeed.OnDemandValidation': 'project_id',

@@ -17,7 +17,7 @@ globalThis.document = {getElementById: () => null, querySelector: () => null, qu
 globalThis.window = globalThis;
 globalThis.localStorage = {getItem: () => null, setItem() {}, removeItem() {}};
 
-const {actionsFor, routingText, stageRunsText, stateLine} = await import('../static/cve/sentinel-live.js');
+const {actionsFor, plannerRows, routingText, stageRunsText, stateLine} = await import('../static/cve/sentinel-live.js');
 const NOTE = 'Sentinel "old-box" (#1) of the same user was revoked on 2026-03-02. Reinstate this one to use it, and reinstate or delete #1 so new agents start normally';
 
 test('a suspended Sentinel reads "Suspended: <reason>", never idle', () => {
@@ -80,4 +80,22 @@ test('the routing sentence says the built-in scanner is the last resort and how 
   assert.doesNotMatch(text, /No external Sentinel is set up/);
   assert.match(routingText({...base, externals: 0, builtin_24h: 7, external_24h: 0}), /No external Sentinel is set up, so the built-in scanner does all the scanning\.$/);
   assert.match(routingText({...base, builtin_24h: 0, external_24h: 0}), /No task was finished by a Sentinel in the last 24 hours\./);
+});
+
+test('the planner line and the due table come from the server and nothing else', () => {
+  const planner = {enabled: true, line: 'Planner: queued 25 SSH checks and 40 secret checks, 3,102 hosts still due for secret checks, next run in 40 s',
+    kinds: [{label: 'SSH checks', applicable: 1217, due: 949, awaiting: 0, in_flight: 25}, {label: 'secret checks', applicable: 2815, due: 3102, awaiting: 12, in_flight: 40}]};
+  const out = plannerRows(planner);
+  assert.equal(out.line, planner.line);
+  assert.deepEqual(out.head, ['Check', 'Applies to', 'Due', 'Waiting for the route check', 'Queued or running']);
+  assert.deepEqual(out.rows[0], ['SSH checks', '1,217', '949', '0', '25']);
+  assert.deepEqual(out.rows[1], ['secret checks', '2,815', '3,102', '12', '40']);
+});
+
+test('a planner that is off shows its line and no table, and an older server shows nothing', () => {
+  const off = plannerRows({enabled: false, line: 'Planner: off (Settings, Work planner). Sentinels only get work from scans.', kinds: [{label: 'SSH checks', applicable: 1, due: 1, awaiting: 0, in_flight: 0}]});
+  assert.match(off.line, /^Planner: off/);
+  assert.deepEqual(off.rows, []);
+  assert.equal(plannerRows(null), null);
+  assert.equal(plannerRows({enabled: true, line: ''}), null);
 });

@@ -1296,10 +1296,57 @@ def total_slots(now=None):
     return total
 
 
-def waiting_tasks(now=None):
-    """Tasks queued for a Sentinel, not yet claimed (one that waited longer than any task is kept in the queue is an orphan, not work waiting)."""
+PLANNER_PRIORITY = 0  # the priority of a task the work planner queued (``cveFeed.work_planner``): below every scan stage (1), smoke (2) and fire (3), so a Sentinel takes it last
+
+
+def waiting_tasks(now=None, planner=True):
+    """Tasks queued for a Sentinel, not yet claimed (one that waited longer than any task is kept in the queue is an orphan, not work waiting).
+    ``planner=False`` leaves out what the work planner queued (``PLANNER_PRIORITY``): the host assessment feed asks that way, so the planner's own
+    backlog never makes it believe the Sentinels have enough first-pass work."""
     now = now or timezone.now()
-    return SentinelTask.objects.filter(status='queued', created_at__gte=now - max(queued_ttl(k) for k in SentinelTask.KINDS)).count()
+    rows = SentinelTask.objects.filter(status='queued', created_at__gte=now - max(queued_ttl(k) for k in SentinelTask.KINDS))
+    return (rows if planner else rows.exclude(priority=PLANNER_PRIORITY)).count()
+
+
+def planner_capacity(kinds, now=None):
+    """What the work planner needs to know about the Sentinels, in a fixed number of queries: ``{'live', 'free_total', 'held_total', 'queued_total',
+    'queued_planner', 'queued': {kind: n}, 'agents': [...], 'kinds': {kind: {'sentinels', 'slots', 'free'}}}``. A kind's ``sentinels`` are the live
+    Sentinels that may take it (``SentinelEff.caps``: declared, not denied by policy, not withheld after repeated failures, and a contract version that can
+    run it, ``sentinel_contract.can_run``); ``slots`` their concurrency for it (a per-kind cap narrows it) and ``free`` the part of it not held now. The built-in
+    scanner is the last resort: while an external Sentinel can take a kind it adds nothing to that kind (as ``capacity_state`` counts). Call it inside
+    ``memoised_rights`` when several answers are wanted together."""
+    now = now or timezone.now()
+    live = _live_scanners(now)
+    held, held_kind = {}, {}
+    for agent_id, task_kind, n in (SentinelTask.objects.filter(agent__in=[e.agent for e in live], status__in=('claimed', 'running'))
+                                   .values_list('agent_id', 'kind').annotate(n=Count('id'))):
+        held[agent_id] = held.get(agent_id, 0) + n
+        held_kind[(agent_id, task_kind)] = n
+    queued = {}
+    fresh = SentinelTask.objects.filter(status='queued', created_at__gte=now - max(queued_ttl(k) for k in SentinelTask.KINDS))
+    for task_kind, n in fresh.order_by().values_list('kind').annotate(n=Count('id')):
+        queued[task_kind] = n
+    out_kinds = {}
+    for kind in kinds:
+        able = [e for e in live if kind in e.caps and not (kind in BUILTIN_KINDS and not e.builtin)]
+        outside = [e for e in able if not e.builtin]
+        if outside and len(outside) < len(able) and builtin_fallback_for(kind) and not any(kind in e.preferred for e in able if e.builtin):
+            able = outside
+        slots = free = 0
+        for e in able:
+            room = max(0, e.max_concurrent - held.get(e.agent.pk, 0))
+            size = e.max_concurrent
+            cap = e.kind_caps.get(kind)
+            if cap is not None:
+                room = min(room, max(0, cap - held_kind.get((e.agent.pk, kind), 0)))
+                size = min(size, cap)
+            slots += size
+            free += room
+        out_kinds[kind] = {'sentinels': len(able), 'slots': slots, 'free': free}
+    return {'live': len(live), 'free_total': sum(max(0, e.max_concurrent - held.get(e.agent.pk, 0)) for e in live), 'held_total': sum(held.values()),
+            'queued_total': sum(queued.values()), 'queued_planner': fresh.filter(priority=PLANNER_PRIORITY).count(), 'queued': queued,
+            'agents': [{'id': e.agent.pk, 'name': e.agent.name, 'slots': e.max_concurrent, 'held': held.get(e.agent.pk, 0), 'builtin': e.builtin} for e in live],
+            'kinds': out_kinds}
 
 
 def any_scanner_for(project, kind=None, internal=False, builtin_only=False):
@@ -2958,7 +3005,19 @@ def _live_overview(ctx):
             'heartbeat_every_seconds': broker.HEARTBEAT_SECONDS, 'results': out, 'kinds': activity['kinds'],
             'stage_runs': stage_runs.metrics(now, project_ids=allowed),  # the stages waiting on Sentinels without a worker (the caller's projects)
             'orgs': [{'slug': slug, 'name': name, 'networks': [n for n in networks if n['org'] == slug]} for slug, name in orgs.items()],
-            'openvas': openvas_scan.overview(_viewer_project_ids(ctx.user, allowed))}
+            'openvas': openvas_scan.overview(_viewer_project_ids(ctx.user, allowed)),
+            'planner': _planner_overview(allowed)}
+
+
+def _planner_overview(allowed):
+    """What the work planner is doing, for the Sentinels page (``cveFeed.work_planner.overview``): one plain line and a per-kind table of what is due, over the
+    projects the caller may read. Never breaks the page: an answer that cannot be built is None."""
+    try:
+        from cveFeed import work_planner
+        return work_planner.overview(allowed)
+    except Exception:  # noqa: BLE001 - the planner is one line of the page, not the page
+        logging.getLogger(__name__).warning('the work planner overview could not be built', exc_info=True)
+        return None
 
 
 def _routing(rows):

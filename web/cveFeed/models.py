@@ -2451,3 +2451,28 @@ class SecretScanRules(models.Model):
 
     def __str__(self):
         return "secrets scan rules"
+
+
+class PlannerBatch(models.Model):
+    """One batch of due checks the work planner (``cveFeed.work_planner``) handed to a Sentinel: up to one task's worth of units of one kind of one
+    project's target. The row is the planner's own bookkeeping: what is in flight (so a minute later it does not queue the same units again), what
+    failed (so it backs off), and the audit trail of what it did. ``units`` are the assets (``address:port`` for SSH, a host name for secrets); no
+    credential, secret or finding is ever stored here."""
+
+    STATUSES = ("queued", "running", "done", "failed", "skipped")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+    kind = models.CharField(max_length=32)  # the Sentinel task kind (ssh_probe, secrets_scan)
+    units = models.JSONField(default=list)
+    status = models.CharField(max_length=10, default="queued")
+    detail = models.CharField(max_length=300, blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now, db_default=Now())
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["status", "kind"], name="plannerbatch_status_kind_idx"),
+                   models.Index(fields=["kind", "finished_at"], name="plannerbatch_kind_fin_idx")]
+
+    def __str__(self):
+        return f"planner batch {self.pk}: {self.kind} x{len(self.units or [])} ({self.status})"
