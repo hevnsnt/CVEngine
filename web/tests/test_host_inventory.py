@@ -463,7 +463,7 @@ class EndpointTests(Base):
 		self.assertEqual([r.detail['outcome'] for r in rows], ['new', 'changed'])
 		self.assertEqual(rows[0].org_id, self.org.pk)
 		self.assertNotIn(self.t_alice, json.dumps(rows[0].detail))  # only the prefix that tells tokens apart
-		self.assertEqual(rows[0].detail['token'], self.t_alice[:8])
+		self.assertEqual(rows[0].detail['token'], self.t_alice[:4])  # the first 4 characters only: nothing more of a token is kept
 
 	def test_a_project_that_allows_it_adds_an_unknown_host_as_a_target(self):
 		ProjectSettings.objects.create(project=self.project, inventory_create_hosts=True)
