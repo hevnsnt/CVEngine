@@ -763,6 +763,14 @@ def _process_host_result(ctx):
         if v.get('host_id') == result['id']:
             done = datetime.fromtimestamp(result['at'], tz=dt_timezone.utc)
             detail = str(result.get('detail') or '')[:300]
+            if result.get('standdown'):  # the host stood aside (an update or maintenance holds the stack): nothing was done, so it does not count and is asked again later
+                state.verify, state.verify_due = {}, None
+                state.last_action_at = None
+                state.actions = list(state.actions or [])[:-1]
+                event(rule.code, 'info', action=result.get('action', ''), result='The host stood aside: ' + detail + ' It is asked again when the stack is free.', request=result['id'])
+                _set(state, 'standing_down', 'The host stood aside: ' + detail)
+                state.save()
+                continue
             v = {**v, 'host_id': '', 'host_done_at': done.isoformat()}
             state.verify = v
             if result.get('ok'):
