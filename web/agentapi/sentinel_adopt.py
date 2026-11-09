@@ -46,16 +46,14 @@ def covered_by_stage_run(task):
 
 
 def orphaned(task, now=None):
-    """Whether nothing waits for ``task`` any more: no open stage run holds it, and either its scan is closed (finished, failed, stopped or interrupted
-    by the update), or an update ran after it was claimed (a stage that blocked in its worker died with the worker)."""
+    """Whether nothing waits for ``task`` any more: no open stage run holds it, and an update ran after it was claimed (the worker that waited for it
+    died with the update, so its stage ended and its scan was interrupted). A closed scan alone is not enough, see below."""
     from django.utils import timezone
 
     from cveFeed import scan_control
     if covered_by_stage_run(task):
         return False
-    scan = task.scan if task.scan_id else None
-    if scan is not None and scan.scan_status != 1:
-        return True
+    # a closed scan alone is not enough: a sweep that is not a StageRun (the weekly deep nuclei) blocks on its own task and files its own result
     started, ended, _grace = scan_control.update_window()
     if started is None:
         return False

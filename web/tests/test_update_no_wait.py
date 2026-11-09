@@ -234,7 +234,12 @@ class AdoptionTests(SentinelBase):
         return task
 
     def interrupted(self):
+        """What an update does to a scan that waits on a Sentinel: the scan is interrupted, and the update window (which began after the task was
+        claimed) is on record. A closed scan alone does not make a result an orphan: a sweep that blocks on its own task files its own result."""
         ScanHistory.objects.filter(pk=self.scan.pk).update(scan_status=0, error_message='interrupted by an update')
+        now = timezone.now()
+        ScanControl.objects.update_or_create(pk=1, defaults={'update_started_at': now - timedelta(minutes=15), 'update_ended_at': now - timedelta(minutes=2),
+                                                              'update_grace_until': now + timedelta(minutes=8)})
 
     def report(self, task, body=None):
         return call(self.t['dana'], 'POST', self.url.format(task.pk), body or NMAP_RESULT)
@@ -342,6 +347,14 @@ class AdoptionTests(SentinelBase):
         self.assertIn('unscreened-same-body', [t.name for t in vuln.tags.all()])
         self.assertEqual(self.report(task, {'outcome': 'done', 'findings': [finding]})[1]['duplicate'], True)
         self.assertEqual(Vulnerability.objects.filter(scan_history=self.scan, name='Exposed panel').count(), 1)
+
+    def test_a_closed_scan_without_an_update_is_not_adopted(self):
+        task = self.held(status='claimed')
+        ScanHistory.objects.filter(pk=self.scan.pk).update(scan_status=2)
+        status, out = self.report(task)
+        self.assertEqual(status, 200, out)
+        self.assertNotIn('adopted', out)  # the sweep that waits on it files its own result
+        self.assertFalse(AuditLog.objects.filter(action='sentinel.task.adopt', detail__task_id=task.pk).exists())
 
     def test_a_kind_with_no_adopter_keeps_its_result_on_the_task_row(self):
         self.assertFalse(sentinel_adopt.has_adopter('testssl'))
@@ -508,8 +521,8 @@ class CopyTests(SimpleTestCase):
         self.assertRegex(js, r'waits && n > 0\) paint\(1, `Waiting for')
 
     def test_the_maintenance_page_says_sentinels_keep_their_results(self):
-        html = self.read('maintenance.html')
-        self.assertIn('Your Sentinels keep running what they', html)
+        html = ' '.join(self.read('maintenance.html').split())
+        self.assertIn('Your Sentinels keep running what they have', html)
         self.assertIn('hand their results over when cvENGINE is back', html)
 
     def test_the_sentinels_page_says_it_holds_results(self):
