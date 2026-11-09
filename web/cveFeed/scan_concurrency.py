@@ -324,7 +324,7 @@ def discovery_workers(app=None, timeout=1.5):
     stats = app.control.inspect(timeout=timeout).stats() or {}
     out = {}
     for name, info in stats.items():
-        if str(name).startswith(DISCOVERY_WORKER_PREFIX):
+        if str(name).startswith(DISCOVERY_WORKER_PREFIX) or 'discovery_worker' in str(name).split('@'):  # celery names a worker `-n discovery_worker` celery@discovery_worker
             ceiling = ((info or {}).get('autoscaler') or {}).get('max')
             out[name] = ceiling if isinstance(ceiling, int) else None
     return out

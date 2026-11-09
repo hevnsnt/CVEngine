@@ -19,6 +19,7 @@ changes nothing. Nothing here deletes data. The tick never raises, and ends by i
 import json
 import logging
 import os
+import re
 import signal
 import time
 import uuid
@@ -107,6 +108,14 @@ class Ctx:
 def human(dt, ctx_now=None):
     """The token the notice strip turns into the viewer's local time (static/cve/alertbar.js, scanners.js)."""
     return '{{time:' + dt.astimezone(dt_timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ') + '}}'
+
+
+_TOKEN = re.compile(r'\{\{time:([0-9T:\-]{19})Z\}\}')
+
+
+def plain_times(text):
+    """A sentence with its time tokens written out in UTC, for the places that cannot turn them into the viewer's own time (the activity feed)."""
+    return _TOKEN.sub(lambda m: m.group(1)[11:] + ' UTC', text)
 
 
 def _lanes_text(names):
@@ -282,7 +291,8 @@ def check_idle_sentinels(ctx):
 
 def act_feed(ctx, chk):
     from cveFeed import coverage_topup
-    out = coverage_topup.feed_sentinels()
+    out = coverage_topup.feed_sentinels() or {}
+    queued = int(out.get('hosts_queued') or 0) + int(out.get('batches_queued') or 0) + int(((out.get('refresh') or {}).get('refreshed')) or 0)
     parts = [f'feed_sentinels: {json.dumps(out, default=str)[:200]}']
     try:
         from cveFeed import work_planner  # the work planner (when this build has it) plans the due secrets and ssh work too
@@ -291,6 +301,9 @@ def act_feed(ctx, chk):
             parts.append(f'work planner: {json.dumps(planned, default=str)[:160]}')
     except ImportError:
         pass
+    if not queued and not out.get('refresh'):
+        # the feed found nothing it may queue (enough is queued already, or nothing is eligible): not an action, and nothing to check afterwards
+        return None, 'The feed had nothing to queue for the Sentinels (' + (str(out.get('skipped')) if out.get('skipped') else 'nothing eligible') + ').'
     return True, '; '.join(parts)
 
 
@@ -530,7 +543,7 @@ def event(rule, level, observation='', action='', result='', **detail):
         from cveFeed.models import WatchdogEvent
         row = WatchdogEvent.objects.create(rule=rule, level=level, observation=observation[:500], action=action[:80], result=result[:500], detail=detail)
         if level != 'info':
-            activity.log('hygiene', ('Watchdog ' + rule + ': ' + (result or observation))[:500], status='failed' if level == 'problem' else 'done', watchdog_rule=rule)
+            activity.log('hygiene', plain_times('Watchdog ' + rule + ': ' + (result or observation))[:500], status='failed' if level == 'problem' else 'done', watchdog_rule=rule)
         return row
     except Exception:  # noqa: BLE001
         logger.warning('watchdog: could not record an event', exc_info=True)
@@ -694,7 +707,7 @@ def _fixed(rule, state, ctx, extra=''):
     if rule.code == 'R3':  # the override stays in force: its warning stays up until the watchdog lets go of it
         event(rule.code, 'fixed', observation='Hosts assessed at once is at the minimum.', action=v.get('action', ''), result='Verified: the pool ceiling holds. The watchdog keeps it until .env stops holding it down or a person saves a value.')
         return text
-    event(rule.code, 'fixed', observation='The symptom is gone two minutes after the action.', action=v.get('action', ''), result='Verified: ' + text.replace('{{time:', '').replace('}}', '') + (f'. {extra}' if extra else ''))
+    event(rule.code, 'fixed', observation='The symptom is gone two minutes after the action.', action=v.get('action', ''), result='Verified: ' + text + (f'. {extra}' if extra else ''))
     notice(rule.code, 'info', text, (extra + ' ' if extra else '') + 'Nothing more is needed. Details: Scanners, Health.', verified=True)
     return text
 
@@ -729,6 +742,11 @@ def _act(rule, state, ctx, chk):
         return True
     if rule.act:
         ok, text = rule.act(ctx, chk)
+        if ok is None:  # nothing was needed: no action to count or to check, but the gap holds so it is not asked every tick
+            state.last_action_at = ctx.now
+            event(rule.code, 'info', observation=chk.text, action='none', result=text)
+            _set(state, 'watching', text)
+            return False
         if ok:
             _record_action(state, ctx)
         if not ok:

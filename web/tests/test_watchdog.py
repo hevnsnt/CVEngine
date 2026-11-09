@@ -597,13 +597,27 @@ class R3PoolTests(WatchdogCase):
 class R4R5R6Tests(WatchdogCase):
     def test_idle_sentinels_with_due_work_are_fed_after_five_minutes(self):
         self.probes.data['sentinels'] = {'slots': 4, 'busy': 0, 'free': 4, 'waiting': 0, 'due': True}
-        with mock.patch('cveFeed.coverage_topup.feed_sentinels', return_value={'queued': 3}) as feed:
+        with mock.patch('cveFeed.coverage_topup.feed_sentinels', return_value={'hosts_queued': 3}) as feed:
             self.tick()
             self.tick(290)
             feed.assert_not_called()
             self.tick(20)
             feed.assert_called_once()
         self.assertTrue(WatchdogEvent.objects.filter(rule='R4', level='action').exists())
+
+    def test_a_feed_that_finds_nothing_to_queue_is_not_an_action_and_never_escalates(self):
+        self.probes.data['sentinels'] = {'slots': 4, 'busy': 0, 'free': 4, 'waiting': 0, 'due': True}
+        with mock.patch('cveFeed.coverage_topup.feed_sentinels', return_value={'skipped': 'global capacity', 'slots': 4}) as feed:
+            self.tick()
+            self.tick(301)
+            self.tick(30)
+            self.tick(200)
+            self.assertEqual(feed.call_count, 1)  # the gap holds: not asked every tick
+        self.assertEqual(self.state('R4').status, 'watching')
+        self.assertTrue(WatchdogEvent.objects.filter(rule='R4', action='none', result__contains='nothing to queue').exists())
+        self.assertEqual(WatchdogEvent.objects.filter(rule='R4', level='problem').count(), 0)
+        self.assertEqual(AdminAlert.objects.filter(code='watchdog_r4').count(), 0)
+        self.assertEqual(self.state('R4').actions, [])
 
     def test_idle_sentinels_with_nothing_due_are_left_alone(self):
         self.probes.data['sentinels'] = {'slots': 4, 'busy': 0, 'free': 4, 'waiting': 0, 'due': False}
@@ -614,7 +628,7 @@ class R4R5R6Tests(WatchdogCase):
 
     def test_the_feed_runs_in_the_tick_not_on_celery(self):
         self.probes.data['sentinels'] = {'slots': 4, 'busy': 0, 'free': 4, 'waiting': 0, 'due': True}
-        with mock.patch('cveFeed.coverage_topup.feed_sentinels', return_value={}), mock.patch('cveFeed.tasks.feed_sentinels.apply_async') as queued:
+        with mock.patch('cveFeed.coverage_topup.feed_sentinels', return_value={'hosts_queued': 2}), mock.patch('cveFeed.tasks.feed_sentinels.apply_async') as queued:
             self.tick()
             self.tick(301)
         queued.assert_not_called()
@@ -959,3 +973,14 @@ class AdminApiTests(WatchdogCase):
         self.assertEqual(self.api(self.root, 'POST', {'enabled': 'yes'})[0], 400)
         self.assertEqual(self.api(self.root, 'POST', {'rule': 'R99', 'enabled': False})[0], 400)
         self.assertEqual(self.api(self.root, 'POST', {'rule': ['R1'], 'enabled': False})[0], 400)
+
+
+class DiscoveryWorkerNameTests(WatchdogCase):
+    def test_a_worker_named_celery_at_discovery_worker_is_the_discovery_worker(self):
+        """celery names a worker started with ``-n discovery_worker`` celery@discovery_worker: the live resize (which the watchdog's R3 uses) must find it."""
+        class App:
+            class control:
+                @staticmethod
+                def inspect(timeout=1.5):
+                    return mock.Mock(stats=lambda: {'celery@discovery_worker': {'autoscaler': {'max': 1}}, 'celery@cve_feed_worker': {'autoscaler': {'max': 4}}})
+        self.assertEqual(sc.discovery_workers(App), {'celery@discovery_worker': 1})

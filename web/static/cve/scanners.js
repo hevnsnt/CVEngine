@@ -99,7 +99,7 @@ function wdRule(rule) {
   const [word, cls] = WD_WORD[rule.status] || WD_WORD.unknown;
   const li = el("li", `wd-rule wd-${rule.color}`);
   const head = el("div", "wd-rule-head");
-  head.append(el("span", `badge ${cls}`, word), el("strong", "", `${rule.code}  ${rule.title}`));
+  head.append(el("span", `badge ${cls}`, word), el("strong", "", `${rule.code} ${rule.title}`));
   const toggle = button(rule.enabled ? "Switch off" : "Switch on", async () => {
     paintWatchdog(await api("POST", "/cve/api/admin/watchdog", { rule: rule.code, enabled: !rule.enabled }));
   }, "btn ghost sm");
@@ -158,8 +158,7 @@ async function loadWatchdog() {
 let timer = null;
 async function loop() {
   try {
-    await load();
-    await loadWatchdog();
+    await Promise.all([load(), loadWatchdog()]);  // the watchdog panel does not wait for the worker inspection
   } catch (err) {
     root.replaceChildren(el("p", "msg err", err.message));
   }
