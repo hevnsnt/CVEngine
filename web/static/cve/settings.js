@@ -563,7 +563,7 @@ const sections = {
     const UPDATE_STEPS = [
       ["Approved", "Done."],
       ["The host picks it up", "Within a few seconds once the host updater is installed. Nothing happens until it is."],
-      ["New scans pause, running scans finish", "As long as the longest running scan: minutes for most, up to a few hours for a deep scan."],
+      ["New work pauses, this server settles", "Up to a minute. Scans that run on Sentinels are not waited for: the Sentinels keep what they finish and hand it over when cvENGINE is back."],
       ["The files are updated", "About 10 seconds."],
       ["The services rebuild and restart", "2 to 5 minutes. The page greys out and comes back on its own."],
       ["Scanning resumes", "Immediately; the page reloads."],
@@ -598,11 +598,13 @@ const sections = {
     };
     const timeline = (s, hu) => {
       const at = stepAt(s, hu);
+      const steps = UPDATE_STEPS.map((x) => x.slice());
+      if (s.wait_for_scans) steps[2] = ["New scans pause, running scans finish", "As long as the longest running scan: minutes for most, up to a few hours for a deep scan."];
       const wrap = el("div", "", null, { style: "margin:12px 0" });
       const waited = s.approved_at ? Date.now() - Date.parse(s.approved_at) : 0;
       wrap.append(el("p", "", `Approved ${ago(waited)} ago. Typical total once the host is listening and no scan is running: about 3 to 6 minutes.`, { style: "margin:0 0 8px;font-weight:500" }));
       const list = el("ol", "", null, { style: "list-style:none;margin:0;padding:0" });
-      UPDATE_STEPS.forEach(([title, expect], i) => {
+      steps.forEach(([title, expect], i) => {
         const blocked = i === 1 && at === 1 && !hu.alive;
         const mark = i < at ? "\u2713" : i === at ? (blocked ? "!" : "\u25CF") : "\u25CB";
         const live = i === at ? (s.phase_detail && !blocked ? ` ${s.phase_detail}.` : blocked ? " Not happening: no host updater is listening." : "") : "";
@@ -665,6 +667,26 @@ const sections = {
         modeBox.append(row);
       });
       kids.push(modeBox);
+      // An update does not wait for scans that run on Sentinels. Waiting for them is an option, off by default.
+      const waitRow = el("label", "", null, { style: "display:flex;gap:10px;align-items:flex-start;margin:6px 0 12px;cursor:pointer" });
+      const waitBox = el("input", "", null, { type: "checkbox", name: "update-wait-scans" });
+      waitBox.checked = s.wait_for_scans === true;
+      waitBox.onchange = async () => {
+        try {
+          draw(await api("PUT", "updates", { wait_for_scans: waitBox.checked }));
+          toast(waitBox.checked ? "Updates now wait for running scans to finish" : "Updates no longer wait for scans");
+        } catch (err) {
+          toast(err.message);
+          draw(s);
+        }
+      };
+      const waitText = el("span", "");
+      waitText.append(
+        el("strong", "", "Wait for scans to finish before updating"),
+        el("span", "note", " Off (the default): an update pauses new work and rebuilds within a minute. Scans that run on your Sentinels are not waited for; the Sentinels keep what they finish and hand it over when cvENGINE is back. On: the update waits for every running scan first (minutes, or hours for a deep scan), then interrupts what is left after the drain limit."),
+      );
+      waitRow.append(waitBox, waitText);
+      kids.push(waitRow);
       // The web interface certificate renews itself 30 days before it ends (the host's renewal check); this speaks up only when it did not.
       const cert = s.certificate || {};
       if (cert.problem) kids.push(el("p", "msg err", cert.problem));

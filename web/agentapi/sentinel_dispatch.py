@@ -304,7 +304,8 @@ class _Dispatch:
                 'scan_id': getattr(self.scan, 'pk', None), 'internal': bool(self.internal), 'busy': self.busy, 'timeout': self.timeout,
                 'label': self.label, 'entry': getattr(self.entry, 'pk', None), 'started': at(self.started), 'queue_budget': self.queue_budget,
                 'claim_deadline': at(self.claim_deadline), 'run_deadline': at(self.run_deadline), 'never_claimed': self.never_claimed,
-                'vanished': self.vanished, 'stop_check': bool(getattr(self, 'stop_check', False))}
+                'vanished': self.vanished, 'stop_check': bool(getattr(self, 'stop_check', False)),
+                'outage_credit': round(getattr(self, 'outage_credit', 0.0), 3)}
 
     @classmethod
     def restore(cls, state, siblings=None):
@@ -331,6 +332,18 @@ class _Dispatch:
         self.run_deadline = back(state.get('run_deadline'))
         if self.run_deadline is None and task.status in ('claimed', 'running') and task.claimed_at is not None:
             self.run_deadline = back(task.claimed_at.timestamp()) + self.timeout
+        # The budgets are wall-clock time minus an update's outage: while the server was down no Sentinel could report, so that time is not the Sentinel's.
+        # What was credited already is written into the state, so a wait restored again is never credited twice.
+        from cveFeed import scan_control
+        began = state.get('started')
+        self.outage_credit = float(state.get('outage_credit') or 0.0)
+        extra = max(0.0, scan_control.outage_overlap(float(began)) - self.outage_credit) if began is not None else 0.0
+        if extra:
+            self.started += extra
+            self.claim_deadline += extra
+            if self.run_deadline is not None:
+                self.run_deadline += extra
+            self.outage_credit += extra
         self.never_claimed, self.vanished = bool(state.get('never_claimed')), bool(state.get('vanished'))
         self.siblings, self.stop_check = siblings, bool(state.get('stop_check'))
         return self
@@ -531,8 +544,10 @@ def _stopped(scan):
     if scan is None:
         return False
     from cveFeed.discovery import stopped
-    from reNgine import resources
-    return stopped(scan.id) or resources.global_pause_requested(fail_closed=False)
+    from cveFeed.scan_control import operator_pause_requested
+    # an update's drain pause does not stop a stage that waits on Sentinels: its tasks keep running there, and the answer is taken when the server is
+    # back (a StageRun resumes, anything else is adopted, ``agentapi.sentinel_adopt``). Only a person's pause or stop does
+    return stopped(scan.id) or operator_pause_requested()
 
 
 def _guarded_prepare(project, kind, prepare, scan):

@@ -881,7 +881,9 @@ def scan_control_set(request, actor):
                 if row.paused:
                     row.paused, row.paused_by_update, row.reason, row.actor, row.changed_at, row.last_error = \
                         False, False, '', actor.username, timezone.now(), ''
-                    row.save(update_fields=['paused', 'paused_by_update', 'reason', 'actor', 'changed_at', 'last_error'])
+                    from cveFeed import scan_control
+                    row.save(update_fields=['paused', 'paused_by_update', 'reason', 'actor', 'changed_at', 'last_error',
+                                            *scan_control.close_update_window(row, row.changed_at)])  # a failed update's open window ends with the pause
                     audit(actor, 'scanning.resume', 'all projects')
         except (OSError, RuntimeError) as exc:
             raise AdminError(409, 'An update is running or its lock is unavailable; scanning cannot resume yet') from exc

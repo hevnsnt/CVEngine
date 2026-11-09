@@ -400,6 +400,15 @@ export function waitingLines(d) {
   });
 }
 
+// A Sentinel that finished work while cvENGINE was down keeps the results on disk and hands them over when the server answers again (an update does not
+// wait for scans on Sentinels). It says how many it holds, and since when, in the heartbeat; nothing is drawn when it holds none.
+export function spoolLine(d) {
+  const n = d.spool && Number.isInteger(d.spool.count) ? d.spool.count : 0;
+  if (n < 1) return null;
+  const age = Number.isInteger(d.spool.oldest_seconds) ? ` The oldest has waited ${minutesOrSeconds(d.spool.oldest_seconds)}.` : "";
+  return el("p", "note ss-detail", `Holding ${n} result${n === 1 ? "" : "s"} until cvENGINE is back. It hands them over as soon as the server answers.${age}`);
+}
+
 // The version and update line of one card, and its "Update now" and "Settings" buttons. ``d`` is the agent detail; nothing is drawn
 // when it does not report these keys.
 // ``builtin`` (the install's own scanner) has no "Update now": it never updates itself, so the button would promise what cannot happen.
@@ -433,6 +442,8 @@ export function versionBlock(d, { onChange, builtin = false }) {
   if (d.contract && d.contract.note)
     box.append(el("p", d.contract.state === "unsupported" ? "msg err ss-detail" : "note ss-detail", d.contract.note));
   box.append(...waitingLines(d));
+  const held = spoolLine(d);
+  if (held) box.append(held);
   const sub =
     u.status === "failed"
       ? u.detail

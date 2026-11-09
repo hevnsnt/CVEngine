@@ -332,7 +332,7 @@ FEATURES = ('secret_read', 'vantage')
 
 
 def clean_info(raw):
-    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (cvengine_scanner/contract/sentinel_contract.json), its updater's ``update`` state, whether its own GVM stack can scan (``openvas``), for the built-in scanner image ``builtin`` and its ``features``, and ``waiting`` (kinds held back for memory, tasks still stopping: ``clean_waiting``). Anything else is dropped."""
+    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (cvengine_scanner/contract/sentinel_contract.json), its updater's ``update`` state, whether its own GVM stack can scan (``openvas``), for the built-in scanner image ``builtin`` and its ``features``, and ``waiting`` (kinds held back for memory, tasks still stopping: ``clean_waiting``), and optionally ``spool`` (results held on disk for cvENGINE: ``clean_spool``). Anything else is dropped."""
     if not isinstance(raw, dict):
         raise ApiError(400, 'info must be an object')
     out = {}
@@ -391,6 +391,27 @@ def clean_info(raw):
     waiting = raw.get('waiting')
     if waiting is not None:
         out['waiting'] = clean_waiting(waiting)
+    spool = clean_spool(raw.get('spool'))
+    if spool:
+        out['spool'] = spool
+    return out
+
+
+MAX_SPOOL_COUNT = 1_000_000
+
+
+def clean_spool(raw):
+    """``{count, oldest_seconds}`` of the results a Sentinel holds on disk until cvENGINE takes them (its spool), or ``None`` for none, for a field that is
+    not that, and for a count of zero. Optional and never an error: a Sentinel older than the field sends nothing, a malformed one is ignored (it is a
+    line on the Sentinels page, not something to refuse a heartbeat for)."""
+    if not isinstance(raw, dict):
+        return None
+    count, oldest = raw.get('count'), raw.get('oldest_seconds')
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= MAX_SPOOL_COUNT:
+        return None
+    out = {'count': count}
+    if not isinstance(oldest, bool) and isinstance(oldest, int) and 0 <= oldest <= 10 * 365 * 86400:
+        out['oldest_seconds'] = oldest
     return out
 
 
@@ -427,6 +448,8 @@ def record_info(agent, raw, now=None):
     if not info:
         return False
     merged = {**(agent.info or {}), **info}
+    if 'contract_version' in info and 'spool' not in info:
+        merged.pop('spool', None)  # a full report that says nothing about a spool says it holds none now
     # when the Sentinel last changed the version it runs (or first reported one): "last updated" on the Sentinels page. Only the server writes it.
     if 'version' in info and (agent.info or {}).get('version') != info['version']:
         from django.utils import timezone

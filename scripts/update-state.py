@@ -212,6 +212,14 @@ def main():
             except (FileNotFoundError, OSError, ValueError):
                 value = b''
             print('auto' if value == b'auto' else 'manual')
+        elif action == 'wait-scans':
+            # "1" only when an administrator turned on "Wait for scans to finish before updating" in Settings > Updates; a missing, unreadable or odd file is 0
+            try:
+                with os.fdopen(regular_fd('.update-wait-scans', dir_fd=web_fd), 'rb') as source:
+                    value = source.read(8).strip()
+            except (FileNotFoundError, OSError, ValueError):
+                value = b''
+            print('1' if value == b'1' else '0')
         elif action == 'approval-branch':
             # the branch the administrator chose in Settings, or nothing when the file is missing or not a plain branch name
             try:

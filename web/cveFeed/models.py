@@ -1355,6 +1355,12 @@ class ScanControl(models.Model):
     actor = models.CharField(max_length=150, blank=True, default='')
     last_error = models.CharField(max_length=160, blank=True, default='')
     changed_at = models.DateTimeField(default=timezone.now)
+    # An update does not wait for scans that run on Sentinels (cveFeed.scan_control, docs/UPDATES.md). The window of the last update, written by
+    # request_drain_pause (``update_started_at``) and release_update_pause (``update_ended_at``, and ``update_grace_until``: how long after it
+    # the broker still keeps what the outage left open, so Sentinels that come back with finished work are heard before any lease is judged).
+    update_started_at = models.DateTimeField(null=True, blank=True)
+    update_ended_at = models.DateTimeField(null=True, blank=True)
+    update_grace_until = models.DateTimeField(null=True, blank=True)
 
     @classmethod
     def current(cls):

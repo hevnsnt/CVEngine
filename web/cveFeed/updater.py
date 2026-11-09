@@ -236,6 +236,49 @@ def set_mode(mode):
     os.replace(tmp, _file('.update-mode'))
 
 
+def read_wait_scans():
+    """Whether an update waits for scans to finish first (Settings > Updates, "Wait for scans to finish before updating"). Off unless an administrator turned it
+    on: an update then pauses new work and rebuilds within a minute, and the scans that run on Sentinels are not waited for (they hand their results over when the
+    server is back). Kept in ``.update-wait-scans`` beside the approval so the host script reads the same answer; a missing or unreadable file is off."""
+    try:
+        with open(_file('.update-wait-scans')) as f:
+            return f.read(8).strip() == '1'
+    except OSError:
+        return False
+
+
+def set_wait_scans(on):
+    tmp = _file('.update-wait-scans.tmp')
+    with open(tmp, 'w') as f:
+        f.write('1\n' if on else '0\n')
+    os.replace(tmp, _file('.update-wait-scans'))
+
+
+def sentinel_work():
+    """What the Sentinels hold that an update does not wait for: ``(tasks, scans)``, the open Sentinel tasks and the running scans that wait on them only."""
+    try:
+        from agentapi.models import SentinelTask
+        rows = SentinelTask._base_manager.filter(status__in=('claimed', 'running')).values_list('scan_id', flat=True)
+        ids = list(rows)
+        return len(ids), len({i for i in ids if i})
+    except Exception:  # noqa: BLE001 - a status line never fails the screen
+        return 0, 0
+
+
+def held_results():
+    """How many finished results the Sentinels say they hold on disk until cvENGINE answers (the optional ``info.spool`` of their heartbeats)."""
+    try:
+        from agentapi.models import Agent
+        total = 0
+        for info in Agent.objects.filter(kind='scanner').exclude(status='revoked').values_list('info', flat=True):
+            spool = (info or {}).get('spool') if isinstance(info, dict) else None
+            if isinstance(spool, dict) and isinstance(spool.get('count'), int):
+                total += spool['count']
+        return total
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def auto_approve(row):
     """In automatic mode, approve the version the check just found, as the administrator would have. Returns whether it did."""
     if read_mode() != 'auto' or state(row)['status'] != 'available':
@@ -485,6 +528,7 @@ def state(row):
     # Read live, not from the phase file: apply-update.sh's own pause/release calls can fail independently of the
     # phase it last wrote, and an admin's manual resume can clear it between runs without rewriting the phase file.
     control = ScanControl.current()
+    sentinel_tasks, sentinel_scans = sentinel_work()
     return {
         'status': status, 'enabled': row.enabled, 'repo': row.repo, 'branch': row.branch, 'branch_warning': branch_warning(row.branch),
         'has_token': bool(row.token),
@@ -498,6 +542,8 @@ def state(row):
         'phase': phase['phase'], 'phase_detail': phase['detail'], 'phase_scans_running': phase['scans_running'],
         'phase_changed_at': phase['changed_at'],
         'scans_paused_by_update': bool(control.paused and control.paused_by_update),
+        'wait_for_scans': read_wait_scans(),
+        'sentinel_tasks_open': sentinel_tasks, 'sentinel_scans_running': sentinel_scans, 'sentinel_results_held': held_results(),
         'host_updater': host_updater(),
         'disk': disk(),
         'certificate': certificate(),

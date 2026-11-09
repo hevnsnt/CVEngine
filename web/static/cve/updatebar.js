@@ -13,7 +13,10 @@ const elapsed = (ms) => {
   const sec = Math.max(0, Math.round(ms / 1000));
   return `${sec < 60 ? `${sec} s` : `${Math.floor(sec / 60)} min ${String(sec % 60).padStart(2, "0")} s`} since approval.`;
 };
-const STEPS = ["Pause", "Drain scans", "Rebuild", "Resume"];
+const STEPS = ["Pause", "Settle", "Rebuild", "Resume"];
+// An update does not wait for scans that run on Sentinels: it pauses the queues, lets work on this server settle for a few seconds, and rebuilds. A Sentinel
+// keeps what it finishes and hands it over when cvENGINE is back. With "Wait for scans to finish before updating" on, the second step is the old drain.
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 // After approval an orange bar sits at the top of every page and says what the update is doing. The page is greyed out only while
 // the services rebuild, and released when they answer again. The server may report `phase` (idle, draining, applying, restarting,
@@ -98,9 +101,15 @@ function watchUpdate(first) {
       paint(3, "Back up. Resuming scanning", now.phase_detail || "");
     } else {
       grey(false);
-      const n = now.scans_running != null ? now.scans_running : await scansNow();
-      if (n > 0) paint(1, `Waiting for ${n} running scan${n === 1 ? "" : "s"} to finish`, "No new scans start meanwhile. The rebuild starts when the last one ends (minutes, or hours for a deep scan).");
-      else {
+      const waits = now.wait_for_scans === true;
+      items[1].textContent = waits ? "Drain scans" : "Settle";
+      const n = now.phase_scans_running != null ? now.phase_scans_running : waits ? await scansNow() : null;
+      const held = now.sentinel_tasks_open || 0;
+      const keeping = held > 0 ? `${plural(held, "task")} keep${held === 1 ? "s" : ""} running on Sentinels. ` : "";
+      if (waits && n > 0) paint(1, `Waiting for ${plural(n, "running scan")} to finish`, "No new scans start meanwhile. The rebuild starts when the last one ends (minutes, or hours for a deep scan).");
+      else if (!waits && now.phase === "draining" && /server|settl/i.test(now.phase_detail || "")) {
+        paint(1, "Pausing new work", `${keeping}Letting ${plural(n || 0, "job")} on this server settle (up to a minute). Your Sentinels keep what they finish and hand it over when cvENGINE is back.`);
+      } else {
         const waited = now.approved_at ? Date.now() - Date.parse(now.approved_at) : 0;
         const hu = now.host_updater || {};
         if (now.phase_detail) paint(1, `Updating to ${now.latest}`, `${now.phase_detail}. ${elapsed(waited)}`);

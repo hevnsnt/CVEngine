@@ -164,6 +164,9 @@ def _end_unreported(agent_id, running):
     """End this Sentinel's own claimed or running tasks that are not in ``running`` and were accepted (or, never accepted, claimed) more than
     ``RUNNING_GRACE`` ago, through ``expire`` (so the dispatcher falls back and the slot frees). Returns the set of ended task ids. Another
     Sentinel's tasks are never in the query."""
+    from cveFeed import scan_control
+    if scan_control.in_update_grace():  # the Sentinel may have been talking to a server that was down: what it does not list now is not lost yet
+        return set()
     cutoff = timezone.now() - RUNNING_GRACE
     ended = set()
     for task in SentinelTask.objects.filter(agent_id=agent_id, status__in=('claimed', 'running')).select_related('project'):
@@ -1468,6 +1471,9 @@ def reap_expired(now=None):
     dispatcher that normally expires it is gone when its worker died, so without this an orphan would stay claimable, and counted as waiting
     work, for ever. Called by every broker entry point, like ``agent_broker.reap_expired``."""
     now = now or timezone.now()
+    from cveFeed import scan_control
+    if scan_control.in_update_grace(now):  # an update is running (or has just ended): Sentinels were talking to a server that was down, nothing is judged lost yet
+        return 0
     stale = (Q(status='queued', kind='openvas', created_at__lt=now - queued_ttl('openvas'))
              | (Q(status='queued', created_at__lt=now - queued_ttl('nmap')) & ~Q(kind='openvas')))
     expired = SentinelTask._base_manager.filter(Q(status__in=SENTINEL_ACTIVE_STATUSES, lease_expires_at__lt=now) | stale).select_related('project')[:CANDIDATES]
@@ -1530,11 +1536,18 @@ def max_runtime(task):
 def extend_leases(agent, now):
     """Extend the lease of every SentinelTask this agent is running, the same way ``agent_broker.heartbeat`` extends
     AgentTask leases (and capped like them, at ``max_runtime`` after it was accepted); called from there so one heartbeat call covers both."""
+    from cveFeed import scan_control
+    grace = scan_control.in_update_grace(now)  # a lease that lapsed while the server was down is taken up again, not left for the reaper
     leases = []
     for task in SentinelTask.objects.filter(agent=agent, status__in=('claimed', 'running')).order_by('id'):
         if task.status == 'running' and agent.status == 'active':
             lease = min(now + RUN_LEASE, (task.accepted_at or now) + max_runtime(task))
-            if SentinelTask.objects.filter(pk=task.pk, agent=agent, status='running', lease_expires_at__gte=now).update(lease_expires_at=lease):
+            if grace:
+                lease = max(lease, now + RUN_LEASE)  # the cap counts the outage as time that did not pass
+            alive = SentinelTask.objects.filter(pk=task.pk, agent=agent, status='running')
+            if not grace:
+                alive = alive.filter(lease_expires_at__gte=now)
+            if alive.update(lease_expires_at=lease):
                 task.lease_expires_at = lease
         leases.append({'task_id': task.pk, 'kind': task.kind, 'status': task.status, 'lease_expires_at': svc._iso(task.lease_expires_at)})
     return leases
@@ -1730,6 +1743,9 @@ def _claim(agent, kinds, now):
         raise ApiError(403, f'no work can be assigned: {eff.problem}')
     if _updating(agent, now):
         return None, 'the Sentinel is updating itself and takes no new work'
+    from cveFeed import scan_control
+    if scan_control.update_hold():  # cvENGINE is updating: the queues wait, the Sentinels keep what they hold and hand it over afterwards
+        return None, 'cvENGINE is updating and hands out no new work'
     with transaction.atomic():
         Agent.objects.select_for_update().get(pk=agent.pk)
         held_by_kind = _holders([agent.pk])[1]
@@ -2625,17 +2641,25 @@ def report_result(ctx, task_id, body):
     if held is not None:
         _ensure_eligible(agent, held)
     rejected = None
+    adopted = None
     with transaction.atomic():
         task = SentinelTask.objects.select_for_update(of=('self',)).select_related('project').filter(pk=_int(task_id)).first()
         late = task is not None and task.status == 'expired' and (task.agent_id == agent.pk or (task.agent_id is None and _held_before(task, agent)))
         if task is None or (task.agent_id != agent.pk and not late):
             raise ApiError(404, 'task not found')
+        from agentapi import sentinel_adopt
+        from cveFeed import scan_control
+        if late and not AuditLog.objects.filter(action='sentinel.task.late', detail__task_id=task.pk).exists() and sentinel_adopt.orphaned(task, now):
+            # an update (or a restart) ended the stage that waited for this task, and this Sentinel did hold it: its result is filed, not discarded
+            late_adopted = _adopt_late(ctx, agent, task, body, now)
+            if late_adopted is not None:
+                return late_adopted
         if task.status in ('done', 'failed', 'expired'):  # a retry of a report that already went through (the answer was lost): the same answer again, whatever the body
             if late:  # the stage stopped waiting first: this result is discarded, as before, but no longer without a trace
                 _record_late(ctx, agent, task)
                 return {'task': task_brief(task), 'duplicate': True, 'late': True}
             return {'task': task_brief(task), 'duplicate': True}
-        if task.status not in ('claimed', 'running') or not task.lease_expires_at or task.lease_expires_at < now:
+        if task.status not in ('claimed', 'running') or not task.lease_expires_at or (task.lease_expires_at < now and not scan_control.in_update_grace(now)):
             raise ApiError(409, 'the task is no longer assigned to this Sentinel (its lease expired or it was cancelled)')
         try:
             result = clean_result(task.kind, body, task)
@@ -2657,6 +2681,9 @@ def report_result(ctx, task_id, body):
                                                             error=explain_error(result.get('error', '')) if status == 'failed' else '', **_scrubbed(task))
             audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
                          agent_id=agent.pk, agent=agent.name, outcome=result['outcome'])
+            if status == 'done' and sentinel_adopt.orphaned(task, now):  # nothing waits for it (the update that ran while it was held ended its stage): filed here
+                task.refresh_from_db()
+                adopted = _adopted(ctx, agent, task, result)
         else:
             # A report that does not fit the schema will not fit when sent again: end the task as failed now (its dispatcher falls back at once and
             # the Sentinel's slot is free), instead of leaving it running until the lease cap while heartbeats keep extending it.
@@ -2670,7 +2697,52 @@ def report_result(ctx, task_id, body):
     task.refresh_from_db()
     if dropped:
         return {'task': task_brief(task), 'duplicate': False, 'dropped': True, 'reason': str(dropped)}
+    if adopted is not None:
+        sentinel_adopt.note_adopted(task)
+        return {'task': task_brief(task), 'duplicate': False, 'adopted': True}
     return {'task': task_brief(task), 'duplicate': False}
+
+
+def _adopted(ctx, agent, task, result):
+    """File the result of a task nothing waits for (``sentinel_adopt``) and say so in the audit log. Runs inside the lock that made the task ``done``."""
+    from agentapi import sentinel_adopt
+    outcome = sentinel_adopt.adopt(task, result, agent)
+    audit.record(ctx.user, 'sentinel.task.adopt', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id, agent_id=agent.pk,
+                 agent=agent.name, kind=task.kind, adopted=outcome.get('adopted', False), kept=bool(outcome.get('kept')))
+    return outcome
+
+
+def _adopt_late(ctx, agent, task, body, now):
+    """A Sentinel's result for a task the server had already expired (its lease ran out while the server was down, or an update ended its stage), held
+    by that Sentinel and with nothing waiting for it: the result is taken and filed, the task becomes ``done``. Returns the answer, or ``None`` when
+    the result does not fit the schema (the caller then treats it as a late report, as before). Called inside the task's row lock."""
+    from agentapi import address_guard, sentinel_adopt
+    try:
+        result = clean_result(task.kind, body, task)
+        if task.kind in sentinel_contract.STREAMED:
+            sentinel_stream.check_final(task, result)
+    except ApiError as exc:
+        if exc.status != 400:
+            raise
+        return None
+    if address_guard.result_refusal(task, result):  # an address excluded since: as for any report, the result is not filed
+        return None
+    status = 'failed' if result['outcome'] == 'error' else 'done'
+    won = SentinelTask._base_manager.filter(pk=task.pk, status='expired').update(
+        status=status, agent=agent, result=result, finished_at=now, lease_expires_at=None, error=explain_error(result.get('error', '')) if status == 'failed' else '',
+        **_scrubbed(task))
+    if not won:
+        return None
+    task.refresh_from_db()
+    audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
+                 agent_id=agent.pk, agent=agent.name, outcome=result['outcome'], late=True)
+    if status == 'done':
+        outcome = _adopted(ctx, agent, task, result)
+        sentinel_adopt.note_adopted(task)
+    else:
+        outcome = {'adopted': False}
+    _ended(task, agent.pk)  # nothing waits for it (that is why it was adopted), but the Sentinel's long poll learns its slot is free
+    return {'task': task_brief(task), 'duplicate': False, 'adopted': bool(outcome.get('adopted')), 'late': True}
 
 
 def release_task(ctx, task_id, reason=''):
