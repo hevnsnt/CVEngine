@@ -848,6 +848,14 @@ def resolve_missing(domain, sub, gone, matches, products):
     return count
 
 
+def scanned_hosts(result):
+    """The addresses of a Sentinel's OpenVAS result that were really scanned: the ones the report lists, less the ``unreached_hosts`` the Sentinel says
+    never answered. With ``CONSIDER_ALIVE`` gvmd finishes a host that is offline, so a listed host proves nothing; counting it would resolve every
+    earlier finding on a host that was only down."""
+    unreached = {a for a in result.get('unreached_hosts') or []}
+    return {a for a in result.get('scanned_addresses') or [] if a not in unreached}
+
+
 def _apply_import(run, items, scanned, no_cve, unusable, partial=False):
     """Observations, findings, evidence and resolutions for each host of ``run``, from already-fetched, already-parsed
     results (``items``, the shape ``sentinel_broker`` cleans a Sentinel's report into) and the set of addresses gvmd actually scanned. ``partial`` is a scan stopped at its time budget: what it found is kept, but it says nothing about
@@ -1002,7 +1010,7 @@ def poll_sentinel(run):
                              **run_detail(run))
         try:
             stale = result.get('nvt_cache_stale') or 0
-            summary, names = _apply_import(run, result.get('results') or [], set(result.get('scanned_addresses') or []),
+            summary, names = _apply_import(run, result.get('results') or [], scanned_hosts(result),
                                            result.get('without_cve', 0), result.get('unusable', 0), partial=bool(result.get('partial') or stale))
         except Exception as exc:  # noqa: BLE001
             finish(run, 'failed', f'the Sentinel-reported results could not be imported ({type(exc).__name__})')

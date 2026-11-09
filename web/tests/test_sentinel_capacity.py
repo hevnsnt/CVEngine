@@ -200,8 +200,20 @@ class BudgetTests(SimpleTestCase):
         one = dispatch._dispatch_timeout('nmap', 1)
         self.assertEqual(one, dispatch.COMPLETION_CEILING['nmap'])
         self.assertEqual(dispatch._dispatch_timeout('nmap', 0), one)
-        self.assertEqual(dispatch._dispatch_timeout('nmap', 65), one + 64 * dispatch.PER_TARGET_SECONDS['nmap'])
+        self.assertEqual(dispatch._dispatch_timeout('nuclei_light', 65), dispatch.COMPLETION_CEILING['nuclei_light'] + 64 * dispatch.PER_TARGET_SECONDS['nuclei_light'])
+        self.assertEqual(dispatch._dispatch_timeout('nmap', 65), dispatch.CEILING_CAP['nmap'])  # nmap's wait is capped just above the Sentinel's own limit
         self.assertEqual(dispatch._dispatch_timeout('testssl', 5), dispatch.COMPLETION_CEILING['testssl'])  # one host:port per task: no scaling
+
+    def test_the_stage_never_gives_up_on_a_chunk_before_the_sentinel_does(self):
+        """The Sentinel limits its own run (nmap: min(3600, max(600, 90 x addresses)) seconds; naabu: 900). A stage that waits for less gives the chunk up
+        while the Sentinel still works, and the late result is discarded: the work repeats on the next scan."""
+        for addresses in range(1, dispatch.MAX_ADDRESSES + 1):
+            self.assertGreaterEqual(dispatch._dispatch_timeout('nmap', addresses), min(3600, max(600, 90 * addresses)), addresses)
+        self.assertGreaterEqual(dispatch._dispatch_timeout('naabu', dispatch.NAABU_CHUNK), 900)
+
+    def test_a_naabu_task_names_few_enough_addresses_to_finish(self):
+        self.assertEqual([len(c) for c in dispatch._chunks(list(range(20)), dispatch.NAABU_CHUNK)], [8, 8, 4])
+        self.assertEqual(len(dispatch._chunks(list(range(70)))), 2)  # the other kinds keep MAX_ADDRESSES
 
     def test_the_operators_single_number_still_replaces_every_ceiling(self):
         with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_DISPATCH_TIMEOUT': '45'}):

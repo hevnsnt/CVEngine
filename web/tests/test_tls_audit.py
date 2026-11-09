@@ -190,6 +190,20 @@ class SweepTests(RouteFixture, TestCase):
         self.assertTrue(match.ai_reason.startswith('Closed automatically:'))
         self.assertEqual(ProbeObservation.objects.get(host='www.rt.test', port=443, product='heartbleed').outcome, 'absent')
 
+    def test_a_run_that_completes_no_handshake_closes_nothing(self):
+        """testssl prints \"not vulnerable\" for every vulnerability test of a listener it could not talk to. That is not a clean result: the proven
+        match, its finding and its observation stay as they were, and the target is not recorded as cleared."""
+        self.output = report(HEARTBLEED)
+        self.sweep()
+        ServiceRun.objects.all().delete()
+        no_handshake = [item(p, 'INFO', 'not offered') for p in ('SSLv2', 'SSLv3', 'TLS1', 'TLS1_1', 'TLS1_2', 'TLS1_3')]
+        self.output = no_handshake + [i for i in CLEAN if i['id'] in ('heartbleed', 'CCS', 'ROBOT', 'FREAK', 'DROWN')]
+        self.sweep()
+        match = CVEMatch.objects.get(cve_entry=self.cve, subdomain=self.sub, source='testssl', matched_product='TLS service on port 443')
+        self.assertEqual((match.template_result, match.ai_verdict), ('vulnerable', ''))
+        self.assertEqual(ProbeObservation.objects.get(host='www.rt.test', port=443, product='heartbleed').outcome, 'found')
+        self.assertEqual(HygieneFinding.objects.get(domain=self.domain, host='www.rt.test:443', check_name='tlsa_heartbleed').status, 'open')
+
     def test_a_match_a_person_works_is_kept_open_when_a_later_test_is_clean(self):
         self.output = report(HEARTBLEED)
         self.sweep()

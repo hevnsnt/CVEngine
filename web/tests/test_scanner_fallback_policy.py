@@ -154,7 +154,7 @@ class WrapperPolicyTests(DispatchBase):
     def test_naabu_never_runs_the_remainder_beyond_one_task_locally(self):
         # the addresses beyond one task go to the Sentinel in further chunk tasks (sentinel_dispatch.dispatch_many): nothing runs here
         self.make_sentinel(['naabu'])
-        many = [f'192.0.2.{i}' for i in range(1, dispatch.MAX_ADDRESSES + 5)]
+        many = [f'192.0.2.{i}' for i in range(1, dispatch.NAABU_CHUNK + 5)]
         result = {'outcome': 'done', 'ports': {}}
         for parallel in ('1', '4'):
             with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)), \
@@ -165,7 +165,7 @@ class WrapperPolicyTests(DispatchBase):
 
     def test_naabu_remainder_after_an_unclaimed_chunk_waits_instead_of_running_here(self):
         self.make_sentinel(['naabu'])
-        many = [f'192.0.2.{i}' for i in range(1, dispatch.MAX_ADDRESSES + 5)]
+        many = [f'192.0.2.{i}' for i in range(1, dispatch.NAABU_CHUNK + 5)]
         for parallel in ('1', '4'):
             with mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=0.2), \
                     mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': parallel}):

@@ -1649,7 +1649,29 @@ def reap_expired(now=None):
         if _end_as_expired(task, reason, now):
             ended.setdefault(task.project.org_id, []).append((task, reason))
     _audit_sweep(ended)
+    scrub_stale_values(now)
     return sum(len(v) for v in ended.values())
+
+
+STALE_VALUES_AFTER = timedelta(minutes=10)  # a finished secrets_scan or route_probe result keeps its secret values this long at most
+STALE_VALUES_BATCH = 200
+
+
+def scrub_stale_values(now=None):
+    """Scrub the secret values of any finished ``secrets_scan`` or ``route_probe`` result older than ``STALE_VALUES_AFTER`` that was not scrubbed when it was
+    filed: filing raised, the stage that waited for the result was gone, or the worker died in between. The values are never meant to outlive the step that
+    fingerprints them. Runs at most once a minute (every broker entry point calls the reaper), ``STALE_VALUES_BATCH`` rows at a time. Returns the number
+    scrubbed."""
+    from django.core.cache import cache
+    now = now or timezone.now()
+    try:
+        if not cache.add('sentinel:scrub-stale-values', 1, 60):
+            return 0
+    except Exception:  # noqa: BLE001 - without the cache it runs every call, bounded by the batch
+        pass
+    ids = list(SentinelTask._base_manager.filter(kind__in=('secrets_scan', 'route_probe'), status='done', finished_at__lt=now - STALE_VALUES_AFTER)
+               .exclude(result__has_key='values_scrubbed').order_by('id').values_list('id', flat=True)[:STALE_VALUES_BATCH])
+    return sum(1 for task_id in ids if scrub_values(task_id))
 
 
 SWEEP_SAMPLE = 20  # task ids named in a sweep's summary row: enough to find the tasks, never a row the size of the sweep
@@ -2274,7 +2296,10 @@ def _clean_nmap_result(body):
         ip = _address(item.get('ip')) if isinstance(item, dict) and isinstance(item.get('ip'), str) else None
         if ip is None:  # an address row is only ever made from an IP literal, never from free text
             continue
-        out.append({'ip': ip, 'os_guess': _clip(item.get('os_guess'), 'os_guess'), 'ports': _clean_ports(item.get('ports') or [])})
+        row = {'ip': ip, 'os_guess': _clip(item.get('os_guess'), 'os_guess'), 'ports': _clean_ports(item.get('ports') or [])}
+        if item.get('timed_out') is True:  # nmap gave up on this host: only the explicit True is kept, so a result without the field reads as before
+            row['timed_out'] = True
+        out.append(row)
     # Docker Desktop can make an OS guess describe its gateway instead of the target.
     # Preserve only the explicit boolean opt-out through result sanitization.
     return {'hosts': out, 'os_reliable': body.get('os_reliable') is not False}
@@ -2299,13 +2324,18 @@ def _clean_naabu_result(body):
         clean = sorted({v for v in values[:MAX_PORTS_PER_HOST] if isinstance(v, int) and not isinstance(v, bool) and 0 < v < 65536})
         if clean:
             out[ip] = clean
-    return {'ports': out}
+    cleaned = {'ports': out}
+    if body.get('incomplete') is True:  # the scan ran out of time: ``unfinished`` are the addresses it did not get through, which stay due
+        cleaned['incomplete'] = True
+        cleaned['unfinished'] = sorted({a for a in (_address(v) if isinstance(v, str) else None for v in (body.get('unfinished') or [])[:MAX_ADDRESSES]) if a})
+    return cleaned
 
 
 _SEVERITY_ORDER = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1, 'info': 0, 'unknown': 0}
 
 
 MAX_CVE_IDS = 20
+MAX_REFERENCES = 20
 _CVE_ID = re.compile(r'CVE-\d{4}-\d{4,7}', re.IGNORECASE)  # bounded: a longer one would overflow CveId.name and fail the whole stage
 MAX_EVIDENCE = 4096  # characters of a finding's matched request and of its response kept from a Sentinel's result (500 findings: ~4 MB)
 _NUCLEI_TYPES = ('http', 'tcp', 'network', 'javascript', 'dns', 'ssl', 'headless', 'file', 'whois', 'code', 'websocket')
@@ -2359,13 +2389,29 @@ def _clean_findings(findings):
             ids = item.get('cve_ids')
             finding['cve_ids'] = list(dict.fromkeys(v.strip().upper() for v in (ids if isinstance(ids, list) else [])[:MAX_CVE_IDS]
                                                     if isinstance(v, str) and _CVE_ID.fullmatch(v.strip())))
+        # what a CVE template says about itself, optional like ``cve_ids``: the CVSS score, the references and the remediation text (a client that
+        # does not send them gets its result back unchanged)
+        score = item.get('cvss_score')
+        if isinstance(score, (int, float)) and not isinstance(score, bool) and 0 <= score <= 10:
+            finding['cvss_score'] = round(float(score), 1)
+        refs = item.get('references')
+        if isinstance(refs, list):
+            finding['references'] = [_text(r, 500) for r in refs[:MAX_REFERENCES] if isinstance(r, str) and r.strip().lower().startswith(('http://', 'https://'))]
+        if isinstance(item.get('remediation'), str) and item['remediation'].strip():
+            finding['remediation'] = _text(item['remediation'], 500)
         out.append(finding)
     return out, dropped
 
 
 def _clean_nuclei_result(body):
     findings, dropped = _clean_findings(body.get('findings') or [])
-    return {'findings': findings, **({'dropped_findings': dropped} if dropped else {})}
+    out = {'findings': findings, **({'dropped_findings': dropped} if dropped else {})}
+    unreachable = body.get('unreachable')
+    if isinstance(unreachable, list):  # the hosts the Sentinel could not resolve or connect to: not scanned, whatever the findings say
+        out['unreachable'] = sorted({_text(h, 260).strip().lower() for h in unreachable[:MAX_ADDRESSES * 4] if isinstance(h, str) and h.strip()})
+    if isinstance(body.get('templates_release'), str) and body['templates_release'].strip():
+        out['templates_release'] = _text(body['templates_release'], 40)  # the nuclei template release the run used: a stale run is visible
+    return out
 
 
 MAX_TESTSSL_ITEMS = 300  # a testssl.sh run of one host:port is a few dozen tests; well above any real report
@@ -2386,7 +2432,12 @@ def _clean_testssl_result(body):
         severity = severity.upper() if isinstance(severity, str) and severity.upper() in _TESTSSL_SEVERITIES else ''
         out.append({'id': _text(item['id'], 60), 'severity': severity, 'finding': _text(item.get('finding'), 600),
                     'cve': _text(item.get('cve'), 300)})
-    return {'items': out}
+    cleaned = {'items': out}
+    if isinstance(body.get('returncode'), int) and not isinstance(body.get('returncode'), bool):
+        cleaned['returncode'] = body['returncode']
+    if isinstance(body.get('handshake'), bool):
+        cleaned['handshake'] = body['handshake']
+    return cleaned
 
 
 MAX_NMAP_UDP_XML = 4 * 1024 * 1024  # a one-address, curated-port-list -sU report; generous, still far below a DoS-sized payload
@@ -2499,8 +2550,12 @@ def _clean_openvas_result(body):
     unusable = _ov_num(body.get('unusable'), 0, MAX_OPENVAS_RESULTS, int, 0)
     # results whose CVE references the Sentinel's gvmd left out (a stale NVT cache, ``cveFeed.openvas_scan.parse_result``): the run is partial
     stale = _ov_num(body.get('nvt_cache_stale'), 0, MAX_OPENVAS_RESULTS, int, 0)
-    return {'results': results, 'scanned_addresses': scanned_addresses, 'without_cve': without_cve, 'unusable': unusable,
-            'partial': body.get('partial') is True or stale > 0, 'nvt_cache_stale': stale}  # a scan stopped at its time budget: what it found is kept, nothing earlier is resolved by it
+    cleaned = {'results': results, 'scanned_addresses': scanned_addresses, 'without_cve': without_cve, 'unusable': unusable,
+               'partial': body.get('partial') is True or stale > 0, 'nvt_cache_stale': stale}
+    unreached = body.get('unreached_hosts')
+    if isinstance(unreached, list):  # hosts gvmd listed but that never answered (offline, firewalled): not scanned, whatever the report says
+        cleaned['unreached_hosts'] = [ov_clean(a, 60) for a in unreached[:MAX_ADDRESSES] if isinstance(a, str)]
+    return cleaned  # a scan stopped at its time budget: what it found is kept, nothing earlier is resolved by it
 
 
 def _clean_waf_result(body):

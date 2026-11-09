@@ -569,9 +569,13 @@ def _remote_review(domain, targets, hosts):
         elif row.get('found'):
             review['infos'][(host, port)] = _cert_info(host, port, row['cert'])
     reviews = {_norm(m['name']): m for m in result.get('mail') or []}
+    # a name whose lookup failed on the scanner (a resolver timeout is not "no MX record"): its open findings stay open, whether or not it is an own name
+    lookup_failed = {_norm(n) for n in result.get('unknown_names') or [] if isinstance(n, str)}
     for name, always in mail:
         row = reviews.get(_norm(name))
-        if row is not None:
+        if _norm(name) in lookup_failed or (row is not None and row.get('error')):
+            review['unknown_mail'].add(name)
+        elif row is not None:
             review['mail_hosts'].append(name)
             review['mail'][name] = ([Finding(f['check'], f['severity'], f['title'], f['detail'], f['host'], f['evidence']) for f in row['findings']],
                                     row['has_mx'])

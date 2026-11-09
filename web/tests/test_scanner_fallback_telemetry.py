@@ -91,7 +91,7 @@ class EveryReasonWaitsTests(Base):
     @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '1'})  # the serial loop: one chunk task at a time
     def test_the_addresses_beyond_one_task_go_in_a_second_task_and_nothing_runs_here(self):
         self.make_sentinel(['naabu'])
-        ips = [f'192.0.2.{n}' for n in range(1, dispatch.MAX_ADDRESSES + 6)]
+        ips = [f'192.0.2.{n}' for n in range(1, dispatch.NAABU_CHUNK + 6)]
         with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task({'outcome': 'done', 'ports': {}})):
             dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)(ips)
         self.assertEqual(SentinelTask.objects.filter(kind='naabu').count(), 2)
