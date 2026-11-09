@@ -1165,6 +1165,16 @@ def _serialize_activity(a):
             'finished': a.finished_at.isoformat() if a.finished_at else None}
 
 
+def _backlog_note():
+    """The feed's one plain line when every Sentinel slot is taken and many checks wait (``sentinel_broker.backlog``): the message and the counts, never a name; None when not."""
+    try:
+        from agentapi import sentinel_broker
+        return sentinel_broker.backlog()
+    except Exception:  # noqa: BLE001 - a note must never break the feed
+        logger.warning('could not read the Sentinel backlog', exc_info=True)
+        return None
+
+
 @require_GET
 @project_scoped
 def api_activity(request):
@@ -1189,7 +1199,7 @@ def api_activity(request):
     if since and after.isdigit() and int(after) > 0:
         bumped = list(activity.filter(id__lte=int(after), repeat__gt=1, created_at__gt=since).order_by('id')[:50])
     body = {'items': [_serialize_activity(a) for a in items], 'settled': [_serialize_activity(a) for a in settled],
-            'bumped': [_serialize_activity(a) for a in bumped]}
+            'bumped': [_serialize_activity(a) for a in bumped], 'backlog': _backlog_note()}
     # the ETag is the lines themselves, never ``now``: a poll that finds the same lines gets a 304 (the page keeps its cursor, and asks again)
     return snapshot_cache.respond(request, snapshot_cache.token_of(body), lambda: {**body, 'now': timezone.now().isoformat()})
 

@@ -105,8 +105,8 @@ class ExpiryTests(AsyncBase):
         self.assertEqual(task.status, 'expired')
         self.assertIn('no Sentinel claimed the task in time', task.error)
         self.assertIn('the targets stay due', task.error)
-        self.assertEqual(list(AgentActivity.objects.filter(message__contains='No Sentinel picked up hygiene_check work').values_list('status', flat=True)),
-                         ['expired'])  # the hand-off line, closed once, as the blocking wait closes it
+        self.assertEqual(list(AgentActivity.objects.filter(message__contains='hygiene_check work for').values_list('status', flat=True)),
+                         ['waiting'])  # the hand-off line, closed once, as the blocking wait closes it
 
     def test_unclaimed_raises_scanner_unavailable_in_the_callback(self):
         with FakeScanner(kinds=['http_probe'], mode='idle', async_stages=True) as fake:

@@ -107,14 +107,14 @@ def outcome_text(kind):
     return STAY_DUE
 
 
-def _no_local(kind, why):
+def _no_local(kind, why, waiting=False):
     """Where a stage found no Sentinel that took (or finished) ``kind``: ``ScannerUnavailable``, always. The kind never runs on this server, so the targets
     stay due and nothing is recorded as done. The scan running in this context is told it waited for ``kind`` (``scanner_wait.noted``): its hosts are
     queued again for when a scanner is back."""
     from cveFeed import scanner_wait
     from reNgine.resources import ScannerUnavailable
     scanner_wait.noted(kind)
-    raise ScannerUnavailable(kind, why)
+    raise ScannerUnavailable(kind, why, waiting=waiting)
 
 
 def _no_scanner(kind, project, capacity=None):
@@ -124,7 +124,8 @@ def _no_scanner(kind, project, capacity=None):
     from agentapi import sentinel_broker
     if capacity is None or 'reason' not in capacity:
         capacity = sentinel_broker.capacity_state(project, kind, why=True)
-    _no_local(kind, capacity.get('message') or 'no Sentinel is live for this project')
+    waiting = bool(capacity.get('waiting'))  # every Sentinel that can run it is busy: back-pressure, said without Sentinel names (the line is read by project members)
+    _no_local(kind, (capacity.get('public') if waiting else capacity.get('message')) or 'no Sentinel is live for this project', waiting=waiting)
 
 
 def _dispatch_timeout(kind=None, targets=0):
@@ -401,10 +402,13 @@ class _Dispatch:
                             else f'A Sentinel reported {kind} failed for {label}: {reason}'), trace_id=task.trace_id)
         else:  # no Sentinel took it, or one did and never reported back: the ending is true for the kind's policy (it ran here, or the targets stay due)
             ending = STAY_DUE
-            if self.never_claimed:
-                activity.settle(self.entry, 'expired', message=(f'No Sentinel slot freed up for {kind} work for {label} in time; {ending}' if busy
-                                                                else f'No Sentinel picked up {kind} work for {label} in time; {ending}'),
-                                trace_id=task.trace_id)
+            if self.never_claimed and not self.vanished:  # back-pressure: one calm line per scan (the same line again counts up), amber, never red
+                scan_name = (self.scan.domain.name if getattr(self.scan, 'domain', None) else '') or label
+                activity.settle_waiting(self.entry, f'{kind} work for {scan_name} is waiting for a free Sentinel slot; {ending}' if busy
+                                        else f'{kind} work for {scan_name} is waiting for a Sentinel to pick it up; {ending}',
+                                        scan_id=getattr(self.scan, 'id', None), trace_id=task.trace_id)
+            elif self.never_claimed:
+                activity.settle(self.entry, 'expired', message=f'No Sentinel picked up {kind} work for {label} in time; {ending}', trace_id=task.trace_id)
             else:  # claimed, but not reported back before the completion timeout
                 activity.settle(self.entry, 'expired', message=f'No Sentinel checked in {kind} work for {label} in time; {ending}',
                                 trace_id=task.trace_id)
@@ -416,7 +420,8 @@ class _Dispatch:
         if task.status == 'done' or self.internal:
             return
         _no_local(self.kind, f'the {"queue" if self.never_claimed else "Sentinel"} did not return a result in time' if task.status != 'failed'
-                  else f'the Sentinel reported it failed: {(task.error or "no reason given")[:120]}')
+                  else f'the Sentinel reported it failed: {(task.error or "no reason given")[:120]}',
+                  waiting=self.never_claimed and not self.vanished and task.status != 'failed')  # it never got a slot: back-pressure, not a failure
 
     def cancel(self, reason):
         """Hand the task back unfinished (the stage was stopped, or its consumer went away): expired, so it is neither claimed nor left queued."""

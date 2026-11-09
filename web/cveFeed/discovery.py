@@ -334,6 +334,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
         extra_args = [*extra_args, bbot_lib.TRUFFLEHOG_FLAG]
     shown = set()  # the scanner reports the same name from several modules; show each thing once
     status, error, partial = SUCCESS, '', ''
+    waited = False  # it only waited for a free Sentinel slot: shown as waiting, never as a failure
     from cveFeed import activity
     from cveFeed.models import DiscoveryEvent
     from reNgine.resources import ScanAborted, ScannerUnavailable
@@ -365,6 +366,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
         return {'scan_id': scan.id, 'status': ABORTED, 'error': 'stopped'}
     except ScannerUnavailable as exc:  # no Sentinel could take it and it may not run here: nothing ran, the target stays due
         status, error = FAILED, (f'not scanned: {exc.refusal}' if hasattr(exc, 'refusal') else f'waiting for a scanner: {exc}')[:290]  # a do-not-scan refusal is not a wait
+        waited = bool(getattr(exc, 'waiting', False))
         logger.warning('discovery of scan %s did not run: %s', scan_id, exc)
     except Exception as exc:  # the scan must end in a visible state, never stay "running"
         logger.exception('discovery failed for scan %s', scan_id)
@@ -376,10 +378,14 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
         scan.save(update_fields=['scan_status', 'stop_scan_date', 'error_message'])
     from startScan.models import Subdomain
     found = Subdomain.objects.filter(scan_history=scan).count()
-    activity.settle(running, 'done' if status == SUCCESS else 'failed', message=(
-        f'Discovery of {scan.domain.name} finished: {found} host{"s" if found != 1 else ""} found'
-        + (f', but incomplete ({partial})' if partial else '')
-        if status == SUCCESS else f'Discovery of {scan.domain.name} failed: {error}'), hosts=found)
+    if waited and status != SUCCESS:  # the scan record still reads "waiting for a scanner" (the target stays due and is queued again); the line is amber, not red
+        activity.settle_waiting(running, f'Discovery of {scan.domain.name} is waiting for a free Sentinel; it is asked again',
+                                scan_id=scan.id, hosts=found)
+    else:
+        activity.settle(running, 'done' if status == SUCCESS else 'failed', message=(
+            f'Discovery of {scan.domain.name} finished: {found} host{"s" if found != 1 else ""} found'
+            + (f', but incomplete ({partial})' if partial else '')
+            if status == SUCCESS else f'Discovery of {scan.domain.name} failed: {error}'), hosts=found)
     if status == SUCCESS and not partial:
         from cveFeed import ledger
         ledger.record('bbot', [scan.domain.name], scan.domain.project_id, scan)
@@ -1009,20 +1015,26 @@ def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=Fa
                          f'Scanning {len(wanted)} new host{"s" if len(wanted) != 1 else ""} of {domain.name} {hosts_text}',
                          project=domain.project_id, scan_id=scan.id)
             lookup_errors = {}
+            lookups_waited = False  # the lookups only waited for a free Sentinel slot
             if resolver is None:  # a Sentinel resolves them (dns_resolve, agentapi.probe_dispatch): the kind has no local path
                 from agentapi import probe_dispatch
                 try:
                     pairs = probe_dispatch.resolve_for(domain, wanted, errors=lookup_errors, scan=scan)
                 except resources.ScannerUnavailable as exc:  # no scanner can resolve them and it may not run here: nothing is recorded, all stay due
                     pairs = set()
+                    lookups_waited = bool(getattr(exc, 'waiting', False))
                     lookup_errors.update({name: f'waiting for a scanner ({exc.why or "none is live"})'[:120] for name in wanted})
             else:
                 pairs = resolver(wanted)
             if lookup_errors:  # a name whose lookup was not answered is not recorded as a host with no address: the next pass looks again
                 wanted = [n for n in wanted if n not in lookup_errors]
-                activity.log('discovery', f'DNS could not answer {len(lookup_errors)} lookup{"s" if len(lookup_errors) != 1 else ""} for {domain.name} '
-                                          f'({next(iter(lookup_errors.values()))}); those hosts are not recorded and are looked up again later',
-                             project=domain.project_id, scan_id=scan.id)
+                if lookups_waited:  # back-pressure: one calm amber line, no alarm about lookups
+                    activity.log('discovery', f'DNS lookups for {domain.name} are waiting for a free Sentinel; those hosts are looked up again later',
+                                 project=domain.project_id, status='waiting', scan_id=scan.id)
+                else:
+                    activity.log('discovery', f'DNS could not answer {len(lookup_errors)} lookup{"s" if len(lookup_errors) != 1 else ""} for {domain.name} '
+                                 f'({next(iter(lookup_errors.values()))}); those hosts are not recorded and are looked up again later',
+                                 project=domain.project_id, scan_id=scan.id)
                 if len(assessment_ids) > 1:
                     for name, reason in lookup_errors.items():  # that host's own outcome: the other hosts of the batch are not held to it
                         per_host[name] = {'scan_id': scan.id, 'status': 'inconclusive', 'hosts': 1, 'resolved': 0, 'lookup_errors': 1,
@@ -1043,7 +1055,8 @@ def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=Fa
             if lookup_errors:
                 found['lookup_errors'] = len(lookup_errors)
                 if not wanted:  # every lookup failed: nothing was learned, and the run says so instead of reporting success
-                    message = f'DNS could not answer any lookup ({next(iter(lookup_errors.values()))}); nothing was recorded'
+                    message = ('The lookups are waiting for a free Sentinel; nothing was recorded and the hosts are looked up again' if lookups_waited
+                               else f'DNS could not answer any lookup ({next(iter(lookup_errors.values()))}); nothing was recorded')
                     ScanHistory.objects.filter(pk=scan.pk).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
                     return {**found, 'status': 'inconclusive', 'error': message, **({'per_host': per_host} if per_host else {})}
             if force and not pairs:

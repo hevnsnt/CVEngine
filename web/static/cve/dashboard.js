@@ -832,6 +832,11 @@ async function pollAgent() {
     if (d === null) return; // 304: the same lines, the same cursor
     activityNow = d.now || activityNow;
     const list = $("agent");
+    const note = $("agent-backlog");
+    if (note) {
+      note.hidden = !d.backlog;
+      note.textContent = d.backlog ? d.backlog.message : "";
+    }
     keepPlace(list, () => {
     d.settled.forEach((a) => {
       const old = running.get(a.id);
