@@ -12,7 +12,7 @@ from pathlib import Path
 from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase
 
-from cveFeed import autotune, detection_author, nuclei_templates as nt, rdp_shot, templategen, validation_plan
+from cveFeed import autotune, detection_author, nuclei_templates as nt, rdp_shot, templategen, templatevalidate, validation_plan
 from reNgine import ai_prompts, ai_providers
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -49,6 +49,7 @@ def system_prompts():
         'validation_plan': validation_plan.SYSTEM,
         'cve_detection': detection_author.SYSTEM_PROMPT,
         'template_generation': templategen.SYSTEM_PROMPT,
+        'template_validation': templatevalidate._system(templatevalidate.FIXTURE_SYSTEM_BODY),
         'autotune_advisor': autotune.ADVISOR_SYSTEM,
         'rdp_screenshot': rdp_shot.VISION_SYSTEM,
         'finding_review': reviewer.REVIEW_SYSTEM,
@@ -60,7 +61,7 @@ def system_prompts():
 # change plus a little room. A job whose prompt grows past its budget fails here, so a longer prompt is a decision, not an accident.
 SYSTEM_BUDGET = {
     'finding_triage': 4720, 'local_check_suggestion': 2190, 'validation_plan': 2950, 'cve_detection': 7600,
-    'template_generation': 1710, 'autotune_advisor': 1360, 'rdp_screenshot': 680, 'finding_review': 3780, 'operations_check': 1660,
+    'template_generation': 1710, 'template_validation': 1550, 'autotune_advisor': 1360, 'rdp_screenshot': 680, 'finding_review': 3780, 'operations_check': 1660,
 }
 
 

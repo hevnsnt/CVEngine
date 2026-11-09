@@ -259,7 +259,7 @@ class ReasoningSettingTests(unittest.TestCase):
 	def test_the_budget_of_an_older_claude_model_follows_the_page_s_reply_limit(self):
 		body = send('anthropic', AIRuntime(reasoning='low', max_tokens=4096), model='claude-sonnet-4-5')[1]
 		self.assertEqual(body['thinking'], {'type': 'enabled', 'budget_tokens': 1024})
-		self.assertEqual(body['max_tokens'], 4096)
+		self.assertEqual(body['max_tokens'], 4096 + 1024)  # the page's limit is the answer room; the budget is added on top
 
 
 class EffectiveSettingsTests(unittest.TestCase):

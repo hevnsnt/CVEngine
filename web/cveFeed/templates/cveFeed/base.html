@@ -57,6 +57,7 @@
       {% if is_admin %}<a data-nav="Administration" {% if nav.utility == 'Administration' %}aria-current="page" {% endif %}href="{% url 'cve_admin' %}"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-building"/></svg>Administration</a>{% endif %}
       {% if request.user.is_superuser %}<a data-nav="{% if ai_usage_connected %}AI Model Usage{% else %}Connect AI model{% endif %}" {% if active == 'setup' %}aria-current="page" {% endif %}href="{% url 'cve_onboarding' %}"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-bot"/></svg>{% if ai_usage_connected %}AI Model Usage{% else %}Connect AI model{% endif %}</a>
       <a data-nav="Settings" {% if nav.utility == 'Settings' %}aria-current="page" {% endif %}href="{% url 'cve_settings' %}"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-sliders"/></svg>Settings</a>{% endif %}
+      <a data-nav="API keys" {% if nav.utility == 'API keys' %}aria-current="page" {% endif %}href="{% url 'cve_agents' %}"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-key"/></svg>API keys</a>
       <button type="button" data-keys-help><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-info"/></svg>Keyboard shortcuts</button>
       <a data-nav="Help" {% if nav.utility == 'Help' %}aria-current="page" {% endif %}href="{% url 'cve_about' %}"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-info"/></svg>Help</a>
       <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button type="submit"><svg width="18" height="18" viewBox="0 0 24 24"><use href="#i-logout"/></svg>Sign out</button></form>
@@ -144,6 +145,7 @@
     {% if is_admin %}<a href="{% url 'cve_admin' %}" {% if nav.utility == 'Administration' %}aria-current="page"{% endif %}><svg width="20" height="20" viewBox="0 0 24 24"><use href="#i-building"/></svg>Administration</a>{% endif %}
     {% if request.user.is_superuser %}<a href="{% url 'cve_onboarding' %}" {% if active == 'setup' %}aria-current="page"{% endif %}><svg width="20" height="20" viewBox="0 0 24 24"><use href="#i-bot"/></svg>{% if ai_usage_connected %}AI Model Usage{% else %}Connect AI model{% endif %}</a>
     <a href="{% url 'cve_settings' %}" {% if nav.utility == 'Settings' %}aria-current="page"{% endif %}><svg width="20" height="20" viewBox="0 0 24 24"><use href="#i-sliders"/></svg>Settings</a>{% endif %}
+    <a href="{% url 'cve_agents' %}" {% if nav.utility == 'API keys' %}aria-current="page"{% endif %}><svg width="20" height="20" viewBox="0 0 24 24"><use href="#i-key"/></svg>API keys</a>
     <a href="{% url 'cve_about' %}" {% if nav.utility == 'Help' %}aria-current="page"{% endif %}><svg width="20" height="20" viewBox="0 0 24 24"><use href="#i-info"/></svg>Help</a>
     <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button class="out" type="submit"><svg width="20" height="20" viewBox="0 0 24 24"><use href="#i-logout"/></svg>Sign out</button></form>
   </div>

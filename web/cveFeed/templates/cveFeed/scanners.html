@@ -12,7 +12,7 @@
 <div class="health-links">
   <a class="btn sm" href="{% url 'cve_sentinels' %}">Sentinels and Provision</a>
   {% if is_app_admin %}<a class="btn ghost sm" href="{% url 'cve_admin' %}#health">Scheduler detail</a>{% endif %}
-  <a class="btn ghost sm" href="{% url 'cve_agents' %}">Integrations</a>
+  <a class="btn ghost sm" href="{% url 'cve_agents' %}">API keys</a>
 </div>
 {% endblock %}
 {% block scripts %}
