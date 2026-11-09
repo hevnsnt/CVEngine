@@ -73,8 +73,8 @@ const maxxing = await import('../static/cve/config-maxxing.js');
 await import('../static/cve/tunables-card.js');
 
 test('the generic cards register themselves, one per group of the registry, and draw their own title and intro', async () => {
-  assert.deepEqual(maxxing.cards().map((c) => c.id), ['ai_spend', 'throughput', 'autotune_pace', 'retention', 'egress', 'heat']);
-  assert.deepEqual(maxxing.cards().map((c) => c.title), ['AI spend', 'Scan pacing', 'Auto-tuning pace', 'Data retention', 'Outbound connections', 'Heat policy']);
+  assert.deepEqual(maxxing.cards().map((c) => c.id), ['ai_spend', 'throughput', 'autotune_pace', 'retention', 'egress', 'heat', 'discovery_keys']);
+  assert.deepEqual(maxxing.cards().map((c) => c.title), ['AI spend', 'Scan pacing', 'Auto-tuning pace', 'Data retention', 'Outbound connections', 'Heat policy', 'Discovery API keys']);
   const host = new Node('div');
   await maxxing.cards()[0].build(host);
   assert.match(host.textContent, /^AI spend/);
@@ -154,7 +154,7 @@ test('a card that fails to build shows its error line and the others still draw'
 test('the page code and the server registry name the same groups', () => {
   const dir = new URL('../static/cve/', import.meta.url);
   const src = readFileSync(new URL('tunables-card.js', dir), 'utf8');
-  assert.deepEqual([...src.matchAll(/registerTunableGroup\("([a-z_]+)", "([^"]+)"\);/g)].map((m) => [m[1], m[2]]), [['ai_spend', 'AI spend'], ['throughput', 'Scan pacing'], ['autotune_pace', 'Auto-tuning pace'], ['retention', 'Data retention'], ['egress', 'Outbound connections'], ['heat', 'Heat policy']]);
+  assert.deepEqual([...src.matchAll(/registerTunableGroup\("([a-z_]+)", "([^"]+)"\);/g)].map((m) => [m[1], m[2]]), [['ai_spend', 'AI spend'], ['throughput', 'Scan pacing'], ['autotune_pace', 'Auto-tuning pace'], ['retention', 'Data retention'], ['egress', 'Outbound connections'], ['heat', 'Heat policy'], ['discovery_keys', 'Discovery API keys']]);
   assert.match(readFileSync(new URL('settings.js', dir), 'utf8'), /tunables-card\.js/);
 });
 
