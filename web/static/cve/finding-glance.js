@@ -3,6 +3,8 @@
 // validation job, the checks) folds away under a one-line summary. Nothing here invents data: every line comes from the detail the
 // server already sends; a signal that is not known says so.
 import { el, badge } from "/staticfiles/cve/ui.js";
+import { fmtLong, zoneLabel } from "/staticfiles/cve/prefs.js";
+import { templateSegments, textSegments } from "/staticfiles/cve/finding-glance-logic.js";
 
 const CLASS_WORDS = {
   confirmed: "Confirmed",
@@ -27,8 +29,25 @@ export function fold(title, sub, { open = false } = {}) {
 const step = (d, label) =>
   (d.how_found.steps || []).find((s) => s.label === label);
 
+// A value as a sentence: words wrap at spaces, a check name is a code chip, a time is written for people (viewer's zone) with the
+// exact ISO value in the tooltip.
+function richValue(segs) {
+  const box = document.createDocumentFragment();
+  segs.forEach((s) => {
+    if (s.k === "code" || s.k === "when") {
+      // the lead word stays with the thing it introduces, so a line never ends on "Check:" or "Tested"
+      const unit = el("span", "gl-unit");
+      if (s.lead) unit.append(document.createTextNode(s.lead));
+      if (s.k === "code") unit.append(el("code", "gl-code", s.v));
+      else unit.append(el("time", "gl-when", fmtLong(s.iso) || s.iso, { datetime: s.iso, title: `${s.iso} (shown in ${zoneLabel()})` }));
+      box.append(unit);
+    } else box.append(document.createTextNode(s.v));
+  });
+  return box;
+}
+
 // The three states a piece of evidence can be in. "for" supports the finding being real, "against" speaks for a false alarm.
-const signal = (tone, label, value) => {
+const signal = (tone, label, value, segs) => {
   const row = el("li", `sig sig-${tone}`);
   row.append(
     el("i", "sig-mark", tone === "for" ? "✓" : tone === "against" ? "✕" : "•", {
@@ -36,7 +55,7 @@ const signal = (tone, label, value) => {
     }),
   );
   const text = el("span", "sig-text");
-  text.append(el("b", "", label), document.createTextNode(` ${value}`));
+  text.append(el("b", "", label), " ", richValue(segs || textSegments(value)));
   row.append(text);
   const word =
     tone === "for"
@@ -75,9 +94,11 @@ function foundCard(d) {
   const rest = steps.filter((x) => x !== first);
   if (rest.length) {
     const list = el("dl", "gl-facts");
-    rest.forEach((x) =>
-      list.append(el("dt", "", x.label), el("dd", "", x.value)),
-    );
+    rest.forEach((x) => {
+      const dd = el("dd", "gl-val");
+      dd.append(richValue(x.label === "Template check" ? templateSegments(x.value) : textSegments(x.value)));
+      list.append(el("dt", "", x.label), dd);
+    });
     card.append(list);
   }
   return card;
@@ -134,6 +155,7 @@ function confidenceCard(d, row) {
             : "unk",
         "Template",
         tpl.value,
+        templateSegments(tpl.value),
       ),
     );
   const dist = step(d, "Distribution");

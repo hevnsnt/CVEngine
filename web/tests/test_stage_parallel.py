@@ -247,7 +247,7 @@ class WindowTests(StageBase):
         self.assertIn('no Sentinel slot freed up in time', queued.error)  # step ended it, not reap_expired ('while it waited in the queue')
         self.assertEqual(SentinelTask.objects.filter(kind='openvas').count(), 2)  # and the stage stopped sending: chunks 2 and 3 were never created
         self.assertEqual(sorted(got), [0])
-        self.assertTrue(AgentActivity.objects.filter(message__contains='No Sentinel slot freed up for openvas work').exists())
+        self.assertTrue(AgentActivity.objects.filter(message__contains='openvas work for', message__endswith='stay due until a scanner can take the work', status='waiting').exists())
         self.assertFalse(AgentActivity.objects.filter(message__contains='No Sentinel checked in openvas work').exists())
 
     def test_one_poll_read_per_tick_whatever_the_number_of_chunks_in_flight(self):

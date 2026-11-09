@@ -109,7 +109,7 @@ class ActivityWordingTests(DispatchBase):
         for value in (None, 'all', 'none', 'openvas,testssl'):
             with self.subTest(value=value):
                 message, reason = self.unclaimed(value)
-                self.assertIn(f'No Sentinel picked up {KIND} work for www.example.test in time; {self.STAYS_DUE}', message)
+                self.assertIn(f'{KIND} work for www.example.test is waiting for a Sentinel to pick it up; {self.STAYS_DUE}', message)
                 self.assertIn(self.STAYS_DUE, reason)
                 for text in (message, reason):
                     self.assertNotIn('locally', text)

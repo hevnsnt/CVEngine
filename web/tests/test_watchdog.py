@@ -871,6 +871,15 @@ class TickSafetyTests(WatchdogCase):
 
 
 class HostFileTests(WatchdogCase):
+    def test_the_runtime_files_are_ignored_by_git(self):
+        """A tracked runtime file makes `git merge --ff-only` refuse on every server that has it: the update would stop."""
+        ignore = Path(__file__).resolve().parents[2] / '.gitignore'
+        if not ignore.is_file():
+            self.skipTest('the repository root is not mounted')
+        text = ignore.read_text()
+        for name in ('web/.watchdog-action', 'web/.watchdog-action.tmp', 'web/.watchdog-result'):
+            self.assertIn(name, text)
+
     def test_only_the_known_actions_can_be_requested(self):
         with self.assertRaises(ValueError):
             wd.request_host_action('rm-rf', 'R1')

@@ -1265,6 +1265,10 @@ a.bb-tile{text-decoration:none;color:inherit;display:block}a.bb-tile:focus-visib
 .agent li::before{content:"";box-sizing:border-box;position:absolute;left:-7px;top:12px;width:12px;height:12px;border-radius:50%;background:var(--surface);border:2px solid var(--ink)}
 .agent li.a-running::before{background:var(--brand);border-color:var(--brand);animation:blink 1s infinite}
 .agent li.a-failed::before{background:var(--fire);border-color:var(--fire)}
+.agent li.a-waiting::before{background:var(--smoke);border-color:var(--smoke)}
+.a-waiting .a-msg{color:var(--smoke-ink)}
+.agent-backlog{margin:0 0 var(--s-2);padding:var(--s-2) var(--s-3);border-radius:var(--r-s);background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 0 0 0 1px var(--ring-smoke);font-size:var(--fs-2)}
+.agent-backlog[hidden]{display:none}
 .agent li.a-done::before,.agent li.a-success::before{background:var(--ok);border-color:var(--ok)}
 .agent li.a-running::after{left:0;bottom:4px}
 .a-time{font-variant-numeric:tabular-nums}
@@ -1909,15 +1913,22 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .supplier-finding .card-head{justify-content:flex-start}
 
 /* A finding's detail: three cards that answer "what was found, how sure, what did the AI say", then folds for the rest */
-.gl-grid{display:grid;gap:var(--s-3);grid-template-columns:repeat(auto-fit,minmax(250px,1fr));margin-top:var(--s-4)}
-.gl-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:var(--s-4);display:flex;flex-direction:column;gap:var(--s-2);min-width:0}
+/* a flex row that wraps: two cards share the whole row when the pane has room for both (340px each), else they stack; the AI card is a full row of its own */
+.gl-grid{display:flex;flex-wrap:wrap;gap:var(--s-3);margin-top:var(--s-4)}
+.gl-card{flex:1 1 340px;container-type:inline-size;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:var(--s-4);display:flex;flex-direction:column;gap:var(--s-2);min-width:0}
 .gl-h{margin:0;font:var(--fw-medium) var(--fs-1)/1 var(--mono);text-transform:none;letter-spacing:0;color:var(--muted)}
-.gl-big{font-size:var(--fs-5);font-weight:var(--fw-semi);line-height:1.2;overflow-wrap:anywhere}
+.gl-big{font-size:var(--fs-5);font-weight:var(--fw-semi);line-height:1.2;overflow-wrap:break-word;word-break:normal}
 .gl-big.mono{font-family:var(--mono);font-size:var(--fs-4)}
 .gl-sub{color:var(--muted);font-size:var(--fs-2)}
-.gl-facts{display:grid;grid-template-columns:max-content 1fr;gap:var(--s-1) var(--s-3);margin:var(--s-1) 0 0;font-size:var(--fs-2)}
-.gl-facts dt{color:var(--muted);font-family:var(--mono)}
-.gl-facts dd{margin:0;overflow-wrap:anywhere}
+/* narrow card: the label sits above its value; wide card: a label column of fit to its longest label (up to 12em: "Template check" stays on one line) beside it. Values wrap at spaces, and only a token longer than the line (a URL) may break. */
+.gl-facts{display:grid;grid-template-columns:minmax(0,1fr);gap:0;margin:var(--s-1) 0 0;font-size:var(--fs-2)}
+.gl-facts dt{color:var(--muted);font-family:var(--mono);margin-top:var(--s-2);padding-right:.25em}
+.gl-facts dt:first-child{margin-top:0}
+.gl-facts dd,.sig-text{margin:0;min-width:0;overflow-wrap:break-word;word-break:normal;line-height:1.4}
+@container (min-width:420px){.gl-facts{grid-template-columns:fit-content(12em) minmax(0,1fr);gap:var(--s-2) var(--s-3)}.gl-facts dt,.gl-facts dt:first-child{margin-top:0}}
+.gl-code{font:var(--fw-medium) var(--fs-1) var(--mono);background:var(--sunk);padding:0 var(--s-1);border-radius:var(--r-s);overflow-wrap:anywhere}
+.gl-unit{display:inline-block;max-width:100%;white-space:nowrap}
+.gl-unit .gl-code{white-space:normal}
 .gl-pct{font-size:var(--fs-8);letter-spacing:-.02em;font-variant-numeric:tabular-nums}
 .gl-pct.high{color:var(--fire-ink)}.gl-pct.mid{color:var(--smoke-ink)}.gl-pct.low{color:var(--ice-ink)}
 .meter{height:6px;border-radius:var(--r-s);background:var(--sunk);overflow:hidden}
@@ -1933,7 +1944,7 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .gl-verdict .badge{font-size:var(--fs-1);padding:var(--s-2) var(--s-2)}
 .gl-override,.gl-reason{margin:0;font-size:var(--fs-2);line-height:1.45}
 .gl-override .badge{margin:0 2px}
-.gl-ai{grid-column:1/-1}
+.gl-ai{flex:1 1 100%}
 .gl-ai-cols{display:grid;gap:var(--s-4) var(--s-6);grid-template-columns:repeat(auto-fit,minmax(230px,1fr));align-items:start}
 .gl-ai-left,.gl-ai-right{display:flex;flex-direction:column;gap:var(--s-2);min-width:0}
 .gl-rule{margin:0;font-size:var(--fs-2);color:var(--ink-2);line-height:1.4}
