@@ -9,7 +9,7 @@ import logging
 from django.http import HttpResponse, JsonResponse
 from django.core.exceptions import RequestDataTooBig
 
-from agentapi import db_timeout
+from agentapi import db_timeout, storage_safe
 from agentapi import agent_broker as broker
 from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
@@ -640,7 +640,7 @@ def call_tool(ctx, name, arguments):
     _, _, schema, handler, writes = tool
     if writes:
         svc.require_write_token(ctx)
-    arguments = arguments or {}
+    arguments = storage_safe.clean(arguments or {})  # NUL bytes and lone surrogates would be a 500 at the database or the encoder (review 2 F3)
     check_arguments(schema, arguments)
     return handler(ctx, arguments)  # a bug in a handler is not the caller's mistake: it surfaces as an internal error, traceback logged
 

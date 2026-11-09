@@ -304,6 +304,21 @@ def record_and_maybe_ban(request, hits, ip, user):
     return acted
 
 
+def _oversize_api_json(request):
+    """True for a JSON body over ``MAX_BODY`` sent to the REST API or the MCP endpoint (not the machine routes, which carry their own bounds). The guard
+    inspects nothing above ``MAX_BODY``, so a body that large would otherwise reach the handlers uninspected (review 2 F6): it is refused instead."""
+    if request.method not in ('POST', 'PUT', 'PATCH') or not API_PATH.match(request.path):
+        return False
+    if INVENTORY_PATH.match(request.path) or SENTINEL_MACHINE_PATH.match(request.path) or REVIEWER_MACHINE_PATH.match(request.path):
+        return False
+    if (request.META.get('CONTENT_TYPE') or '').split(';')[0].strip().lower() != 'application/json':
+        return False
+    try:
+        return int(request.META.get('CONTENT_LENGTH') or 0) > MAX_BODY
+    except ValueError:
+        return False
+
+
 class InputGuardMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
@@ -311,6 +326,8 @@ class InputGuardMiddleware:
     def __call__(self, request):
         if EXEMPT_PATH.match(request.path):
             return self.get_response(request)
+        if _oversize_api_json(request):
+            return JsonResponse({'error': f'the request body is larger than {MAX_BODY // 1024} KiB'}, status=413)
         try:
             hits = inspect(_request_pairs(request))
         except Exception:  # noqa: BLE001 - never take the app down because inspection failed

@@ -9,7 +9,7 @@ from django.http import JsonResponse
 from django.http.response import HttpResponseBase
 
 from agentapi import agent_broker as broker
-from agentapi import db_timeout
+from agentapi import db_timeout, storage_safe
 from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
 from agentapi import inventory
@@ -44,7 +44,7 @@ def _body(request):
         raise ApiError(400, 'body must be valid JSON')
     if not isinstance(data, dict):
         raise ApiError(400, 'body must be a JSON object')
-    return data
+    return storage_safe.clean(data)  # a NUL byte or a lone surrogate in any string is refused by Postgres or the encoder: cleaned once, here (review 2 F3)
 
 
 def _need(data, *keys):
