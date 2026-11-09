@@ -147,7 +147,8 @@ which send nothing to the target and need no vantage point.
     them in order and persists each through `cveFeed.discovery`'s own flush, then the final result closes the run. A stop of the scan ends the task
     at its next batch (409). `run_discovery` hands the run to a Sentinel that declares the kind; the kind is in `NEVER_LOCAL`, so with none able to take it
     the scan waits (`ScannerUnavailable`) and the target stays due. A project's bbot module keys go by reference (`secret_ref` `bbotkeys:<project id>`) to the built-in
-    scanner only, read once through the secure read. See [AGENT-API.md](AGENT-API.md) ("Streamed work").
+    scanner and to the instance's own Sentinels that report `bbot_keys` (instance setting and per-Sentinel opt-out permitting), read once through the secure
+    read; one gate, `sentinel_stream.key_delivery_decision` (see [SENTINELS.md](SENTINELS.md#discovery-api-keys-on-your-sentinels)). See [AGENT-API.md](AGENT-API.md) ("Streamed work").
 - **Signed-in work**: the built-in fetches a stored credential through a single-use read tied to one task, written to the audit
   log, callable only by the trusted built-in agent. The credential is never in a task row, and an external Sentinel is never
   offered a signed-in task.
