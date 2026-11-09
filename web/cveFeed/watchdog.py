@@ -290,20 +290,21 @@ def check_idle_sentinels(ctx):
 
 
 def act_feed(ctx, chk):
-    from cveFeed import coverage_topup
+    from cveFeed import coverage_topup, work_planner
     out = coverage_topup.feed_sentinels() or {}
     queued = int(out.get('hosts_queued') or 0) + int(out.get('batches_queued') or 0) + int(((out.get('refresh') or {}).get('refreshed')) or 0)
     parts = [f'Ran the Sentinel feed: {queued} item(s) queued for {out.get("slots", "the")} Sentinel slots']
+    planned = 0
     try:
-        from cveFeed import work_planner  # the work planner (when this build has it) plans the due secrets and ssh work too
-        planned = work_planner.run() if hasattr(work_planner, 'run') else None
-        if planned is not None:
-            parts.append('ran the work planner')
-    except ImportError:
-        pass
-    if not queued and not out.get('refresh'):
-        # the feed found nothing it may queue (enough is queued already, or nothing is eligible): not an action, and nothing to check afterwards
-        return None, 'The feed had nothing to queue for the Sentinels (' + (str(out.get('skipped')) if out.get('skipped') else 'nothing eligible') + ').'
+        plan = work_planner.tick() or {}  # the work planner queues the due SSH and secrets checks too (its own gates: off, paused, busy, backing off)
+        planned = int(plan.get('batches') or 0)
+        if planned:
+            parts.append(f'ran the work planner: {planned} batch(es) of due checks queued')
+    except Exception:  # noqa: BLE001 - the planner failing must not hide what the feed did
+        logger.warning('watchdog: the work planner tick failed', exc_info=True)
+    if not queued and not planned and not out.get('refresh'):
+        # nothing was queued (enough is queued already, or nothing is eligible): not an action, and nothing to check afterwards
+        return None, 'The feed and the work planner had nothing to queue for the Sentinels (' + (str(out.get('skipped')) if out.get('skipped') else 'nothing eligible') + ').'
     return True, '; '.join(parts)
 
 
@@ -527,6 +528,40 @@ BY_CODE = {r.code: r for r in RULES}
 
 
 # --- persistence -------------------------------------------------------------------------------------------------------------
+
+# Sentinel watchdogs ------------------------------------------------------------------------------------------------------------
+# Not a numbered rule (it changes nothing): it reads what each live Sentinel's own watchdog reports (agentapi.sentinel_settings.watchdog_problem) and keeps
+# one administrator notice, code ``watchdog_sentinels``, while any of them is stuck or has stopped tasks repeatedly. It resolves itself when none is.
+
+SENTINEL_NOTICE = 'SENTINELS'
+SENTINEL_NOTICE_LIMIT = 5  # names listed in the notice; the count says the rest
+
+
+def sentinel_watchdog_notice(now):
+    """Raise, update or resolve the one notice about Sentinel watchdogs. Returns the number of Sentinels with a problem. Never raises."""
+    try:
+        from agentapi import sentinel_settings
+        from agentapi.agent_broker import LIVE_WINDOW
+        from agentapi.models import Agent
+        agents = Agent.objects.filter(kind='scanner', status='active', token__revoked=False, last_seen__gte=now - LIVE_WINDOW).order_by('name')[:200]
+        found = []
+        for agent in agents:
+            problem = sentinel_settings.watchdog_problem(agent, now=now.timestamp())
+            if problem:
+                found.append((agent.name, problem))
+        if not found:
+            resolve_notice(SENTINEL_NOTICE)
+            return 0
+        lines = [f'{name}: {problem}' for name, problem in found[:SENTINEL_NOTICE_LIMIT]]
+        if len(found) > SENTINEL_NOTICE_LIMIT:
+            lines.append(f'and {len(found) - SENTINEL_NOTICE_LIMIT} more')
+        title = f'{len(found)} Sentinel{"s" if len(found) != 1 else ""} with a watchdog problem'
+        notice(SENTINEL_NOTICE, 'warning', title, 'The watchdog on a Sentinel stops stuck scans and frees memory on that machine. ' + '; '.join(lines) + '. Look at the Sentinels page.', count=len(found))
+        return len(found)
+    except Exception:  # noqa: BLE001
+        logger.warning('watchdog: could not read the Sentinel watchdogs', exc_info=True)
+        return 0
+
 
 def _states():
     from cveFeed.models import WatchdogState
@@ -979,6 +1014,8 @@ def _tick(now, probes, out):
         client.set('cvengine:watchdog:snapshot', snapshot.dumps(snap), ex=300)
     except Exception:  # noqa: BLE001
         pass
+    if not stand:
+        out['sentinel_watchdog_problems'] = sentinel_watchdog_notice(now)
     try:
         expire_settled(now)
         if now.minute % 10 == 0 and now.second < 30:

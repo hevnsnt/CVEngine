@@ -106,7 +106,20 @@ class Probes:
         due = None
         if slots and not waiting:
             due = bool(coverage_topup.backlog_exists())
+            if not due:
+                due = self._planner_due()
         return {'slots': slots, 'busy': min(busy, slots), 'free': max(slots - busy, 0), 'waiting': waiting, 'due': due}
+
+    @staticmethod
+    def _planner_due():
+        """True when the work planner (cveFeed.work_planner) has checks ready for a Sentinel (due and past the route check), from its cached census."""
+        try:
+            from cveFeed import work_planner
+            if not work_planner.enabled():
+                return False
+            return any(row.get('ready', 0) > 0 for row in work_planner.overview()['kinds'])
+        except Exception:  # noqa: BLE001 - the planner is an extra reason to feed, never a reason to fail the snapshot
+            return False
 
     def discovery(self):
         from cveFeed import scan_concurrency

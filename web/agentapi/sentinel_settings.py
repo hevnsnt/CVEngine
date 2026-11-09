@@ -513,7 +513,7 @@ def watchdog_view(agent, now=None):
 
 def watchdog_problem(agent, now=None):
     """The administrator-notice hook: a sentence when this Sentinel's watchdog is stale or has stopped repeatedly, else ``None``. The server-side watchdog
-    (claude/watchdog-srv, ``docs/WATCHDOG.md``) is meant to call it for every live Sentinel and raise its notice; nothing here depends on that branch."""
+    (``cveFeed.watchdog.sentinel_watchdog_notice``, ``docs/WATCHDOG.md``) calls it for every live Sentinel and raises its notice."""
     view = watchdog_view(agent, now)
     return view['problem'] if view else None
 

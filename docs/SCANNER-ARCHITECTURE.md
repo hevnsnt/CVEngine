@@ -442,5 +442,6 @@ red only after `WAIT_RED_SECONDS` (20 minutes, `web/static/cve/sentinel-settings
 old, has its watchdog off, or really lacks memory. The result contract is not touched.
 
 **Hook for the server-side watchdog.** `sentinel_settings.watchdog_problem(agent)` returns a sentence when a live Sentinel's watchdog has not ticked for 180
-seconds (while its heartbeats arrive) or has stopped three or more tasks in the last hour, else `None`. The server watchdog (`claude/watchdog-srv`, not merged
-at the time of writing) is meant to call it for each live Sentinel and raise its administrator notice; nothing here depends on that branch.
+seconds (while its heartbeats arrive) or has stopped three or more tasks in the last hour, else `None`. The server watchdog (`cveFeed/watchdog.py`,
+[WATCHDOG.md](WATCHDOG.md)) calls it for each live Sentinel on every pass and keeps one administrator notice, `watchdog_sentinels`, while any has a problem;
+the notice resolves itself when none has. It changes nothing on the Sentinel.

@@ -633,6 +633,32 @@ class R4R5R6Tests(WatchdogCase):
             self.tick(301)
         queued.assert_not_called()
 
+    def test_r4_runs_the_work_planner_tick_and_counts_what_it_queued(self):
+        self.probes.data['sentinels'] = {'slots': 4, 'busy': 0, 'free': 4, 'waiting': 0, 'due': True}
+        with mock.patch('cveFeed.coverage_topup.feed_sentinels', return_value={'skipped': 'nothing eligible', 'slots': 4}), \
+                mock.patch('cveFeed.work_planner.tick', return_value={'state': 'queued', 'batches': 2, 'queued': {'ssh_probe': 40}}) as planner:
+            self.tick()
+            self.tick(301)
+        planner.assert_called_once_with()
+        event = WatchdogEvent.objects.get(rule='R4', level='action')
+        self.assertIn('work planner: 2 batch(es)', event.result)
+
+    def test_r4_with_nothing_from_the_feed_or_the_planner_is_not_an_action(self):
+        self.probes.data['sentinels'] = {'slots': 4, 'busy': 0, 'free': 4, 'waiting': 0, 'due': True}
+        with mock.patch('cveFeed.coverage_topup.feed_sentinels', return_value={'skipped': 'nothing eligible'}), \
+                mock.patch('cveFeed.work_planner.tick', return_value={'state': 'busy', 'batches': 0}) as planner:
+            self.tick()
+            self.tick(301)
+        planner.assert_called_once_with()
+        self.assertFalse(WatchdogEvent.objects.filter(rule='R4', level='action').exists())
+
+    def test_a_planner_that_raises_does_not_hide_what_the_feed_did(self):
+        self.probes.data['sentinels'] = {'slots': 4, 'busy': 0, 'free': 4, 'waiting': 0, 'due': True}
+        with mock.patch('cveFeed.coverage_topup.feed_sentinels', return_value={'hosts_queued': 3}), mock.patch('cveFeed.work_planner.tick', side_effect=RuntimeError('boom')):
+            self.tick()
+            self.tick(301)
+        self.assertIn('3 item(s) queued', WatchdogEvent.objects.get(rule='R4', level='action').result)
+
     def test_stuck_unacked_messages_no_worker_holds_go_back(self):
         self.probes.data['unacked'] = {'count': 2, 'oldest_age_seconds': 4000}
         self.probes.client.unacked = {'a': (self.t.timestamp() - 4000, '[{"headers": {"id": "held-1"}}]'), 'b': (self.t.timestamp() - 3000, '[{"headers": {"id": "gone-2"}}]')}
@@ -1002,3 +1028,49 @@ class ReviewerSeesTheWatchdogTests(WatchdogCase):
         wd.event('R1', 'info', observation='noise')
         snap = reviewer.snapshot()
         self.assertEqual([(e['rule'], e['action']) for e in snap['watchdog']], [('R1', 'restart-celery')])
+
+
+class SentinelWatchdogNoticeTests(WatchdogCase):
+    """The notice sentinel_settings.watchdog_problem was written for: one administrator notice while a live Sentinel's own watchdog is stuck or stopping tasks."""
+
+    def sentinel(self, name, info):
+        from agentapi.models import Agent
+        from agentapi.auth import create_token
+        user = User.objects.get_or_create(username='wd-owner')[0]
+        token, _raw = create_token(user, f'wd-{name}')
+        return Agent.objects.create(token=token, name=name, kind='scanner', status='active', last_seen=T0, info=info)
+
+    def alerts(self):
+        return AdminAlert.objects.filter(code='watchdog_sentinels', resolved_at__isnull=True)
+
+    def report(self, **over):
+        return {'watchdog': {'last_tick': int(T0.timestamp()) - 5, 'actions_last_hour': 0, 'kills': 0, 'actions': [], 'withheld': [], 'reasons': [], **over}}
+
+    def test_a_stuck_sentinel_watchdog_raises_one_notice_and_it_resolves_when_it_ticks_again(self):
+        agent = self.sentinel('zebra', self.report(last_tick=int(T0.timestamp()) - 900))
+        self.sentinel('quiet', self.report())
+        out = self.tick()
+        self.assertEqual(out['sentinel_watchdog_problems'], 1)
+        alert = self.alerts().get()
+        self.assertIn('zebra', alert.detail)
+        self.assertNotIn('quiet', alert.detail)
+        self.tick(60)
+        self.assertEqual(self.alerts().count(), 1)  # kept, not repeated
+        agent.info = self.report(last_tick=int(self.t.timestamp()) - 5)
+        agent.last_seen = self.t
+        agent.save()
+        self.tick(60)
+        self.assertEqual(self.alerts().count(), 0)
+
+    def test_repeated_stops_raise_it_and_a_sentinel_without_a_watchdog_does_not(self):
+        self.sentinel('old-build', {})
+        self.assertEqual(self.tick()['sentinel_watchdog_problems'], 0)
+        self.sentinel('busy-one', self.report(kills=3))
+        self.assertEqual(self.tick(30)['sentinel_watchdog_problems'], 1)
+        self.assertIn('stopped 3 stuck tasks', self.alerts().get().detail)
+
+    def test_nothing_is_raised_while_the_watchdog_is_switched_off(self):
+        self.sentinel('zebra', self.report(kills=5))
+        os.environ['CVENGINE_WATCHDOG'] = '0'
+        self.tick()
+        self.assertEqual(self.alerts().count(), 0)
