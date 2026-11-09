@@ -81,6 +81,27 @@ jobs:
         run: "$GITHUB_WORKSPACE/.github/rehearsal/install-base.sh overlay"
       - name: Put data in it
         run: "$GITHUB_WORKSPACE/.github/rehearsal/seed.sh"
+      - name: The files the running app and updater write exist, untracked, before the update
+        run: |
+          # The earlier bug class (a runtime file that was tracked made `git merge --ff-only` refuse on every real server): a real server has these
+          # files in its checkout when an update is approved. Create what the app creates, then require that git does not track them in the
+          # installed version's checkout once they are ignored, nor in the candidate, and that the checkout is clean for the updater.
+          cd "$HOME/cvengine"
+          printf 'master\n' > web/.update-source
+          printf '{"phase":"idle"}\n' > web/.update-phase.json
+          printf '{}\n' > web/.upstream-state.json
+          date +%s > web/.updater-heartbeat
+          for f in web/.update-source web/.update-phase.json web/.upstream-state.json web/.updater-heartbeat; do
+            [ -f "$f" ] || { echo "::error::$f does not exist before the update"; exit 1; }
+            if [ -n "$(git --git-dir="$HOME/origin.git" ls-tree -r --name-only "$(cat "$HOME/candidate.sha")" -- "$f")" ]; then echo "::error::the candidate tracks $f: it would block the fast-forward on a server that has it"; exit 1; fi
+          done
+          git --git-dir="$HOME/origin.git" show "$(cat "$HOME/candidate.sha"):.gitignore" | grep -qx 'web/.update-source' || { echo "::error::the candidate does not ignore web/.update-source"; exit 1; }
+          git rev-parse HEAD > "$HOME/installed.sha"
+      - name: Start requesting the site every second (visitor and API client)
+        run: |
+          nohup "$GITHUB_WORKSPACE/.github/rehearsal/probe.sh" >"$HOME/probe.out" 2>&1 &
+          sleep 3
+          test -s "$HOME/probe.log"
       - name: Approve; the host watcher applies it (the in-app path, started the way cron starts it)
         run: |
           cd "$HOME/cvengine"
@@ -101,6 +122,17 @@ jobs:
             cat "$HOME/watcher.log" || true
             exit 1
           fi
+      - name: During the update a visitor saw the maintenance page and never the old image on the new files
+        run: |
+          sleep 5
+          touch "$HOME/probe.stop"; sleep 2
+          cat "$HOME/probe.log" | awk '{print $2, $3, $4, $6}' | uniq -c | head -60
+          # this update starts in the host's older apply-update.sh (the installed version's): the page goes up right after its merge, so a grace of 4 samples
+          "$GITHUB_WORKSPACE/.github/rehearsal/probe-check.sh" "$(cat "$HOME/installed.sha")" 4
+          cd "$HOME/cvengine"
+          for f in web/.update-source web/.update-phase.json; do [ -e "$f" ] || { echo "::error::$f was removed by the update"; exit 1; }; done
+          [ ! -e config/nginx/state/maintenance ] || { echo "::error::the maintenance flag is still set after a verified update"; exit 1; }
+          [ ! -e config/nginx/state/maintenance-failed ] || { echo "::error::the failure flag is still set after a verified update"; exit 1; }
       - name: The updated install works, keeps its data and still uses the overlay
         run: "$GITHUB_WORKSPACE/.github/rehearsal/verify.sh overlay"
       - name: Turn on Redis authentication (make redis-auth) and check again
@@ -128,6 +160,10 @@ jobs:
           # stop what runs now, the way an operator's "Stop all scans" does, then let the update wait for whatever is left.
           . "$GITHUB_WORKSPACE/.github/rehearsal/lib.sh"
           dc exec -T web python3 manage.py shell -c "from cveFeed.scan_control import abort_running_scans; print(abort_running_scans(None), 'scans stopped')"
+          # the scripts this update is applied by are the ones the first update installed: the page must be up BEFORE the files change
+          git rev-parse HEAD > "$HOME/installed.sha"
+          nohup "$GITHUB_WORKSPACE/.github/rehearsal/probe.sh" >"$HOME/probe.out" 2>&1 &
+          sleep 3
           # exit 3 is "waiting: scans are running, approval kept": the host watcher calls it again a minute later, so this does too
           for attempt in $(seq 1 60); do
             status=0
@@ -142,6 +178,11 @@ jobs:
             echo "::error::the second update ended with status $status"; exit 1
           fi
           [ ! -e web/.update-approved ] || { echo "::error::the second update did not clear its approval"; exit 1; }
+          sleep 5
+          touch "$HOME/probe.stop"; sleep 2
+          awk '{print $2, $3, $4, $6}' "$HOME/probe.log" | uniq -c | head -60
+          "$GITHUB_WORKSPACE/.github/rehearsal/probe-check.sh" "$(cat "$HOME/installed.sha")" 0
+          [ ! -e config/nginx/state/maintenance ] || { echo "::error::the maintenance flag is still set after a verified update"; exit 1; }
           "$GITHUB_WORKSPACE/.github/rehearsal/verify.sh" overlay
       - name: Approving the same commit again does nothing
         run: |

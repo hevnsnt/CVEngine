@@ -4,21 +4,64 @@
 # in the very update that delivers it. The update script itself is the copy already on the host and only changes on the next update.
 # Not run on its own: it uses the update script's COMPOSE, STATE_HELPER, phase and log, and sets DEPLOY_STAGE for its rollback decision.
 
-# The proxy shows its friendly maintenance page (web/static/cve/maintenance.html) for as long as this flag file exists. It is set after the
-# build and before the database changes. The build is not "untouched": ./web is a bind mount, so the new files are already under the running
-# containers, and a worker that restarts during the build loads the new code against the old schema (reNgine/schema_guard.py answers those
-# requests 503 with Retry-After instead of 500 until the migration has run). The flag is set before the database changes, because from then until the new web service answers the
-# old code runs on a new schema or nothing runs at all, and a visitor would get an error page. It is always removed when the deploy ends,
-# failed or not: a failed update must not claim "back soon", and a retry sets it again. A host that was stopped mid-update can leave it
-# behind; `rm config/nginx/state/maintenance` (or the next update, or make up) clears it.
+# The proxy shows its friendly maintenance page (web/static/cve/maintenance.html) for as long as the flag file config/nginx/state/maintenance exists
+# (and says "the update did not finish" when config/nginx/state/maintenance-failed exists too). ./web is a bind mount, so the moment the update
+# changes a file the running containers already read the new code on the old image; the page therefore goes up BEFORE the files change, and
+# scripts/apply-update.sh (this repository's copy, and the host's once it has been updated) owns it: it puts the page up before the branch switch and the
+# fast-forward, keeps it through the build and the swap, and removes it only after verify_serving below succeeded. It says so by exporting
+# UPDATE_OWNS_MAINTENANCE=1. A host whose copy of apply-update.sh is older (the first update that delivers this) does not, and then this file does what it
+# can: the page goes up as the first step of the deploy (right after the merge, before the build), and a failed deploy leaves it up (the older script
+# puts the previous version back, whose deploy removes it; a retry after the migration sets it again). A host that was stopped mid-update can leave
+# the flag behind; `rm config/nginx/state/maintenance*` (or the next update, or make up) clears it.
 MAINTENANCE_FLAG=config/nginx/state/maintenance
-maintenance_on() { mkdir -p "$(dirname "$MAINTENANCE_FLAG")" 2>/dev/null && : >"$MAINTENANCE_FLAG" 2>/dev/null || log "could not set the maintenance flag; visitors may see an error page while the update runs"; }
-maintenance_off() { rm -f "$MAINTENANCE_FLAG" 2>/dev/null || true; }
+# folder and files readable by everyone: the proxy checks them as an unprivileged user, whatever umask this script runs under
+maintenance_on() { mkdir -p "$(dirname "$MAINTENANCE_FLAG")" 2>/dev/null && chmod 755 "$(dirname "$MAINTENANCE_FLAG")" 2>/dev/null && rm -f "$MAINTENANCE_FLAG-failed" && : >"$MAINTENANCE_FLAG" 2>/dev/null && chmod 644 "$MAINTENANCE_FLAG" 2>/dev/null || log "could not set the maintenance flag; visitors may see an error page while the update runs"; }
+maintenance_off() { rm -f "$MAINTENANCE_FLAG" "$MAINTENANCE_FLAG-failed" 2>/dev/null || true; }
+maintenance_failed() { : >"$MAINTENANCE_FLAG" 2>/dev/null && chmod 644 "$MAINTENANCE_FLAG" 2>/dev/null; : >"$MAINTENANCE_FLAG-failed" 2>/dev/null && chmod 644 "$MAINTENANCE_FLAG-failed" 2>/dev/null; true; }
+
+# The built-in scanner's image (scanner.lock.json; about 5 GB) is fetched ONCE per update, and while the site is still up wherever that can be: a pull changes
+# nothing the running containers read, so doing it under the maintenance page only lengthens the outage (minutes on a small host).
+#   early  before the page goes up. scripts/apply-update.sh (this repository's copy) does this before the merge itself; a host whose copy of it is older
+#          has this done by deploy_current, right before it puts the page up. Skipped when the scanner is off (the fetch would remove it: that is for
+#          the step below, after the host-fit answer). The answer is remembered in CV_SCANNER_PREFETCHED (the image it was for).
+#   once   from the deploy steps, after the host-fit decision: fetches only when no early fetch was made for the image the new files name (the lock changed,
+#          the scanner was off then and is on now, the early fetch could not be made). It never fails the update (scripts/scanner.sh).
+CV_SCANNER_PREFETCHED=${CV_SCANNER_PREFETCHED:-}
+deploy_scanner_fetch() {  # early|once
+  local ref
+  [ -f scripts/scanner.sh ] || return 0
+  . scripts/scanner.sh
+  if [ "$1" = early ]; then
+    cvengine_scanner_enabled "${COMPOSE[@]}" || return 0
+    cvengine_scanner_fetch "${COMPOSE[@]}"
+    CV_SCANNER_PREFETCHED=$(cvengine_scanner_wanted_image "${COMPOSE[@]}" 2>/dev/null) || CV_SCANNER_PREFETCHED=''
+    return 0
+  fi
+  ref=$(cvengine_scanner_wanted_image "${COMPOSE[@]}" 2>/dev/null) || ref=''
+  if [ -n "$ref" ] && [ "$ref" = "$CV_SCANNER_PREFETCHED" ]; then
+    log "the built-in scanner image ($ref) was already fetched before the maintenance page went up"
+    return 0
+  fi
+  cvengine_scanner_fetch "${COMPOSE[@]}"
+}
 
 deploy_current() {
   local status=0
+  if [ -n "${UPDATE_OWNS_MAINTENANCE:-}" ]; then
+    # the caller put the page up before it changed any file and takes it down after a verified update; it is set again here only for a deploy
+    # that is run on its own
+    [ -e "$MAINTENANCE_FLAG" ] || maintenance_on
+    deploy_steps || status=$?
+    return "$status"
+  fi
+  deploy_scanner_fetch early  # the image pull changes nothing the site reads: before the page, not under it
+  maintenance_on
   deploy_steps || status=$?
-  maintenance_off
+  if [ "$status" = 0 ]; then
+    maintenance_off
+  elif [ "$DEPLOY_STAGE" = migrated ]; then
+    maintenance_failed  # new code on a migrated database, services not (all) up: never a normal page
+  fi
   return "$status"
 }
 
@@ -128,12 +171,8 @@ deploy_steps() {
     [ -z "$cv_fit_short" ] || phase applying "build: $cv_fit_short"
   fi
   warn_discovery_pin "${compose[@]}"
-  # The built-in scanner's pinned image (scanner.lock.json): pulled now, before anything is stopped. It never fails the update (scripts/scanner.sh).
-  if [ -f scripts/scanner.sh ]; then
-    . scripts/scanner.sh
-    cvengine_scanner_fetch "${compose[@]}"
-  fi
-  maintenance_on
+  # The built-in scanner's image (scanner.lock.json): normally fetched already, before the page went up (deploy_scanner_fetch). It never fails the update.
+  deploy_scanner_fetch once
   DEPLOY_STAGE=datastores
   phase applying "$DEPLOY_STAGE"
   # Compose reads ${REDIS_PASSWORD} from the --env-file it is given (an overlay's .env.vps), so the password goes there too
@@ -266,7 +305,7 @@ check_disk() {
 # The cold build of the server image needs about 2 GiB (a 1 GiB cap fails in the nuclei compile). On a host under 7 GB (the rule of scripts/host-fit.sh) the
 # heavy containers that can come back safely are stopped for the build and started again right after it, with or without a build that worked: the
 # built-in scanner and the celery workers (their memory stays resident after the scans drain, and the build then competes with it, swaps or is killed).
-# Never db, redis, web or proxy: the site keeps answering, and beat is small. CVENGINE_UPDATE_STOP_CELERY=0 (environment or .env) turns it off.
+# Never db, redis, web or proxy, and beat is small. CVENGINE_UPDATE_STOP_CELERY=0 (environment or .env) turns it off.
 BUILD_STOPPED=()
 build_free_memory() {
   local compose=("${COMPOSE[@]}") kb off running svc
@@ -282,7 +321,7 @@ build_free_memory() {
     grep -qx "$svc" <<<"$running" && BUILD_STOPPED+=("$svc")
   done
   [ "${#BUILD_STOPPED[@]}" -gt 0 ] || return 0
-  log "this host has $(cvengine_fit_gb "$kb") of memory and the build needs about 2 GB: stopping ${BUILD_STOPPED[*]} for the build; they start again right after it (the site stays up)"
+  log "this host has $(cvengine_fit_gb "$kb") of memory and the build needs about 2 GB: stopping ${BUILD_STOPPED[*]} for the build; they start again right after it (the update has stopped them already when it moves the files, this is the fallback for a deploy run on its own)"
   phase applying "build: ${BUILD_STOPPED[*]} stopped for the build"
   "${compose[@]}" stop -t 30 "${BUILD_STOPPED[@]}" >/dev/null 2>&1 || log "could not stop ${BUILD_STOPPED[*]} cleanly; the build goes on"
 }
