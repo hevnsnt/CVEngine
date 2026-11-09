@@ -368,6 +368,8 @@ def stats_payload():
         'internal': internal_view.summary(),  # the declared internal networks and their share of the numbers above (cveFeed.internal_view)
         'autofire_runs': AutoFireRun.objects.count(),
         'templates': GeneratedTemplate.objects.filter(status=GeneratedTemplate.STATUS_VALID).count(),
+        'templates_pending': GeneratedTemplate.objects.filter(status=GeneratedTemplate.STATUS_DRAFT).count(),
+        'templates_rejected': GeneratedTemplate.objects.filter(status__in=(GeneratedTemplate.STATUS_INVALID, GeneratedTemplate.STATUS_EXPIRED)).count(),
     }
 
 

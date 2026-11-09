@@ -125,6 +125,17 @@ if (mount) {
       output.append(cards);
       if (!data.attempts) output.append(el("p", "empty", "No provider attempts recorded for this period. Earlier usage cannot be reconstructed."));
       if (!data.priced_attempts && data.attempts) output.append(el("p", "ai-usage-price-hint", "Cost is unavailable until an exact model price is saved below. Token counts and provider billing may differ."));
+      if (data.templates) {
+        const t = data.templates;
+        const rows = el("div", "ai-usage-templates");
+        rows.append(el("p", "note", `${count(t.valid)} passed and may run on hosts · ${count(t.pending)} being checked by the system · ${count(t.rejected + t.expired)} rejected (${count(t.expired)} of them expired without being validated). The system tests and reviews every AI-written check itself; nothing here needs your review.`));
+        if ((t.reasons || []).length) {
+          const list = el("ul", "ai-usage-reasons");
+          t.reasons.forEach((r) => list.append(el("li", "", `${r.reason} (${count(r.count)})`)));
+          rows.append(el("p", "note", "Why checks were rejected, last 30 days:"), list);
+        }
+        output.append(section("AI-written checks", rows));
+      }
       output.append(section("Model breakdown", wrap([
         { label: "Provider / model", render: (r) => `${r.provider} · ${r.billed_model || "unknown model"}` },
         { label: "Attempts", render: (r) => `${count(r.attempts)} (${count(r.errors)} errors)` },
@@ -142,7 +153,8 @@ if (mount) {
         { label: "Stage", render: (r) => r.stage },
         { label: "Attempts", render: (r) => count(r.attempts) },
         { label: "Errors", render: (r) => count(r.errors) },
-        { label: "Answered by", render: (r) => (r.models || []).length ? r.models.map((m) => `${m.model} (${count(m.successes)} of ${count(m.attempts)})`).join(", ") : "no recorded model" },
+        { label: "Answered by", render: (r) => ((r.models || []).length ? r.models.map((m) => `${m.model} (${count(m.successes)} of ${count(m.attempts)})`).join(", ") : "no recorded model")
+          + ((r.failed_reasons || []).length ? ` | Not answered: ${r.failed_reasons.map((f) => `${count(f.count)} ${f.recovered ? "cut off, answered by the automatic retry" : f.category}${f.stop_reason && !f.recovered ? ` [${f.stop_reason}]` : ""}`).join(", ")}` : "") },
       ], data.stages)));
       output.append(expandable("Recent attempts and errors", wrap([
         { label: "When (UTC)", render: (r) => shortDate(r.at) },

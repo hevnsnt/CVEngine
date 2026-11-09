@@ -146,3 +146,45 @@ class LoopTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MeasuredCallRetryTests(unittest.TestCase):
+    """The container's own two jobs (finding_review, operations_check): thinking room apart from the answer, one retry of a cut-off reply."""
+    PROVIDER = {'provider': 'anthropic', 'model': 'claude-haiku-5-5'}
+
+    def run_call(self, outcomes):
+        from unittest import mock
+        reports, limits = [], []
+
+        def fake_call(provider, system, user, schema, max_tokens, effort='medium'):
+            limits.append(max_tokens)
+            outcome = outcomes[len(limits) - 1]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        server = mock.Mock()
+        server.usage.side_effect = reports.append
+        with mock.patch.object(jobs.llm, 'call', fake_call):
+            try:
+                return jobs.measured_call(server, 'finding_review', self.PROVIDER, 's', 'u', {}, 4000, effort='medium'), reports, limits
+            except jobs.llm.ModelError as error:
+                return error, reports, limits
+
+    def test_a_cut_off_is_asked_once_more_with_a_larger_limit_and_the_first_is_recovered(self):
+        cut = jobs.llm.ModelError('cut', 'truncated')
+        result, reports, limits = self.run_call([cut, ('{}', {'input_tokens': 1, 'output_tokens': 2}, 'm')])
+        self.assertEqual(result[0], '{}')
+        self.assertEqual(limits, [4000 + 4096, 2 * 4000 + 4096])  # the answer room plus the thinking room of effort medium
+        self.assertEqual([(r['stage'], r['status'], r.get('category'), r.get('stop_reason')) for r in reports],
+                         [('finding_review', 'failed', 'truncated_retried', 'max_tokens'), ('finding_review', 'succeeded', None, None)])
+
+    def test_cut_off_twice_is_one_failure_and_never_a_third_request(self):
+        cut = jobs.llm.ModelError('cut', 'truncated')
+        result, reports, limits = self.run_call([cut, cut, ('{}', {}, 'm')])
+        self.assertIsInstance(result, jobs.llm.ModelError)
+        self.assertEqual((len(limits), [r['category'] for r in reports]), (2, ['truncated_retried', 'truncated']))
+
+    def test_no_retry_for_another_failure(self):
+        result, reports, limits = self.run_call([jobs.llm.ModelError('no', 'refused'), ('{}', {}, 'm')])
+        self.assertEqual((len(limits), reports[0]['category']), (1, 'refused'))

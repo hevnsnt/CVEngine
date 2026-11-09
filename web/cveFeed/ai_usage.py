@@ -34,6 +34,12 @@ def _estimate(row, rate):
     return str(amount.quantize(Decimal('0.000001')))
 
 
+def _templates():
+    """The AI-written checks by outcome, with the plain reasons of rejections (the system validates them itself: cveFeed.templatevalidate)."""
+    from cveFeed import templatevalidate
+    return templatevalidate.summary()
+
+
 def snapshot(days=7):
     from dashboard.models import AIProviderSettings
     from cveFeed.models import AIPriceRate, AIUsage
@@ -86,7 +92,16 @@ def snapshot(days=7):
         entry = by_stage.setdefault(row['stage'], {}).setdefault(name, {'model': name, 'attempts': 0, 'successes': 0})
         entry['attempts'] += row['attempts']
         entry['successes'] += row['successes']
+    # why the failed attempts of each stage failed: category and stop reason, with the plain sentence; a cut-off that the automatic retry
+    # answered is listed apart (``recovered``), it is not a failure
+    failed_by_stage = {}
+    for row in qs.filter(status='failed', stage__in=[st['stage'] for st in stages]).values('stage', 'error_category', 'stop_reason').annotate(n=Count('id')):
+        failed_by_stage.setdefault(row['stage'], []).append({
+            'category': row['error_category'] or 'unknown', 'stop_reason': row['stop_reason'], 'count': row['n'],
+            'recovered': row['error_category'] == 'truncated_retried', 'reason': plain_failure(row['error_category'], row['stop_reason'])})
     for st in stages:
+        st['failed_reasons'] = sorted(failed_by_stage.get(st['stage'], []), key=lambda e: (e['recovered'], -e['count'], e['category']))
+        st['errors_final'] = sum(e['count'] for e in st['failed_reasons'] if not e['recovered'])
         used = sorted(by_stage.get(st['stage'], {}).values(), key=lambda e: (-e['successes'], -e['attempts'], e['model']))
         st['models'] = used
         st['answered_by'] = [e['model'] for e in used if e['successes']]
@@ -125,7 +140,7 @@ def snapshot(days=7):
             'priced_attempts': priced_attempts,
             'unknown_cost_attempts': unknown_cost_attempts, 'models': models,
             'daily': [{'day': _iso(d['day']), 'attempts': d['attempts'], 'errors': d['errors']} for d in daily],
-            'stages': stages, 'recent': recent,
+            'stages': stages, 'recent': recent, 'templates': _templates(),
             'rates': [{'provider': r.provider, 'model': r.model, 'input_per_million_usd': str(r.input_per_million_usd),
                        'output_per_million_usd': str(r.output_per_million_usd), 'cache_read_per_million_usd':
                        str(r.cache_read_per_million_usd) if r.cache_read_per_million_usd is not None else None,

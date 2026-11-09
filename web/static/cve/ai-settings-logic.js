@@ -35,7 +35,7 @@ export const FIELDS = [
   { key: "connect_timeout", label: "Connect timeout (seconds)", kind: "number",
     help: "How long to wait to reach the server. A server that is down then fails quickly instead of after the full request timeout." },
   { key: "max_tokens", label: "Reply limit (tokens)", kind: "number",
-    help: "The most a request may ask for as an answer, for every task (a finding triage whose answer was cut off is asked once more with twice the limit, up to 32,768). A reasoning model spends part of it thinking, so a short limit can cut its answer off." },
+    help: "The room an ANSWER may take, for every task. Empty is right for most servers: each task then has its own room (a whole detection record or template gets several thousand tokens). The model's thinking gets room of its own on top, so thinking cannot cut the answer off. A reply that is still cut off is asked once more with twice the limit, up to 32,768 tokens in all." },
   { key: "context_tokens", label: "Context window (tokens)", kind: "number",
     help: "Ollama only. How much text the model reads at once. Ollama picks it from the machine's memory (4096 tokens under 24 GiB) and cuts a longer prompt at its start without an error." },
   { key: "structured_mode", label: "JSON mode", kind: "choice",
@@ -43,7 +43,7 @@ export const FIELDS = [
     help: "Whether a finding triage carries a JSON Schema the reply must follow. It makes a small local model reliable at the format; the reply is checked either way." },
   { key: "reasoning", label: "Reasoning", kind: "choice",
     choices: [["", "Not set here"], ["default", "Provider default (send nothing)"], ["off", "Off"], ["low", "Low"], ["medium", "Medium"], ["high", "High"], ["max", "Max"]],
-    help: "How much the model thinks before it answers, where the provider has a switch for it. Thinking is paid from the reply limit." },
+    help: "How much the model thinks before it answers, where the provider has a switch for it. Its thinking room is added on top of the reply limit." },
   { key: "keep_alive", label: "Keep the model loaded", kind: "text", placeholder: "for example 30m",
     help: "Ollama only. How long the model stays in memory after a request: 30m, 1h, 90s, 0 to unload at once, -1 to keep it loaded. Empty is the server's default (five minutes)." },
 ];
@@ -183,7 +183,7 @@ export function warnings(s, provider, drafts) {
     out.push("A reply limit under 1,000 tokens cuts off the answer of most tasks, and of a reasoning model before it finishes thinking.");
   }
   if (cap.ok && cap.value !== "" && level && level !== "off" && Number(cap.value) < 4096) {
-    out.push("Reasoning is paid from the reply limit: with thinking on, give the reply limit 4,096 tokens or more.");
+    out.push("Thinking gets room of its own on top of the reply limit, so the limit only has to hold the answer.");
   }
   const timeout = checkDraft(s, "request_timeout", drafts.request_timeout);
   const connect = checkDraft(s, "connect_timeout", drafts.connect_timeout);

@@ -19,8 +19,8 @@ import requests
 
 from cveFeed.secret_redaction import redact_text
 from reNgine import ai_prompts
-from reNgine.ai_profiles import (DEFAULT_REPLY_CAP, NUMBER_SETTINGS, PROFILES, REASONING_LEVELS, SETTING_ENV, STAGE_REPLY_CAPS, STRUCTURED_MODES,
-	AIRuntime, clean_number, reasoning_plan, setting_applies)
+from reNgine.ai_profiles import (DEFAULT_REPLY_CAP, NUMBER_SETTINGS, PROFILES, REASONING_LEVELS, SETTING_ENV, STAGE_ANSWER_CAPS, STAGE_REPLY_CAPS, STRUCTURED_MODES,
+	AIRuntime, answer_room, clean_number, reasoning_plan, reply_total, retry_total, setting_applies, thinking_reserve)
 
 logger = logging.getLogger(__name__)
 _usage_stage = ContextVar('cvengine_ai_usage_stage', default='unspecified')
@@ -93,24 +93,33 @@ def connect_timeout(runtime=None):
 TRIAGE_TOKEN_CAP = STAGE_REPLY_CAPS['triage']  # a triage answer is a short JSON object: 300 cut off 14% of them on a local model (issue 209), 400 does not
 
 
-def reply_limit(provider):
-	"""The reply length limit to send, or None to send none. The Settings page's limit, else ``CVENGINE_AI_MAX_TOKENS`` (64 to 32768), for every
-	provider and every stage. Neither set:
-	Anthropic is sent MAX_TOKENS (2048, what it always was); a self-hosted server and Ollama are sent the stage's own limit when it has one
-	(``request_options(max_tokens=...)``: triage's TRIAGE_TOKEN_CAP) and MAX_TOKENS otherwise, so a model that never stops cannot hold a
-	worker; OpenAI and OpenRouter get none (a hosted reasoning model spends part of its limit thinking, and OpenAI names the field
-	differently). A retry after a cut-off reply asks for ``token_factor`` times as much."""
-	options = _request_options.get()
-	if options.get('reply_limit'):  # a retry that asked for exactly this much (see ``complete_with_headroom``)
-		return int(options['reply_limit'])
+def _answer_room(provider):
+	"""The ANSWER room (tokens) of this request, or 0 when no limit is sent: the operator's limit when they set one (the Settings page's, else
+	``CVENGINE_AI_MAX_TOKENS``, 64 to 32768), else the stage's own (``request_options(max_tokens=...)``, else ``STAGE_ANSWER_CAPS`` for the
+	usage stage) on a self-hosted server, and at least the default for Anthropic. OpenAI and OpenRouter get none (OpenAI names the field
+	differently, and a hosted reasoning model has no limit of ours to starve)."""
 	cap = _layered('max_tokens', provider.runtime)[0]
-	if cap is None:
-		profile = PROFILES.get(provider.name)
-		if profile and profile.reply_cap:  # Anthropic and the self-hosted servers; the latter take the stage's own limit first
-			cap = (options.get('max_tokens') if profile.reply_cap_by_stage else None) or profile.reply_cap
-	if cap and options.get('token_factor'):
-		cap = min(32768, cap * int(options['token_factor']))
-	return cap
+	if cap is not None:
+		return cap
+	profile = PROFILES.get(provider.name)
+	if not profile:
+		return 0
+	return answer_room(profile, _request_options.get().get('max_tokens') or STAGE_ANSWER_CAPS.get(_usage_stage.get()))
+
+
+def _thinking_reserve(provider):
+	return thinking_reserve(provider.name, provider.model, reasoning_level(provider.runtime))
+
+
+def reply_limit(provider):
+	"""The reply length limit to send, or None to send none: the ANSWER room (``_answer_room``) plus the model's thinking reserve
+	(``ai_profiles.thinking_reserve``, by the Reasoning setting), so thinking cannot take the room of the answer. A retry after a cut-off reply
+	asks for exactly what ``complete_with_headroom`` worked out."""
+	options = _request_options.get()
+	if options.get('reply_limit'):
+		return int(options['reply_limit'])
+	answer = _answer_room(provider)
+	return reply_total(answer, _thinking_reserve(provider), options.get('token_factor')) or None
 
 
 _REASONING_NOTED = set()
@@ -235,6 +244,8 @@ def tracked_completion(fn):
 			return answer
 		except Exception as exc:
 			category = exc.category if isinstance(exc, AIProviderError) else 'unexpected_error'
+			if category == 'output_truncated' and _request_options.get().get('retry_ahead'):
+				category = 'truncated_retried'  # ``complete_with_headroom`` asks again at once: recovered unless that one is cut off too
 			stop_reason = getattr(exc, 'stop_reason', '') or ''
 			if isinstance(exc, AIProviderError) and exc.usage and self._last_usage is None:
 				self._last_usage = exc.usage
@@ -250,7 +261,9 @@ def plain_failure(category, stop_reason=None, fix=False):
 	say, how = '', ''
 	if category == 'output_truncated':
 		say = 'The model answered with no text (it stopped at the token limit)'
-		how = 'raise "Reply limit" (CVENGINE_AI_MAX_TOKENS) or lower "Reasoning": a reasoning model spends the limit thinking'
+		how = ('it was already asked again once with more room (twice the room, up to 32768 tokens); lower "Reasoning" (Settings, AI model) or pick a model that thinks less: its thinking used the room')
+	elif category == 'truncated_retried':
+		say = 'The answer was cut off at the token limit and was asked again with more room (this attempt is not a failure)'
 	elif category == 'refused':
 		say = 'The model declined to answer (stop reason: refusal)'
 		how = 'it is not asked the same question again; try another model if this keeps happening'
@@ -260,25 +273,25 @@ def plain_failure(category, stop_reason=None, fix=False):
 	return say + (f'. To fix: {how}' if say and fix else '')
 
 
-RETRY_REPLY_FACTOR = 4   # a reply cut off at the limit is asked once more with this many times the limit ...
-RETRY_REPLY_CEILING = 8192  # ... but never more than this (a name-to-tag answer is a few hundred tokens: this is for a model that thinks first)
-
-
 def complete_with_headroom(provider, system, user, allow_retry=None):
-	"""``provider.complete(system, user)``, and when the answer was cut off at the reply limit (``output_truncated``: with a reasoning model
-	the limit can be gone before the first word of text) ONE more request with a larger limit, ``RETRY_REPLY_FACTOR`` times as much up to
-	``RETRY_REPLY_CEILING``. The retry is a request like any other: it is recorded in the usage table under the caller's stage, so it counts
-	against whatever the caller counts (``allow_retry``, a callable returning whether the caller's own per-day cap has room for one more, is
-	asked first). No retry when no limit is sent (OpenAI, OpenRouter), when the larger limit would not be larger, when the cap has no room, and
-	never after a refusal or any other failure: only a cut-off is fixed by asking for more room. A second failure is raised as it is."""
+	"""``provider.complete(system, user)``, and when the answer was cut off at the reply limit (``output_truncated``) ONE more request with a
+	larger limit: ``RETRY_FACTOR`` times the answer room plus the thinking reserve, never more than ``RETRY_CEILING`` (``ai_profiles.retry_total``).
+	The retry is a request like any other: it is recorded in the usage table under the caller's stage, so it counts against whatever the caller
+	counts (``allow_retry``, a callable returning whether the caller's own per-day cap has room for one more, is asked first). The cut-off
+	attempt is recorded as ``truncated_retried`` (recovered, not a failure), so the alert counts only a cut-off that survived the retry. No
+	retry when no limit is sent (OpenAI, OpenRouter), when the limit is at the ceiling already, when the cap has no room, and never after a
+	refusal or any other failure: only a cut-off is fixed by asking for more room. A second failure is raised as it is."""
 	try:
-		return provider.complete(system, user)
-	except AIProviderError as error:
-		if error.category != 'output_truncated':
-			raise
 		sent = reply_limit(provider)
-		bigger = min(RETRY_REPLY_CEILING, sent * RETRY_REPLY_FACTOR) if sent else 0
-		if not bigger or bigger <= sent or (allow_retry is not None and not allow_retry()):
+		bigger = retry_total(_answer_room(provider), _thinking_reserve(provider), sent) if sent else 0
+		can = bool(bigger) and (allow_retry is None or bool(allow_retry()))
+	except (AttributeError, TypeError):  # not a provider of this module (a test double): nothing is known about its limit, so it is not retried
+		sent, bigger, can = None, 0, False
+	try:
+		with request_options(retry_ahead=can):
+			return provider.complete(system, user)
+	except AIProviderError as error:
+		if error.category != 'output_truncated' or not can:
 			raise
 		logger.info('%s answered nothing usable at a reply limit of %s tokens (stop reason %s); asking once more with %s', provider.name, sent,
 			error.stop_reason, bigger)
