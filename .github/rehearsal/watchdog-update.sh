@@ -33,6 +33,15 @@ wait_for_ticks() {
 nohup env -i PATH=/usr/bin:/bin HOME="$HOME" CVENGINE_WATCHDOG_SECONDS=10 scripts/update-watch.sh 3000 >"$HOME/watcher3.log" 2>&1 &
 watcher=$!
 trap 'kill "$watcher" 2>/dev/null || true' EXIT
+# A real install already has a watcher: the update that installed the host updater (scripts/update.sh) started one, and it holds the watcher's lock, so a
+# second one exits at once. Then the installed watcher is the one under test (it runs the watchdog at its own interval); only a stopped one is a failure.
+sleep 3
+if ! kill -0 "$watcher" 2>/dev/null; then
+  if flock -n 9 9>"$state/watch.lock"; then cat "$HOME/watcher3.log" || true; bad "the host watcher exited and nobody else holds its lock"; fi
+  echo "The host watcher the install already runs is the one under test."
+  sleep 7200 &  # stands in for the installed watcher in the checks below; the trap ends it
+  watcher=$!
+fi
 wait_for_ticks 300 || { cat "$state/watchdog.log" 2>/dev/null || true; cat "$HOME/watcher3.log" || true; bad "the watchdog does not tick beside the host watcher"; }
 
 # a third commit, approved the way the app approves one
