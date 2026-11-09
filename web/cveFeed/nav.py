@@ -12,7 +12,7 @@ GROUP_OF = {
     'vulns': 'findings', 'matches': 'findings', 'hygiene': 'findings', 'changes': 'findings', 'cves': 'findings',
     'hosts': 'assets', 'targets': 'assets', 'graph': 'assets', 'secrets': 'assets', 'suppliers': 'assets',
     'scans': 'scans', 'activity': 'scans',
-    'scanners': 'scanners', 'sentinels': 'scanners', 'project-sentinels': 'scanners', 'agents': 'scanners',
+    'scanners': 'scanners', 'sentinels': 'scanners', 'project-sentinels': 'scanners',
     'bounty': 'bounty',
 }
 
@@ -22,8 +22,8 @@ GROUP_OF = {
 OWN_ENTRY = {'hygiene': 'hygiene', 'suppliers': 'suppliers'}
 
 # Pages that belong to the person, not to the work: no rail entry is current on them (by design), the account control is, and so is
-# the one item of the account menu that opens the page.
-UTILITY = {'account': 'My account', 'admin': 'Administration', 'settings': 'Settings', 'about': 'Help', 'setup': 'Connect AI model',
+# the one item of the account menu that opens the page. 'agents' is the API keys page (MCP and agents), whose menu item is 'API keys'.
+UTILITY = {'account': 'My account', 'admin': 'Administration', 'settings': 'Settings', 'agents': 'API keys', 'about': 'Help', 'setup': 'Connect AI model',
            'welcome': ''}
 
 SECTION_ICON = {'overview': 'pulse', 'findings': 'bug', 'hygiene': 'shield', 'assets': 'server', 'suppliers': 'building', 'scans': 'radar',
@@ -56,7 +56,6 @@ def _tabs(group, slug, sentinels_enabled):
         out += [('scanners', 'Health', reverse('cve_scanners')), ('sentinels', 'Sentinels', reverse('cve_sentinels'))]
         if sentinels_enabled and slug:
             out.append(('project-sentinels', 'This project', _section(slug, 'sentinels')))
-        out.append(('agents', 'Integrations', reverse('cve_agents')))
     return out
 
 
@@ -89,7 +88,7 @@ def build(active, slug, *, bounty_enabled, sentinels_enabled, all_projects=False
     for g in ('findings', 'assets', 'scans', 'scanners'):
         for k, label, href in _tabs(g, slug, sentinels_enabled):
             full = {'vulns': 'Findings', 'cves': 'CVE catalog', 'graph': 'Asset graph', 'scanners': 'Scanner health',
-                    'agents': 'API tokens and MCP', 'project-sentinels': 'Project Sentinels'}.get(k, label)
+                    'project-sentinels': 'Project Sentinels'}.get(k, label)
             if href not in seen:
                 seen.add(href)
                 index.append({'label': full, 'href': href})

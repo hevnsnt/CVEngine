@@ -419,14 +419,26 @@ def resolve_model(target):
 # ------------------------------------------------------------------------------------------------------------------ request shape
 
 def reply_limit(target, options, factor=None):
-    """The reply limit to send, or None to send none: the operator's, else (Anthropic and the self-hosted servers) the stage's own limit for a
-    self-hosted server, else the profile's default; OpenAI and OpenRouter get none. ``factor`` lengthens it for a retry after a cut-off."""
-    cap = target.max_tokens
-    if cap is None and target.profile.reply_cap:
-        cap = (_number('max_tokens', options.get('max_tokens')) if target.profile.reply_cap_by_stage else None) or target.profile.reply_cap
-    if cap and factor:
-        cap = min(CEILING, cap * int(factor))
-    return cap
+    """The reply limit to send, or None to send none. The operator's limit is the ANSWER room when they set one; else the stage's own (a
+    self-hosted server) or at least the profile's default (Anthropic); OpenAI and OpenRouter get none. The thinking reserve of the model
+    (``profiles.thinking_reserve``, by the Reasoning setting) is added on top, so reasoning cannot take the room of the answer. ``factor``
+    lengthens the answer room; ``_reply_limit`` in ``options`` is the exact limit of a retry (see ``retry_limit``)."""
+    if options.get('_reply_limit'):
+        return int(options['_reply_limit'])
+    answer = target.max_tokens
+    if answer is None:
+        answer = profiles.answer_room(target.profile, _number('max_tokens', options.get('max_tokens')))
+    if not answer:
+        return None
+    return profiles.reply_total(answer, profiles.thinking_reserve(target.name, target.model, target.reasoning), factor)
+
+
+def retry_limit(target, options, sent):
+    """The limit of the one retry of a reply cut off at ``sent`` (see ``profiles.retry_total``), or 0 when there is none to ask for."""
+    answer = target.max_tokens
+    if answer is None:
+        answer = profiles.answer_room(target.profile, _number('max_tokens', options.get('max_tokens')))
+    return profiles.retry_total(answer, profiles.thinking_reserve(target.name, target.model, target.reasoning), sent)
 
 
 def reasoning_fields(target, cap):
@@ -597,6 +609,17 @@ def _request(target, system, user, schema, options, image, factor, level):
     return f'{_openai_base(target)}/chat/completions', _headers(target), body
 
 
+def _stop_reason(data):
+    """The provider's stop reason of one answer (``end_turn``, ``max_tokens``, ``length``, ``stop``, ...), a short plain word or ''."""
+    if not isinstance(data, dict):
+        return ''
+    reason = data.get('stop_reason') or data.get('done_reason')
+    if not reason and isinstance(data.get('choices'), list) and data['choices'] and isinstance(data['choices'][0], dict):
+        reason = data['choices'][0].get('finish_reason')
+    reason = str(reason or '')
+    return reason if re.fullmatch(r'[a-z_]{1,24}', reason) else ''
+
+
 def _attempt(target, system, user, schema, options, image, factor, calls):
     """One completion as the server's ``complete()`` made it (stepping down the structured ladder when the server refuses a level or answers
     nothing under it); one entry in ``calls`` with its usage, outcome and time."""
@@ -634,15 +657,18 @@ def _attempt(target, system, user, schema, options, image, factor, calls):
         counts = _usage(target, last.get('data'))
         actual = last.get('data', {}).get('model') if isinstance(last.get('data'), dict) else ''
         record.update(input_tokens=counts[0], output_tokens=counts[1], cache_read_tokens=counts[2], cache_write_tokens=counts[3],
-                      actual_model=str(actual or '')[:200], started_at=int(started), duration_ms=max(0, int((time.monotonic() - tick) * 1000)))
+                      stop_reason=_stop_reason(last.get('data')), actual_model=str(actual or '')[:200], started_at=int(started), duration_ms=max(0, int((time.monotonic() - tick) * 1000)))
         calls.append(record)
 
 
 def complete(block, system, user, schema=None, options=None, image=None):
     """One answer for a pipeline job: ``(text, calls, model)``. ``block`` is the job block of the server's configuration, ``options`` the
-    job's (``temperature`` and ``seed`` pinned for a self-hosted server, ``max_tokens`` the stage's own reply limit, ``retry_truncated``,
-    ``schema_name``), ``image`` ``{media_type, data (base64)}``. A reply cut off at a limit that was sent is asked once more with twice the
-    limit when the job allows it. Raises ModelError, with the calls made so far in ``error.calls``."""
+    job's (``temperature`` and ``seed`` pinned for a self-hosted server, ``max_tokens`` the stage's own answer room, ``retry_truncated``,
+    ``schema_name``), ``image`` ``{media_type, data (base64)}``. A reply cut off at a limit that was sent is asked ONCE more with a larger
+    limit (``profiles.retry_total``: ``RETRY_FACTOR`` times the answer room plus the thinking reserve, never past ``RETRY_CEILING``), for every
+    stage unless the job says ``retry_truncated: false``; no third request is ever made. Both requests are entries in ``calls``, and the
+    first is marked ``retried`` (it was cut off and was asked again: the server records it as ``truncated_retried``) so only a cut-off that survived the retry counts as a failure.
+    Raises ModelError, with the calls made so far in ``error.calls``."""
     options = dict(options or {})
     calls = []
     try:
@@ -655,12 +681,15 @@ def complete(block, system, user, schema=None, options=None, image=None):
         try:
             return _attempt(target, system, user, schema, options, image, None, calls), calls, target.model
         except ModelError as error:
-            if error.category != 'output_truncated' or not options.get('retry_truncated'):
+            if error.category != 'output_truncated' or options.get('retry_truncated') is False:
                 raise
-            sent = reply_limit(target, options)
-            if not sent or reply_limit(target, options, 2) == sent:  # nothing was sent to lengthen, or it is at the ceiling already
+            sent, why = reply_limit(target, options), error.stop_reason
+            bigger = retry_limit(target, options, sent) if sent else 0
+            if not bigger:  # nothing was sent to lengthen, or it is at the ceiling already
                 raise
-        return _attempt(target, system, user, schema, options, image, 2, calls), calls, target.model
+        logger.info('%s: reply cut off at %s tokens (stop reason %s); asking once more with %s', target.name, sent, why, bigger)
+        calls[-1]['retried'] = True  # the server records it as recovered, not failed, once it sees the retry
+        return _attempt(target, system, user, schema, {**options, '_reply_limit': bigger}, image, None, calls), calls, target.model
     except ModelError as error:
         error.calls = calls
         raise

@@ -122,7 +122,7 @@ async function draw() {
   security.id = 'security';
   const apiCard = card('API tokens',
     el('p', 'note', `${me.tokens} active token${me.tokens === 1 ? '' : 's'}. Tokens let scripts and AI agents act as you.`),
-    linkButton('Manage API tokens', '/cve/agents/'));
+    linkButton('Manage API keys', '/cve/agents/'));
 
   // Two independent columns, so a tall card on one side never pushes the other side's cards down.
   const left = el('div', 'acct-col');

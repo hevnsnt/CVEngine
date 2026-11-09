@@ -15,6 +15,7 @@ const GO_LETTERS = {
   Targets: "t",
   Scans: "s",
   "Bug bounty": "b",
+  "API keys": "k",
 };
 const OPEN_DELAY_MS = 220; // moving with j/k opens the row after a pause, so holding a key does not fetch every row it passes
 const GO_WINDOW_MS = 1200;

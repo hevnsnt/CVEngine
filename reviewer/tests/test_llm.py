@@ -172,9 +172,13 @@ class TruncationTests(unittest.TestCase):
         _, sent = ask('vllm', self.CUT, answer('vllm'), max_tokens=20000, options=TRIAGE)
         self.assertEqual([r['body']['max_tokens'] for r in sent], [20000, 32768])
 
-    def test_a_stage_that_does_not_ask_for_it_is_not_retried(self):
+    def test_a_stage_that_opts_out_is_not_retried(self):
         with self.assertRaises(llm.ModelError):
-            ask('vllm', self.CUT, answer('vllm'), options={'max_tokens': 400})
+            ask('vllm', self.CUT, answer('vllm'), options={'max_tokens': 400, 'retry_truncated': False})
+
+    def test_every_stage_is_retried_unless_it_opts_out(self):
+        (_, calls, _), sent = ask('vllm', self.CUT, answer('vllm'), options={'max_tokens': 400})
+        self.assertEqual([r['body']['max_tokens'] for r in sent], [400, 800])
 
     def test_empty_and_cut_off_replies_have_their_own_categories(self):
         for name, data, category in (('openai', answer('openai', text=' '), 'empty_response'), ('ollama', {'message': {'content': '{'}, 'done_reason': 'length'}, 'output_truncated'),

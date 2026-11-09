@@ -24,7 +24,7 @@ def unschedule(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('cveFeed', '0153_excluded_address'),
+        ('cveFeed', '0155_detection_ai_backoff'),
         ('dashboard', '0032_setup_wizard'),
         ('targetApp', '0008_domain_expect_private_ca'),
         ('django_celery_beat', '0001_initial'),

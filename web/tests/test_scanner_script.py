@@ -484,7 +484,10 @@ class UpdatePathTests(unittest.TestCase):
 
     def test_the_web_updater_fetches_before_maintenance(self):
         text = self.text('scripts/update-deploy.sh')
+        # the first fetch in the file is the early one (deploy_scanner_fetch, called before maintenance_on); the behavioral proof, in the real order of
+        # execution across apply-update.sh and update-deploy.sh, is in test_apply_update_script (the pull is logged with the site up, before the page and the merge)
         self.assertLess(text.index('cvengine_scanner_fetch'), text.index('  maintenance_on\n'))
+        self.assertLess(text.index('deploy_scanner_fetch early'), text.index('  maintenance_on\n'))
         self.assertLess(text.index('cvengine_scanner_start'), text.index('  prune_old_images\n'))
 
     def test_make_up_waits_for_nothing_on_a_first_start(self):
