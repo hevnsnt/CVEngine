@@ -544,10 +544,11 @@ def _stopped(scan):
     if scan is None:
         return False
     from cveFeed.discovery import stopped
-    from cveFeed.scan_control import operator_pause_requested
+    from cveFeed.scan_control import update_hold
+    from reNgine import resources
     # an update's drain pause does not stop a stage that waits on Sentinels: its tasks keep running there, and the answer is taken when the server is
     # back (a StageRun resumes, anything else is adopted, ``agentapi.sentinel_adopt``). Only a person's pause or stop does
-    return stopped(scan.id) or operator_pause_requested()
+    return stopped(scan.id) or (resources.global_pause_requested(fail_closed=False) and not update_hold())
 
 
 def _guarded_prepare(project, kind, prepare, scan):
