@@ -1081,11 +1081,26 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
 
 
 # Why a kind has nowhere to go, in the order a reader should act on it (the first that applies is the reason; every Sentinel's own state is in the sentence).
-NONE_REASONS = ('disabled', 'offline', 'withheld', 'inactive', 'outdated', 'never')
+# ``busy`` is not a fault: a live, enabled Sentinel has the kind and every slot it may use is taken, so the work waits its turn (``WAITING_REASONS``).
+# ``builtin`` is work that may only go to the built-in scanner (it reads a stored key or sign-in) while no live one is there; ``limited`` is a live Sentinel
+# that declares the kind but whose own limits leave it out. ``never`` is only for a kind no Sentinel that covers the project lists.
+NONE_REASONS = ('disabled', 'offline', 'withheld', 'inactive', 'outdated', 'busy', 'builtin', 'limited', 'never')
+WAITING_REASONS = ('busy',)  # reasons that are back-pressure, not a missing scanner: nothing is wrong, the work is asked again (never recorded as a failure)
 
 
-def _explain(kind, agents, live, internal=False, only=None):
-    """``(reason, clauses)`` for ``kind`` among ``agents`` (the Sentinels that could matter) given ``live`` (``{pk: SentinelEff}`` of those heard from now)."""
+def _load(live):
+    """``{agent pk: held}``, the tasks each live Sentinel holds now (claimed or running), for the ``busy`` sentence."""
+    held = {}
+    for agent_id, n in (SentinelTask.objects.filter(agent__in=[e.agent for e in live.values()], status__in=SENTINEL_ACTIVE_STATUSES)
+                        .values_list('agent_id').annotate(n=Count('id'))):
+        held[agent_id] = n
+    return held
+
+
+def _explain(kind, agents, live, internal=False, only=None, load=None, builtin_only=False):
+    """``(reason, clauses)`` for ``kind`` among ``agents`` (the Sentinels that could matter) given ``live`` (``{pk: SentinelEff}`` of those heard from now).
+    ``load`` (``{pk: held}``, see ``_load``) lets a live, enabled Sentinel that has the kind be named as ``busy`` (it has the kind, no slot is free now);
+    ``builtin_only`` is work only the built-in scanner may take (it reads a stored key), so another Sentinel with the kind is not the answer for it."""
     clauses, reasons = [], set()
     word = sentinel_policy.label(kind)
     for a in agents:
@@ -1112,24 +1127,45 @@ def _explain(kind, agents, live, internal=False, only=None):
         elif kind not in e.caps and not sentinel_contract.can_run((a.info or {}).get('contract_version'), kind):
             reasons.add('outdated')
             clauses.append(f'{a.name} has it but its client is too old to run {word}')
+        elif builtin_only and not e.builtin:
+            reasons.add('builtin')
+            clauses.append(f'{a.name} has it but this work reads a stored key, so only the built-in scanner may run it')
+        elif kind in e.caps:
+            reasons.add('busy')
+            held = (load or {}).get(a.pk)
+            clauses.append(f'{a.name} {held} of {e.max_concurrent}' if held is not None else a.name)
+        else:
+            reasons.add('limited')
+            clauses.append(f"{a.name} has it but its limits leave {word} out")
     reason = next((r for r in NONE_REASONS if r in reasons), 'never')
     return reason, clauses
 
 
-def _none_answer(kind, reason, clauses, any_sentinel):
+def _none_answer(kind, reason, clauses, any_sentinel, offered=None):
+    """The sentence for a ``none`` (``explain_none``). ``offered`` is the kinds the live Sentinels do list, named for ``never``, so it is never a bare
+    "does not have it". ``busy`` names each Sentinel's load only in ``message`` (an administrator's reading); ``public`` is the same sentence without names."""
     word = sentinel_policy.label(kind)
     if reason == 'never':
-        sentence = (f'no Sentinel that covers this has {word} (install its tool on one, or turn it on there)' if any_sentinel
-                    else 'no Sentinel is live for this project')
+        if not any_sentinel:
+            sentence = 'no Sentinel is live for this project'
+        else:
+            shown = ', '.join(sentinel_policy.label(k) for k in sorted(offered or ())[:8])
+            sentence = (f'no Sentinel that covers this lists {word} (install its tool on one, or turn it on there)'
+                        + (f'; they offer {shown}' if shown else '; they offer no scan kinds'))
+    elif reason == 'busy':
+        sentence = f'every Sentinel that can run {word} is busy right now{" (" + "; ".join(clauses) + ")" if clauses else ""}; this waits its turn and is asked again'
+        public = f'every Sentinel that can run {word} is busy right now; this waits its turn and is asked again'
+        return {'reason': reason, 'message': sentence, 'public': public, 'waiting': True}
     else:
         sentence = f'{word} is not enabled on any live Sentinel ({"; ".join(clauses)})'
-    return {'reason': reason, 'message': sentence}
+    return {'reason': reason, 'message': sentence, 'public': sentence, 'waiting': False}
 
 
 def explain_none(project, kind, internal=False, now=None, builtin_only=False):
-    """``{'reason': ..., 'message': ...}`` for why ``kind`` work in ``project`` has no live, eligible Sentinel (``NONE_REASONS``), the sentence naming each
-    Sentinel that has the kind and what keeps it from taking it, e.g. ``OpenVAS is not enabled on any live Sentinel (off on CVEngine Scanner; Remote-1 has it
-    but is offline)``. A few queries, so asked only once the answer is already ``none``.
+    """``{'reason': ..., 'message': ..., 'waiting': bool}`` for why ``kind`` work in ``project`` has no live, eligible Sentinel (``NONE_REASONS``), the sentence
+    naming each Sentinel that has the kind and what keeps it from taking it, e.g. ``OpenVAS is not enabled on any live Sentinel (off on CVEngine Scanner;
+    Remote-1 has it but is offline)``. A live, enabled Sentinel that has the kind is ``busy`` (``waiting`` is true: back-pressure, not a fault), and ``never``
+    is said only when no covered Sentinel lists the kind. A few queries, so asked only once the answer is already ``none``.
 
     The sentence names Sentinels, so it is for an administrator or a server log. If it is ever surfaced to a user in an activity line or a page, it must go
     through the per-viewer redaction (``_live_task``, ``agent_broker._redacted``) first: a Sentinel's name is not another tenant's to read."""
@@ -1138,8 +1174,15 @@ def explain_none(project, kind, internal=False, now=None, builtin_only=False):
                   .exclude(status='revoked').select_related('token__user').order_by('name', 'id')[:CANDIDATES])
     agents = _builtin_last(agents)
     live = {e.agent.pk: e for e in _live_for(project, now)}
-    reason, clauses = _explain(kind, agents, live, internal, builtin_pk() if builtin_only else None)
-    return _none_answer(kind, reason, clauses, bool(agents))
+    own = (builtin_pk() or 0) if builtin_only else None  # 0: no built-in scanner is set up, so no Sentinel is the one this work may go to
+    reason, clauses = _explain(kind, agents, live, internal, own, load=_load(live), builtin_only=False)
+    if reason == 'never' and builtin_only:
+        # only the built-in scanner may take this work: a live Sentinel that has the kind is not the answer, and is named as such
+        reason, clauses = _explain(kind, agents, live, internal, None, load=_load(live), builtin_only=True)
+    offered = set()
+    for e in live.values():
+        offered |= set(e.caps)
+    return _none_answer(kind, reason, clauses, bool(agents), offered)
 
 
 def _builtin_last(agents, own=None):
@@ -1177,6 +1220,28 @@ def kinds_overview(now=None):
             row['reason'] = _explain(kind, agents, by_pk)[0]
         out[kind] = row
     return out
+
+
+BACKLOG_MIN = 20  # queued tasks before the interface says the Sentinels are all busy: a short queue is ordinary
+
+
+def backlog(now=None):
+    """``None``, or ``{'queued': n, 'running': n, 'slots': n, 'message': ...}`` when every live Sentinel slot is taken and at least ``BACKLOG_MIN`` tasks wait in the
+    queue (``queued`` counts tasks young enough to be asked for, see ``queued_ttl``): the one plain sentence the activity feed shows at its top instead of a red line per
+    stage. Numbers only, no Sentinel names, so any member of a project may read it. Two cheap counts."""
+    now = now or timezone.now()
+    live = _live_scanners(now)
+    if not live:
+        return None  # nothing is busy when nothing is there: that is the offline state, shown elsewhere
+    slots = sum(e.max_concurrent for e in live)
+    held = SentinelTask.objects.filter(agent__in=[e.agent for e in live], status__in=SENTINEL_ACTIVE_STATUSES).count()
+    if held < slots:
+        return None
+    queued = SentinelTask.objects.filter(status='queued', created_at__gte=now - max(queued_ttl(k) for k in SentinelTask.KINDS)).count()
+    if queued < BACKLOG_MIN:
+        return None
+    return {'queued': queued, 'running': held, 'slots': slots,
+            'message': f'Your Sentinels are all busy: {queued:,} check{"s are" if queued != 1 else " is"} waiting. They are working through {"them" if queued != 1 else "it"}.'}
 
 
 def load_overview(now=None):

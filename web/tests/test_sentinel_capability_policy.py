@@ -149,7 +149,7 @@ class DenyTests(PolicyBase):
         nmap_only = self.external('Remote-1', caps=('nmap',))
         state = sb.capacity_state(self.project, 'openvas', why=True)
         self.assertEqual(state['reason'], 'never')
-        self.assertIn('no Sentinel that covers this has OpenVAS', state['message'])
+        self.assertIn('no Sentinel that covers this lists OpenVAS', state['message'])
         Agent.objects.filter(pk=nmap_only.pk).update(capabilities=['nmap', 'openvas'], status='suspended')
         self.assertEqual(sb.capacity_state(self.project, 'openvas', why=True)['reason'], 'inactive')
         Agent.objects.filter(pk=nmap_only.pk).update(status='active', last_seen=timezone.now() - timedelta(hours=1))

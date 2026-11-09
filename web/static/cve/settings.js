@@ -730,6 +730,7 @@ const sections = {
         if (s.latest_url) kids.push(el("a", "note", "View on GitHub", { href: s.latest_url, target: "_blank", rel: "noopener noreferrer", style: "display:block;margin:0 0 14px" }));
       }
       if (s.scanner_notice) kids.push(el("p", "msg", `${s.scanner_notice.text} `, { style: "margin-top:10px", role: "status" }), el("a", "note", "Open Sentinels", { href: "/cve/sentinels/" }), document.createTextNode(" "));
+      if (s.discovery_pin_notice) kids.push(el("p", "msg", s.discovery_pin_notice, { style: "margin-top:10px", role: "status" }));
       if (s.branch_warning) kids.push(el("p", "msg err", s.branch_warning, { style: "margin-top:10px" }));
       if (s.status === "approved") {
         kids.push(

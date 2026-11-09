@@ -283,6 +283,19 @@ Why not `@main` in `web/requirements.txt`: three CI places read a 40 character c
 
 See also: [DEPLOYMENT.md](DEPLOYMENT.md), [CONFIGURATION.md](CONFIGURATION.md), [documentation index](README.md).
 
+## Workers that are missing after an update
+
+The celery container runs four workers (`discovery_worker`, `cve_feed_worker`, `validation_priority_worker`, `classic_worker`), one per group of queues, under `celery-entrypoint.sh`. All four must be there: a container that is up with a lane gone leaves its queues unconsumed and nothing scans.
+
+- **The entrypoint checks each worker itself** every two seconds (`CELERY_SUPERVISE_INTERVAL`), not just "something exited". When any one is gone (crashed, killed for memory, failed to start) it stops the others with a warm stop that is **bounded** by `CELERY_STOP_GRACE` seconds (45, under the 60 s `stop_grace_period`), kills what is still there, and exits non-zero so `restart: always` brings all four back. The log names the lane. Before 1.4 the stop was an unbounded `wait`: the discovery worker holds assessments that wait on a Sentinel for hours, so after one lane died the container stayed up with only that worker and the restart policy was never reached.
+- **The container has a health check** (`python3 celery_healthcheck.py`): all four lanes must answer a ping and consume their queue, or `docker ps` says `unhealthy` and the output names the lane.
+- **The update does not finish without them.** After the web service answers, `verify_workers` runs the same check in the recreated container for up to ten minutes (`CVENGINE_VERIFY_WORKERS_SECONDS`). If a lane never answers, the update is not "done", the maintenance page stays up and the log says which worker and what to run: `docker compose restart celery`.
+- **A notice appears** in the status strip for App Admins (check `workers_down`) when lanes stay down, and clears when they answer.
+
+## A DISCOVERY_CONCURRENCY left over from 1.3
+
+On 1.4 a host assessment holds a discovery slot while it waits for a Sentinel. A `DISCOVERY_CONCURRENCY` of 1 to 3 in `.env` (the 1.3 era, when that pool only ran discovery) lets one to three hosts be assessed at a time for the whole instance while the Sentinels idle, and it pins the value so the auto-tuner will not raise it. The update never edits `.env`; it says so in the update log (`warn_discovery_pin`), the Update panel in Settings, the Scanners page and the system status show the same line, and the "host assessment queue is at capacity" error names the pin. Remove the line or set it to 4 or more and restart.
+
 ## An approved update that never starts
 
 The web app has no Docker or git access, on purpose. When you click **Approve update** it only records the approval; a small watcher on the server (`scripts/update-watch.sh`, started by cron every minute, installed by `./install.sh` and by `scripts/install-updater.sh`) sees it within about two seconds and runs the update: scans are paused, running ones finish, the files are updated, the containers are rebuilt and restarted, and scanning resumes. It also writes a heartbeat every 15 seconds, and Settings > Updates shows "Host updater: listening" or, when it does not report, says so and what to do. Approving also writes `web/.update-branch`. Changing the update repository or branch in Settings clears the stored check and cancels any approval. An older updater (a cron entry that runs `scripts/apply-update.sh` every 5 minutes) does not report but still works, with up to 5 minutes before an approval starts; run `scripts/install-updater.sh` again to switch it to the watcher.

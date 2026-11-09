@@ -48,6 +48,15 @@ services:
     init: true
     stop_grace_period: 60s
     entrypoint: /usr/src/app/celery-entrypoint.sh
+    # Healthy while all four workers answer a ping and consume their own queue (web/celery_healthcheck.py). Docker only RESTARTS an unhealthy container under an
+    # orchestrator, so the real guard is the entrypoint, which exits when any worker process is gone; this feeds `docker ps`, the system status page and the update's
+    # last check. start_period covers the entrypoint's start work (migrations wait, collectstatic, the template and whatportis updates).
+    healthcheck:
+      test: ["CMD", "python3", "celery_healthcheck.py"]
+      interval: 60s
+      timeout: 40s
+      retries: 3
+      start_period: 10m
     volumes:
       - ./web:/usr/src/app
       - github_repos:/usr/src/github

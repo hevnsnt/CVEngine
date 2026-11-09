@@ -275,8 +275,8 @@ class DispatchActivityLoggingTests(DispatchBase):
         with self.assertRaises(ScannerUnavailable):
             dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=0.2)
         entries = self._entries()
-        self.assertEqual(entries[-1].status, 'expired')
-        self.assertIn('No Sentinel picked up openvas work for www.example.test in time; the targets stay due until a scanner can take the work', entries[-1].message)
+        self.assertEqual(entries[-1].status, 'waiting')  # back-pressure: amber, never a failure
+        self.assertIn('openvas work for www.example.test is waiting for a Sentinel to pick it up; the targets stay due until a scanner can take the work', entries[-1].message)
         self.assertNotIn('locally', entries[-1].message)
 
     def test_the_activity_line_carries_the_tasks_trace_id_from_hand_off_to_ending(self):
@@ -315,8 +315,8 @@ class ClaimTimeoutTests(DispatchBase):
             elapsed = time.monotonic() - start
         self.assertLess(elapsed, 2)  # nowhere near the 10s completion timeout
         entries = self._entries()
-        self.assertEqual(entries[-1].status, 'expired')
-        self.assertIn('No Sentinel picked up openvas work for www.example.test in time', entries[-1].message)
+        self.assertEqual(entries[-1].status, 'waiting')
+        self.assertIn('openvas work for www.example.test is waiting for a Sentinel to pick it up', entries[-1].message)
         self.assertEqual(SentinelTask.objects.get().status, 'expired')
 
     def test_once_claimed_a_slow_sentinel_still_gets_the_full_completion_timeout(self):
