@@ -165,7 +165,7 @@ def _screenshot(item, scope):
 
 
 def _wildcard_placeholder(name):
-    """True for the name bbot makes up for a wildcard zone (``_wildcard.<parent>``): it is a marker, not a host, and every stage after discovery would scan
+    """True for the name the discovery scanner makes up for a wildcard zone (``_wildcard.<parent>``): it is a marker, not a host, and every stage after discovery would scan
     it and see the zone's catch-all answer."""
     return any(label.startswith('_wildcard') for label in name.split('.'))
 
