@@ -882,6 +882,19 @@ class ReviewScenarioTests(ReviewScenarioBase):
         self.assertTrue(all(m.ai_verdict != 'not_affected' or m.matched_version == '1.12.4' for m in found.values()))
         self.assertEqual(found[('hosted.x.test', 'CVE-2020-11023', '1.11.2')].ai_verdict, '')
 
+    def test_the_version_a_file_states_wins_over_a_name_version_whichever_technology_was_stored_first(self):
+        # One match is kept per product on a host, the strongest sighting. The file-stated 1.11.2 and the query-string 1.12.4 tied, and the
+        # one the database returned last won: the test above failed about 1 run in 100, by the ids the technologies happened to get. Both
+        # orders of storing them, and so both orders of reading them back, must keep the version the page's file states.
+        for host, techs in (('first.x.test', ['jQuery:1.11.2', 'jQuery:1.12.4']), ('second.x.test', ['jQuery:1.12.4', 'jQuery:1.11.2'])):
+            sub = self.host(host, techs)
+            page = '<script src="/hs/jquery-1.11.2.js"></script><script src="/site.js?ver=1.12.4"></script>'
+            self.read_root(host, 200, page, scripts={f'https://{host}/hs/jquery-1.11.2.js': oracle('jquery-1.11.2-head.js')})
+            for _ in range(2):  # and the second pass, over the rows the first wrote
+                found = self.correlate(sub)
+                self.assertEqual(found[(host, 'CVE-2020-11023', '1.11.2')].evidence['version_source'], 'body', host)
+                self.assertNotIn((host, 'CVE-2020-11023', '1.12.4'), found, host)
+
     def test_a_library_match_that_reopened_lately_is_not_closed_again_on_the_pages_word(self):
         from cveFeed.models import CVEMatch
         from cveFeed.tasks import reconcile_library_provenance
