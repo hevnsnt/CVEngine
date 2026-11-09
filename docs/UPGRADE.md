@@ -121,6 +121,7 @@ Update from 1.2.x the way you always do: the in-app updater, `scripts/update.sh`
 - To turn a new sweep off, set its variable in `.env` ([CONFIGURATION.md](CONFIGURATION.md#scanning)) and run `make up`.
 - If you want a Tailscale node or OpenVAS, follow their guides. Neither is started for you.
 - If the approval updater needs a longer drain limit than 5 minutes, put `CVENGINE_UPDATE_DRAIN_SECONDS` in `.env` ([CONFIGURATION.md](CONFIGURATION.md#updates)).
+- **Updates no longer wait for scans on Sentinels.** From the update after the one that delivers this change, an approved update pauses the queues, lets work on this server settle for at most a minute and rebuilds; the Sentinels keep what they finish (a durable spool, 6 hours by default) and hand it over when the server is back, where it is adopted into the host data ([UPDATES.md](UPDATES.md#updates)). *Wait for scans to finish before updating* in Settings, Updates brings the old drain back. A Sentinel needs the matching client (this change is in the Sentinel repository too) to spool for hours; an older Sentinel still releases a result it cannot deliver after about two minutes, and the stage runs it again. The change adds migration `cveFeed.0157_scancontrol_update_window` (three nullable columns on the scan control row).
 - Sentinels run from their own repository and are enrolled from the Sentinels page, which also needs the new 1.3 server.
 
 **Check afterwards**
