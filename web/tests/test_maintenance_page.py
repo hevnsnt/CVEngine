@@ -18,7 +18,7 @@ class MaintenancePageTests(SimpleTestCase):
 		self.assertRegex(conf, r'error_page\s+502 503 504 /maintenance\.html;')
 		self.assertRegex(conf, r'proxy_intercept_errors\s+on;')
 		block = conf[conf.index('location = /maintenance.html'):]
-		block = block[:block.index('}')]
+		block = block[:block.index('\n    }')]
 		self.assertIn('internal;', block)
 		self.assertIn('no-store', block)
 
@@ -41,14 +41,44 @@ class MaintenancePageTests(SimpleTestCase):
 		self.assertIn('rebuilding', page.lower())
 		self.assertNotRegex(page, '[–—]')
 
-	def test_an_update_sets_the_flag_after_the_build_and_always_removes_it(self):
-		script = read('scripts', 'update-deploy.sh')
-		steps = script[script.index('deploy_steps() {'):]
-		self.assertLess(steps.index('build web celery celery-beat'), steps.index('maintenance_on'))
-		self.assertLess(steps.index('maintenance_on'), steps.index('manage.py migrate --noinput'))
-		wrapper = script[script.index('deploy_current() {'):script.index('deploy_steps() {')]
-		self.assertIn('deploy_steps || status=$?', wrapper)
-		self.assertIn('maintenance_off', wrapper)
+	def test_the_updater_puts_the_page_up_before_any_file_changes_and_takes_it_down_only_after_verification(self):
+		apply = read('scripts', 'apply-update.sh')
+		main = apply[apply.index('PREV=$(git rev-parse HEAD)'):]
+		self.assertLess(main.index('cv_begin_maintenance'), main.index('git checkout -q'))  # before the branch switch
+		self.assertLess(main.index('cv_begin_maintenance'), main.index('git merge --ff-only'))  # before the fast-forward
+		self.assertLess(main.index('cv_begin_maintenance'), main.index('if deploy >>'))  # and before the build
+		# removed only in the success handler (after deploy, whose last step is verify_serving) or when the previous version is serving again
+		finish = main[main.index('finish_ok() {'):main.index('if deploy >>')]
+		self.assertIn('cv_maint_off', finish)
+		deploy = read('scripts', 'update-deploy.sh')
+		steps = deploy[deploy.index('deploy_steps() {'):]
+		self.assertNotIn('maintenance_on', steps)  # no longer set after the build
+		self.assertNotIn('maintenance_off', steps)
+		wrapper = deploy[deploy.index('deploy_current() {'):deploy.index('deploy_steps() {')]
+		self.assertIn('UPDATE_OWNS_MAINTENANCE', wrapper)
+		self.assertIn('maintenance_failed', wrapper)
+
+	def test_the_proxy_says_the_update_did_not_finish_when_the_failure_flag_exists(self):
+		conf = read('config', 'nginx', 'rengine.conf')
+		block = conf[conf.index('location = /maintenance.html'):]
+		block = block[:block.index('\n    }')]
+		self.assertIn('if (-f /etc/nginx/state/maintenance-failed) { set $maint_state failed; }', block)
+		self.assertRegex(block, r"sub_filter\s+'__MAINT_STATE__' '\$maint_state';")
+		self.assertNotIn('proxy_pass', block)  # served from the proxy's own files: the web container may be old, stopped or restarting
+		self.assertIn('Retry-After', block)  # Sentinels and other API clients back off and retry
+		page = read('web', 'static', 'cve', 'maintenance.html')
+		self.assertIn('data-maint="__MAINT_STATE__"', page)
+		self.assertIn('The update did not finish.', page)
+		self.assertIn('The administrator is fixing it', page)
+		self.assertNotRegex(page, '[–—]')
+
+	def test_sentinel_and_api_locations_answer_503_with_a_retry_after_while_the_flag_exists(self):
+		conf = read('config', 'nginx', 'rengine.conf')
+		for location in ('location / {', 'location ~ ^/api/v1/sentinel/tasks/[0-9]+/(result|partial)$ {', 'location = /cve/api/settings/cve_seed/import {'):
+			block = conf[conf.index(location):]
+			block = block[:block.index('proxy_pass')]
+			self.assertIn('if (-f /etc/nginx/state/maintenance) { return 503; }', block, location)
+		self.assertIn('add_header Retry-After "120" always;', ' '.join(conf.split()))
 
 	def test_make_up_clears_a_flag_an_interrupted_update_left_behind(self):
 		up = re.search(r'^up:.*\n((?:\t.*\n)+)', read('Makefile'), re.M).group(1)
