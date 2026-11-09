@@ -281,7 +281,7 @@ class DiscoveryOnSentinelTests(StreamBase):
         batch = self.batch_for()
 
         def fake(project, kind, target, scan, on_partial, **kwargs):
-            self.assertEqual((kind, target['domain'], kwargs['secret_ref'], kwargs['builtin_only']), ('bbot_discovery', 'a.example', None, False))
+            self.assertEqual((kind, target['domain'], kwargs['secret_ref'], kwargs['bbot_keys']), ('bbot_discovery', 'a.example', None, False))
             on_partial(batch)
             return {'result': {**RESULT, 'partials': 1}, 'consumed': 1}
         with mock.patch.object(stream, 'dispatch_stream', side_effect=fake), \
@@ -328,7 +328,7 @@ class DiscoveryOnSentinelTests(StreamBase):
         self.assertEqual(ScanHistory.objects.get(pk=self.scan.pk).error_message[:23], 'waiting for a scanner: ')
         self.assertEqual(Subdomain.objects.filter(scan_history=self.scan).count(), before)  # nothing was stored
 
-    def test_the_projects_keys_go_by_reference_to_the_builtin_scanner_only(self):
+    def test_the_projects_keys_go_by_reference_and_the_gate_decides_who_gets_them(self):
         from cveFeed import discovery
         seen = {}
 
@@ -339,7 +339,7 @@ class DiscoveryOnSentinelTests(StreamBase):
                 mock.patch('cveFeed.api_credentials.bbot_config_args', return_value=['-c', 'modules.shodan_dns.api_key=KEY-123']), \
                 mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False):
             discovery.run_discovery(self.scan.pk, 'standard')
-        self.assertEqual((seen['secret_ref'], seen['builtin_only'], seen['target']['api_keys']), (f'bbotkeys:{self.pa.pk}', True, True))
+        self.assertEqual((seen['secret_ref'], seen['bbot_keys'], seen.get('builtin_only', False), seen['target']['api_keys']), (f'bbotkeys:{self.pa.pk}', True, False, True))
         self.assertNotIn('KEY-123', json.dumps(seen['target']))
 
 

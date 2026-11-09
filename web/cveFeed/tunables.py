@@ -81,6 +81,10 @@ GROUPS = [
           'What makes a CVE finding fire, smoke or ice. The KEV rule (1, the default): on the KEV or with a known exploit and the version proven on '
           'the host is fire; on the KEV or with a known exploit and the version only inferred is smoke; anything else is ice, whatever its CVSS '
           'or EPSS. 0 brings back the legacy rule (CVSS and EPSS raise heat too). CVSS and EPSS stay visible either way.'),
+    Group('discovery_keys', 'Discovery API keys',
+          'The API keys a project stores for discovery (Shodan and the like) live encrypted on this server. A Sentinel enrolled on this instance can be sent them, once per '
+          'discovery task and for that project only, so discovery of a project with keys can run there. 0 keeps them on this server: only the built-in scanner '
+          'ever sees them. A single Sentinel can also opt out on the Sentinels page.'),
 ]
 
 TUNABLES = [
@@ -194,6 +198,13 @@ TUNABLES = [
             'heat', 'CVENGINE_HEAT_POLICY', 1, 0, 1, '1 KEV rule, 0 legacy',
             note='Applies within a few seconds to every list, count, alert and API; stored host scores are recomputed within a few minutes',
             auto_tunable=False, env_choices={'kev': 1, 'legacy': 0}),
+    Tunable('sentinel_bbot_keys', 'Send discovery API keys to my Sentinels (1 on, 0 off)',
+            'On (1, the default): a Sentinel enrolled on this instance that says it can handle them (and that has not opted out itself) is sent a project\'s '
+            'discovery API keys, once per discovery task of that project and for nothing else, so discovery of a project with keys can run on it. '
+            'Off (0): the keys never leave this server and only the built-in scanner runs such a discovery. In .env it is CVENGINE_SENTINEL_BBOT_KEYS=0 or 1.',
+            'discovery_keys', 'CVENGINE_SENTINEL_BBOT_KEYS', 1, 0, 1, '1 on, 0 off',
+            note='Applies from the next discovery task a Sentinel claims; a key already sent stays on that Sentinel until its task ends',
+            auto_tunable=False, env_choices={'on': 1, 'off': 0, 'true': 1, 'false': 0}),
 ]
 BY_KEY = {t.key: t for t in TUNABLES}
 GROUP_BY_ID = {g.id: g for g in GROUPS}

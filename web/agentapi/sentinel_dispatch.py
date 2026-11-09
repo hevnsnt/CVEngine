@@ -255,6 +255,13 @@ def _refuse(project, kind, target, host, ips, scan=None):
         raise AddressExcluded(kind, refusal)
 
 
+def capacity_flags(secret_ref):
+    """The ``capacity_state`` arguments that count the right slots for a task with ``secret_ref``: a stored sign-in is the built-in scanner's alone (``builtin_only``), a\n    discovery's keys (``bbotkeys:``) go to the built-in scanner or a Sentinel that may be sent them (``bbot_keys``, the one gate ``sentinel_stream.key_delivery_decision``)."""
+    if isinstance(secret_ref, str) and secret_ref.startswith('bbotkeys:'):
+        return {'bbot_keys': True}
+    return {'builtin_only': bool(secret_ref), 'secret': bool(secret_ref)}
+
+
 class _Dispatch:
     """One dispatched SentinelTask and its wait: the state ``dispatch_or_none`` keeps for a single task, as an object, so a stage that sends
     several chunks at once (``dispatch_many``) can wait for all of them in one loop. ``step`` is one look at a freshly read task row."""
@@ -265,7 +272,7 @@ class _Dispatch:
         from cveFeed import activity
         _refuse(project, kind, target, host, ips, scan)  # every task is made here: nothing is created for an address on the do-not-scan list
         self.project, self.kind, self.scan, self.internal = project, kind, scan, internal
-        self.builtin_only = bool(secret_ref)  # signed-in work: only the built-in scanner's slots count, and only it may take the task
+        self.capacity_flags = capacity_flags(secret_ref)  # signed-in work: only the built-in scanner's slots count, and only it may take the task; a discovery's keys: the ones that may be sent them
         self.siblings = siblings  # a callable for a fanned-out chunk: the other chunk tasks of the same stage, which a slot of this one's waits on
         targets = len(ips or []) or len((target or {}).get('targets') or (target or {}).get('hosts') or []) if isinstance(target, dict) else len(ips or [])
         self.timeout = _dispatch_timeout(kind, targets) if timeout is None else timeout
@@ -324,7 +331,7 @@ class _Dispatch:
         self = cls.__new__(cls)
         self.task, self.kind, self.project, self.scan = task, state.get('kind') or task.kind, task.project, task.scan
         self.internal, self.busy, self.timeout = bool(state.get('internal')), bool(state.get('busy')), state.get('timeout') or _dispatch_timeout(task.kind)
-        self.builtin_only = bool(task.secret_ref)  # signed-in work, read from the row it was created with: a restored wait counts the same slots
+        self.capacity_flags = capacity_flags(task.secret_ref)  # signed-in work, read from the row it was created with: a restored wait counts the same slots
         self.label = state.get('label') or _label(task.host, task.ips)
         self.entry = AgentActivity.objects.filter(pk=state['entry']).first() if state.get('entry') else None
         self.started = back(state.get('started')) or mono
@@ -367,7 +374,7 @@ class _Dispatch:
             others = [t.pk for t in self.siblings()] if self.siblings else []
             if (not self.busy and now < self.started + self.queue_budget
                     and sentinel_broker.capacity_state(self.project, self.kind, self.internal, exclude=[task.pk, *others],
-                                                       builtin_only=self.builtin_only, secret=self.builtin_only)['state'] == 'busy'):
+                                                       **self.capacity_flags)['state'] == 'busy'):
                 self.busy, self.claim_deadline = True, self.started + self.queue_budget  # another stage took the free slot first: wait for the next one
                 return False
             hold = self._sibling_hold()

@@ -147,6 +147,8 @@ export function sourceLine(setting) {
 }
 
 const shown = (key, value) => {
+  if (key === "discovery_keys")
+    return value === false ? "Never sent" : "Sent when the instance setting is on";
   if (value == null) return "not set";
   if (key === "network")
     return value === "internal" ? "Internal network" : "External";
@@ -552,6 +554,15 @@ function control(key, value) {
     s.value = value || "";
     return s;
   }
+  if (key === "discovery_keys") {
+    const s = el("select");
+    [
+      ["true", "Send them when the instance setting is on (the default)"],
+      ["false", "Never send discovery API keys to this Sentinel"],
+    ].forEach(([v, label]) => s.append(el("option", "", label, { value: v })));
+    s.value = value === false ? "false" : "true";
+    return s;
+  }
   if (key === "max_concurrent")
     return text(value == null ? "" : String(value), {
       type: "number",
@@ -564,6 +575,7 @@ function control(key, value) {
 }
 
 function readControl(key, node) {
+  if (key === "discovery_keys") return node.value !== "false";
   if (key === "max_concurrent")
     return node.value.trim() === "" ? undefined : Number(node.value);
   const v = node.value.trim();
@@ -572,7 +584,11 @@ function readControl(key, node) {
 
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 const controlValue = (key, setting) =>
-  key === "network" ? setting?.server_grant ?? setting?.value : setting?.value;
+  key === "network"
+    ? setting?.server_grant ?? setting?.value
+    : key === "discovery_keys"
+      ? setting?.value ?? true
+      : setting?.value;
 
 const ROWS = [
   ["name", "Name", "How it appears in cvENGINE."],
@@ -582,6 +598,11 @@ const ROWS = [
     "Choose the server grant. Internal Sentinels scan declared private networks only when their machine setting allows it.",
   ],
   ["profile", "Size", "Light never runs OpenVAS."],
+  [
+    "discovery_keys",
+    "Discovery API keys",
+    "Whether this Sentinel may be sent a project's discovery API keys (Shodan and the like), once per discovery task of that project. The instance setting under Settings, configMaxxing, Discovery API keys must also be on, and the Sentinel must be up to date.",
+  ],
   [
     "max_concurrent",
     "Tasks at once",

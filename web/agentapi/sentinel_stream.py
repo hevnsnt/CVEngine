@@ -373,7 +373,7 @@ def report_partial(ctx, task_id, body):
     return {'accepted': True, 'duplicate': False, 'seq': seq}
 
 
-# --- the API keys of a project, for the built-in scanner only -----------------------------------------------------------------------------
+# --- the API keys of a project, for the built-in scanner and the owner's own Sentinels the gate allows -----------------------------------------------------------------------------
 
 def keys_ref(project_id):
     return f'{KEYS_REF_PREFIX}{int(project_id)}'
@@ -399,6 +399,55 @@ def keys_payload(task):
 def keys_ref_project(ref):
     tail = ref[len(KEYS_REF_PREFIX):] if isinstance(ref, str) and ref.startswith(KEYS_REF_PREFIX) else ''
     return int(tail) if tail.isdigit() and len(tail) <= 18 else None
+
+
+KEYS_FEATURE = 'bbot_keys'  # ``info.features`` entry of a Sentinel client that handles a discovery's keys (sentinel_settings.FEATURES)
+# Why a Sentinel is not sent a project's discovery keys, and the plain sentence for it (the Sentinel's name is added by the caller where it helps).
+KEYS_REASONS = {
+    'keys_setting_off': 'this project has discovery API keys, and your Sentinels are set not to receive them (Settings, Discovery API keys: \"Send discovery API keys to my Sentinels\" is off)',
+    'keys_sentinel_opt_out': 'this project has discovery API keys, and the Sentinel is set not to receive them (its settings turn sending discovery API keys off)',
+    'keys_client_outdated': 'this project has discovery API keys, and the Sentinel is too old to receive them safely (update it: it must report the bbot_keys feature)',
+}
+
+
+def keys_enabled():
+    """The instance setting \"Send discovery API keys to my Sentinels\" (a tunable, on unless an App Admin or the environment turned it off)."""
+    from cveFeed import tunables
+    return bool(tunables.value('sentinel_bbot_keys', 1))
+
+
+def key_delivery_decision(eff, kind, ref, project_id):
+    """THE one gate for a discovery's key material, used wherever a task that carries a reference to it is offered, claimed or read (the claim, the refusal, the
+    secure read, the capacity answer, the explanation). ``(True, '')`` when ``eff`` (the rights of one Sentinel, ``sentinel_broker.SentinelEff``) may be sent the
+    keys ``ref`` names for a task of ``kind`` in project ``project_id``, else ``(False, reason)``. Key material goes only for a ``bbot_discovery`` task whose reference
+    is ``bbotkeys:<its own project's id>``: any other kind, any other reference (a stored sign-in included) or another project's keys is refused here, for every
+    Sentinel. Then the built-in scanner (its image reads secrets) is always fine; any other Sentinel needs, all of: an active, unrevoked Sentinel token (``eff.problem``
+    empty), the project in its scope (checked by ``refusal`` first), ``info.features`` naming ``bbot_keys``, the instance setting on, and its own opt-out off."""
+    if kind != KIND:
+        return False, 'keys_wrong_kind'
+    ref_project = keys_ref_project(ref)
+    if ref_project is None or ref_project != project_id:
+        return False, 'keys_wrong_project'
+    if eff.problem:
+        return False, 'keys_sentinel_unusable'
+    if eff.builtin:
+        return (True, '') if eff.reads_secrets else (False, 'keys_client_outdated')
+    if not keys_enabled():
+        return False, 'keys_setting_off'
+    from agentapi import sentinel_settings
+    if sentinel_settings.discovery_keys_opt_out(eff.agent):
+        return False, 'keys_sentinel_opt_out'
+    if KEYS_FEATURE not in ((eff.agent.info or {}).get('features') or []):
+        return False, 'keys_client_outdated'  # an older client never says it: it is never sent a key
+    token = eff.agent.token
+    if token.revoked or token.read_only or token.scope != 'sentinel':
+        return False, 'keys_sentinel_unusable'
+    return True, ''
+
+
+def provider_names(config):
+    """The module (provider) names in a keys payload, never an option or a value: for the audit row."""
+    return sorted(m for m in ((config or {}).get('modules') or {}) if isinstance(m, str))
 
 
 # --- the stage side: build the target, dispatch it, consume the batches ---------------------------------------------------------------
@@ -483,7 +532,7 @@ def _drain(task_id, consumed, on_partial):
             SentinelPartial._base_manager.filter(pk=row.pk).delete()
 
 
-def dispatch_stream(project, kind, target, scan, on_partial, label='', secret_ref=None, builtin_only=False):
+def dispatch_stream(project, kind, target, scan, on_partial, label='', secret_ref=None, builtin_only=False, bbot_keys=False):
     """Send one streamed task to a Sentinel and consume its batches as they arrive, through ``on_partial(batch)``, until its final result.
 
     Returns ``{'result': <the final result>, 'consumed': n}`` when the task ended ``done``; ``{'result': None, 'consumed': n, 'error': why}`` when it ended
@@ -492,6 +541,9 @@ def dispatch_stream(project, kind, target, scan, on_partial, label='', secret_re
     only for internal work, which has no stage that waits. A stop of the scan, or a global pause,
     cancels the task and raises ``ScanAborted``; any error of ``on_partial`` cancels it too and is raised.
 
+    ``bbot_keys``: the task carries a project's discovery API keys by reference (``secret_ref``): it goes to the built-in scanner or to a Sentinel the one gate
+    (``key_delivery_decision``) allows, and with none the stage waits for a scanner with the plain reason.
+
     The waits are ``sentinel_dispatch``'s (claim, queue), and the run's own: its target's ``timeout_seconds`` plus ``REPORT_GRACE`` from the claim.
     A task of the same kind and scan that is still active (the queue gave a lost worker's pipeline to a new one) is ended first."""
     from agentapi import sentinel_broker, sentinel_dispatch
@@ -499,7 +551,7 @@ def dispatch_stream(project, kind, target, scan, on_partial, label='', secret_re
     if scan is not None:
         for old in SentinelTask._base_manager.filter(scan=scan, kind=kind, status__in=('queued', 'claimed', 'running')).select_related('project'):
             sentinel_broker.expire(old, 'a new run of the same scan took the work over')
-    capacity = sentinel_broker.capacity_state(project, kind, why=True, builtin_only=builtin_only)
+    capacity = sentinel_broker.capacity_state(project, kind, why=True, builtin_only=builtin_only, bbot_keys=bbot_keys)
     if capacity['state'] == 'none':
         sentinel_dispatch._no_scanner(kind, project, capacity=capacity)
         return None
@@ -525,7 +577,7 @@ def dispatch_stream(project, kind, target, scan, on_partial, label='', secret_re
                 sentinel_broker.reap_expired()
                 last_reap = now
                 none_left = work.task.status == 'queued' and sentinel_broker.capacity_state(
-                    project, kind, builtin_only=builtin_only)['state'] == 'none'
+                    project, kind, builtin_only=builtin_only, bbot_keys=bbot_keys)['state'] == 'none'
             if work.step(now, none_left):
                 break
             pause = work.pause(now) if work.run_deadline is None else min(POLL_SECONDS, max(0.0, work.run_deadline - now))

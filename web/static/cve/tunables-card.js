@@ -126,3 +126,4 @@ registerTunableGroup("retention", "Data retention");
 registerTunableGroup("egress", "Outbound connections");
 registerTunableGroup("planner", "Work planner");
 registerTunableGroup("heat", "Heat policy");
+registerTunableGroup("discovery_keys", "Discovery API keys");

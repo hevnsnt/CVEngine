@@ -291,18 +291,18 @@ class DiscoveryApiCredentialWiringTests(TestCase):
 			discovery.run_discovery(scan.id)
 		return seen
 
-	def test_configured_keys_are_named_by_reference_for_the_builtin_scanner_only(self):
+	def test_configured_keys_are_named_by_reference_for_the_scanners_the_gate_allows(self):
 		from dashboard.models import ApiCredential
 		ApiCredential.objects.create(org=self.org, service='shodan', value={'api_key': 'sk-live'})
 		seen = self._dispatched()
 		self.assertTrue(seen['target']['api_keys'])
-		self.assertEqual((seen['secret_ref'], seen['builtin_only']), (f'bbotkeys:{self.project.pk}', True))
+		self.assertEqual((seen['secret_ref'], seen['bbot_keys'], seen.get('builtin_only', False)), (f'bbotkeys:{self.project.pk}', True, False))  # no longer the built-in scanner alone (sentinel_stream.key_delivery_decision decides)
 		self.assertNotIn('sk-live', json.dumps(seen['target']))
 
 	def test_no_keys_configured_means_no_reference_and_any_scanner_may_take_it(self):
 		seen = self._dispatched()
 		self.assertFalse(seen['target']['api_keys'])
-		self.assertEqual((seen['secret_ref'], seen['builtin_only']), (None, False))
+		self.assertEqual((seen['secret_ref'], seen['bbot_keys'], seen.get('builtin_only', False)), (None, False, False))
 
 
 class TrufflehogBountyTests(TestCase):
