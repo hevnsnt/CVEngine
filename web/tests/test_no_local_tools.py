@@ -245,6 +245,7 @@ ALLOWED = {
         'agentapi/rest.py',  # 1.4 T8: user-facing route descriptions that name the discovery tool (share lines with other tool words), runs nothing
         'agentapi/sentinel_broker.py',  # 1.4 bbot on a Sentinel: the run's time budget and the secure read of its module keys, runs nothing
         'agentapi/sentinel_policy.py',  # 1.4 bbot on a Sentinel: the kind's label, runs nothing
+        'agentapi/sentinel_settings.py',  # bbot_keys: the name of the optional heartbeat feature a Sentinel advertises for a discovery's API keys (a data value and its comment), runs nothing
         'agentapi/services.py',  # 1.4 T8: finding kind 'bbot' (a stored data value) and text shared with other tool words, runs nothing
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/check_coverage.py',  # 1.4 T8: ledger service keys 'bbot' and 'bbot-deep' and the check label (stored data values), runs nothing

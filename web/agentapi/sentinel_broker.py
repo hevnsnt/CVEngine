@@ -799,6 +799,20 @@ def task_hosts(task):
 SECRET_FEATURE = 'secret_read'  # the built-in scanner image's ``info.features`` entry for the secure read (sentinel_settings.FEATURES)
 
 
+def secret_refusal(eff, task):
+    """``None`` when ``eff`` (the rights of one Sentinel) may be given ``task`` whatever secret it names, else why not: ``SIGNED_IN`` for a stored sign-in it may not read,
+    or the reason of ``sentinel_stream.key_delivery_decision`` for a discovery's keys (``bbotkeys:`` references go through that one gate, for every Sentinel; any
+    other reference is the built-in scanner's alone, as always). A module function, not only a method, so that ``refusal`` needs nothing of ``eff`` for a task with
+    no secret."""
+    ref = task.secret_ref
+    if not ref:
+        return None
+    if ref.startswith(sentinel_stream.KEYS_REF_PREFIX):
+        ok, why = sentinel_stream.key_delivery_decision(eff, task.kind, ref, task.project_id)
+        return None if ok else why
+    return None if eff.reads_secrets else SIGNED_IN
+
+
 class SentinelEff:
     def __init__(self, agent, now):
         self.agent, self.now = agent, now
@@ -837,16 +851,8 @@ class SentinelEff:
         return self.builtin and SECRET_FEATURE in ((self.agent.info or {}).get('features') or [])
 
     def secret_refusal(self, task):
-        """``None`` when this Sentinel may be given the task whatever secret it names, else why not: ``SIGNED_IN`` for a stored sign-in it may not read, or the
-        reason of ``sentinel_stream.key_delivery_decision`` for a discovery's keys (``bbotkeys:`` references go through that one gate, for every Sentinel; any other
-        reference is the built-in scanner's alone, as always)."""
-        ref = task.secret_ref
-        if not ref:
-            return None
-        if ref.startswith(sentinel_stream.KEYS_REF_PREFIX):
-            ok, why = sentinel_stream.key_delivery_decision(self, task.kind, ref, task.project_id)
-            return None if ok else why
-        return None if self.reads_secrets else SIGNED_IN
+        """``None`` when this Sentinel may be given the task whatever secret it names, else why not (``secret_refusal`` below)."""
+        return secret_refusal(self, task)
 
     def secret_filter(self, queued):
         """``queued`` (a queryset of tasks) left with what this Sentinel may be given: no secret at all, or (when it may be sent keys) a ``bbot_discovery`` task whose
@@ -876,7 +882,7 @@ class SentinelEff:
             return 'capability', task.kind
         if task.kind in BUILTIN_KINDS and not self.builtin:
             return 'capability', BUILTIN  # a kind only the built-in scanner takes (path_probe, nuclei_validate, route_probe_signed): decided by the kind, before any task row says more
-        why = self.secret_refusal(task)
+        why = secret_refusal(self, task)
         if why:
             return 'capability', why  # signed-in work is the built-in scanner's alone; a discovery's keys go only where ``sentinel_stream.key_delivery_decision`` allows
         if validating(task) and not self.builtin:
