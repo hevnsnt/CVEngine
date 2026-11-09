@@ -10,33 +10,46 @@ import json
 import logging
 import time
 
-from cvengine_reviewer import guard, llm, prompts
+from cvengine_reviewer import guard, llm, profiles, prompts
 
 logger = logging.getLogger(__name__)
 
-REVIEW_MAX_TOKENS = 4000   # thinking included; a verdict and an 800-character note need far less
-OPS_MAX_TOKENS = 4000
+REVIEW_MAX_TOKENS = profiles.STAGE_ANSWER_CAPS['finding_review']   # the ANSWER room: the model's thinking is kept room apart (``measured_call``)
+OPS_MAX_TOKENS = profiles.STAGE_ANSWER_CAPS['operations_check']
 NOTE_LIMIT = 1200
 
 
-def measured_call(server, stage, provider, *args, **kwargs):
-    """``llm.call`` for one of the container's own two jobs, and a report of it to the server (stage, outcome, counts, never text) so the usage
-    page names the job and counts its refusals. The report is best effort: a server that does not take it never changes the answer."""
-    started, report = time.monotonic(), {'stage': stage, 'provider': provider.get('provider'), 'model': provider.get('model')}
-    try:
-        text, usage, model = llm.call(provider, *args, **kwargs)
-    except llm.ModelError as exc:
-        report.update(status='failed', category=exc.category, stop_reason=getattr(exc, 'stop_reason', None))
-        raise
-    else:
-        report.update(status='succeeded', model=model, input_tokens=usage.get('input_tokens'), output_tokens=usage.get('output_tokens'))
-        return text, usage, model
-    finally:
-        report['duration_ms'] = int((time.monotonic() - started) * 1000)
+def measured_call(server, stage, provider, system, user, schema, max_tokens, effort='medium'):
+    """``llm.call`` for one of the container's own two jobs, and a report of each request to the server (stage, outcome, stop reason, counts,
+    never text) so the usage page names the job and counts its refusals. ``max_tokens`` is the ANSWER room: the limit sent is that plus the
+    model's thinking reserve for ``effort`` (``profiles.thinking_reserve``), so thinking cannot take the answer's room. A reply cut off at
+    the limit is asked ONCE more with a larger one (``profiles.retry_total``); the first request is then reported as ``truncated_retried``
+    (recovered, not a failure) and a second cut-off is the failure. The report is best effort: a server that does not take it never changes
+    the answer."""
+    reserve = profiles.thinking_reserve(provider.get('provider'), provider.get('model') or '', effort)
+    limit = profiles.reply_total(max_tokens, reserve)
+    attempt = 0
+    while True:
+        started, report = time.monotonic(), {'stage': stage, 'provider': provider.get('provider'), 'model': provider.get('model')}
+        retry = 0
         try:
-            server.usage(report)
-        except Exception as exc:  # noqa: BLE001 - accounting must never change an answer
-            logger.info('%s: the call was not reported to the server (%s)', stage, type(exc).__name__)
+            text, usage, model = llm.call(provider, system, user, schema, limit, effort)
+        except llm.ModelError as exc:
+            retry = profiles.retry_total(max_tokens, reserve, limit) if exc.category == 'truncated' and not attempt else 0
+            report.update(status='failed', category='truncated_retried' if retry else exc.category, stop_reason=getattr(exc, 'stop_reason', None) or ('max_tokens' if exc.category == 'truncated' else None))
+            if not retry:
+                raise
+        else:
+            report.update(status='succeeded', model=model, input_tokens=usage.get('input_tokens'), output_tokens=usage.get('output_tokens'))
+            return text, usage, model
+        finally:
+            report['duration_ms'] = int((time.monotonic() - started) * 1000)
+            try:
+                server.usage(report)
+            except Exception as exc:  # noqa: BLE001 - accounting must never change an answer
+                logger.info('%s: the call was not reported to the server (%s)', stage, type(exc).__name__)
+        logger.info('%s: reply cut off at %s tokens; asking once more with %s', stage, limit, retry)
+        limit, attempt = retry, attempt + 1
 
 
 def review_message(packet):
