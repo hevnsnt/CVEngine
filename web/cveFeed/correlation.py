@@ -1115,9 +1115,13 @@ _MATCH_FIELDS = ("matched_version", "version_in_range", "confidence", "scan_hist
 
 def _row_strength(row):
     """Orders sightings of one match: hard evidence (a template hit, a distribution tracker), then a version inside the range, then an
-    unknown range, then outside it."""
+    unknown range, then outside it. Of two sightings equal in all that, the one whose version a file of the page stated outranks one only a
+    name or a query string carried (``version_confidence``): the strongest evidence wins, never whichever row the database returned last."""
+    evidence = row.get("evidence")
+    confidence = evidence.get("version_confidence") if isinstance(evidence, dict) else None
     return (row.get("template_result") == "vulnerable" or row.get("distro_status") == "vulnerable",
-            row.get("version_in_range") is True, row.get("version_in_range") is None)
+            row.get("version_in_range") is True, row.get("version_in_range") is None,
+            confidence if isinstance(confidence, (int, float)) else 0.0)
 
 
 def _carry_remediation(fresh):
@@ -1429,7 +1433,7 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
 
     # Technology fingerprints (httpx tech-detect). A version of a one-core product the evidence disproves (jQuery's number read as
     # WordPress's) is kept on the host as evidence and not matched.
-    technologies = list(subdomain.technologies.all())
+    technologies = sorted(subdomain.technologies.all(), key=lambda t: t.id)  # a stable order: a tie between two sightings must not depend on the row order the database returns
     # a JavaScript library's version stands on what its file states (cveFeed.js_libraries): a copy a later one replaces, or a string a
     # script's query or name carried where the file says otherwise, is not matched; a file-name-only version is matched at low confidence
     libraries = js_libraries.HostLibraries.for_subdomain(subdomain) if any(js_libraries.is_library(t.name) for t in technologies) else None
