@@ -55,6 +55,9 @@ flock -n 9 || exit 0  # another run is in progress
 STATE_HELPER="$STATE/update-state.py"
 cp scripts/update-state.py "$STATE_HELPER"
 python3 "$STATE_HELPER" migrate-log "$LOG"
+# The status the maintenance page shows (scripts/update-status.py): kept next to the state helper for the same reason, the checkout it runs from may be rolled back
+STATUS_HELPER="$STATE/update-status.py"
+if [ -f scripts/update-status.py ]; then cp scripts/update-status.py "$STATUS_HELPER" 2>/dev/null || true; fi
 
 # .env is kept in a private (0600) temporary copy during the merge and removed when the script ends; its
 # contents are never printed or logged.
@@ -63,9 +66,11 @@ ENV_MODE=
 cleanup() {
   local status=$?
   [ -z "$ENV_BACKUP" ] || rm -f "$ENV_BACKUP"
+  if declare -F cv_ticker_stop >/dev/null; then cv_ticker_stop; fi
   # the script ended (a command failed under set -e, a signal) with the maintenance page up and no decision about it: the files may be
   # half changed, so the page says the update did not finish rather than "back soon"
   if [ "${CV_MAINT_OPEN:-0}" = 1 ] && [ "$status" != 0 ]; then
+    cv_status_fail stopped unknown
     cv_maint_failed
     [ -z "${LOG:-}" ] || printf '%s the update stopped with the maintenance page up; it now says the update did not finish\n' "$(date -u +%FT%TZ)" >>"$LOG" 2>/dev/null || true
     python3 "${STATE_HELPER:-scripts/update-state.py}" phase failed "the update stopped part way (see the update log); the administrator has to finish it. The maintenance page stays up until then" >>"${LOG:-/dev/null}" 2>&1 || true
@@ -125,8 +130,27 @@ cv_maint_on() {
   mkdir -p "$CV_MAINT_DIR" 2>/dev/null && chmod 755 "$CV_MAINT_DIR" 2>/dev/null && rm -f "$CV_MAINT_DIR/maintenance-failed" && cv_maint_flag maintenance || return 1
   CV_MAINT_OPEN=1
 }
-cv_maint_failed() { mkdir -p "$CV_MAINT_DIR" 2>/dev/null; chmod 755 "$CV_MAINT_DIR" 2>/dev/null || true; cv_maint_flag maintenance || true; cv_maint_flag maintenance-failed || true; CV_MAINT_OPEN=0; }
-cv_maint_off() { rm -f "$CV_MAINT_DIR/maintenance" "$CV_MAINT_DIR/maintenance-failed" 2>/dev/null || true; CV_MAINT_OPEN=0; }
+cv_maint_failed() { cv_ticker_stop; mkdir -p "$CV_MAINT_DIR" 2>/dev/null; chmod 755 "$CV_MAINT_DIR" 2>/dev/null || true; cv_maint_flag maintenance || true; cv_maint_flag maintenance-failed || true; CV_MAINT_OPEN=0; }
+cv_maint_off() { cv_ticker_stop; rm -f "$CV_MAINT_DIR/maintenance" "$CV_MAINT_DIR/maintenance-failed" 2>/dev/null || true; cv_status clear; CV_MAINT_OPEN=0; }
+# The page's live status (config/nginx/state/status.json, served by the proxy; scripts/update-status.py writes only whitelisted text). A courtesy: never fails an update.
+cv_status() {
+  local helper=$STATUS_HELPER
+  [ -f "$helper" ] || helper=scripts/update-status.py
+  [ -f "$helper" ] || return 0
+  CV_STATUS_LOG="$LOG" python3 "$helper" "$@" >/dev/null 2>&1 || true
+}
+CV_TICK_PID=
+cv_ticker_start() {
+  [ -z "$CV_TICK_PID" ] || return 0
+  local parent=$$
+  # refreshes the status every few seconds so the page can tell "working" from "stalled" (it reads when the log last grew); it ends with the updater
+  ( trap - ERR EXIT; while kill -0 "$parent" 2>/dev/null; do sleep "${CVENGINE_STATUS_TICK:-5}"; cv_status tick; done ) 9>&- >/dev/null 2>&1 &
+  CV_TICK_PID=$!
+}
+cv_ticker_stop() { [ -z "$CV_TICK_PID" ] || { kill "$CV_TICK_PID" 2>/dev/null || true; wait "$CV_TICK_PID" 2>/dev/null || true; CV_TICK_PID=; }; }
+# the update ended and the page says why (failed) or goes (cv_maint_off): the page's own poll sees the failure state for a moment before it goes
+cv_status_fail() { cv_ticker_stop; cv_status fail "$1" "$2"; }
+cv_status_settle() { cv_ticker_stop; [ "${CVENGINE_STATUS_LINGER:-6}" = 0 ] || sleep "${CVENGINE_STATUS_LINGER:-6}"; }
 export UPDATE_OWNS_MAINTENANCE=1  # scripts/update-deploy.sh then leaves the flag to this script (an older copy of this script does not say so, and the deploy sets and clears it itself)
 
 # What must not run while files change under it: the Celery workers and beat read ./web too (a worker process that restarts, or a task that
@@ -171,7 +195,10 @@ cv_begin_maintenance() {
     return 1
   fi
   log "maintenance page up (visitors are told the site is being rebuilt) before the files change"
+  cv_status begin "$SHA"
+  cv_ticker_start
   phase applying "maintenance page is up; stopping background work, then updating the files"
+  cv_status step stopping
   freeze_background
 }
 
@@ -653,6 +680,18 @@ else
   restore_env
 fi
 
+# Why the deploy stopped before the migration, as one of the reasons the page has a sentence for (scripts/update-status.py FAILURES)
+failure_reason() {
+  case "${DEPLOY_WHY:-}" in
+    *"could not be built"*) echo build_failed; return;;
+    *"free disk"*|*"disk space"*|*"GB"*) echo disk; return;;
+  esac
+  case "$DEPLOY_STAGE" in
+    build) echo build_failed;;
+    datastores|migrate) echo migrate_failed;;
+    *) echo unknown;;
+  esac
+}
 # The page comes down only here, after the new web service answered (scripts/update-deploy.sh verify_serving) and scanning resumed.
 finish_ok() {
   python3 "$STATE_HELPER" commit "$(git rev-parse HEAD)"
@@ -662,6 +701,7 @@ finish_ok() {
   clear_approval
   FROZEN=()  # the deploy recreated the workers
   resume_scanning
+  cv_status done
   cv_maint_off
   phase done
   log "updated to $SHA"
@@ -676,6 +716,7 @@ elif [ "$DEPLOY_STAGE" = migrated ]; then
     finish_ok
   else
     printf '%s %s\n' "$SHA" "$((TRIES + 1))" >"$ATTEMPTS_FILE"
+    cv_status_fail restart_failed no
     cv_maint_failed
     phase failed "The update did not finish: restarting after the migration failed (run $((TRIES + 1)) of $MAX_ATTEMPTS). The maintenance page stays up while the administrator fixes it"
     log "could not restart $SHA; the database is already migrated (or part way), so $PREV is not restored. Run $((TRIES + 1)) of $MAX_ATTEMPTS: the approval is kept and the next run retries until then; the maintenance page now says the update did not finish; see $LOG"
@@ -692,6 +733,8 @@ else
     log "the services were never replaced: $PREV is running again on its own files, no rebuild needed"
     mark_deployed "$PREV"
     resume_scanning
+    cv_status_fail "$(failure_reason)" yes
+    cv_status_settle
     cv_maint_off
     phase failed "${DEPLOY_WHY:-The update could not be applied (see the update log). Nothing was changed: the version that was running is still running.}"
     clear_approval
@@ -701,11 +744,14 @@ else
   if CVENGINE_UPDATE_MIN_FREE_MB=0 deploy >>"$LOG" 2>&1; then
     mark_deployed "$PREV"
     resume_scanning
+    cv_status_fail "$(failure_reason)" yes
+    cv_status_settle
     cv_maint_off
     # what stopped it (too little disk, a build that failed) is what the Update screen says, not a "done" that looks like an update that never happened
     if [ -n "${DEPLOY_WHY:-}" ]; then phase failed "$DEPLOY_WHY"; else phase done; fi
   else
     log "could not restart the previous version; redeploy by hand"
+    cv_status_fail previous_failed no
     cv_maint_failed
     phase failed "The update did not finish and the previous version could not be restarted. The maintenance page stays up while the administrator fixes it; scanning stays paused"
   fi

@@ -19,6 +19,9 @@ maintenance_on() { mkdir -p "$(dirname "$MAINTENANCE_FLAG")" 2>/dev/null && chmo
 maintenance_off() { rm -f "$MAINTENANCE_FLAG" "$MAINTENANCE_FLAG-failed" 2>/dev/null || true; }
 maintenance_failed() { : >"$MAINTENANCE_FLAG" 2>/dev/null && chmod 644 "$MAINTENANCE_FLAG" 2>/dev/null; : >"$MAINTENANCE_FLAG-failed" 2>/dev/null && chmod 644 "$MAINTENANCE_FLAG-failed" 2>/dev/null; true; }
 
+# the page's live status (scripts/update-status.py); the update script defines it too and wins
+declare -F cv_status >/dev/null || cv_status() { [ -f scripts/update-status.py ] && CV_STATUS_LOG="${LOG:-}" python3 scripts/update-status.py "$@" >/dev/null 2>&1; return 0; }
+
 # The built-in scanner's image (scanner.lock.json; about 5 GB) is fetched ONCE per update, and while the site is still up wherever that can be: a pull changes
 # nothing the running containers read, so doing it under the maintenance page only lengthens the outage (minutes on a small host).
 #   early  before the page goes up. scripts/apply-update.sh (this repository's copy) does this before the merge itself; a host whose copy of it is older
@@ -47,6 +50,7 @@ deploy_scanner_fetch() {  # early|once
 
 deploy_current() {
   local status=0
+  if [ -z "${UPDATE_OWNS_MAINTENANCE:-}" ]; then cv_status begin "$(git rev-parse HEAD)"; fi
   if [ -n "${UPDATE_OWNS_MAINTENANCE:-}" ]; then
     # the caller put the page up before it changed any file and takes it down after a verified update; it is set again here only for a deploy
     # that is run on its own
@@ -58,8 +62,10 @@ deploy_current() {
   maintenance_on
   deploy_steps || status=$?
   if [ "$status" = 0 ]; then
+    cv_status clear
     maintenance_off
   elif [ "$DEPLOY_STAGE" = migrated ]; then
+    cv_status fail restart_failed no
     maintenance_failed  # new code on a migrated database, services not (all) up: never a normal page
   fi
   return "$status"
@@ -137,6 +143,7 @@ deploy_steps() {
   fi
   DEPLOY_STAGE=build
   phase applying "$DEPLOY_STAGE"
+  cv_status step build
   check_disk || return 1
   # The proxy image is a moving tag and is meant to move with every update (nginx's security releases). It is fetched here, before anything is
   # stopped, and an unreachable registry only keeps the image already on the host: a pull that failed inside `up` after the migration (as
@@ -189,9 +196,11 @@ deploy_steps() {
   "${compose[@]}" up -d --no-deps db || return 1
   for _ in $(seq 1 60); do "${compose[@]}" exec -T db pg_isready -q >/dev/null 2>&1 && break; sleep 1; done
   phase applying backup
+  cv_status step backup
   backup_database || return 1
   DEPLOY_STAGE=migrate
   phase applying "$DEPLOY_STAGE"
+  cv_status step migrating
   run_migrations || return 1
   DEPLOY_STAGE=migrated
   phase applying "$DEPLOY_STAGE"
@@ -201,6 +210,7 @@ deploy_steps() {
   if [ -f scripts/renew-certs.sh ]; then
     scripts/renew-certs.sh --if-due --no-reload >/dev/null 2>&1 || log "the certificate check failed (see the Settings > Updates page); the update goes on"
   fi
+  cv_status step starting
   "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}" || return 1
   # The Tailscale sidecar shares the celery container's network namespace by container id, so it is orphaned (no tailscale0, no tailnet route
   # for scans) when celery is recreated. Only present when the profile is on.
@@ -216,11 +226,13 @@ deploy_steps() {
   # still DEPLOY_STAGE=migrated: a failure here is a failure AFTER the migration, and the script that applies the update (the copy already on
   # the host, which only knows build, datastores, migrate and migrated) must keep the new code and retry, never put the old code on the new schema
   phase applying verifying
+  cv_status step verifying
   verify_serving || return 1
   # The built-in scanner, once the server answers: recreated after celery (it shares celery's network namespace), kept on the new image only once a
   # heartbeat of it reaches the server, else put back on the previous one. Never a failed update: until it runs, the scans that need it wait.
   if declare -F cvengine_scanner_start >/dev/null; then
     phase applying scanner
+    cv_status step scanner
     cvengine_scanner_start "${compose[@]}"
   fi
   if declare -F cvengine_fit_budget >/dev/null; then cvengine_fit_budget "${compose[@]}" || true; fi
