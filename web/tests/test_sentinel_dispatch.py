@@ -432,6 +432,26 @@ class NucleiDispatchTests(DispatchBase):
         sub = Subdomain.objects.get(scan_history=self.scan, name='www.example.test')
         self.assertIn('jQuery', [t.name for t in sub.technologies.all()])
 
+    def test_a_host_the_sentinel_could_not_reach_is_not_recorded_as_scanned(self):
+        """nuclei exits 0 with no output for a host it could not connect to, so \"done, no findings\" proves nothing about it. The Sentinel names the hosts it did
+        not reach (``unreachable``) and a name this server cannot resolve is never sent; the stage records both as failed, not done, and the reached host as done."""
+        from cveFeed.models import ServiceRun
+        sub = Subdomain.objects.get(scan_history=self.scan, name='www.example.test')
+        Subdomain.objects.create(scan_history=self.scan, name='down.example.test', target_domain=self.domain)
+        Subdomain.objects.create(scan_history=self.scan, name='gone.example.test', target_domain=self.domain)
+        for sub_ in Subdomain.objects.filter(scan_history=self.scan).exclude(pk=sub.pk):
+            sub_.ip_addresses.add(IpAddress.objects.create(address='192.0.2.%d' % (50 + sub_.pk % 100)))
+        self.make_sentinel(['nuclei_light'])
+        result = {'outcome': 'done', 'findings': [], 'unreachable': ['down.example.test']}
+        stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=5)
+        with mock.patch('agentapi.sentinel_dispatch._resolves', side_effect=lambda host, timeout: host != 'gone.example.test'):
+            with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
+                nuclei_scan.run_light_nuclei(self.scan.id, stream=stream)
+        status = dict(ServiceRun.objects.filter(service=nuclei_scan.LIGHT_SERVICE).values_list('asset', 'status'))
+        self.assertEqual(status.get('www.example.test'), 'done')
+        self.assertEqual(status.get('down.example.test'), 'failed')
+        self.assertEqual(status.get('gone.example.test'), 'failed')
+
     @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '1'})  # the serial loop, one dispatch_or_none per chunk; test_stage_parallel covers the fan-out
     def test_every_target_of_a_long_list_is_sent_in_chunks_and_an_unserved_chunk_waits(self):
         """A stage marks its whole list scanned once the stream returns, so the targets past the first chunk must not be dropped, and a chunk no

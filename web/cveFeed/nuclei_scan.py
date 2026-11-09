@@ -279,6 +279,17 @@ def _echo_ports(subs):
     return out
 
 
+def record_reached(service, chunk, project, scan, stream):
+    """Write the ledger for one chunk the stream returned from: the targets it reached as done, the ones it could not (a name that did not resolve, a host
+    the Sentinel could not connect to: ``stream.unreached``) as failed. A pass that finds nothing on a host it never reached is not a clean host."""
+    from cveFeed import ledger
+    unreached = {t for t in chunk if t in getattr(stream, 'unreached', ())}
+    ledger.record(service, [t for t in chunk if t not in unreached], project, scan)
+    if unreached:
+        ledger.record(service, sorted(unreached), project, scan, 'failed')
+    return unreached
+
+
 def _chunk_size(stream, total):
     """Targets handed to ``stream`` per call: ``NUCLEI_CHUNK`` at a time. The Sentinel wrapper (``agentapi.sentinel_dispatch.wrap_nuclei_stream``)
     splits each call into 64-target chunk tasks and runs them side by side, so it is handed enough to fill its window (``MAX_ADDRESSES`` times
@@ -400,7 +411,7 @@ def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, servi
                         save(line)
                 finally:
                     os.unlink(path)
-                ledger.record(service, chunk, project, scan)
+                record_reached(service, chunk, project, scan, stream)
                 scanned += chunk
         except ScannerUnavailable as exc:  # no scanner could take it and this kind may not run here: not the targets' failure, they stay due
             logger.warning('nuclei for scan %s is waiting for a scanner: %s', scan_id, exc)
@@ -565,7 +576,7 @@ def run_light_nuclei(scan_id, stream, force=False):
                 finally:
                     os.unlink(path)
                     flush_links()  # what a killed chunk already saw is kept
-                ledger.record(service, chunk, project, scan)
+                record_reached(service, chunk, project, scan, stream)
                 scanned += chunk
         except ScannerUnavailable as exc:  # no scanner could take it and this kind may not run here: not the targets' failure, they stay due
             logger.warning('nuclei technology pass for scan %s is waiting for a scanner: %s', scan_id, exc)

@@ -1128,6 +1128,13 @@ def _chunks(targets):
     return [targets[i:i + MAX_ADDRESSES] for i in range(0, len(targets), MAX_ADDRESSES)]
 
 
+def _unreachable_of(result, chunk):
+    """The targets of ``chunk`` that the Sentinel says it did not reach (``result['unreachable']``: bare hosts it could not resolve or connect to). A
+    Sentinel that does not send the field reports none, which is what it did before it existed."""
+    down = {str(h).strip().lower() for h in (result.get('unreachable') or []) if isinstance(h, str)}
+    return {t for t in chunk if _bare_host(t).lower() in down} if down else set()
+
+
 def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
     """A ``stream(targets_file, **kwargs) -> iterable of result-line dicts`` for ``run_light_nuclei``/``run_targeted_nuclei``/``run_nuclei``'s
     ``stream`` parameter: it hands the targets to a Sentinel in chunk tasks and yields the findings they report. The kind never runs on this
@@ -1141,20 +1148,24 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                     targets = [line.strip() for line in handle if line.strip()]
             except OSError:
                 targets = []
+            internal_stream.unreached = set()
             chunks = _chunks(targets)  # every target is sent: a stage that marks its whole list scanned must not have dropped the tail
             with contextlib.closing(dispatch_many(project, kind, chunks, prepare=lambda chunk: (_nuclei_target(kind, chunk, kwargs), []), scan=scan,
                                                   internal=True, timeout=timeout, labeler=_targets_label)) as results:
                 for _index, result in results:
                     if result is None:
                         raise RuntimeError('no Sentinel inside the network answered (one must declare network:internal and cover this project)')
+                    internal_stream.unreached.update(_unreachable_of(result, chunks[_index]))
                     for finding in result.get('findings', []):
                         yield _finding_to_nuclei_line(finding)
+        internal_stream.unreached = set()
         internal_stream.chunks_itself = True  # the caller hands over the whole list: this splits it and runs the chunks side by side
         return internal_stream
     if not any_scanner_for(project, kind):
         _no_scanner(kind, project)  # raises ScannerUnavailable: the kind has no local path
 
     def stream(targets_file, **kwargs):
+        stream.unreached = set()  # what this call could not reach (read by ``cveFeed.nuclei_scan.record_reached``): not scanned, whatever the call returns
         try:
             with open(targets_file, encoding='utf-8') as handle:
                 targets = [line.strip() for line in handle if line.strip()]
@@ -1168,6 +1179,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
 
         def prepare(chunk):
             live = resolvable_targets(chunk)
+            stream.unreached.update(set(chunk) - set(live))  # a name that does not resolve was not scanned: the stage must not record it as done
             if not live:
                 unresolved.add(tuple(chunk))
                 return None  # nothing in the chunk resolves: a Sentinel would be asked to do nothing, and nothing can run here
@@ -1180,8 +1192,10 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                     # the dispatcher raises ScannerUnavailable for a chunk no Sentinel finished; one that comes back empty anyway is never read as scanned
                     from reNgine.resources import ScannerUnavailable
                     raise ScannerUnavailable(kind, 'no scanner returned a result for a chunk')
+                stream.unreached.update(_unreachable_of(result, chunks[index]))
                 for finding in result.get('findings', []):
                     yield _finding_to_nuclei_line(finding)
+    stream.unreached = set()
     stream.chunks_itself = True  # the caller hands over the whole list: this splits it and runs the chunks side by side
     stream.signed_in = signed_in_stream(scan, kind, timeout)
     return stream
