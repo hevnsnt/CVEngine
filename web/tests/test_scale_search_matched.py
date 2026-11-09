@@ -1,6 +1,8 @@
 """A search page says why each row matched; the route and web-archive evidence it reads is looked up once for the page, not once per row
 (100 extra queries on a 50-row page of ``q=nginx``)."""
 from django.contrib.auth.models import User
+from unittest import mock
+
 from django.core.cache import cache
 from django.db import connection
 from django.test import TestCase
@@ -10,6 +12,7 @@ from django.utils import timezone
 from agentapi.auth import create_token
 from cveFeed.models import HostArchive, RouteAuth
 from dashboard.models import Org, Project
+from reNgine import input_guard, ip_allowlist
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, ScanHistory, Subdomain
 from targetApp.models import Domain
@@ -40,6 +43,16 @@ class MatchedReasonsTests(TestCase):
 
     def setUp(self):
         cache.clear()
+        # The perimeter middleware keeps two answers per process for 10 s of wall clock (the IP allowlist switch, the banned addresses),
+        # filled by whichever request comes first after they lapse. A 10 s window that ended between the readings of the cost test
+        # put 2 queries on one reading and not the other (43 != 45, or the reverse, in about 1 run in 20 that crossed one).
+        # Hold both for the whole test: dropped now, read once by the first request, and a clock they cannot see move.
+        for guard in (ip_allowlist, input_guard):
+            guard.invalidate_cache()
+            self.addCleanup(guard.invalidate_cache)
+            patcher = mock.patch.object(guard, 'time', mock.Mock(time=lambda: 1e9))
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def search(self, q):
         with CaptureQueriesContext(connection) as queries:
