@@ -125,3 +125,4 @@ registerTunableGroup("autotune_pace", "Auto-tuning pace");
 registerTunableGroup("retention", "Data retention");
 registerTunableGroup("egress", "Outbound connections");
 registerTunableGroup("heat", "Heat policy");
+registerTunableGroup("discovery_keys", "Discovery API keys");

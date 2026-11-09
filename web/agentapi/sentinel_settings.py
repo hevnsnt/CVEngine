@@ -27,8 +27,10 @@ from agentapi.models import Agent, SentinelDefaults, SentinelEnrollment, Sentine
 from agentapi.services import ApiError
 from tenancy import audit
 
-SETTINGS = ('name', 'network', 'profile', 'disabled_kinds', 'kinds', 'max_concurrent', 'self_update')
-MANAGED_ONLY = ('kinds',)  # set from cvENGINE only: a Sentinel never reports a policy (it can only turn a kind off, with ``disabled_kinds``)
+SETTINGS = ('name', 'network', 'profile', 'disabled_kinds', 'kinds', 'max_concurrent', 'self_update', 'discovery_keys')
+# ``kinds`` and ``discovery_keys`` are set from cvENGINE only. ``discovery_keys`` is a boolean: false is this Sentinel's opt-out from being sent the project's discovery API
+# keys (the instance setting ``sentinel_bbot_keys`` is the other switch); absent or true means it follows the instance setting. Never sent to a Sentinel.
+MANAGED_ONLY = ('kinds', 'discovery_keys')  # set from cvENGINE only: a Sentinel never reports a policy (it can only turn a kind off, with ``disabled_kinds``)
 SELF_UPDATE = ('off', 'manual', 'automatic')
 # What an administrator is told to run on the Sentinel's machine when its host updater is missing: fixed text, never something a Sentinel reported.
 INSTALL_COMMAND = 'cd <the Sentinel checkout> && sudo ./scripts/install-updater.sh'
@@ -71,11 +73,20 @@ def clean_settings(raw, managed=True):
             out[key] = sorted(set(value))
         elif key == 'kinds':
             out[key] = policy_lib.clean_kinds(value)
+        elif key == 'discovery_keys':
+            if not isinstance(value, bool):
+                raise ApiError(400, 'discovery_keys must be true or false (false: this Sentinel is never sent a project\'s discovery API keys)')
+            out[key] = value
         elif key == 'max_concurrent':
             if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= broker.MAX_CONCURRENT_CAP:
                 raise ApiError(400, f'max_concurrent must be a whole number from 1 to {broker.MAX_CONCURRENT_CAP}')
             out[key] = value
     return out
+
+
+def discovery_keys_opt_out(agent):
+    """Whether an administrator turned off sending discovery API keys to this one Sentinel (Sentinel settings)."""
+    return ((agent.managed_settings or {}).get('discovery_keys') or {}).get('value') is False
 
 
 def _when(entry):
@@ -268,6 +279,8 @@ def set_managed(agent, raw, actor, now=None):
     grant_change = {'network_grant_before': network_before, 'network_grant_after': agent.network} if 'network' in values else {}
     if kinds_after != kinds_before:
         grant_change.update(kinds_before=kinds_before, kinds_after=kinds_after)  # who changed what in the capability policy: the map before and after
+    if 'discovery_keys' in values:
+        grant_change['discovery_keys_after'] = 'follows the instance setting' if values['discovery_keys'] is None else ('send' if values['discovery_keys'] else 'never send')
     audit.record_for_user(actor, 'agent.settings', agent.token.user, target=agent.name, agent_id=agent.pk,
                           before=before, after=explicit(agent), **grant_change)
     return effective(agent)
@@ -328,7 +341,9 @@ UPDATE_STATUSES = ('idle', 'waiting', 'draining', 'updating', 'done', 'failed')
 # single-use read of a stored credential for a signed-in pass, and ``vantage``, the egress proxy and private ranges of the settings reply. A name this
 # server does not know is dropped. ``info.builtin`` is what the image says it is; whether a Sentinel IS the built-in scanner is decided by its
 # enrollment (``builtin_scanner.builtin_agent``), never by this.
-FEATURES = ('secret_read', 'vantage')
+# ``bbot_keys`` (any Sentinel: the Sentinel client's ``config.EXTERNAL_FEATURES``): it reads a bbot discovery task's API keys through the same single-use read, keeps
+# them in a private file for the run and masks them. A Sentinel that does not say so (every older client) is never sent them; the field is optional.
+FEATURES = ('secret_read', 'vantage', 'bbot_keys')
 
 
 def clean_info(raw):
