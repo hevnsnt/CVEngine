@@ -1905,7 +1905,7 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .gl-facts dt:first-child{margin-top:0}
 .gl-facts dd,.sig-text{margin:0;min-width:0;overflow-wrap:break-word;word-break:normal;line-height:1.4}
 @container (min-width:420px){.gl-facts{grid-template-columns:fit-content(12em) minmax(0,1fr);gap:var(--s-2) var(--s-3)}.gl-facts dt,.gl-facts dt:first-child{margin-top:0}}
-.gl-code{font:var(--fw-medium) var(--fs-1) var(--mono);background:var(--sunk);padding:1px var(--s-1);border-radius:var(--r-s);overflow-wrap:anywhere}
+.gl-code{font:var(--fw-medium) var(--fs-1) var(--mono);background:var(--sunk);padding:0 var(--s-1);border-radius:var(--r-s);overflow-wrap:anywhere}
 .gl-unit{display:inline-block;max-width:100%;white-space:nowrap}
 .gl-unit .gl-code{white-space:normal}
 .gl-pct{font-size:var(--fs-8);letter-spacing:-.02em;font-variant-numeric:tabular-nums}
