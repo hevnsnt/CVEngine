@@ -2,7 +2,7 @@
 
 A process that watches this server from outside the workers and puts right what it safely can. It exists because everything that used to watch the workers was itself a Celery task, a beat entry or a check inside the worker container, so it stopped with the thing it watched. In the 1.3.7 to 1.4 update on one production instance three of the four worker lanes (`cve_feed`, `validation_priority`, `classic`) were gone while the container stayed up; every queue grew; no notice said so. Then a leftover `DISCOVERY_CONCURRENCY=1` in `.env` kept one host assessment at a time while two Sentinels idled.
 
-It is on by default. Switch it off for everything with the **Watchdog** switch on **Scanners, Health**, or `CVENGINE_WATCHDOG=0` in `.env` (the host side reads it too); each rule has its own switch on the same panel.
+It is on by default. Switch it off for everything with the **Watchdog** switch on **Administration, Watchdog**, or `CVENGINE_WATCHDOG=0` in `.env` (the host side reads it too); each rule has its own switch on the same panel.
 
 ## How it runs
 
@@ -69,7 +69,7 @@ Every action is followed by a check. For a host action the clock starts when the
 
 ## What you see
 
-- **Scanners, Health** (App Admin): the **Watchdog** panel: the switch, whether it is ticking, each rule in plain words with a green, amber or red edge and a word (not colour alone), **What the watchdog changed** (the settings it holds that are still in force, with how to undo each) and the **last 20 actions** (when, rule, what happened).
+- **Administration, Watchdog** (App Admin; the Scanners page links to it): the **Watchdog** panel: the switch, whether it is ticking, each rule in plain words with a green, amber or red edge and a word (not colour alone), **What the watchdog changed** (the settings it holds that are still in force, with how to undo each) and the **last 20 actions** (when, rule, what happened).
 - **The notice strip** (App Admins): one notice per rule that needed acting or could not be fixed, for example *The workers stopped answering at 18:12; the watchdog restarted them at 18:15 and they answer again*, or *The workers stopped answering; the watchdog could not fix it. Next step: run `docker compose restart celery`*. They are `AdminAlert` rows with the code `watchdog_<rule>`; Dismiss works as for any alert, and a dismissed one returns when what it says changes.
 - **The activity feed** gets a line for every action and every verified fix, and `WatchdogEvent` (append only, 30 days or 5000 rows) keeps when, rule, observation, action and result. No secrets are written to any of these.
 
@@ -77,7 +77,7 @@ Every action is followed by a check. For a host action the clock starts when the
 
 | Setting | Where | Default |
 | --- | --- | --- |
-| **Watchdog** (instance setting) | Scanners, Health, the Switch off button; `POST /cve/api/admin/watchdog {"enabled": false}` | on |
+| **Watchdog** (instance setting) | Administration, Watchdog, the Switch off button; `POST /cve/api/admin/watchdog {"enabled": false}` | on |
 | per rule switch | the same panel; `{"rule": "R3", "enabled": false}` | on |
 | `CVENGINE_WATCHDOG=0` | `.env` or the environment of the host and the web container | unset (on) |
 | `CVENGINE_WATCHDOG_SECONDS` | the host watcher's tick interval, for tests | 30 |

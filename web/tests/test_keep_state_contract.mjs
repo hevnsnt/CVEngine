@@ -42,7 +42,7 @@ test('every polling file redraws through renderKeepingState, or is on the allowl
 });
 
 test('the pages that were reported (AI usage, Sentinels) and the other polled regions use the helper', () => {
-  for (const f of ['ai-usage.js', 'sentinel-live.js', 'statusstrip.js', 'scanners.js', 'bounty.js', 'app.js']) {
+  for (const f of ['ai-usage.js', 'sentinel-live.js', 'statusstrip.js', 'scanners.js', 'watchdog-panel.js', 'bounty.js', 'app.js']) {
     assert.match(read(f), /import \{ renderKeepingState \} from "\/staticfiles\/cve\/keep-state\.js";/, `${f} imports the helper`);
     assert.match(read(f), /renderKeepingState\(/, `${f} draws through the helper`);
   }

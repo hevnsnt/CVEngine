@@ -16,6 +16,7 @@ import {
   toast,
 } from "/staticfiles/cve/ui.js";
 import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
+import { watchdogPanel } from "/staticfiles/cve/watchdog-panel.js";
 
 import { legacyAdminTarget } from "/staticfiles/cve/admin-legacy-logic.js";
 
@@ -1018,6 +1019,7 @@ async function healthTab(panel) {
   };
   if (me.is_superuser) defs.timings = { label: "Timings", open: timingsTab };
   if (me.is_superuser) defs.health = { label: "Scheduler health", open: healthTab };
+  if (me.is_superuser) defs.watchdog = { label: "Watchdog", open: watchdogPanel };
   defs.openvas = { label: "OpenVAS", open: openvasPanel };
   defs.audit = { label: "Audit log", open: auditTab };
   defs.activity = { label: "Activity and errors", open: activityTab };
