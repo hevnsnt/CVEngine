@@ -410,8 +410,15 @@ WATCHDOG_WORDS = {
 }
 WATCHDOG_STALE_SECONDS = 180  # a Sentinel that heartbeats but whose watchdog has not ticked for this long has a stuck watchdog (it ticks every 10 seconds)
 WATCHDOG_KILL_NOTICE = 3  # watchdog stops of one Sentinel in an hour that deserve an administrator's notice (the same number the Sentinel withholds a kind at)
-_WATCHDOG_KINDS = {'nuclei_light': 'nuclei light scan', 'nuclei_targeted': 'nuclei targeted scan', 'nuclei_deep': 'nuclei deep scan', 'nmap': 'nmap scan',
-                   'nmap_full': 'full port scan', 'nmap_udp': 'UDP scan', 'testssl': 'TLS check', 'wpscan': 'WordPress scan', 'bbot_discovery': 'discovery run'}
+# How an action line names a kind: the kind's own label read as a scan, except where the line reads better another way. Tool names are never spelled
+# out here (they come through sentinel_policy.label), so the removed-binary guard sees no new server reference.
+_WATCHDOG_KIND_WORDS = {'nmap_full': 'full port scan', 'nmap_udp': 'UDP scan', 'bbot_discovery': 'discovery run'}
+
+
+def _watchdog_kind_text(kind):
+    if kind in _WATCHDOG_KIND_WORDS:
+        return _WATCHDOG_KIND_WORDS[kind]
+    return f'{policy_lib.label(kind)} scan' if isinstance(kind, str) and kind else 'task'
 
 
 def _text(value, limit):
@@ -455,7 +462,7 @@ def watchdog_view(agent, now=None):
     for a in reversed(raw.get('actions') or []):
         word = WATCHDOG_WORDS.get(a.get('code'))
         if word:
-            kind = _WATCHDOG_KINDS.get(a.get('kind')) or str(a.get('kind') or 'task').replace('_', ' ')
+            kind = _watchdog_kind_text(a.get('kind'))
             actions.append({'at': a.get('at'), 'text': word.format(kind=kind, minutes=a.get('minutes') or 0)})
     age = max(0, int(now - raw['last_tick'])) if raw.get('last_tick') else None
     stale = age is not None and age > WATCHDOG_STALE_SECONDS
