@@ -938,7 +938,7 @@ def _dispatch_serially(project, kind, chunks, prepare, scan, timeout, created_by
 def try_nmap(project, scan, targets, org_id=None, timeout=None):
     """Fingerprint ``targets`` on Sentinels and persist what they report; return the persist totals.
 
-    Nothing runs on this server. An address is covered only when a Sentinel reports a host row for it. Raises ``ScannerUnavailable`` when no
+    Nothing runs on this server. An address is covered only when a Sentinel reports a host row for it that nmap finished (a row marked ``timed_out`` is not). Raises ``ScannerUnavailable`` when no
     scanner can take the work, or when a Sentinel finished a chunk without reporting every host in it: the exception's ``done`` lists the
     addresses a Sentinel did cover (persisted already), so the caller marks only those done and the rest stay due.
     """
@@ -956,7 +956,8 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None):
                     continue
                 chunk = chunks[index]
                 inventory = [{'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': None, 'ports': host.get('ports', [])}
-                             for host in result.get('hosts', []) if host.get('ip') in chunk]
+                             for host in result.get('hosts', []) if host.get('ip') in chunk and not host.get('timed_out')]
+                # a host nmap gave up on (``timed_out``) was not fingerprinted: it is stored as nothing and stays due (it is "missing" below)
                 # the Sentinel's own network, unless it says it sits behind Docker Desktop's; the built-in scanner's is this server's own (os_reliable None:
                 # judged and marked as a local scan, cveFeed.os_detection)
                 reliable = None if getattr(result, 'ran_here', False) else result.get('os_reliable') is not False

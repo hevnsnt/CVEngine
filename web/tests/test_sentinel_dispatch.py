@@ -117,6 +117,22 @@ class NmapDispatchTests(DispatchBase):
         port = IpAddress.objects.get(address='192.0.2.10').ports.get(number=443)
         self.assertEqual((port.product, port.version, port.source), ('nginx', '1.25', 'nmap'))
 
+    def test_a_host_nmap_timed_out_on_is_not_fingerprinted_and_stays_due(self):
+        """nmap gave up on the host (timedout): a row with no services is not a fingerprint. Nothing is stored for it, it is not reported as covered, and the
+        host that finished in the same chunk is still persisted and reported done."""
+        from reNgine.resources import ScannerUnavailable
+        IpAddress.objects.create(address='192.0.2.11')
+        self.make_sentinel(['nmap'])
+        result = {'outcome': 'done', 'hosts': [
+            {'ip': '192.0.2.10', 'os_guess': '', 'timed_out': True, 'ports': []},
+            {'ip': '192.0.2.11', 'os_guess': 'Linux 6.X', 'ports': [{'number': 22, 'protocol': 'tcp', 'state': 'open', 'service_name': 'ssh'}]}]}
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
+            with self.assertRaises(ScannerUnavailable) as caught:
+                dispatch.try_nmap(self.project, self.scan, ['192.0.2.10', '192.0.2.11'], timeout=5)
+        self.assertEqual(caught.exception.done, ['192.0.2.11'])
+        self.assertTrue(IpAddress.objects.get(address='192.0.2.11').ports.filter(number=22).exists())
+        self.assertFalse(IpAddress.objects.get(address='192.0.2.10').ports.exists())
+
     def test_an_omitted_sentinel_host_stays_due_and_is_never_scanned_here(self):
         from reNgine.resources import ScannerUnavailable
         self.make_sentinel(['nmap'])
