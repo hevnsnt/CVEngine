@@ -39,7 +39,7 @@ Host search (everything above) answers "which of my hosts...". To look up a CVE 
 - A leading `-` **excludes**: `-host:www`.
 - Wrap a value with spaces in **quotes**: `tech:"apache tomcat"`.
 - Matching is case-insensitive and by substring, so `nginx` finds `nginx/1.24.0`. There is no OR between terms, no parentheses, and no wildcard. Inside one filter, a comma list is OR: `port:80,443` is port 80 or 443, `sev:high,critical` is either severity, and it is still ANDed with the other terms. Quote the value (`tech:"foo,bar"`) to keep a literal comma.
-- A search may have at most 15 terms of 200 characters each and 1,000 characters in all. More is a 400.
+- A search may have at most 15 terms of 200 characters each and 1,000 characters in all. A search may name at most 40 values in all (every term, and every item of a comma list). More is a 400.
 - Unknown filter names are treated as plain text, so a pasted URL searches for the URL.
 
 | Filter | Matches | Example |

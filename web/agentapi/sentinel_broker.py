@@ -35,6 +35,7 @@ from django.utils import timezone
 from agentapi import agent_broker as broker
 from agentapi import agent_scope as scope_lib
 from agentapi import builtin_scanner
+from agentapi import storage_safe
 from agentapi import probe_results
 from agentapi import sentinel_policy
 from agentapi import sentinel_settings
@@ -2750,7 +2751,9 @@ def clean_result(kind, body, task=None):
     if cleaner is None:
         raise ApiError(400, f'unknown task kind {kind!r}')
     try:
-        return _bind_to_task(kind, {'outcome': 'done', **cleaner(body)}, task)
+        # evidence a probe copied from the host (a header, a script URL, a banner) can hold a NUL or a lone surrogate: Postgres refuses both, so the
+        # whole result would never be stored (agentapi/storage_safe.py)
+        return storage_safe.clean(_bind_to_task(kind, {'outcome': 'done', **cleaner(body)}, task))
     except ApiError:
         raise
     except (TypeError, ValueError, KeyError):
