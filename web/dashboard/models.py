@@ -230,7 +230,7 @@ class ApiToken(models.Model):
 	name = models.CharField(max_length=100)
 	key_hash = models.CharField(max_length=64, unique=True)
 	prefix = models.CharField(max_length=12)  # the first 4 characters of the token (always the fixed 'cve_' marker): shown in the UI with `suffix`, never more
-	suffix = models.CharField(max_length=2, blank=True, default='')  # the last 2 characters; '' for a token made before they were kept (only a hash of it exists, so they cannot be recovered)
+	suffix = models.CharField(max_length=2, blank=True, default='', db_default='')  # the last 2 characters; '' for a token made before they were kept (only a hash of it exists, so they cannot be recovered)
 	read_only = models.BooleanField(default=False)
 	created_at = models.DateTimeField(auto_now_add=True)
 	last_used_at = models.DateTimeField(null=True, blank=True)
