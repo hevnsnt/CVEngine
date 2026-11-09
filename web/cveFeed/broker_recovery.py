@@ -35,6 +35,27 @@ def requeue_unacked(app=None):
         return 0
 
 
+def requeue_tags(tags, app=None):
+    """Return the unacknowledged messages with these delivery tags to the front of their queues (``requeue_unacked`` for chosen messages: the watchdog
+    returns only the ones no worker holds). Returns how many were restored. Never raises."""
+    if not tags:
+        return 0
+    try:
+        from reNgine.celery import app as default_app
+        with (app or default_app).connection_for_write() as connection:
+            channel = connection.default_channel
+            if getattr(channel, 'qos', None) is None or getattr(channel, 'client', None) is None:
+                return 0
+            done = 0
+            for tag in tags:
+                channel.qos.restore_by_tag(tag.decode() if isinstance(tag, bytes) else str(tag), leftmost=True)
+                done += 1
+            return done
+    except Exception:  # noqa: BLE001
+        logger.exception('could not return the chosen unacknowledged broker messages to their queues')
+        return 0
+
+
 # ---- which tasks still exist -------------------------------------------------------------------------------------------------
 # A row that says "queued" is only waiting if a Celery task for it exists somewhere: in a queue, held unacknowledged by a worker, or
 # reserved, scheduled or running inside a worker. A worker that acknowledges on receipt and is killed takes its reserved tasks with it

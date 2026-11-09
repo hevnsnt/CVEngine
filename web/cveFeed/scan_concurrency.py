@@ -260,7 +260,7 @@ def update(values, user):
                 changed.append(key)
                 audit(user, 'scan_concurrency.set', key, before=before['value'], before_source=before['source'], after=new)
         if changed:
-            row.values, row.meta, row.updated_by = stored, meta, user
+            row.values, row.meta, row.updated_by = stored, meta, (user if getattr(user, 'pk', None) else None)  # None: a system actor (the watchdog) has no account
             row.save()
     if changed:
         after_saved(changed, stored)

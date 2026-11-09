@@ -41,7 +41,7 @@ def _body(request):
 
 
 def audit(actor, action, target='', org=None, **detail):
-    AuditLog.objects.create(actor=actor, actor_name=actor.username, action=action, target=target[:300],
+    AuditLog.objects.create(actor=actor if getattr(actor, 'pk', None) else None, actor_name=actor.username, action=action, target=target[:300],
                             org_id=getattr(org, 'pk', org), detail=detail)
 
 
