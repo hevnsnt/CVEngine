@@ -53,7 +53,7 @@ def orphaned(task, now=None):
     from cveFeed import scan_control
     if covered_by_stage_run(task):
         return False
-    # a closed scan alone is not enough: a sweep that is not a StageRun (the weekly deep nuclei) blocks on its own task and files its own result
+    # a closed scan alone is not enough: a sweep that is not a StageRun (the weekly deep sweep) blocks on its own task and files its own result
     started, ended, _grace = scan_control.update_window()
     if started is None:
         return False
