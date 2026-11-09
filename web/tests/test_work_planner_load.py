@@ -2,6 +2,9 @@
 
 A tick is the once-a-minute part: it must cost under a second and a number of queries that does not grow with the hosts (it reads the cached census; the
 census, a pass over every host, is its own task every five minutes and has its own, looser budget)."""
+import cProfile
+import io
+import pstats
 import time
 from unittest import mock
 
@@ -75,10 +78,16 @@ class LoadTests(TestCase):
                                  last_seen=timezone.now(), info={'contract_version': sentinel_contract.version()}, scope={'instance': True})
 
     def measure(self):
+        profile = cProfile.Profile()
         with CaptureQueriesContext(connection) as census_queries:
             started = time.monotonic()
+            profile.enable()
             data = work_planner.census(self.now)
+            profile.disable()
             census_seconds = time.monotonic() - started
+        out = io.StringIO()
+        pstats.Stats(profile, stream=out).sort_stats('cumulative').print_stats(25)
+        self.census_profile = out.getvalue()
         cache.delete(work_planner.LOCK_KEY)
         with CaptureQueriesContext(connection) as tick_queries:
             started = time.monotonic()
@@ -98,7 +107,7 @@ class LoadTests(TestCase):
         self.assertEqual(out['batches'], 12)  # the per-run ceiling: a backlog of thousands fills the queue over several runs
         self.assertLess(tick[0], TICK_SECONDS, f'a tick took {tick[0]:.2f} s')
         self.assertLessEqual(tick[1], TICK_QUERIES, f'a tick ran {tick[1]} queries')
-        self.assertLess(census[0], CENSUS_SECONDS, f'the census took {census[0]:.2f} s')
+        self.assertLess(census[0], CENSUS_SECONDS, f'the census took {census[0]:.2f} s\n{self.census_profile}')
         self.assertLessEqual(census[1], CENSUS_QUERIES, f'the census ran {census[1]} queries')
         # one batch is one task of at most 25 units, and the projects take turns inside each kind: 6 batches of a kind reach 6 projects, not one
         for kind in ('ssh_probe', 'secrets_scan'):
