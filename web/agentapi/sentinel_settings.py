@@ -391,7 +391,88 @@ def clean_info(raw):
     waiting = raw.get('waiting')
     if waiting is not None:
         out['waiting'] = clean_waiting(waiting)
+    watchdog = clean_watchdog(raw.get('watchdog'))
+    if watchdog is not None:
+        out['watchdog'] = watchdog
     return out
+
+
+WATCHDOG_WORDS = {
+    'stopped_deadline': 'stopped a {kind} that passed its time limit after {minutes} minutes',
+    'stopped_hung': 'stopped a hung {kind}: no output or CPU for {minutes} minutes',
+    'stopped_memory': 'stopped a {kind} to keep the machine from running out of memory',
+    'overcommit': 'let a {kind} start ahead of a long scan, within the memory that was really free',
+    'orphans': 'ended tool processes that a finished task left behind',
+    'heartbeat_restart': 'restarted its own heartbeat thread, which had stopped',
+    'withheld': 'stopped taking {kind} work for a while after repeated stops',
+    'disk_clean': 'removed its own old temporary files to free disk',
+    'low_disk': 'ran low on disk and stopped taking work',
+}
+WATCHDOG_STALE_SECONDS = 180  # a Sentinel that heartbeats but whose watchdog has not ticked for this long has a stuck watchdog (it ticks every 10 seconds)
+WATCHDOG_KILL_NOTICE = 3  # watchdog stops of one Sentinel in an hour that deserve an administrator's notice (the same number the Sentinel withholds a kind at)
+_WATCHDOG_KINDS = {'nuclei_light': 'nuclei light scan', 'nuclei_targeted': 'nuclei targeted scan', 'nuclei_deep': 'nuclei deep scan', 'nmap': 'nmap scan',
+                   'nmap_full': 'full port scan', 'nmap_udp': 'UDP scan', 'testssl': 'TLS check', 'wpscan': 'WordPress scan', 'bbot_discovery': 'discovery run'}
+
+
+def _text(value, limit):
+    return ''.join(c for c in value if c.isprintable())[:limit] if isinstance(value, str) else ''
+
+
+def clean_watchdog(raw):
+    """``info.watchdog``, the Sentinel's own watchdog report (Sentinel ``client/watchdog.py``): ``{last_tick, actions_last_hour, kills, overcommit_active,
+    overcommit_mb, low_disk, withheld, spool, reasons, actions: [{at, code, kind, minutes}]}``. Optional and never refused: a shape this server does not
+    recognise is dropped (``None``), so a Sentinel that changes it cannot lose its heartbeat. Numbers are whole and bounded, text is clipped, lists capped."""
+    if not isinstance(raw, dict):
+        return None
+    out = {'last_tick': _count(raw.get('last_tick'), 4_102_444_800), 'actions_last_hour': _count(raw.get('actions_last_hour'), 10 ** 6),
+           'kills': _count(raw.get('kills'), 10 ** 6), 'overcommit_active': raw.get('overcommit_active') is True, 'overcommit_mb': _count(raw.get('overcommit_mb'), 10 ** 6),
+           'low_disk': raw.get('low_disk') is True}
+    out['withheld'] = [_text(k, 40) for k in (raw.get('withheld') if isinstance(raw.get('withheld'), list) else [])[:10] if isinstance(k, str)]
+    out['reasons'] = [_text(r, 160) for r in (raw.get('reasons') if isinstance(raw.get('reasons'), list) else [])[:5] if isinstance(r, str)]
+    actions = []
+    for item in (raw.get('actions') if isinstance(raw.get('actions'), list) else [])[:8]:
+        if isinstance(item, dict) and isinstance(item.get('code'), str):
+            kind = item.get('kind')
+            actions.append({'at': _count(item.get('at'), 4_102_444_800), 'code': _text(item['code'], 30), 'kind': _text(kind, 40) if isinstance(kind, str) else None,
+                            'minutes': _count(item.get('minutes'), 10 ** 6) if item.get('minutes') is not None else None})
+    out['actions'] = actions
+    spool = raw.get('spool')
+    if isinstance(spool, dict):
+        out['spool'] = {'count': _count(spool.get('count')), 'oldest_seconds': _count(spool.get('oldest_seconds'), 10 ** 9)}
+    return out
+
+
+def watchdog_view(agent, now=None):
+    """What the Sentinels page shows of a Sentinel's watchdog: its recent actions in plain words (newest first), whether its watchdog has stopped ticking, and
+    ``problem``: the sentence an administrator notice would carry (a stuck watchdog, repeated stops), or ``None``. ``None`` for a Sentinel that does not report a
+    watchdog (an older build, or one that switched it off)."""
+    raw = (agent.info or {}).get('watchdog')
+    if not isinstance(raw, dict):
+        return None
+    import time
+    now = now if now is not None else time.time()
+    actions = []
+    for a in reversed(raw.get('actions') or []):
+        word = WATCHDOG_WORDS.get(a.get('code'))
+        if word:
+            kind = _WATCHDOG_KINDS.get(a.get('kind')) or str(a.get('kind') or 'task').replace('_', ' ')
+            actions.append({'at': a.get('at'), 'text': word.format(kind=kind, minutes=a.get('minutes') or 0)})
+    age = max(0, int(now - raw['last_tick'])) if raw.get('last_tick') else None
+    stale = age is not None and age > WATCHDOG_STALE_SECONDS
+    problem = None
+    if stale:
+        problem = f'its watchdog has not run for {age // 60} minutes (it should run every 10 seconds)'
+    elif (raw.get('kills') or 0) >= WATCHDOG_KILL_NOTICE:
+        problem = f'its watchdog stopped {raw["kills"]} stuck tasks in the last hour'
+    return {'actions': actions[:5], 'stale': stale, 'age_seconds': age, 'overcommit_active': bool(raw.get('overcommit_active')), 'low_disk': bool(raw.get('low_disk')),
+            'withheld': raw.get('withheld') or [], 'problem': problem}
+
+
+def watchdog_problem(agent, now=None):
+    """The administrator-notice hook: a sentence when this Sentinel's watchdog is stale or has stopped repeatedly, else ``None``. The server-side watchdog
+    (claude/watchdog-srv, ``docs/WATCHDOG.md``) is meant to call it for every live Sentinel and raise its notice; nothing here depends on that branch."""
+    view = watchdog_view(agent, now)
+    return view['problem'] if view else None
 
 
 def _count(value, high=10 ** 7):

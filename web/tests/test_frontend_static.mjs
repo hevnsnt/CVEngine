@@ -233,7 +233,7 @@ test('Sentinel page shows the OpenVAS idle state without a deferred list', () =>
 const settingsSource = read('sentinel-settings.js').replace(/^import[\s\S]*?from "[^"]*";\n/gm, '');
 globalThis.__sentinelUi.button = (label, _fn, cls) => sentinelEl('button', cls, label);
 globalThis.__sentinelUi.text = (value = '', attrs = {}) => Object.assign(sentinelEl('input', '', null, attrs), {value});
-const {versionBlock, newestLine, updateLine, waitingLines, kindState, kindNote, kindChips, kindsChange, modesOffered, canReset, capProblem, defaultHint, kindsPanel} = await import(`data:text/javascript,${encodeURIComponent(
+const {versionBlock, newestLine, updateLine, waitingLines, watchdogLines, WAIT_RED_SECONDS, kindState, kindNote, kindChips, kindsChange, modesOffered, canReset, capProblem, defaultHint, kindsPanel} = await import(`data:text/javascript,${encodeURIComponent(
   `const {el, badge, button, text} = globalThis.__sentinelUi;\n${settingsSource}`,
 )}`);
 const buttonLabels = (node) => (node.tag === 'button' ? [node.text] : []).concat(...node.children.filter((c) => typeof c !== 'string').map(buttonLabels));
@@ -275,7 +275,7 @@ test('a card says what is running, what is newest and whether an update was aske
 });
 
 test('a card says which kind waits for memory and what holds it, and a task that is still stopping', () => {
-  const base = {id: 7, name: 'CVEngine Scanner', version: 'abc1234', update: {requested_at: null}, settings: {}};
+  const base = {id: 7, name: 'zebra', version: 'abc1234', update: {requested_at: null}, settings: {}};
   assert.deepEqual(waitingLines({...base, waiting: []}), []);
   assert.deepEqual(waitingLines(base), []);
   const lines = waitingLines({...base, waiting: [
@@ -283,9 +283,44 @@ test('a card says which kind waits for memory and what holds it, and a task that
     {kind: 'naabu', task: 3534, seconds: 45, stopping: true},
   ]});
   assert.equal(lines.length, 2);
-  assert.equal(sentinelText(lines[0]), 'web_screenshot waiting 14 min: needs 400 MB, 140 MB free of 1540 MB, held by task 3534 naabu (80 MB, 30 min).');
+  assert.equal(sentinelText(lines[0]), 'Waiting for memory, 14 min: screenshots. Needs 400 MB, 140 MB free of 1540 MB; held by naabu on zebra (30 min).');
   assert.match(sentinelText(lines[1]), /Task 3534 \(naabu\) was taken back by the server and is still stopping, 45 s later/);
-  assert.match(sentinelText(versionBlock({...base, waiting: [{kind: 'web_screenshot', need_mb: 400, free_mb: 0, budget_mb: 1540, seconds: 5, held_by: []}]}, {onChange() {}})), /web_screenshot waiting 5 s: needs 400 MB/);
+  assert.match(sentinelText(versionBlock({...base, waiting: [{kind: 'web_screenshot', need_mb: 400, free_mb: 0, budget_mb: 1540, seconds: 5, held_by: []}]}, {onChange() {}})), /Waiting for memory, 5 s: screenshots\. Needs 400 MB/);
+});
+
+test('waiting for memory is amber back-pressure, and red only past what the watchdog should have fixed', () => {
+  const base = {id: 7, name: 'haxxxk-docker', version: 'abc1234', update: {requested_at: null}, settings: {}};
+  const wait = (seconds) => ({kind: 'nuclei_light', need_mb: 520, free_mb: 500, budget_mb: 1540, seconds, held_by: [{task: 9522, kind: 'nuclei_deep', mb: 520, seconds: 780}, {task: 9672, kind: 'nuclei_targeted', mb: 520, seconds: 480}]});
+  const rows = [wait(480), {...wait(480), kind: 'nuclei_targeted'}, {...wait(480), kind: 'nuclei_deep'}];
+  const eight = waitingLines({...base, waiting: rows});
+  assert.equal(eight.length, 1, 'three kinds waiting on the same memory are one line, not three');
+  assert.equal(eight[0].cls, 'msg warn ss-detail');
+  assert.equal(sentinelText(eight[0]), 'Waiting for memory, 8 min: nuclei (light), nuclei (targeted), nuclei (deep). Needs 520 MB, 500 MB free of 1540 MB; held by nuclei (deep) on haxxxk-docker (13 min), nuclei (targeted) on haxxxk-docker (8 min).');
+  assert.doesNotMatch(eight[0].cls, /err/);
+  const justUnder = waitingLines({...base, waiting: [wait(WAIT_RED_SECONDS - 1)]});
+  assert.equal(justUnder[0].cls, 'msg warn ss-detail');
+  const late = waitingLines({...base, waiting: [wait(WAIT_RED_SECONDS)]});
+  assert.equal(late[0].cls, 'msg err ss-detail');
+  assert.match(sentinelText(late[0]), /longer than the Sentinel's watchdog should allow/);
+  assert.equal(WAIT_RED_SECONDS, 1200);
+});
+
+test('a card lists what the Sentinel watchdog did, and says so when the watchdog itself has stopped', () => {
+  const base = {id: 7, name: 'zebra', version: 'abc1234', update: {requested_at: null}, settings: {}};
+  assert.deepEqual(watchdogLines(base), []);
+  assert.deepEqual(watchdogLines({...base, watchdog: null}), []);
+  const at = Math.floor(Date.now() / 1000) - 120;
+  const lines = watchdogLines({...base, watchdog: {stale: false, low_disk: false, actions: [
+    {at, text: 'stopped a hung nuclei deep scan: no output or CPU for 30 minutes'},
+    {at, text: 'let a nuclei light scan start ahead of a long scan, within the memory that was really free'}]}});
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0].cls, 'note ss-detail');
+  assert.match(sentinelText(lines[0]), /^Watchdog 2 min ago: stopped a hung nuclei deep scan: no output or CPU for 30 minutes\.$/);
+  const stale = watchdogLines({...base, watchdog: {stale: true, age_seconds: 600, actions: []}});
+  assert.equal(stale[0].cls, 'msg err ss-detail');
+  assert.match(sentinelText(stale[0]), /watchdog has not run for 10 min/);
+  assert.equal(watchdogLines({...base, watchdog: {low_disk: true, actions: []}})[0].cls, 'msg warn ss-detail');
+  assert.equal(watchdogLines({...base, watchdog: {actions: Array(9).fill({at, text: 'x'})}}).length, 5);
 });
 
 test('the Built-in chip is drawn from the live row flag, and only for the built-in scanner', () => {

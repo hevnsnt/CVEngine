@@ -408,3 +408,22 @@ that does something with the result passes `then=('<continuation>', {args})` and
 `stage_runs.remember` / `recall` for a sweep's place in its list (see `tls_audit.sweep`). A job that creates its own tasks (a streamed bbot job)
 uses `stage_runs.watch(adapter, task_ids, context)` to be called back when they end.
 
+
+
+## The Sentinel watchdog and the Sentinels page
+
+A Sentinel runs its own watchdog (Sentinel repository, `docs/WATCHDOG.md`): a thread that stops a hung tool (no CPU and no bytes for 15 to 30 minutes) or one past
+its hard deadline, lets work that waited for memory behind long runs start inside a bounded overcommit while real free memory allows it, kills tool processes
+left behind by a finished task, restarts a stuck heartbeat thread, ends a stuck process so its container restarts, and stops taking work on a full disk. It
+reports itself in the heartbeat's optional `info.watchdog` (last tick, actions in the last hour, kills, overcommit, up to eight recent actions); a server that
+does not know the field would drop it, this one stores it clipped (`agentapi.sentinel_settings.clean_watchdog`, never refused) and the Sentinel's detail carries
+`watchdog` (`watchdog_view`): its recent actions in plain words, whether it still ticks, and `problem`.
+
+A Sentinel that waits for memory is applying back-pressure on purpose (a memory budget stops two long nuclei runs and a third from exhausting a small host). The
+Sentinels page therefore draws that wait as one amber line ("Waiting for memory, 8 min: nuclei (light), ... held by nuclei (deep) on zebra (13 min)") and turns it
+red only after `WAIT_RED_SECONDS` (20 minutes, `web/static/cve/sentinel-settings.js`): longer than the watchdog should ever allow, which means the Sentinel is
+old, has its watchdog off, or really lacks memory. The result contract is not touched.
+
+**Hook for the server-side watchdog.** `sentinel_settings.watchdog_problem(agent)` returns a sentence when a live Sentinel's watchdog has not ticked for 180
+seconds (while its heartbeats arrive) or has stopped three or more tasks in the last hour, else `None`. The server watchdog (`claude/watchdog-srv`, not merged
+at the time of writing) is meant to call it for each live Sentinel and raise its administrator notice; nothing here depends on that branch.

@@ -141,6 +141,12 @@ No scan kind runs on the server (see [SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECT
 
 Not built (planned): a Sentinel would declare which egress ports it can reach, found by itself with a canary connection at start-up (for example, whether outbound port 25 works from its network), and the server would route the stages that need port 25 only to Sentinels that can reach it, instead of to any Sentinel with the tool. Today any eligible Sentinel takes the work, and a Sentinel whose own network blocks port 25 reports that port as filtered.
 
+### The Sentinel's own watchdog
+
+Each Sentinel watches itself (hung tools, a memory budget two long runs hold, orphan processes, a stuck heartbeat, a full disk); the page lists what it did lately
+under its card ("Watchdog 2 min ago: stopped a hung nuclei (deep) scan: no output or CPU for 30 minutes"). Waiting for memory is shown amber, because it is
+normal back-pressure, and red only past 20 minutes. Details: [SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECTURE.md#the-sentinel-watchdog-and-the-sentinels-page).
+
 ## Security model
 
 A Sentinel is exactly as untrusted as any other agent ([TENANCY.md](TENANCY.md)).
