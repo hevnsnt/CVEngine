@@ -95,6 +95,30 @@ def settle(entry, status='done', message=None, **detail):
         logger.warning('could not settle AI activity', exc_info=True)
 
 
+def settle_waiting(entry, message, scan_id=None, **detail):
+    """Settle ``entry`` as ``waiting``: back-pressure (every Sentinel slot was taken), not a failure. The same line for the same scan right before it counts up
+    (``repeat``) on that row and ``entry`` is dropped, so a scan whose hundred hosts all waited shows one line, not a hundred. Never raises."""
+    if entry is None:
+        return None
+    try:
+        from datetime import timedelta
+        from django.db.models import F
+        from cveFeed.models import AgentActivity
+        same = (AgentActivity.objects.filter(project_id=entry.project_id, kind=entry.kind, message=message[:500], status='waiting',
+                                             detail__scan_id=scan_id, created_at__gte=timezone.now() - timedelta(seconds=REPEAT_WINDOW))
+                .exclude(pk=entry.pk).order_by('-id').first())
+        if same is not None:
+            AgentActivity.objects.filter(pk=same.pk).update(repeat=F('repeat') + 1, created_at=timezone.now(), finished_at=timezone.now())
+            discard(entry)
+            same.refresh_from_db()
+            return same
+        settle(entry, 'waiting', message=message, **detail)
+        return entry
+    except Exception:  # noqa: BLE001
+        logger.warning('could not settle waiting activity', exc_info=True)
+        return None
+
+
 @contextlib.contextmanager
 def step(kind, message, project=None, cve_id='', **detail):
     """Show ``message`` as running, then done (or failed if the block raises). Yields a handle whose
