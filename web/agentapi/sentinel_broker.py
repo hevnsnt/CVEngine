@@ -2539,8 +2539,12 @@ def _clean_openvas_result(body):
     unusable = _ov_num(body.get('unusable'), 0, MAX_OPENVAS_RESULTS, int, 0)
     # results whose CVE references the Sentinel's gvmd left out (a stale NVT cache, ``cveFeed.openvas_scan.parse_result``): the run is partial
     stale = _ov_num(body.get('nvt_cache_stale'), 0, MAX_OPENVAS_RESULTS, int, 0)
-    return {'results': results, 'scanned_addresses': scanned_addresses, 'without_cve': without_cve, 'unusable': unusable,
-            'partial': body.get('partial') is True or stale > 0, 'nvt_cache_stale': stale}  # a scan stopped at its time budget: what it found is kept, nothing earlier is resolved by it
+    cleaned = {'results': results, 'scanned_addresses': scanned_addresses, 'without_cve': without_cve, 'unusable': unusable,
+               'partial': body.get('partial') is True or stale > 0, 'nvt_cache_stale': stale}
+    unreached = body.get('unreached_hosts')
+    if isinstance(unreached, list):  # hosts gvmd listed but that never answered (offline, firewalled): not scanned, whatever the report says
+        cleaned['unreached_hosts'] = [ov_clean(a, 60) for a in unreached[:MAX_ADDRESSES] if isinstance(a, str)]
+    return cleaned  # a scan stopped at its time budget: what it found is kept, nothing earlier is resolved by it
 
 
 def _clean_waf_result(body):

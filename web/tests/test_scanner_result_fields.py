@@ -31,3 +31,17 @@ class ResultFieldTests(SimpleTestCase):
         self.assertEqual(out['mail'], [{'name': 'example.com', 'has_mx': False, 'findings': [], 'error': 'mx lookup failed'}])
         self.assertEqual(out['unknown_names'], ['mail.example.com'])
         self.assertNotIn('unknown_names', probe_results.clean_hygiene_check({'certs': [], 'mail': []}))
+
+
+class OpenvasUnreachedTests(SimpleTestCase):
+    def test_a_host_gvmd_listed_but_that_never_answered_is_not_scanned(self):
+        from cveFeed import openvas_scan
+        out = broker._clean_openvas_result({'results': [], 'scanned_addresses': ['192.0.2.10', '192.0.2.11'], 'unreached_hosts': ['192.0.2.11', 4]})
+        self.assertEqual(out['unreached_hosts'], ['192.0.2.11'])
+        self.assertEqual(openvas_scan.scanned_hosts(out), {'192.0.2.10'})
+
+    def test_a_result_without_the_field_counts_every_listed_host_as_before(self):
+        from cveFeed import openvas_scan
+        out = broker._clean_openvas_result({'results': [], 'scanned_addresses': ['192.0.2.10']})
+        self.assertNotIn('unreached_hosts', out)
+        self.assertEqual(openvas_scan.scanned_hosts(out), {'192.0.2.10'})
