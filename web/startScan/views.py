@@ -72,7 +72,7 @@ def create_report(request, id):
         show_vuln = True
         report_name = 'Full Scan Report'
 
-    scan = ScanHistory.objects.get(id=id)
+    scan = get_object_or_404(ScanHistory, id=id)
     vulns = (
         Vulnerability.objects
         .filter(scan_history=scan)
