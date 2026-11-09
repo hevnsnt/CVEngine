@@ -7,6 +7,7 @@ import json
 import re
 
 from agentapi.services import ApiError
+from agentapi import storage_safe
 
 MAX_PROBES = 300
 MAX_OBSERVATIONS = 40
@@ -32,11 +33,13 @@ def _evidence(value):
     """A JSON object of at most MAX_EVIDENCE_BYTES, or ``{}``: what the probe read (signals, a library record) is shown and read as data only."""
     if not isinstance(value, dict):
         return {}
+    value = storage_safe.clean(value)  # a NUL or a lone surrogate copied from the host: Postgres refuses it, and a surrogate cannot even be measured as UTF-8
     try:
         text = json.dumps(value, ensure_ascii=False, allow_nan=False)
+        size = len(text.encode('utf-8'))
     except (TypeError, ValueError):
         return {}
-    return value if len(text.encode('utf-8')) <= MAX_EVIDENCE_BYTES else {}
+    return value if size <= MAX_EVIDENCE_BYTES else {}
 
 
 def _observation(item):
@@ -586,6 +589,7 @@ def _route_evidence(raw):
     unanswered: a truncated reading would be read as what the page says)."""
     if not isinstance(raw, dict):
         return {}
+    raw = storage_safe.clean(raw)  # before anything is measured or stored: a NUL or a lone surrogate from the host (agentapi/storage_safe.py)
     out = {}
     for key, kind in _ROUTE_EVIDENCE.items():
         value = raw.get(key)

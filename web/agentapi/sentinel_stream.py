@@ -34,6 +34,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from agentapi import sentinel_contract
+from agentapi import storage_safe
 from agentapi.models import SentinelPartial, SentinelTask
 from agentapi.services import ApiError
 
@@ -222,7 +223,7 @@ def clean_partial(task, body):
         out['screenshots'] = [s for s in (_screenshot(item, scope) for item in _list(body, 'screenshots')) if s]
     except (TypeError, AttributeError):
         raise ApiError(400, 'the batch does not match the expected shape for this task kind') from None
-    return out
+    return storage_safe.clean(out)  # a NUL or a lone surrogate from the host would make Postgres refuse the whole batch (agentapi/storage_safe.py)
 
 
 def _finding(item, scope):

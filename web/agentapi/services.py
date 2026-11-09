@@ -2115,7 +2115,7 @@ def list_hosts(ctx, slug, params):
 
 SEARCH_FIELDS = ('tech', 'banner', 'port', 'proto', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth',
                   'sensitive', 'zombie', 'country', 'alias', 'note', 'secret')
-MAX_SEARCH_QUERY, MAX_SEARCH_TERMS, MAX_SEARCH_VALUE = 1000, 15, 200
+MAX_SEARCH_QUERY, MAX_SEARCH_TERMS, MAX_SEARCH_VALUE, MAX_SEARCH_VALUES = 1000, 15, 200, 40
 _SEARCH_TERM = re.compile(r'(-)?(?:([A-Za-z]+):)?(?:"([^"]*)"|(\S+))')
 
 
@@ -2142,6 +2142,10 @@ def parse_search(query):
     terms = _bind_versions(terms)
     if len(terms) > MAX_SEARCH_TERMS:
         raise ApiError(400, f'a search may have at most {MAX_SEARCH_TERMS} terms')
+    values = sum(min(MAX_SEARCH_TERMS, len([p for p in value.split(',') if p.strip()])) if field and not quoted and ',' in value else 1 for _, field, value, quoted in terms)
+    if values > MAX_SEARCH_VALUES:
+        # every value is several EXISTS subqueries: fifteen terms of fifteen values made a query of a million characters that took Postgres seconds to plan
+        raise ApiError(400, f'a search may name at most {MAX_SEARCH_VALUES} values in all (every term, and every item of a comma list)')
     return terms
 
 
@@ -2163,6 +2167,27 @@ def _bind_versions(terms):
     return out
 
 
+_V4 = r'^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$'
+_H = '[0-9a-f]{1,4}'
+_V6 = (f'^(({_H}:){{7}}{_H}|({_H}:){{1,7}}:|({_H}:){{1,6}}:{_H}|({_H}:){{1,5}}(:{_H}){{1,2}}|({_H}:){{1,4}}(:{_H}){{1,3}}|({_H}:){{1,3}}(:{_H}){{1,4}}|'
+       f'({_H}:){{1,2}}(:{_H}){{1,5}}|{_H}:(:{_H}){{1,6}}|:((:{_H}){{1,7}}|:))$')
+# IpAddress.address is free text (a stored row can be anything), and ``address::inet`` raises for the first row that is not an address: one bad row of
+# any organization then failed the search of every other (review 2 of 2026-11-09, P4). A row is cast only after a regular expression says it is an
+# address, and the guard is a CASE so Postgres does not evaluate the cast first. An IPv4 range is compared as whole numbers, with no cast at all.
+_INSIDE_SQL = {
+    False: ("CASE WHEN address ~ %s THEN ((split_part(address, '.', 1)::bigint << 24) + (split_part(address, '.', 2)::bigint << 16) "
+            "+ (split_part(address, '.', 3)::bigint << 8) + split_part(address, '.', 4)::bigint) BETWEEN %s AND %s ELSE false END"),
+    True: "CASE WHEN address ~* %s THEN address::inet <<= %s::inet ELSE false END",
+}
+
+
+def _inside_params(net):
+    network = ipaddress.ip_network(net)
+    if network.version == 4:
+        return [_V4, int(network.network_address), int(network.broadcast_address)]
+    return [_V6, net]
+
+
 def _ip_filter(value):
     """A Q matching hosts with an IP equal to ``value``, inside it (``10.0.0.0/24``, via Postgres ``inet``), or starting with it."""
     from django.db.models import Q
@@ -2172,7 +2197,7 @@ def _ip_filter(value):
             net = str(ipaddress.ip_network(value, strict=False))
         except ValueError:
             raise ApiError(400, f'{value} is not a valid CIDR range')
-        inside = IpAddress.objects.extra(where=['address::inet <<= %s::inet'], params=[net]).values('pk')
+        inside = IpAddress.objects.extra(where=[_INSIDE_SQL[':' in net]], params=_inside_params(net)).values('pk')
         return Q(ip_addresses__in=inside)
     try:
         return Q(ip_addresses__address=str(ipaddress.ip_address(value)))
