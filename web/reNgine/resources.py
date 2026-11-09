@@ -77,8 +77,11 @@ class ScannerUnavailable(MemoryBusy):
     stage before it had to wait (the nmap stage's addresses a Sentinel fully covered, ``sentinel_dispatch.try_nmap``): the caller may mark
     those done, and only the rest stays due. Empty everywhere else."""
 
-    def __init__(self, kind, why=''):
+    waiting = False  # back-pressure: every Sentinel that can run it was busy (or none claimed it in time); nothing is wrong, so it is not recorded as a failure
+
+    def __init__(self, kind, why='', waiting=False):
         self.kind, self.why, self.done = kind, why, []
+        self.waiting = bool(waiting)
         super().__init__(f'no scanner could run {kind} work{": " + why if why else ""}; it stays due until one can')
 
 
@@ -88,7 +91,7 @@ class AddressExcluded(ScannerUnavailable):
     why, in plain words."""
 
     def __init__(self, kind, refusal):
-        self.kind, self.why, self.done, self.refusal = kind, str(refusal), [], refusal
+        self.kind, self.why, self.done, self.refusal, self.waiting = kind, str(refusal), [], refusal, False
         MemoryBusy.__init__(self, f'{kind} work was not started: {refusal}')
 
 

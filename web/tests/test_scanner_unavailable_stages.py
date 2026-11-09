@@ -42,7 +42,10 @@ class WaitsMixin:
         lines = self.waiting_lines() if lines is None else lines
         self.assertTrue(lines, 'the stage left no activity line saying it waits')
         for message, status in lines:
-            self.assertIn('no scanner could take this work', message)
+            if status == 'waiting':  # the dispatch's own line for work nobody claimed in time (one per scan, amber)
+                self.assertRegex(message, r'is waiting for a (free )?Sentinel')
+            else:
+                self.assertIn('no scanner could take this work', message)
             self.assertIn(kind, message)
             self.assertNotIn('memory', message.lower())
             self.assertNotEqual(status, 'failed')

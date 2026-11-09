@@ -1022,8 +1022,10 @@ def _update_row():
 
 def _updates_state(row):
     """The update state plus the question the Update button asks first (which scanners run) and what an unattended update left to say."""
-    from cveFeed import scanner_plan, updater
-    return {**updater.state(row), 'scanner_choice': scanner_plan.decision(), 'scanner_notice': scanner_plan.notice()}
+    from cveFeed import autotune, scanner_plan, updater
+    pin = autotune.discovery_pin()
+    return {**updater.state(row), 'scanner_choice': scanner_plan.decision(), 'scanner_notice': scanner_plan.notice(),
+            'discovery_pin_notice': pin['text'] if pin else None}
 
 
 def updates_get(request):

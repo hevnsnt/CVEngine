@@ -71,6 +71,9 @@ def _env_int(name):
         return None
 
 
+DISCOVERY_PIN_BELOW = 4  # scripts/update-deploy.sh warn_discovery_pin says the same at the same number
+
+
 def managed():
     """Every setting that opts in to auto-tuning, from both registries, with its auto-tuning range (``cveFeed.autotune_policy.Setting``). For a
     scanner kind, HEAVY_TUNE_MIN_<KIND> / HEAVY_TUNE_MAX_<KIND> in the environment narrow or widen the range (never outside what the page
@@ -1042,6 +1045,28 @@ def list_decisions(setting=None, limit=50, offset=0):
     return {'results': out, 'has_more': len(rows) > limit}
 
 
+def discovery_pin():
+    """The one pin that costs a whole instance its throughput, or None. On 1.4 a host assessment holds a discovery slot while it waits for a
+    Sentinel, so ``DISCOVERY_CONCURRENCY`` below ``DISCOVERY_PIN_BELOW`` in the environment (a leftover from 1.3, when that pool only ran discovery)
+    lets one host be assessed at a time while the Sentinels idle, and it pins the value: the tuner may not move it. Returns ``{'value', 'env',
+    'text'}`` for the page, the status and the Settings screen, or None when the number is not set by the environment or is not low."""
+    for m in managed():
+        if m.key != 'discovery_concurrency':
+            continue
+        pin = pin_of(m, _saved_rows())
+        if pin is None or pin[1] != 'environment':
+            return None
+        value = _effective(m, _saved_rows()[m.registry][0], {})
+        if value >= DISCOVERY_PIN_BELOW:
+            return None
+        env = f'{m.env_name}={value}'
+        return {'value': value, 'env': env,
+                'text': f'Hosts assessed at once is held at {value} by {env} in the environment (.env), so only {value} host{"" if value == 1 else "s"} '
+                        f'{"is" if value == 1 else "are"} assessed at a time and the tuner may not raise it. Remove the line, or set it to {DISCOVERY_PIN_BELOW} or more, '
+                        'then restart the stack.'}
+    return None
+
+
 def status():
     """Everything the page, the API, MCP and the system status say about auto-tuning."""
     row = settings_row()
@@ -1058,7 +1083,7 @@ def status():
     return {
         'mode': row.mode, 'effective_mode': mode, 'killed': killed(), 'kill_switch': KILL_ENV, 'advisor': advisor_state(row),
         'changed_by': row.changed_by.username if row.changed_by_id else None, 'changed_at': _iso(row.changed_at),
-        'tuned': applied_values(row), 'pinned': pinned,
+        'tuned': applied_values(row), 'pinned': pinned, 'discovery_pin': discovery_pin(),
         'managed': [{'setting': m.key, 'label': m.label, 'min': m.setting.low, 'max': m.setting.high, 'step': m.setting.step,
                      'higher_means': 'more work at once' if m.setting.sense == 'more' else 'a longer wait between runs'} for m in managed()],
         'last_run': last or None, 'sized_for': last.get('sized_for'), 'facts': last.get('facts'), 'recent_decisions': recent,
