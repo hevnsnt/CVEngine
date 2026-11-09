@@ -352,7 +352,7 @@ def _autotune():
             'advisor': {k: full['advisor'].get(k) for k in ('enabled', 'provider', 'used_today', 'cap', 'last_error')},
             'last_run_at': last.get('at'), 'held': last.get('held'), 'changes_last_run': last.get('changes') or [],
             'sized_for': last.get('sized_for'), 'targets': {key: info.get('target') for key, info in (last.get('settings') or {}).items() if info.get('target') is not None},
-            'why_not_raised': not_raised, 'pinned': [p['setting'] for p in full['pinned']],
+            'why_not_raised': not_raised, 'pinned': [p['setting'] for p in full['pinned']], 'discovery_pin': full.get('discovery_pin'),
             'last_decisions': [{k: d[k] for k in ('at', 'setting', 'old_value', 'new_value', 'source', 'action', 'applied', 'reason')}
                                for d in full['recent_decisions'][:5]]}
 
@@ -635,6 +635,8 @@ def _system(user, problems, notes):
     out['os_detection'] = _probe(problems, 'os_detection', _os_detection)
     out['ai'] = _probe(problems, 'ai', lambda: _ai(problems))
     out['autotune'] = _probe(problems, 'autotune', _autotune)
+    if (out['autotune'] or {}).get('discovery_pin'):
+        notes.append(out['autotune']['discovery_pin']['text'])
     out['runzero'] = _probe(problems, 'runzero', lambda: _runzero(problems))
     out['udp_scan'] = _probe(problems, 'udp_scan', lambda: _udp_scan(problems))
     out['screenshots'] = _probe(problems, 'screenshots', lambda: _screenshots(problems, notes))
