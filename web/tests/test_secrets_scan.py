@@ -154,6 +154,12 @@ class StageTests(StageBase):
         self.assertFalse(ledger.fresh('secrets-scan', [HOST], self.project.id))
         self.assertTrue(ServiceRun.objects.filter(service='secrets-scan', asset=HOST, status='failed').exists())
 
+    def test_a_full_batch_never_overflows_the_fetched_cap(self):
+        """read_hosts counts a host only by its fetched entries, and clean_result keeps at most MAX_FETCHED of them: a full batch must fit, or its
+        last hosts would never be recorded as read. A Sentinel reads at most 20 pages, the scripts limit and as many source maps per host."""
+        per_host = 20 + 2 * secrets_scan.LIMITS['max_scripts_per_host']
+        self.assertLessEqual(secrets_scan.MAX_HOSTS * per_host, secrets_scan.MAX_FETCHED)
+
     def test_read_hosts_counts_a_host_only_with_an_answer(self):
         result = {'fetched': [{'url': 'https://a.example.test/', 'status': 200}, {'url': 'https://b.example.test/x', 'status': None},
                               {'url': 'https://C.example.test/', 'status': 404}]}
