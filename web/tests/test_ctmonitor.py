@@ -15,9 +15,10 @@ from tests.test_tenancy import client_for
 
 def _reset_slots():
 	ctmonitor._local['next'] = 0.0
+	ctmonitor._flight_local['n'] = 0
 	client = ctmonitor._redis()
 	if client is not None:
-		client.delete(ctmonitor._SLOT_KEY)
+		client.delete(ctmonitor._SLOT_KEY, ctmonitor._FLIGHT_KEY)
 
 
 def setUpModule():
@@ -212,3 +213,55 @@ class PoliteLookupTests(TestCase):
 		domain = Domain.objects.create(name='retry.example', project=project, insert_date=timezone.now())
 		with mock.patch.object(ctmonitor, '_fetch', return_value=None):
 			self.assertEqual(ctmonitor.run_ct_watch(domain.id), {'checked': 0, 'new': 0, 'failed': True})
+
+
+class InFlightTests(TestCase):
+	def setUp(self):
+		_reset_slots()
+		self.addCleanup(_reset_slots)
+
+	def test_no_more_than_the_limit_are_under_way_and_a_place_frees_when_one_ends(self):
+		held = []
+		for _ in range(ctmonitor.MAX_IN_FLIGHT):
+			flight = ctmonitor._Flight(lambda s: None)
+			flight.__enter__()
+			held.append(flight)
+		self.assertFalse(ctmonitor._enter_flight())
+		held[0].__exit__(None, None, None)
+		self.assertTrue(ctmonitor._enter_flight())
+		ctmonitor._leave_flight()
+		for flight in held[1:]:
+			flight.__exit__(None, None, None)
+
+	def test_a_lookup_with_no_free_place_waits_then_goes_back_to_the_queue(self):
+		for _ in range(ctmonitor.MAX_IN_FLIGHT):
+			ctmonitor._enter_flight()
+		slept = []
+		with self.assertRaises(ctmonitor.CtBusy):
+			ctmonitor._Flight(slept.append).__enter__()
+		self.assertEqual(len(slept), int(ctmonitor.MAX_INLINE_WAIT))  # it waited, one second at a time, before giving up the slot
+		for _ in range(ctmonitor.MAX_IN_FLIGHT):
+			ctmonitor._leave_flight()
+
+	def test_the_place_is_given_back_when_the_request_raises(self):
+		with mock.patch.object(ctmonitor.requests, 'get', side_effect=ctmonitor.requests.ConnectionError('refused')):
+			self.assertIsNone(ctmonitor._fetch('example.test', sleep=lambda s: None))
+		self.assertTrue(ctmonitor._enter_flight())  # nothing is held
+		ctmonitor._leave_flight()
+
+	def test_lookups_in_a_row_each_get_a_place(self):
+		class Reply:
+			status_code = 200
+			headers = {}
+
+			def raise_for_status(self):
+				pass
+
+			def iter_content(self, size):
+				yield b'[]'
+
+			def close(self):
+				pass
+		with mock.patch.object(ctmonitor.requests, 'get', return_value=Reply()):
+			for _ in range(ctmonitor.MAX_IN_FLIGHT * 3):
+				self.assertEqual(ctmonitor._fetch('example.test', sleep=lambda s: None), [])
