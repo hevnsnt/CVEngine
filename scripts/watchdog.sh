@@ -75,8 +75,8 @@ if [ "$mode" = tick ]; then
   exec 7>"$STATE/watchdog.lock"
   flock -n 7 || exit 0  # the previous tick is still running
   layout || { log "tick: could not work out the Compose layout"; exit 1; }
-  # `timeout` is the hard bound around the tick's own limit (25 seconds) and its own timer (33): the tick ends itself, and this kills it if it does not
-  out=$(timeout -k 5 45 "${COMPOSE[@]}" exec -T web timeout -k 3 40 python3 manage.py watchdog_tick 2>&1 </dev/null 7>&- 8>&-)
+  # `timeout` is the hard bound around the tick's own limit (40 seconds) and its own timer (55): the tick ends itself, and this kills it if it does not
+  out=$(timeout -k 5 65 "${COMPOSE[@]}" exec -T web timeout -k 3 55 python3 manage.py watchdog_tick 2>&1 </dev/null 7>&- 8>&-)
   rc=$?
   summary=$(printf '%s\n' "$out" | grep '^{' | tail -n 1)  # the command prints one JSON line; Django's start-up chatter around it is not for the log
   if [ $rc -ne 0 ]; then

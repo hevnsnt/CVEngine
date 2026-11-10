@@ -854,6 +854,11 @@ class TickSafetyTests(WatchdogCase):
         self.assertLess(time.time() - started, 5)
         self.assertFalse(out['ok'])
         self.assertIn('stopped itself', out['skipped'])
+        self.assertIsNotNone(WatchdogState.objects.get(rule=wd.ALL).last_tick_at)  # a pass cut off by its limit still shows the watchdog was running
+
+    def test_the_tick_limit_leaves_room_for_a_pass_on_a_loaded_box_with_a_silent_lane(self):
+        """11/9: a pass took 18 s with a lane silent (each broadcast waits 3 s) and the 25 s limit cut off the slower ones, so the page said not running."""
+        self.assertGreaterEqual(wd.TICK_SECONDS, 40)
 
     def test_redis_db_and_celery_all_hanging_end_in_time(self):
         hang = lambda: time.sleep(30)  # noqa: E731

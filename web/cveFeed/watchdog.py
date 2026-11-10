@@ -33,7 +33,7 @@ from cveFeed import watchdog_snapshot as snapshot
 
 logger = logging.getLogger(__name__)
 
-TICK_SECONDS = 25            # a tick ends itself after this long (the command kills the process a little later, the host script a little later still)
+TICK_SECONDS = 40            # a tick ends itself after this long (the command kills the process a little later, the host script a little later still). A pass took 18 s on the loaded 2-core VPS with a lane silent (each broadcast to a silent lane waits its 3 s), and 25 s cut it off before it recorded itself
 # R1 and R2 may act 16 times a day (not 4): a worker container that crashes every quarter of an hour needs a restart each time it goes silent, and a rule that has
 # used its day leaves a hung lane hung (the owner's server, 2026-11-09: the cap of 4 was spent by 9:28 am and a lane stood silent for 50 minutes). The loop
 # protection is the flap guard (an action that did not fix it holds the rule for an hour), the 15 minute gap and the host's own limit.
@@ -988,6 +988,7 @@ def _tick(now, probes, out):
     states = _states()
     all_state = states[ALL]
     all_state.last_tick_at = now
+    all_state.save(update_fields=['last_tick_at'])  # at once: a pass that is cut off later still shows the watchdog was running (it read "not running" for 11 minutes on 11/9)
     if killed() or all_state.enabled is False:
         for rule in RULES:
             _set(states[rule.code], 'off', 'Switched off.' + (' (CVENGINE_WATCHDOG=0)' if killed() else ''))
