@@ -771,13 +771,21 @@ def template_test_for_cve(cve_pk, hosts, project_id=None, batch=None):
             hit_batch.leave(batch)  # also when the test failed: the run's count must still reach zero
 
 
+VALIDATE_SLICE_SECONDS = 45  # how long one validate_findings task holds a worker slot before handing the rest back to the queue
+
+
 @app.task(name="validate_findings", bind=False, queue="cve_feed_queue")
 def validate_findings(project_id, triage_ids, scan_id=None):
     """Run the validation checks (cveFeed.validation) for ``triage_ids``, all of one project: one task per project, never a list
     that mixes tenants. Started by the pipeline's triage stage (``scan_id`` then carries its stop flag) and by the validation sweep."""
     from cveFeed import validation
     try:
-        return validation.run_validation(project_id, triage_ids, scan_id=scan_id)
+        result = validation.run_validation(project_id, triage_ids, scan_id=scan_id, budget_seconds=VALIDATE_SLICE_SECONDS)
+        left = result.pop('deferred_ids', None)
+        if left:  # the rest goes to the back of the queue: the lane's slot is free for the scheduler's ticks in between
+            validate_findings.apply_async((project_id, left, scan_id))
+            result['deferred'] = len(left)
+        return result
     except Exception as exc:  # noqa: BLE001 - validation is best effort and must never surface as a task failure
         logger.exception("validation failed for project %s", project_id)
         return {"error": str(exc)[:200]}
