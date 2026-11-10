@@ -29,40 +29,38 @@ class Unsupported(Exception):
 
 REGEX_SECONDS = 2.0  # a matcher pattern gets this long on a fixture body, then it is given up on
 
+_REGEX_CHILD = (
+    "import json, re, sys\n"
+    "data = json.load(sys.stdin)\n"
+    "try:\n"
+    "    out = ['ok', re.search(data['pattern'], data['text'], re.DOTALL) is not None]\n"
+    "except re.error as exc:\n"
+    "    out = ['error', str(exc)]\n"
+    "sys.stdout.write(json.dumps(out))\n"
+)
+
 
 def _regex_found(pattern, text):
     """Whether ``pattern`` matches ``text`` (DOTALL), with a time limit. A model wrote the pattern and public CVE text it read may have steered it: Python's
-    backtracking engine can take hours on ``(a+)+$`` against twenty thousand characters, and that would hold a worker and its database connection. nuclei runs
-    the same pattern with Go's linear engine, so a pattern that is too slow here is only slow in this check. It runs in a child process that is killed at the
-    limit (a thread cannot be interrupted) and is reported as a matcher this check cannot evaluate (review 2 F5)."""
-    import multiprocessing
+    backtracking engine can take hours on ``(a+)+$`` against twenty thousand characters, and that would hold a worker and its database connection. The
+    scanner's own engine reads the same pattern in linear time, so a pattern that is too slow here is only slow in this check. It runs in a separate
+    interpreter that is killed at the limit (a thread cannot be interrupted, and a Celery child may not start a ``multiprocessing`` process) and is reported
+    as a matcher this check cannot evaluate (review 2 F5). The pattern and text go in on standard input, never on a command line."""
+    import json
+    import subprocess
+    import sys
 
-    context = multiprocessing.get_context('fork')
-    receiver, sender = context.Pipe(duplex=False)
-
-    def run(conn):
-        try:
-            conn.send(('ok', re.search(pattern, text, re.DOTALL) is not None))
-        except re.error as exc:
-            conn.send(('error', str(exc)))
-        except BaseException as exc:  # noqa: BLE001 - whatever happened, the parent must hear something
-            conn.send(('error', type(exc).__name__))
-        finally:
-            conn.close()
-    process = context.Process(target=run, args=(sender,), daemon=True)
-    process.start()
-    sender.close()
     try:
-        if not receiver.poll(REGEX_SECONDS):
-            raise Unsupported(f'regex {pattern[:60]!r} took longer than {REGEX_SECONDS:g} s on the fixture and cannot be evaluated offline')
-        kind, value = receiver.recv()
-    except EOFError:
+        done = subprocess.run([sys.executable, '-I', '-c', _REGEX_CHILD], input=json.dumps({'pattern': pattern, 'text': text}), capture_output=True,
+                              text=True, timeout=REGEX_SECONDS, check=False)
+    except subprocess.TimeoutExpired:
+        raise Unsupported(f'regex {pattern[:60]!r} took longer than {REGEX_SECONDS:g} s on the fixture and cannot be evaluated offline')
+    except OSError as exc:
+        raise Unsupported(f'regex {pattern[:60]!r} cannot be evaluated offline ({type(exc).__name__})')
+    try:
+        kind, value = json.loads(done.stdout)
+    except ValueError:
         raise Unsupported(f'regex {pattern[:60]!r} cannot be evaluated offline (the check ended without an answer)')
-    finally:
-        if process.is_alive():
-            process.kill()
-        process.join(1)
-        receiver.close()
     if kind == 'error':
         raise Unsupported(f'regex {pattern[:60]!r} cannot be evaluated offline ({value})')
     return value
