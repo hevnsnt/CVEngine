@@ -128,6 +128,14 @@ def refresh_live_snapshots():
     return live_refresh.refresh_hot_scopes()
 
 
+@app.task(name='refresh_openvas_queue', bind=False, queue='live_cache_queue', ignore_result=True, time_limit=300, soft_time_limit=270)
+def refresh_openvas_queue(project_id):
+    """Asked by the Sentinels page when its kept OpenVAS queue explanation for a project is over a minute old (``cveFeed.openvas_scan.queue_explained``):
+    work it out again off the request. Reads the database and writes the cache only; it never touches a target."""
+    from cveFeed import openvas_scan
+    openvas_scan.refresh_queue(int(project_id))
+
+
 @app.task(name='openvas_sweep', bind=False, queue='openvas_queue')
 def openvas_sweep():
     """Every 15 minutes while the OpenVAS add-on is switched on (the beat entry is disabled otherwise): one step of the slow GVM sweep, which
