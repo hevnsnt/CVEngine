@@ -1,0 +1,11 @@
+{
+  "_comment": "List prices in USD per million tokens that the AI cost view (cveFeed.ai_usage.cost_by_stage_day) uses when no price was entered for a model on the AI Model Usage page; a price entered there wins. Edit this file to change a rate. cache_write_5m is 1.25x and cache_write_1h is 2x the input price; cache_read is 0.1x (0.05x on Sonnet 5.5). Haiku 5.5 doubles every figure for a prompt over 100,000 tokens, and no cvENGINE prompt is that long. The batch discount (50%) is not applied. Anthropic's invoice governs.",
+  "as_of": "2026-11-10",
+  "source": "https://platform.claude.com/docs/en/models/haiku-5-5/overview and https://platform.claude.com/docs/en/models/sonnet-5-5/overview",
+  "models": {
+    "anthropic": {
+      "claude-haiku-5-5": {"input": "0.10", "output": "0.50", "cache_read": "0.01", "cache_write_5m": "0.125", "cache_write_1h": "0.20"},
+      "claude-sonnet-5-5": {"input": "2.00", "output": "10.00", "cache_read": "0.10", "cache_write_5m": "2.50", "cache_write_1h": "4.00"}
+    }
+  }
+}

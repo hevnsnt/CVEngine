@@ -1,4 +1,6 @@
 """Read-only AI attempt accounting and operator supplied price estimates."""
+import json
+import os
 from datetime import timedelta
 from decimal import Decimal
 
@@ -27,6 +29,83 @@ def _estimate(row, rate):
               + Decimal(cached) * (rate.cache_read_per_million_usd or 0)
               + Decimal(written) * (rate.cache_write_per_million_usd or 0)) / Decimal(1_000_000)
     return str(amount.quantize(Decimal('0.000001')))
+
+
+PRICE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ai_list_prices.json')
+_MILLION = Decimal(1_000_000)
+
+
+def list_prices(path=None):
+    """The owner-edited list prices (``ai_list_prices.json``): ``{(provider, model): {field: Decimal}}``. A missing or unreadable file gives no
+    prices, and the cost view then says so (``list_usd`` None) instead of guessing."""
+    try:
+        with open(path or PRICE_FILE, encoding='utf-8') as handle:
+            data = json.load(handle)
+        return {(provider, model): {k: Decimal(str(v)) for k, v in fields.items()}
+                for provider, models in data.get('models', {}).items() for model, fields in models.items()}
+    except (OSError, ValueError, ArithmeticError, AttributeError):
+        return {}
+
+
+def _price_for(provider, model, file_prices, db_rates, write_ttl):
+    """One model's rates as ``{input, output, cache_read, cache_write}``: a price entered on the usage page (``AIPriceRate``) wins over the file."""
+    rate = db_rates.get((provider, model))
+    if rate is not None:
+        return {'input': rate.input_per_million_usd, 'output': rate.output_per_million_usd,
+                'cache_read': rate.cache_read_per_million_usd, 'cache_write': rate.cache_write_per_million_usd}
+    fields = file_prices.get((provider, model))
+    if fields is None:
+        return None
+    return {'input': fields['input'], 'output': fields['output'], 'cache_read': fields.get('cache_read'),
+            'cache_write': fields.get(f'cache_write_{write_ttl}', fields.get('cache_write_5m'))}
+
+
+def price_row(totals, price):
+    """List-price USD (string, 6 places) of ``totals`` (``input``, ``output``, ``cache_read``, ``cache_write`` token sums) at ``price``, or None
+    when there is no price, or cached tokens were used and the price has no cache rate. Anthropic's input_tokens excludes the cached ones."""
+    if not price:
+        return None
+    read, wrote = totals['cache_read'] or 0, totals['cache_write'] or 0
+    if (read and price['cache_read'] is None) or (wrote and price['cache_write'] is None):
+        return None
+    amount = (Decimal(totals['input'] or 0) * price['input'] + Decimal(totals['output'] or 0) * price['output']
+              + Decimal(read) * (price['cache_read'] or 0) + Decimal(wrote) * (price['cache_write'] or 0)) / _MILLION
+    return str(amount.quantize(Decimal('0.000001')))
+
+
+def cache_read_share(totals):
+    """Cached tokens read as a share of every prompt token (fresh input + cache read + cache write), 0 to 1, or None when there were none."""
+    total = (totals['input'] or 0) + (totals['cache_read'] or 0) + (totals['cache_write'] or 0)
+    return round((totals['cache_read'] or 0) / total, 4) if total else None
+
+
+def cost_by_stage_day(days=7, provider='anthropic', path=None):
+    """The cost view: one row per (day, stage, model) of the ledger, newest day first: calls, failed calls, input, output, cache-read and
+    cache-write tokens, ``cache_read_share`` and ``list_usd`` at the owner's rates (``ai_list_prices.json``, or a price entered on the usage
+    page). A cache write is priced at the stage's own lifetime (``ai_profiles.stage_cache_ttl``), because the ledger keeps one write count for
+    both lifetimes. Only calls with token counts are priced; ``unpriced_calls`` counts the rest. Read-only; one grouped query."""
+    from cveFeed.models import AIPriceRate, AIUsage
+    from reNgine.ai_profiles import stage_cache_ttl
+
+    cutoff = timezone.now() - timedelta(days=days)
+    file_prices = list_prices(path)
+    db_rates = {(r.provider, r.model): r for r in AIPriceRate.objects.filter(provider=provider)}
+    grouped = (AIUsage.objects.filter(provider=provider, started_at__gte=cutoff)
+               .annotate(day=TruncDate('started_at')).values('day', 'stage', 'model', 'actual_model')
+               .annotate(calls=Count('id'), failed=Count('id', filter=Q(status='failed')),
+                         missing=Count('id', filter=Q(input_tokens__isnull=True) | Q(output_tokens__isnull=True)),
+                         input=Sum('input_tokens'), output=Sum('output_tokens'),
+                         cache_read=Sum('cache_read_tokens'), cache_write=Sum('cache_write_tokens'))
+               .order_by('-day', 'stage', 'model'))
+    rows = []
+    for g in grouped:
+        model = g['actual_model'] or g['model']
+        price = _price_for(provider, model, file_prices, db_rates, '1h' if stage_cache_ttl(g['stage']) == '1h' else '5m')
+        rows.append({'day': _iso(g['day']), 'stage': g['stage'], 'model': model, 'calls': g['calls'], 'failed': g['failed'],
+                     'input_tokens': g['input'] or 0, 'output_tokens': g['output'] or 0, 'cache_read_tokens': g['cache_read'] or 0,
+                     'cache_write_tokens': g['cache_write'] or 0, 'cache_read_share': cache_read_share(g),
+                     'list_usd': price_row(g, price), 'unpriced_calls': g['missing']})
+    return rows
 
 
 def snapshot(days=7):
@@ -107,7 +186,7 @@ def snapshot(days=7):
             'priced_attempts': priced_attempts,
             'unknown_cost_attempts': unknown_cost_attempts, 'models': models,
             'daily': [{'day': _iso(d['day']), 'attempts': d['attempts'], 'errors': d['errors']} for d in daily],
-            'stages': stages, 'recent': recent,
+            'stages': stages, 'recent': recent, 'cost_by_stage_day': cost_by_stage_day(days),
             'rates': [{'provider': r.provider, 'model': r.model, 'input_per_million_usd': str(r.input_per_million_usd),
                        'output_per_million_usd': str(r.output_per_million_usd), 'cache_read_per_million_usd':
                        str(r.cache_read_per_million_usd) if r.cache_read_per_million_usd is not None else None,

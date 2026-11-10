@@ -9,7 +9,55 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 DEFAULT_REPLY_CAP = 2048  # the reply limit (tokens) of Anthropic and of a self-hosted server when nothing else is set
+STAGE_REPLY_FLOORS = {'cve_detection': 8192}  # the reply limit (tokens) a stage never goes below when the operator set none: a Claude model that thinks by default spends the limit on thinking, and 2048 cut off 1,780 of 5,335 cve_detection replies
 STAGE_REPLY_CAPS = {'triage': 400}  # a triage answer is a short JSON object: 300 cut off 14% of them on a local model (issue 209), 400 does not
+
+# ----------------------------------------------------------------------------- Anthropic prompt caching
+
+# The shortest prompt (tokens, tools and system included) Anthropic will cache; a shorter prefix marked with cache_control is processed
+# normally, with no error and no cache write. From Anthropic's prompt caching page (read 2026-11-10): 512 for Fable, Mythos, Opus 5 and 5.5,
+# Sonnet 5.5 and Haiku 5.5; 1024 for Sonnet 5 and 4.x, Opus 4.8, 4.1 and 4; 2048 for Opus 4.7 and Haiku 3.5; 4096 for Opus 4.5 and 4.6
+# and Haiku 4.5. A name that is not a Claude model, or a version not listed, gets the highest figure (4096): caching is then only tried
+# on a prompt that is long under any model.
+CACHE_MIN_DEFAULT = 4096
+
+
+def cache_min_tokens(model):
+	version = claude_version(model)
+	if not version:
+		return CACHE_MIN_DEFAULT
+	family, major, minor = version
+	if family in ('fable', 'mythos'):
+		return 512
+	if family == 'opus':
+		return 512 if (major, minor) >= (5, 0) else 2048 if (major, minor) == (4, 7) else 4096 if (major, minor) in ((4, 5), (4, 6)) else 1024
+	if family == 'sonnet':
+		return 512 if (major, minor) >= (5, 5) else 1024
+	if family == 'haiku':
+		return 512 if (major, minor) >= (5, 5) else 4096 if (major, minor) >= (4, 5) else 2048
+	return CACHE_MIN_DEFAULT
+
+
+CACHE_TTLS = ('5m', '1h')
+# How long Anthropic keeps a cached prefix without a hit (a hit renews it at no charge). A write costs 1.25x the input price for 5m and 2x
+# for 1h; a read costs 0.1x (0.05x on Sonnet 5.5 and Opus 5.5). So 1h pays when the stage's calls come in runs more than 5 minutes apart but
+# less than an hour apart (cve_detection: the authoring task runs every 30 minutes), 5m when they come in bursts (a scan's triage, plans and
+# targeting: seconds apart), and 'off' when calls are rarer than hourly (a write that is never read costs 25% to 100% more than no cache).
+# A stage that is not listed gets DEFAULT_CACHE_TTL. A stage's prefix shorter than cache_min_tokens is never marked, whatever is here.
+STAGE_CACHE_TTL = {
+	'cve_detection': '1h',
+	'finding_triage': '5m', 'finding_triage_repair': '5m', 'validation_plan': '5m', 'nuclei_tag_selection': '5m',
+	'local_check_suggestion': '5m', 'template_generation': '5m', 'assessment_review': '5m', 'cve_confirmation': '5m',
+	'nuclei_targeting': 'off',  # its system prompt carries the offered tag list, which differs between scans: a write nobody reads costs 25% more
+	'autotune_advisor': 'off', 'connection_test': 'off', 'rdp_screenshot': 'off', 'report_writing': 'off',
+}
+DEFAULT_CACHE_TTL = '5m'
+
+
+def stage_cache_ttl(stage):
+	"""'5m', '1h' or 'off' for a usage stage."""
+	return STAGE_CACHE_TTL.get(stage, DEFAULT_CACHE_TTL)
+
 
 REASONING_LEVELS = ('off', 'low', 'medium', 'high', 'max')  # CVENGINE_AI_REASONING; unset sends nothing
 MECHANISMS = ('none', 'effort', 'toggle', 'budget', 'adaptive')

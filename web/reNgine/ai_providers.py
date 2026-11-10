@@ -15,11 +15,13 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 
+from urllib.parse import urlsplit
+
 import requests
 
 from cveFeed.secret_redaction import redact_text
 from reNgine.ai_profiles import (DEFAULT_REPLY_CAP, NUMBER_SETTINGS, PROFILES, REASONING_LEVELS, SETTING_ENV, STAGE_REPLY_CAPS, STRUCTURED_MODES,
-	AIRuntime, clean_number, reasoning_plan, setting_applies)
+	AIRuntime, STAGE_REPLY_FLOORS, cache_min_tokens, clean_number, reasoning_plan, setting_applies, stage_cache_ttl)
 
 logger = logging.getLogger(__name__)
 _usage_stage = ContextVar('cvengine_ai_usage_stage', default='unspecified')
@@ -105,6 +107,7 @@ def reply_limit(provider):
 		profile = PROFILES.get(provider.name)
 		if profile and profile.reply_cap:  # Anthropic and the self-hosted servers; the latter take the stage's own limit first
 			cap = (options.get('max_tokens') if profile.reply_cap_by_stage else None) or profile.reply_cap
+			cap = max(cap, STAGE_REPLY_FLOORS.get(_usage_stage.get(), 0))  # a stage that needs room to think (cve_detection) is never held to the default
 	if cap and options.get('token_factor'):
 		cap = min(32768, cap * int(options['token_factor']))
 	return cap
@@ -173,6 +176,26 @@ def _usage_numbers(provider, raw):
 		_token_number(raw.get('completion_tokens') if 'completion_tokens' in raw else raw.get('output_tokens')),
 		_token_number((raw.get('prompt_tokens_details') or {}).get('cached_tokens')),
 		None)
+
+
+def complete_retrying_truncation(provider, system, user):
+	"""``provider.complete`` and, when the reply was cut off at a limit that was sent, one more request with twice the limit (at most 32768),
+	never a second retry: a reasoning model spends part of the limit thinking. A provider that was sent no limit has nothing to lengthen,
+	and neither has a limit already at the ceiling (the same paid request cannot answer differently): the error stands. The retry carries
+	the same system prompt, so it reads the cache the first request wrote."""
+	try:
+		return provider.complete(system, user)
+	except AIProviderError as error:
+		if error.category != 'output_truncated':
+			raise
+		sent = reply_limit(provider)
+		if not sent:
+			raise
+		cut_off = error
+	with request_options(token_factor=2):
+		if reply_limit(provider) == sent:
+			raise cut_off
+		return provider.complete(system, user)
 
 
 def _record_completion(provider, status, category, started, duration_ms):
@@ -514,6 +537,31 @@ def _structured_post(provider, build):
 			raise
 
 
+def estimated_tokens(text):
+	"""A deliberately high estimate (3 characters a token; the real figure for English and JSON is 3 to 4), used only to skip a cache marker
+	on a prefix that is clearly under the model's minimum."""
+	return -(-len(text or '') // 3)
+
+
+def prompt_cache_ttl(provider, system):
+	"""'5m' or '1h' when this request's system prompt should carry a cache breakpoint, else None. The system prompt is the stable prefix of
+	every stage (the per-CVE, per-target and per-finding data is in the user turn and is never marked). None when ``CVENGINE_AI_PROMPT_CACHE``
+	is off (the switch back to the old request), when the stage's setting is 'off', when the prompt is under the model's minimum, or when the
+	request does not go to Anthropic's own host (a gateway may refuse the field)."""
+	if os.environ.get('CVENGINE_AI_PROMPT_CACHE', '').strip().lower() in ('off', '0', 'false', 'no'):
+		return None
+	if not isinstance(system, str) or not system:
+		return None
+	ttl = _request_options.get().get('cache_ttl') or stage_cache_ttl(_usage_stage.get())
+	if ttl not in ('5m', '1h'):
+		return None
+	if estimated_tokens(system) < cache_min_tokens(provider.model):
+		return None
+	if (urlsplit(provider._messages_url()).hostname or '').lower() != 'api.anthropic.com':
+		return None
+	return ttl
+
+
 class AnthropicProvider(AIProvider):
 	name = 'anthropic'
 
@@ -536,6 +584,9 @@ class AnthropicProvider(AIProvider):
 
 	def _body(self, system, messages):
 		cap = reply_limit(self)
+		ttl = prompt_cache_ttl(self, system)
+		if ttl:  # one breakpoint at the end of the system prompt: everything before the user turn is the cached prefix
+			system = [{'type': 'text', 'text': system, 'cache_control': {'type': 'ephemeral', **({'ttl': '1h'} if ttl == '1h' else {})}}]
 		return {'model': self.model, 'max_tokens': cap, 'system': system, 'messages': messages, **reasoning_fields(self, cap)}
 
 	def list_models(self):

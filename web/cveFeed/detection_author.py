@@ -391,14 +391,14 @@ def enrich_with_ai(row, provider):
     """Ask the model for this record, once per version of the CVE: a first answer, or a revision of its own earlier answer when the CVE
     changed. The answer is validated; what passes is merged after the rules' checks, and its scope decision is applied when it widens
     matching (external); a local_only answer stays on the record as a suggestion. Returns True when the model's answer was stored."""
-    from reNgine.ai_providers import AIProviderError, usage_stage
+    from reNgine.ai_providers import AIProviderError, complete_retrying_truncation, usage_stage
     now = timezone.now()
     if not _claim_ai(row, now):
         return False
     cve = row.cve_entry
     try:
         with usage_stage('cve_detection'):
-            reply = provider.complete(SYSTEM_PROMPT, build_user_prompt(cve, row.strategy if row.ai_model else None))
+            reply = complete_retrying_truncation(provider, SYSTEM_PROMPT, build_user_prompt(cve, row.strategy if row.ai_model else None))
     except AIProviderError:
         CVEDetection.objects.filter(pk=row.pk).update(ai_problems=['the model call failed'])
         return False
@@ -413,11 +413,11 @@ def enrich_with_ai(row, provider):
 def revise_with_guidance(row, provider, guidance):
     """An administrator's new guidance for one CVE: the model revises the record with it (the same validation as any answer). Not counted
     against the daily budget. Returns the stored strategy, or None with the reasons it was not usable."""
-    from reNgine.ai_providers import AIProviderError, usage_stage
+    from reNgine.ai_providers import AIProviderError, complete_retrying_truncation, usage_stage
     cve = row.cve_entry
     try:
         with usage_stage('cve_detection'):
-            reply = provider.complete(SYSTEM_PROMPT, build_user_prompt(cve, row.strategy or {}, guidance))
+            reply = complete_retrying_truncation(provider, SYSTEM_PROMPT, build_user_prompt(cve, row.strategy or {}, guidance))
     except AIProviderError as e:
         return None, [f'the model call failed: {str(e)[:120]}']
     strategy, problems = detection.parse_ai_strategy(reply)
@@ -427,7 +427,7 @@ def revise_with_guidance(row, provider, guidance):
     return _apply_answer(row, strategy, problems, provider, input_hash(cve)), problems
 
 
-def _enrich_in_thread(row_id, provider):
+def _enrich_in_thread(row_id, provider, own_connection=True):
     from django.db import connection
     try:
         row = CVEDetection.objects.select_related('cve_entry').get(pk=row_id)
@@ -436,7 +436,8 @@ def _enrich_in_thread(row_id, provider):
         logger.exception('detection authoring failed for record %s', row_id)
         return False
     finally:
-        connection.close()  # a worker thread owns its own database connection
+        if own_connection:
+            connection.close()  # a worker thread owns its own database connection
 
 
 def author_with_ai(provider, per_run=None, workers=1, within_budget=True):
@@ -458,8 +459,11 @@ def author_with_ai(provider, per_run=None, workers=1, within_budget=True):
     ids = list(ids)
     if workers > 1 and len(ids) > 1:
         from concurrent.futures import ThreadPoolExecutor
+        # the first record goes alone: a cached prefix is readable only once the request that writes it has started to answer, so four
+        # requests sent together would each pay the cache write (the system prompt is the same for every record)
+        added = _enrich_in_thread(ids[0], provider, own_connection=False)  # on the caller's thread: its connection stays open
         with ThreadPoolExecutor(max_workers=workers) as pool_:
-            return sum(pool_.map(lambda i: _enrich_in_thread(i, provider), ids))
+            return added + sum(pool_.map(lambda i: _enrich_in_thread(i, provider), ids[1:]))
     added = 0
     for row in CVEDetection.objects.filter(due, pk__in=ids).select_related('cve_entry'):
         try:

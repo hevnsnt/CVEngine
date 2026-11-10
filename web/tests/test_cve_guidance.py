@@ -272,9 +272,10 @@ class CatalogueTests(TestCase):
 		self.assertEqual(detection_author.author_with_ai(P(''), per_run=1), 1)
 		self.assertIn('CVE-2099-7201', asked[0])  # matchable and hottest first
 		# worker threads open their own database connections, which a test's transaction hides: check what they are given instead
-		given = []
-		with mock.patch.object(detection_author, '_enrich_in_thread', side_effect=lambda i, p: given.append(i) or True):
+		given, owns = [], []
+		with mock.patch.object(detection_author, '_enrich_in_thread', side_effect=lambda i, p, **kw: given.append(i) or owns.append(kw.get('own_connection', True)) or True):
 			self.assertEqual(detection_author.author_with_ai(P(''), per_run=5, workers=3), 2)
+		self.assertEqual(owns, [False, True])  # the first record goes alone on the caller's thread (it writes the prompt cache), the rest in the pool
 		order = list(CVEDetection.objects.filter(pk__in=given).values_list('cve_entry__cve_id', flat=True))
 		self.assertEqual(sorted(order), ['CVE-2099-7202', 'CVE-2099-7203'])
 		self.assertEqual(CVEDetection.objects.get(pk=given[0]).cve_entry.cve_id, 'CVE-2099-7202')  # the matchable one before the local-only one

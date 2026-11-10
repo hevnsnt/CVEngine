@@ -2,6 +2,15 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Changed
+
+- **Anthropic prompt caching.** The stable system prompt of each stage is sent with one `cache_control` breakpoint (the per-CVE, per-target and per-finding text is never marked), so a repeated prompt is read from Anthropic's cache at 10% (5% on Sonnet 5.5) of the input price. `cve_detection` uses the 1 hour lifetime (its task runs every 30 minutes); the stages whose calls come in bursts use 5 minutes; nuclei targeting (its prompt carries a per-scan tag list), the auto-tuner advisor, the connection test and the screenshot reader are not cached. A prompt under the model's minimum (512 tokens for Haiku 5.5 and Sonnet 5.5) is sent as before. `CVENGINE_AI_PROMPT_CACHE=off` sends the old request. Anthropic's own host only.
+- **`cve_detection` replies are no longer cut off by thinking.** The reply limit for that stage is 8192 tokens (it was 2048, and 1,780 of 5,335 replies on one install ended `output_truncated` with no result), and a cut-off reply is asked once more with twice the limit, never again. A limit set on the Settings page or in `CVENGINE_AI_MAX_TOKENS` still wins.
+- **Cost by stage and day.** The AI usage API (`GET /cve/api/settings/ai/usage`) carries `cost_by_stage_day`: calls, tokens, cache-read share and list-price dollars per day, stage and model. The default rates are in `web/cveFeed/ai_list_prices.json`; a price entered on the usage page wins.
+- No migration, no setting to change.
+
 ## v1.3.7 (2026-11-06)
 
 ### Fixed
