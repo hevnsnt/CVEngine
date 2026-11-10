@@ -1920,11 +1920,24 @@ def check_for_updates():
     return {"status": state["status"], "latest": state["latest"]}
 
 
+FEED_SENTINELS_LOCK = "cvengine:feed_sentinels:lock"
+FEED_SENTINELS_LOCK_SECONDS = 600  # a worker that dies mid-run leaves the lock for this long
+
+
 @app.task(name="feed_sentinels", bind=False, queue="cve_feed_queue")
 def feed_sentinels():
     """Every minute: keep twice the Sentinels' slots of work queued behind what they are running (see ``cveFeed.coverage_topup.feed_sentinels``)."""
+    from django.core.cache import cache
+
     from cveFeed import coverage_topup
-    return coverage_topup.feed_sentinels()
+    # One at a time: it is scheduled every minute, and a run that takes longer than a minute must not stack another behind itself. On 11/10 four of them
+    # sat in the CVE-feed lane at once, each in the same slow query, and everything else on that lane waited behind them.
+    if not cache.add(FEED_SENTINELS_LOCK, 1, FEED_SENTINELS_LOCK_SECONDS):
+        return {'skipped': 'the previous run is still going'}
+    try:
+        return coverage_topup.feed_sentinels()
+    finally:
+        cache.delete(FEED_SENTINELS_LOCK)
 
 
 @app.task(name="work_planner_tick", bind=False, queue="cve_feed_queue", time_limit=120, soft_time_limit=100)
