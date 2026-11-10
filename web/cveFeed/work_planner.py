@@ -675,21 +675,26 @@ def overview(allowed=None, now=None):
         except ValueError:
             next_in = None
     on = enabled()
-    return {'enabled': on, 'state': last.get('state') or ('off' if not on else 'waiting'), 'line': describe(last, rows, on, next_in, want), 'next_run_seconds': next_in,
+    return {'enabled': on, 'state': last.get('state') or ('off' if not on else 'waiting'), 'line': describe(last, rows, on, next_in, want, scoped=allowed is not None), 'next_run_seconds': next_in,
             'last_run': at, 'census_at': data.get('at'), 'kinds': list(rows.values()), 'batches_in_flight': flight.count()}
 
 
-def describe(last, rows, on, next_in, want=None):
-    """The one plain sentence about the planner (``Planner: ...``)."""
+def describe(last, rows, on, next_in, want=None, scoped=False):
+    """The one plain sentence about the planner (``Planner: ...``). ``scoped`` is a viewer who sees some projects: the last run's ``queued`` counts are the
+    whole instance's (every tenant's), so the sentence is built from the viewer's own rows (what is in flight for them) and never says what was queued
+    elsewhere (review 2 F7)."""
     want = want or specs()
     state = (last or {}).get('state')
     if not on:
         return 'Planner: off (Settings, Work planner). Sentinels only get work from scans.'
     tail = f', next run in {next_in} s' if next_in is not None else ''
-    still = [f'{want[k].phrase(max(0, r["ready"] - last.get("queued", {}).get(k, 0)))} still due' for k, r in rows.items() if k in want and r['ready']]
+    queued = ({k: r['in_flight'] for k, r in rows.items() if r['in_flight']} if scoped else (last or {}).get('queued', {}))
+    still = [f'{want[k].phrase(max(0, r["ready"] - (r["in_flight"] if scoped else (last or {}).get("queued", {}).get(k, 0))))} still due' for k, r in rows.items() if k in want and r['ready']]
     still_text = f', {"; ".join(still)}' if still else ''
     if state == 'queued':
-        done = ' and '.join(want[k].phrase(n) for k, n in last['queued'].items())
+        done = ' and '.join(want[k].phrase(n) for k, n in queued.items() if k in want)
+        if not done:  # a viewer none of whose projects had work in this round
+            return f'Planner: running, nothing of yours was queued in the last round{still_text}{tail}'
         return f'Planner: queued {done}{still_text}{tail}'
     if state == 'paused':
         return 'Planner: waiting, scanning is paused' + tail

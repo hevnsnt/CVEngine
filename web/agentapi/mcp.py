@@ -9,6 +9,7 @@ import logging
 from django.http import HttpResponse, JsonResponse
 from django.core.exceptions import RequestDataTooBig
 
+from agentapi import db_timeout, storage_safe
 from agentapi import agent_broker as broker
 from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
@@ -639,7 +640,7 @@ def call_tool(ctx, name, arguments):
     _, _, schema, handler, writes = tool
     if writes:
         svc.require_write_token(ctx)
-    arguments = arguments or {}
+    arguments = storage_safe.clean(arguments or {})  # NUL bytes and lone surrogates would be a 500 at the database or the encoder (review 2 F3)
     check_arguments(schema, arguments)
     return handler(ctx, arguments)  # a bug in a handler is not the caller's mistake: it surfaces as an internal error, traceback logged
 
@@ -737,6 +738,14 @@ def _without_waiting(message):
     return message
 
 
+HEAVY_TOOLS = frozenset(('search_hosts', 'list_hosts'))  # a query over a whole project's hosts: one per batch
+
+
+def _heavy_call(message):
+    params = message.get('params') if isinstance(message, dict) else None
+    return isinstance(params, dict) and message.get('method') == 'tools/call' and params.get('name') in HEAVY_TOOLS
+
+
 def _internal_error(ctx, message):
     """handle_message, with an uncaught exception answered as the JSON-RPC internal error instead of an HTML 500 page."""
     try:
@@ -744,10 +753,13 @@ def _internal_error(ctx, message):
     except Exception as exc:  # noqa: BLE001 - the reason stays in the log; the client gets a protocol-level answer
         if schema_guard.behind(exc):
             raise  # the middleware answers 503: an update is between its new files and its migration, and the client asks again
-        logger.exception('MCP request failed')
         rpc_id = message.get('id') if isinstance(message, dict) else None
         if not isinstance(rpc_id, (str, int, float, type(None))) or len(str(rpc_id)) > 128:
             rpc_id = None
+        if db_timeout.hit(exc) and isinstance(message, dict) and 'id' in message:  # cut off by the statement timeout: a tool error the agent can act on, not a crash
+            logger.warning('MCP request cut off by the database statement timeout')
+            return _rpc_result(rpc_id, {'content': [{'type': 'text', 'text': db_timeout.MESSAGE}], 'isError': True})
+        logger.exception('MCP request failed')
         return _rpc_error(rpc_id, -32603, 'internal error') if isinstance(message, dict) and 'id' in message else None
 
 
@@ -802,8 +814,15 @@ def endpoint(request):
         # each response before dispatching the next, rather than retaining catalogs
         # or tool results for the entire batch. Notifications still have no response.
         item_limit = (MAX_RESPONSE_BYTES - MAX_BATCH_ITEMS - 2) // max(1, len(payload))
-        responses = []
+        responses, heavy = [], 0
         for message in payload:
+            if _heavy_call(message):
+                heavy += 1
+                if heavy > 1:  # one search or listing per batch: twenty of them in one request were twenty queries run back to back (review 2 F2)
+                    if isinstance(message, dict) and 'id' in message:
+                        responses.append(_bounded_result(_rpc_error(message.get('id') if isinstance(message.get('id'), (str, int, float)) else None, -32600,
+                                                                    'a batch may hold one search_hosts or list_hosts call: send the others in a later request'), item_limit))
+                    continue
             response = _internal_error(ctx, _without_waiting(message))
             if response is not None:
                 responses.append(_bounded_result(response, item_limit))

@@ -2132,6 +2132,7 @@ def list_hosts(ctx, slug, params):
 SEARCH_FIELDS = ('tech', 'banner', 'port', 'proto', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth',
                   'sensitive', 'zombie', 'country', 'alias', 'note', 'secret')
 MAX_SEARCH_QUERY, MAX_SEARCH_TERMS, MAX_SEARCH_VALUE, MAX_SEARCH_VALUES = 1000, 15, 200, 40
+MAX_NEGATED_TERMS = 3  # every negated term is a pass over the whole project's hosts (review 2 F1): three is a real query, fifteen is an abuse
 _SEARCH_TERM = re.compile(r'(-)?(?:([A-Za-z]+):)?(?:"([^"]*)"|(\S+))')
 
 
@@ -2158,6 +2159,8 @@ def parse_search(query):
     terms = _bind_versions(terms)
     if len(terms) > MAX_SEARCH_TERMS:
         raise ApiError(400, f'a search may have at most {MAX_SEARCH_TERMS} terms')
+    if sum(1 for t in terms if t[0]) > MAX_NEGATED_TERMS:
+        raise ApiError(400, f'a search may have at most {MAX_NEGATED_TERMS} negated terms')
     values = sum(min(MAX_SEARCH_TERMS, len([p for p in value.split(',') if p.strip()])) if field and not quoted and ',' in value else 1 for _, field, value, quoted in terms)
     if values > MAX_SEARCH_VALUES:
         # every value is several EXISTS subqueries: fifteen terms of fifteen values made a query of a million characters that took Postgres seconds to plan

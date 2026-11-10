@@ -693,6 +693,31 @@ class AgentApiTests(TestCase):
 		self.assertEqual(self.mcp_post({'jsonrpc': '2.0', 'id': 7, 'result': {}}), (202, None))
 		self.assertEqual(self.mcp_post({'jsonrpc': '2.0', 'id': 7, 'error': {'code': -1, 'message': 'x'}}), (202, None))
 
+	def test_a_batch_runs_one_search_or_listing_and_refuses_the_rest(self):
+		"""Twenty searches in one request were twenty queries back to back (review 2 F2): the first heavy call runs, the others are refused by name."""
+		calls = [{'jsonrpc': '2.0', 'id': i, 'method': 'tools/call', 'params': {'name': name, 'arguments': {'project': 'proj-a'}}}
+		         for i, name in enumerate(['search_hosts', 'list_hosts', 'list_projects', 'search_hosts'], 1)]
+		status, data = self.mcp_post(calls)
+		self.assertEqual(status, 200)
+		by_id = {r['id']: r for r in data}
+		self.assertNotIn('error', by_id[1])
+		self.assertNotIn('error', by_id[3])
+		for refused in (2, 4):
+			self.assertEqual(by_id[refused]['error']['code'], -32600)
+			self.assertIn('one search_hosts or list_hosts', by_id[refused]['error']['message'])
+
+	def test_a_statement_the_database_cut_off_is_answered_plainly_by_the_api_and_the_mcp(self):
+		from django.db.utils import OperationalError
+		cut = OperationalError('canceling statement due to statement timeout')
+		cut.__cause__ = type('Canceled', (Exception,), {'pgcode': '57014'})()
+		with mock.patch('agentapi.services.list_projects', side_effect=cut):
+			status, data = call(self.t_alice, 'GET', '/api/v1/projects')
+		self.assertEqual(status, 503)
+		self.assertIn('narrow it', data['error'])
+		with mock.patch('agentapi.mcp.call_tool', side_effect=cut):
+			status, data = rpc(self.t_alice, 'tools/call', {'name': 'list_projects', 'arguments': {}}, rpc_id=11)
+		self.assertEqual((status, data['id'], data['result']['isError']), (200, 11, True))
+
 	def test_an_unknown_tool_is_a_protocol_error_and_a_crash_is_a_json_rpc_error(self):
 		status, data = rpc(self.t_alice, 'tools/call', {'name': 'no_such_tool', 'arguments': {}})
 		self.assertEqual((status, data['error']['code']), (200, -32602))
