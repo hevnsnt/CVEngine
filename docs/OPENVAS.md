@@ -92,7 +92,7 @@ Only one GVM task runs at a time. See [AGENT-API.md](AGENT-API.md#sentinels-scan
 
 ## Images, pins and updating
 
-**Which stack scans.** The Greenbone stack that scans is the one in the **Sentinel repository's** `docker-compose.yml` (the `openvas` profile of a Full Sentinel: `COMPOSE_PROFILES=openvas` in the Sentinel's `.env`). This repository's `docker-compose.yml` still carries the same 15 `openvas-*` services under the `openvas` profile, but the application no longer uses them (`make openvas-up` starts them by hand); they are off unless you ask. The digests below are this repository's. The two files pin the same images except `openvas-scanner` (the Sentinel's file pins `sha256:d6d8288c22bc525e78e221a36c9db44328d3d9e0141f810c4216750ff0641ddc`, this one `sha256:7a7c440c…`), so read the Sentinel's file for what actually scans. Software list with versions and licenses: the About page and THIRD-PARTY.md.
+**Which stack scans.** The Greenbone stack that scans is the one in the **Sentinel repository's** `docker-compose.yml` (the `openvas` profile of a Full Sentinel: `COMPOSE_PROFILES=openvas` in the Sentinel's `.env`). This repository's `docker-compose.yml` still carries the same 15 `openvas-*` services under the `openvas` profile, but the application no longer uses them (`make openvas-up` starts them by hand); they are off unless you ask. The digests below are this repository's. The two files pin the same images, `openvas-scanner` included (`sha256:5b2043df…` since 11/10, when Greenbone removed both earlier digests from its registry). Greenbone publishes no version tags and replaces the images behind `stable`, so a pin can disappear: the Sentinel's `scripts/greenbone-digests.sh` checks every pin and prints the current digest. Software list with versions and licenses: the About page and THIRD-PARTY.md.
 
 **Some of these images float, on purpose.** The program images (the manager, the scanner, its database and cache) are pinned by digest. The **feed data images are not**: they follow Greenbone's moving `community` tag so the vulnerability definitions keep updating. The cost is that what they contain changes without a cvENGINE release and cannot be reproduced from a cvENGINE version; the software bill of materials (`scripts/generate_sbom.py`) lists them as unpinned and says why. If you need a frozen set, pin those digests yourself and accept that the definitions then go stale.
 
@@ -109,7 +109,7 @@ Digests read from `registry.community.greenbone.net` on 2026-10-27 (multi-archit
 | `pg-gvm-migrator` | `stable` | `sha256:8fc1cc11cac0481674527e01ec7610a8195110cf117d700bd47fe3af7012b34d` |
 | `redis-server` | `stable` | `sha256:83227e34b276bf7c7453a91bbfc070341af58f7ff40eb707ed6724965fe3846c` |
 | `ospd-openvas` | `stable` | `sha256:31a85272abc77521c98451ce6834ed7d2f887e98ff1b26ff3fd94f00d000b169` |
-| `openvas-scanner` | `stable` | `sha256:7a7c440cf675a83ca1b6d8284eb28450893a8b05f5fed1f98e997df605792632` |
+| `openvas-scanner` | `stable` | `sha256:5b2043df8abed6acff7cd4c08636ea87c57f73b95cd406c88dc2adcec24426dd` |
 | `gpg-data` | `stable` | `sha256:c18618252f7d874cd1fe09413b043cfc40b57e6464d8c5973d4a93b074d5d91a` |
 | `vulnerability-tests` | `community` | `sha256:d0a8df253c177321c03c24ca5be051ca22da547756f684a96a2153c2ff0c9bd7` |
 | `notus-data` | `community` | `sha256:f84397aede60d158e47ac199e0fe5108f707ed75657406e4e9aad37b92cb0c9a` |
