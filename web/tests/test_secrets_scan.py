@@ -15,7 +15,7 @@ from agentapi import sentinel_contract as contract
 from agentapi import sentinel_dispatch
 from agentapi.models import SentinelTask
 from cveFeed import bucket_probe, bucket_scan, ledger, secret_rules, secrets_inventory, secrets_scan, secrets_validation
-from cveFeed.models import (BountyEngagement, BountyProgram, HygieneFinding, ProjectSettings, ResourceRef, RouteAuth, SecretFinding,
+from cveFeed.models import (ServiceRun, BountyEngagement, BountyProgram, HygieneFinding, ProjectSettings, ResourceRef, RouteAuth, SecretFinding,
                             SecretOccurrence)
 from dashboard.models import AuditLog
 from reNgine import resources
@@ -145,6 +145,20 @@ class StageTests(StageBase):
         sourcemap = HygieneFinding.objects.get(check_name='src_sourcemap_public')
         self.assertEqual((sourcemap.severity, sourcemap.host), (1, HOST))
         self.assertTrue(ledger.fresh('secrets-scan', [HOST], self.project.id))
+
+    def test_a_host_the_scanner_read_nothing_from_stays_due(self):
+        """A Sentinel skips a host whose name does not resolve and reads the rest of its batch; that host was not checked, so it is not recorded as read."""
+        with FakeScanner(kinds=['secrets_scan'], responders={'secrets_scan': self.responder(findings=[], fetched=[])}):
+            summary = secrets_scan.run_for_scan(self.scan.id)
+        self.assertEqual(summary['hosts'], 0)
+        self.assertFalse(ledger.fresh('secrets-scan', [HOST], self.project.id))
+        self.assertTrue(ServiceRun.objects.filter(service='secrets-scan', asset=HOST, status='failed').exists())
+
+    def test_read_hosts_counts_a_host_only_with_an_answer(self):
+        result = {'fetched': [{'url': 'https://a.example.test/', 'status': 200}, {'url': 'https://b.example.test/x', 'status': None},
+                              {'url': 'https://C.example.test/', 'status': 404}]}
+        self.assertEqual(secrets_scan.read_hosts(result, ['a.example.test', 'b.example.test', 'c.example.test', 'd.example.test']),
+                         ['a.example.test', 'c.example.test'])
 
     def test_an_aws_key_id_and_its_secret_in_one_file_are_one_pair(self):
         url = f'https://{HOST}/static/app.js'
