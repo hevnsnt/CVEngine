@@ -2243,9 +2243,16 @@ def stage_run_resume(run_id):
 
 
 @app.task(name='stage_run_drive', bind=False, queue='cve_feed_queue')
-def stage_run_drive(run_id):
-    """Keep the claim, queue and completion budgets of a waiting stage, as its blocking wait did (``agentapi.stage_runs.drive``)."""
+def stage_run_drive(run_id, guarded=False):
+    """Keep the claim, queue and completion budgets of a waiting stage, as its blocking wait did (``agentapi.stage_runs.drive``). ``guarded``: this was the
+    run's one pending delayed drive (``stage_runs._schedule_drive``); it is running now, so the next may be scheduled."""
     from agentapi import stage_runs
+    if guarded:
+        from django.core.cache import cache
+        try:
+            cache.delete(stage_runs.drive_key(run_id))
+        except Exception:  # noqa: BLE001 - the key expires on its own
+            pass
     return stage_runs.drive(run_id)
 
 
