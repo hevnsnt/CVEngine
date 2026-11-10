@@ -9,7 +9,7 @@ from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 
 from agentapi import agent_broker as broker
-from agentapi import agent_tasks, mcp
+from agentapi import agent_tasks
 from agentapi.auth import create_token
 from agentapi.models import Agent, AgentTask
 from agentapi.services import Ctx

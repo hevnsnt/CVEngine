@@ -288,21 +288,37 @@ def _target_search(qs, q):
 
 def list_targets(ctx, slug, params):
     from targetApp.models import Domain
-    from django.db.models import Count
     project, _ = get_project(ctx, slug)
-    from cveFeed.correlation import latest_scan_q
-    current = latest_scan_q('subdomain__')  # each host once, from its domain's current scan
-    from cveFeed.counts import exposure_filter
-    exposed = exposure_filter('subdomain__')  # the same definition as the dashboard's Exposed hosts
     everywhere = _is_all(project)
     qs = _scoped(Domain.objects.all(), project, 'project')
     qs = qs.order_by('name', 'project_id', 'id') if everywhere else qs.order_by('name')
-    qs = qs.annotate(n_hosts=Count('subdomain', filter=current, distinct=True), n_exposed=Count('subdomain', filter=exposed & current, distinct=True))
     if everywhere:
         qs = qs.select_related('project')
     if params.get('q'):
         qs = _target_search(qs, params['q'])
-    return paginate(qs, params, _tagged(_target, lambda d: d.project) if everywhere else _target)
+    page = paginate(qs, params, _tagged(_target, lambda d: d.project) if everywhere else _target)
+    _count_target_hosts(page['results'])
+    return page
+
+
+def _count_target_hosts(rows):
+    """Put ``hosts`` and ``exposed`` on each target of one page, counted the way the Hosts page and the dashboard count (``cveFeed.counts``): a host
+    is one per project and name, names on the same addresses fold together, and a scan-less row is not a second host. They were counted as current
+    Subdomain rows, so one target read 3 on the Targets table and 1 on the Hosts page (review 1 F2). One grouped query per page, for its targets only."""
+    from django.db.models import Count
+
+    from cveFeed import counts
+    from targetApp.models import Domain
+    ids = [r['id'] for r in rows]
+    if not ids:
+        return
+    reps = counts.host_reps(domain_ids=ids)
+    hosts = dict(reps.order_by().values('target_domain_id').annotate(n=Count('pk')).values_list('target_domain_id', 'n'))
+    projects = set(Domain.objects.filter(pk__in=ids).values_list('project_id', flat=True))
+    exposed = dict(counts.exposed_among(reps, project_ids=projects).order_by().values('target_domain_id').annotate(n=Count('pk'))
+                   .values_list('target_domain_id', 'n'))
+    for row in rows:
+        row['hosts'], row['exposed'] = hosts.get(row['id'], 0), exposed.get(row['id'], 0)
 
 
 def get_target(ctx, slug, target_id):
@@ -2779,7 +2795,6 @@ def search_hosts(ctx, slug, params):
         facet_names = []
     if counts_only and not heat:
         return {'count': qs.count(), 'page': 1, 'page_size': 0, 'results': [], 'facets': None, 'has_internal': _any_internal()}
-    qs_all = qs  # the whole match of q, before the heat filter narrows it
     if heat or not no_facets:
         bundle = _cached_facets(project, qs, terms, params, facet_names, facet_size, with_unscannable=not no_facets)
         heat_counts, heat_by_id, heat_truncated, unscannable, search_facets = bundle['heat'], bundle['by_id'], bundle['truncated'], bundle['unscannable'], bundle['facets']
@@ -3336,18 +3351,21 @@ def _require_member(ctx):
 
 def list_cve_feed(ctx, params):
     from cveFeed.models import CVEEntry
-    from cveFeed.threat import classify_threat_tier
     _require_member(ctx)
     qs = CVEEntry.objects.order_by('-published_at', '-id')
     if params.get('q'):
         qs = qs.filter(cve_id__icontains=params['q'])
     wanted = params.get('tier')
-    if wanted:  # tier is derived, so filter in Python over a bounded window
-        window = [c for c in qs[:2000] if classify_threat_tier(
-            kev=c.kev, epss_reached=c.epss_reached, exploit_db=c.exploit_db, cvss=c.cvss) == wanted]
-        page, size = page_args(params)
-        start = (page - 1) * size
-        return {'count': len(window), 'page': page, 'page_size': size, 'results': [_cve(c, True) for c in window[start:start + size]]}
+    if wanted:  # filtered by the database, as the dashboard's tier tiles count it (``views.tier_counts``): the count is the true total, not a sample
+        from cveFeed.threat import FIRE, ICE, SMOKE, fire_tier_q, hot_tier_q
+        if wanted == FIRE:
+            qs = qs.filter(fire_tier_q())
+        elif wanted == SMOKE:
+            qs = qs.filter(hot_tier_q()).exclude(fire_tier_q())
+        elif wanted == ICE:
+            qs = qs.exclude(hot_tier_q())
+        else:
+            qs = qs.none()  # an unknown tier matches nothing, as the old filter did
     return paginate(qs, params, lambda c: _cve(c, brief=True))
 
 
@@ -3820,6 +3838,10 @@ def _apply_remediation(obj, status, note, user, rescore=True):
         obj.remediation_note = note
         fields.append('remediation_note')
     obj.save(update_fields=fields)
+    from django.db import transaction
+
+    from cveFeed.views import bump_stats_revision
+    transaction.on_commit(bump_stats_revision)  # the dashboards read a snapshot: whoever closed a finding sees the numbers move now (review 1 F11)
     host = _host_of(obj) if rescore else None
     if host:
         _rescore_hosts([host])
@@ -4193,7 +4215,6 @@ def register_assets(ctx, assets):
 def work_items(ctx, slug, params):
     """Remediation handoff: confirmed or pending CVE-on-host matches still to fix, narrowed to the
     agent's registered assets (or ?assets=a,b) and optionally to a tier."""
-    from cveFeed.models import CVEMatch
     project, _ = get_one_project(ctx, slug)
     asked = [a.strip() for a in (params.get('assets') or '').split(',') if a.strip()]
     if len(asked) > MAX_ASSET_PATTERNS:
@@ -4203,7 +4224,6 @@ def work_items(ctx, slug, params):
     placed = {}  # subdomain id -> whether it is one of the assets; a host with many matches is tested once
     # Closed asset correlations do not belong in remediation work. An unresolved candidate with a low-confidence
     # triage classification remains reviewable unless the caller requests ?include_fp=0.
-    from django.db.models import Q
 
     from cveFeed.counts import CLOSED
     qs = _matches_qs(project).exclude(ai_verdict='not_affected') \

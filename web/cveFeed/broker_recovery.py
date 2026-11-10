@@ -228,7 +228,3 @@ def live_snapshot(max_age=SNAPSHOT_MAX_AGE):
         return None
 
 
-def cached_live_task_ids(max_age=SNAPSHOT_MAX_AGE):
-    """The ids of ``live_snapshot`` alone, or None: what a caller on a request path may ask instead of ``live_task_ids``."""
-    found = live_snapshot(max_age)
-    return None if found is None else found[0]

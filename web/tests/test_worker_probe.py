@@ -80,7 +80,6 @@ class WorkerProbeTests(TestCase):
 
     def health(self, probes):
         """scheduler_health with ``probes`` (the cached answers) in place of real ones."""
-        from django.contrib.auth.models import AnonymousUser
         user = mock.Mock(is_superuser=True)
         answers = iter(probes)
         with mock.patch.object(admin_api.probe_cache, 'cached_probe', side_effect=lambda *a, **k: (next(answers), 0)):

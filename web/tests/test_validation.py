@@ -11,11 +11,11 @@ from django.utils import timezone
 
 from cvengine_scanner import flags as scan_flags
 
-from cveFeed import ledger, nuclei_scan, templategen, triage, validation
+from cveFeed import nuclei_scan, templategen, triage, validation
 from cveFeed.models import CVEEntry, CVEMatch, GeneratedTemplate, ServiceRun, Triage
 from dashboard.models import Org, Project
 from reNgine import resources
-from startScan.models import IpAddress, Port, Subdomain, Vulnerability
+from startScan.models import Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests import ai_queue
 
@@ -452,7 +452,6 @@ class ApplyValidationTests(ValidationBase):
 		m, row = self.prepared()
 		self.assertEqual((row.classification, row.validation_status), ('', 'none'))  # not triaged: no provider
 		self.assertEqual(row.status, 'not_triaged')
-		from cveFeed.templategen import _host_key
 		result = validation._result_from_outcome({'host': 'www.v.test', 'vulnerable': True, 'hit': hit(), 'output': '{}'})
 		validation.apply_validation(row, self.check(), result)
 		row.refresh_from_db()

@@ -212,7 +212,6 @@ def _claim(run_id=None):
 def run_page(run_id=None):
     """Visit a bounded page, checkpoint its last id, and enqueue continuation until every due host was visited."""
     from cveFeed import activity
-    from cveFeed.models import UnresolvedArchiveReview
     from cveFeed.scan_control import pause_requested
     from cveFeed.tasks import review_unresolved_hosts
 

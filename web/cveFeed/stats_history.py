@@ -35,11 +35,23 @@ def _open_findings_and_cve_matches(project):
 def _fixed_stats(project):
     """(count of findings of any kind currently marked fixed, mean days from first seen to that mark) for one project.
     ``None`` for the mean when there are no fixed findings, or none with both timestamps set."""
+    from django.db.models import OuterRef, Subquery
+
+    from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch, HygieneFinding
     from startScan.models import Vulnerability
+
+    # Every scan keeps its own copy of a match, and ``_carry_remediation`` gives each new copy the fixed mark of the earlier one. Counting every
+    # copy counted one finding once per retained scan, and measuring each copy's own ``created_at`` against the carried mark gave a negative
+    # mean. One finding is one row of the current inventory, first seen when its earliest copy was made (review 1 F1).
+    first_seen = Subquery(CVEMatch.objects.filter(
+        cve_entry=OuterRef('cve_entry'), subdomain__target_domain=OuterRef('subdomain__target_domain'),
+        subdomain__name=OuterRef('subdomain__name')).order_by('created_at').values('created_at')[:1])
+    fixed_matches = (CVEMatch.objects.filter(latest_scan_q('subdomain__'), subdomain__target_domain__project=project, remediation_status='fixed')
+                     .annotate(first_seen=first_seen))
     rows = []
     for qs, first_field in (
-        (CVEMatch.objects.filter(subdomain__target_domain__project=project, remediation_status='fixed'), 'created_at'),
+        (fixed_matches, 'first_seen'),
         (Vulnerability.objects.filter(target_domain__project=project, remediation_status='fixed'), 'discovered_date'),
         (HygieneFinding.objects.filter(domain__project=project, remediation_status='fixed'), 'first_seen'),
     ):

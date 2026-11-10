@@ -14,7 +14,7 @@ from django.utils import timezone
 from cveFeed import ghost_scans, updater
 from cveFeed.models import UpdateSettings
 from tests.test_tenancy import client_for
-from tests.test_updater import NEW, OLD, fake_github
+from tests.test_updater import OLD, fake_github
 
 SENTENCE = 'This update needs about 14 GB of free disk; this server has 9 GB free. Free some space or add disk, then try again.'
 

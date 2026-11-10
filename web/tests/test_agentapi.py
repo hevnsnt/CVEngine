@@ -1183,6 +1183,26 @@ class ListSummaryTests(TestCase):
 		rows = {t['name']: (t['hosts'], t['exposed']) for t in list_targets(Ctx(user=self.user), 'sum-p', {})['results']}
 		self.assertEqual(rows, {'sum.example': (2, 1), 'empty.example': (0, 0)})  # one of two hosts has an open high finding
 
+	def test_targets_count_hosts_the_way_the_hosts_page_does(self):
+		"""Review 1 F2: two names on one address are one host, and a scan-less row beside the scanned copy of the same name is not another host."""
+		from agentapi.services import Ctx, list_targets
+		from cveFeed import counts
+		from scanEngine.models import EngineType
+		from startScan.models import IpAddress, ScanHistory, Subdomain
+		now = timezone.now()
+		project = Project.objects.get(slug='sum-p')
+		domain = Domain.objects.create(name='fold.example', project=project, insert_date=now)
+		engine = EngineType.objects.create(engine_name='e2', yaml_configuration='x')
+		scan = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=now, scan_status=2)
+		ip = IpAddress.objects.create(address='192.0.2.77')
+		for name in ('www.fold.example', 'api.fold.example'):
+			Subdomain.objects.create(name=name, target_domain=domain, scan_history=scan, http_status=200).ip_addresses.add(ip)
+		Subdomain.objects.create(name='www.fold.example', target_domain=domain, scan_history=None)  # a certificate transparency row
+		row = {t['name']: t for t in list_targets(Ctx(user=self.user), 'sum-p', {})['results']}['fold.example']
+		self.assertEqual(row['hosts'], counts.host_reps(domain.id).count())
+		self.assertEqual(row['hosts'], 1)
+		self.assertEqual(row['exposed'], 0)
+
 class ScanDetailApiTests(TestCase):
 	@classmethod
 	def setUpTestData(cls):
@@ -1543,7 +1563,6 @@ class BulkTargetTests(TestCase):
 		self.assertIn('the cap is', data['error'])
 
 	def test_the_add_cap_can_be_set_from_the_environment(self):
-		import importlib
 		from agentapi import services
 		with mock.patch.dict('os.environ', {'CVENGINE_MAX_TARGETS_PER_ADD': '77'}):
 			self.assertEqual(services._max_targets(), 77)
@@ -2119,7 +2138,7 @@ class TriageApiTests(TestCase):
 		self.assertEqual(call(self.t_alice, 'POST', bbot)[0], 409)
 
 	def test_nonmatch_retriage_is_hourly_bounded(self):
-		from cveFeed.models import AutomaticValidation, Triage
+		from cveFeed.models import AutomaticValidation
 		from cveFeed import triage
 		row = triage.track([self.bbot])[0][0]
 		for _ in range(20):

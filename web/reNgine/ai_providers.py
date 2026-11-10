@@ -19,7 +19,7 @@ import requests
 
 from cveFeed.secret_redaction import redact_text
 from reNgine import ai_prompts
-from reNgine.ai_profiles import (DEFAULT_REPLY_CAP, NUMBER_SETTINGS, PROFILES, REASONING_LEVELS, SETTING_ENV, STAGE_ANSWER_CAPS, STAGE_REPLY_CAPS, STRUCTURED_MODES,
+from reNgine.ai_profiles import (DEFAULT_REPLY_CAP, NUMBER_SETTINGS, PROFILES, REASONING_LEVELS, STAGE_ANSWER_CAPS, STAGE_REPLY_CAPS, STRUCTURED_MODES,
 	AIRuntime, answer_room, clean_number, reasoning_plan, reply_total, retry_total, setting_applies, thinking_reserve)
 
 logger = logging.getLogger(__name__)

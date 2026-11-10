@@ -223,7 +223,7 @@ def save_seed(request):
     """Organization, project and the seed domain in one step: create or rename them, add the target and start its discovery. Safe to send again:
     the same values change nothing and start nothing a second time; another name renames; another domain is added beside the first."""
     from agentapi import services
-    from cveFeed import discovery, welcome
+    from cveFeed import welcome
     from tenancy import roles
     body = welcome._body(request)
     org_name, project_name = _clean_name(body.get('org'), 'organization'), _clean_name(body.get('project'), 'project')

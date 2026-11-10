@@ -61,11 +61,6 @@ def engine_fixed(obj):
             and (obj.remediation_note or '').startswith(FIXED_VERSION))
 
 
-def person_worked(obj):
-    """A person set its status (any status but open, or open with their name on it) or wrote a note: the engine leaves its status alone."""
-    return obj.remediation_status != 'open' or obj.remediation_by_id is not None
-
-
 def _identity_q(lookup):
     q = Q()
     for key in IDENTITY:

@@ -63,7 +63,7 @@ def set_credential(ctx, slug, target_id, body):
         headers = auth_checks.clean_headers(body.get('headers'), stored)
         headers = [list(pair) for pair in stored] if headers is None else headers
         cookie = auth_checks.clean_cookie(body.get('cookie_secret')) or ''
-        if not cookie and not body.get('clear_cookie') is True:
+        if not cookie and body.get('clear_cookie') is not True:
             cookie = auth_checks.stored_cookie(existing) if existing else ''
         if not headers and not cookie:
             raise auth_checks.CredentialError('give at least one header or a cookie')

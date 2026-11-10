@@ -149,21 +149,6 @@ def expand_cidr(value, max_hosts=65536):
     return out
 
 
-def expand_target(value):
-    """Return (target_type, [host strings]).
-
-    Domains and single IPs return themselves; CIDR/range expand to host IPs.
-    """
-    target_type = classify_target(value)
-    if target_type == CIDR:
-        return target_type, expand_cidr(value)
-    if target_type == RANGE:
-        return target_type, expand_range(value)
-    if target_type in (IP, DOMAIN):
-        return target_type, [value.strip()]
-    return None, []
-
-
 # Addresses a scanner must never be pointed at on a user's say-so (or because a domain they control resolves
 # there): loopback, link-local (cloud metadata 169.254.169.254), multicast and "this host". Internal ranges
 # (RFC1918, CGNAT, unique-local) are refused too unless the operator opts in, because on a shared instance

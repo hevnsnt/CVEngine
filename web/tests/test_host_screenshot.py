@@ -170,10 +170,8 @@ class ScreenshotNoteTests(TestCase):
 		self.assertNotIn('rediscovered', note)
 
 	def test_the_host_record_carries_the_note(self):
-		from unittest import mock
 
 		from agentapi.services import Ctx, list_hosts
-		from cveFeed import web_shot
 		now = timezone.now()
 		org = Org.objects.create(name='N', slug='n-shot')
 		project = Project.objects.create(name='N', slug='n-shot-p', insert_date=now, org=org)

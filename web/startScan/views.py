@@ -5,7 +5,6 @@ import markdown
 from html import escape
 
 from collections import Counter, defaultdict
-from datetime import datetime
 from django.db.models import Count, Case, When, IntegerField, Prefetch
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404

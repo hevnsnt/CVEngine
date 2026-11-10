@@ -21,8 +21,7 @@ from django.test.utils import CaptureQueriesContext
 
 from agentapi import system_status
 from cveFeed import graph_live, live_refresh, snapshot_cache, views
-from cveFeed.models import CVEMatch
-from dashboard.models import Org, OrgMembership, ProjectMembership
+from dashboard.models import OrgMembership, ProjectMembership
 from reNgine import livecache_config
 from startScan.models import Subdomain
 from tenancy import membership_cache, roles, scope

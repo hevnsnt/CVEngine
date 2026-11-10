@@ -10,7 +10,7 @@ from django.test import Client, TestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from agentapi import mcp, rest
+from agentapi import rest
 from agentapi import services as svc
 from agentapi.auth import create_token
 from agentapi.services import AllProjects, ApiError, Ctx

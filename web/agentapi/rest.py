@@ -13,7 +13,6 @@ from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
 from agentapi import inventory
 from agentapi import sentinel_broker as sentinels
-from agentapi import sentinel_settings
 from agentapi import sentinel_dispatch
 from agentapi import sentinel_stream
 from agentapi import services as svc
