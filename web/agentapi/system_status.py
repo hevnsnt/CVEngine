@@ -274,7 +274,8 @@ def _memory():
             'jobs_running': len(c.get('running', [])), 'jobs_waiting': len(c.get('waiting', [])),
             'memory_kills_24h': len(c.get('memory_kills', [])), 'report_age_seconds': c.get('age_seconds'),
         })
-    return {'store': snap.get('store'), 'containers': containers}
+    from reNgine import lane_memory
+    return {'store': snap.get('store'), 'containers': containers, 'lanes': lane_memory.report()}
 
 
 def _disk():

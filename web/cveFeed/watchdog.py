@@ -33,7 +33,7 @@ from cveFeed import watchdog_snapshot as snapshot
 
 logger = logging.getLogger(__name__)
 
-TICK_SECONDS = 25            # a tick ends itself after this long (the command kills the process a little later, the host script a little later still)
+TICK_SECONDS = 40            # a tick ends itself after this long (the command kills the process a little later, the host script a little later still). A pass took 18 s on the loaded 2-core VPS with a lane silent (each broadcast to a silent lane waits its 3 s), and 25 s cut it off before it recorded itself
 # R1 and R2 may act 16 times a day (not 4): a worker container that crashes every quarter of an hour needs a restart each time it goes silent, and a rule that has
 # used its day leaves a hung lane hung (the owner's server, 2026-11-09: the cap of 4 was spent by 9:28 am and a lane stood silent for 50 minutes). The loop
 # protection is the flap guard (an action that did not fix it holds the rule for an hour), the 15 minute gap and the host's own limit.
@@ -132,9 +132,17 @@ def check_lanes(ctx):
     if not snap.get('redis_ok') or snap.get('lanes') is None:
         return Check(None, 'Could not ask the workers (the broker did not answer), so nothing is done.')
     status = snapshot.lane_status(snap)
-    absent = [p for p, lane in status.items() if lane['present'] is False]
+    silent = [p for p, lane in status.items() if lane['present'] is False]
+    try:
+        from reNgine import lane_memory
+        working = lane_memory.recent_progress()
+    except Exception:  # noqa: BLE001 - no evidence of work means the old rule: a silent lane is absent
+        working = {}
+    absent = [p for p in silent if p.removesuffix('_worker') not in working]  # the lane table says cve_feed_worker, the memory report cve_feed
     queues = snap.get('queues') or {}
     if not absent:
+        if silent:
+            return Check(False, f'All four worker lanes answer, except {_lanes_text(silent)}, which missed a ping but finished a task {min(working[p.removesuffix('_worker')] for p in silent)} seconds ago: busy, not gone.')
         return Check(False, 'All four worker lanes answer.')
     waiting = {LANE_WORDS.get(p, p): queues.get(status[p]['queue'], 0) for p in absent}
     parts = ', '.join(f'{w}: {n} waiting' for w, n in waiting.items())
@@ -705,6 +713,8 @@ def _stand_down_reason(ctx):
     if u.get('active'):
         why = [w for w, on in (('phase ' + str(u.get('phase')), u.get('phase') in ('draining', 'applying')), ('an approved update is waiting', u.get('approved')), ('the update lock is held', u.get('locked'))) if on]
         return 'an update is in progress (' + ', '.join(why) + ')'
+    if u.get('warming_up'):
+        return 'the stack finished an update a few minutes ago and its workers are still starting'
     return ''
 
 
@@ -918,6 +928,8 @@ def _process_rule(rule, ctx, stand):
         state.fire_since = ctx.now
     seen = (ctx.now - state.fire_since).total_seconds()
     if stand:
+        if (ctx.snap.get('update') or {}).get('warming_up'):
+            state.fire_since = ctx.now  # a lane still starting is not a lane that stopped: the 3 minutes count from the end of the warm-up
         _set(state, 'standing_down', f'{chk.text} The watchdog stands aside while {stand}.')
         return
     if seen < rule.confirm:
@@ -984,6 +996,7 @@ def _tick(now, probes, out):
     states = _states()
     all_state = states[ALL]
     all_state.last_tick_at = now
+    all_state.save(update_fields=['last_tick_at'])  # at once: a pass that is cut off later still shows the watchdog was running (it read "not running" for 11 minutes on 11/9)
     if killed() or all_state.enabled is False:
         for rule in RULES:
             _set(states[rule.code], 'off', 'Switched off.' + (' (CVENGINE_WATCHDOG=0)' if killed() else ''))
