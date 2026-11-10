@@ -2,6 +2,7 @@
 the one-task-at-a-time sweep, the import (QoD, severity, dedupe, resolution), the settings API and its permissions, and the off-by-default
 behaviour (nothing contacts the sidecar, nothing is scheduled, nothing starts). python-gvm itself runs unmodified over a unix socket; only gvmd is
 simulated (tests/fake_gvmd.py), so nothing here proves a real gvmd answers the same way (docs/OPENVAS.md says what that leaves open)."""
+import hashlib
 import json
 import os
 import re
@@ -598,6 +599,31 @@ class SweepTests(Fixture, TestCase):
         self.tick()
         self.assertEqual(len(self.gvmd.sent('create_target')), 2)
         self.assertNotIn(old, self.gvmd.targets)
+
+    def test_a_target_kept_by_an_old_task_is_reused_when_its_host_set_returns(self):
+        batch_a = [('www.rt.test', '93.184.216.5', None)]
+        batch_b = [('api.rt.test', '93.184.216.6', None)]
+        with self.factory() as gmp:
+            first = ov.target_for(gmp, self.link, batch_a)
+            self.gvmd.tasks['kept-task'] = {'target': first}  # the inconclusive report still needs its task
+            second = ov.target_for(gmp, self.link, batch_b)
+            self.assertNotEqual(first, second)
+            self.assertIn(first, self.gvmd.targets)
+            self.assertEqual(ov.target_for(gmp, self.link, batch_a), first)
+        self.assertEqual(len(self.gvmd.sent('create_target')), 2)
+        self.link.refresh_from_db()
+        self.assertEqual(self.link.target_id, first)
+
+    def test_a_same_named_target_with_different_hosts_is_not_reused(self):
+        batch = [('www.rt.test', '93.184.216.5', None)]
+        key = hashlib.sha256(b'93.184.216.5').hexdigest()[:40]
+        name = f'cvengine-p{self.project.id}-{key[:12]}'
+        self.gvmd.targets['other'] = {'name': name, 'hosts': '93.184.216.99', 'port_list': ov.PORT_LIST[0]}
+        with self.factory() as gmp, self.assertRaises(ov.OpenvasError):
+            ov.target_for(gmp, self.link, batch)
+        self.assertEqual(len(self.gvmd.sent('create_target')), 0)
+        self.link.refresh_from_db()
+        self.assertFalse(self.link.target_id)
 
     def test_no_feed_no_scan_and_the_reason_is_recorded(self):
         self.start_gvmd(nvts=0)

@@ -846,18 +846,31 @@ def explain(link):
 # ----------------------------------------------------------------------------- targets and tasks
 
 def target_for(gmp, link, batch):
-    """The GVM target id for this project's address set: reused when the set is the one the last target was made for and gvmd still has
-    it, else created (and the superseded one removed when gvmd lets it go)."""
+    """Reuse the project's target for this address set, including a target retained by an older GVM task."""
     addresses = sorted({ip for _host, ip, _domain in batch})
     key = hashlib.sha256(','.join(addresses).encode()).hexdigest()[:40]
     if link.target_id and link.target_key == key:
         found = [t for t in gmp.get_targets(filter_string=f'uuid={link.target_id}').findall('target') if t.get('id') == link.target_id]
         if found:
             return link.target_id
+    name = f'cvengine-p{link.project_id}-{key[:12]}'
+    existing = [t for t in gmp.get_targets(filter_string=f'name={name}').findall('target') if t.findtext('name') == name]
+    if existing:
+        if len(existing) != 1 or sorted((existing[0].findtext('hosts') or '').split(',')) != addresses:
+            raise OpenvasError('gvmd has a target with this name but a different address set; refusing to reuse it')
+        target_id = existing[0].get('id')
+        old, link.target_id, link.target_key = link.target_id, target_id, key
+        link.save(update_fields=['target_id', 'target_key'])
+        if old and old != target_id:
+            try:
+                gmp.delete_target(old, ultimate=True)
+            except Exception:  # noqa: BLE001 - an old task may still need its target
+                logger.info('could not remove the superseded GVM target %s', old)
+        return target_id
     port_list = _find(gmp.get_port_lists(), PORT_LIST, 'port_list')
     if port_list is None:
         raise OpenvasError(f'gvmd has no "{PORT_LIST[1]}" port list yet (the feed data is not loaded)')
-    created = gmp.create_target(f'cvengine-p{link.project_id}-{key[:12]}', hosts=addresses, port_list_id=port_list.get('id'),
+    created = gmp.create_target(name, hosts=addresses, port_list_id=port_list.get('id'),
                                 comment='cvENGINE: a vetted host set; created and removed by cvENGINE')
     old, link.target_id, link.target_key = link.target_id, created.get('id'), key
     link.save(update_fields=['target_id', 'target_key'])

@@ -273,16 +273,21 @@ class FakeGvmd:
                   '<port_list id="4a4717fe-57d2-11e1-9a26-406186ea4fc5"><name>All IANA assigned TCP and UDP</name></port_list>')
 
     def cmd_get_targets(self, root):
-        wanted = (root.get('filter') or '').replace('uuid=', '')
+        filters = self._filter(root)
         return ok('get_targets_response', ''.join(f'<target id="{i}"><name>{escape(t["name"])}</name><hosts>{escape(t["hosts"])}</hosts></target>'
-                                                 for i, t in self.targets.items() if not wanted or wanted == i))
+                                                 for i, t in self.targets.items() if (not filters.get('uuid') or filters['uuid'] == i)
+                                                 and (not filters.get('name') or filters['name'] == t['name'])))
 
     def cmd_create_target(self, root):
+        if any(t['name'] == root.findtext('name') for t in self.targets.values()):
+            return ok('create_target_response', status='400', text='Target exists already')
         new = self.new_id()
         self.targets[new] = {'name': root.findtext('name'), 'hosts': root.findtext('hosts'), 'port_list': root.find('port_list').get('id')}
         return ok('create_target_response', status='201', text='OK, resource created', id=new)
 
     def cmd_delete_target(self, root):
+        if any(task['target'] == root.get('target_id') for task in self.tasks.values()):
+            return ok('delete_target_response', status='400', text='Target is in use')
         self.targets.pop(root.get('target_id'), None)
         return ok('delete_target_response')
 
