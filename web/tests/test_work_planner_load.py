@@ -63,6 +63,10 @@ def build(hosts_per_project, now, tag='p', offset=0):
         RouteAuth.objects.bulk_create([RouteAuth(project=project, domain=domain, host=s.name, url=f'https://{s.name}/', path='/', auth_state='open', http_status=200,
                                                  content_type='text/html') for s in subs[: count * 8 // 10]])
         n += count
+    # Rows added with bulk_create inside the test transaction have no planner statistics: Postgres plans the census joins as if the tables were empty
+    # (nested loops over thousands of rows: 937 s locally, 445 s once in CI). ANALYZE is allowed in a transaction and gives it real numbers (6 s).
+    with connection.cursor() as cursor:
+        cursor.execute('ANALYZE')
     return n
 
 
