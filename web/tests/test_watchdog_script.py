@@ -127,7 +127,7 @@ class WatchdogScriptTests(unittest.TestCase):
 
     def test_a_tick_is_bounded_by_timeout_in_the_container(self):
         self.run_script('tick')
-        self.assertRegex([c for c in self.docker_calls() if 'watchdog_tick' in c][0], r'exec -T web timeout -k 3 40 python3')
+        self.assertRegex([c for c in self.docker_calls() if 'watchdog_tick' in c][0], r'exec -T web timeout -k 3 55 python3')
 
     # ---- the request file ----
 
