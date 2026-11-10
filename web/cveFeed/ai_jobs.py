@@ -184,11 +184,15 @@ def enqueue(kind, stage, *, system, parts, schema=None, options=None, image=None
     from cveFeed.models import AIJob
     if kind not in HANDLERS:
         raise ValueError(f'unknown AI job kind {kind!r}')
-    from reNgine.ai_profiles import STAGE_ANSWER_CAPS
+    from reNgine.ai_profiles import STAGE_ANSWER_CAPS, stage_cache_ttl
     if stage not in STAGE_ANSWER_CAPS:  # tests/test_ai_truncation.py fails for a stage that is not in the table: a new stage must name its room
         logger.warning('AI job stage %r has no answer room in ai_profiles.STAGE_ANSWER_CAPS: it gets the default', stage)
     # every stage is sent with its own answer room and the one automatic retry of a cut-off reply (a stage may say ``retry_truncated: False``)
-    options = {'max_tokens': STAGE_ANSWER_CAPS.get(stage), 'retry_truncated': True, **dict(options or {})}
+    # and the lifetime of Anthropic's prompt cache for its system prompt (``ai_profiles.STAGE_CACHE_TTL``; none when the stage or the switch
+    # is off). The container marks the prompt only for Anthropic's own host and only when it is long enough to be cached.
+    ttl = stage_cache_ttl(stage)
+    options = {'max_tokens': STAGE_ANSWER_CAPS.get(stage), 'retry_truncated': True, 'cache_ttl': ttl if ttl in ('5m', '1h') else None,
+               **dict(options or {})}
     options = {k: v for k, v in options.items() if v is not None}
     packet = {'system': str(system), 'parts': _clean_parts(parts), 'schema': schema, 'options': options}
     if len(json.dumps(packet, default=str)) > PACKET_MAX:
