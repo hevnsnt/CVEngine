@@ -705,6 +705,8 @@ def _stand_down_reason(ctx):
     if u.get('active'):
         why = [w for w, on in (('phase ' + str(u.get('phase')), u.get('phase') in ('draining', 'applying')), ('an approved update is waiting', u.get('approved')), ('the update lock is held', u.get('locked'))) if on]
         return 'an update is in progress (' + ', '.join(why) + ')'
+    if u.get('warming_up'):
+        return 'the stack finished an update a few minutes ago and its workers are still starting'
     return ''
 
 
@@ -918,6 +920,8 @@ def _process_rule(rule, ctx, stand):
         state.fire_since = ctx.now
     seen = (ctx.now - state.fire_since).total_seconds()
     if stand:
+        if (ctx.snap.get('update') or {}).get('warming_up'):
+            state.fire_since = ctx.now  # a lane still starting is not a lane that stopped: the 3 minutes count from the end of the warm-up
         _set(state, 'standing_down', f'{chk.text} The watchdog stands aside while {stand}.')
         return
     if seen < rule.confirm:

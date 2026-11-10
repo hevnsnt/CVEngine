@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 from django.contrib.auth.models import User
+from django.utils import timezone
 from django.test import TestCase, override_settings
 
 from cveFeed import scan_concurrency as sc
@@ -352,6 +353,29 @@ class StandDownTests(WatchdogCase):
         self.probes.data['update'] = {'phase': 'done', 'approved': False, 'locked': False, 'active': False}
         self.tick(30)  # the lanes are still absent: already seen for a long time, so it acts
         self.assertIsNotNone(self.request())
+
+    def test_a_stack_that_just_finished_an_update_is_given_time_to_start_its_lanes(self):
+        """11/9 10:22 pm: the update ended, a lane had not answered yet, and the watchdog restarted celery 10 seconds later, twice, then reported it could not fix it."""
+        self.break_lanes()
+        self.probes.data['update'] = {'phase': 'done', 'approved': False, 'locked': False, 'active': False, 'warming_up': True}
+        self.tick()
+        self.tick(400)
+        self.assertIsNone(self.request())
+        self.assertEqual(self.state('R1').status, 'standing_down')
+        self.probes.data['update'] = {'phase': 'done', 'approved': False, 'locked': False, 'active': False, 'warming_up': False}
+        self.tick(30)  # the warm-up is over and the lanes are still silent, but the three minutes start now
+        self.assertIsNone(self.request())
+        self.tick(200)
+        self.assertIsNotNone(self.request())
+
+    def test_the_warm_up_is_ten_minutes_after_the_phase_turns_done_and_no_longer(self):
+        from datetime import timedelta as td
+        from unittest import mock
+        for age, expected in ((60, True), (599, True), (601, False)):
+            changed = (timezone.now() - td(seconds=age)).isoformat()
+            with mock.patch('cveFeed.updater.read_phase', return_value={'phase': 'done', 'changed_at': changed}):
+                self.assertIs(snap_mod._just_updated('done'), expected, age)
+        self.assertFalse(snap_mod._just_updated('idle'))
 
     def test_an_unreadable_update_state_stands_it_down(self):
         self.break_lanes()
