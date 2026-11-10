@@ -132,9 +132,17 @@ def check_lanes(ctx):
     if not snap.get('redis_ok') or snap.get('lanes') is None:
         return Check(None, 'Could not ask the workers (the broker did not answer), so nothing is done.')
     status = snapshot.lane_status(snap)
-    absent = [p for p, lane in status.items() if lane['present'] is False]
+    silent = [p for p, lane in status.items() if lane['present'] is False]
+    try:
+        from reNgine import lane_memory
+        working = lane_memory.recent_progress()
+    except Exception:  # noqa: BLE001 - no evidence of work means the old rule: a silent lane is absent
+        working = {}
+    absent = [p for p in silent if p.removesuffix('_worker') not in working]  # the lane table says cve_feed_worker, the memory report cve_feed
     queues = snap.get('queues') or {}
     if not absent:
+        if silent:
+            return Check(False, f'All four worker lanes answer, except {_lanes_text(silent)}, which missed a ping but finished a task {min(working[p.removesuffix('_worker')] for p in silent)} seconds ago: busy, not gone.')
         return Check(False, 'All four worker lanes answer.')
     waiting = {LANE_WORDS.get(p, p): queues.get(status[p]['queue'], 0) for p in absent}
     parts = ', '.join(f'{w}: {n} waiting' for w, n in waiting.items())

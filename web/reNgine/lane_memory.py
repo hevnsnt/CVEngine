@@ -103,3 +103,14 @@ def report(now=None):
                     'by_growth': [{'task': n, 'runs': t['n'], 'max_growth_mb': t['max_growth_mb']} for n, t in sorted(tasks.items(), key=lambda i: -i[1]['max_growth_mb'])[:5]
                                   if t['max_growth_mb'] > 0]})
     return sorted(out, key=lambda r: -(r['rss_mb'] or 0))
+
+
+PROGRESS_SECONDS = 90  # a lane that finished a task this recently is working, whatever it did with its last ping
+
+
+def recent_progress(now=None):
+    """``{lane: seconds since it last finished a task}`` for the lanes that finished one within ``PROGRESS_SECONDS``. A worker lane that is busy can miss a
+    3 second ping while it works (on 11/9 the CVE-feed lane did, again and again, while finishing a correlation every few seconds), and the watchdog took
+    each miss for a dead lane and restarted the container. Finishing work is proof of life that does not depend on a reply to a ping."""
+    now = time.time() if now is None else now
+    return {row['lane']: row['age_seconds'] for row in report(now) if 0 <= row['age_seconds'] <= PROGRESS_SECONDS}

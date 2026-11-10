@@ -377,6 +377,16 @@ class StandDownTests(WatchdogCase):
                 self.assertIs(snap_mod._just_updated('done'), expected, age)
         self.assertFalse(snap_mod._just_updated('idle'))
 
+    def test_a_silent_lane_that_finished_a_task_a_moment_ago_is_not_restarted(self):
+        """11/9 11:00 pm: the CVE-feed lane missed pings while it completed a correlation every few seconds, and the watchdog restarted celery three times."""
+        from unittest import mock
+        self.break_lanes()
+        with mock.patch('reNgine.lane_memory.recent_progress', return_value={p: 20 for p in ('discovery', 'cve_feed', 'validation_priority', 'classic')}):
+            self.tick()
+            self.tick(400)
+        self.assertIsNone(self.request())
+        self.assertIn('busy, not gone', self.state('R1').status_text)
+
     def test_an_unreadable_update_state_stands_it_down(self):
         self.break_lanes()
         self.probes.data['update'] = RuntimeError('cannot read')

@@ -43,3 +43,15 @@ class LaneMemoryTests(SimpleTestCase):
         with mock.patch('reNgine.resources.cluster_snapshot', return_value={'store': 'redis', 'containers': []}), \
                 mock.patch('reNgine.lane_memory.report', return_value=[{'lane': 'classic', 'rss_mb': 1.0}]):
             self.assertEqual(system_status._memory()['lanes'], [{'lane': 'classic', 'rss_mb': 1.0}])
+
+
+class ProgressTests(SimpleTestCase):
+    def setUp(self):
+        for lane in lm.LANES:
+            cache.delete(lm.CACHE_PREFIX + lane)
+
+    def test_a_lane_that_finished_a_task_a_moment_ago_is_working(self):
+        import json
+        cache.set(lm.CACHE_PREFIX + 'cve_feed', json.dumps({'pid': 1, 'at': 1000.0, 'rss_mb': 5, 'peak_mb': 5, 'tasks': {}}), 600)
+        cache.set(lm.CACHE_PREFIX + 'classic', json.dumps({'pid': 2, 'at': 800.0, 'rss_mb': 5, 'peak_mb': 5, 'tasks': {}}), 600)
+        self.assertEqual(lm.recent_progress(now=1030.0), {'cve_feed': 30})  # classic last finished 230 s ago: not evidence of anything
