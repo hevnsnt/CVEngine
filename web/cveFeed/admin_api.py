@@ -861,7 +861,7 @@ def scan_control_get(request, actor):
 
 
 def watchdog_get(request, actor):
-    """The outer watchdog for the Health tab (App Admin only): each rule's state in words, the last 20 actions and what it changed (cveFeed.watchdog.view)."""
+    """The outer watchdog for the Watchdog panel of the Scanners page (App Admin only): each rule's state in words, the last 20 actions and what it changed (cveFeed.watchdog.view)."""
     if not actor.is_superuser:
         raise AdminError(403, 'App Admin only')
     from cveFeed import watchdog

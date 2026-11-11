@@ -9,6 +9,7 @@ import { activityMatrix, displayZone, sparkline } from "/staticfiles/cve/charts.
 import { reportButton } from "/staticfiles/cve/report-export.js";
 import { createGet, createPace, every } from "/staticfiles/cve/poll.js";
 import { dialog } from "/staticfiles/cve/ui.js";
+import { firstNoteHidden } from "/staticfiles/cve/first-note-logic.js";
 import { scoreList } from "/staticfiles/cve/score-detail.js";
 import { scoreLines } from "/staticfiles/cve/score-detail-logic.js";
 import { openSecret } from "/staticfiles/cve/secret-panel.js";
@@ -450,7 +451,7 @@ function paintMapCount() {
 function paintFirstNote() {
   const note = $("first-note");
   if (!note) return;
-  note.hidden = !(dash.dataset.first && statsNow && !statsNow.hosts);
+  note.hidden = firstNoteHidden(dash.dataset.first, statsNow);
 }
 
 // An empty map says why it is empty: nothing added yet, or hosts known but none live (resolved or answering).
@@ -733,7 +734,7 @@ async function pollDiscovery() {
     if (d === null) return; // 304: no new events
     if (!d.scan) {
       $("d-status").style.display = "none";
-      $("d-target").textContent = "No discovery has run yet. Add a target to start one.";
+      $("d-target").textContent = "Nothing has run yet. Add a target to start a first look.";
       return;
     }
     if (shownScan !== d.scan.id) {
@@ -960,7 +961,7 @@ poll(pollAgent, 2000);
 poll(pollFeed, 6000);
 
 // --- changes since you last looked ---------------------------------------------------------------
-// A one-line strip above the instrument panel: how many inventory changes arrived since this browser last had the Live page
+// A one-line strip above the instrument panel: how many inventory changes arrived since this browser last had the Overview
 // open, with a link to the Changes page narrowed to that moment. The baseline is per browser and moves forward when you leave.
 (async () => {
   if (!slug) return;

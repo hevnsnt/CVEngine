@@ -72,5 +72,5 @@ class EmptyDashboardTests(SimpleTestCase):
 
 	def test_the_idle_discovery_line_names_the_next_step(self):
 		js = read('static', 'cve', 'dashboard.js')
-		self.assertIn('No discovery has run yet. Add a target to start one.', js)
+		self.assertIn('Nothing has run yet. Add a target to start a first look.', js)  # the same words as the page, so the poll does not change the line
 		self.assertNotIn('"No discovery has run yet."', js)

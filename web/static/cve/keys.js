@@ -239,7 +239,7 @@ window.cveCommands = (window.cveCommands || []).filter(
 window.cveCommands.push({
   owner: "keys",
   label: "Keyboard shortcuts",
-  hint: "Help",
+  hint: "Shortcuts",
   run: cheatSheet,
 });
 window.cveCommands.push({

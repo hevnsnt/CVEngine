@@ -59,8 +59,60 @@ class MenuTests(TestCase):
 		for m in re.finditer(r'<a data-nav="([^"]+)"[^>]*>(.*?)</a>', block, re.S):
 			self.assertNotIn('aria-label', m.group(0).split('>')[0], m.group(1))
 			self.assertEqual(re.sub(r'<[^>]+>', '', m.group(2)).strip(), m.group(1))
-		# one visible link (the palette's hidden index lists the page under the same name; shell.js folds the same page and name into one row)
-		self.assertEqual(block.count('data-nav="Hygiene"'), 1)
+		self.assertEqual(self.repeats(html), [], 'a page shows the same destination twice')
+
+	@staticmethod
+	def surfaces(html):
+		"""[(label, href)] of each set of navigation links a user sees together. Desktop: the rail (with its account menu) and the page's tab strip.
+		Narrow screens: the bottom bar and the tab strip, and the bottom bar with its More sheet open. The palette's hidden index is left out: shell.js folds it into one row per page and name."""
+		def links(*blocks):
+			out = []
+			for block in blocks:
+				for attrs, inner in re.findall(r'<a\b([^>]*)>(.*?)</a>', block, re.S):
+					if 'class="brand' in attrs:  # the logo is the home link, not a page entry
+						continue
+					href = re.search(r'href="([^"]+)"', attrs)
+					label = re.sub(r'<[^>]+>', '', inner).strip()
+					if href and label and not href.group(1).startswith(('#', 'javascript')):
+						out.append((label, href.group(1)))
+			return out
+		rail = re.search(r'<aside class="rail".*?</aside>', html, re.S).group(0)
+		strip = ''.join(re.findall(r'<nav class="pagetabs".*?</nav>', html, re.S))
+		bar = re.search(r'<nav class="tabbar".*?</nav>', html, re.S).group(0)
+		sheet = html[html.index('<div class="sheet" id="sheet"'):]
+		sheet = sheet[:sheet.index('</div>\n</div>') + 6]
+		# the More sheet is a dialog the bar opens: it is seen with the bar, over the page, not beside the tab strip
+		return {'desktop': links(rail, strip), 'narrow': links(bar, strip), 'narrow, More open': links(bar, sheet)}
+
+	# Owner decision S8 (open): a tab family repeats the rail entry of the page you are on as its first tab. These are the only repeats allowed.
+	TAB_FAMILY_REPEATS = {'Hygiene', 'Findings', 'Suppliers', 'Scanners', 'Hosts', 'Scans'}
+
+	def repeats(self, html):
+		"""Destinations shown twice on one surface, ignoring only the known tab-family repeat of the current page (label in TAB_FAMILY_REPEATS, twice at most),
+		and pages shown under two names."""
+		bad = []
+		for surface, links in self.surfaces(html).items():
+			for dest in sorted(set(links)):
+				n = links.count(dest)
+				if n > 1 and not (n == 2 and dest[0] in self.TAB_FAMILY_REPEATS):
+					bad.append((surface, dest, n))
+			by_href = {}
+			for label, href in set(links):
+				by_href.setdefault(href, set()).add(label)
+			bad += [(surface, h, sorted(ls)) for h, ls in by_href.items() if len(ls) > 1]
+		return bad
+
+	def test_the_visible_duplicate_check_catches_a_second_link_to_a_page(self):
+		html = self.page('/cve/alpha/hosts/')
+		self.assertEqual(self.repeats(html), [])
+		doubled = html.replace('<main', '<nav class="pagetabs"><a href="/cve/alpha/targets/">Targets</a></nav><main', 1)
+		self.assertNotEqual(self.repeats(doubled), [])
+		renamed = html.replace('<main', '<nav class="pagetabs"><a href="/cve/alpha/targets/">Aims</a></nav><main', 1)
+		self.assertNotEqual(self.repeats(renamed), [])
+
+	def test_a_page_in_the_tab_family_repeats_its_rail_entry_only_once(self):
+		for path in ('/cve/alpha/hygiene/', '/cve/alpha/vulns/', '/cve/alpha/suppliers/', '/cve/scanners/', '/cve/alpha/hosts/', '/cve/alpha/scans/', '/cve/graph/', '/cve/alpha/targets/'):
+			self.assertEqual(self.repeats(self.page(path)), [], path)
 
 	def test_hygiene_and_suppliers_keep_their_original_icons_and_have_no_badge(self):
 		html = self.page('/cve/alpha/hosts/')

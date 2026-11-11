@@ -2487,7 +2487,7 @@ class PlannerBatch(models.Model):
 class WatchdogEvent(models.Model):
     """One line of what the outer watchdog saw, decided or did (cveFeed.watchdog, docs/WATCHDOG.md): when, which rule, what it observed, what
     it did and what came of it. Append only: a row is never changed once written (old rows are pruned by age, nothing else removes one).
-    Plain text, no secrets: it is shown on the Health tab of the Scanners page."""
+    Plain text, no secrets: it is shown in the Watchdog panel of the Scanners page."""
 
     LEVELS = ("info", "action", "fixed", "problem")
     at = models.DateTimeField(default=timezone.now, db_index=True)

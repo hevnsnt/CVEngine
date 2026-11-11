@@ -20,7 +20,7 @@
 ---
 
 <p align="center">
-  <img src="docs/images/cvengine-tour-1.3.gif" alt="What is new in 1.3: the Live page with hosts inside private networks counted apart, the Hosts page filtered to internal hosts, the Sentinels that scan them from inside the network, provisioning a Sentinel from a list of your organizations, the regrouped Settings tabs and the new Email tab" width="900">
+  <img src="docs/images/cvengine-tour-1.3.gif" alt="What is new in 1.3: the Overview with hosts inside private networks counted apart, the Hosts page filtered to internal hosts, the Sentinels that scan them from inside the network, provisioning a Sentinel from a list of your organizations, the regrouped Settings tabs and the new Email tab" width="900">
 </p>
 
 ## Know what you expose. Fix what's exploitable first.

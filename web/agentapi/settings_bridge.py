@@ -67,7 +67,7 @@ ENTRIES = {
     'watchdog': ('admin', 'watchdog', 'The watchdog: what it watches, what it changed, its switches. A POST changes a switch or asks for an action.', None),
     'audit': ('admin', 'audit', 'The audit log of administrative changes (last 200).', None),
     'activity': ('admin', 'activity', 'Retained activity and errors (paged; page and page_size in the query).', None),
-    'health': ('admin', 'health', 'Scheduler health.', None),
+    'health': ('admin', 'health', 'Scheduler detail.', None),
     'org_api_keys': ('admin', 'orgs/(?P<org_id>\\d+)/api-keys', 'The API keys saved for one organization (never their values). The id is the organization id.', 'org_id'),
     'org_api_key': ('admin', 'orgs/(?P<org_id>\\d+)/api-keys/(?P<service>[-\\w]+)', 'One organization API key. The id is "org_id/service", for example "3/shodan".', 'org_id/service'),
     'org_excluded_addresses': ('admin', 'orgs/(?P<org_id>\\d+)/excluded-addresses', 'The organization\'s "do not scan these addresses" list. The id is the organization id.', 'org_id'),

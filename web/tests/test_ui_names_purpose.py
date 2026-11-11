@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from cveFeed import nav
 from dashboard.models import Org, Project, ProjectMembership
-from cveFeed.views import SECTION_PURPOSE
+from cveFeed.views import ALL_PROJECTS_PURPOSE, SECTION_PURPOSE
 from tests.test_tenancy import client_for
 from tests.test_ui_nav import rail, tabs
 
@@ -66,7 +66,7 @@ class OneNamePerPageTests(TestCase):
 		for path, name, heading in (('/cve/alpha/hygiene/', 'Hygiene', 'Hygiene'), ('/cve/alpha/suppliers/', 'Suppliers', 'Suppliers'),
 									('/cve/alpha/hosts/', 'Hosts', 'Hosts'), ('/cve/graph/', 'Graph', 'Graph'), ('/cve/cves/', 'CVE catalog', 'CVE catalog'),
 									('/cve/scanners/', 'Scanners', 'Scanners'), ('/cve/agents/', 'API keys', 'API keys'),
-									('/cve/about/', 'About', 'About CVEngine')):
+									('/cve/about/', 'About', 'About')):
 			html = self.get(self.root, path)
 			self.assertEqual(h1_and_sub(html)[0], heading, path)
 			self.assertIn(f'<title>CVEngine · {name}</title>', html, path)
@@ -120,6 +120,14 @@ class PurposeLineTests(TestCase):
 		self.assertIn('All projects', html)
 		self.assertIn('read-only', html)
 
+	def test_the_all_projects_view_never_says_this_project(self):
+		Project.objects.create(name='Beta', slug='beta', insert_date=timezone.now(), org=self.org)
+		for section in SECTION_PURPOSE:
+			html = client_for(self.root).get(f'/cve/_all/{section}/').content.decode()
+			_, sub = h1_and_sub(html)
+			self.assertNotRegex(sub, r'(?i)this project|for this project', (section, sub))
+			self.assertTrue(sub.startswith(ALL_PROJECTS_PURPOSE[section]), (section, sub))
+
 
 class PurposeCopyTests(SimpleTestCase):
 	def test_the_purpose_sentences_follow_the_copy_rules(self):
@@ -128,3 +136,73 @@ class PurposeCopyTests(SimpleTestCase):
 		for key, text in SECTION_PURPOSE.items():
 			self.assertNotRegex(text, '[–—]|--', key)
 			self.assertIsNone(re.search(r'(?i)scanning|discovery running', text), key)
+
+	def test_each_purpose_line_is_exactly_one_sentence(self):
+		for table in (SECTION_PURPOSE, ALL_PROJECTS_PURPOSE):
+			self.assertEqual(set(table), set(SECTION_PURPOSE))
+			for key, text in table.items():
+				self.assertTrue(text.endswith('.'), key)
+				self.assertNotIn('. ', text, key)
+				self.assertEqual(text.count('.'), 1, key)
+
+	def test_the_matches_line_does_not_claim_a_confirmation_the_product_does_not_do(self):
+		self.assertNotRegex(SECTION_PURPOSE['matches'] + ALL_PROJECTS_PURPOSE['matches'], r'(?i)confirm')
+
+	def test_the_overview_line_is_one_sentence(self):
+		html = read_template('dashboard.html')
+		sub = re.search(r'<p class="sub">(.*?)</p>', html, re.S).group(1)
+		self.assertEqual(sub.count('.'), 1, sub)
+		self.assertTrue(sub.endswith('.'), sub)
+
+
+def read_template(name):
+	with open(os.path.join(os.path.dirname(__file__), '..', 'cveFeed', 'templates', 'cveFeed', name), encoding='utf-8') as f:
+		return f.read()
+
+
+def read_repo(*parts):
+	with open(os.path.join(os.path.dirname(__file__), '..', '..', *parts), encoding='utf-8') as f:
+		return f.read()
+
+
+class OldNamesTests(SimpleTestCase):
+	"""Text a person reads (notices, messages, report columns, docs, the palette hints) uses the names the rail uses."""
+
+	def test_watchdog_notices_point_at_screens_that_exist(self):
+		src = read_repo('web', 'cveFeed', 'watchdog.py')
+		for old in ('Health tab', 'Scanners, Health'):
+			for n, line in enumerate(src.splitlines(), 1):
+				if 'Next step' in line or 'Details:' in line or 'look at the' in line:
+					self.assertNotIn(old, line, n)
+		self.assertIn('Details: Scanners, Scheduler detail.', src)
+		self.assertIn('look at Scheduler detail on the Scanners page', src)
+		self.assertIn('see Scheduler detail on the Scanners page', src)
+
+	def test_no_screen_text_says_scheduler_health_or_the_old_page_names(self):
+		for parts in (('web', 'static', 'cve', 'bounty.js'), ('web', 'agentapi', 'settings_bridge.py'), ('docs', 'FRONTEND.md')):
+			self.assertNotIn('Scheduler health', read_repo(*parts), parts)
+		self.assertNotIn('Assets, Hosts', read_repo('docs', 'FRONTEND.md'))
+
+	def test_the_current_docs_say_overview_not_the_live_page(self):
+		for name in ('ARCHITECTURE.md', 'UPDATES.md'):
+			self.assertNotIn('Live page', read_repo('docs', name), name)
+
+	def test_the_findings_scope_filter_and_the_pdf_column_and_the_tour_use_current_words(self):
+		self.assertNotIn('All findings', read_repo('web', 'static', 'cve', 'app.js'))
+		self.assertNotIn('>Assets<', read_template('report.html'))
+		self.assertNotIn('<b>Live</b>', read_repo('scripts', 'demo', 'record_tour.js'))
+
+	def test_the_palette_hints_do_not_use_the_word_help(self):
+		for name in ('shell.js', 'keys.js'):
+			self.assertNotRegex(read_repo('web', 'static', 'cve', name), r'(hint|section): \"Help\"|hint: \"Help\"', name)
+
+	def test_the_old_explorer_doc_anchor_still_works(self):
+		self.assertIn('<a id="cve-explorer"></a>', read_repo('docs', 'FRONTEND.md'))
+
+	def test_the_first_run_wait_and_the_idle_line_each_say_one_thing(self):
+		html = read_template('dashboard.html')
+		js = read_repo('web', 'static', 'cve', 'dashboard.js')
+		self.assertIn('Nothing has run yet. Add a target to start a first look.', html)
+		self.assertIn('Nothing has run yet. Add a target to start a first look.', js)
+		self.assertNotIn('No discovery has run yet', js)
+		self.assertIn('usually within the next few minutes', html)

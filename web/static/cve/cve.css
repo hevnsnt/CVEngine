@@ -2281,7 +2281,7 @@ section.internal[hidden]{display:none}
 .scannerbar .ab-label{font-weight:var(--fw-semi)}
 .scannerbar .ab-more{margin:0;font-size:var(--fs-2)}
 
-/* ---- CVE explorer (/cve/cves/, explorer.js): a search box, ranked rows in the feed's heat style, and a detail drawer ---- */
+/* ---- CVE catalog (/cve/cves/, explorer.js): a search box, ranked rows in the feed's heat style, and a detail drawer ---- */
 .cvx-sr{position:absolute;width:1px;height:1px;padding:0;margin:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 .cvx-form{display:flex;flex-wrap:wrap;gap:var(--s-3) var(--s-3);align-items:center;margin-bottom:var(--s-4);padding:var(--s-3)}
 .cvx-q{position:relative;flex:1 1 320px;min-width:0}
@@ -2595,7 +2595,7 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 .seed-withheld{margin:0 0 var(--s-3);padding-left:var(--s-5);font-size:var(--fs-3)}.seed-withheld li{margin:2px 0}
 .seed-card input[type=file]{padding:var(--s-2) var(--s-3)}
 @media (max-width:480px){.seed-stats{grid-template-columns:1fr}.seed-card .tools .btn,.seed-card>.btn{width:100%}}
-/* current page in the account control: a utility page (Administration, Settings, Help, My account) highlights the account, not a rail entry */
+/* current page in the account control: a utility page (Administration, Settings, About, My account) highlights the account, not a rail entry */
 .acct summary[aria-current="page"],.menu a[aria-current="page"]{background:var(--sunk);box-shadow:inset 3px 0 0 var(--brand)}
 .menu a[aria-current="page"]{color:var(--ink)}
 .sheet-list a[aria-current="page"],.sheet-grid a[aria-current="page"]{color:var(--ink);box-shadow:inset 3px 0 0 var(--brand)}
