@@ -47,6 +47,9 @@ ALL = '_all'
 ACTION_FILE = '.watchdog-action'
 RESULT_FILE = '.watchdog-result'
 RESTART_ACTIONS = ('restart-celery', 'restart-celery-beat')
+HOST_RESTARTS_PER_DAY = 24   # the host's own cap on restarts of any kind (scripts/watchdog.sh); R1 and R2 recreate the same container, so the web side counts them together
+HELD_DAY_SECONDS = 3600      # after the host refused for its daily limit the rule does not ask again for this long
+HELD_GAP_SECONDS = 900       # ... and after it refused for the gap between two restarts, for this long
 VERIFY_RETRY_SECONDS = 30    # while a restarted stack warms up, the check is looked at again this soon
 HOST_ACTIONS = ('restart-celery', 'restart-celery-beat', 'prune-docker')
 LANE_WORDS = {'discovery_worker': 'discovery', 'cve_feed_worker': 'CVE feed', 'validation_priority_worker': 'validation', 'classic_worker': 'classic'}
@@ -761,8 +764,17 @@ def _gate(rule, state, ctx):
     epoch = ctx.epoch
     if state.hold_until and state.hold_until > ctx.now:
         return 'problem', f'Could not fix it; not trying again until {human(state.hold_until)}. ' + (f'Next step: {rule.next_step}.' if rule.next_step else '')
+    held = _held(state, ctx)
+    if held:
+        return 'held', held
     if state.verify_due or (state.verify or {}).get('host_id'):
         return 'acting', 'Waiting to see whether the last action worked.'
+    if rule.host_action in RESTART_ACTIONS:
+        used = sum(len(_within(ctx.states[r.code].actions or [], epoch, 86400)) for r in RULES if r.host_action in RESTART_ACTIONS)
+        if used >= HOST_RESTARTS_PER_DAY:  # a request the host would refuse is not made: it is no fault, only a limit
+            text = _limit_text(rule, f'{used} restarts were asked for in the last 24 hours (the limit is {HOST_RESTARTS_PER_DAY}).')
+            _hold_notice(rule, ctx, text)
+            return 'held', text
     recent = [a for a in state.actions or [] if epoch - a < 86400]
     if rule.gap and state.last_action_at and (ctx.now - state.last_action_at).total_seconds() < rule.gap:
         return 'watching', f'Acted {int((ctx.now - state.last_action_at).total_seconds() // 60)} minutes ago; the next try is at least {rule.gap // 60} minutes after that.'
@@ -771,6 +783,37 @@ def _gate(rule, state, ctx):
     if rule.per_day and len(recent) >= rule.per_day:
         return 'problem', f'Reached the limit of {rule.per_day} actions a day for this rule. ' + (f'Next step: {rule.next_step}.' if rule.next_step else '')
     return None
+
+
+def _limit_text(rule, what):
+    return f'The daily limit of restarts has been reached: {what} The watchdog waits and tries again later.' + (f' Next step: {rule.next_step}.' if rule.next_step else '')
+
+
+def _held(state, ctx):
+    """The text while the rule is held back by a limit (not by a failed fix), else ''."""
+    data = state.data or {}
+    until = data.get('held_until')
+    if until and datetime.fromisoformat(until) > ctx.now:
+        return data.get('held_text') or 'Held back by a limit.'
+    return ''
+
+
+def _hold_notice(rule, ctx, text):
+    """A warning, not a failure: the restart is wanted, but a limit says not now."""
+    notice(rule.code, 'warning', f'{rule.notice_title or rule.title}; the watchdog is holding back', text)
+
+
+def host_limit(result):
+    """'day' or 'gap' when the host's answer is a refusal for one of its own limits (not a fault), else ''. The host marks it (``limit``); an older host
+    script only says so in words, which are read here too."""
+    if result.get('ok') or result.get('standdown'):
+        return ''
+    if result.get('limit') in ('day', 'gap'):
+        return result['limit']
+    detail = str(result.get('detail') or '')
+    if detail.startswith('refused by the host:'):
+        return 'day' if 'restarts in the last 24 hours' in detail else 'gap'
+    return ''
 
 
 def _record_action(state, ctx):
@@ -886,6 +929,19 @@ def _process_host_result(ctx):
                 _set(state, 'standing_down', 'The host stood aside: ' + detail)
                 state.save()
                 continue
+            limit = host_limit(result)
+            if limit:  # the host's own limit said no: nothing was tried, so nothing failed and nothing counts
+                hold = HELD_DAY_SECONDS if limit == 'day' else HELD_GAP_SECONDS
+                text = _limit_text(rule, detail) if limit == 'day' else f'The host restarted this a moment ago and allows one restart at a time apart: {detail} The watchdog waits and tries again later.'
+                state.verify, state.verify_due = {}, None
+                state.last_action_at = None
+                state.actions = list(state.actions or [])[:-1]
+                state.data = {**(state.data or {}), 'held_until': (ctx.now + timedelta(seconds=hold)).isoformat(), 'held_text': text[:400]}
+                event(rule.code, 'info', action=result.get('action', ''), result='The host did not carry it out because of its own limit: ' + detail + ' Held, not a failed fix.', request=result['id'])
+                _set(state, 'held', text)
+                _hold_notice(rule, ctx, text)
+                state.save()
+                continue
             v = {**v, 'host_id': '', 'host_done_at': done.isoformat()}
             state.verify = v
             if result.get('ok'):
@@ -964,6 +1020,9 @@ def _process_rule(rule, ctx, stand):
         return
     if chk.firing is False:
         state.fire_since = None
+        if (state.data or {}).get('held_until'):
+            state.data = {k: v for k, v in state.data.items() if k not in ('held_until', 'held_text')}
+            resolve_notice(rule.code)
         if state.hold_until or state.escalated_at:
             if state.escalated_at:
                 event(rule.code, 'fixed', observation=chk.text, result='The symptom went away without further help.')

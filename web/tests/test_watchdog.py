@@ -120,10 +120,10 @@ class WatchdogCase(TestCase):
         path = self.home / wd.ACTION_FILE
         return json.loads(path.read_text()) if path.exists() else None
 
-    def host_answers(self, ok=True, at=None):
+    def host_answers(self, ok=True, at=None, detail='done', **extra):
         req = self.request()
         (self.home / wd.ACTION_FILE).unlink()
-        (self.home / wd.RESULT_FILE).write_text(json.dumps({'id': req['id'], 'action': req['action'], 'ok': ok, 'at': (at or self.t).timestamp(), 'detail': 'done'}))
+        (self.home / wd.RESULT_FILE).write_text(json.dumps({'id': req['id'], 'action': req['action'], 'ok': ok, 'at': (at or self.t).timestamp(), 'detail': detail, **extra}))
         return req
 
 
@@ -316,6 +316,72 @@ class R1LanesTests(WatchdogCase):
         self.tick(1000)
         self.assertIsNone(self.request())
         self.assertIn('limit', self.state('R1').status_text)
+
+    def test_r1_and_r2_share_the_restart_budget(self):
+        """Both rules recreate the same container and the host allows 24 restarts a day in all: the web side counts them together, not 16 and 16."""
+        self.tick()
+        now = self.t.timestamp()
+        for code in ('R1', 'R2'):
+            row = self.state(code)
+            row.actions = [now - (i + 2) * 3600 for i in range(12)]
+            row.save()
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.assertIsNone(self.request())
+        self.assertEqual(self.state('R1').status, 'held')
+        self.assertIn('24', self.state('R1').status_text)
+        self.assertFalse(AdminAlert.objects.filter(code='watchdog_r1', severity='critical').exists())
+
+    def test_a_host_budget_refusal_is_held_not_escalated(self):
+        """The host's own limit said no: nothing was tried and nothing failed. No 'could not fix it', no hour of silence, and the attempt does not count."""
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.host_answers(ok=False, detail='refused by the host: 24 restarts in the last 24 hours (limit 24).', limit='day')
+        self.tick(30)
+        row = self.state('R1')
+        self.assertEqual(row.status, 'held')
+        self.assertIsNone(row.hold_until)
+        self.assertIsNone(row.escalated_at)
+        self.assertEqual(row.actions, [])
+        self.assertFalse(WatchdogEvent.objects.filter(rule='R1', level='problem').exists())
+        alert = AdminAlert.objects.get(code='watchdog_r1', resolved_at__isnull=True)
+        self.assertEqual(alert.severity, 'warning')
+        self.assertNotIn('could not fix', alert.title)
+        self.assertIn('daily limit', alert.detail)
+        for _ in range(5):  # still held: the host is not asked again every minute
+            self.tick(60)
+            self.assertIsNone(self.request())
+        self.assertEqual(self.state('R1').status, 'held')
+
+    def test_a_host_budget_refusal_is_recognised_from_an_older_host_script_by_its_words(self):
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.host_answers(ok=False, detail='refused by the host: restart-celery was done 4 minutes ago (limit: one per 10 minutes).')
+        self.tick(30)
+        self.assertEqual(self.state('R1').status, 'held')
+        self.assertFalse(AdminAlert.objects.filter(code='watchdog_r1', severity='critical').exists())
+
+    def test_a_held_rule_asks_again_when_the_hold_ends_and_resolves_its_notice_when_the_lanes_answer(self):
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.host_answers(ok=False, detail='refused by the host: 24 restarts in the last 24 hours (limit 24).', limit='day')
+        self.tick(30)
+        self.probes.data['lanes'] = dict(LANES)
+        self.tick(60)
+        self.assertEqual(self.state('R1').status, 'ok')
+        self.assertFalse(AdminAlert.objects.filter(code='watchdog_r1', resolved_at__isnull=True).exists())
+
+    def test_a_host_that_failed_for_another_reason_is_still_a_failed_fix(self):
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.host_answers(ok=False, detail='restart-celery failed (exit 1); see watchdog.log on the host')
+        self.tick(30)
+        self.assertEqual(self.state('R1').status, 'problem')
 
     def test_minimum_gap_of_fifteen_minutes(self):
         self.break_lanes()

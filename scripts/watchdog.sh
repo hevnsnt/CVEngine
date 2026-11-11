@@ -108,8 +108,8 @@ now=$(date +%s)
 case $action in prune-docker) gap=1800;; *) gap=600;; esac
 last=$(awk -v a="$action" '$2 == a { t = $1 } END { print t + 0 }' "$ACTIONS_LOG" 2>/dev/null || echo 0)
 today=$(awk -v n="$now" '$2 != "prune-docker" && n - $1 < 86400 { c++ } END { print c + 0 }' "$ACTIONS_LOG" 2>/dev/null || echo 0)
-if (( now - last < gap )); then log "act: refused $action: done $(( (now - last) / 60 )) minutes ago"; answer failed "refused by the host: $action was done $(( (now - last) / 60 )) minutes ago (limit: one per $((gap / 60)) minutes)."; exit 0; fi
-if [ "$action" != prune-docker ] && (( today >= 24 )); then log "act: refused $action: $today restarts in the last day"; answer failed "refused by the host: $today restarts in the last 24 hours (limit 24)."; exit 0; fi
+if (( now - last < gap )); then log "act: refused $action: done $(( (now - last) / 60 )) minutes ago"; answer limit-gap "refused by the host: $action was done $(( (now - last) / 60 )) minutes ago (limit: one per $((gap / 60)) minutes)."; exit 0; fi
+if [ "$action" != prune-docker ] && (( today >= 24 )); then log "act: refused $action: $today restarts in the last day"; answer limit-day "refused by the host: $today restarts in the last 24 hours (limit 24)."; exit 0; fi
 printf '%s %s %s\n' "$now" "$action" "$rule" >>"$ACTIONS_LOG"
 if [ "$(wc -l <"$ACTIONS_LOG" 2>/dev/null || echo 0)" -gt 500 ]; then tail -n 200 "$ACTIONS_LOG" >"$ACTIONS_LOG.tmp" && mv -f "$ACTIONS_LOG.tmp" "$ACTIONS_LOG"; fi
 
