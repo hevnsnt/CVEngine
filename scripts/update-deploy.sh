@@ -147,6 +147,12 @@ deploy_steps() {
   if grep -qx proxy <<<"$listed"; then
     "${compose[@]}" pull --quiet proxy || log "could not pull the newest proxy image (offline, or the registry is limiting pulls); the one on this host is kept"
   fi
+  # Redis and Postgres are moving tags too (redis:alpine, postgres:18-alpine: security and bug-fix releases inside one major version, never a
+  # new major). Fetched here with the proxy, before anything is stopped; the datastores step below recreates each one only when its image moved.
+  # Without this an install kept the Redis and Postgres it was installed with forever. A failed pull keeps the images on this host.
+  if grep -qx proxy <<<"$listed"; then  # the production stack, as for the proxy: the dev stack pulls nothing
+    "${compose[@]}" pull --quiet db redis || log "could not pull the newest Redis and Postgres images (offline, or the registry is limiting pulls); the ones on this host are kept"
+  fi
   build_free_memory
   SENTINEL_SHA=$(scripts/sentinel-ref.sh 2>/dev/null) || SENTINEL_SHA=''  # the newest Sentinel library, resolved now (docs/UPDATES.md)
   export SENTINEL_SHA
@@ -190,6 +196,8 @@ deploy_steps() {
   # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
   # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
   "${compose[@]}" up -d --no-deps db || return 1
+  # the same for Redis: recreated only when a newer image was pulled above (dispatch is paused and the queues drained by now), else a no-op
+  "${compose[@]}" up -d --no-deps redis || return 1
   for _ in $(seq 1 60); do "${compose[@]}" exec -T db pg_isready -q >/dev/null 2>&1 && break; sleep 1; done
   phase applying backup
   cv_status step backup
