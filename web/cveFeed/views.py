@@ -6,6 +6,7 @@ below, so the UI updates on its own without a reload.
 import json
 import logging
 import re
+import time
 from urllib.parse import quote
 from collections import Counter
 
@@ -959,6 +960,58 @@ def graph_cache_key(scope, version):
     return f'cve-graph:{scope}:{snapshot_cache.revision()}:{version}'  # a revision bump (a finding was closed) drops it with the snapshots
 
 
+GRAPH_LOCK_SECONDS = 45  # a builder that dies leaves its lock this long at most
+GRAPH_WAIT_SECONDS = 10.0  # a viewer that finds the graph being built waits this long for it before building it itself
+GRAPH_WAIT_STEP = 0.05
+
+
+def cached_graph(scope, version, domain_id=None, scan_id=None):
+    """The graph payload of ``version`` for ``scope``: from the cache, else built by ONE caller. The key carries the version, which moves on every write
+    during a scan, so every open graph of a scope finds its key empty at the same moment; each used to build the payload (1.2 s and 19 queries at 20,000
+    hosts). The first takes a short lock (``cache.add``) and builds; the others wait for its answer, and one that waits too long (the builder died) builds it
+    itself. A cache that does not answer gives the graph, built here, as before."""
+    from django.core.cache import cache
+    key = graph_cache_key(scope, version)
+    lock = f'{key}:lock'
+
+    def stored():
+        try:
+            return cache.get(key)
+        except Exception:  # noqa: BLE001 - the graph is computed when the cache is down
+            return None
+
+    def build():
+        payload = {**graph_payload(domain_id, scan_id), 'version': version}
+        try:
+            cache.set(key, payload, GRAPH_CACHE_SECONDS)
+        except Exception:  # noqa: BLE001
+            pass
+        return payload
+    payload = stored()
+    if payload is not None:
+        return payload
+    try:
+        won = cache.add(lock, 1, GRAPH_LOCK_SECONDS)
+    except Exception:  # noqa: BLE001
+        return build()
+    if not won:
+        deadline = time.monotonic() + GRAPH_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            time.sleep(GRAPH_WAIT_STEP)
+            payload = stored()
+            if payload is not None:
+                return payload
+        return build()
+    try:
+        payload = stored()  # another caller may have stored it between the read above and winning the lock
+        return payload if payload is not None else build()
+    finally:
+        try:
+            cache.delete(lock)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 @require_GET
 @project_scoped
 def api_graph(request):
@@ -966,7 +1019,6 @@ def api_graph(request):
     aggregate queries when nothing changed; otherwise the payload is served from a short per-scope cache (shared by every viewer of the
     same projects). The version is itself a snapshot kept GRAPH_VERSION_SECONDS per scope, so a change shows within that many seconds (at once
     after ``bump_stats_revision``) and a poll in between costs no aggregate query at all."""
-    from django.core.cache import cache
     from django.http import HttpResponseNotModified
     domain, scan = request.GET.get('domain', ''), request.GET.get('scan', '')
     domain_id, scan_id = int(domain) if domain.isdigit() else None, int(scan) if scan.isdigit() else None
@@ -976,18 +1028,7 @@ def api_graph(request):
                                       hot={'params': params, 'args': {'domain_id': domain_id, 'scan_id': scan_id}, 'check': _hot_check(domain_id, scan_id)})['payload']
     if request.GET.get('v') == version:
         return HttpResponseNotModified()
-    key = graph_cache_key(scope, version)
-    try:
-        payload = cache.get(key)
-    except Exception:  # noqa: BLE001 - the graph is computed when the cache is down
-        payload = None
-    if payload is None:
-        payload = {**graph_payload(domain_id, scan_id), 'version': version}
-        try:
-            cache.set(key, payload, GRAPH_CACHE_SECONDS)
-        except Exception:  # noqa: BLE001
-            pass
-    return JsonResponse(payload)
+    return JsonResponse(cached_graph(scope, version, domain_id, scan_id))  # one viewer builds a cold graph, the others wait for it
 
 
 @require_GET

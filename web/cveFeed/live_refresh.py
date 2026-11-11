@@ -59,10 +59,8 @@ def _prebuild_graph(recipe, entry, previous):
     from cveFeed import views
     if previous is not None and previous['payload'] == entry['payload']:
         return
-    key = views.graph_cache_key(recipe['scope'], entry['payload'])
-    if cache.get(key) is None:
-        args = recipe['args']
-        cache.set(key, {**views.graph_payload(args.get('domain_id'), args.get('scan_id')), 'version': entry['payload']}, views.GRAPH_CACHE_SECONDS)
+    args = recipe['args']
+    views.cached_graph(recipe['scope'], entry['payload'], args.get('domain_id'), args.get('scan_id'))  # one builder per version, here or in a request
 
 
 def budget_seconds(interval=None):
