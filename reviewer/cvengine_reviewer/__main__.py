@@ -22,6 +22,7 @@ IDLE_SLEEP = 300
 ERROR_SLEEP = 60
 BACKOFF_SLEEP = 900
 MAX_FAILURES = 3
+OPS_RETRY_SECONDS = 3600  # the operations job runs at most once an hour, whatever happens to it: it is a paid model call
 JOB_POLL = 15          # seconds between asks for pipeline jobs while there are none
 JOB_BATCH = 8          # jobs taken per ask
 MAX_WORKERS = 8        # pipeline jobs run side by side (the server says how many, up to this)
@@ -67,7 +68,9 @@ def run_jobs(server, config, state):
 def run_reviews(server, config, state):
     """The reviewer's own two jobs. Returns how long until they should run again."""
     worked = 0
-    if config.get('ops_due') and config.get('ops'):
+    ops_at = state.get('ops_at')
+    if config.get('ops_due') and config.get('ops') and (ops_at is None or time.monotonic() - ops_at >= OPS_RETRY_SECONDS):
+        state['ops_at'] = time.monotonic()  # noted BEFORE the call: no failure path (a refused report, a dead server, a bug) can run it again within the hour
         try:
             result = jobs.run_ops(server, config['ops'], latest_templates_release())
             logger.info('operations: %s alert(s) diagnosed, actions run %s', result.get('alerts_updated'), result.get('actions_run'))
@@ -75,6 +78,8 @@ def run_reviews(server, config, state):
         except llm.ModelError as exc:
             _failed(state, exc.category)
             logger.warning('operations: model call failed (%s)', exc.category)
+        except Exception as exc:  # noqa: BLE001 - the reviews below must still run; the job waits an hour
+            logger.warning('operations: not completed (%s); next try in an hour', type(exc).__name__)
     left = int(config.get('reviews_left_today') or 0)
     if left and config.get('review'):
         for packet in server.next_findings(min(BATCH, left)):
@@ -117,7 +122,7 @@ def cycle(server, state):
 
 
 def new_state():
-    return {'failures': 0, 'pause_until': 0.0, 'review_at': 0.0}
+    return {'failures': 0, 'pause_until': 0.0, 'review_at': 0.0, 'ops_at': None}
 
 
 def main():
