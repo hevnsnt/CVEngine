@@ -74,6 +74,7 @@ class QueueTests(Fixture, TestCase):
         self.addCleanup(cache.clear)
 
     def overview(self):
+        ov.refresh_queue(self.project.id)  # what the live-cache worker does first; the page then reads it
         return ov.overview([self.project.id])
 
     def test_the_counts_and_the_summary_come_from_every_host_not_the_rows_shown(self):
@@ -95,6 +96,8 @@ class QueueTests(Fixture, TestCase):
             second = mock.Mock(project_id=991, project=mock.Mock(slug='second'))
             first = mock.Mock(project_id=990, project=mock.Mock(slug='first'))
             links.return_value = [first, second]
+            ov.refresh_queue(990)
+            ov.refresh_queue(991)
             data = ov.overview([990, 991])
         self.assertEqual(data['counts']['not_due'], 4)
         self.assertEqual(data['not_due_summary'], '4 not due: 4 excluded from scanning')
@@ -130,16 +133,27 @@ class QueueNeverWaitsTests(Fixture, TestCase):
         self.first = [row('a.example.test', 'excluded from scanning')]
         self.second = [row('a.example.test', 'excluded from scanning'), row('b.example.test', 'excluded from scanning')]
 
-    def test_the_first_look_works_it_out_once_and_the_next_one_inside_a_minute_does_no_work(self):
+    def test_the_first_look_does_no_work_in_the_request_and_asks_for_one_refresh(self):
         with mock.patch.object(ov, 'explain', return_value=self.first) as explain, mock.patch('cveFeed.tasks.refresh_openvas_queue.delay') as delay:
-            self.assertEqual(ov.overview([self.project.id])['counts']['not_due'], 1)
-            self.assertEqual(ov.overview([self.project.id])['counts']['not_due'], 1)
-        self.assertEqual(explain.call_count, 1)
+            first = ov.overview([self.project.id])
+            second = ov.overview([self.project.id])
+        explain.assert_not_called()  # the request never works a queue out
+        delay.assert_called_once_with(self.project.id)  # one refresh, not one per poll
+        self.assertEqual((first['pending_projects'], first['counts']['not_due']), (1, 0))
+        self.assertEqual(second['pending_projects'], 1)
+
+    def test_once_the_refresh_lands_the_next_look_inside_a_minute_does_no_work(self):
+        with mock.patch.object(ov, 'explain', return_value=self.first):
+            ov.refresh_queue(self.project.id)
+        with mock.patch.object(ov, 'explain') as explain, mock.patch('cveFeed.tasks.refresh_openvas_queue.delay') as delay:
+            data = ov.overview([self.project.id])
+        self.assertEqual((data['counts']['not_due'], data['pending_projects']), (1, 0))
+        explain.assert_not_called()
         delay.assert_not_called()
 
     def test_an_old_answer_is_shown_at_once_and_one_refresh_is_asked_for(self):
         with mock.patch.object(ov, 'explain', return_value=self.first):
-            ov.overview([self.project.id])
+            ov.refresh_queue(self.project.id)
         later = time.time() + ov.QUEUE_FRESH_SECONDS + 5
         with mock.patch.object(ov, 'explain', return_value=self.second) as explain, mock.patch('cveFeed.tasks.refresh_openvas_queue.delay') as delay, \
                 mock.patch.object(ov.time, 'time', return_value=later):
@@ -150,7 +164,7 @@ class QueueNeverWaitsTests(Fixture, TestCase):
 
     def test_the_refresh_replaces_the_answer_and_frees_the_next_one(self):
         with mock.patch.object(ov, 'explain', return_value=self.first):
-            ov.overview([self.project.id])
+            ov.refresh_queue(self.project.id)
         cache.add(f'{ov._queue_key(self.project.id)}:refreshing', 1, 300)
         with mock.patch.object(ov, 'explain', return_value=self.second):
             from cveFeed.tasks import refresh_openvas_queue
@@ -160,7 +174,7 @@ class QueueNeverWaitsTests(Fixture, TestCase):
 
     def test_a_broker_that_cannot_be_reached_still_shows_the_page(self):
         with mock.patch.object(ov, 'explain', return_value=self.first):
-            ov.overview([self.project.id])
+            ov.refresh_queue(self.project.id)
         with mock.patch('cveFeed.tasks.refresh_openvas_queue.delay', side_effect=OSError('broker down')), \
                 mock.patch.object(ov.time, 'time', return_value=time.time() + 120):
             self.assertEqual(ov.overview([self.project.id])['counts']['not_due'], 1)
