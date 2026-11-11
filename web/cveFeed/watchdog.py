@@ -332,7 +332,7 @@ def check_unacked(ctx):
         return Check(False, 'No message has been held unacknowledged for long.')
     tags = orphan_tags(ctx, R5_SECONDS)  # a worker with a full pool legitimately holds messages it has not started: only what no worker holds counts
     if tags is None:
-        return Check(None, 'Could not tell which unacknowledged messages a worker holds.')
+        return Check(None, 'Could not tell which unacknowledged messages a worker holds (a worker lane did not answer), so none are returned to the queue.')
     if not tags:
         return Check(False, f'{u["count"]} messages are held unacknowledged for a long time, and workers hold them (busy, not stuck).')
     return Check(True, f'{len(tags)} messages have been unacknowledged for over {R5_SECONDS // 60} minutes and no worker holds them.', {'count': len(tags)})
@@ -344,15 +344,17 @@ def act_unacked(ctx, chk):
 
 
 def held_task_ids(lanes=None):
-    """The ids of the tasks the workers hold (running, reserved or scheduled); empty when no worker answered (``lanes`` {} says none did)."""
-    if lanes == {}:
-        return set()
+    """The ids of the tasks the workers hold (running, reserved or scheduled), or None when that cannot be told for certain: no worker answered
+    (``lanes`` {} or None), a question went unanswered, or a worker the snapshot saw did not answer all three. A silent worker may be busy and still hold
+    its messages, so a partial list is never a list of what nobody holds."""
+    if not lanes:
+        return None
     from reNgine.celery import app
     held = set()
     for call in ('active', 'reserved', 'scheduled'):
         found = getattr(app.control.inspect(timeout=snapshot.PING_SECONDS), call)()
-        if found is None:
-            break  # nobody answered the first question: there is nobody to ask
+        if found is None or not set(lanes) <= set(found):
+            return None
         for tasks in found.values():
             for task in tasks:
                 task = task.get('request', task)
@@ -362,14 +364,20 @@ def held_task_ids(lanes=None):
 
 
 def orphan_tags(ctx, min_age):
-    """The delivery tags of unacknowledged messages older than ``min_age`` seconds that no worker holds, or None when that cannot be told."""
+    """The delivery tags of unacknowledged messages older than ``min_age`` seconds that no worker holds, or None when that cannot be told. It cannot be
+    told while any lane is silent or the answer of the workers is partial: a message is only an orphan when every lane answered and none holds it."""
     try:
         from cveFeed import broker_recovery
         client = ctx.probes.redis() if ctx.probes else snapshot.Probes().redis()
         tags = list(client.zrangebyscore(snapshot.UNACKED_INDEX_KEY, '-inf', ctx.epoch - min_age))
         if not tags:
             return []
-        held = held_task_ids(ctx.snap.get('lanes'))
+        lanes = ctx.snap.get('lanes')
+        if not lanes or any(lane['present'] is not True for lane in snapshot.lane_status(ctx.snap).values()):
+            return None
+        held = held_task_ids(lanes)
+        if held is None:
+            return None
         out = []
         for tag in tags:
             raw = client.hget(snapshot.UNACKED_KEY, tag)
@@ -382,10 +390,16 @@ def orphan_tags(ctx, min_age):
 
 
 def requeue_orphans(ctx, min_age):
-    """Return the unacknowledged messages older than ``min_age`` seconds that no worker holds to their queues. Never raises; returns how many."""
+    """Return the unacknowledged messages older than ``min_age`` seconds that no worker holds to their queues. Never raises; returns how many. When it
+    cannot tell what the workers hold it returns nothing and says so in the event log: work must not run twice."""
     try:
         from cveFeed import broker_recovery
-        return broker_recovery.requeue_tags(orphan_tags(ctx, min_age) or [])
+        tags = orphan_tags(ctx, min_age)
+        if tags is None:
+            event('R5', 'info', observation='Not every worker lane answered, so what the workers hold cannot be told.', action='none',
+                  result='Unacknowledged messages were left where they are, so no task can run twice. They are looked at again when every lane answers.')
+            return 0
+        return broker_recovery.requeue_tags(tags)
     except Exception:  # noqa: BLE001
         logger.warning('watchdog: could not return the unacknowledged messages', exc_info=True)
         return 0

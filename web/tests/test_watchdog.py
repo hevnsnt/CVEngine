@@ -710,6 +710,58 @@ class R4R5R6Tests(WatchdogCase):
             restored.assert_not_called()
         self.assertEqual(self.state('R5').status, 'ok')
 
+    def _unacked_45_minutes(self):
+        self.probes.data['unacked'] = {'count': 1, 'oldest_age_seconds': 2700}
+        self.probes.client.unacked = {'a': (self.t.timestamp() - 2700, '[{"headers": {"id": "busy-1"}}]')}
+
+    def _inspect_answering(self, workers):
+        """A fake Celery inspect: only ``workers`` answer, and none of them lists the task."""
+        fake = mock.MagicMock()
+        for call in ('active', 'reserved', 'scheduled'):
+            getattr(fake, call).return_value = {w: [] for w in workers} or None
+        app = mock.MagicMock()
+        app.control.inspect.return_value = fake
+        return mock.patch('reNgine.celery.app', app)
+
+    def test_no_worker_answering_never_returns_an_unacked_message(self):
+        """A worker that does not answer may still hold the message: returning it would run the task twice."""
+        self._unacked_45_minutes()
+        self.probes.data['lanes'] = {}
+        with mock.patch('cveFeed.broker_recovery.requeue_tags') as restored:
+            self.tick()
+            self.tick(700)
+        restored.assert_not_called()
+        self.assertEqual(self.state('R5').status, 'unknown')
+
+    def test_a_partial_answer_never_returns_an_unacked_message(self):
+        """Three lanes answer the inspect, the fourth is busy and silent: its message must stay where it is."""
+        self._unacked_45_minutes()
+        with self._inspect_answering(['discovery_worker@c', 'cve_feed_worker@c', 'validation_priority_worker@c']), \
+                mock.patch('cveFeed.broker_recovery.requeue_tags') as restored:
+            self.tick()
+        restored.assert_not_called()
+        self.assertEqual(self.state('R5').status, 'unknown')
+
+    def test_a_silent_lane_in_the_snapshot_blocks_the_requeue_even_when_the_inspect_answers(self):
+        self._unacked_45_minutes()
+        self.probes.data['lanes'] = {n: q for n, q in LANES.items() if not n.startswith('cve_feed')}
+        with self._inspect_answering(list(self.probes.data['lanes'])), mock.patch('cveFeed.broker_recovery.requeue_tags') as restored:
+            self.tick()
+        restored.assert_not_called()
+
+    def test_a_complete_answer_still_returns_what_no_worker_holds(self):
+        self._unacked_45_minutes()
+        with self._inspect_answering(list(LANES)), mock.patch('cveFeed.broker_recovery.requeue_tags', return_value=1) as restored:
+            self.tick()
+        restored.assert_called_once_with(['a'])
+
+    def test_a_requeue_that_cannot_tell_is_written_to_the_event_log(self):
+        self._unacked_45_minutes()
+        self.probes.data['lanes'] = {}
+        ctx = wd.Ctx(self.t, snap_mod.collect(self.probes, now=self.t.timestamp()), {}, probes=self.probes)
+        self.assertEqual(wd.requeue_orphans(ctx, 60), 0)
+        self.assertTrue(WatchdogEvent.objects.filter(result__contains='left where they are').exists())
+
     def test_recent_unacked_messages_are_left_alone(self):
         self.probes.data['unacked'] = {'count': 30, 'oldest_age_seconds': 120}
         with mock.patch('cveFeed.broker_recovery.requeue_tags') as restored:
