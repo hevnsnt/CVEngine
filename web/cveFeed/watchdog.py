@@ -178,8 +178,8 @@ R2_SECONDS = 600
 
 
 def check_hung(ctx, state=None):
-    """A lane answers, its queue is not empty and does not shrink, no task has finished in ten minutes, and its pool has free slots (a pool full of long
-    scans is busy, not hung)."""
+    """A lane answers, its queue is not empty and does not shrink, no task has finished in ten minutes, its pool has free slots and it has no task that
+    started less than 30 minutes ago (a pool full of long scans, or one long task, is busy, not hung)."""
     snap = ctx.snap
     if not snap.get('redis_ok') or snap.get('lanes') is None:
         return Check(None, 'Could not ask the workers, so nothing is done.')
@@ -189,6 +189,11 @@ def check_hung(ctx, state=None):
     state = state or ctx.states.get('R2')
     windows = dict((state.data or {}).get('windows') or {}) if state else {}
     hung, busy, notes = [], [], []
+    try:
+        from reNgine import lane_memory
+        running = lane_memory.in_flight()
+    except Exception:  # noqa: BLE001 - no record of running tasks means the slot count alone decides, as before
+        running = {}
     for prefix, lane in status.items():
         depth = queues.get(lane['queue'], 0)
         if not lane['present'] or work is None or not depth:
@@ -209,13 +214,16 @@ def check_hung(ctx, state=None):
         if capacity is None or active >= capacity:
             busy.append(prefix)  # every slot is taken: long work, not a hung worker
             continue
+        if prefix.removesuffix('_worker') in running:  # the lane table says cve_feed_worker, the memory records cve_feed
+            busy.append(prefix)  # a task that started less than 30 minutes ago is running: one long task is work, whatever the slot count
+            continue
         hung.append(prefix)
         notes.append(f'{LANE_WORDS.get(prefix, prefix)}: queue grew from {win["depth"]} to {depth} in {int((ctx.epoch - win["since"]) // 60)} minutes with nothing finished and {capacity - active} free slot(s)')
     if state is not None:
         state.data = {**(state.data or {}), 'windows': windows}
     if hung:
         return Check(True, 'A lane answers but takes no work: ' + '; '.join(notes) + '.', {'hung': hung})
-    return Check(False, 'Every lane that answers is taking its work' + (' (a full pool is busy, not hung).' if busy else '.'))
+    return Check(False, 'Every lane that answers is taking its work' + (' (a lane with every slot taken, or with a task running, is busy, not hung).' if busy else '.'))
 
 
 # R3 ----------------------------------------------------------------------------------------------------------------------------

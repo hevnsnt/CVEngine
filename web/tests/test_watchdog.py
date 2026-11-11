@@ -558,6 +558,27 @@ class R2HungTests(WatchdogCase):
         self.assertIsNone(self.request())
         self.assertEqual(self.state('R2').status, 'ok')
 
+    def test_one_long_task_with_free_slots_is_busy_not_hung(self):
+        """One task running for twelve minutes, 1 of 8 slots taken, completions frozen, a queue that does not shrink: the lane is busy."""
+        self.grow(10)
+        with mock.patch('reNgine.lane_memory.in_flight', return_value={'cve_feed': 720}):
+            self.tick()
+            for step in range(1, 14):
+                self.grow(10 + step * 5)
+                self.tick(60)
+        self.assertIsNone(self.request())
+        self.assertEqual(self.state('R2').status, 'ok')
+        self.assertIn('busy', self.state('R2').status_text)
+
+    def test_a_task_started_over_thirty_minutes_ago_does_not_make_a_lane_busy(self):
+        self.grow(10)
+        with mock.patch('reNgine.lane_memory.in_flight', return_value={}):
+            self.tick()
+            for step in range(1, 12):
+                self.grow(10 + step * 5)
+                self.tick(60)
+        self.assertEqual(self.request()['rule'], 'R2')
+
     def test_a_queue_that_shrinks_is_not_hung(self):
         self.grow(100)
         self.tick()
