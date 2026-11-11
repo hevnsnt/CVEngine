@@ -966,7 +966,7 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None):
                 # a host nmap gave up on (``timed_out``) was not fingerprinted: it is stored as nothing and stays due (it is "missing" below)
                 # the Sentinel's own network, unless it says it sits behind Docker Desktop's; the built-in scanner's is this server's own (os_reliable None:
                 # judged and marked as a local scan, cveFeed.os_detection)
-                reliable = None if getattr(result, 'ran_here', False) else result.get('os_reliable') is not False
+                reliable = os_reliable(result)
                 done = persist_inventory(inventory, org_id=org_id, os_reliable=reliable)
                 totals = {key: totals.get(key, 0) + done.get(key, 0) for key in set(totals) | set(done)}
                 reported.update(host['ip'] for host in inventory)
@@ -1464,12 +1464,14 @@ def rdp_image(result):
     return base64.b64decode(result['image'])
 
 
-# path_probe: the built-in scanner's own path -------------------------------------------------------------------------------------------------
+# path_probe: the path a scanner's packets leave from -------------------------------------------------------------------------------------------
 
 def try_path_probe(groups):
-    """The path survey rows (``cveFeed.path_probe.survey``'s shape) from the built-in scanner, one task per project of ``groups`` (``{project_id: [(ip,
-    port)]}``, so no task names another tenant's address); ``None`` when no address of ``groups`` belongs to a project. Raises ``ScannerUnavailable``
-    when the built-in scanner cannot take it: the survey never runs here."""
+    """The path survey rows (``cveFeed.path_probe.survey``'s shape), one task per project of ``groups`` (``{project_id: [(ip, port)]}``, so no task
+    names another tenant's address); ``None`` when no address of ``groups`` belongs to a project. The built-in scanner takes it while the install has
+    one; with none, the project's own Sentinels do, and each of their rows names the Sentinel that measured it (``sentinel``: its agent id), since
+    that path is that machine's, not this install's (``cveFeed.path_probe.check`` keeps a verdict per Sentinel). Raises ``ScannerUnavailable`` when no
+    scanner can take it: the survey never runs here."""
     from reNgine.resources import ScannerUnavailable
     projects = [(p, targets) for p, targets in ((_project_of(pid), t) for pid, t in groups.items()) if p is not None]
     if not projects:
@@ -1483,41 +1485,78 @@ def try_path_probe(groups):
         result = dispatch_or_none(project, 'path_probe', {'targets': [{'ip': ip, 'port': port} for ip, port in targets]},
                                   ips=[ip for ip, _port in targets])
         if result is not None:
-            rows.extend(result.get('results') or [])
+            found = result.get('results') or []
+            rows.extend(found if result.ran_here else [{**row, 'sentinel': result.agent_id} for row in found])
     if not rows:
-        raise ScannerUnavailable('path_probe', 'the built-in scanner returned no path survey')
+        raise ScannerUnavailable('path_probe', 'no scanner returned a path survey')
     return rows
 
 
-# nuclei_validate: an AI-written or approved template, on the built-in scanner --------------------------------------------------------------
+def os_reliable(result):
+    """The ``os_reliable`` of an nmap result for ``port_inventory.persist_inventory``: ``None`` for the built-in scanner (this server's own path,
+    ``cveFeed.os_detection``), else whether the Sentinel says its guesses describe the hosts (not Docker Desktop's network) and its own measured
+    path (``path_probe`` run by it) does not lose the malformed probes."""
+    if getattr(result, 'ran_here', False):
+        return None
+    from cveFeed import os_detection
+    return result.get('os_reliable') is not False and os_detection.sentinel_guess_believed(getattr(result, 'agent_id', None))
+
+
+# nuclei_validate: an AI-written or approved check, on the built-in scanner or the project's own Sentinels (agentapi.ai_checks) ---------------
 
 def _carrier_project(project):
-    """The project a ``nuclei_validate`` task in mode ``validate`` is filed under: the one the work is for, else the oldest. The task carries only a
-    template written from public CVE data, never a host, and only the built-in scanner, whose scope is the whole instance, takes the kind."""
+    """The project a ``nuclei_validate`` task in mode ``validate`` is filed under: the one the work is for, else the oldest project a scanner can take
+    the kind for (the built-in scanner's scope is the whole instance; with none, the oldest project one of its own Sentinels covers), else the oldest.
+    The task carries only a template written from public CVE data, never a host, and runs against a loopback page of the scanner's own."""
     if project is not None and not isinstance(project, int):
         return project
+    if project:
+        return _project_of(project)
     from dashboard.models import Project
-    return _project_of(project) if project else Project.objects.select_related('org').order_by('id').first()
+    projects = Project.objects.select_related('org').order_by('id')
+    for candidate in projects[:200]:
+        if any_scanner_for(candidate, 'nuclei_validate'):
+            return candidate
+    return projects.first()
 
 
 def nuclei_validate_ready(project=None):
-    """Raise ``ScannerUnavailable`` when a new template could not be checked now (no live built-in scanner: the kind never runs here), so the
-    AI is not asked for one first. Records nothing."""
+    """Raise ``ScannerUnavailable`` when a new template could not be checked now (no live scanner that may take the kind: the built-in scanner, or
+    with none a contract-4 Sentinel of the project; the kind never runs here), so the AI is not asked for one first. Records nothing."""
     carrier = _carrier_project(project)
     if carrier is None or not any_scanner_for(carrier, 'nuclei_validate'):
         from reNgine.resources import ScannerUnavailable
-        raise ScannerUnavailable('nuclei_validate', 'no live built-in scanner can check a new template')
+        raise ScannerUnavailable('nuclei_validate', 'no live scanner can check a new template (the built-in scanner, or a Sentinel of contract 4 '
+                                                    'or newer when there is none)')
+
+
+def _gate(mode, text):
+    """Why ``text`` is not sent as a check in ``mode`` at all, or "": the server's approval (``ai_checks.approval_problem``) and, while the install
+    has no built-in scanner (so a Sentinel of a customer network runs it), read-only and only the task's own target and port. Nothing that fails is
+    ever put in a task."""
+    from agentapi import ai_checks
+    problem = ai_checks.approval_problem(mode, text, builtin=True)
+    if problem or ai_checks.builtin_in_use():
+        return problem
+    if mode == 'test' and not ai_checks.validation_readonly(text):
+        return ai_checks.NOT_READ_ONLY  # an installed template Settings allows, but only for the built-in scanner
+    return ai_checks.external_problem(text)
 
 
 def try_nuclei_validate(text, project=None):
-    """``(valid, output, fixture_ok, fixture_note)`` for a template's syntax check and benign-fixture run on the built-in scanner. Raises
-    ``ScannerUnavailable`` when the scanner cannot take it: the check never runs on this server."""
+    """``(valid, output, fixture_ok, fixture_note)`` for a template's syntax check and benign-fixture run on a scanner (``ai_checks``: the built-in
+    scanner while the install has one, else a Sentinel of the project). A draft the server's gate refuses is answered here as not valid and never
+    sent. Raises ``ScannerUnavailable`` when no scanner can take it: the check never runs on this server."""
+    from agentapi import ai_checks
+    problem = _gate('validate', text)
+    if problem:
+        return False, problem, None, ''
     carrier = _carrier_project(project)
     scanner_or_local(carrier, 'nuclei_validate')  # raises when no scanner is live
-    result = dispatch_or_none(carrier, 'nuclei_validate', {'mode': 'validate', 'template': text})
+    result = dispatch_or_none(carrier, 'nuclei_validate', ai_checks.target('validate', text))
     if result is None:
         from reNgine.resources import ScannerUnavailable
-        raise ScannerUnavailable('nuclei_validate', 'the built-in scanner returned no result for the template check')
+        raise ScannerUnavailable('nuclei_validate', 'the scanner returned no result for the template check')
     return result.get('valid') is True, result.get('output') or '', result.get('fixture_ok'), result.get('fixture_note') or ''
 
 
@@ -1525,12 +1564,19 @@ NOT_REPORTED = 'not tested: the scanner reported no result for this host'
 
 
 def try_template_test(text, hosts, project):
-    """The outcomes (one ``{host, vulnerable, output, ...}`` per host, in order) of the approved template ``text`` run on the built-in
-    scanner against ``hosts`` of ``project`` (the project the hosts belong to), in tasks of at most ``MAX_ADDRESSES``. A host a finished chunk
-    left out, or one no scanner could take (the kind never runs here), is reported as not tested (an error outcome), so it stays due."""
+    """The outcomes (one ``{host, vulnerable, output, ...}`` per host, in order) of the approved template ``text`` run on a scanner (the built-in
+    one while the install has one, else a Sentinel of the project: ``ai_checks``) against ``hosts`` of ``project`` (the project the hosts belong to),
+    in tasks of at most ``MAX_ADDRESSES``. A template the server's gate refuses is never sent: every host is reported as not tested with the reason.
+    A host a finished chunk left out, or one no scanner could take (the kind never runs here), is reported as not tested (an error outcome), so it
+    stays due."""
+    from agentapi import ai_checks
     from reNgine.resources import ScannerUnavailable
     project = _project_of(project) if isinstance(project, int) else project
     hosts = list(hosts)
+    problem = _gate('test', text)
+    if problem:
+        why = problem if problem.startswith('not tested') else f'not tested: {problem}'
+        return [{'host': host, 'vulnerable': False, 'output': '', 'error': why[:300]} for host in hosts]
     chunks = _chunks(hosts)
     by_host, waiting = {}, None
     try:
@@ -1540,7 +1586,7 @@ def try_template_test(text, hosts, project):
         chunks = []
     try:
         with contextlib.closing(dispatch_many(project, 'nuclei_validate', chunks, labeler=_targets_label,
-                                              prepare=lambda chunk: ({'mode': 'test', 'template': text, 'targets': list(chunk)}, []))) as results:
+                                              prepare=lambda chunk: (ai_checks.target('test', text, chunk), []))) as results:
             for _index, result in results:
                 if result is None:
                     continue

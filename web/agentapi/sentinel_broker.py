@@ -65,12 +65,15 @@ RATES = {'claim': broker.RATES['claim'], 'report': broker.RATES['report'], 'rele
          'heartbeat': broker.RATES['heartbeat'], 'register': broker.RATES['register'],
          'policy': (60, 60), 'bundle': (12, 60),  # the template policy is a cheap read, the bundle a download of several MiB
          'secret': (6, 60),  # a stored credential is read once per signed-in task; more than a few a minute is a caller gone wrong, or guessing ids
-         'partial': (240, 60)}  # a streamed task posts a batch every few seconds while it runs (sentinel_stream.report_partial)
-# Kinds only the built-in scanner takes: what they measure or run belongs to this install, not to a network a Sentinel was set up for. ``path_probe``
-# measures the path this install's scans leave from (``cveFeed.os_detection`` keeps one verdict for it), and ``nuclei_validate`` runs an AI-written
-# template the server has not approved yet, on the scanner's own loopback or against a host, where the server ran it before.
-BUILTIN_KINDS = ('path_probe', 'nuclei_validate', 'route_probe_signed')  # route_probe_signed also needs the stored-sign-in read (secret_ref), which only a built-in image that reads one is offered
+         'partial': (240, 60),  # a streamed task posts a batch every few seconds while it runs (sentinel_stream.report_partial)
+         'check': (60, 60)}  # an AI-written check's approval is asked once per nuclei_validate task (approved_check)
+# Kinds the built-in scanner keeps to itself while the install has one (``builtin_only_kind``). ``route_probe_signed`` is its alone whatever happens: it
+# reads a stored sign-in (secret_ref), which only a built-in image that reads one is offered. ``path_probe`` (the path a scanner's packets leave from) and
+# ``nuclei_validate`` (an AI-written or approved check) go to the project's own Sentinels when the install has no built-in scanner, to one whose contract
+# version is at least the kind's ``external_since`` and under the rules of ``agentapi.ai_checks`` (hash, the server's approval, read-only, own target).
+BUILTIN_KINDS = ('path_probe', 'nuclei_validate', 'route_probe_signed')
 BUILTIN = 'built-in only'  # the refusal reason of such a task offered to any other Sentinel
+AI_CHECK = 'nuclei_validate'  # agentapi.ai_checks.KIND
 SIGNED_IN = 'signed-in'  # the refusal reason of a task that needs a stored credential, offered to a Sentinel that is not the built-in scanner
 SENTINEL_TOKEN_TTL = timedelta(days=90)  # a Sentinel's token expires this long after its last renewal; a heartbeat renews it, so only a Sentinel gone this long needs a new enrollment
 SENTINEL_TOKEN_RENEW_BELOW = timedelta(days=60)  # ...and a heartbeat renews it only once less than this is left, so renewal is one write a month, not one a minute
@@ -482,6 +485,10 @@ def effective_capabilities(agent, withheld=None, policy=None):
         caps -= set(failing_kinds(agent) if withheld is None else withheld)  # a kind it keeps failing is run here for a while instead (failing_kinds)
         reported = (agent.info or {}).get('contract_version')
         caps = {c for c in caps if c not in SentinelTask.KINDS or sentinel_contract.can_run(reported, c)}  # a kind its contract version predates is never sent
+        if caps & set(BUILTIN_KINDS) and not is_builtin(agent):
+            from agentapi import ai_checks
+            # older than the kind's external_since: never offered outside (route_probe_signed has none and is refused by ``builtin_only_kind``)
+            caps -= {k for k in BUILTIN_KINDS if sentinel_contract.external_since(k) is not None and not ai_checks.offered_outside(k, reported)}
     return caps
 
 
@@ -884,8 +891,13 @@ class SentinelEff:
             return 'scope', "the target is outside this Sentinel's scope"
         if task.kind not in self.caps:
             return 'capability', task.kind
-        if task.kind in BUILTIN_KINDS and not self.builtin:
-            return 'capability', BUILTIN  # a kind only the built-in scanner takes (path_probe, nuclei_validate, route_probe_signed): decided by the kind, before any task row says more
+        if not self.builtin and builtin_only_kind(task.kind):
+            return 'capability', BUILTIN  # a kind only the built-in scanner takes now (route_probe_signed; path_probe and nuclei_validate while it is in use)
+        if task.kind == AI_CHECK and not self.builtin:
+            from agentapi import ai_checks
+            why = ai_checks.task_problem(task, builtin=False)
+            if why:
+                return 'capability', why  # an AI-written check: unchanged, approved, read-only, own target and port (agentapi.ai_checks)
         why = secret_refusal(self, task)
         if why:
             return 'capability', why  # signed-in work is the built-in scanner's alone; a discovery's keys go only where ``sentinel_stream.key_delivery_decision`` allows
@@ -955,6 +967,15 @@ def is_builtin(agent):
     return pk is not None and pk == agent.pk
 
 
+def builtin_only_kind(kind):
+    """Whether only the built-in scanner may be offered ``kind`` right now: a kind of ``BUILTIN_KINDS`` that is never offered outside (no
+    ``external_since``: ``route_probe_signed``), or one that is while the install has no built-in scanner in use (``ai_checks.builtin_in_use``)."""
+    if kind not in BUILTIN_KINDS:
+        return False
+    from agentapi import ai_checks
+    return sentinel_contract.external_since(kind) is None or ai_checks.builtin_in_use()
+
+
 def _covers(project_slug, org_slug):
     """The SQL pre-filter for "this Sentinel's declared scope may reach this project": named directly, via its organization,
     or instance-wide. ``SentinelEff`` then applies the rest (the owner's reach, the administrator's limits)."""
@@ -977,7 +998,7 @@ def eligible_sentinels(project, kind, now=None, internal=False, live_only=False,
     the live window already in SQL, so a caller that only wants those never builds the rights of the silent ones. ``builtin_only`` keeps only the
     built-in scanner: the candidates for signed-in work, which no other Sentinel may be offered."""
     now = now or timezone.now()
-    builtin_only = builtin_only or kind in BUILTIN_KINDS
+    builtin_only = builtin_only or builtin_only_kind(kind)
     agents = Agent.objects.filter(_covers(project.slug, project.org.slug if project.org_id else None), kind='scanner', status='active',
                                   token__revoked=False)
     if builtin_only:
@@ -1072,7 +1093,7 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
     kind and its policy denies it), ``offline`` (an active one has it and none is live), ``withheld`` (a live one has it and keeps failing it, or is too old
     to run it), ``inactive`` (one has it but is pending or suspended) or ``never`` (none ever declared it). Left off, the cheap answer a dispatch gate needs."""
     now = now or timezone.now()
-    builtin_only = builtin_only or kind in BUILTIN_KINDS  # a kind only the built-in scanner takes has no other slots
+    builtin_only = builtin_only or builtin_only_kind(kind)  # a kind only the built-in scanner takes has no other slots
     live = [e for e in (_live_for(project, now) if kind else []) if kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps)]
     if builtin_only:
         own = builtin_pk()
@@ -1385,7 +1406,7 @@ def planner_capacity(kinds, now=None):
         queued[task_kind] = n
     out_kinds = {}
     for kind in kinds:
-        able = [e for e in live if kind in e.caps and not (kind in BUILTIN_KINDS and not e.builtin)]
+        able = [e for e in live if kind in e.caps and not (builtin_only_kind(kind) and not e.builtin)]
         outside = [e for e in able if not e.builtin]
         if outside and len(outside) < len(able) and builtin_fallback_for(kind) and not any(kind in e.preferred for e in able if e.builtin):
             able = outside
@@ -1899,7 +1920,7 @@ def _lighter_elsewhere(eff, task, own_held, now, memo):
 
 def _left_to_externals(eff, task, now, memo):
     """Whether ``task`` is held back from the built-in scanner ``eff`` (the last resort, ``builtin_fallback_for``): at least one live, active, external Sentinel is eligible for it\n    (its kind, scope, hosts and network, not denied, not cooling off, not updating: ``refusal``, ``_updating``; its free slots are not asked, a full one frees one soon), and the\n    task has not waited the grace yet. Never for a kind only the built-in one takes, a task it prefers (an administrator's choice for the kind), or ``CVENGINE_BUILTIN_FALLBACK_SECONDS=0``."""
-    if not eff.builtin or task.kind in BUILTIN_KINDS or task.kind in eff.preferred:
+    if not eff.builtin or builtin_only_kind(task.kind) or task.kind in eff.preferred:
         return False
     hold = builtin_fallback_for(task.kind)
     if not hold or (now - task.created_at).total_seconds() >= hold:
@@ -1951,6 +1972,16 @@ def _claim(agent, kinds, now):
                 continue  # only a Sentinel inside the private network can reach it
             if eff.secret_refusal(task) or (validating(task) and not eff.builtin):
                 continue  # (the query already left it out; this is the same rule where the task is actually taken)
+            if not eff.builtin and builtin_only_kind(task.kind):
+                continue  # the built-in scanner's while it is in use
+            if task.kind == AI_CHECK and not eff.builtin:
+                from agentapi import ai_checks
+                why = ai_checks.task_problem(task, builtin=False)
+                if why:  # changed after it was made, or no longer approved: never run anywhere, and the stage hears it now (agentapi.ai_checks)
+                    expire(task, reason=f'cancelled: {why}'[:300])
+                    audit.record(agent.token.user, 'sentinel.check.refused', _target(task), org=task.project.org_id, task_id=task.pk, agent_id=agent.pk,
+                                 agent=agent.name, reason=why[:300])
+                    continue
             cap = eff.kind_caps.get(task.kind)
             if cap is not None and held_by_kind.get((agent.pk, task.kind), 0) >= cap:
                 held_back.setdefault(task.kind, f'{sentinel_policy.label(task.kind)} is at its limit of {cap} at once here')
@@ -2093,6 +2124,24 @@ def accept_task(ctx, task_id):
     audit.record(ctx.user, 'sentinel.task.accept', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id, agent_id=agent.pk,
                  agent=agent.name)
     return {'task': task_payload(task), 'accepted': True}
+
+
+def approved_check(ctx, task_id):
+    """``GET sentinel/tasks/<id>/check``: the hash and mode of the AI-written check (``nuclei_validate``) the server approves for a task the calling
+    Sentinel holds (claimed or running): ``{task_id, template_sha256, mode}``. The Sentinel asks it apart from the task it was handed and runs the
+    text only when its own hash of the file it wrote is this one (client/daemon.py). The answer is worked out now from the server's own stored task
+    (``ai_checks.task_problem``: the text still hashes to the task's hash and is still approved, and for a Sentinel other than the built-in scanner,
+    read-only and aimed only at the task's own target and port). Anything else, a task of another Sentinel or kind included, is a 404 and audited."""
+    from agentapi import ai_checks
+    agent = _sentinel_agent(ctx, write=False)
+    broker._limit(agent.token, 'check')
+    task = SentinelTask.objects.select_related('project').filter(pk=_int(task_id), agent=agent, kind=AI_CHECK, status__in=('claimed', 'running')).first()
+    why = 'not a check this Sentinel holds' if task is None else ai_checks.task_problem(task, builtin=is_builtin(agent))
+    if why:
+        audit.record(ctx.user, 'sentinel.check.refused', f'sentinel task #{_int(task_id)}', org=task.project.org_id if task else None,
+                     task_id=_int(task_id), agent_id=agent.pk, agent=agent.name, reason=why[:300])
+        raise ApiError(404, 'no approved check for this task')
+    return {'task_id': task.pk, 'template_sha256': task.target['template_sha256'], 'mode': task.target['mode']}
 
 
 def get_task(ctx, task_id):
@@ -2698,6 +2747,8 @@ def _clean_nuclei_validate_result(body):
         out['output'] = _text(body.get('output'), 2000)
         out['fixture_ok'] = body.get('fixture_ok') if isinstance(body.get('fixture_ok'), bool) else None
         out['fixture_note'] = _text(body.get('fixture_note'), 300)
+    if isinstance(body.get('template_sha256'), str) and re.fullmatch(r'[0-9a-f]{64}', body['template_sha256']):
+        out['template_sha256'] = body['template_sha256']  # contract 4: the hash of the check the Sentinel verified and ran (``_bind_to_task`` holds it to the task's)
     if 'outcomes' in body:
         rows = body.get('outcomes')
         if not isinstance(rows, list) or len(rows) > MAX_TEMPLATE_OUTCOMES:
@@ -2713,7 +2764,7 @@ def _clean_nuclei_validate_result(body):
                 item['error'] = _text(row['error'], 300)
             kept.append(item)
         out['outcomes'] = kept
-    if not out:
+    if not set(out) - {'template_sha256'}:
         raise ApiError(400, 'a nuclei_validate result carries valid (validate) or outcomes (test)')
     return out
 
@@ -2765,10 +2816,14 @@ def _bind_to_task(kind, result, task):
         result = {**result, 'results': kept}
         return {**result, 'dropped': dropped} if dropped else result
     if kind == 'nuclei_validate':
+        from agentapi import ai_checks
+        problem = ai_checks.result_problem(task, result, builtin=getattr(task, 'agent_id', None) is not None and task.agent_id == builtin_pk())
+        if problem:
+            raise ApiError(400, problem)  # a result for another check than the one sent: rejected, nothing of it kept
         if 'outcomes' not in result:
             return result
         asked = [t for t in target.get('targets') or [] if isinstance(t, str)]
-        kept = [o for o in result['outcomes'] if o['host'] in asked]
+        kept = [_held_to_its_host(o) for o in result['outcomes'] if o['host'] in asked]
         dropped = len(result['outcomes']) - len(kept)
         result = {**result, 'outcomes': kept}
         return {**result, 'dropped': dropped} if dropped else result
@@ -2788,6 +2843,22 @@ def _bind_to_task(kind, result, task):
         dropped = len(result['findings']) - len(kept)
         result = {**result, 'findings': kept}
     return {**result, 'dropped': dropped} if dropped else result
+
+
+OTHER_HOST_HIT = 'not tested: the result line named another host than this one'
+
+
+def _held_to_its_host(outcome):
+    """A template test's outcome whose hit names another host than the one it is filed under (``host`` or ``matched-at`` of the result line) is
+    not a hit: the check reached somewhere else, which says nothing about this host."""
+    hit = outcome.get('hit')
+    if not outcome.get('vulnerable') or not isinstance(hit, dict):
+        return outcome
+    own = _bare(outcome['host'])
+    named = {_bare(hit[k]) for k in ('host', 'matched-at') if isinstance(hit.get(k), str) and hit[k].strip()}
+    if named and named != {own}:
+        return {**outcome, 'vulnerable': False, 'hit': None, 'output': '', 'error': OTHER_HOST_HIT}
+    return outcome
 
 
 def clean_result(kind, body, task=None):
