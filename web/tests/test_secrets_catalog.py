@@ -7,7 +7,7 @@ from django.test import SimpleTestCase
 
 from cveFeed import secrets_catalog as catalog
 
-RULE_IDS = Path(__file__).with_name('fixtures') / 'kingfisher_rule_ids.txt'  # every rule ID of the pinned Kingfisher 2.16.0 rule bundle
+RULE_IDS = Path(__file__).with_name('fixtures') / 'kingfisher_rule_ids.txt'  # every rule ID of the pinned Kingfisher 2.18.1 rule bundle
 
 
 def jwt(claims):
