@@ -32,7 +32,7 @@ validators==0.36.0
 watchdog==6.0.0
 whatportis==0.8  # 0.8.2 pins requests==2.25.1, which cannot be installed beside requests 2.34
 weasyprint==70.0
-pypdf==7.0.1  # reads text back out of the generated report PDFs in the tests; pure Python, BSD-3-Clause
+pypdf==7.0.1  # stamps the page numbers on a long report rendered in parts (cveFeed/report_render.py) and reads report text back in the tests; pure Python, BSD-3-Clause
 xmltodict==1.0.4
 django-environ==0.14.0
 dnspython==2.9.2
