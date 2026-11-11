@@ -159,6 +159,10 @@ def _no_handshake(result, where):
     give way to one low finding that says so. A proven vulnerability stays (it needed an answer from the server)."""
     proven = {check_name(test_id) for test_id in result.vulnerable}
     result.findings = [f for f in result.findings if f['check'] in proven]
+    # testssl prints "not vulnerable" for the vulnerability tests of a listener it could not talk to: nothing was tested, so nothing is cleared. A test
+    # that is not cleared closes no earlier proven match (``run_for_host`` closes only what an ``absent`` observation names).
+    result.inconclusive |= {check_name(test_id) for test_id in result.cleared}
+    result.cleared = set()
     result.inconclusive -= {check_name(test_id) for test_id in CONFIG}  # an earlier cipher finding of this port resolves: it never applied
     tested = ', '.join(f'{k}: {v}' for k, v in sorted(result.protocols.items()))
     result.findings.append({

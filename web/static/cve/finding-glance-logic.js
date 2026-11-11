@@ -45,3 +45,27 @@ export function segmentsText(segs, fmt) {
     .map((s) => (s.k === "when" ? `${s.lead || ""}${fmt(s.iso) || s.iso}` : s.k === "code" ? `${s.lead}${s.v}` : s.v))
     .join("");
 }
+
+// The proof of a finding: what the checks cvENGINE ran against the host reproduced, as one object the card can draw, or null when no check reproduced it
+// (a check that failed, found nothing, or only read metadata is not proof). ``validation`` is the detail's own: {status, steps: [{kind, label, display,
+// ran_at, result, summary}], evidence: {<check kind>: {request, response, reply}}}. Nothing is invented: every field is the server's, and a hit with no
+// recorded exchange still says which check reproduced it.
+export function proofOf(validation) {
+  const v = validation || {};
+  if (v.status !== "hit") return null;
+  const hits = (v.steps || []).filter((st) => st && st.result === "hit");
+  if (!hits.length) return null;
+  const latest = hits.reduce((a, b) => (String(b.ran_at || "") > String(a.ran_at || "") ? b : a));
+  const exchanges = Object.entries(v.evidence || {})
+    .filter(([, e]) => e && (e.request || e.response || e.reply))
+    .map(([kind, e]) => ({ kind, request: e.request || "", response: e.response || "", reply: e.reply || "" }));
+  return {
+    label: latest.label || latest.kind || "a check",
+    at: latest.ran_at || "",
+    summary: latest.summary || "",
+    display: latest.display || "",
+    checks: hits.length,
+    exchanges,
+  };
+}
+

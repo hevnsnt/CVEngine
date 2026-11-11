@@ -32,7 +32,7 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 # wall clock ran out. A Sentinel that stops heartbeating loses its lease on its own (``sentinel_broker.reap_expired``, five minutes) and
 # the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes. Every kind is here except those in
 # ``scanner_state.NO_STAGE`` (no stage waits for them yet), which ``tests.test_sentinel_contract`` holds to.
-COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
+COMPLETION_CEILING = {'nmap': 900, 'naabu': 1020, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
                       'nmap_udp': 900, 'wpscan': 1800, 'wpscan_thorough': 12 * 3600 + 600, 'openvas': 3600, 'discover': 1200, 'waf': 300, 'http_probe': 1500, 'dns_resolve': 300,
                       'secrets_scan': 1800, 'nmap_full': 1800, 'nmap_verify': 300, 'node2shell': 600, 'rdp_shot': 180, 'db_probe': 120, 'path_probe': 300,
                       'nuclei_validate': 600, 'alive_check': 900, 'bucket_check': 1800, 'vhost_probe': 1800, 'subdir_probe': 1800, 'supplier_check': 1800, 'hygiene_check': 1800, 'dangling_dns_check': 900, 'route_probe': 1800, 'route_probe_signed': 1800, 'page_read': 600, 'identity_check': 300, 'web_screenshot': 900, 'ssh_probe': 600,
@@ -40,7 +40,12 @@ COMPLETION_CEILING = {'nmap': 900, 'naabu': 600, 'nuclei_light': 900, 'nuclei_ta
 DEFAULT_CEILING = 900
 # Added to a kind's ceiling for each target beyond the first (an address of a chunk, a template-pass target): a chunk of 64 addresses takes longer than one.
 # Only the kinds that take a chunk of targets are listed; any other adds nothing.
-PER_TARGET_SECONDS = {'nmap': 15, 'naabu': 10, 'nuclei_light': 20, 'nuclei_targeted': 30, 'nuclei_deep': 60, 'nuclei_validate': 15, 'ssh_probe': 20}
+PER_TARGET_SECONDS = {'nmap': 90, 'naabu': 10, 'nuclei_light': 20, 'nuclei_targeted': 30, 'nuclei_deep': 60, 'nuclei_validate': 15, 'ssh_probe': 20}
+# A Sentinel limits its own nmap run to min(3600, max(600, 90 x addresses)) seconds (client/tools.py) and its naabu run to 900: the stage waits for at least as
+# long, or it gives a chunk up while the Sentinel is still working and the late result is thrown away (``tests.test_sentinel_capacity`` pins the relation).
+# The cap keeps the wait finite for a chunk of 64 addresses.
+CEILING_CAP = {'nmap': 3600 + 300}
+NAABU_CHUNK = 8  # a full-port scan of one address takes about 70 s at the default rate: 8 addresses fit the Sentinel's 900 s limit, 64 never could
 DEFAULT_QUEUE_SECONDS = 300  # how long a stage waits for a free Sentinel slot when every live, eligible Sentinel is at its limit
 REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out while a stage waits
 
@@ -144,7 +149,8 @@ def _dispatch_timeout(kind=None, targets=0):
         from cveFeed import openvas_scan
         return openvas_scan.max_hours() * 3600 + 600  # the task's own deadline, plus time to report
     base = COMPLETION_CEILING.get(kind, DEFAULT_CEILING)
-    return base + PER_TARGET_SECONDS.get(kind, 0) * max(0, int(targets or 0) - 1)
+    seconds = base + PER_TARGET_SECONDS.get(kind, 0) * max(0, int(targets or 0) - 1)
+    return min(seconds, CEILING_CAP[kind]) if kind in CEILING_CAP else seconds
 
 
 def _queue_timeout(kind=None):
@@ -938,7 +944,7 @@ def _dispatch_serially(project, kind, chunks, prepare, scan, timeout, created_by
 def try_nmap(project, scan, targets, org_id=None, timeout=None):
     """Fingerprint ``targets`` on Sentinels and persist what they report; return the persist totals.
 
-    Nothing runs on this server. An address is covered only when a Sentinel reports a host row for it. Raises ``ScannerUnavailable`` when no
+    Nothing runs on this server. An address is covered only when a Sentinel reports a host row for it that nmap finished (a row marked ``timed_out`` is not). Raises ``ScannerUnavailable`` when no
     scanner can take the work, or when a Sentinel finished a chunk without reporting every host in it: the exception's ``done`` lists the
     addresses a Sentinel did cover (persisted already), so the caller marks only those done and the rest stay due.
     """
@@ -956,7 +962,8 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None):
                     continue
                 chunk = chunks[index]
                 inventory = [{'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': None, 'ports': host.get('ports', [])}
-                             for host in result.get('hosts', []) if host.get('ip') in chunk]
+                             for host in result.get('hosts', []) if host.get('ip') in chunk and not host.get('timed_out')]
+                # a host nmap gave up on (``timed_out``) was not fingerprinted: it is stored as nothing and stays due (it is "missing" below)
                 # the Sentinel's own network, unless it says it sits behind Docker Desktop's; the built-in scanner's is this server's own (os_reliable None:
                 # judged and marked as a local scan, cveFeed.os_detection)
                 reliable = None if getattr(result, 'ran_here', False) else result.get('os_reliable') is not False
@@ -1021,13 +1028,17 @@ def wrap_naabu_runner(project, scan, timeout=None):
 
     def runner(ips):
         found = {}
-        chunks = _chunks(list(ips))  # a batch of hosts has more addresses than one task takes: every chunk is dispatched, several at once when slots are free
+        runner.unfinished = set()  # the addresses a Sentinel ran out of time on (``port_stage.discover`` leaves them due instead of recording "nothing open")
+        chunks = _chunks(list(ips), NAABU_CHUNK)  # a batch of hosts has more addresses than one task takes: every chunk is dispatched, several at once when slots are free
         with contextlib.closing(dispatch_many(project, 'naabu', chunks, scan=scan, timeout=timeout, stop_on_none=True)) as results:
             for index, result in results:
                 if result is None:
                     raise ScannerUnavailable('naabu', 'no scanner finished the work')
                 found.update(dict(result.get('ports') or {}))
+                if result.get('incomplete'):
+                    runner.unfinished.update(result.get('unfinished') or [])
         return found
+    runner.unfinished = set()
     return runner
 
 
@@ -1092,7 +1103,9 @@ def _finding_to_nuclei_line(finding):
             'template-url': [], 'matcher-name': finding.get('matcher_name') or '', 'curl-command': None, 'request': finding.get('request'),
             'response': finding.get('response'), 'extracted-results': finding.get('extracted_results') or [],
             'info': {'name': finding.get('name') or '', 'severity': finding.get('severity') or 'unknown',
-                     'description': finding.get('description') or '', 'classification': {'cve-id': list(finding.get('cve_ids') or [])}, 'reference': [],
+                     'description': finding.get('description') or '',
+                     'classification': {'cve-id': list(finding.get('cve_ids') or []), **({'cvss-score': finding['cvss_score']} if 'cvss_score' in finding else {})},
+                     'reference': list(finding.get('references') or []), 'remediation': finding.get('remediation') or '',
                      'tags': finding.get('tags') or []}}
 
 
@@ -1123,8 +1136,15 @@ def _targets_label(chunk):
     return f'{len(chunk)} target{"s" if len(chunk) != 1 else ""}'
 
 
-def _chunks(targets):
-    return [targets[i:i + MAX_ADDRESSES] for i in range(0, len(targets), MAX_ADDRESSES)]
+def _chunks(targets, size=MAX_ADDRESSES):
+    return [targets[i:i + size] for i in range(0, len(targets), size)]
+
+
+def _unreachable_of(result, chunk):
+    """The targets of ``chunk`` that the Sentinel says it did not reach (``result['unreachable']``: bare hosts it could not resolve or connect to). A
+    Sentinel that does not send the field reports none, which is what it did before it existed."""
+    down = {str(h).strip().lower() for h in (result.get('unreachable') or []) if isinstance(h, str)}
+    return {t for t in chunk if _bare_host(t).lower() in down} if down else set()
 
 
 def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
@@ -1140,20 +1160,24 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                     targets = [line.strip() for line in handle if line.strip()]
             except OSError:
                 targets = []
+            internal_stream.unreached = set()
             chunks = _chunks(targets)  # every target is sent: a stage that marks its whole list scanned must not have dropped the tail
             with contextlib.closing(dispatch_many(project, kind, chunks, prepare=lambda chunk: (_nuclei_target(kind, chunk, kwargs), []), scan=scan,
                                                   internal=True, timeout=timeout, labeler=_targets_label)) as results:
                 for _index, result in results:
                     if result is None:
                         raise RuntimeError('no Sentinel inside the network answered (one must declare network:internal and cover this project)')
+                    internal_stream.unreached.update(_unreachable_of(result, chunks[_index]))
                     for finding in result.get('findings', []):
                         yield _finding_to_nuclei_line(finding)
+        internal_stream.unreached = set()
         internal_stream.chunks_itself = True  # the caller hands over the whole list: this splits it and runs the chunks side by side
         return internal_stream
     if not any_scanner_for(project, kind):
         _no_scanner(kind, project)  # raises ScannerUnavailable: the kind has no local path
 
     def stream(targets_file, **kwargs):
+        stream.unreached = set()  # what this call could not reach (read by ``cveFeed.nuclei_scan.record_reached``): not scanned, whatever the call returns
         try:
             with open(targets_file, encoding='utf-8') as handle:
                 targets = [line.strip() for line in handle if line.strip()]
@@ -1167,6 +1191,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
 
         def prepare(chunk):
             live = resolvable_targets(chunk)
+            stream.unreached.update(set(chunk) - set(live))  # a name that does not resolve was not scanned: the stage must not record it as done
             if not live:
                 unresolved.add(tuple(chunk))
                 return None  # nothing in the chunk resolves: a Sentinel would be asked to do nothing, and nothing can run here
@@ -1179,8 +1204,10 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                     # the dispatcher raises ScannerUnavailable for a chunk no Sentinel finished; one that comes back empty anyway is never read as scanned
                     from reNgine.resources import ScannerUnavailable
                     raise ScannerUnavailable(kind, 'no scanner returned a result for a chunk')
+                stream.unreached.update(_unreachable_of(result, chunks[index]))
                 for finding in result.get('findings', []):
                     yield _finding_to_nuclei_line(finding)
+    stream.unreached = set()
     stream.chunks_itself = True  # the caller hands over the whole list: this splits it and runs the chunks side by side
     stream.signed_in = signed_in_stream(scan, kind, timeout)
     return stream

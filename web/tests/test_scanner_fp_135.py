@@ -297,7 +297,9 @@ class TestsslArtefactTests(SimpleTestCase):
         self.assertEqual(finding['severity'], tls_audit.SEVERITY['LOW'])
         self.assertEqual(finding['title'], 'help.example.test:443: TLS listener does not negotiate')
         self.assertNotIn('tlsa_cipherlist_3des_idea', result.inconclusive)  # the old cipher findings of the port resolve
-        self.assertIn('heartbleed', result.cleared)
+        # nothing was tested on a listener that completes no handshake, so "not vulnerable" from testssl clears nothing (it would close a proven match)
+        self.assertNotIn('heartbleed', result.cleared)
+        self.assertIn('tlsa_heartbleed', result.inconclusive)
 
     def test_a_listener_that_negotiates_keeps_its_forward_secrecy_finding(self):
         items = [{'id': 'TLS1_2', 'severity': 'OK', 'finding': 'offered'},

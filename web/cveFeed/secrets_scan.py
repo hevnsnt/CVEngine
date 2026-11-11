@@ -241,6 +241,20 @@ def _aws_pairs(findings):
 
 
 def persist(project, domain, scan_id, target, result, now=None):
+    """File one ``secrets_scan`` result (see ``_persist``), then drop the secret values from the task row. The scrub runs whether filing worked or raised:
+    the values are in the row only for this step, and a failed filing is asked again from a fresh scan, never from the stored values."""
+    try:
+        return _persist(project, domain, scan_id, target, result, now=now)
+    finally:
+        if getattr(result, 'task_id', None):
+            from agentapi import sentinel_broker
+            try:
+                sentinel_broker.scrub_values(result.task_id)
+            except Exception:  # noqa: BLE001 - the reaper scrubs what this missed (``scrub_stale_values``)
+                logger.exception('could not scrub the secret values of task %s', result.task_id)
+
+
+def _persist(project, domain, scan_id, target, result, now=None):
     """File a cleaned ``secrets_scan`` result of hosts of ``domain`` (the target), read by scan ``scan_id`` (None for a validation a person asked
     for). Returns ``{'findings', 'secrets', 'validated'}``."""
     from cveFeed import secrets_inventory, secrets_validation
@@ -278,9 +292,6 @@ def persist(project, domain, scan_id, target, result, now=None):
     if filed:
         from cveFeed import scoring
         scoring.rescore_quietly(project.pk, sorted({_host_of(f['url']) for f in findings}))
-    if getattr(result, 'task_id', None):  # the values are filed (fingerprinted and masked): the task row does not keep them
-        from agentapi import sentinel_broker
-        sentinel_broker.scrub_values(result.task_id)
     return {'findings': len(findings), 'secrets': len(filed), 'validated': validated}
 
 

@@ -158,9 +158,18 @@ class BusyTests(Fleet):
                                         lease_expires_at=self.now + timedelta(minutes=10))
         out = self.tick()
         self.assertEqual(out['state'], 'busy')
-        self.assertEqual(out['reasons']['ssh_probe'], 'all Sentinel slots busy')
+        self.assertEqual(out['reasons']['ssh_probe'], 'no free slot: all 2 Sentinel slots busy')
         self.assertEqual(self.batches(), [])
         self.assertEqual(work_planner.overview(None, self.now)['line'].split(',')[0], 'Planner: waiting')
+
+    def test_the_reason_names_the_real_cause_when_other_slots_are_free(self):
+        """6 of 10 slots free did not mean "all slots busy": the Sentinels able to run the kind can be full while others are idle."""
+        cap = {'free_total': 6, 'queued_total': 0, 'queued': {}, 'agents': [{'slots': 5}, {'slots': 5}]}
+        full = work_planner._busy_reason({'sentinels': 1, 'slots': 4, 'free': 0}, cap, 'ssh_probe')
+        self.assertIn('1 Sentinel(s) that can run it have no free slot', full)
+        self.assertIn('6 slot(s) are free on Sentinels that cannot take it', full)
+        crowded = work_planner._busy_reason({'sentinels': 2, 'slots': 10, 'free': 6}, {**cap, 'queued_total': 9, 'queued': {'nmap': 9}}, 'ssh_probe')
+        self.assertIn('9 task(s) of other kinds already wait for the 6 free slot(s)', crowded)
 
     def test_a_queue_at_its_target_queues_nothing_more(self):
         for i in range(60):

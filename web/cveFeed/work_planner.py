@@ -460,7 +460,7 @@ def _run(now):
                 continue
             idle = max(0, min(k['free'], cap['free_total']) - (cap['queued_total'] - cap['queued'].get(kind, 0)))
             if not idle:
-                summary['reasons'][kind] = 'all Sentinel slots busy'
+                summary['reasons'][kind] = _busy_reason(k, cap, kind)
                 continue
             have = cap['queued'].get(kind, 0) + pending_all[kind][1]
             wanted[kind] = max(0, factor * idle - have)
@@ -515,7 +515,7 @@ def _run(now):
         more = [f'{want[k].phrase(max(0, summary["due"][k] - summary["awaiting"][k] - summary["queued"].get(k, 0)))} still due' for k in want if summary['due'].get(k)]
         activity.log('run_check', f'Work planner queued {text} for the Sentinels ({summary["batches"]} batches' + (f'; {"; ".join(more)}' if more else '') + ')',
                      batches=summary['batches'], queued=summary['queued'], due=summary['due'])
-    elif any(r == 'all Sentinel slots busy' for r in summary['reasons'].values()) or any('deep enough' in r for r in summary['reasons'].values()):
+    elif any(r.startswith(BUSY_PREFIX) for r in summary['reasons'].values()) or any('deep enough' in r for r in summary['reasons'].values()):
         summary['state'] = 'busy'
     elif any(r.startswith('backing off') for r in summary['reasons'].values()):
         summary['state'] = 'backing_off'
@@ -675,21 +675,43 @@ def overview(allowed=None, now=None):
         except ValueError:
             next_in = None
     on = enabled()
-    return {'enabled': on, 'state': last.get('state') or ('off' if not on else 'waiting'), 'line': describe(last, rows, on, next_in, want), 'next_run_seconds': next_in,
+    return {'enabled': on, 'state': last.get('state') or ('off' if not on else 'waiting'), 'line': describe(last, rows, on, next_in, want, scoped=allowed is not None), 'next_run_seconds': next_in,
             'last_run': at, 'census_at': data.get('at'), 'kinds': list(rows.values()), 'batches_in_flight': flight.count()}
 
 
-def describe(last, rows, on, next_in, want=None):
-    """The one plain sentence about the planner (``Planner: ...``)."""
+BUSY_PREFIX = 'no free slot: '
+
+
+def _busy_reason(k, cap, kind):
+    """Why a kind with work due got no slot, in numbers. "All Sentinel slots busy" was said whenever this kind's share came to zero, including when 6 of 10
+    slots were free: the Sentinels that can run the kind may all be full, the kind may have a cap of its own, or other kinds' waiting tasks may already
+    claim every free slot. Each is a different thing for a person to do something about."""
+    free_total = cap['free_total']
+    others = cap['queued_total'] - cap['queued'].get(kind, 0)
+    if free_total <= 0:
+        return f'{BUSY_PREFIX}all {sum(a["slots"] for a in cap["agents"])} Sentinel slots busy'
+    if k['free'] <= 0:
+        who = f'{k["sentinels"]} Sentinel(s) that can run it' if k['sentinels'] else 'the Sentinels that can run it'
+        return f'{BUSY_PREFIX}the {who} have no free slot ({k["slots"]} slot(s) for this kind, all held, or capped for it); {free_total} slot(s) are free on Sentinels that cannot take it'
+    return f'{BUSY_PREFIX}{others} task(s) of other kinds already wait for the {min(k["free"], free_total)} free slot(s) of Sentinels that can run it'
+
+
+def describe(last, rows, on, next_in, want=None, scoped=False):
+    """The one plain sentence about the planner (``Planner: ...``). ``scoped`` is a viewer who sees some projects: the last run's ``queued`` counts are the
+    whole instance's (every tenant's), so the sentence is built from the viewer's own rows (what is in flight for them) and never says what was queued
+    elsewhere (review 2 F7)."""
     want = want or specs()
     state = (last or {}).get('state')
     if not on:
         return 'Planner: off (Settings, Work planner). Sentinels only get work from scans.'
     tail = f', next run in {next_in} s' if next_in is not None else ''
-    still = [f'{want[k].phrase(max(0, r["ready"] - last.get("queued", {}).get(k, 0)))} still due' for k, r in rows.items() if k in want and r['ready']]
+    queued = ({k: r['in_flight'] for k, r in rows.items() if r['in_flight']} if scoped else (last or {}).get('queued', {}))
+    still = [f'{want[k].phrase(max(0, r["ready"] - (r["in_flight"] if scoped else (last or {}).get("queued", {}).get(k, 0))))} still due' for k, r in rows.items() if k in want and r['ready']]
     still_text = f', {"; ".join(still)}' if still else ''
     if state == 'queued':
-        done = ' and '.join(want[k].phrase(n) for k, n in last['queued'].items())
+        done = ' and '.join(want[k].phrase(n) for k, n in queued.items() if k in want)
+        if not done:  # a viewer none of whose projects had work in this round
+            return f'Planner: running, nothing of yours was queued in the last round{still_text}{tail}'
         return f'Planner: queued {done}{still_text}{tail}'
     if state == 'paused':
         return 'Planner: waiting, scanning is paused' + tail

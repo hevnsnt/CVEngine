@@ -27,6 +27,45 @@ class Unsupported(Exception):
     """The template uses a matcher this evaluator cannot decide offline."""
 
 
+REGEX_SECONDS = 2.0  # a matcher pattern gets this long on a fixture body, then it is given up on
+
+_REGEX_CHILD = (
+    "import json, re, sys\n"
+    "data = json.load(sys.stdin)\n"
+    "try:\n"
+    "    out = ['ok', re.search(data['pattern'], data['text'], re.DOTALL) is not None]\n"
+    "except re.error as exc:\n"
+    "    out = ['error', str(exc)]\n"
+    "sys.stdout.write(json.dumps(out))\n"
+)
+
+
+def _regex_found(pattern, text):
+    """Whether ``pattern`` matches ``text`` (DOTALL), with a time limit. A model wrote the pattern and public CVE text it read may have steered it: Python's
+    backtracking engine can take hours on ``(a+)+$`` against twenty thousand characters, and that would hold a worker and its database connection. The
+    scanner's own engine reads the same pattern in linear time, so a pattern that is too slow here is only slow in this check. It runs in a separate
+    interpreter that is killed at the limit (a thread cannot be interrupted, and a Celery child may not start a ``multiprocessing`` process) and is reported
+    as a matcher this check cannot evaluate (review 2 F5). The pattern and text go in on standard input, never on a command line."""
+    import json
+    import subprocess
+    import sys
+
+    try:
+        done = subprocess.run([sys.executable, '-I', '-c', _REGEX_CHILD], input=json.dumps({'pattern': pattern, 'text': text}), capture_output=True,
+                              text=True, timeout=REGEX_SECONDS, check=False)
+    except subprocess.TimeoutExpired:
+        raise Unsupported(f'regex {pattern[:60]!r} took longer than {REGEX_SECONDS:g} s on the fixture and cannot be evaluated offline')
+    except OSError as exc:
+        raise Unsupported(f'regex {pattern[:60]!r} cannot be evaluated offline ({type(exc).__name__})')
+    try:
+        kind, value = json.loads(done.stdout)
+    except ValueError:
+        raise Unsupported(f'regex {pattern[:60]!r} cannot be evaluated offline (the check ended without an answer)')
+    if kind == 'error':
+        raise Unsupported(f'regex {pattern[:60]!r} cannot be evaluated offline ({value})')
+    return value
+
+
 def clean_fixture(value):
     """A bounded, well-formed fixture from a model's JSON object, or None when it is not one."""
     if not isinstance(value, dict):
@@ -82,10 +121,7 @@ def _one(matcher, fixture, parts):
             raise Unsupported('a regex matcher without patterns')
         found = []
         for pattern in patterns:
-            try:
-                found.append(re.search(pattern, text, re.DOTALL) is not None)
-            except re.error as exc:
-                raise Unsupported(f'regex {pattern[:60]!r} cannot be evaluated offline ({exc})')
+            found.append(_regex_found(pattern, text))
         hit = all(found) if condition == 'and' else any(found)
     elif kind == 'binary':
         found = []

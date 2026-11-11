@@ -52,3 +52,29 @@ test('the prefs formatter writes "Nov 7, 2026 12:31 AM" in the chosen zone', asy
   assert.equal(prefs.fmtLong('nonsense'), '');
   assert.equal(prefs.fmtLong(''), '');
 });
+
+test('a check that reproduced it is proof, with the latest hit and what the host answered', () => {
+  const proof = logic.proofOf({
+    status: 'hit',
+    steps: [
+      {kind: 'fact_probe', label: 'banner probe', result: 'no_match', ran_at: '2026-11-08T10:00:00Z'},
+      {kind: 'nuclei_template', label: 'nuclei check', display: 'nuclei -t cve-2024-1 -u https://a.example.com', result: 'hit', ran_at: '2026-11-08T11:00:00Z', summary: 'matched'},
+      {kind: 'fact_probe', label: 'second probe', result: 'hit', ran_at: '2026-11-09T09:00:00Z', summary: 'version 1.2'},
+    ],
+    evidence: {nuclei_template: {request: 'GET /x', response: 'HTTP/1.1 200 OK'}, fact_probe: {}},
+  });
+  assert.equal(proof.label, 'second probe');
+  assert.equal(proof.at, '2026-11-09T09:00:00Z');
+  assert.equal(proof.checks, 2);
+  assert.deepEqual(proof.exchanges, [{kind: 'nuclei_template', request: 'GET /x', response: 'HTTP/1.1 200 OK', reply: ''}]);
+});
+
+test('no proof unless a check reproduced it', () => {
+  assert.equal(logic.proofOf(null), null);
+  assert.equal(logic.proofOf({status: 'clean', steps: [{result: 'no_match'}]}), null);
+  assert.equal(logic.proofOf({status: 'observed', steps: [{result: 'observed'}]}), null);
+  assert.equal(logic.proofOf({status: 'hit', steps: []}), null);  // a hit with no step is not shown as proof
+  const bare = logic.proofOf({status: 'hit', steps: [{kind: 'script_read', result: 'hit', ran_at: '2026-11-09T09:00:00Z'}], evidence: {}});
+  assert.equal(bare.label, 'script_read');
+  assert.deepEqual(bare.exchanges, []);  // still says which check, and the card says nothing was kept
+});

@@ -32,7 +32,7 @@ The server image carries one scan tool, [nuclei](https://github.com/projectdisco
 
 ## Stack
 
-Ubuntu 26.04, Python 3.14, Django 5.2 LTS, PostgreSQL 18, nmap 7.993, and Go 1.27 for building the scanners.
+Ubuntu 26.04, Python 3.14, Django 6.0, PostgreSQL 18, nmap 7.993, and Go 1.27 for building the scanners.
 
 ## Main data
 

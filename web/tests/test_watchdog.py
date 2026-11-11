@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 from django.contrib.auth.models import User
+from django.utils import timezone
 from django.test import TestCase, override_settings
 
 from cveFeed import scan_concurrency as sc
@@ -261,10 +262,11 @@ class R1LanesTests(WatchdogCase):
         self.tick(5)
         self.assertIsNotNone(self.request())
 
-    def test_four_a_day_then_no_more(self):
+    def test_sixteen_a_day_then_no_more(self):
+        """The cap was four: it was spent by 9:28 am on the owner's server and a lane stood silent for 50 minutes. A restart that is verified fixed is a good restart."""
         self.break_lanes()
         state_actions = []
-        for _ in range(4):
+        for _ in range(16):
             self.tick(1000)
             self.tick(1000)
             if self.request():
@@ -272,7 +274,7 @@ class R1LanesTests(WatchdogCase):
                 self.probes.data['lanes'] = dict(LANES)
                 self.tick(200)  # verified
                 self.break_lanes()
-        self.assertEqual(len(state_actions), 4)
+        self.assertEqual(len(state_actions), 16)
         self.tick(1000)
         self.tick(1000)
         self.assertIsNone(self.request())
@@ -351,6 +353,39 @@ class StandDownTests(WatchdogCase):
         self.probes.data['update'] = {'phase': 'done', 'approved': False, 'locked': False, 'active': False}
         self.tick(30)  # the lanes are still absent: already seen for a long time, so it acts
         self.assertIsNotNone(self.request())
+
+    def test_a_stack_that_just_finished_an_update_is_given_time_to_start_its_lanes(self):
+        """11/9 10:22 pm: the update ended, a lane had not answered yet, and the watchdog restarted celery 10 seconds later, twice, then reported it could not fix it."""
+        self.break_lanes()
+        self.probes.data['update'] = {'phase': 'done', 'approved': False, 'locked': False, 'active': False, 'warming_up': True}
+        self.tick()
+        self.tick(400)
+        self.assertIsNone(self.request())
+        self.assertEqual(self.state('R1').status, 'standing_down')
+        self.probes.data['update'] = {'phase': 'done', 'approved': False, 'locked': False, 'active': False, 'warming_up': False}
+        self.tick(30)  # the warm-up is over and the lanes are still silent, but the three minutes start now
+        self.assertIsNone(self.request())
+        self.tick(200)
+        self.assertIsNotNone(self.request())
+
+    def test_the_warm_up_is_ten_minutes_after_the_phase_turns_done_and_no_longer(self):
+        from datetime import timedelta as td
+        from unittest import mock
+        for age, expected in ((60, True), (599, True), (601, False)):
+            changed = (timezone.now() - td(seconds=age)).isoformat()
+            with mock.patch('cveFeed.updater.read_phase', return_value={'phase': 'done', 'changed_at': changed}):
+                self.assertIs(snap_mod._just_updated('done'), expected, age)
+        self.assertFalse(snap_mod._just_updated('idle'))
+
+    def test_a_silent_lane_that_finished_a_task_a_moment_ago_is_not_restarted(self):
+        """11/9 11:00 pm: the CVE-feed lane missed pings while it completed a correlation every few seconds, and the watchdog restarted celery three times."""
+        from unittest import mock
+        self.break_lanes()
+        with mock.patch('reNgine.lane_memory.recent_progress', return_value={p: 20 for p in ('discovery', 'cve_feed', 'validation_priority', 'classic')}):
+            self.tick()
+            self.tick(400)
+        self.assertIsNone(self.request())
+        self.assertIn('busy, not gone', self.state('R1').status_text)
 
     def test_an_unreadable_update_state_stands_it_down(self):
         self.break_lanes()
@@ -829,6 +864,11 @@ class TickSafetyTests(WatchdogCase):
         self.assertLess(time.time() - started, 5)
         self.assertFalse(out['ok'])
         self.assertIn('stopped itself', out['skipped'])
+        self.assertIsNotNone(WatchdogState.objects.get(rule=wd.ALL).last_tick_at)  # a pass cut off by its limit still shows the watchdog was running
+
+    def test_the_tick_limit_leaves_room_for_a_pass_on_a_loaded_box_with_a_silent_lane(self):
+        """11/9: a pass took 18 s with a lane silent (each broadcast waits 3 s) and the 25 s limit cut off the slower ones, so the page said not running."""
+        self.assertGreaterEqual(wd.TICK_SECONDS, 40)
 
     def test_redis_db_and_celery_all_hanging_end_in_time(self):
         hang = lambda: time.sleep(30)  # noqa: E731

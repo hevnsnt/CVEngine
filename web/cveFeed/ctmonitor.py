@@ -65,6 +65,23 @@ redis.call('SET', KEYS[1], math.max(nxt, tonumber(ARGV[1])), 'EX', 900)
 return 1
 """
 MAX_INLINE_WAIT = 30          # seconds a lookup may sleep inside a worker slot; a longer wait goes back to the queue (see ``CtBusy``)
+MAX_IN_FLIGHT = 2             # requests to crt.sh under way at once, across every worker. The spacing above only spaces out the STARTS: with replies taking up to
+#                               REQUEST_TIMEOUT seconds a dozen overlapped, crt.sh answered 429 or timed out, and every miss became a retry (an exception
+#                               record built inside a greenlet: the classic lane crashed in the garbage collector doing exactly that, three times on 11/9 to 11/10)
+_FLIGHT_KEY = 'cvengine:crtsh:inflight'
+_FLIGHT_LUA = """
+local n = tonumber(redis.call('GET', KEYS[1]) or '0')
+if n >= tonumber(ARGV[1]) then return 0 end
+redis.call('INCR', KEYS[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+return 1
+"""
+_LEAVE_LUA = """
+local n = tonumber(redis.call('GET', KEYS[1]) or '0')
+if n > 0 then redis.call('DECR', KEYS[1]) end
+return 1
+"""
+_flight_local = {'n': 0}
 _local = {'next': 0.0}
 _local_lock = threading.Lock()
 _SLOT_KEY = 'cvengine:crtsh:next'
@@ -126,6 +143,55 @@ def push_back(seconds, now=time.time):
         _local['next'] = max(_local['next'], until)
 
 
+def _enter_flight():
+    """True when a request may go now (fewer than ``MAX_IN_FLIGHT`` are under way). The count lives in Redis for every worker, and expires on its own so a
+    worker that dies mid-request cannot hold a place for ever; without Redis it is counted per process."""
+    client = _redis()
+    if client is not None:
+        try:
+            return bool(client.eval(_FLIGHT_LUA, 1, _FLIGHT_KEY, MAX_IN_FLIGHT, 2 * REQUEST_TIMEOUT))
+        except Exception:  # noqa: BLE001 - a Redis hiccup must not stop the monitor
+            pass
+    with _local_lock:
+        if _flight_local['n'] >= MAX_IN_FLIGHT:
+            return False
+        _flight_local['n'] += 1
+        return True
+
+
+def _leave_flight():
+    client = _redis()
+    if client is not None:
+        try:
+            client.eval(_LEAVE_LUA, 1, _FLIGHT_KEY)
+            return
+        except Exception:  # noqa: BLE001
+            pass
+    with _local_lock:
+        _flight_local['n'] = max(0, _flight_local['n'] - 1)
+
+
+class _Flight:
+    """``with _Flight(sleep):`` holds one of the ``MAX_IN_FLIGHT`` places for the body, waiting up to ``MAX_INLINE_WAIT`` seconds for one; ``CtBusy`` when none
+    came free (the lookup goes back to the queue and no worker slot is held meanwhile)."""
+
+    def __init__(self, sleep):
+        self.sleep, self.held = sleep, False
+
+    def __enter__(self):
+        for _ in range(int(MAX_INLINE_WAIT)):
+            if _enter_flight():
+                self.held = True
+                return self
+            self.sleep(1)
+        raise CtBusy(10)
+
+    def __exit__(self, *exc):
+        if self.held:
+            _leave_flight()
+        return False
+
+
 def _retry_after(resp):
     try:
         return min(float(resp.headers.get('Retry-After')), MAX_BACKOFF)
@@ -160,33 +226,34 @@ def _fetch(domain, timeout=REQUEST_TIMEOUT, sleep=time.sleep):
             raise CtBusy(waiting)
         sleep(reserve_slot(random.uniform(*MIN_GAP)))
         last = attempt + 1 == MAX_ATTEMPTS
-        try:
-            resp = requests.get(CRT_SH_URL, params={'q': f'%.{domain}', 'output': 'json'}, timeout=timeout, stream=True)
-        except requests.Timeout as exc:
-            logger.warning('crt.sh lookup for %s timed out (attempt %s of %s): %s', domain, attempt + 1, MAX_ATTEMPTS, exc)
-            if last:
+        with _Flight(sleep):
+            try:
+                resp = requests.get(CRT_SH_URL, params={'q': f'%.{domain}', 'output': 'json'}, timeout=timeout, stream=True)
+            except requests.Timeout as exc:
+                logger.warning('crt.sh lookup for %s timed out (attempt %s of %s): %s', domain, attempt + 1, MAX_ATTEMPTS, exc)
+                if last:
+                    return None
+                push_back(min(2 ** attempt * 5, MAX_BACKOFF))
+                continue
+            except requests.RequestException as exc:
+                logger.warning('crt.sh lookup failed for %s: %s', domain, exc)
                 return None
-            push_back(min(2 ** attempt * 5, MAX_BACKOFF))
-            continue
-        except requests.RequestException as exc:
-            logger.warning('crt.sh lookup failed for %s: %s', domain, exc)
-            return None
-        status = resp.status_code if isinstance(getattr(resp, 'status_code', None), int) else 200
-        if status == 429 or status >= 500:
-            wait = _retry_after(resp) or min(2 ** attempt * 10, MAX_BACKOFF)
-            logger.info('crt.sh answered %s for %s; backing off %.0fs (attempt %s of %s)', status, domain, wait, attempt + 1, MAX_ATTEMPTS)
-            if last:
-                logger.warning('crt.sh lookup failed for %s: HTTP %s after %s attempts', domain, status, MAX_ATTEMPTS)
+            status = resp.status_code if isinstance(getattr(resp, 'status_code', None), int) else 200
+            if status == 429 or status >= 500:
+                wait = _retry_after(resp) or min(2 ** attempt * 10, MAX_BACKOFF)
+                logger.info('crt.sh answered %s for %s; backing off %.0fs (attempt %s of %s)', status, domain, wait, attempt + 1, MAX_ATTEMPTS)
+                if last:
+                    logger.warning('crt.sh lookup failed for %s: HTTP %s after %s attempts', domain, status, MAX_ATTEMPTS)
+                    return None
+                push_back(wait)
+                continue
+            try:
+                resp.raise_for_status()
+                entries = _read_json(resp)
+            except (requests.RequestException, ValueError, RecursionError) as exc:
+                logger.warning('crt.sh lookup failed for %s: %s', domain, exc)
                 return None
-            push_back(wait)
-            continue
-        try:
-            resp.raise_for_status()
-            entries = _read_json(resp)
-        except (requests.RequestException, ValueError, RecursionError) as exc:
-            logger.warning('crt.sh lookup failed for %s: %s', domain, exc)
-            return None
-        return entries if isinstance(entries, list) else []
+            return entries if isinstance(entries, list) else []
     return None
 
 

@@ -266,11 +266,18 @@ def clean_hygiene_check(body):
             row['error'] = _text(item['error'], 200)  # not asked or not probed: unknown, never "nothing there"
         out_certs.append(row)
     for item in mail:
-        if not isinstance(item, dict) or not isinstance(item.get('name'), str) or not item['name'] or not isinstance(item.get('findings'), list):
+        failed = isinstance(item, dict) and isinstance(item.get('error'), str) and bool(item['error'])  # an error row needs no findings
+        if not isinstance(item, dict) or not isinstance(item.get('name'), str) or not item['name'] or not (isinstance(item.get('findings'), list) or failed):
             continue
-        findings = [f for f in (_finding(x) for x in item['findings'][:MAX_MAIL_FINDINGS]) if f is not None]
-        out_mail.append({'name': _text(item['name'], 253), 'has_mx': item.get('has_mx') is True, 'findings': findings})
-    return {'certs': out_certs, 'mail': out_mail, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+        findings = [f for f in (_finding(x) for x in (item.get('findings') or [])[:MAX_MAIL_FINDINGS]) if f is not None]
+        row = {'name': _text(item['name'], 253), 'has_mx': item.get('has_mx') is True, 'findings': findings}
+        if isinstance(item.get('error'), str) and item['error']:
+            row['error'] = _text(item['error'], 200)  # the review of this name failed on the scanner: unknown, never "nothing there"
+        out_mail.append(row)
+    cleaned = {'certs': out_certs, 'mail': out_mail, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+    if isinstance(body.get('unknown_names'), list):  # names whose DNS lookup failed or timed out on the scanner (not "no MX record")
+        cleaned['unknown_names'] = [_text(n, 253) for n in body['unknown_names'][:MAX_MAIL] if isinstance(n, str) and n.strip()]
+    return cleaned
 
 
 MAX_RATINGS = 50

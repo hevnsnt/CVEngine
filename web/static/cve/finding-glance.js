@@ -4,7 +4,7 @@
 // server already sends; a signal that is not known says so.
 import { el, badge } from "/staticfiles/cve/ui.js";
 import { fmtLong, zoneLabel } from "/staticfiles/cve/prefs.js";
-import { templateSegments, textSegments } from "/staticfiles/cve/finding-glance-logic.js";
+import { proofOf, templateSegments, textSegments } from "/staticfiles/cve/finding-glance-logic.js";
 
 const CLASS_WORDS = {
   confirmed: "Confirmed",
@@ -313,8 +313,31 @@ function threatLine(d) {
   return line;
 }
 
+// The proof, first: when a check cvENGINE ran against this host reproduced the finding, say so before anything else and show what the host answered.
+// Everything underneath still folds away; this is the part a person reads to believe it. Nothing is drawn for a finding no check reproduced.
+function proofCard(d) {
+  const proof = proofOf(d.validation);
+  if (!proof) return null;
+  const card = el("section", "gl-card gl-proof");
+  card.append(el("h3", "gl-h", "Proven on this host"));
+  const line = el("p", "gl-proof-line");
+  line.append(`Reproduced by the ${proof.label}`);
+  if (proof.at) line.append(" on ", el("time", "gl-when", fmtLong(proof.at) || proof.at, { datetime: proof.at, title: `${proof.at} (shown in ${zoneLabel()})` }));
+  if (proof.summary) line.append(`: ${proof.summary}`);
+  card.append(line);
+  if (proof.display) card.append(el("p", "note", "Repeat it yourself:"), el("pre", "banner mono", proof.display));
+  proof.exchanges.forEach((e) => {
+    const name = e.kind.replace(/_/g, " ");
+    if (e.request) card.append(el("h4", "gl-h2", `Request (${name})`), el("pre", "banner mono gl-proof-pre", e.request));
+    if (e.response) card.append(el("h4", "gl-h2", "What the host answered"), el("pre", "banner mono gl-proof-pre", e.response));
+    if (e.reply) card.append(el("h4", "gl-h2", "The service replied"), el("pre", "banner mono gl-proof-pre", e.reply));
+  });
+  if (!proof.exchanges.length) card.append(el("p", "note", "No request or response was kept for this check."));
+  return card;
+}
+
 export function glance(d, { row, aiBadge, note }) {
   const grid = el("div", "gl-grid");
   grid.append(foundCard(d), confidenceCard(d, row), aiCard(d, aiBadge, note));
-  return [grid, threatLine(d)].filter(Boolean);
+  return [proofCard(d), grid, threatLine(d)].filter(Boolean);
 }

@@ -82,6 +82,10 @@ class ScopeTests(SimpleTestCase):
         self.assertEqual(out['ports'], [{'host': '192.0.2.1', 'port': 8443}])
         self.assertEqual(out['urls'], [{'url': 'https://www.example.com/a', 'status': 301}])
 
+    def test_the_placeholder_bbot_makes_for_a_wildcard_zone_is_not_a_host(self):
+        out = self.clean({'subdomains': ['www.example.com', '_wildcard.example.com', 'a._wildcard.example.com']})
+        self.assertEqual(out['subdomains'], ['www.example.com'])
+
     def test_an_exact_host_keeps_only_itself(self):
         out = self.clean({'subdomains': ['example.com', 'www.example.com'], 'edges': [{'parent': 'example.com', 'child': 'www.example.com'}],
                           'events': [{'type': 'DNS_NAME', 'label': 'www.example.com', 'host': 'www.example.com', 'parent_host': 'example.com', 'module': 'crt'}]},

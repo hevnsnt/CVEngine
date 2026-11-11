@@ -128,6 +128,14 @@ def refresh_live_snapshots():
     return live_refresh.refresh_hot_scopes()
 
 
+@app.task(name='refresh_openvas_queue', bind=False, queue='live_cache_queue', ignore_result=True, time_limit=300, soft_time_limit=270)
+def refresh_openvas_queue(project_id):
+    """Asked by the Sentinels page when its kept OpenVAS queue explanation for a project is over a minute old (``cveFeed.openvas_scan.queue_explained``):
+    work it out again off the request. Reads the database and writes the cache only; it never touches a target."""
+    from cveFeed import openvas_scan
+    openvas_scan.refresh_queue(int(project_id))
+
+
 @app.task(name='openvas_sweep', bind=False, queue='openvas_queue')
 def openvas_sweep():
     """Every 15 minutes while the OpenVAS add-on is switched on (the beat entry is disabled otherwise): one step of the slow GVM sweep, which
@@ -771,13 +779,21 @@ def template_test_for_cve(cve_pk, hosts, project_id=None, batch=None):
             hit_batch.leave(batch)  # also when the test failed: the run's count must still reach zero
 
 
+VALIDATE_SLICE_SECONDS = 45  # how long one validate_findings task holds a worker slot before handing the rest back to the queue
+
+
 @app.task(name="validate_findings", bind=False, queue="cve_feed_queue")
 def validate_findings(project_id, triage_ids, scan_id=None):
     """Run the validation checks (cveFeed.validation) for ``triage_ids``, all of one project: one task per project, never a list
     that mixes tenants. Started by the pipeline's triage stage (``scan_id`` then carries its stop flag) and by the validation sweep."""
     from cveFeed import validation
     try:
-        return validation.run_validation(project_id, triage_ids, scan_id=scan_id)
+        result = validation.run_validation(project_id, triage_ids, scan_id=scan_id, budget_seconds=VALIDATE_SLICE_SECONDS)
+        left = result.pop('deferred_ids', None)
+        if left:  # the rest goes to the back of the queue: the lane's slot is free for the scheduler's ticks in between
+            validate_findings.apply_async((project_id, left, scan_id))
+            result['deferred'] = len(left)
+        return result
     except Exception as exc:  # noqa: BLE001 - validation is best effort and must never surface as a task failure
         logger.exception("validation failed for project %s", project_id)
         return {"error": str(exc)[:200]}
@@ -1920,11 +1936,24 @@ def check_for_updates():
     return {"status": state["status"], "latest": state["latest"]}
 
 
+FEED_SENTINELS_LOCK = "cvengine:feed_sentinels:lock"
+FEED_SENTINELS_LOCK_SECONDS = 600  # a worker that dies mid-run leaves the lock for this long
+
+
 @app.task(name="feed_sentinels", bind=False, queue="cve_feed_queue")
 def feed_sentinels():
     """Every minute: keep twice the Sentinels' slots of work queued behind what they are running (see ``cveFeed.coverage_topup.feed_sentinels``)."""
+    from django.core.cache import cache
+
     from cveFeed import coverage_topup
-    return coverage_topup.feed_sentinels()
+    # One at a time: it is scheduled every minute, and a run that takes longer than a minute must not stack another behind itself. On 11/10 four of them
+    # sat in the CVE-feed lane at once, each in the same slow query, and everything else on that lane waited behind them.
+    if not cache.add(FEED_SENTINELS_LOCK, 1, FEED_SENTINELS_LOCK_SECONDS):
+        return {'skipped': 'the previous run is still going'}
+    try:
+        return coverage_topup.feed_sentinels()
+    finally:
+        cache.delete(FEED_SENTINELS_LOCK)
 
 
 @app.task(name="work_planner_tick", bind=False, queue="cve_feed_queue", time_limit=120, soft_time_limit=100)
@@ -2133,6 +2162,8 @@ def report_resources():
     tunables.reconcile()  # republish the other configMaxxing tunables, so a flushed Redis heals (never raises)
     from cveFeed import autotune
     autotune.reconcile()  # republish the auto-tuned numbers (empty unless the mode is Auto), so a flushed Redis heals (never raises)
+    from cveFeed import db_stats
+    db_stats.analyze_if_needed()  # table statistics lost in a crash or never refreshed (one cheap read; never raises)
     from cveFeed import scoring
     scoring.rescore_if_heat_cap_changed()  # a heat policy saved on configMaxxing reaches the stored host scores (one GETSET; never raises)
     try:  # ...and the switch pages nothing: what is fire under the new rule is marked as announced (one cheap read when nothing changed)
@@ -2230,9 +2261,16 @@ def stage_run_resume(run_id):
 
 
 @app.task(name='stage_run_drive', bind=False, queue='cve_feed_queue')
-def stage_run_drive(run_id):
-    """Keep the claim, queue and completion budgets of a waiting stage, as its blocking wait did (``agentapi.stage_runs.drive``)."""
+def stage_run_drive(run_id, guarded=False):
+    """Keep the claim, queue and completion budgets of a waiting stage, as its blocking wait did (``agentapi.stage_runs.drive``). ``guarded``: this was the
+    run's one pending delayed drive (``stage_runs._schedule_drive``); it is running now, so the next may be scheduled."""
     from agentapi import stage_runs
+    if guarded:
+        from django.core.cache import cache
+        try:
+            cache.delete(stage_runs.drive_key(run_id))
+        except Exception:  # noqa: BLE001 - the key expires on its own
+            pass
     return stage_runs.drive(run_id)
 
 

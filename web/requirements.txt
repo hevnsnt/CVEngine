@@ -1,5 +1,5 @@
 beautifulsoup4==4.15.0
-celery==5.6.3
+celery==5.7.0
 # celery's broker stack, pinned so CI and the images run the same one. kombu decides how a dropped Redis connection is handled
 # (reNgine/broker_acks.py, reNgine/gevent_pidbox.py): run tests/test_gevent_worker_e2e.py on the new version before bumping any of these
 kombu==5.7.0
@@ -7,7 +7,7 @@ amqp==5.4.2
 billiard==4.3.2
 vine==5.1.0
 discord-webhook==1.4.1
-Django==5.2.18
+Django==6.0.10
 django-ace==1.44.0
 django-celery-beat==2.9.0
 django-login-required-middleware==0.9.0
@@ -16,10 +16,10 @@ django-mathfilters==1.0.0
 django-timezone-field==7.2.2
 djangorestframework==3.18.3
 dotted-dict==2.0.0
-gunicorn==26.2.0
+gunicorn==27.0.0
 gevent==26.9.0
 humanize==4.16.0
-Markdown==3.11.2
+Markdown==3.11.3
 Pillow>=13.0.0,<14
 PyYAML==6.0.3
 PySocks==1.7.1
@@ -30,12 +30,12 @@ requests==2.34.2
 tldextract==5.4.0
 validators==0.36.0
 watchdog==6.0.0
-whatportis==0.8
+whatportis==0.8  # 0.8.2 pins requests==2.25.1, which cannot be installed beside requests 2.34
 weasyprint==70.0
-pypdf==6.21.4  # reads text back out of the generated report PDFs in the tests; pure Python, BSD-3-Clause
+pypdf==7.0.1  # stamps the page numbers on a long report rendered in parts (cveFeed/report_render.py) and reads report text back in the tests; pure Python, BSD-3-Clause
 xmltodict==1.0.4
 django-environ==0.14.0
-dnspython==2.9.0
+dnspython==2.9.2
 cryptography==50.0.2
 packaging==26.3
 # The scanner library (hevnsnt/cvENGINE-sentinel, cvengine_scanner/): the scan policy, the tool output parsers and the pure web fingerprint

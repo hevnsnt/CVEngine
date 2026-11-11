@@ -117,6 +117,22 @@ class NmapDispatchTests(DispatchBase):
         port = IpAddress.objects.get(address='192.0.2.10').ports.get(number=443)
         self.assertEqual((port.product, port.version, port.source), ('nginx', '1.25', 'nmap'))
 
+    def test_a_host_nmap_timed_out_on_is_not_fingerprinted_and_stays_due(self):
+        """nmap gave up on the host (timedout): a row with no services is not a fingerprint. Nothing is stored for it, it is not reported as covered, and the
+        host that finished in the same chunk is still persisted and reported done."""
+        from reNgine.resources import ScannerUnavailable
+        IpAddress.objects.create(address='192.0.2.11')
+        self.make_sentinel(['nmap'])
+        result = {'outcome': 'done', 'hosts': [
+            {'ip': '192.0.2.10', 'os_guess': '', 'timed_out': True, 'ports': []},
+            {'ip': '192.0.2.11', 'os_guess': 'Linux 6.X', 'ports': [{'number': 22, 'protocol': 'tcp', 'state': 'open', 'service_name': 'ssh'}]}]}
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
+            with self.assertRaises(ScannerUnavailable) as caught:
+                dispatch.try_nmap(self.project, self.scan, ['192.0.2.10', '192.0.2.11'], timeout=5)
+        self.assertEqual(caught.exception.done, ['192.0.2.11'])
+        self.assertTrue(IpAddress.objects.get(address='192.0.2.11').ports.filter(number=22).exists())
+        self.assertFalse(IpAddress.objects.get(address='192.0.2.10').ports.exists())
+
     def test_an_omitted_sentinel_host_stays_due_and_is_never_scanned_here(self):
         from reNgine.resources import ScannerUnavailable
         self.make_sentinel(['nmap'])
@@ -223,6 +239,22 @@ class NaabuDispatchTests(DispatchBase):
             runner = dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)
             found = runner(['192.0.2.10'])
         self.assertEqual(found, {'192.0.2.10': [22, 80]})
+
+    def test_a_scan_that_ran_out_of_time_leaves_its_unfinished_addresses_due(self):
+        """A full-port scan that hit its limit did not look at the addresses it did not reach. They are not recorded as scanned with nothing open: the runner
+        reports them and ``port_stage.discover`` records them failed, so the next pass asks again, while the addresses it did finish are done."""
+        from cveFeed import ledger
+        from cveFeed.models import ServiceRun
+        self.make_sentinel(['naabu'])
+        result = {'outcome': 'done', 'ports': {'192.0.2.10': [22]}, 'incomplete': True, 'unfinished': ['192.0.2.11']}
+        with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)), \
+                mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda ips: list(ips)):
+            runner = dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)
+            found = port_stage.discover(['192.0.2.10', '192.0.2.11'], self.scan, runner)
+        self.assertEqual(runner.unfinished, {'192.0.2.11'})
+        status = dict(ServiceRun.objects.filter(service=port_stage.SERVICE).values_list('asset', 'status'))
+        self.assertEqual(status, {'192.0.2.10': 'done', '192.0.2.11': 'failed'})
+        self.assertEqual(found['192.0.2.10'], [22])
 
     def test_timeout_waits_for_a_scanner_and_never_runs_here(self):
         from reNgine.resources import ScannerUnavailable
@@ -415,6 +447,26 @@ class NucleiDispatchTests(DispatchBase):
         self.assertEqual(light_result['techs'], {'www.example.test': ['jQuery']})
         sub = Subdomain.objects.get(scan_history=self.scan, name='www.example.test')
         self.assertIn('jQuery', [t.name for t in sub.technologies.all()])
+
+    def test_a_host_the_sentinel_could_not_reach_is_not_recorded_as_scanned(self):
+        """nuclei exits 0 with no output for a host it could not connect to, so \"done, no findings\" proves nothing about it. The Sentinel names the hosts it did
+        not reach (``unreachable``) and a name this server cannot resolve is never sent; the stage records both as failed, not done, and the reached host as done."""
+        from cveFeed.models import ServiceRun
+        sub = Subdomain.objects.get(scan_history=self.scan, name='www.example.test')
+        Subdomain.objects.create(scan_history=self.scan, name='down.example.test', target_domain=self.domain)
+        Subdomain.objects.create(scan_history=self.scan, name='gone.example.test', target_domain=self.domain)
+        for sub_ in Subdomain.objects.filter(scan_history=self.scan).exclude(pk=sub.pk):
+            sub_.ip_addresses.add(IpAddress.objects.create(address='192.0.2.%d' % (50 + sub_.pk % 100)))
+        self.make_sentinel(['nuclei_light'])
+        result = {'outcome': 'done', 'findings': [], 'unreachable': ['down.example.test']}
+        stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=5)
+        with mock.patch('agentapi.sentinel_dispatch._resolves', side_effect=lambda host, timeout: host != 'gone.example.test'):
+            with mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=_answer_queued_task(result)):
+                nuclei_scan.run_light_nuclei(self.scan.id, stream=stream)
+        status = dict(ServiceRun.objects.filter(service=nuclei_scan.LIGHT_SERVICE).values_list('asset', 'status'))
+        self.assertEqual(status.get('www.example.test'), 'done')
+        self.assertEqual(status.get('down.example.test'), 'failed')
+        self.assertEqual(status.get('gone.example.test'), 'failed')
 
     @mock.patch.dict('os.environ', {'CVENGINE_STAGE_PARALLEL': '1'})  # the serial loop, one dispatch_or_none per chunk; test_stage_parallel covers the fan-out
     def test_every_target_of_a_long_list_is_sent_in_chunks_and_an_unserved_chunk_waits(self):

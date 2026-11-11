@@ -12,7 +12,7 @@
 <p align="center">
   <img alt="License GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-black">
   <img alt="Python 3.14" src="https://img.shields.io/badge/python-3.14-black">
-  <img alt="Django 5.2 LTS" src="https://img.shields.io/badge/django-5.2%20LTS-black">
+  <img alt="Django 6.0" src="https://img.shields.io/badge/django-6.0-black">
   <img alt="PostgreSQL 18" src="https://img.shields.io/badge/postgresql-18-black">
   <img alt="Runs in Docker" src="https://img.shields.io/badge/runs%20in-docker-black">
 </p>

@@ -303,6 +303,7 @@ ALLOWED = {
         'cveFeed/heavy_process.py',
         'cveFeed/report_pdf.py',
         'cveFeed/tasks.py',
+        'cveFeed/templatefixture.py',  # runs a model-written regex in a time-limited child interpreter; no scan tool (review 2 F5)
         'reNgine/resources.py',
         'reNgine/tasks.py',
         'reNgine/time_limits.py',

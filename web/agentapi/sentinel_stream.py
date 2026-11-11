@@ -164,6 +164,12 @@ def _screenshot(item, scope):
     return {'host': host, 'url': scope.url(item.get('url')) or '', 'filename': filename, 'content_type': kind, 'data': data}
 
 
+def _wildcard_placeholder(name):
+    """True for the name the discovery scanner makes up for a wildcard zone (``_wildcard.<parent>``): it is a marker, not a host, and every stage after discovery would scan
+    it and see the zone's catch-all answer."""
+    return any(label.startswith('_wildcard') for label in name.split('.'))
+
+
 def clean_partial(task, body):
     """The typed, clipped batch of ``task``'s report, held to the scope its target carries: anything out of scope, malformed or unexpected is
     dropped, every string clipped, every list capped. 400 when the body is not a batch at all (a list over its cap, a missing ``seq``)."""
@@ -180,7 +186,7 @@ def clean_partial(task, body):
     if isinstance(name, str) and _SCAN_NAME.match(name) and name:
         out['scan_name'] = name
     try:
-        out['subdomains'] = sorted({n for n in (scope.name(v) for v in _list(body, 'subdomains') if isinstance(v, str)) if n})
+        out['subdomains'] = sorted({n for n in (scope.name(v) for v in _list(body, 'subdomains') if isinstance(v, str)) if n and not _wildcard_placeholder(n)})
         out['ips'] = sorted({a for a in (scope.address(v) for v in _list(body, 'ips') if isinstance(v, str)) if a})
         ports = set()
         for item in _list(body, 'ports'):

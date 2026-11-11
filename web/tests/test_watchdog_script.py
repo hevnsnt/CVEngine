@@ -127,7 +127,7 @@ class WatchdogScriptTests(unittest.TestCase):
 
     def test_a_tick_is_bounded_by_timeout_in_the_container(self):
         self.run_script('tick')
-        self.assertRegex([c for c in self.docker_calls() if 'watchdog_tick' in c][0], r'exec -T web timeout -k 3 40 python3')
+        self.assertRegex([c for c in self.docker_calls() if 'watchdog_tick' in c][0], r'exec -T web timeout -k 3 55 python3')
 
     # ---- the request file ----
 
@@ -289,13 +289,13 @@ class WatchdogScriptTests(unittest.TestCase):
         self.run_script('act')
         self.assertTrue(self.result()['ok'])
 
-    def test_eight_restarts_in_a_day_is_the_hosts_limit(self):
+    def test_twenty_four_restarts_in_a_day_is_the_hosts_limit(self):
         now = int(time.time())
-        (self.state / 'watchdog-actions.log').write_text(''.join(f'{now - 3000 - i * 100} restart-celery R1\n' for i in range(8)))
+        (self.state / 'watchdog-actions.log').write_text(''.join(f'{now - 3000 - i * 100} restart-celery R1\n' for i in range(24)))
         self.request('restart-celery-beat', 'R6', 'ffffffffffff')
         self.run_script('act')
         self.assertEqual([c for c in self.docker_calls() if '--force-recreate' in c], [])
-        self.assertIn('limit 8', self.result()['detail'])
+        self.assertIn('limit 24', self.result()['detail'])
 
     def test_one_action_at_a_time(self):
         self.hold(self.state / 'watchdog-act.lock')

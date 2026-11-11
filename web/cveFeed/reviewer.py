@@ -730,7 +730,7 @@ _USAGE_CATEGORIES = {'auth': 'provider_auth', 'rate_limit': 'provider_rate_limit
 
 def record_usage(body, now=None):
     """Take one call report from the container: ``{stage, provider, model, status, category, stop_reason, input_tokens, output_tokens,
-    duration_ms}``. One AIUsage row. Raises VerdictError for a stage that is not one of the container's own two jobs."""
+    cache_read_tokens, cache_write_tokens, duration_ms}``. One AIUsage row. Raises VerdictError for a stage that is not one of the container's own two jobs."""
     import re
     from cveFeed import ai_jobs
     from cveFeed.models import AIUsage
@@ -754,7 +754,8 @@ def record_usage(body, now=None):
     AIUsage.objects.create(
         provider=re.sub(r'[^a-z0-9_-]', '', str(body.get('provider') or '').lower())[:32], model=model[:200] if ai_jobs.MODEL_NAME.match(model) else '',
         stage=body['stage'], status=status, error_category=category, stop_reason=stop[:24] if re.fullmatch(r'[a-z_]{1,24}', stop) else '',
-        input_tokens=count('input_tokens'), output_tokens=count('output_tokens'), duration_ms=count('duration_ms', 24 * 3600 * 1000), started_at=now)
+        input_tokens=count('input_tokens'), output_tokens=count('output_tokens'), cache_read_tokens=count('cache_read_tokens'),
+        cache_write_tokens=count('cache_write_tokens'), duration_ms=count('duration_ms', 24 * 3600 * 1000), started_at=now)
     return {'recorded': True}
 
 

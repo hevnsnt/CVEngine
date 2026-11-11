@@ -75,8 +75,8 @@ if [ "$mode" = tick ]; then
   exec 7>"$STATE/watchdog.lock"
   flock -n 7 || exit 0  # the previous tick is still running
   layout || { log "tick: could not work out the Compose layout"; exit 1; }
-  # `timeout` is the hard bound around the tick's own limit (25 seconds) and its own timer (33): the tick ends itself, and this kills it if it does not
-  out=$(timeout -k 5 45 "${COMPOSE[@]}" exec -T web timeout -k 3 40 python3 manage.py watchdog_tick 2>&1 </dev/null 7>&- 8>&-)
+  # `timeout` is the hard bound around the tick's own limit (40 seconds) and its own timer (55): the tick ends itself, and this kills it if it does not
+  out=$(timeout -k 5 65 "${COMPOSE[@]}" exec -T web timeout -k 3 55 python3 manage.py watchdog_tick 2>&1 </dev/null 7>&- 8>&-)
   rc=$?
   summary=$(printf '%s\n' "$out" | grep '^{' | tail -n 1)  # the command prints one JSON line; Django's start-up chatter around it is not for the log
   if [ $rc -ne 0 ]; then
@@ -109,7 +109,7 @@ case $action in prune-docker) gap=1800;; *) gap=600;; esac
 last=$(awk -v a="$action" '$2 == a { t = $1 } END { print t + 0 }' "$ACTIONS_LOG" 2>/dev/null || echo 0)
 today=$(awk -v n="$now" '$2 != "prune-docker" && n - $1 < 86400 { c++ } END { print c + 0 }' "$ACTIONS_LOG" 2>/dev/null || echo 0)
 if (( now - last < gap )); then log "act: refused $action: done $(( (now - last) / 60 )) minutes ago"; answer failed "refused by the host: $action was done $(( (now - last) / 60 )) minutes ago (limit: one per $((gap / 60)) minutes)."; exit 0; fi
-if [ "$action" != prune-docker ] && (( today >= 8 )); then log "act: refused $action: $today restarts in the last day"; answer failed "refused by the host: $today restarts in the last 24 hours (limit 8)."; exit 0; fi
+if [ "$action" != prune-docker ] && (( today >= 24 )); then log "act: refused $action: $today restarts in the last day"; answer failed "refused by the host: $today restarts in the last 24 hours (limit 24)."; exit 0; fi
 printf '%s %s %s\n' "$now" "$action" "$rule" >>"$ACTIONS_LOG"
 if [ "$(wc -l <"$ACTIONS_LOG" 2>/dev/null || echo 0)" -gt 500 ]; then tail -n 200 "$ACTIONS_LOG" >"$ACTIONS_LOG.tmp" && mv -f "$ACTIONS_LOG.tmp" "$ACTIONS_LOG"; fi
 

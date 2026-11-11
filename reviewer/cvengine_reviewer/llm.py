@@ -96,7 +96,9 @@ def _anthropic(provider, system, user, schema, max_tokens, effort):
         raise ModelError('the answer was cut off at the reply limit', 'truncated')
     text = ''.join(block.text for block in message.content if getattr(block, 'type', '') == 'text')
     usage = {'input_tokens': int(getattr(message.usage, 'input_tokens', 0) or 0),
-             'output_tokens': int(getattr(message.usage, 'output_tokens', 0) or 0)}
+             'output_tokens': int(getattr(message.usage, 'output_tokens', 0) or 0),
+             'cache_read_tokens': int(getattr(message.usage, 'cache_read_input_tokens', 0) or 0),
+             'cache_write_tokens': int(getattr(message.usage, 'cache_creation_input_tokens', 0) or 0)}
     return text, usage, message.model or model
 
 
@@ -570,6 +572,21 @@ def _usage(target, data):
             number(details.get('cached_tokens')), None)
 
 
+def _cached_system(url, model, system, options):
+    """``system`` as one text block marked for Anthropic's prompt cache with the job's ``cache_ttl`` ('5m' or '1h', set by the server per
+    stage), or ``system`` unchanged: when the job names no lifetime, when the request does not go to Anthropic's own host (a gateway may
+    refuse the field), or when the prompt is clearly under the model's minimum (estimated high, at 3 characters a token). The system prompt
+    is the stage's fixed text; the job's data is in the user turn and is never marked."""
+    ttl = (options or {}).get('cache_ttl')
+    if ttl not in ('5m', '1h') or not isinstance(system, str) or not system:
+        return system
+    if (urllib.parse.urlsplit(url).hostname or '').lower() != 'api.anthropic.com':
+        return system
+    if -(-len(system) // 3) < profiles.cache_min_tokens(model):
+        return system
+    return [{'type': 'text', 'text': system, 'cache_control': {'type': 'ephemeral', **({'ttl': '1h'} if ttl == '1h' else {})}}]
+
+
 def _request(target, system, user, schema, options, image, factor, level):
     """``(url, headers, body)`` of one completion at structured level ``level``."""
     transport, model = target.profile.transport, target.model
@@ -580,9 +597,10 @@ def _request(target, system, user, schema, options, image, factor, level):
                        {'type': 'text', 'text': user}]
         else:
             content = user
-        body = {'model': model, 'max_tokens': cap, 'system': system, 'messages': [{'role': 'user', 'content': content}],
-                **reasoning_fields(target, cap)}
-        return _anthropic_url(target), _headers(target), body
+        url = _anthropic_url(target)
+        body = {'model': model, 'max_tokens': cap, 'system': _cached_system(url, model, system, options),
+                'messages': [{'role': 'user', 'content': content}], **reasoning_fields(target, cap)}
+        return url, _headers(target), body
     if transport == 'ollama':
         message = {'role': 'user', 'content': user, **({'images': [image['data']]} if image else {})}
         body = {'model': model, 'stream': False, 'messages': [{'role': 'system', 'content': system}, message],

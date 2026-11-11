@@ -1,5 +1,6 @@
 """The one line above the OpenVAS queue's collapsed "Not due" list: the per-host reasons grouped into stable categories, counted on the server over every host."""
 import os
+import time
 from unittest import mock
 
 from django.core.cache import cache
@@ -117,3 +118,55 @@ class QueueTests(Fixture, TestCase):
         self.assertEqual(by, {'not_fire_smoke': 1, 'scanned_this_week': 1, 'failed_lately': 1})  # www is clean
         self.assertEqual(data['not_due_summary'], '3 not due: 1 not Fire or Smoke, 1 scanned this week, 1 failed or interrupted lately')
         self.assertEqual(data['counts']['not_due'], 3)
+
+
+class QueueNeverWaitsTests(Fixture, TestCase):
+    """The Sentinels page reads the kept OpenVAS explanation and never waits for a new one (``openvas_scan.queue_explained``)."""
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+        self.addCleanup(cache.clear)
+        self.first = [row('a.example.test', 'excluded from scanning')]
+        self.second = [row('a.example.test', 'excluded from scanning'), row('b.example.test', 'excluded from scanning')]
+
+    def test_the_first_look_works_it_out_once_and_the_next_one_inside_a_minute_does_no_work(self):
+        with mock.patch.object(ov, 'explain', return_value=self.first) as explain, mock.patch('cveFeed.tasks.refresh_openvas_queue.delay') as delay:
+            self.assertEqual(ov.overview([self.project.id])['counts']['not_due'], 1)
+            self.assertEqual(ov.overview([self.project.id])['counts']['not_due'], 1)
+        self.assertEqual(explain.call_count, 1)
+        delay.assert_not_called()
+
+    def test_an_old_answer_is_shown_at_once_and_one_refresh_is_asked_for(self):
+        with mock.patch.object(ov, 'explain', return_value=self.first):
+            ov.overview([self.project.id])
+        later = time.time() + ov.QUEUE_FRESH_SECONDS + 5
+        with mock.patch.object(ov, 'explain', return_value=self.second) as explain, mock.patch('cveFeed.tasks.refresh_openvas_queue.delay') as delay, \
+                mock.patch.object(ov.time, 'time', return_value=later):
+            self.assertEqual(ov.overview([self.project.id])['counts']['not_due'], 1)  # the kept answer, no waiting
+            self.assertEqual(ov.overview([self.project.id])['counts']['not_due'], 1)
+        explain.assert_not_called()
+        delay.assert_called_once_with(self.project.id)  # one refresh, not one per poll
+
+    def test_the_refresh_replaces_the_answer_and_frees_the_next_one(self):
+        with mock.patch.object(ov, 'explain', return_value=self.first):
+            ov.overview([self.project.id])
+        cache.add(f'{ov._queue_key(self.project.id)}:refreshing', 1, 300)
+        with mock.patch.object(ov, 'explain', return_value=self.second):
+            from cveFeed.tasks import refresh_openvas_queue
+            refresh_openvas_queue(self.project.id)
+        self.assertIsNone(cache.get(f'{ov._queue_key(self.project.id)}:refreshing'))
+        self.assertEqual(ov.overview([self.project.id])['counts']['not_due'], 2)
+
+    def test_a_broker_that_cannot_be_reached_still_shows_the_page(self):
+        with mock.patch.object(ov, 'explain', return_value=self.first):
+            ov.overview([self.project.id])
+        with mock.patch('cveFeed.tasks.refresh_openvas_queue.delay', side_effect=OSError('broker down')), \
+                mock.patch.object(ov.time, 'time', return_value=time.time() + 120):
+            self.assertEqual(ov.overview([self.project.id])['counts']['not_due'], 1)
+        self.assertIsNone(cache.get(f'{ov._queue_key(self.project.id)}:refreshing'))  # asked again at the next poll
+
+    def test_a_project_no_longer_opted_in_drops_its_kept_answer(self):
+        cache.set(ov._queue_key(424242), {'at': 0, 'value': {'rows': [], 'ready': 0, 'refused': 0, 'groups': []}}, 60)
+        self.assertIsNone(ov.refresh_queue(424242))
+        self.assertIsNone(cache.get(ov._queue_key(424242)))

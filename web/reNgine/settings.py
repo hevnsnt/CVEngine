@@ -109,7 +109,10 @@ DATABASES = {
         # No JIT. CVEngine's host queries are large (one row per host: window functions, a dozen correlated subqueries) and Postgres
         # overestimates their cost, so it compiled each one with LLVM before running it: a 0.1 s query took 2 s here and up to a minute
         # on a busy 3-core server, which is what made a 2,000-host project's dashboard slow to open. The queries themselves are cheap.
-        'OPTIONS': {'options': '-c jit=off'},
+        # The web service gives every statement at most CVENGINE_WEB_STATEMENT_TIMEOUT_MS (docker-compose.yml: 30000; 0 = no limit, the default for the workers
+        # and the watchdog, whose long statements are by design). Without it a slow search kept running in Postgres after the client gave up (review 2 F2).
+        'OPTIONS': {'options': '-c jit=off' + (f' -c statement_timeout={env.int("CVENGINE_WEB_STATEMENT_TIMEOUT_MS", default=0)}'
+                                              if env.int('CVENGINE_WEB_STATEMENT_TIMEOUT_MS', default=0) > 0 else '')},
         # A new connection costs 3.8 ms and a backend process on the database (a dozen Sentinels and a few browsers polling every few seconds opened and
         # closed one per request). The web container sets this to 60 (docker-compose.yml): its 2 x 8 threads then hold at most 16 connections. Left at 0 for the
         # Celery workers, whose gevent greenlets would each keep one.
@@ -131,6 +134,8 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'django.contrib.humanize',
+    # Django 6.0 requires it for ArrayField (postgres.E005); it adds the Postgres field types and lookups only, no tables
+    'django.contrib.postgres',
     'rest_framework',
     'dashboard.apps.DashboardConfig',
     'targetApp.apps.TargetappConfig',

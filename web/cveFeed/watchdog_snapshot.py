@@ -196,7 +196,27 @@ def update_state():
         logger.debug('watchdog: update phase unreadable', exc_info=True)
     approved = os.path.lexists(updater._file('.update-approved'))
     locked = _lock_held(os.path.join(getattr(settings, 'RENGINE_HOME', '') or '', '.update-lock'))
-    return {'phase': phase, 'approved': approved, 'locked': locked, 'active': in_progress or approved or locked}
+    return {'phase': phase, 'approved': approved, 'locked': locked, 'active': in_progress or approved or locked, 'warming_up': _just_updated(phase)}
+
+
+WARMUP_SECONDS = 600  # a worker lane of a freshly started stack can take minutes to answer its first ping (the CVE-feed lane took about ten on 11/9)
+
+
+def _just_updated(phase):
+    """True for ``WARMUP_SECONDS`` after an update finished: the containers were just recreated and their lanes are still starting. Restarting them again
+    in that window (the watchdog did, 10 seconds after the 11/9 update, and then reported "could not fix it") only starts the warm-up over."""
+    if phase != 'done':
+        return False
+    try:
+        from datetime import datetime
+
+        from django.utils import timezone
+
+        from cveFeed import updater
+        changed = updater.read_phase().get('changed_at')
+        return bool(changed) and (timezone.now() - datetime.fromisoformat(changed)).total_seconds() < WARMUP_SECONDS
+    except Exception:  # noqa: BLE001 - unreadable means no grace, as before
+        return False
 
 
 def _lock_held(path):

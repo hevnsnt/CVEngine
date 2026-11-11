@@ -437,6 +437,34 @@ class ValidationBase(TestCase):
 		return stats, calls
 
 
+class BudgetTests(ValidationBase):
+	def worked(self, rows):
+		"""How many of ``rows`` a run actually validated (their status moved off none or pending)."""
+		return Triage.objects.filter(pk__in=[r.pk for r in rows]).exclude(validation_status__in=('none', 'pending')).count()
+
+	def test_a_spent_budget_stops_after_one_finding_and_names_the_rest(self):
+		for n in range(3):
+			self.match(name=f'h{n}.v.test')
+		rows = self.rows()
+		self.assertEqual(len(rows), 3)
+		stats, _ = self.run_validation(rows, budget_seconds=-1)
+		self.assertEqual(stats['rows'], 3)
+		self.assertEqual(len(stats['deferred_ids']), 2)
+		self.assertEqual(self.worked(rows), 1)  # one finding was worked, then the slot was handed back
+		left = [r for r in rows if r.pk in stats['deferred_ids']]
+		stats2, _ = self.run_validation(left, budget_seconds=-1)
+		self.assertEqual(len(stats2['deferred_ids']), 1)  # each slice makes progress, so the chain ends
+		self.assertEqual(self.worked(rows), 2)
+
+	def test_no_budget_runs_everything_as_before(self):
+		for n in range(3):
+			self.match(name=f'h{n}.v.test')
+		rows = self.rows()
+		stats, _ = self.run_validation(rows)
+		self.assertNotIn('deferred_ids', stats)
+		self.assertEqual(self.worked(rows), 3)
+
+
 class ApplyValidationTests(ValidationBase):
 	def check(self, kind='nuclei_template'):
 		argv = ['nuclei', '-t', '/t/cve-2099-1.yaml', '-u', 'www.v.test', '-ni']

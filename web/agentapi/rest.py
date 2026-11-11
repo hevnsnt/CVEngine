@@ -9,6 +9,7 @@ from django.http import JsonResponse
 from django.http.response import HttpResponseBase
 
 from agentapi import agent_broker as broker
+from agentapi import db_timeout, storage_safe
 from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
 from agentapi import inventory
@@ -43,7 +44,7 @@ def _body(request):
         raise ApiError(400, 'body must be valid JSON')
     if not isinstance(data, dict):
         raise ApiError(400, 'body must be a JSON object')
-    return data
+    return storage_safe.clean(data)  # a NUL byte or a lone surrogate in any string is refused by Postgres or the encoder: cleaned once, here (review 2 F3)
 
 
 def _need(data, *keys):
@@ -517,7 +518,7 @@ ROUTES = [
      lambda r, c, **k: reviewer_api.ops_snapshot(r, c)),
     ('POST', r'reviewer/ops/report', 'AI reviewer token only: the operations job\'s report {alerts: [{code, severity, diagnosis}], actions: [feed_sentinels|refresh_nuclei_templates], model, templates_release}; an action runs only when a current check offers it',
      lambda r, c, **k: reviewer_api.ops_report(r, c, _body(r))),
-    ('POST', r'reviewer/usage', 'AI reviewer token only: one report of a model call the container made for its own two jobs {stage: finding_review|operations_check, provider, model, status: succeeded|failed, category, stop_reason, input_tokens, output_tokens, duration_ms}; recorded as AI usage under that stage, counts and outcome only',
+    ('POST', r'reviewer/usage', 'AI reviewer token only: one report of a model call the container made for its own two jobs {stage: finding_review|operations_check, provider, model, status: succeeded|failed, category, stop_reason, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, duration_ms}; recorded as AI usage under that stage, counts and outcome only',
      lambda r, c, **k: reviewer_api.usage(r, c, _body(r))),
     ('GET', r'reviewer/jobs/next', 'AI reviewer token only (docs/AI-REVIEWER.md): up to ?limit= (at most 20) of the pipeline\'s queued AI jobs (triage and the other stages), each leased to the container with a fresh lease token: {jobs: [{id, kind, stage, attempt, lease, system, parts: [{text} | {fence, data}], schema, options, image?}]}; none while no provider is configured, CVENGINE_REVIEWER=0 or scanning is paused',
      lambda r, c, **k: reviewer_api.next_jobs(r, c)),
@@ -644,6 +645,11 @@ def dispatch(request, path):
         except Exception as exc:  # noqa: BLE001 - a bug is not the caller's mistake: the traceback goes to the error log, the caller gets a JSON 500
             if schema_guard.behind(exc):  # an update is between its new files and its migration: ask again shortly
                 return schema_guard.unavailable(request)
+            if db_timeout.hit(exc):  # the statement ran past the web timeout: not a bug, and the caller can narrow the request and ask again
+                logger.warning('API request cut off by the database statement timeout: %s %s', request.method, path)
+                response = JsonResponse({'error': db_timeout.MESSAGE}, status=503)
+                response['Retry-After'] = '30'
+                return response
             logger.exception('API request failed: %s %s', request.method, path)
             return JsonResponse({'error': 'internal error'}, status=500)
         if isinstance(result, HttpResponseBase):  # a file (a report PDF), not JSON
