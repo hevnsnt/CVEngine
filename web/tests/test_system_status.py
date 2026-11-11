@@ -500,7 +500,7 @@ class CountsCacheTests(TestCase):
 	def setUp(self):
 		from django.core.cache import cache
 		self.cache = cache
-		self.key = f'sysstatus:project:{self.user.pk}:{self.project.id}'
+		self.key = f'sysstatus:project:{self.project.id}'  # one row per project, shared by every caller (was per user and project)
 		self.cache.delete(self.key)
 		self.addCleanup(self.cache.delete, self.key)
 		self.ctx = mock.Mock(user=self.user)
