@@ -47,8 +47,14 @@ function render(alerts) {
     return { kind: "alert", text: localTimes(a.title), node: row, rank: a.severity === "critical" ? 0 : 2 };
   });
   if (alerts.length > SHOWN) {
-    const more = `${alerts.length - SHOWN} more alert(s): see Settings, AI model.`;
-    items.push({ kind: "more", text: more, node: el("p", "ab-more", more), rank: 3 });
+    // the rest are laid out on the Scanners page (workers, scheduler, Sentinels), so the line is a link there
+    const n = alerts.length - SHOWN;
+    const more = `${n} more ${n === 1 ? "alert" : "alerts"}. Open Scanners to see them.`;
+    const row = el("p", "ab-more");
+    const link = el("a", "", more);
+    link.setAttribute("href", "/cve/scanners/");
+    row.append(link);
+    items.push({ kind: "more", text: more, node: row, rank: 3 });
   }
   setNotices("alerts", items);
 }
