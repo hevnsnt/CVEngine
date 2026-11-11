@@ -28,10 +28,26 @@ export async function api(method, url, body) {
   return data;
 }
 
+// A message that says something went well goes by itself. An error stays until the person dismisses it (it is often the only explanation the
+// server gave), is announced as an alert, and sits in a stack so a second error does not cover the first. The same words are not stacked twice.
+let errorStack = null;
 export function toast(message, isError = false) {
-  const t = el('div', `toast${isError ? ' err' : ''}`, message, { role: 'status' });
-  document.body.appendChild(t);
-  setTimeout(() => t.remove(), 4000);
+  if (!isError) {
+    const t = el('div', 'toast', message, { role: 'status' });
+    document.body.appendChild(t);
+    setTimeout(() => t.remove(), 4000);
+    return;
+  }
+  if (!errorStack || !errorStack.isConnected) {
+    errorStack = el('div', 'toast-stack');
+    document.body.appendChild(errorStack);
+  }
+  if (errorStack.querySelectorAll('span').some((n) => n.textContent === message)) return;
+  const t = el('div', 'toast err stays', null, { role: 'alert' });
+  const close = el('button', 'toast-close', 'Dismiss', { type: 'button', 'aria-label': 'Dismiss this message' });
+  close.addEventListener('click', () => t.remove());
+  t.append(el('span', '', message), close);
+  errorStack.appendChild(t);
 }
 
 // What a part of a page shows while its answer is on the way: a shimmering placeholder (still, when the person asked for less motion) and one
