@@ -40,12 +40,13 @@ COMPLETION_CEILING = {'nmap': 900, 'naabu': 1020, 'nuclei_light': 900, 'nuclei_t
 DEFAULT_CEILING = 900
 # Added to a kind's ceiling for each target beyond the first (an address of a chunk, a template-pass target): a chunk of 64 addresses takes longer than one.
 # Only the kinds that take a chunk of targets are listed; any other adds nothing.
-PER_TARGET_SECONDS = {'nmap': 90, 'naabu': 10, 'nuclei_light': 20, 'nuclei_targeted': 30, 'nuclei_deep': 60, 'nuclei_validate': 15, 'ssh_probe': 20}
-# A Sentinel limits its own nmap run to min(3600, max(600, 90 x addresses)) seconds (client/tools.py) and its naabu run to 900: the stage waits for at least as
+PER_TARGET_SECONDS = {'nmap': 90, 'naabu': 150, 'nuclei_light': 20, 'nuclei_targeted': 30, 'nuclei_deep': 60, 'nuclei_validate': 15, 'ssh_probe': 20}
+# A Sentinel limits its own nmap run to min(3600, max(600, 90 x addresses)) seconds (client/tools.py) and its naabu run to max(900, 150 x addresses): the stage waits for at least as
 # long, or it gives a chunk up while the Sentinel is still working and the late result is thrown away (``tests.test_sentinel_capacity`` pins the relation).
 # The cap keeps the wait finite for a chunk of 64 addresses.
-CEILING_CAP = {'nmap': 3600 + 300}
-NAABU_CHUNK = 8  # a full-port scan of one address takes about 70 s at the default rate: 8 addresses fit the Sentinel's 900 s limit, 64 never could
+# naabu: the Sentinel's own limit is max(900, 150 x addresses) up to 3600 (cvengine_scanner.flags.TASK_LIMITS), and the wait adds 120 s to report: 1020 + 150 for each address beyond the first.
+CEILING_CAP = {'nmap': 3600 + 300, 'naabu': 3600 + 120}
+NAABU_CHUNK = 8  # a full-port scan of one address takes about 70 s at the default rate: 8 addresses fit well inside the Sentinel's limit (at most flags.hosts_per_task), 64 never could
 DEFAULT_QUEUE_SECONDS = 300  # how long a stage waits for a free Sentinel slot when every live, eligible Sentinel is at its limit
 REAP_EVERY = 10  # seconds between checks for a Sentinel whose lease ran out while a stage waits
 
