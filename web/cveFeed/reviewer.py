@@ -486,15 +486,63 @@ def apply_verdict(ref, body, now=None):
     return {'outcome': outcome, 'reason': held, 'review_id': review.pk}
 
 
-def review_summary(triage_id):
-    """The newest review of a finding, for its page and the API: ``{verdict, confidence, reason_code, note, model, outcome, held_reason,
-    at}`` or None."""
-    from cveFeed.models import FindingReview
-    row = FindingReview.objects.filter(triage_id=triage_id).order_by('-created_at').first()
-    if row is None:
-        return None
+VERDICT_WORDS = {
+    'false_positive': 'The AI reviewer thinks this is a false positive.',
+    'true_open': 'The AI reviewer thinks this is real and still open.',
+    'true_in_progress': 'The AI reviewer thinks this is real and is being worked on.',
+    'true_fixed': 'The AI reviewer thinks this is real but already fixed.',
+    'true_accepted_risk': 'The AI reviewer thinks this is real and the risk is accepted.',
+    'uncertain': 'The AI reviewer could not decide.',
+}
+REAL_VERDICTS = tuple(v for v in VERDICTS if v.startswith('true_'))
+
+
+def outcome_words(outcome, held_reason=''):
+    """What the server did with a verdict, as a sentence for a person (``FindingReview.outcome``)."""
+    if outcome == 'closed':
+        return 'cvENGINE closed this finding as a false positive because the verdict was high confidence and nothing stood against it.'
+    if outcome == 'disputed':
+        return ('The finding was kept open because cvENGINE has hard evidence that it is real' + (f' ({held_reason})' if held_reason else '')
+                + '. A person should look at it.')
+    if outcome == 'held':
+        return f"The finding was kept open: {held_reason or 'the verdict did not meet the rules for closing'}. A person should look at it."
+    return 'The opinion is recorded; nothing was changed on the finding.'
+
+
+def _summary_of(row):
+    """The plain form of one FindingReview row. ``disputed`` is true when the reviewer called the finding a false positive and the server did
+    not close it: the cases a person should look at. Every text field is stored already cleaned (``clean_note``) and is shown as text."""
     return {'verdict': row.verdict, 'confidence': row.confidence, 'reason_code': row.reason_code, 'note': row.note, 'model': row.model,
-            'outcome': row.outcome, 'held_reason': row.held_reason, 'at': row.created_at.isoformat()}
+            'outcome': row.outcome, 'held_reason': row.held_reason, 'at': row.created_at.isoformat(),
+            'verdict_text': VERDICT_WORDS.get(row.verdict, row.verdict), 'outcome_text': outcome_words(row.outcome, row.held_reason),
+            'disputed': row.verdict == 'false_positive' and row.outcome != 'closed', 'says_real': row.verdict in REAL_VERDICTS}
+
+
+def review_summaries(triage_ids):
+    """``{triage id: summary}`` of the newest review of each of these findings (one query), for the list and the detail."""
+    from cveFeed.models import FindingReview
+    out = {}
+    ids = [i for i in triage_ids if i]
+    if not ids:
+        return out
+    for row in FindingReview.objects.filter(triage_id__in=ids).order_by('triage_id', '-created_at', '-id'):
+        out.setdefault(row.triage_id, _summary_of(row))
+    return out
+
+
+def review_summary(triage_id):
+    """The newest review of a finding, for its page and the API (``_summary_of``), or None."""
+    return review_summaries([triage_id]).get(triage_id)
+
+
+def newest_review_q(prefix=''):
+    """The newest review's verdict and outcome of a finding as two subquery annotations, ``review_verdict`` and ``review_outcome``
+    (``prefix`` reaches the Triage row's id from the finding: ``triage__``)."""
+    from django.db.models import CharField, OuterRef, Subquery
+    from cveFeed.models import FindingReview
+    newest = FindingReview.objects.filter(triage_id=OuterRef(prefix + 'id')).order_by('-created_at', '-id')
+    return {'review_verdict': Subquery(newest.values('verdict')[:1], output_field=CharField()),
+            'review_outcome': Subquery(newest.values('outcome')[:1], output_field=CharField())}
 
 
 # --------------------------------------------------------------------------------------------------------------- operations

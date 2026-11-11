@@ -48,7 +48,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | project settings | `GET/PUT projects/{slug}/settings` | `get_project_settings`, `set_project_settings` |
 | stats history | `GET projects/{slug}/stats/history?days=90` | `stats_history` |
 | activity per day | `GET projects/{slug}/activity-days?days=90&tz=&series=findings,changes,scans` | `activity_days` |
-| all findings | `GET projects/{slug}/findings?type=&heat=&severity=&status=&host=&group=` (`group=cve`: [one row per script on sibling hosts](#grouped-findings)) | `list_findings` |
+| all findings | `GET projects/{slug}/findings?type=&heat=&severity=&status=&host=&ai=&group=` (`group=cve`: [one row per script on sibling hosts](#grouped-findings)) | `list_findings` |
 | scanner findings | `GET projects/{slug}/vulnerabilities` | `list_vulnerabilities` |
 | finding detail | `GET projects/{slug}/findings/{match,vulnerability,route,hygiene}/{id}` | `get_finding` |
 | triage | `GET projects/{slug}/triage`, `POST .../findings/{kind}/{id}/retriage` | `list_triage`, `retriage_finding` |
@@ -464,3 +464,7 @@ See also: [TENANCY.md](TENANCY.md) for roles, [PIPELINE.md](PIPELINE.md) for wha
 ## Settings through the MCP (App Admin)
 
 cvENGINE is meant to be run by agents as well as people, so every setting on the Settings and Administration pages has an MCP tool. `list_settings` names each one (what it is, whether it can be read, changed or removed, and what its `id` means). `get_setting` (`get_setting(name)`) reads it. `change_setting` (`change_setting(name, values)`) changes it, or runs the action it names (a test mail, an update check), with the limits, the audit entry and the secret masking of the page: a secret is never returned, only whether one is saved. `remove=true` deletes the object an entry names (an allowlist entry, an organization key). An entry that names one object takes `id`, for example `3/shodan`. A change needs an App Admin (an administrator for audit, activity, health, organization keys and excluded addresses) and a token that is not read only. Left out on purpose: factory reset and file upload or download. A route added to the Settings or Administration tables without a tool fails `tests/test_settings_bridge.py`.
+
+### The AI reviewer's verdict on a finding
+
+A row of `findings` and the `get_finding` detail carry `ai_review`: `null` while the AI reviewer has not reviewed the finding, else its newest verdict as `verdict`, `confidence`, `reason_code`, `note`, `model`, `outcome` (`recorded`, `closed`, `disputed` or `held`), `held_reason`, `at`, and in plain words `verdict_text` and `outcome_text`, with `disputed` (it called the finding a false positive and the server kept it open) and `says_real`. `findings?ai=disputed` (`list_findings` `ai: disputed`) keeps the disputed ones, `ai=real` the ones it called real. The note is text: show it as text.

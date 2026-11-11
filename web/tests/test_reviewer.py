@@ -19,7 +19,7 @@ from dashboard.models import AIProviderSettings, ApiToken, Org, Project
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
-from tests.test_agentapi import call
+from tests.test_agentapi import call, tool_call
 
 REVIEWER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'reviewer')
 
@@ -252,6 +252,78 @@ class ReviewTests(Fixture):
             self.assertTrue(data['reason'].startswith('hard evidence: '), data)
         self.assertTrue(Vulnerability.objects.get(pk=vuln.pk).open_status)
         self.assertEqual(CVEMatch.objects.get(pk=unbounded.pk).remediation_status, 'open')
+
+
+class ShownVerdictTests(Fixture):
+    """D1: the reviewer's newest verdict is shown on the finding, in the list, in REST and in MCP, and can be filtered."""
+
+    def setUp(self):
+        super().setUp()
+        _, self.full = create_token(self.admin, 'rev-full')
+
+    def detail(self, **kw):
+        return call(self.full, 'GET', f'/api/v1/projects/{self.proj.slug}/findings/match/{self.match.pk}')
+
+    def test_a_recorded_verdict_is_shown_on_the_finding(self):
+        self.assertIsNone(self.detail()[1]['ai_review'])
+        self.verdict(self.packet(), verdict='true_open', confidence='medium', reason_code='plausible_exposure',
+                     note='The version is inside the range and nothing rules it out.')
+        review = self.detail()[1]['ai_review']
+        self.assertEqual((review['verdict'], review['confidence'], review['reason_code'], review['outcome']),
+                         ('true_open', 'medium', 'plausible_exposure', 'recorded'))
+        self.assertEqual(review['model'], 'claude-sonnet-5-5')
+        self.assertEqual(review['note'], 'The version is inside the range and nothing rules it out.')
+        self.assertIn('real', review['verdict_text'])
+        self.assertIn('nothing was changed', review['outcome_text'])
+        self.assertFalse(review['disputed'])
+
+    def test_the_newest_verdict_is_the_one_shown_and_model_text_has_no_markup(self):
+        packet = self.packet()
+        self.verdict(packet, verdict='uncertain', confidence='low', note='<b>Not sure</b> either way.')
+        self.state.fingerprint = 'c' * 40
+        self.state.save()
+        cache.clear()
+        again = self.packet()
+        self.verdict(again, verdict='true_in_progress', confidence='high', reason_code='plausible_exposure', note='Being worked on.')
+        review = self.detail()[1]['ai_review']
+        self.assertEqual(review['verdict'], 'true_in_progress')
+        self.assertNotIn('<', str(FindingReview.objects.get(verdict='uncertain').note))
+
+    def test_a_kept_open_false_positive_says_why_in_plain_words(self):
+        CVEMatch.objects.filter(pk=self.match.pk).update(template_result='vulnerable')
+        triage.track([CVEMatch.objects.get(pk=self.match.pk)])
+        self.verdict(self.packet())
+        review = self.detail()[1]['ai_review']
+        self.assertTrue(review['disputed'])
+        self.assertIn('hard evidence', review['outcome_text'])
+        self.assertIn('false positive', review['verdict_text'])
+
+    def test_the_list_carries_the_verdict_and_filters_by_it(self):
+        base = f'/api/v1/projects/{self.proj.slug}/findings?type=cve'
+        self.assertEqual(call(self.full, 'GET', base + '&ai=real')[1]['total'], 0)
+        self.verdict(self.packet(), verdict='true_open', confidence='high', reason_code='plausible_exposure')
+        real = call(self.full, 'GET', base + '&ai=real')[1]
+        self.assertEqual(real['total'], 1)
+        self.assertEqual(real['results'][0]['ai_review']['verdict'], 'true_open')
+        self.assertEqual(call(self.full, 'GET', base + '&ai=disputed')[1]['total'], 0)
+        self.assertEqual(call(self.full, 'GET', base + '&ai=nonsense')[0], 400)
+
+    def test_ai_disputed_lists_a_false_positive_verdict_that_left_the_finding_open(self):
+        CVEMatch.objects.filter(pk=self.match.pk).update(template_result='vulnerable')
+        triage.track([CVEMatch.objects.get(pk=self.match.pk)])
+        self.verdict(self.packet())
+        base = f'/api/v1/projects/{self.proj.slug}/findings?type=cve'
+        self.assertEqual(call(self.full, 'GET', base + '&ai=disputed')[1]['total'], 1)
+        self.assertEqual(call(self.full, 'GET', base + '&ai=real')[1]['total'], 0)
+
+    def test_mcp_get_finding_and_list_findings_carry_it(self):
+        self.verdict(self.packet(), verdict='true_open', confidence='high', reason_code='plausible_exposure')
+        error, detail = tool_call(self.full, 'get_finding', {'project': self.proj.slug, 'kind': 'match', 'id': self.match.pk})
+        self.assertFalse(error)
+        self.assertEqual(detail['ai_review']['verdict'], 'true_open')
+        error, listed = tool_call(self.full, 'list_findings', {'project': self.proj.slug, 'type': 'cve', 'ai': 'real'})
+        self.assertFalse(error)
+        self.assertEqual(listed['total'], 1)
 
 
 class InjectionGuardTests(TestCase):
