@@ -10,15 +10,18 @@ lists run after run is the one to look at.
 import json
 import os
 import sys
+import threading
 import time
 
 CACHE_PREFIX = 'lane_memory:'
+RUNNING_PREFIX = 'lane_running:'  # its own key: the tasks in flight change with every task start and end, the memory report is written at most every WRITE_EVERY seconds
 LANES = ('discovery', 'cve_feed', 'validation_priority', 'classic')
 WRITE_EVERY = 20  # seconds between writes from one process
 KEEP_SECONDS = 6 * 3600
 MAX_TASKS = 30
 
-_state = {'lane': None, 'started': {}, 'tasks': {}, 'last_write': 0.0, 'peak_mb': 0.0}
+_state = {'lane': None, 'started': {}, 'running': {}, 'tasks': {}, 'last_write': 0.0, 'peak_mb': 0.0, 'beat_thread': None}
+MAX_RUNNING = 50  # tasks listed as in flight in one record
 
 
 def rss_mb():
@@ -41,16 +44,24 @@ def lane_name(argv=None):
     return ''
 
 
-def before(task_id):
+def before(task_id, task_name='?', now=None):
+    """A task starts: remember its memory baseline, and write that it is running. A lane in one long task finishes nothing for minutes (and can miss a
+    ping), so the start is the only sign of life the watchdog gets from it."""
+    now = time.time() if now is None else now
     _state['started'][task_id] = rss_mb()
-    if len(_state['started']) > 500:  # a task that never reported its end must not grow this forever
-        _state['started'].pop(next(iter(_state['started'])), None)
+    _state['running'][task_id] = {'name': task_name, 'since': now}
+    for table in ('started', 'running'):
+        if len(_state[table]) > 500:  # a task that never reported its end must not grow this forever
+            _state[table].pop(next(iter(_state[table])), None)
+    write_running(now)
+    _ensure_heartbeat()
 
 
 def after(task_id, task_name, now=None):
     now = time.time() if now is None else now
     size = rss_mb()
     start = _state['started'].pop(task_id, size)
+    _state['running'].pop(task_id, None)
     row = _state['tasks'].setdefault(task_name, {'n': 0, 'max_rss_mb': 0.0, 'max_growth_mb': 0.0})
     row['n'] += 1
     row['max_rss_mb'] = max(row['max_rss_mb'], round(size, 1))
@@ -59,6 +70,7 @@ def after(task_id, task_name, now=None):
     if len(_state['tasks']) > MAX_TASKS:
         for name in sorted(_state['tasks'], key=lambda n: _state['tasks'][n]['max_rss_mb'])[:len(_state['tasks']) - MAX_TASKS]:
             _state['tasks'].pop(name, None)
+    write_running(now)
     if now - _state['last_write'] >= WRITE_EVERY:
         _state['last_write'] = now
         write(now, size)
@@ -77,10 +89,64 @@ def write(now, size):
         pass
 
 
-def install():
-    from celery.signals import task_postrun, task_prerun
+def reset():
+    """A worker (re)started or is shutting down: nothing it had running before is running now, so the record is written again without it."""
+    _state['running'].clear()
+    write_running()
 
-    task_prerun.connect(lambda task_id=None, **kw: before(task_id), weak=False, dispatch_uid='lane-memory-pre')
+
+def write_running(now=None):
+    """Write which tasks this worker has in flight (name and start time), its process id and the time of this write (``beat``) under the lane's own key.
+    The beat is the sign that the worker is alive: ``in_flight`` ignores a record nobody has refreshed lately. Never raises."""
+    lane = _state['lane'] or lane_name()
+    _state['lane'] = lane
+    if not lane:
+        return
+    now = time.time() if now is None else now
+    try:
+        from django.core.cache import cache
+        cache.set(RUNNING_PREFIX + lane, json.dumps({'pid': os.getpid(), 'beat': now, 'running': list(_state['running'].values())[-MAX_RUNNING:]}), KEEP_SECONDS)
+    except Exception:  # noqa: BLE001 - a measurement must never fail a task
+        pass
+
+
+def heartbeat_once(now=None):
+    """Refresh the in-flight record while this worker has a task running. Returns True when it wrote one."""
+    if not _state['running']:
+        return False
+    write_running(now)
+    return True
+
+
+def _heartbeat_loop():
+    while True:
+        time.sleep(HEARTBEAT_SECONDS)
+        try:
+            heartbeat_once()
+        except Exception:  # noqa: BLE001 - the heartbeat must outlive any one failed write
+            pass
+
+
+def _ensure_heartbeat():
+    """Start the one thread that refreshes the record every ``HEARTBEAT_SECONDS`` (a greenlet under gevent, which the workers run: the heartbeat goes on while a
+    task is blocked in a socket or a child process, and stops when the process dies, which is the point). Never raises."""
+    thread = _state.get('beat_thread')
+    if thread is not None and thread.is_alive():
+        return
+    try:
+        thread = threading.Thread(target=_heartbeat_loop, name='lane-memory-heartbeat', daemon=True)
+        thread.start()
+        _state['beat_thread'] = thread
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def install():
+    from celery.signals import task_postrun, task_prerun, worker_ready, worker_shutdown
+
+    worker_ready.connect(lambda **kw: reset(), weak=False, dispatch_uid='lane-memory-ready')
+    worker_shutdown.connect(lambda **kw: reset(), weak=False, dispatch_uid='lane-memory-shutdown')
+    task_prerun.connect(lambda task_id=None, task=None, **kw: before(task_id, getattr(task, 'name', '?')), weak=False, dispatch_uid='lane-memory-pre')
     task_postrun.connect(lambda task_id=None, task=None, **kw: after(task_id, getattr(task, 'name', '?')), weak=False, dispatch_uid='lane-memory-post')
 
 
@@ -114,3 +180,39 @@ def recent_progress(now=None):
     each miss for a dead lane and restarted the container. Finishing work is proof of life that does not depend on a reply to a ping."""
     now = time.time() if now is None else now
     return {row['lane']: row['age_seconds'] for row in report(now) if 0 <= row['age_seconds'] <= PROGRESS_SECONDS}
+
+
+HEARTBEAT_SECONDS = 30  # how often a worker with a task running refreshes its record
+BEAT_STALE_SECONDS = 90  # a record whose beat is older than this (three missed beats) was written by a worker that is gone or stuck
+# The longest a task may be called busy on its heartbeat alone. A queue's hard time limit (reNgine/time_limits.py) is held below the broker's visibility
+# timeout (12 hours), so a task still "running" after that has outlived every limit it can have: the lane's heartbeat then proves the lane lives, not that the
+# task works, and the watchdog's other rules judge it again. Below the ceiling a healthy long task that lets the worker yield (a 45 minute port load) is not restarted; one that blocks the worker without yielding stops the beat and is judged like a hung worker.
+IN_FLIGHT_MAX_SECONDS = 12 * 3600
+
+
+def in_flight(now=None, pids=None):
+    """``{lane: seconds since its youngest running task started}`` for the lanes whose worker is alive and has a task that has not ended.
+    A lane in one long task is busy, not dead, even when it finished nothing for minutes and missed its ping. Alive means: the record's beat is at most
+    ``BEAT_STALE_SECONDS`` old (a worker killed without running its shutdown leaves a record that nobody refreshes), and, when ``pids`` says which processes
+    answer for the lane (``{lane: {pid, ...}}``), the record was written by one of them (a restarted worker has a new pid). A task older than
+    ``IN_FLIGHT_MAX_SECONDS`` is not counted. A record with no beat (written before the heartbeat existed) is not trusted."""
+    from django.core.cache import cache
+    now = time.time() if now is None else now
+    out = {}
+    for lane in LANES:
+        try:
+            raw = cache.get(RUNNING_PREFIX + lane)
+            data = json.loads(raw) if raw else None
+        except Exception:  # noqa: BLE001
+            data = None
+        data = data if isinstance(data, dict) else {}
+        beat = data.get('beat')
+        if not isinstance(beat, (int, float)) or now - beat > BEAT_STALE_SECONDS:
+            continue
+        if pids and lane in pids and data.get('pid') not in pids[lane]:
+            continue
+        ages = [now - t['since'] for t in data.get('running') or [] if isinstance(t, dict) and 'since' in t]
+        ages = [int(a) for a in ages if 0 <= a <= IN_FLIGHT_MAX_SECONDS]
+        if ages:
+            out[lane] = min(ages)
+    return out
