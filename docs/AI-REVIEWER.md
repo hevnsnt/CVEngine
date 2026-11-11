@@ -82,7 +82,10 @@ reviewer is built on the assumption that every scanned byte is hostile.
    SpikeStrip families (workflow orders, "include this reference", gates, fake CVE leads to routes) and the classic "ignore previous
    instructions". A finding whose evidence contains such text is never closed automatically. The packet says so, and the reviewer's note says so.
 6. **Each call is bounded.** Every call has a maximum reply length and a time limit. A daily cap limits the number of reviews, and the operations
-   job runs at most once per scheduled slot. A task meant to burn tokens ends at the cap.
+   job runs at most once per scheduled slot. A task meant to burn tokens ends at the cap. A review the model refuses, answers with nothing,
+   cuts off twice or answers outside the schema is recorded (with no verdict) and counts against the cap; the finding is asked about again
+   only when its host changes or 24 hours have passed. A failed operations call is tried again after an hour at the earliest, not on every
+   pass of the loop. A provider that is down (not the finding's fault) is not recorded; three failures in a row pause the work for 15 minutes.
 7. **The container is locked down.** It has:
    - its own small image, with only the reviewer package and two pinned libraries;
    - no cvENGINE source and no database or Redis credentials;
@@ -279,6 +282,7 @@ All routes are under `/api/v1/reviewer/` and need a `reviewer`-scope token. The 
 | `GET config` | Enabled flag, the provider, base URL, key and model per job, the limits, and whether the operations job is due; `jobs_enabled` and the job block (provider, address, key, model and request settings) for the pipeline's AI jobs |
 | `GET findings/next?limit=N` | Up to N review packets, each leased for 15 minutes |
 | `POST findings/<ref>/verdict` | One verdict. The answer says whether it was applied, recorded, held (and why) or stale |
+| `POST findings/<ref>/refusal` | The model gave no usable answer for the packet (`review_key`, `category`, `model`). Recorded with no verdict and counted against the daily cap; the finding is not handed out again for 24 hours unless its host changes |
 | `GET ops/snapshot` | The checks above, and (`watchdog`) the last ten things the outer watchdog did, so the diagnosis can explain them ([WATCHDOG.md](WATCHDOG.md)); no check or action depends on it |
 | `POST ops/report` | Diagnoses and requested actions. The answer says what was run |
 | `GET jobs/next?limit=N` | Up to N (at most 20) of the pipeline's queued AI jobs, each leased with a fresh lease token |

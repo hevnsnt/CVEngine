@@ -43,6 +43,17 @@ def verdict(request, ctx, ref, body):
         raise ApiError(exc.status, str(exc))
 
 
+def refusal(request, ctx, ref, body):
+    from cveFeed import reviewer
+    _require_reviewer(ctx)
+    if not reviewer.enabled():
+        raise ApiError(409, 'the reviewer is turned off')
+    try:
+        return reviewer.record_refusal(ref, body)
+    except reviewer.VerdictError as exc:
+        raise ApiError(exc.status, str(exc))
+
+
 def ops_snapshot(request, ctx):
     from cveFeed import reviewer
     _require_reviewer(ctx)

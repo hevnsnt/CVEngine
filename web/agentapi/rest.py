@@ -514,6 +514,8 @@ ROUTES = [
      lambda r, c, **k: reviewer_api.next_findings(r, c)),
     ('POST', r'reviewer/findings/(?P<ref>t\d{1,12})/verdict', 'AI reviewer token only: one verdict {review_key, verdict, confidence, reason_code, note, model, usage: {input_tokens, output_tokens}}; answers {outcome: closed|recorded|disputed|held, reason, review_id}, 409 when the finding or its host changed since the packet',
      lambda r, c, ref, **k: reviewer_api.verdict(r, c, ref, _body(r))),
+    ('POST', r'reviewer/findings/(?P<ref>t\d{1,12})/refusal', 'AI reviewer token only: the model gave no usable answer for one finding {review_key, category, model} (refused, empty, cut off twice, outside the schema); recorded with no verdict, counted against the daily cap, and the finding is not handed out again until its host changes or 24 hours pass; answers {outcome: refused, reason, review_id}, 409 when the finding or its host changed since the packet',
+     lambda r, c, ref, **k: reviewer_api.refusal(r, c, ref, _body(r))),
     ('GET', r'reviewer/ops/snapshot', 'AI reviewer token only: the operations checks {checks: [{code, state, severity, title, detail, facts, actions}], actions}; ?templates_release= and templates_published_at= pass the newest nuclei-templates release',
      lambda r, c, **k: reviewer_api.ops_snapshot(r, c)),
     ('POST', r'reviewer/ops/report', 'AI reviewer token only: the operations job\'s report {alerts: [{code, severity, diagnosis}], actions: [feed_sentinels|refresh_nuclei_templates], model, templates_release}; an action runs only when a current check offers it',

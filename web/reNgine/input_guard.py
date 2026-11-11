@@ -92,7 +92,7 @@ SENTINEL_MACHINE_PATH = re.compile(r'^/api/v1/sentinel/(?:tasks/\d+/(?:result|pa
 # which it strips of markup and links and stores as text; nothing in it reaches a shell, a query or a template. An answer to one of the
 # pipeline's AI jobs (cveFeed.ai_jobs) is a model's reply about scanned hosts, a nuclei template among them: it is checked by the stage's own
 # validator, stored as data and never reaches a shell, a query or a template either.
-REVIEWER_MACHINE_PATH = re.compile(r'^/api/v1/reviewer/(?:findings/t\d{1,12}/verdict|ops/report|jobs/\d{1,12}/result)/?$')
+REVIEWER_MACHINE_PATH = re.compile(r'^/api/v1/reviewer/(?:findings/t\d{1,12}/(?:verdict|refusal)|ops/report|jobs/\d{1,12}/result)/?$')
 BOUNTY_TEXT_FIELDS = frozenset({'title', 'summary', 'steps', 'impact', 'remediation', 'references', 'evidence', 'response', 'request', 'curl',
                                 'note', 'notes', 'location_url', 'cwe', 'cvss_vector'})
 

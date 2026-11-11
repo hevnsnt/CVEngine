@@ -80,6 +80,12 @@ class Server:
             raise ServerError('a packet with a malformed reference')
         return self._request('POST', f'findings/{ref}/verdict', body=body)
 
+    def refusal(self, ref, body):
+        """Tell the server the model gave no usable answer for this packet, so it is not handed out again at once."""
+        if not _REF.match(str(ref)):
+            raise ServerError('a packet with a malformed reference')
+        return self._request('POST', f'findings/{ref}/refusal', body=body)
+
     def next_jobs(self, limit):
         return self._request('GET', 'jobs/next', query={'limit': int(limit)}).get('jobs') or []
 

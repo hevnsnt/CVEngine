@@ -99,10 +99,20 @@ def ops_hours(row):
     return sorted(set(hours)) or list(DEFAULT_OPS_HOURS)
 
 
+def _ops_failed_since(last_ops_at, since):
+    """Whether a call of the operations job failed at or after ``since`` and after the last report that worked (``record_usage`` keeps them)."""
+    from cveFeed.models import AIUsage
+    if last_ops_at and last_ops_at > since:
+        since = last_ops_at
+    return AIUsage.objects.filter(stage='operations_check', status='failed', started_at__gte=since).exclude(error_category='truncated_retried').exists()
+
+
 def ops_due(row, now=None):
     """Whether the operations job should run now: a scheduled UTC hour has passed since it last reported."""
     now = now or timezone.now()
     last = row.last_ops_at
+    if _ops_failed_since(last, now - OPS_RETRY_WAIT):
+        return False  # the last try failed (the model refused, or cut off twice): once an hour, not on every pass of the loop
     for days_back in (0, 1):
         day = (now - timedelta(days=days_back)).date()
         for hour in sorted(ops_hours(row), reverse=True):
@@ -117,6 +127,11 @@ def reviews_today(now=None):
     now = now or timezone.now()
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     return FindingReview.objects.filter(created_at__gte=start).count()
+
+
+REFUSED = 'refused'  # FindingReview.outcome of a review the model did not answer (refused, empty, cut off, unusable): no verdict
+REFUSED_WAIT = timedelta(hours=24)  # how long such a finding waits before it is asked again, when its host does not change meanwhile
+OPS_RETRY_WAIT = timedelta(hours=1)  # a failed operations job runs again after this at the earliest
 
 
 JOB_WORKERS = 4  # pipeline jobs the container runs side by side
@@ -180,8 +195,9 @@ def review_key(triage, fingerprint):
 def _last_keys(triage_ids):
     from cveFeed.models import FindingReview
     out = {}
-    for row in FindingReview.objects.filter(triage_id__in=triage_ids).order_by('triage_id', '-created_at').values('triage_id', 'review_key'):
-        out.setdefault(row['triage_id'], row['review_key'])
+    for row in (FindingReview.objects.filter(triage_id__in=triage_ids).order_by('triage_id', '-created_at', '-id')
+                .values('triage_id', 'review_key', 'outcome', 'created_at')):
+        out.setdefault(row['triage_id'], row)
     return out
 
 
@@ -193,11 +209,13 @@ def due(limit=PACKET_LIMIT, now=None):
     rows.sort(key=lambda t: KIND_ORDER.get(t.kind, 9))  # stable: newest first within a kind
     fingerprints = _fingerprints({(t.project_id, t.host) for t in rows[:WINDOW]})
     last = _last_keys([t.pk for t in rows[:WINDOW]])
+    now = now or timezone.now()
     picked = []
     for triage in rows[:WINDOW]:
         key = review_key(triage, fingerprints.get((triage.project_id, triage.host), ''))
-        if last.get(triage.pk) == key:
-            continue
+        seen = last.get(triage.pk)
+        if seen and seen['review_key'] == key and not (seen['outcome'] == REFUSED and now - seen['created_at'] >= REFUSED_WAIT):
+            continue  # reviewed in this state; a refused or empty review is asked again only after a day (or when the host changes)
         if not cache.add(f'cvengine:reviewer:lease:{triage.pk}', key, LEASE_SECONDS):
             continue  # handed out within the last 15 minutes
         picked.append((triage.pk, key))
@@ -432,7 +450,7 @@ def apply_verdict(ref, body, now=None):
     key = review_key(triage, fingerprint)
     if parsed['review_key'] != key:
         raise VerdictError('the finding or its host changed since the packet was built', 409)
-    if FindingReview.objects.filter(triage=triage, review_key=key).exists():
+    if FindingReview.objects.filter(triage=triage, review_key=key).exclude(outcome=REFUSED).exists():
         raise VerdictError('this state of the finding was already reviewed', 409)
     finding = triage.finding
     d = triage_lib.describe(finding)
@@ -486,6 +504,33 @@ def apply_verdict(ref, body, now=None):
     return {'outcome': outcome, 'reason': held, 'review_id': review.pk}
 
 
+def record_refusal(ref, body, now=None):
+    """Take the container's report that the model gave no usable answer for the finding ``ref`` (``{review_key, category, model}``): it
+    refused, answered with nothing, was cut off twice or answered outside the schema. One ``FindingReview`` row with outcome ``refused`` and
+    no verdict is kept, so the call counts against the daily cap and ``due`` leaves the finding alone until its host changes or a day passes.
+    Raises VerdictError like ``apply_verdict`` (404 unknown finding, 409 a state that is no longer current)."""
+    from cveFeed.models import FindingReview, Triage
+    if not isinstance(body, dict):
+        raise VerdictError('body must be a JSON object')
+    key = body.get('review_key')
+    if not isinstance(key, str) or not re.fullmatch(r'[0-9a-f]{40}', key):
+        raise VerdictError('review_key must be the key of the packet')
+    match = re.fullmatch(r't(\d{1,12})', str(ref or ''))
+    triage = _load(int(match.group(1))) if match else None
+    if triage is None or triage.finding is None or triage.kind not in KIND_ORDER:
+        raise VerdictError('not found', 404)
+    if not Triage.objects.filter(open_q(), pk=triage.pk).exists():
+        raise VerdictError('the finding is no longer open', 409)
+    fingerprint = _fingerprints({(triage.project_id, triage.host)}).get((triage.project_id, triage.host), '')
+    if key != review_key(triage, fingerprint):
+        raise VerdictError('the finding or its host changed since the packet was built', 409)
+    category = re.sub(r'[^a-z_]', '', str(body.get('category') or '').lower())[:40] or 'no_answer'
+    review = FindingReview.objects.create(triage=triage, project_id=triage.project_id, review_key=key, verdict='', confidence='low',
+                                          outcome=REFUSED, held_reason=category, model=str(body.get('model') or '')[:100])
+    cache.delete(f'cvengine:reviewer:lease:{triage.pk}')
+    return {'outcome': REFUSED, 'reason': category, 'review_id': review.pk}
+
+
 VERDICT_WORDS = {
     'false_positive': 'The AI reviewer thinks this is a false positive.',
     'true_open': 'The AI reviewer thinks this is real and still open.',
@@ -525,7 +570,7 @@ def review_summaries(triage_ids):
     ids = [i for i in triage_ids if i]
     if not ids:
         return out
-    for row in FindingReview.objects.filter(triage_id__in=ids).order_by('triage_id', '-created_at', '-id'):
+    for row in FindingReview.objects.filter(triage_id__in=ids).exclude(outcome=REFUSED).order_by('triage_id', '-created_at', '-id'):
         out.setdefault(row.triage_id, _summary_of(row))
     return out
 
@@ -540,7 +585,7 @@ def newest_review_q(prefix=''):
     (``prefix`` reaches the Triage row's id from the finding: ``triage__``)."""
     from django.db.models import CharField, OuterRef, Subquery
     from cveFeed.models import FindingReview
-    newest = FindingReview.objects.filter(triage_id=OuterRef(prefix + 'id')).order_by('-created_at', '-id')
+    newest = FindingReview.objects.filter(triage_id=OuterRef(prefix + 'id')).exclude(outcome=REFUSED).order_by('-created_at', '-id')
     return {'review_verdict': Subquery(newest.values('verdict')[:1], output_field=CharField()),
             'review_outcome': Subquery(newest.values('outcome')[:1], output_field=CharField())}
 

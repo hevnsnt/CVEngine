@@ -85,6 +85,8 @@ def run_reviews(server, config, state):
                 state['failures'] = 0
             except llm.ModelError as exc:
                 _failed(state, exc.category)
+                if exc.category not in OUTAGE:  # the model refused, answered nothing or was cut off twice: say so, or it is asked again every 15 minutes
+                    jobs.report_unanswered(server, config['review'], packet, exc.category)
                 continue
             except ServerError as exc:
                 logger.info('verdict for %s not taken: %s', packet.get('ref'), exc)

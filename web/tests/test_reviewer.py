@@ -13,7 +13,7 @@ from django.utils import timezone
 from agentapi import builtin_reviewer
 from agentapi.auth import create_token
 from cveFeed import closure, injection_guard, reviewer, triage
-from cveFeed.models import (AdminAlert, CVEEntry, CVEMatch, FindingAuditEvent, FindingComment, FindingReview, HostState, HygieneFinding,
+from cveFeed.models import (AdminAlert, AIUsage, CVEEntry, CVEMatch, FindingAuditEvent, FindingComment, FindingReview, HostState, HygieneFinding,
                             ReviewerSettings, Triage)
 from dashboard.models import AIProviderSettings, ApiToken, Org, Project
 from scanEngine.models import EngineType
@@ -324,6 +324,78 @@ class ShownVerdictTests(Fixture):
         error, listed = tool_call(self.full, 'list_findings', {'project': self.proj.slug, 'type': 'cve', 'ai': 'real'})
         self.assertFalse(error)
         self.assertEqual(listed['total'], 1)
+
+
+class UnansweredReviewTests(Fixture):
+    """D3: a review the model did not answer is recorded, counts against the daily cap and is not asked again at once."""
+
+    def setUp(self):
+        super().setUp()
+        _, self.admin_token = create_token(self.admin, 'rev-full')
+
+    def refuse(self, packet, **over):
+        body = {'review_key': packet['review_key'], 'category': 'refused', 'model': 'claude-haiku-5-5'}
+        body.update(over)
+        return call(self.raw, 'POST', f"/api/v1/reviewer/findings/{packet['ref']}/refusal", body)
+
+    def test_a_refused_packet_is_not_handed_out_again_for_a_day(self):
+        packet = self.packet()
+        status, data = self.refuse(packet)
+        self.assertEqual((status, data['outcome']), (200, 'refused'))
+        review = FindingReview.objects.get(pk=data['review_id'])
+        self.assertEqual((review.verdict, review.outcome, review.held_reason), ('', 'refused', 'refused'))
+        cache.clear()  # the 15 minute lease is gone
+        later = timezone.now() + timezone.timedelta(hours=23)
+        self.assertFalse([p for p in reviewer.next_packets(25, later) if p['ref'] == packet['ref']])
+        a_day = timezone.now() + timezone.timedelta(hours=25)
+        again = [p for p in reviewer.next_packets(25, a_day) if p['ref'] == packet['ref']]
+        self.assertEqual(len(again), 1)
+        self.assertEqual(again[0]['review_key'], packet['review_key'])
+        self.assertEqual(self.verdict(again[0], verdict='true_open', confidence='low', reason_code='plausible_exposure')[0], 200)
+
+    def test_a_refused_packet_comes_back_when_its_host_changes(self):
+        packet = self.packet()
+        self.refuse(packet)
+        cache.clear()
+        self.state.fingerprint = 'a' * 40
+        self.state.save()
+        self.assertEqual(len([p for p in reviewer.next_packets(25) if p['ref'] == packet['ref']]), 1)
+
+    def test_a_refusal_counts_against_the_daily_cap(self):
+        row = ReviewerSettings.current()
+        row.review_daily_max = 1
+        row.save()
+        self.refuse(self.packet())
+        self.assertEqual(reviewer.reviews_today(), 1)
+        self.assertEqual(reviewer.next_packets(25), [])
+        self.assertEqual(call(self.raw, 'GET', '/api/v1/reviewer/config')[1]['reviews_left_today'], 0)
+
+    def test_a_refusal_is_not_shown_as_a_verdict_and_is_checked_like_one(self):
+        packet = self.packet()
+        self.refuse(packet)
+        finding = call(self.admin_token, 'GET', f'/api/v1/projects/{self.proj.slug}/findings/match/{self.match.pk}')[1]
+        self.assertIsNone(finding['ai_review'])
+        self.assertEqual(self.refuse(packet, review_key='0' * 40)[0], 409)
+        self.assertEqual(self.refuse(packet, review_key='nope')[0], 400)
+        self.assertEqual(call(self.raw, 'POST', '/api/v1/reviewer/findings/t999999/refusal', {'review_key': packet['review_key']})[0], 404)
+
+    def test_a_failed_ops_call_is_not_retried_within_an_hour(self):
+        row = ReviewerSettings.current()
+        row.ops_hours = [3]
+        now = timezone.now().replace(hour=4, minute=0)
+        row.last_ops_at = now.replace(hour=2)
+        self.assertTrue(reviewer.ops_due(row, now))
+        reviewer.record_usage({'stage': 'operations_check', 'provider': 'anthropic', 'model': 'claude-haiku-5-5', 'status': 'failed',
+                               'category': 'refused'}, now=now - timezone.timedelta(minutes=10))
+        self.assertFalse(reviewer.ops_due(row, now))
+        self.assertTrue(reviewer.ops_due(row, now + timezone.timedelta(minutes=55)))
+        row.last_ops_at = now.replace(hour=3, minute=59)  # a report that worked after it: back to the schedule
+        self.assertFalse(reviewer.ops_due(row, now))
+        # a cut-off the container retried and recovered is not a failure
+        reviewer.record_usage({'stage': 'operations_check', 'status': 'failed', 'category': 'truncated_retried'}, now=now)
+        row.last_ops_at = now.replace(hour=2)
+        AIUsage.objects.filter(error_category='refused').delete()
+        self.assertTrue(reviewer.ops_due(row, now))
 
 
 class InjectionGuardTests(TestCase):

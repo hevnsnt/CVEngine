@@ -16,7 +16,11 @@ def job(**changes):
 class FakeServer:
     def __init__(self, config=None, queued=()):
         self.posted, self.queued, self._config = [], [list(queued)], config or {}
-        self.findings = []
+        self.findings, self.packets, self.refusals = [], [], []
+
+    def refusal(self, ref, body):
+        self.refusals.append((ref, body))
+        return {'outcome': 'refused'}
 
     def config(self):
         return self._config
@@ -30,7 +34,7 @@ class FakeServer:
 
     def next_findings(self, limit):
         self.findings.append(limit)
-        return []
+        return self.packets
 
 
 class MessageTests(unittest.TestCase):
@@ -142,6 +146,38 @@ class LoopTests(unittest.TestCase):
         with mock.patch.object(jobs, 'run_job', return_value=({}, 'output_truncated')):
             loop.cycle(server, state)
         self.assertEqual((state['failures'], state['pause_until']), (0, 0.0))
+
+    REVIEW_CONFIG = {'enabled': True, 'review': {'provider': 'anthropic', 'model': 'm'}, 'reviews_left_today': 5}
+
+    def test_a_refused_review_is_reported_so_the_server_does_not_ask_again_and_it_is_no_outage(self):
+        packet = {'ref': 't5', 'review_key': 'a' * 40, 'kind': 'cve_match', 'trusted': {}, 'untrusted': {}}
+        for category in ('refused', 'empty_response', 'truncated'):
+            server = FakeServer(self.REVIEW_CONFIG)
+            server.packets = [packet]
+            state = loop.new_state()
+            with mock.patch.object(jobs, 'review_one', side_effect=llm.ModelError('no', category)):
+                loop.run_reviews(server, self.REVIEW_CONFIG, state)
+            self.assertEqual(server.refusals, [('t5', {'review_key': 'a' * 40, 'category': category, 'model': 'm'})], category)
+            self.assertEqual((state['failures'], state['pause_until']), (0, 0.0))
+
+    def test_an_outage_is_not_reported_as_a_refusal_and_an_unusable_answer_is(self):
+        packet = {'ref': 't5', 'review_key': 'a' * 40, 'kind': 'cve_match', 'trusted': {}, 'untrusted': {}}
+        server = FakeServer(self.REVIEW_CONFIG)
+        server.packets = [packet]
+        with mock.patch.object(jobs, 'review_one', side_effect=llm.ModelError('down', 'network')):
+            loop.run_reviews(server, self.REVIEW_CONFIG, loop.new_state())
+        self.assertEqual(server.refusals, [])  # the provider was down: the finding is not at fault, and it is asked again soon
+        with mock.patch.object(jobs, 'measured_call', return_value=('not json', {}, 'm')):
+            self.assertIsNone(jobs.review_one(server, {'provider': 'anthropic', 'model': 'm'}, packet))
+        self.assertEqual([(r, b['category']) for r, b in server.refusals], [('t5', 'unusable_answer')])
+
+    def test_a_server_that_does_not_take_the_report_changes_nothing(self):
+        packet = {'ref': 't5', 'review_key': 'a' * 40, 'kind': 'cve_match', 'trusted': {}, 'untrusted': {}}
+        server = FakeServer(self.REVIEW_CONFIG)
+        server.packets = [packet]
+        server.refusal = mock.Mock(side_effect=loop.ServerError('HTTP 409', 409))
+        with mock.patch.object(jobs, 'review_one', side_effect=llm.ModelError('no', 'refused')):
+            loop.run_reviews(server, self.REVIEW_CONFIG, loop.new_state())  # must not raise
 
 
 if __name__ == '__main__':
