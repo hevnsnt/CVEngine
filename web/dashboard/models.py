@@ -384,7 +384,7 @@ class ApiCredential(models.Model):
 	class Meta:
 		constraints = [
 			models.CheckConstraint(
-				check=(models.Q(org__isnull=False, project__isnull=True) | models.Q(org__isnull=True, project__isnull=False)),
+				condition=(models.Q(org__isnull=False, project__isnull=True) | models.Q(org__isnull=True, project__isnull=False)),
 				name='apicredential_exactly_one_scope'),
 		]
 		unique_together = [('org', 'service'), ('project', 'service')]
