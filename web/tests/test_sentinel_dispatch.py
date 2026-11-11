@@ -243,7 +243,6 @@ class NaabuDispatchTests(DispatchBase):
     def test_a_scan_that_ran_out_of_time_leaves_its_unfinished_addresses_due(self):
         """A full-port scan that hit its limit did not look at the addresses it did not reach. They are not recorded as scanned with nothing open: the runner
         reports them and ``port_stage.discover`` records them failed, so the next pass asks again, while the addresses it did finish are done."""
-        from cveFeed import ledger
         from cveFeed.models import ServiceRun
         self.make_sentinel(['naabu'])
         result = {'outcome': 'done', 'ports': {'192.0.2.10': [22]}, 'incomplete': True, 'unfinished': ['192.0.2.11']}

@@ -3,7 +3,6 @@ kind paused by the failure cool-off is paused, not offline (D12)."""
 import json
 
 from datetime import timedelta
-from unittest import mock
 
 from django.contrib.auth.models import User
 from django.test import Client, SimpleTestCase, TestCase

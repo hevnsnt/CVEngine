@@ -234,7 +234,7 @@ def _resume_internal(context):
 def _run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=None):
     from agentapi import sentinel_dispatch
     from cveFeed import activity
-    from cveFeed.discovery import FAILED, RUNNING, SUCCESS, _stage, mark_running
+    from cveFeed.discovery import FAILED, SUCCESS, _stage, mark_running
     from cveFeed.bounty_gate import Gate
     from cveFeed.exclusions import is_excluded
     from reNgine.tasks import persist_bbot_result

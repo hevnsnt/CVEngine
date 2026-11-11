@@ -368,7 +368,6 @@ class ActivityTests(TestCase):
 
 	def test_pipeline_steps_are_narrated(self):
 		from cveFeed.autofire import fire_for_cve
-		from cveFeed.models import CVEMatch
 		org = Org.objects.create(name='A', slug='a')
 		project = Project.objects.create(name='P', slug='pa', insert_date=timezone.now(), org=org)
 		domain = Domain.objects.create(name='af.test', project=project, insert_date=timezone.now())
@@ -566,7 +565,7 @@ class NucleiStageTests(TestCase):
 	             'info': {'name': 'Wappalyzer Technology Detection', 'severity': 'info'}}
 
 	def test_the_targeted_pass_gets_tags_from_nmap_and_the_light_pass_and_works_without_an_ai(self):
-		from startScan.models import Subdomain, Technology
+		from startScan.models import Subdomain
 		seen = []
 
 		def targeted(path, **kwargs):

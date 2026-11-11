@@ -800,7 +800,6 @@ def run_quick(scan_id, hosts, attempt=1, runner=None):
     """The queued quick pass: the stage's WordPress scan run for just these hosts, under the same checks (exclusions, bug bounty confirmation, ledger
     freshness, memory), one run per project at a time. Whatever it still cannot reach is queued again by ``run_wpscan`` until the attempts are
     spent. Returns the run's summary, or ``{'skipped': why}``."""
-    from cveFeed import ledger
     from reNgine import resources
     from startScan.models import ScanHistory
     scan = ScanHistory.objects.select_related('domain').filter(pk=scan_id).first()

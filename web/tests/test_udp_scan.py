@@ -67,7 +67,6 @@ def udp_xml(address, states, extra=''):
 def run_udp(runner=None, **kwargs):
     """``udp_scan.run`` with ``runner(targets, flags, timeout)`` standing in for the Sentinel: its raw XML is read exactly as ``try_nmap_udp`` reads
     a Sentinel's report (the one parser, the host named by the address); a report that names no host leaves the address due."""
-    from reNgine.resources import ScannerUnavailable
 
     def try_nmap_udp(project, address, scan=None, timeout=None):
         text = runner([address], [], '20m')

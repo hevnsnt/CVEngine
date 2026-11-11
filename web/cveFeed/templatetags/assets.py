@@ -8,7 +8,6 @@ import os
 from django import template
 from django.conf import settings
 from django.templatetags.static import static
-from django.utils.html import format_html
 from django.utils.safestring import mark_safe
 
 register = template.Library()

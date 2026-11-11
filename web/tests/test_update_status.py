@@ -2,7 +2,6 @@
 that only whitelisted text can reach it, and that the updater writes it at each phase. Run on the host: ``cd web && python3 -m unittest tests.test_update_status``."""
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys

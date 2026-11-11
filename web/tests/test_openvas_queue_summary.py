@@ -8,7 +8,7 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from cveFeed import openvas_scan as ov
-from cveFeed.models import CVEEntry, OpenvasProject
+from cveFeed.models import CVEEntry
 from tests.test_openvas import Fixture
 
 

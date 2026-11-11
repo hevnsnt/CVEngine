@@ -6,16 +6,15 @@ import re
 from datetime import timedelta
 from unittest import mock
 
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase
 from django.utils import timezone
 
 from agentapi import sentinel_broker as sb
 from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import SentinelTask
-from cveFeed import filler, fullscan, hot_validation, port_flood, reviewer
+from cveFeed import filler, hot_validation, port_flood, reviewer
 from cveFeed.hygiene import INFO
 from cveFeed.models import AdminAlert, AgentActivity
-from startScan.models import IpAddress, Port
 from tests.test_fullscan import FullScanBase, sweep_ip_with, xml
 from tests.test_reviewer import Fixture
 from tests.test_sentinel_dispatch import DispatchBase

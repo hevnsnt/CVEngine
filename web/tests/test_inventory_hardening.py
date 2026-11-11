@@ -13,13 +13,13 @@ from django.utils import timezone
 
 from agentapi import auth, inventory as inventory_api
 from agentapi.auth import create_token
-from cveFeed import correlation, host_inventory, inventory_match, inventory_schema as schema
+from cveFeed import host_inventory, inventory_match, inventory_schema as schema
 from cveFeed.models import CVEMatch, HostExclusion, HostInventory, ProjectSettings
 from dashboard.models import ApiToken, AuditLog, Project
 from startScan.models import IpAddress, Port
 from targetApp.models import Domain
 from tests.test_agentapi import call
-from tests.test_host_inventory import Base, MACHINE, report
+from tests.test_host_inventory import Base, report
 from tests.test_inventory_match import MatchBase, cve, windows_report
 from tests.test_inventory_scripts import Fixture, SH, PY, PS1, stubs_linux
 from tests.test_tenancy import client_for

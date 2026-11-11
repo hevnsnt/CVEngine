@@ -3,14 +3,12 @@ target carries, and the heartbeat's optional ``running`` list."""
 import hashlib
 import io
 import os
-import re
 import shutil
 import tarfile
 import tempfile
 from datetime import timedelta
 from unittest import mock
 
-from django.core.cache import cache
 from django.test import Client, SimpleTestCase, TestCase
 from django.utils import timezone
 

@@ -548,23 +548,6 @@ def last_admitted(kind, targets):
     return {t: float(v) for t, v in zip(targets, values) if v is not None}
 
 
-def note_admitted(kind, targets):
-    client = _client()
-    targets = list(targets or ())
-    if client is None or not targets:
-        return
-    at = launch_now()
-    try:
-        if at is None:
-            seconds, micro = client.time()
-            at = seconds + micro / 1e6
-        key = f'{PREFIX}:rotation:{kind}'
-        client.hset(key, mapping={t: at for t in targets})
-        client.expire(key, ROTATION_DAYS * 86400)
-    except Exception:  # noqa: BLE001
-        pass
-
-
 def launch_now():
     """The window's clock at a process start: None, the Redis server's clock (tests replace it)."""
     return None
@@ -583,14 +566,6 @@ def admit_one(port, kind=None, address=None, weight=1, now=None, burst=True):
     if reason and address:
         log_connections([address], [port], kind, mode=EXACT, outcome=reason)
     return reason
-
-
-def check_connect(port, kind=None, address=None):
-    """The gate of an in-process connection: raises ``PortHeld`` for a skipped or paced port, otherwise counts (and logs) the attempt."""
-    reason = admit_one(port, kind, address)
-    if reason:
-        raise PortHeld(port, reason)
-    record_one(port, kind, address=address)
 
 
 # --- the opt-in skip list, applied where a local tool starts ---------------------------------------------------------

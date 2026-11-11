@@ -365,11 +365,6 @@ def clip_certificate(info):
     return out
 
 
-def _project_kw(project):
-    """``{'project': id}`` when the target has one that may authorise a tailnet device, else nothing (the probes take it as an option)."""
-    return {} if project is None else {'project': project}
-
-
 # ----------------------------------------------------------------------------- DNS
 
 
@@ -387,11 +382,6 @@ def confirm_resolvers():
     import os
     raw = os.environ.get('CVENGINE_HYGIENE_CONFIRM_RESOLVERS')
     return CONFIRM_RESOLVERS if raw is None else tuple(x.strip() for x in raw.split(',') if x.strip())
-
-
-def organizational_domain(name):
-    from targetApp.target_types import apex_domain
-    return apex_domain(name)
 
 
 # ----------------------------------------------------------------------------- runner
