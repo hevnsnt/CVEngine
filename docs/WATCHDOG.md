@@ -62,7 +62,7 @@ The override is recorded in `WatchdogState` as the watchdog's, and is **released
 
 ### R10: the check after an action, and the flap guard
 
-Every action is followed by a check. For a host action the clock starts when the host **finished** (its answer file), 2 minutes later; for a local action 2 minutes after it. Two outcomes:
+Every action is followed by a check. For a host action the clock starts when the host **finished** (its answer file), 2 minutes later; for a local action 2 minutes after it. After a restart the host carried out, the check gives the workers the same warm-up an update gets (10 minutes from when the host finished): a lane that has not answered yet is starting, not unfixed, so the watchdog keeps looking every 30 seconds and escalates only if the symptom is still there when the warm-up ends. A host that refused or failed is checked at once. Two outcomes:
 
 - **Cleared**: a `fixed` line is recorded ("Verified: ...") and the notice becomes an information line that expires after a day.
 - **Not cleared**: **one** escalation notice with the evidence and the exact next step ("The workers still do not answer. Next step: run `docker compose restart celery`, then read `docker compose logs --tail 100 celery`"), and the rule stops acting **for an hour** (no restart loops). The row turns red until the symptom goes away.

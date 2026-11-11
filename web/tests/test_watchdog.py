@@ -3,6 +3,7 @@ action and the flap guard (R10), the switches, the host request files, and a tic
 fakes: nothing here talks to a broker or a container."""
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -232,13 +233,48 @@ class R1LanesTests(WatchdogCase):
         self.assertIn('stopped answering at {{time:2026-11-08T18:00:00Z}}', alert.title)
         self.assertIn('they answer again', alert.title)
 
+    def test_a_restart_whose_lanes_answer_after_five_minutes_is_fixed_not_escalated(self):
+        """The lanes of a restarted container can take minutes to answer (the CVE feed lane took ten on 11/9): the check waits as long as an update's warm-up."""
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.host_answers()
+        self.tick(30)
+        self.tick(125)  # two minutes after the host finished: the lanes are still starting
+        self.assertEqual(self.state('R1').status, 'acting')
+        self.assertFalse(AdminAlert.objects.filter(code='watchdog_r1', severity='critical').exists())
+        self.assertIn('starting', self.state('R1').status_text)
+        self.tick(120)  # five minutes after the host finished: still starting, still no verdict
+        self.assertFalse(AdminAlert.objects.filter(code='watchdog_r1', severity='critical').exists())
+        self.probes.data['lanes'] = dict(LANES)
+        self.tick(30)
+        self.assertEqual(self.state('R1').status, 'ok')
+        self.assertTrue(WatchdogEvent.objects.filter(rule='R1', level='fixed').exists())
+        self.assertFalse(WatchdogEvent.objects.filter(rule='R1', level='problem').exists())
+        self.assertFalse(AdminAlert.objects.filter(code='watchdog_r1', severity='critical').exists())
+        self.assertIsNone(self.state('R1').hold_until)
+
+    def test_a_restart_whose_lanes_never_answer_is_escalated_once_the_warm_up_is_over(self):
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.host_answers()
+        self.tick(30)
+        for _ in range(11):  # 11 minutes after the host finished
+            self.tick(60)
+        self.assertEqual(self.state('R1').status, 'problem')
+        self.assertEqual(AdminAlert.objects.get(code='watchdog_r1', resolved_at__isnull=True).severity, 'critical')
+        self.assertEqual(WatchdogEvent.objects.filter(rule='R1', level='problem').count(), 1)
+
     def test_not_fixed_escalates_once_and_stops_for_an_hour(self):
         self.break_lanes()
         self.tick()
         self.tick(181)
         self.host_answers()
         self.tick(30)
-        self.tick(125)  # check due, symptom still there
+        self.tick(125)  # check due, symptom still there: the lanes are given the warm-up first
+        self.assertEqual(self.state('R1').status, 'acting')
+        self.tick(500)  # the warm-up (ten minutes after the host finished) is over, the symptom is still there
         self.assertEqual(self.state('R1').status, 'problem')
         alert = AdminAlert.objects.get(code='watchdog_r1', resolved_at__isnull=True)
         self.assertEqual(alert.severity, 'critical')
@@ -257,6 +293,7 @@ class R1LanesTests(WatchdogCase):
         self.host_answers()
         self.tick(30)
         self.tick(125)
+        self.tick(500)  # the warm-up is over: escalated and held for an hour
         self.assertIsNone(self.request())
         self.tick(3600)
         self.tick(5)

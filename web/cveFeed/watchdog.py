@@ -46,6 +46,8 @@ EVENT_KEEP_ROWS = 5000
 ALL = '_all'
 ACTION_FILE = '.watchdog-action'
 RESULT_FILE = '.watchdog-result'
+RESTART_ACTIONS = ('restart-celery', 'restart-celery-beat')
+VERIFY_RETRY_SECONDS = 30    # while a restarted stack warms up, the check is looked at again this soon
 HOST_ACTIONS = ('restart-celery', 'restart-celery-beat', 'prune-docker')
 LANE_WORDS = {'discovery_worker': 'discovery', 'cve_feed_worker': 'CVE feed', 'validation_priority_worker': 'validation', 'classic_worker': 'classic'}
 WATCHDOG_ACTOR = 'watchdog'
@@ -788,6 +790,15 @@ def _fixed(rule, state, ctx, extra=''):
     return text
 
 
+def _still_warming_up(rule, state, ctx):
+    """True while a restart the host carried out is younger than the warm-up an update gets (``snapshot.WARMUP_SECONDS``): the containers were just
+    recreated, and a lane that has not answered yet is starting, not unfixed. After that the check judges as before."""
+    done = (state.verify or {}).get('host_done_at')
+    if rule.host_action not in RESTART_ACTIONS or not done or not (state.verify or {}).get('host_ok'):  # a host that refused or failed carried nothing out
+        return False
+    return (ctx.now - datetime.fromisoformat(done)).total_seconds() < snapshot.WARMUP_SECONDS
+
+
 def _escalate(rule, state, ctx, chk):
     v = state.verify or {}
     evidence = chk.text
@@ -795,8 +806,9 @@ def _escalate(rule, state, ctx, chk):
     state.escalated_at = ctx.now
     state.verify, state.verify_due = {}, None
     nxt = rule.next_step or 'look at the Health tab of the Scanners page'
+    later = 'ten minutes after the restart, long after the workers had time to start' if v.get('host_ok') else 'two minutes later'
     event(rule.code, 'problem', observation=evidence, action=v.get('action', ''), result=f'Not fixed after the action. Stopped acting on this rule for an hour. Next step: {nxt}.')
-    notice(rule.code, 'critical', f'{rule.notice_title or rule.title}; the watchdog could not fix it. Next step: {nxt}', f'{evidence} The watchdog acted at {human(datetime.fromisoformat(v["acted_at"])) if v.get("acted_at") else "an earlier time"} and the symptom was still there two minutes later, so it has stopped acting on this for an hour to avoid a restart loop.',
+    notice(rule.code, 'critical', f'{rule.notice_title or rule.title}; the watchdog could not fix it. Next step: {nxt}', f'{evidence} The watchdog acted at {human(datetime.fromisoformat(v["acted_at"])) if v.get("acted_at") else "an earlier time"} and the symptom was still there {later}, so it has stopped acting on this for an hour to avoid a restart loop.',
            action=v.get('action', ''))
 
 
@@ -869,6 +881,7 @@ def _process_host_result(ctx):
             v = {**v, 'host_id': '', 'host_done_at': done.isoformat()}
             state.verify = v
             if result.get('ok'):
+                state.verify = {**state.verify, 'host_ok': True}
                 state.verify_due = done + timedelta(seconds=rule.verify)
                 event(rule.code, 'action', action=result.get('action', ''), result='The host carried it out. ' + detail, request=result['id'])
             else:
@@ -920,6 +933,10 @@ def _process_rule(rule, ctx, stand):
                 extra = after_lanes_fixed(ctx, rule, state)
             _fixed(rule, state, ctx, extra)
             _set(state, 'ok', chk.text)
+            return
+        if chk.firing is True and _still_warming_up(rule, state, ctx):
+            state.verify_due = ctx.now + timedelta(seconds=VERIFY_RETRY_SECONDS)
+            _set(state, 'acting', 'The restart was carried out and the workers are still starting; checking again shortly.')
             return
         if chk.firing is True:
             _escalate(rule, state, ctx, chk)
