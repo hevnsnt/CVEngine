@@ -31,13 +31,6 @@ def enabled():
     return os.environ.get('CVENGINE_NODE2SHELL', '0').strip().lower() not in ('0', 'false', 'no', 'off')
 
 
-def check_timeout():
-    try:
-        return max(10, int(os.environ.get('CVENGINE_NODE2SHELL_TIMEOUT', DEFAULT_TIMEOUT)))
-    except ValueError:
-        return DEFAULT_TIMEOUT
-
-
 def scope():
     """``runtimes`` (the default): only hosts a technology or route fingerprint names as a runtime that carries the decoder. ``all``: every web host
     this scan found, for the cases a fingerprint cannot see (a Python service using Brotli, a container base image, a sidecar that hides its name).

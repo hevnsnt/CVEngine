@@ -3,7 +3,6 @@ cveFeed.udp_scan must not spend capacity on a full port sweep or a UDP exposure 
 a host missing its core first pass, but a backlog that is only bounty-blocked or only there because scanning is
 paused must not gate deep scanning forever."""
 import os
-from datetime import timedelta
 from unittest import mock
 
 from django.test import TestCase

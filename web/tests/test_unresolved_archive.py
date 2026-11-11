@@ -7,7 +7,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from cveFeed import archive_rediscovery
-from cveFeed.unresolved_archive import candidates, check_one, record_attempt, run_page, ttl
+from cveFeed.unresolved_archive import candidates, check_one, record_attempt, run_page
 from cveFeed.models import HostAssessment, HostExclusion, HostState, UnresolvedArchiveReview
 from dashboard.models import Org, Project
 from startScan.models import Subdomain

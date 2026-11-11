@@ -7,9 +7,8 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from cveFeed import host_context, port_inventory, probes, triage, validation, validation_plan
-from cveFeed.models import CVEEntry, CVEMatch, ProbeObservation, RouteAuth, Triage, TriageVerdict
-from reNgine import ai_providers
-from startScan.models import IpAddress, Port, Subdomain, Technology, Waf
+from cveFeed.models import CVEEntry, CVEMatch, ProbeObservation, RouteAuth, Triage
+from startScan.models import IpAddress, Subdomain, Technology, Waf
 from tests.fake_scanner import FakeScanner, LocalFallback, assert_ran_nowhere_locally
 from tests.test_route_auth import RouteFixture
 from tests.test_triage import reply

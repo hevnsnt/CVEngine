@@ -6,7 +6,7 @@ from django.db import DataError, transaction
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from agentapi import probe_results, sentinel_stream, storage_safe
+from agentapi import probe_results, storage_safe
 from agentapi.models import SentinelTask
 from dashboard.models import Org, Project
 from reNgine.ai_providers import clean_text

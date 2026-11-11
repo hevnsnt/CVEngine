@@ -5,7 +5,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from dashboard.models import Org, Project
-from reNgine.discovery_events import BbotResult, short_title
+from reNgine.discovery_events import short_title
 from tests.discovery_fixtures import fold_findings
 from startScan.models import Vulnerability
 from targetApp.models import Domain

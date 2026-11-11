@@ -9,7 +9,6 @@ from django.utils import timezone
 
 from agentapi import sentinel_broker
 from agentapi.models import SentinelTask
-from agentapi.services import Ctx
 from agentapi.system_status import _sentinels
 from cveFeed import reviewer
 from tests.test_reviewer import Fixture

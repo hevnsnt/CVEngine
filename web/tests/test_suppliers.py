@@ -849,7 +849,7 @@ class SeparationTests(Fixture, TestCase):
         self.assertEqual((HygieneFinding.objects.count(), Domain.objects.filter(project=self.project).count(), Subdomain.objects.count()), (0, 1, 0))
 
     def test_a_supplier_never_becomes_a_target_a_host_or_scan_work(self):
-        from cveFeed import conductor, fullscan
+        from cveFeed import conductor
         self.rows[self.D] = row(self.D)
         self.supplier(domains=[self.D])
         self.sweep()

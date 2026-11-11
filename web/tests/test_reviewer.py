@@ -14,7 +14,7 @@ from agentapi import builtin_reviewer
 from agentapi.auth import create_token
 from cveFeed import closure, injection_guard, reviewer, triage
 from cveFeed.models import (AdminAlert, CVEEntry, CVEMatch, FindingAuditEvent, FindingComment, FindingReview, HostState, HygieneFinding,
-                            ReviewerSettings, Triage)
+                            ReviewerSettings)
 from dashboard.models import AIProviderSettings, ApiToken, Org, Project
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain, Vulnerability

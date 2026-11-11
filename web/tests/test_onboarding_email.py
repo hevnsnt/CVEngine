@@ -3,7 +3,6 @@ import json
 import smtplib
 import socket
 import ssl
-from datetime import timedelta
 from unittest import mock
 from urllib.parse import urlsplit
 
