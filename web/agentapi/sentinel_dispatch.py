@@ -1109,18 +1109,20 @@ def _finding_to_nuclei_line(finding):
                      'tags': finding.get('tags') or []}}
 
 
-def _nuclei_target(kind, targets, kwargs):
+def _nuclei_target(kind, targets, kwargs, scan=None):
     """The target of a dispatched template task: the targets, the tags and severities the pass runs with, and the template policy it applies. The
     light pass is the technology fingerprint (tags ``tech``, severity ``info``), so the Sentinel is told that here, or it would run the whole
     template library at every severity and the stage would time out. ``etags`` are the tags every run leaves out (``cvengine_scanner.flags.NUCLEI_EXCLUDED_TAGS``, ``dos``) and
     ``template_policy`` names the template policy in force (the read-only set, or everything when an administrator allowed it), so the client runs
     nothing this server would not; its ``bundle_sha256`` is the sha256 of the approved template archive the client fetches from
     ``GET /api/v1/sentinel/template-policy/bundle`` (``None`` until that archive exists: it is packed here when the approved snapshot is already
-    cached, else on the first policy request)."""
+    cached, else on the first policy request). ``budget`` is the most one non-web host:port may receive from the task (``cvengine_scanner.flags.NUCLEI_SERVICE_BUDGET``)
+    and ``services`` (given ``scan``) labels each ``host:port`` of the targets with what speaks there (``cveFeed.nuclei_services``: ``web``, ``unknown`` or a
+    protocol class), so a Sentinel sends a port only the templates of its protocol: a bare host, an address or a URL has no label and is web."""
     from cvengine_scanner import flags as scan_flags
 
     from agentapi import template_bundle
-    from cveFeed import nuclei_scan
+    from cveFeed import nuclei_scan, nuclei_services
     # no severities given: the default (``cvengine_scanner.flags.NUCLEI_SEVERITIES``, info to critical), sent as a list, since a client given none
     # would run every severity, ``unknown`` included
     tags, severities = sorted(kwargs.get('tags') or []), list(kwargs.get('severities') or scan_flags.NUCLEI_SEVERITIES.split(','))
@@ -1128,8 +1130,13 @@ def _nuclei_target(kind, targets, kwargs):
         tags, severities = ['tech'], ['info']
     etags = list(scan_flags.NUCLEI_EXCLUDED_TAGS)
     rev = nuclei_scan.policy_rev()
-    return {'targets': targets, 'tags': tags, 'severities': severities, 'etags': etags,
-            'template_policy': {'rev': rev, 'read_only': rev == nuclei_scan.TEMPLATE_POLICY_REV, 'bundle_sha256': template_bundle.sha256_if_ready()}}
+    target = {'targets': targets, 'tags': tags, 'severities': severities, 'etags': etags,
+              'template_policy': {'rev': rev, 'read_only': rev == nuclei_scan.TEMPLATE_POLICY_REV, 'bundle_sha256': template_bundle.sha256_if_ready()},
+              'budget': dict(scan_flags.NUCLEI_SERVICE_BUDGET)}
+    services = nuclei_services.labels_for(scan, targets) if scan is not None else {}
+    if services:
+        target['services'] = services
+    return target
 
 
 def _targets_label(chunk):
@@ -1162,7 +1169,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                 targets = []
             internal_stream.unreached = set()
             chunks = _chunks(targets)  # every target is sent: a stage that marks its whole list scanned must not have dropped the tail
-            with contextlib.closing(dispatch_many(project, kind, chunks, prepare=lambda chunk: (_nuclei_target(kind, chunk, kwargs), []), scan=scan,
+            with contextlib.closing(dispatch_many(project, kind, chunks, prepare=lambda chunk: (_nuclei_target(kind, chunk, kwargs, scan), []), scan=scan,
                                                   internal=True, timeout=timeout, labeler=_targets_label)) as results:
                 for _index, result in results:
                     if result is None:
@@ -1195,7 +1202,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
             if not live:
                 unresolved.add(tuple(chunk))
                 return None  # nothing in the chunk resolves: a Sentinel would be asked to do nothing, and nothing can run here
-            return _nuclei_target(kind, live, kwargs), []
+            return _nuclei_target(kind, live, kwargs, scan), []
         with contextlib.closing(dispatch_many(project, kind, chunks, prepare=prepare, scan=scan, timeout=timeout, labeler=_targets_label)) as results:
             for index, result in results:
                 if result is None:
