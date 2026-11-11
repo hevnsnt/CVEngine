@@ -170,6 +170,8 @@ def host_archive(ctx, slug, host, action, reason='', pinned=None):
             raise ApiError(400, 'pinned must be true or false')
         state.pinned = pinned
         state.save(update_fields=['pinned'])
+    from cveFeed import snapshot_cache
+    snapshot_cache.bump_on_commit()  # archive, restore and pin change what the host lists and counts show
     from cveFeed.admin_api import audit
     audit(ctx.user, f'host.{action}', f'{name} in {slug}', project.org, project=slug, host=name,
           reason=reason.strip() if action == 'archive' else '', pinned=state.pinned)
@@ -213,6 +215,8 @@ def _purge(project, name, subtree=False):
                                 RouteAuth, TlsCertificate, Triage)
     from startScan.models import EndPoint, ScanHistory, Subdomain, Vulnerability
     from targetApp.models import Domain
+    from cveFeed import snapshot_cache
+    snapshot_cache.bump_on_commit()  # the host, finding and match counts on the live screen change with this commit
     counts = {}
     subs = Subdomain.objects.filter(target_domain__project=project).filter(_host_q('name', name, subtree))
     sub_ids = list(subs.values_list('id', flat=True))

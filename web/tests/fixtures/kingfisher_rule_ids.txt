@@ -169,6 +169,7 @@ betterleaks.gcp-api-key
 betterleaks.gcp-application-default-credentials
 betterleaks.gcp-gemini-api
 betterleaks.gcp-service-account
+betterleaks.generic-api-key
 betterleaks.generic-credential-uri
 betterleaks.gitea-access-token
 betterleaks.github-app-token
@@ -256,6 +257,7 @@ betterleaks.mailgun-private-api-token
 betterleaks.mailgun-pub-key
 betterleaks.mailgun-signing-key
 betterleaks.mapbox-api-token
+betterleaks.mapbox-secret-token
 betterleaks.mattermost-access-token
 betterleaks.maxmind-license-key
 betterleaks.mem0-api-key.1

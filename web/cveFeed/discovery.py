@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from django.conf import settings
 from django.utils import timezone
 
-from cveFeed import scanner_wait
+from cveFeed import scanner_wait, snapshot_cache
 from reNgine import discovery_events as bbot_lib
 
 logger = logging.getLogger(__name__)
@@ -377,6 +377,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
     if finalize or status == FAILED:
         scan.scan_status, scan.stop_scan_date, scan.error_message = status, timezone.now(), error or None
         scan.save(update_fields=['scan_status', 'stop_scan_date', 'error_message'])
+        snapshot_cache.bump_on_commit()  # a scan that ended changes which hosts are current
     from startScan.models import Subdomain
     found = Subdomain.objects.filter(scan_history=scan).count()
     if waited and status != SUCCESS:  # the scan record still reads "waiting for a scanner" (the target stays due and is queued again); the line is amber, not red
@@ -897,6 +898,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_st
     scan.scan_status, scan.stop_scan_date = SUCCESS, timezone.now()
     scan.error_message = ('Failed stages: ' + ', '.join(failed_names))[:290] if failed_names else None
     scan.save(update_fields=['scan_status', 'stop_scan_date', 'error_message'])
+    snapshot_cache.bump_on_commit()  # the scan's hosts are now the target's current inventory: the live screen's counts move with it
     found['status'] = scan.scan_status
     found['error'] = scan.error_message or ''
     found['failed_stages'] = failed_names
