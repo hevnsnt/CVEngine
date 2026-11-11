@@ -384,6 +384,20 @@ class ReviewerCheckTests(Base):
             GeneratedTemplate.objects.create(cve_entry=self.cve, yaml='x', status='valid', validated_at=timezone.now())
             self.assertEqual(self.check()['state'], 'ok')
 
+    def test_all_rejected_alert_does_not_advise_a_bigger_model(self):
+        for n in range(5):
+            GeneratedTemplate.objects.create(cve_entry=self.cve, yaml='x', status='invalid', validation_reason='the fixture did not match',
+                                             validated_at=timezone.now())
+        with mock.patch('agentapi.sentinel_dispatch.nuclei_validate_ready'):
+            check = self.check()
+        self.assertEqual(check['state'], 'warning')
+        text = check['detail'].lower()
+        for advice in ('more capable', 'bigger model', 'larger model', 'choose a'):
+            self.assertNotIn(advice, text)
+        self.assertIn('the fixture did not match', text)  # what happened
+        self.assertIn('what you can do', text)  # and what to do about it
+        self.assertIn('product and version', text)
+
     def test_fresh_pending_drafts_are_no_problem(self):
         self.draft()
         with mock.patch('agentapi.sentinel_dispatch.nuclei_validate_ready', side_effect=ScannerUnavailable('nuclei_validate', 'none')):
