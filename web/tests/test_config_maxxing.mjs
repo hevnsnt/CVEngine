@@ -10,8 +10,8 @@ const read = (name) => readFileSync(new URL(name, dir), 'utf8');
 const field = (over = {}) => ({key: 'heavy.nmap', label: 'Port and service scan (nmap)', group: 'heavy', default: 2, min: 1, max: 8, value: 2, source: 'default',
   env_name: 'HEAVY_MAX_NMAP', env_value: null, set_by: null, set_at: null, applies: 'live', ...over});
 
-test('the section is called Performance and tuning (a plain name, not the project nickname) and has no subtitle', () => {
-  assert.equal(L.SECTION_LABEL, 'Performance and tuning');
+test('the section is called configMaxxing, with that capitalisation, and has no subtitle', () => {
+  assert.equal(L.SECTION_LABEL, 'configMaxxing');
   assert.equal(L.SECTION_ID, 'configmaxxing');
   for (const name of ['config-maxxing.js', 'config-maxxing-logic.js', 'scan-concurrency-card.js', 'tunables-card.js', 'settings.js']) {
     const src = read(name);
@@ -135,13 +135,13 @@ test('the new pages build the DOM with textContent only, never innerHTML, and re
   assert.doesNotMatch(read('config-maxxing-logic.js'), /^\s*import\s/m, 'the logic module must stay importable by node');
 });
 
-test('Settings has the Performance and tuning group, collapsed by default, with a pointer from Resources', () => {
+test('Settings has the configMaxxing group, collapsed by default, with a pointer from Resources', () => {
   const src = read('settings.js');
   assert.match(src, /SECTION_LABEL/);
   assert.match(src, /async \[SECTION_ID\]\(m\)/);
   assert.match(src, /setCmOpen\(readOpen\(storage\), false\)/);
   assert.match(src, /"aria-controls": "set-cm-items"/);
-  assert.match(src, /Scan concurrency moved to Performance and tuning/);
+  assert.match(src, /Scan concurrency moved to configMaxxing/);
   assert.match(src, /isSectionHash\(location\.hash\)/);
   assert.doesNotMatch(src, /innerHTML/);
   assert.match(src, /try \{\s*storage = window\.localStorage;\s*\} catch/);

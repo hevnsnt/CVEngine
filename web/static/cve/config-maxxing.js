@@ -51,15 +51,15 @@ export async function buildSection(host, { card = "" } = {}) {
   head.append(el("h2", "", SECTION_LABEL, { style: "margin-bottom:8px" }), el("p", "note", WARNING_TEXT, { style: "margin:0 0 12px" }));
   head.append(
     button(
-      "Reset all performance settings to defaults",
+      "Reset all configMaxxing settings to defaults",
       async () => {
-        const sure = await ask("Every setting here goes back to its default (or to the value the server sets, where there is one). Scans keep running; the new limits apply within seconds.", {
-          title: "Reset everything under Performance and tuning?",
+        const sure = await ask("Every setting in configMaxxing goes back to its default (or to the value the server sets, where there is one). Scans keep running; the new limits apply within seconds.", {
+          title: "Reset everything in configMaxxing?",
           ok: "Reset all",
         });
         if (!sure) return;
         await api("POST", `${API}/config_maxxing/reset`, {});
-        toast("Performance and tuning is back to its defaults");
+        toast("configMaxxing is back to its defaults");
         await buildSection(host);
       },
       "btn ghost sm",

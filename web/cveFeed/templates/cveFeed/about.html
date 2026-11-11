@@ -56,10 +56,14 @@
         <h3>OpenVAS add-on <span class="chip">Optional</span></h3>
         <p class="note">Greenbone Community Edition, in separate containers a Sentinel runs</p>
         <ul>
-          <li>Off until you turn it on with <code>COMPOSE_PROFILES=openvas</code> on a Sentinel</li>
-          <li>gvmd, ospd-openvas, openvas-scanner, pg-gvm, Redis and the Greenbone feed data</li>
-          <li>CVEngine drives it over GMP with python-gvm</li>
+          <li>Off until you choose the Full size when you add a Sentinel</li>
+          <li>Checks for known weaknesses with a large, regularly updated set of tests</li>
         </ul>
+        <details class="tech">
+          <summary>Details</summary>
+          <p class="note">For engineers and auditors: it is switched on with <code>COMPOSE_PROFILES=openvas</code> on a Sentinel.</p>
+          <p class="note">The parts: gvmd, ospd-openvas, openvas-scanner, pg-gvm, Redis and the Greenbone feed data. CVEngine drives it over GMP with python-gvm.</p>
+        </details>
       </article>
     </div>
   </section>

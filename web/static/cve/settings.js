@@ -869,9 +869,9 @@ const sections = {
     };
     // Always shown, also when no worker has reported yet (the cards below are not drawn then).
     const pointer = () => {
-      const note = el("p", "note", "Scan concurrency moved to Performance and tuning: how many scans of each kind run at once, how many hosts are assessed at once and how many discovery scans are kept running. ", { style: "margin:0" });
+      const note = el("p", "note", "Scan concurrency moved to configMaxxing: how many scans of each kind run at once, how many hosts are assessed at once and how many discovery scans are kept running. ", { style: "margin:0" });
       note.append(
-        Object.assign(el("a", "", "Open Performance and tuning", { href: `#${SECTION_ID}` }), {
+        Object.assign(el("a", "", "Open configMaxxing", { href: `#${SECTION_ID}` }), {
           onclick: (event) => {
             event.preventDefault();
             open(SECTION_ID);

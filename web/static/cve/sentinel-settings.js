@@ -601,7 +601,7 @@ const ROWS = [
   [
     "discovery_keys",
     "Discovery API keys",
-    "Whether this Sentinel may be sent a project's discovery API keys (Shodan and the like), once per discovery task of that project. The instance setting under Settings, Performance and tuning, Discovery API keys must also be on, and the Sentinel must be up to date.",
+    "Whether this Sentinel may be sent a project's discovery API keys (Shodan and the like), once per discovery task of that project. The instance setting under Settings, configMaxxing, Discovery API keys must also be on, and the Sentinel must be up to date.",
   ],
   [
     "max_concurrent",

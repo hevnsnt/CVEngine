@@ -8,9 +8,9 @@ import * as logic from '../static/cve/config-maxxing-logic.js';
 const field = {key: 'stage_parallel', label: 'Chunks', default: 4, value: 6, source: 'environment', env_name: 'CVENGINE_STAGE_PARALLEL', env_value: 6};
 const bare = (s) => assert.doesNotMatch(String(s), /CVENGINE_|\.env\b|configMaxxing|environment variable/i, String(s));
 
-test('the section has a plain name, not the project nickname', () => {
-  assert.equal(logic.SECTION_LABEL, 'Performance and tuning');
-  bare(logic.SECTION_LABEL);
+test('the section keeps its name, with a plain sentence saying what it is for', () => {
+  assert.equal(logic.SECTION_LABEL, 'configMaxxing');
+  assert.match(logic.WARNING_TEXT, /^configMaxxing: advanced performance settings\./);
 });
 
 test('where a number comes from is said in plain words; the variable name is the Details line', () => {

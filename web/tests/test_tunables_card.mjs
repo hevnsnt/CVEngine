@@ -138,10 +138,10 @@ test('the section draws every registered card, the cards share one width, and Re
   const host = new Node('div');
   calls.length = 0;
   await maxxing.buildSection(host);
-  assert.match(host.textContent, /^Performance and tuning/);
+  assert.match(host.textContent, /^configMaxxing/);
   assert.match(host.textContent, /AI spend/);
   assert.match(host.textContent, /Scan pacing/);
-  assert.match(host.textContent, /Reset all performance settings to defaults/);
+  assert.match(host.textContent, /Reset all configMaxxing settings to defaults/);
   const widths = find(host, (n) => n.className === 'card').map((n) => /max-width:(\d+px)/.exec(n.attrs.style || '')?.[1]);
   assert.equal(new Set(widths).size, 1, String(widths));
 });

@@ -74,13 +74,13 @@ test('the card registers itself once and the section draws title, warning, the c
   const host = new Node('div');
   await maxxing.buildSection(host);
   const text = host.textContent;
-  assert.match(text, /^Performance and tuning/);
+  assert.match(text, /^configMaxxing/);
   assert.match(text, /Changing these can make scans slower, use more memory or send more traffic to your targets/);
   assert.match(text, /Scan concurrency/);
   assert.match(text, /second machine \(a Sentinel\) is the best way to scale/);
   assert.match(text, /Memory budget of the scanning container: 3\.0 GB \(container limit 4\.0 GB\)\./);
   assert.match(text, /Details\s*The container limit is set by the server's administrator with CELERY_MEM_LIMIT/);
-  assert.match(text, /Reset all performance settings to defaults/);
+  assert.match(text, /Reset all configMaxxing settings to defaults/);
   assert.doesNotMatch(text, /Tinkerer/i);
   assert.deepEqual(calls.map((c) => `${c.method} ${c.url}`), ['GET /cve/api/settings/scan_concurrency']);
 });
@@ -145,7 +145,7 @@ test('Reset all is a button of the section (it asks before it posts)', async () 
   // ask() draws a <dialog> and waits for a click; here the dialog is not drawn, so only the call made after a yes is checked
   const host = new Node('div');
   await maxxing.buildSection(host);
-  const resetAll = find(host, (n) => n.tag === 'button' && /^Reset all performance settings/.test(n.textContent))[0];
+  const resetAll = find(host, (n) => n.tag === 'button' && /^Reset all configMaxxing/.test(n.textContent))[0];
   assert.ok(resetAll && typeof resetAll.onclick === 'function', String(dialogs));
 });
 
@@ -175,12 +175,12 @@ test('the discovery status line uses the note style of the lines around it, and 
   assert.equal(new Set(widths).size, 1, String(widths));
 });
 
-test('the Resources tab shows the pointer to Performance and tuning even when no worker has reported', () => {
+test('the Resources tab shows the pointer to configMaxxing even when no worker has reported', () => {
   const src = readFileSync(new URL('../static/cve/settings.js', import.meta.url), 'utf8');
   const draw = src.slice(src.indexOf('const draw = (snap) => {'), src.indexOf('const refresh = async'));
   const pointerAt = draw.indexOf('host.append(pointer())');
   const emptyAt = draw.indexOf('!snap.containers.length');
   assert.ok(pointerAt > 0 && emptyAt > 0 && pointerAt < emptyAt, 'the pointer is drawn after the no-worker early return');
-  assert.match(src, /Scan concurrency moved to Performance and tuning/);
-  assert.match(src, /Open Performance and tuning/);
+  assert.match(src, /Scan concurrency moved to configMaxxing/);
+  assert.match(src, /Open configMaxxing/);
 });
