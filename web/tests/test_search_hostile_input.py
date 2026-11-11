@@ -1,6 +1,5 @@
 """Search abuse found by review 2 of 2026-11-09 (P4 and P5): one bad address row must not break every organization's ``ip:`` search, and a search
 must not be able to ask Postgres to plan a query of a million characters."""
-from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 

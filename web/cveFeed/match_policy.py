@@ -517,7 +517,7 @@ def unversioned_leads(technologies, ports):
     sighting on the same host did give a version, an operating system, or a generic label. Pure, so it is unit tested without a database."""
     from cveFeed.correlation import (_MIN_TOKEN, GENERIC_PRODUCT_TOKENS, _norm, name_matches_token, parse_cpe, parse_version,
                                      split_name_version)
-    seen, candidates = [], []
+    candidates = []
     for source_id, stored in technologies:
         name, version = split_name_version(stored or '')
         candidates.append((name or (stored or '').strip(), parse_version(version) is not None, _lead(name or stored, 'tech', source_id)))

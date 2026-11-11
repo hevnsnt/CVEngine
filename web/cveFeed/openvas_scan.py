@@ -516,17 +516,29 @@ def queue_explained(link, now=None):
     now = time.time() if now is None else now
     held = cache.get(_queue_key(link.project_id))
     if not isinstance(held, dict) or 'value' not in held:
-        value = _explained(link)
-        cache.set(_queue_key(link.project_id), {'at': now, 'value': value}, QUEUE_KEEP_SECONDS)
-        return value
-    if now - float(held.get('at') or 0) > QUEUE_FRESH_SECONDS and cache.add(f'{_queue_key(link.project_id)}:refreshing', 1, QUEUE_REFRESH_LOCK_SECONDS):
+        # nothing kept (a new project, or the cache emptied by an update or a restart): the page does not wait for it either. Working every
+        # project out in the request took 55 s on the production install right after an update; the refresh is asked for and the page shows
+        # the project as still being worked out until it lands (a few seconds).
+        _ask_refresh(link.project_id)
+        return dict(PENDING)
+    if now - float(held.get('at') or 0) > QUEUE_FRESH_SECONDS:
+        _ask_refresh(link.project_id)
+    return held['value']
+
+
+PENDING = {'rows': [], 'ready': 0, 'refused': 0, 'groups': [], 'pending': True}
+
+
+def _ask_refresh(project_id):
+    """Queue one refresh of a project's explanation on the live-cache worker, unless one is already queued or running."""
+    from django.core.cache import cache
+    if cache.add(f'{_queue_key(project_id)}:refreshing', 1, QUEUE_REFRESH_LOCK_SECONDS):
         try:
             from cveFeed.tasks import refresh_openvas_queue
-            refresh_openvas_queue.delay(link.project_id)
+            refresh_openvas_queue.delay(project_id)
         except Exception:  # noqa: BLE001 - a broker that cannot be reached leaves the kept answer; the page must still draw
-            cache.delete(f'{_queue_key(link.project_id)}:refreshing')
-            logger.warning('the OpenVAS queue refresh for project %s could not be queued', link.project_id, exc_info=True)
-    return held['value']
+            cache.delete(f'{_queue_key(project_id)}:refreshing')
+            logger.warning('the OpenVAS queue refresh for project %s could not be queued', project_id, exc_info=True)
 
 
 def overview(project_ids, limit=12):
@@ -537,9 +549,10 @@ def overview(project_ids, limit=12):
     if not OpenvasSettings.current().enabled:
         return None
     run = OpenvasRun.objects.filter(status='running', project_id__in=project_ids).select_related('project').first()
-    rows, ready_total, refused_total, groups = [], 0, 0, {}
+    rows, ready_total, refused_total, groups, pending = [], 0, 0, {}, 0
     for link in links_for(project_ids):
         found = queue_explained(link)
+        pending += 1 if found.get('pending') else 0
         rows += [{**r, 'project': link.project.slug} for r in found['rows']]
         ready_total, refused_total = ready_total + found['ready'], refused_total + found['refused']
         for g in found['groups']:
@@ -552,7 +565,8 @@ def overview(project_ids, limit=12):
                         if run else None),
             'hosts_per_task': max_hosts(), 'budget_hours_per_host': max_hours(), 'max_checks': int(task_preferences()['max_checks']),
             'next': ready[:limit], 'not_due': refused[:limit], 'counts': {'next': ready_total, 'not_due': refused_total},
-            'not_due_groups': summary_groups, 'not_due_summary': not_due_summary(summary_groups)}
+            'not_due_groups': summary_groups, 'not_due_summary': not_due_summary(summary_groups),
+            'pending_projects': pending}  # projects whose queue is still being worked out (the page says so; the next poll has them)
 
 
 def next_batch(link, resolve=None, blocked=None):

@@ -6,7 +6,6 @@ the discovery's own ``crt`` module uses. Nothing is sent to the target itself.
 """
 import json
 import logging
-import os
 import random
 import re
 import threading

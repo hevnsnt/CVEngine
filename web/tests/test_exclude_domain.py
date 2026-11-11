@@ -7,7 +7,7 @@ from agentapi.services import ApiError
 from cveFeed.exclusions import ExclusionSet, drop_excluded, excluded_names, is_excluded
 from cveFeed.models import HostExclusion, HostState
 from reNgine.tasks import save_subdomain
-from startScan.models import IpAddress, ScanHistory, Subdomain, Vulnerability
+from startScan.models import ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests.test_agentapi import call
 from tests.test_host_manage import Base

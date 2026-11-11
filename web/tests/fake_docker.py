@@ -10,7 +10,6 @@ pulled first (the default).
 """
 import json
 import os
-import re
 import sys
 
 DIR = os.environ['STUB_DIR']

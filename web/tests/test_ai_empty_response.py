@@ -11,7 +11,7 @@ from cveFeed import nuclei_templates as nt
 from cveFeed.models import AIUsage
 from cveFeed.ai_usage import snapshot
 from reNgine import ai_providers as ai
-from tests.anthropic_fake import SHAPES, FakeAnthropic, message, text, THINKING
+from tests.anthropic_fake import SHAPES, FakeAnthropic
 
 INSTALLED = {'nginx', 'php', 'exposure', 'cve'}
 ANSWER = '{"0": {"tags": ["nginx"], "severities": ["high"]}}'

@@ -1583,7 +1583,7 @@ def deep_scan_apexes():
 
     from cveFeed import activity, ledger
     from cveFeed.counts import running_window
-    from cveFeed.discovery import FAILED, HOST_PIPELINE_TASK, QUEUED, RUNNING, start_discoveries
+    from cveFeed.discovery import HOST_PIPELINE_TASK, QUEUED, RUNNING, start_discoveries
     from startScan.models import ScanHistory
     from targetApp.models import Domain
     from targetApp.shared_domains import effective_apex, is_shared_apex

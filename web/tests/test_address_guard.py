@@ -5,13 +5,11 @@ import json
 from pathlib import Path
 
 from django.contrib.auth.models import User
-from django.core.cache import cache
 from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 from unittest import mock
 
 from agentapi import address_guard, excluded_addresses
-from agentapi import sentinel_broker as broker
 from agentapi import sentinel_contract
 from agentapi import sentinel_dispatch as dispatch
 from agentapi.auth import create_token

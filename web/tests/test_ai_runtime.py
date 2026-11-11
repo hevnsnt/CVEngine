@@ -173,7 +173,6 @@ class ReplyLimitSettingTests(unittest.TestCase):
 
 class ConnectTimeoutTests(unittest.TestCase):
 	def category(self, exc):
-		import requests
 		with mock.patch('requests.post', side_effect=exc), self.assertRaises(ai.AIProviderError) as raised:
 			ai.get_provider('vllm', model='m', base_url='http://h:8000/v1').complete('s', 'u')
 		return raised.exception.category

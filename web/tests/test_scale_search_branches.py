@@ -1,6 +1,6 @@
 """A bare-word search is an OR over many relations; each branch is its own semi-join (``services._host_has``). The hosts it finds are exactly the hosts the
 single big join found, for every kind of term, and the cost of the term does not grow with how many relations the word touches."""
-from django.db.models import Exists, OuterRef, Q
+from django.db.models import Exists, OuterRef
 from django.test import TestCase
 from django.utils import timezone
 
