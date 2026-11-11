@@ -4,7 +4,7 @@
 // GET /api/v1/sentinels/live and is set with textContent; the card ages itself every second between polls. When the server reports `orgs`,
 // the cards are grouped by the organizations each Sentinel covers (an instance-wide one under "Every organization"), each group with the
 // internal networks its projects declared.
-import { api, badge, button, el, toast } from "/staticfiles/cve/ui.js";
+import { SLOW_MS, api, badge, button, couldNotRead, el, toast, waiting } from "/staticfiles/cve/ui.js";
 import { thinkingOrb } from "/staticfiles/cve/thinking-orb.js";
 import { detailCache, kindChips, versionBlock } from "/staticfiles/cve/sentinel-settings.js";
 import { createGet, createPace, every, staleRows } from "/staticfiles/cve/poll.js";
@@ -431,6 +431,8 @@ const detailKey = (s) => `${s.revision || ""}|${s.version_state || ""}`;
 
 export function sentinelLive(mount) {
   let data = null;
+  let failure = null; // the words of a failed first read, shown with Retry
+  let slowed = false;
   const pace = createPace();
   const conditional = createGet();
   const details = detailCache(() => paint());
@@ -449,7 +451,17 @@ export function sentinelLive(mount) {
   // leaves a block whose markup did not change alone; it waits while the person is using the page (static/cve/keep-state.js).
   const blocks = () => {
     const built = el("div");
-    if (!data) return [];
+    if (!data) {
+      // nothing read yet: a placeholder while waiting, and when the read failed, say so with Retry; never "No Sentinel has registered yet"
+      if (!failure) {
+        const wait = waiting("Checking the Sentinels", { slow: slowed });
+        wait.setAttribute("data-keep-key", "wait");
+        return [wait];
+      }
+      const box = couldNotRead("The Sentinel list", () => { failure = null; slowed = false; paint(); reload(); }, failure);
+      box.setAttribute("data-keep-key", "load-error");
+      return [box];
+    }
     if (!data.results.length) {
       built.append(el("p", "empty", "No Sentinel has registered yet. Generate an enrollment secret for a project and give it to a Sentinel's setup."));
       if (!(data.orgs || []).some((o) => o.networks.length) && !data.openvas) return Array.from(built.childNodes);
@@ -504,7 +516,11 @@ export function sentinelLive(mount) {
       }
     } catch (err) {
       pace.fail(err);
-      if (!data) toast(err.status ? `Request failed (${err.status})` : err.message, true);
+      // a failed refresh keeps the cards on screen; a failed first read says so where the list would be
+      if (!data) {
+        failure = err.status ? `The server answered ${err.status}.` : "The server did not answer.";
+        paint();
+      }
     }
   }
   async function reload() {
@@ -513,6 +529,9 @@ export function sentinelLive(mount) {
   }
   // One request at a time, jittered, paused while the tab is hidden; the detail of a Sentinel (settings, version, update) is asked for only when its live
   // row says it moved (``revision``), not on every round.
+  paint();
+  const slowTimer = setTimeout(() => { if (!data && !failure) { slowed = true; paint(); } }, SLOW_MS);
+  if (slowTimer.unref) slowTimer.unref();
   const live = every(reload, POLL_MS, { pace });
   setInterval(tick, 1000);
   return () => live.stop();

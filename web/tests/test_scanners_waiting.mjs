@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {register} from 'node:module';
 import {test} from 'node:test';
 
-import {Element, Text} from './fake_dom.mjs';
+import {Page} from './fake_page.mjs';
 
 // The Scanners page (static/cve/scanners.js) must paint its frame at once: every health cell is a placeholder that says what is being checked,
 // and each cell fills in by itself when its own request answers. A request that failed says "could not be read" and offers Retry; it never
@@ -16,17 +16,6 @@ export async function resolve(specifier, context, next) {
 }`;
 register('data:text/javascript,' + encodeURIComponent(hook));
 
-class Page extends Element {
-  constructor(tag) { super(tag); this.dataset = {}; this.onclick = null; }
-  get className() { return this.getAttribute('class') || ''; }
-  set className(v) { this.setAttribute('class', v); }
-  get classList() { return {add: (c) => { this.className = `${this.className} ${c}`.trim(); }}; }
-  set textContent(v) { this.childNodes.splice(0).forEach((c) => { c.parentNode = null; }); if (v !== '') this.appendChild(new Text(v)); }
-  get textContent() { return this.childNodes.map((c) => c.textContent).join(''); }
-  get isConnected() { return this._connected !== false; }
-  append(...kids) { kids.forEach((k) => this.appendChild(typeof k === 'string' ? new Text(k) : k)); }
-  replaceChildren(...kids) { this.childNodes.splice(0).forEach((c) => { c.parentNode = null; }); this.append(...kids); }
-}
 const root = new Page('div');
 root.dataset.appAdmin = '1';
 globalThis.document = {

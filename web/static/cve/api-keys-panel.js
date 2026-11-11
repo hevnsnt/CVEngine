@@ -7,6 +7,7 @@ import {
   ask,
   badge,
   button,
+  couldNotRead,
   dialog,
   el,
   field,
@@ -85,13 +86,14 @@ export async function apiKeysPanel(mount) {
 
   // where the key applies: every organization (App Admins see all) and every project
   const scopes = [];
+  let readFailed = null; // the words of a failed read: with nothing to pick from it is "could not be read", not "create one first"
   const [orgs, projects] = await Promise.all([
     api("GET", ORGS)
       .then((d) => d.results || [])
-      .catch(() => []),
+      .catch((err) => { readFailed = err.message || "The server did not answer."; return []; }),
     api("GET", PROJECTS)
       .then((d) => d.results || [])
-      .catch(() => []),
+      .catch((err) => { readFailed = err.message || "The server did not answer."; return []; }),
   ]);
   orgs.forEach((o) =>
     scopes.push({
@@ -131,6 +133,11 @@ export async function apiKeysPanel(mount) {
   const body = el("div", "ak-body");
   page.append(body);
 
+  if (!scopes.length && readFailed) {
+    bar.setAttribute("hidden", "");
+    body.append(couldNotRead("The list of organizations and projects", () => { page.remove(); apiKeysPanel(mount); }, readFailed));
+    return;
+  }
   if (!scopes.length) {
     body.append(
       el(
@@ -431,13 +438,8 @@ export async function apiKeysPanel(mount) {
       loadVault(),
     ]).catch((err) => {
       body.textContent = "";
-      body.append(
-        el(
-          "p",
-          "msg err",
-          `Could not load the keys of ${scope.name}: ${err.message}`,
-        ),
-      );
+      body.removeAttribute("aria-busy");
+      body.append(couldNotRead(`The keys of ${scope.name}`, draw, err.message));
       return [null];
     });
     if (mine !== version || !data) return;

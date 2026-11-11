@@ -1454,6 +1454,7 @@ a.bb-tile{text-decoration:none;color:inherit;display:block}a.bb-tile:focus-visib
 .load-error b{font-size:var(--fs-3)}
 .load-error.inline{margin-top:var(--s-3)}
 .wait{display:flex;flex-direction:column;gap:var(--s-2);min-width:0}.wait-line{margin:0}.wait-bar{width:60%}.wait-bar+.wait-bar{width:38%}.wait.slow .wait-line{color:var(--ink)}
+@media (prefers-reduced-motion:reduce){.sk-bar,.skeleton{animation:none}}
 
 /* copy buttons: small, quiet until hovered or focused, a tick when done */
 .copy-btn{all:unset;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:var(--r-s);color:var(--muted);cursor:pointer;flex:none}
