@@ -7,7 +7,7 @@ amqp==5.4.2
 billiard==4.3.2
 vine==5.1.0
 discord-webhook==1.4.1
-Django==5.2.18
+Django==5.2.19
 django-ace==1.44.0
 django-celery-beat==2.9.0
 django-login-required-middleware==0.9.0
@@ -19,7 +19,7 @@ dotted-dict==2.0.0
 gunicorn==26.2.0
 gevent==26.9.0
 humanize==4.16.0
-Markdown==3.11.2
+Markdown==3.11.3
 Pillow>=13.0.0,<14
 PyYAML==6.0.3
 PySocks==1.7.1
@@ -30,12 +30,12 @@ requests==2.34.2
 tldextract==5.4.0
 validators==0.36.0
 watchdog==6.0.0
-whatportis==0.8
+whatportis==0.8.2
 weasyprint==70.0
 pypdf==6.21.4  # reads text back out of the generated report PDFs in the tests; pure Python, BSD-3-Clause
 xmltodict==1.0.4
 django-environ==0.14.0
-dnspython==2.9.0
+dnspython==2.9.2
 cryptography==50.0.2
 packaging==26.3
 # The scanner library (hevnsnt/cvENGINE-sentinel, cvengine_scanner/): the scan policy, the tool output parsers and the pure web fingerprint
