@@ -5,7 +5,7 @@ from unittest import mock
 import requests
 from django.test import TestCase
 
-from reNgine import common_func, tasks
+from reNgine import common_func
 from scanEngine.models import Notification
 
 TOKEN = '123456:SECRET-bot-token'

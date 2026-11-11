@@ -21,7 +21,6 @@ account is disabled, its API tokens are revoked, and a public IP is blocked for 
 and proxy addresses are never IP-banned (that would block a whole site), and superusers are only logged. An admin
 lifts a ban in Django admin (AbuseBan.lifted) and re-enables the user.
 """
-import ipaddress
 import json
 import logging
 import os

@@ -25,7 +25,7 @@ from agentapi import services as svc
 from agentapi.auth import SCOPE_SENTINEL
 from agentapi.models import ACTIVE_TASK_STATUSES, Agent, AgentTask
 from agentapi.services import ApiError, AssetFilter
-from tenancy import audit, roles, throttle
+from tenancy import audit, roles
 
 logger = logging.getLogger(__name__)
 

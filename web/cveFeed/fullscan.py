@@ -309,7 +309,6 @@ def investigate(ip, new_ports, project, pipeline=None):
     from cveFeed import activity, ledger, port_inventory, retest
     from cveFeed.models import ServiceRun
     from datetime import timedelta
-    from startScan.models import Subdomain
     ports = sorted(set(new_ports))[:investigate_max()]
     out = {'ports': ports, 'capped': len(set(new_ports)) > len(ports)}
     try:

@@ -12,7 +12,6 @@ from cveFeed.models import AssetChange, CVEEntry, CVEMatch, HostState, HygieneFi
 from cveFeed.tasks import rescore_all_hosts
 from cveFeed.views import graph_payload
 from dashboard.models import Org, Project, ProjectMembership
-from scanEngine.models import EngineType
 from startScan.models import IpAddress, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests.test_agentapi import call

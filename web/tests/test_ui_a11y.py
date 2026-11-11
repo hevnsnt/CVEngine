@@ -1,5 +1,4 @@
 """Accessible names the interface must keep (found with axe-core on a seeded instance; see the UI audit). Source-level checks: no browser needed."""
-import re
 from pathlib import Path
 
 from django.test import SimpleTestCase

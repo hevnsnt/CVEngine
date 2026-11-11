@@ -205,7 +205,6 @@ class PoliteLookupTests(TestCase):
 		self.assertEqual(waits, [0.0, 2.0, 4.0, 6.0])  # one at a time, in order, across every caller
 
 	def test_a_failed_check_is_reported_so_the_task_can_try_again_later(self):
-		from startScan.models import Subdomain
 		from targetApp.models import Domain
 		from dashboard.models import Org, Project
 		org = Org.objects.create(name='C', slug='c-t')

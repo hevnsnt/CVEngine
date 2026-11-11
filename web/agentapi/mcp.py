@@ -18,7 +18,7 @@ from agentapi import inventory
 from agentapi import reports
 from agentapi import sentinel_broker as sentinels
 from agentapi import sentinel_settings
-from agentapi import db_timeout, settings_bridge
+from agentapi import settings_bridge
 from agentapi import sentinel_dispatch
 from reNgine import schema_guard
 from agentapi import services as svc

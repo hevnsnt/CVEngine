@@ -3,7 +3,6 @@
 The matcher, the WordPress plugin matcher, the triage brief, the detection strategy, the agent API and the AI prompts must agree on what a
 list of ranges says, and a range list that cannot be read with certainty must never give a confident "in range" for a version the advisory
 fixes: the answer is unknown (``version_in_range`` None, which routes to needs_validation) and the WordPress path records no match."""
-import json
 from types import SimpleNamespace
 
 from django.test import SimpleTestCase

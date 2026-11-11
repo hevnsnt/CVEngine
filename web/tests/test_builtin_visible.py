@@ -6,7 +6,6 @@ from unittest import mock
 
 from django.contrib.auth.models import User
 from django.db import connection
-from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 

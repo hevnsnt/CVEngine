@@ -1,6 +1,5 @@
 """Which Sentinel commit the contract was read from (About and Sentinels pages), and the build wiring that installs the newest Sentinel main."""
 import json
-import re
 import subprocess
 from importlib import metadata
 from pathlib import Path

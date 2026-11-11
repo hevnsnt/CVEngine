@@ -109,7 +109,7 @@ run_migrations() {
 
 # On 1.4 an assessment holds a discovery slot while it waits for a Sentinel, so DISCOVERY_CONCURRENCY below 4 (a leftover of the 1.3 era, when the pool
 # only ran discovery) lets ONE host be assessed at a time for the whole instance while the Sentinels idle, and it pins the value: the server's own sizing
-# (autotune range 4 to 32) is not allowed to move it. Say so in the update log (the Update screen shows it). The owner's env file is NEVER edited here.
+# (autotune range 4 to 32) is not allowed to move it. Say so in the update log (the Update screen shows it). (The pin is removed by cvengine_fit_review, scripts/host-review.py, before this runs; this says so only when that could not run, and edits nothing.)
 # A Sentinel that is live, or the built-in scanner (on unless CVENGINE_BUILTIN_SCANNER=0), is what makes it matter. Always returns 0.
 warn_discovery_pin() {
   local value builtin live env_file=''

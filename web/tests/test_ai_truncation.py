@@ -13,7 +13,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from cveFeed import ai_jobs
-from cveFeed.models import AdminAlert, AIJob, AIUsage
+from cveFeed.models import AIJob, AIUsage
 from reNgine import ai_profiles as profiles
 from reNgine import ai_prompts
 from reNgine import ai_providers as ai

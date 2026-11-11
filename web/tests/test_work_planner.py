@@ -556,7 +556,7 @@ class RunBatchTests(Fleet):
 
         def dispatch(project, target, hosts, scan):
             seen.append((target['hosts'][0]['host'], scan))
-            return {'outcome': 'done', 'findings': [], 'fetched': [], 'references': []}
+            return {'outcome': 'done', 'findings': [], 'fetched': answered(target), 'references': []}
         out = work_planner.execute_batch(batch.pk, dispatch=dispatch)
         self.assertEqual(out['status'], 'done')
         self.assertEqual(len(seen), 1)
@@ -567,10 +567,16 @@ class RunBatchTests(Fleet):
     def test_the_stage_entry_still_runs_the_stage_the_way_it_did(self):
         self.host(self.project, 'w', ssh=False, web=True)
         calls = []
-        out = secrets_scan.run_for_scan(self.project.t_scan.pk, dispatch=lambda p, t, h, s: calls.append(s) or {'outcome': 'done', 'findings': [], 'fetched': [],
-                                                                                                              'references': []})
+        out = secrets_scan.run_for_scan(self.project.t_scan.pk, dispatch=lambda p, t, h, s: calls.append(s) or {'outcome': 'done', 'findings': [],
+                                                                                                              'fetched': answered(t), 'references': []})
         self.assertEqual((out['hosts'], out['tasks']), (1, 1))
         self.assertEqual(calls[0].pk, self.project.t_scan.pk)
+
+
+def answered(target):
+    """What a Sentinel sends back for a batch whose every host answered: one fetched page per host, with its HTTP status (a host with none was
+    not read, cveFeed.secrets_scan.read_hosts)."""
+    return [{'url': f"https://{h['host']}/", 'kind': 'page', 'status': 200, 'bytes': 0, 'content_type': 'text/html'} for h in target['hosts']]
 
 
 class GuardTests(SimpleTestCase):
