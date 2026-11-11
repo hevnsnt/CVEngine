@@ -155,7 +155,9 @@ def _screenshots(problems, notes):
 
 def _projects(ctx):
     """One row per project the caller may see. A row costs several whole-project counts and agents poll this, so a row is kept for
-    ``CVENGINE_STATUS_CACHE_SECONDS`` (60) per caller and project: the counts may be up to that old."""
+    ``CVENGINE_STATUS_CACHE_SECONDS`` (60) per project: the counts may be up to that old. The row is the project's, the same for everyone who may see
+    it (which projects are listed is still decided per caller), so every caller shares one: it was kept per caller and project, and each caller computed
+    every project again."""
     from django.core.cache import cache
 
     from agentapi.services import _allowed_ids
@@ -163,7 +165,7 @@ def _projects(ctx):
 
     seconds, rows = _cache_seconds(), []
     for project in Project.objects.filter(id__in=list(_allowed_ids(ctx.user))).order_by('name')[:MAX_PROJECTS]:
-        key = f'sysstatus:project:{ctx.user.pk}:{project.id}'
+        key = f'sysstatus:project:{project.id}'
         row = None
         if seconds:
             try:

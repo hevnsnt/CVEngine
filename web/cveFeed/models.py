@@ -1705,7 +1705,9 @@ class CVEDetection(models.Model):
     class Meta:
         verbose_name = "CVE detection"
         verbose_name_plural = "CVE detections"
-        indexes = [models.Index(fields=["ai_attempted_at"], name="cvedetect_ai_idx")]
+        indexes = [models.Index(fields=["ai_attempted_at"], name="cvedetect_ai_idx"),
+                   # ``detection_author.progress``: the detections that have checks, counted by source, without reading the ``strategy`` JSON of every row
+                   models.Index(fields=["source", "id"], name="cvedetection_source_filled_idx", condition=~models.Q(strategy={}))]
 
     def __str__(self):
         return f"detection for {self.cve_entry_id}"

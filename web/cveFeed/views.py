@@ -6,6 +6,7 @@ below, so the UI updates on its own without a reload.
 import json
 import logging
 import re
+import time
 from urllib.parse import quote
 
 from django.db.models import F
@@ -134,8 +135,9 @@ def graph_payload(domain_id=None, scan_id=None):
     if scan_id:
         subs = subs.filter(scan_history_id=scan_id)  # one scan asked for by id: exactly its rows
     else:
-        from cveFeed.counts import host_reps
-        subs = subs.filter(pk__in=host_reps(domain_id).values('pk'))  # otherwise each host once: the row the Hosts page shows
+        from cveFeed.counts import rep_ids, snapshot_rep_ids
+        # otherwise each host once: the row the Hosts page shows. The collapse runs once; the drawn hosts and the per-project totals below read its ids
+        subs = subs.filter(pk__in=snapshot_rep_ids() if not domain_id else rep_ids(domain_id))
     nodes, edges = {}, set()
     by_name = {}
 
@@ -339,7 +341,9 @@ def stats_payload():
     from startScan.models import Vulnerability
     from targetApp.models import Domain
     tiers = tier_counts()
-    reps = counts.host_reps()
+    # the inventory is collapsed to one row per host ONCE; the host counts, the exposed count and the internal share are all read from those ids
+    # (each used to collapse it again). While a snapshot is being built the ids are shared with the other snapshots of the scope (counts.snapshot_rep_ids)
+    reps = counts.reps_of(counts.snapshot_rep_ids())
     from django.db.models import Count
     host_counts = reps.aggregate(total=Count('pk', distinct=True), live=Count('pk', filter=counts.LIVE_HOST_Q, distinct=True))  # one pass over the hosts, not two
     oldest = counts.oldest_open()
@@ -359,12 +363,12 @@ def stats_payload():
         # 'matches' stays the per-host count it always was; this is the number beside it that says how many distinct findings that is
         **dict(zip(('match_groups', 'match_groups_truncated'), counts.match_group_count())),
         'scanner_findings': counts.actionable_findings(Vulnerability.objects.all()).count(),
-        'exposed_hosts': counts.exposed_host_count(),
+        'exposed_hosts': counts.exposed_host_count(reps),
         'oldest_open_days': oldest['days'],  # the longest a critical or high item has sat open, across CVE matches, scanner and hygiene findings
         'oldest_open_kind': oldest['kind'],  # 'cve', 'scanner' or 'hygiene'
         'oldest_open_id': oldest['id'],  # the row of that kind to link to
         'oldest_open_what': _oldest_open_what(oldest['kind'], oldest['id']) if oldest['id'] else None,  # {severity, title, host}
-        'internal': internal_view.summary(),  # the declared internal networks and their share of the numbers above (cveFeed.internal_view)
+        'internal': internal_view.summary(reps),  # the declared internal networks and their share of the numbers above (cveFeed.internal_view)
         'autofire_runs': AutoFireRun.objects.count(),
         'templates': GeneratedTemplate.objects.filter(status=GeneratedTemplate.STATUS_VALID).count(),
         'templates_pending': GeneratedTemplate.objects.filter(status=GeneratedTemplate.STATUS_DRAFT).count(),
@@ -977,6 +981,89 @@ def graph_cache_key(scope, version):
     return f'cve-graph:{scope}:{snapshot_cache.revision()}:{version}'  # a revision bump (a finding was closed) drops it with the snapshots
 
 
+GRAPH_LOCK_SECONDS = 45  # a builder that dies leaves its lock this long at most
+GRAPH_WAIT_SECONDS = 10.0  # a viewer that finds the graph being built waits this long for it, then is served the last good graph (marked stale) if there is one
+GRAPH_WAIT_STEP = 0.05
+GRAPH_LAST_SECONDS = 3600  # the last good graph of a scope is kept this long as the answer for a viewer who cannot wait for a build
+
+
+def cached_graph(scope, version, domain_id=None, scan_id=None, wait=True):
+    """The graph payload of ``version`` for ``scope``: from the cache, else built by ONE caller. The key carries the version, which moves on every write
+    during a scan, so every open graph of a scope finds its key empty at the same moment; each used to build the payload (1.2 s and 19 queries at 20,000
+    hosts). The first takes a short lock (``cache.add``) and builds; the others wait for its answer while the lock is held. A build that takes longer than
+    ``GRAPH_WAIT_SECONDS`` (the host collapse alone takes up to 10 s on a large install) does not turn the waiters into builders: they are served the
+    last good graph of the scope with ``stale: true`` (its own ``version`` is the older one, so the page asks again on its next poll), and a viewer with
+    no earlier graph keeps waiting. A lock nobody holds any more (the builder died; it expires after ``GRAPH_LOCK_SECONDS``) is taken over.
+
+    ``wait=False`` is the refresher's: it never waits on the lock. When a request is building the graph it returns None (that request stores the payload).
+    A cache that does not answer gives the graph, built here, as before."""
+    import uuid
+
+    from django.core.cache import cache
+    key = graph_cache_key(scope, version)
+    lock, last_key = f'{key}:lock', f'cve-graph-last:{scope}'
+    token = uuid.uuid4().hex
+
+    def stored():
+        try:
+            return cache.get(key)
+        except Exception:  # noqa: BLE001 - the graph is computed when the cache is down
+            return None
+
+    def last_good():
+        try:
+            return cache.get(last_key)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def build():
+        payload = {**graph_payload(domain_id, scan_id), 'version': version}
+        try:
+            cache.set(key, payload, GRAPH_CACHE_SECONDS)
+            cache.set(last_key, payload, GRAPH_LAST_SECONDS)
+        except Exception:  # noqa: BLE001
+            pass
+        return payload
+
+    def build_holding_lock():
+        try:
+            payload = stored()  # another caller may have stored it between the read above and winning the lock
+            return payload if payload is not None else build()
+        finally:
+            try:
+                if cache.get(lock) == token:  # not a later builder's lock, when this build outlived its own
+                    cache.delete(lock)
+            except Exception:  # noqa: BLE001
+                pass
+    payload = stored()
+    if payload is not None:
+        return payload
+    try:
+        won = cache.add(lock, token, GRAPH_LOCK_SECONDS)
+    except Exception:  # noqa: BLE001
+        return build()
+    if won:
+        return build_holding_lock()
+    if not wait:
+        return None
+    deadline, gave_up = time.monotonic() + GRAPH_WAIT_SECONDS, False
+    while True:
+        time.sleep(GRAPH_WAIT_STEP)
+        payload = stored()
+        if payload is not None:
+            return payload
+        try:
+            if cache.add(lock, token, GRAPH_LOCK_SECONDS):  # the builder let go without storing (it failed) or died: this caller builds
+                return build_holding_lock()
+        except Exception:  # noqa: BLE001
+            return build()
+        if not gave_up and time.monotonic() >= deadline:
+            gave_up = True
+            earlier = last_good()
+            if earlier is not None:
+                return {**earlier, 'stale': True}
+
+
 @require_GET
 @project_scoped
 def api_graph(request):
@@ -984,7 +1071,6 @@ def api_graph(request):
     aggregate queries when nothing changed; otherwise the payload is served from a short per-scope cache (shared by every viewer of the
     same projects). The version is itself a snapshot kept GRAPH_VERSION_SECONDS per scope, so a change shows within that many seconds (at once
     after ``bump_stats_revision``) and a poll in between costs no aggregate query at all."""
-    from django.core.cache import cache
     from django.http import HttpResponseNotModified
     domain, scan = request.GET.get('domain', ''), request.GET.get('scan', '')
     domain_id, scan_id = int(domain) if domain.isdigit() else None, int(scan) if scan.isdigit() else None
@@ -994,18 +1080,7 @@ def api_graph(request):
                                       hot={'params': params, 'args': {'domain_id': domain_id, 'scan_id': scan_id}, 'check': _hot_check(domain_id, scan_id)})['payload']
     if request.GET.get('v') == version:
         return HttpResponseNotModified()
-    key = graph_cache_key(scope, version)
-    try:
-        payload = cache.get(key)
-    except Exception:  # noqa: BLE001 - the graph is computed when the cache is down
-        payload = None
-    if payload is None:
-        payload = {**graph_payload(domain_id, scan_id), 'version': version}
-        try:
-            cache.set(key, payload, GRAPH_CACHE_SECONDS)
-        except Exception:  # noqa: BLE001
-            pass
-    return JsonResponse(payload)
+    return JsonResponse(cached_graph(scope, version, domain_id, scan_id))  # one viewer builds a cold graph, the others wait for it
 
 
 @require_GET
@@ -1241,9 +1316,9 @@ def discovery_counts():
     The live hosts are read once (the one expensive part: the current inventory collapsed to a row per host), and the addresses and ports
     are then looked up through the link tables by id. The three counts used to be three nested queries that each repeated the whole host walk
     inside it; the ports one took 6 to 18 s on a 4,000-scan install, and several of them ran at once whenever the snapshot went cold."""
-    from cveFeed.counts import LIVE_HOST_Q, host_reps
+    from cveFeed.counts import LIVE_HOST_Q, reps_of, snapshot_rep_ids
     from startScan.models import IpAddress, Subdomain
-    live = set(host_reps().filter(LIVE_HOST_Q).values_list('pk', flat=True))
+    live = set(reps_of(snapshot_rep_ids()).filter(LIVE_HOST_Q).values_list('pk', flat=True))  # the collapsed host list, shared with the other snapshots of the scope
     ips = set()
     for chunk in _chunks(sorted(live)):
         ips.update(Subdomain.ip_addresses.through.objects.filter(subdomain_id__in=chunk).values_list('ipaddress_id', flat=True))
