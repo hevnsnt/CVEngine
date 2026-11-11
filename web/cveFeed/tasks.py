@@ -2162,6 +2162,8 @@ def report_resources():
     tunables.reconcile()  # republish the other configMaxxing tunables, so a flushed Redis heals (never raises)
     from cveFeed import autotune
     autotune.reconcile()  # republish the auto-tuned numbers (empty unless the mode is Auto), so a flushed Redis heals (never raises)
+    from cveFeed import db_stats
+    db_stats.analyze_if_needed()  # table statistics lost in a crash or never refreshed (one cheap read; never raises)
     from cveFeed import scoring
     scoring.rescore_if_heat_cap_changed()  # a heat policy saved on configMaxxing reaches the stored host scores (one GETSET; never raises)
     try:  # ...and the switch pages nothing: what is fire under the new rule is marked as announced (one cheap read when nothing changed)

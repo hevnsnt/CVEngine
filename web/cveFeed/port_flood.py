@@ -47,7 +47,12 @@ def findings_for(domain, hosts=None):
     from cveFeed.cleartext import _allowed, _newest_rows, _scope
     from startScan.models import OPEN_PORT_STATES, TCP_PROTOCOLS, IpAddress, Port, Subdomain
     wanted, banned = _scope(domain, hosts)
-    crowded = (IpAddress.objects.annotate(n=Count('ports', filter=Q(ports__state__in=OPEN_PORT_STATES, ports__protocol__in=TCP_PROTOCOLS)))
+    # Only this domain's own addresses are counted. Counting the ports of every address in the database for each domain's check read the whole port table
+    # (612,846 rows on the VPS, 1.0 second) once per call, and hygiene calls this once per scan. The subquery keeps the count per address exact:
+    # a join through the hosts would count each port once per host that shares the address.
+    own = Subdomain.objects.filter(target_domain=domain).order_by().values('ip_addresses')
+    crowded = (IpAddress.objects.filter(pk__in=own)
+               .annotate(n=Count('ports', filter=Q(ports__state__in=OPEN_PORT_STATES, ports__protocol__in=TCP_PROTOCOLS)))
                .filter(n__gte=THRESHOLD))
     names = {n for n in Subdomain.objects.filter(target_domain=domain, ip_addresses__in=crowded).order_by().values_list('name', flat=True).distinct()
              if _allowed(n, wanted, banned)}
