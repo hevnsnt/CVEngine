@@ -52,9 +52,13 @@ class CensusPagingTests(TestCase):
         """The census, and the most Port objects alive at any call of ``check_coverage.load`` (once per page of hosts)."""
         seen, real = [], check_coverage.load
 
-        def gauge(items, *args, **kwargs):
+        def alive():
             gc.collect()
-            seen.append(sum(1 for o in gc.get_objects() if type(o) is Port))
+            return sum(1 for o in gc.get_objects() if type(o) is Port)
+        before = alive()  # Port objects other tests left behind in this process are not the census's
+
+        def gauge(items, *args, **kwargs):
+            seen.append(alive() - before)
             return real(items, *args, **kwargs)
         with mock.patch.object(check_coverage, 'load', gauge):
             data = work_planner.build_census(timezone.now())
