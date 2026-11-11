@@ -60,7 +60,8 @@ function drawErrors() {
     t.append(el('span', '', `${extra} more ${extra === 1 ? 'error' : 'errors'}. Dismiss to see them.`), close);
     cards.push(t);
   }
-  errorStack.replaceChildren(...cards);
+  while (errorStack.firstChild) errorStack.removeChild(errorStack.firstChild);
+  errorStack.append(...cards);
   if (!cards.length) { errorStack.remove(); errorStack = null; }
 }
 export function toast(message, isError = false) {

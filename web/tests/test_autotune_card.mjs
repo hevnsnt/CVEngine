@@ -29,6 +29,17 @@ class Node {
 }
 const walk = (n, f) => { f(n); n.children.forEach((c) => walk(c, f)); };
 const find = (root, pred) => { const out = []; walk(root, (n) => pred(n) && out.push(n)); return out; };
+
+// The words are inside a closed <details> (whose summary says "Details") and are not shown anywhere outside it: a person who never opens it never reads them.
+const behindDetails = (host, pattern) => {
+  const boxes = find(host, (n) => n.tag === 'details');
+  const inside = boxes.filter((d) => pattern.test(d.textContent));
+  assert.ok(inside.length >= 1, `${pattern} is inside a details element`);
+  assert.ok(inside[0].textContent.startsWith('Details'), 'whose summary is Details');
+  assert.ok(!inside[0].attrs || !('open' in inside[0].attrs), 'closed by default');
+  const outside = host.textContent.split(inside[0].textContent).join('');
+  assert.doesNotMatch(outside, pattern, `${pattern} is not shown outside the details`);
+};
 const buttonNamed = (root, text) => find(root, (n) => n.tag === 'button' && n.textContent === text);
 
 globalThis.document = {
@@ -126,7 +137,7 @@ test('the kill switch disables the controls and says why', async () => {
   const host = new Node('div');
   await maxxing.cards()[0].build(host);
   assert.match(host.textContent, /Auto-tuning is switched off for this whole server by its administrator/);
-  assert.match(host.textContent, /Details\s*For the server's administrator: CVENGINE_AUTOTUNE=0 is set in the environment/);
+  behindDetails(host, /For the server's administrator: CVENGINE_AUTOTUNE=0 is set in the environment/);
   assert.equal(find(host, (n) => n.tag === 'select')[0].disabled, true);
   assert.equal(buttonNamed(host, 'Save')[0].disabled, true);
   reply = {status: status(), concurrency: concurrency()};

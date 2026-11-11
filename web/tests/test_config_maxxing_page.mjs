@@ -30,6 +30,17 @@ class Node {
 const walk = (n, f) => { f(n); n.children.forEach((c) => walk(c, f)); };
 const find = (root, pred) => { const out = []; walk(root, (n) => pred(n) && out.push(n)); return out; };
 
+// The words are inside a closed <details> (whose summary says "Details") and are not shown anywhere outside it: a person who never opens it never reads them.
+const behindDetails = (host, pattern) => {
+  const boxes = find(host, (n) => n.tag === 'details');
+  const inside = boxes.filter((d) => pattern.test(d.textContent));
+  assert.ok(inside.length >= 1, `${pattern} is inside a details element`);
+  assert.ok(inside[0].textContent.startsWith('Details'), 'whose summary is Details');
+  assert.ok(!inside[0].attrs || !('open' in inside[0].attrs), 'closed by default');
+  const outside = host.textContent.split(inside[0].textContent).join('');
+  assert.doesNotMatch(outside, pattern, `${pattern} is not shown outside the details`);
+};
+
 const registry = {};
 globalThis.document = {
   createElement: (tag) => new Node(tag),
@@ -79,7 +90,7 @@ test('the card registers itself once and the section draws title, warning, the c
   assert.match(text, /Scan concurrency/);
   assert.match(text, /second machine \(a Sentinel\) is the best way to scale/);
   assert.match(text, /Memory budget of the scanning container: 3\.0 GB \(container limit 4\.0 GB\)\./);
-  assert.match(text, /Details\s*The container limit is set by the server's administrator with CELERY_MEM_LIMIT/);
+  behindDetails(host, /The container limit is set by the server's administrator with CELERY_MEM_LIMIT/);
   assert.match(text, /Reset all configMaxxing settings to defaults/);
   assert.doesNotMatch(text, /Tinkerer/i);
   assert.deepEqual(calls.map((c) => `${c.method} ${c.url}`), ['GET /cve/api/settings/scan_concurrency']);
@@ -95,7 +106,7 @@ test('each row shows its default, range, environment value, who set it and a Res
   assert.deepEqual(resets.map((b) => b.disabled), [true, false, true, true]);
   const text = host.textContent;
   assert.match(text, /Built-in default · allowed 1 to 8 · Default 2 · Applies within a few seconds/);
-  assert.match(text, /Details\s*HEAVY_MAX_NMAP is not set/);
+  behindDetails(host, /HEAVY_MAX_NMAP is not set/);
   assert.match(text, /Saved here · allowed 1 to 8 · Default 1 · Set by alice <b>x<\/b> on /);  // shown as text, never as markup
   assert.match(text, /Set on the server/);
   assert.match(text, /Worker ceiling now: 8/);

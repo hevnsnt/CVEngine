@@ -43,7 +43,8 @@ globalThis.document = {
 };
 globalThis.localStorage = {getItem: () => null, setItem() {}};
 const timers = [];
-globalThis.setTimeout = (fn) => { timers.push(fn); return timers.length; };
+// the request time limit every read now carries (poll.js REQUEST_MS) is not one of the page's own timers, which this queue counts
+globalThis.setTimeout = (fn, ms) => { if (ms >= 60000) return 0; timers.push(fn); return timers.length; };
 globalThis.clearTimeout = () => {};
 const flush = () => { while (timers.length) timers.shift()(); };
 

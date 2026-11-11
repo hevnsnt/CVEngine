@@ -166,8 +166,7 @@ function round() {
     try {
       await load();
     } catch (err) {
-      root.replaceChildren(el("p", "msg err", err.message));
-      grid = null;
+      console.error(err); // every read ends as data or as "could not be read", so this is a bug in the page, never a failed request
     } finally {
       running = null;
       if (!stopped) timer = setTimeout(round, EVERY_MS);

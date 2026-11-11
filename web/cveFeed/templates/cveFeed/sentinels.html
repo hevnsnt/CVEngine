@@ -125,7 +125,7 @@ mountScannerPlan(document.getElementById('plan-card'));
         var ways = [
           {key: 'command', label: 'Terminal command', sub: 'Paste on the machine that will scan. It clones the client, writes its settings, names it after the machine and starts it.', text: steps.one_liner || ''},
           {key: 'agent', label: 'AI agent prompt', sub: 'Give this to an agent with a shell on that machine. The blob and your choices are already in it.', text: steps.agent_prompt || '', cls: 'enroll-prompt'},
-          {key: 'blob', label: 'Existing Sentinel', sub: 'For a Sentinel that is already installed: give it this value in place of its old one (see For developers and integrators below). Server: ' + x.d.server_url, text: x.d.blob}
+          {key: 'blob', label: 'Existing Sentinel', sub: 'For a Sentinel that is already installed: put this value in its settings file in place of the old one. Server: ' + x.d.server_url, more: 'The setting is named CVENGINE_SENTINEL_BLOB, in the .env file in the folder the Sentinel runs from.', text: x.d.blob}
         ];
         var chosen = 'command';
         try { chosen = localStorage.getItem('cve.sentinel.way') || 'command'; } catch (e) { /* storage blocked: default */ }
@@ -138,6 +138,7 @@ mountScannerPlan(document.getElementById('plan-card'));
           var panel = el('div', 'enroll-panel'); panel.id = 'enroll-panel-' + w.key;
           panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', tab.id);
           panel.appendChild(el('div', 'enroll-sub', w.sub));
+          if (w.more) { var more = el('details', 'tech'); more.appendChild(el('summary', '', 'Details')); more.appendChild(el('p', 'note', w.more)); panel.appendChild(more); }
           var pre = el('pre', 'code' + (w.cls ? ' ' + w.cls : ''), w.text); pre.appendChild(copyBtn(function () { return w.text; })); panel.appendChild(pre);
           tab.addEventListener('click', function () { pick(i, true); });
           tab.addEventListener('keydown', function (e) {

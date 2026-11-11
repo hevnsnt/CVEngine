@@ -187,7 +187,7 @@ if (mount) {
         waitBox.stop?.();
         const box = couldNotRead("The AI usage", () => {
           // the error box goes and the placeholder comes back while the same read runs again
-          status.textContent = "";
+          while (status.firstChild) status.removeChild(status.firstChild); // the error line goes; the placeholder speaks
           waitBox = waiting("Loading recorded AI attempts");
           renderKeepingState(output, () => [waitBox]);
           load();
