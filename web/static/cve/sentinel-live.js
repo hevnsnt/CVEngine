@@ -310,7 +310,8 @@ function openvasQueue(queue) {
 
   if (queue.counts.not_due) {
     // the server counted every host and grouped the reasons ("33 not due: 20 not Fire or Smoke, 8 scanned this week"): shown as it came, above the list
-    if (queue.not_due_summary) box.append(el("p", "note sl-openvas-summary", queue.not_due_summary));
+    if (queue.pending_projects) box.append(el("p", "note sl-openvas-pending", `Working out the queue of ${queue.pending_projects} project${queue.pending_projects === 1 ? "" : "s"}; it appears at the next refresh.`));
+  if (queue.not_due_summary) box.append(el("p", "note sl-openvas-summary", queue.not_due_summary));
     const deferred = el("details", "sl-openvas-deferred", null, { "data-keep-key": "openvas-not-due" });
     deferred.append(el("summary", "", `Not due (${queue.counts.not_due})`));
     const list = el("ul");

@@ -12,18 +12,14 @@ from unittest import mock
 from django.contrib.auth.models import User
 from django.db import connection
 from django.test import Client, SimpleTestCase, TestCase
-from django.utils import timezone
 
 from agentapi import probe_results, secrets_api
-from agentapi.models import SentinelTask
 from agentapi.services import Ctx
-from cveFeed import route_auth
 from cveFeed import secret_redaction
 from cveFeed import secrets_catalog as catalog
-from cveFeed import secrets_inventory as inv
 from cveFeed import secrets_scan
 from cveFeed.models import SecretFinding, SecretOccurrence
-from dashboard.models import AuditLog, Org, Project, ProjectMembership
+from dashboard.models import AuditLog, ProjectMembership
 from tests.fake_scanner import FakeScanner
 from tests.test_secrets_scan import HOST, StageBase
 

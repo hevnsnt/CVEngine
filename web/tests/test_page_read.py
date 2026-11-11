@@ -7,7 +7,7 @@ redirect hop or a script read is held to now live in the task, not in a local fe
 """
 from unittest import mock
 
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase
 
 from agentapi import probe_dispatch, probe_results, sentinel_broker
 from agentapi.services import ApiError

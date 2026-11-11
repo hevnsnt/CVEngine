@@ -11,6 +11,8 @@
 #   cvengine_fit_run PLAN COMPOSE...   before anything is stopped. PLAN is an answer somebody gave (internal, both, external: the Update button's dialog, or
 #                                      update.sh --sentinels), else empty. With an answer it is applied; without one the automatic default applies: the host-size
 #                                      rule, and a scanner is never removed (an unattended update asks nothing and blocks on nothing).
+#   cvengine_fit_review COMPOSE...     (called by cvengine_fit_run) scripts/host-review.py --apply: settings that do not fit this host (a leftover
+#                                      DISCOVERY_CONCURRENCY pin, a container ceiling below what its service needs) are put right, backed up and logged
 #   cvengine_fit_budget COMPOSE...     after the containers started: do the memory limits add up to more than 90 percent of the host?
 #
 # CVENGINE_HOST_MEM_MB overrides the host's memory (the tests and rehearsals fake a small host with it; nothing else sets it).
@@ -148,10 +150,25 @@ cvengine_fit_externals() {  # COMPOSE...: how many Sentinels of the owner's own 
   printf '%s' "$out"
 }
 
+cvengine_fit_review() {  # COMPOSE...: put right the settings that do not fit this host (scripts/host-review.py), never fail an update
+  local out line fixed=0
+  [[ -f scripts/host-review.py ]] && command -v python3 >/dev/null 2>&1 || return 0
+  out=$(python3 scripts/host-review.py --apply --compose-args "$@" 2>&1) || { _cv_fit_say "The host review could not run, so no setting was checked against this host."; return 0; }
+  while IFS= read -r line; do
+    case $line in
+      Fixed:*|Warning:*|*"was backed up first"*) _cv_fit_say "$line" ;;
+    esac
+    [[ $line != Fixed:* ]] || fixed=1
+  done <<<"$out"
+  [[ $fixed == 0 ]] || cv_fit_short="${cv_fit_short:+$cv_fit_short; }settings that did not fit this host were put right (see the update log)"
+  return 0
+}
+
 cvengine_fit_run() {  # PLAN COMPOSE...
   local plan=$1 file live limit; shift
   file=$(_cv_fit_env_file "$@")
   cv_fit_short=''
+  cvengine_fit_review "$@"
   if [[ -n $plan ]]; then
     if cvengine_fit_apply_plan "$plan" "$file"; then
       _cv_fit_say "Which scanners run: $(cvengine_fit_plan_words "$plan")."

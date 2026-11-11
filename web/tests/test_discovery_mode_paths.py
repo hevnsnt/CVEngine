@@ -7,12 +7,11 @@ from datetime import timedelta
 from unittest import mock
 
 from django.contrib.auth.models import User
-from django.test import Client, TestCase
+from django.test import Client
 from django.utils import timezone
 
 from cveFeed import conductor, coverage_topup, ctmonitor, fullscan, host_assessment, reaper, tasks
 from cveFeed.models import HostAssessment
-from scanEngine.models import EngineType
 from startScan.models import IpAddress, ScanHistory, Subdomain
 from targetApp.models import Domain
 from tests import test_internal_scan as internal

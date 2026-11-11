@@ -966,7 +966,6 @@ class RereviewScenarioTests(ReviewScenarioBase):
     """The re-review of #388 (X1 to X9): what the parse could not see, stale readings, inline libraries, ordinary stale closures."""
 
     def test_x1_scripts_past_the_parse_limit_make_the_page_not_whole(self):
-        from cveFeed import route_auth
         sub = self.host('many.x.test', ['Bootstrap:3.4.1', 'jQuery:1.8.3'])
         self.correlate(sub)
         filler = ''.join(f'<script src="/wp-content/plugins/p{i}/a.js?ver=2.{i}"></script>' for i in range(85))

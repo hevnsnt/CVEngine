@@ -10,7 +10,6 @@ import inspect
 import json
 import os
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
@@ -138,7 +137,7 @@ class CallSitesBindTests(SimpleTestCase):
     phase 2, commit 58966d7, which changed these signatures). Found by name over the whole web tree, tests and fakes excluded."""
 
     def functions(self):
-        from cveFeed import detection_author, nuclei_scan as ns, rdp_shot, templategen as tg, validation_plan
+        from cveFeed import detection_author, nuclei_scan as ns, rdp_shot, templategen as tg
         found = {f.__name__: f for f in (tg.run_cve_tests, tg.generate_template, ns.run_cve_checks, ns.run_targeted_nuclei,
                                         detection_author.author_with_ai, detection_author.author_pending, detection_author.enrich_with_ai,
                                         detection_author.revise_with_guidance, rdp_shot.run_for_scan, rdp_shot.queue_reading)}

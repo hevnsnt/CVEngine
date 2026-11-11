@@ -1,7 +1,6 @@
 """The secret detail view (docs/SECRETS-PLAN.md section 11): a secret in plain words, where it was found with a masked text around the match, why it is
 rated as it is, and the decisions a person can take. A CANARY value, never a real key, must be in no stored row, API answer or page."""
 import json
-from unittest import mock
 
 from django.contrib.auth.models import User
 from django.db import connection

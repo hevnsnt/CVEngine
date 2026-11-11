@@ -1,6 +1,5 @@
 """The discovery mode chosen for a target is stored on it, and nothing that starts discovery on its own widens it (issue 284)."""
 import json
-from datetime import timedelta
 from unittest import mock
 
 from django.contrib.auth.models import User

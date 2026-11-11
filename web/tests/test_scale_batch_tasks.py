@@ -9,7 +9,7 @@ from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from cveFeed import host_assessment, hot_validation, triage
-from cveFeed.models import AutomaticValidation, CVEEntry, CVEMatch, HostAssessment, HostExclusion, HostState, OnDemandValidation, Triage
+from cveFeed.models import AutomaticValidation, CVEEntry, HostAssessment, HostExclusion, HostState
 from dashboard.models import Org, Project
 from startScan.models import Subdomain, Vulnerability
 from targetApp.models import Domain
