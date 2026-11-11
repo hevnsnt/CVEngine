@@ -39,6 +39,7 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
 
+from django.db.models import prefetch_related_objects
 from django.core.cache import cache
 from django.utils import timezone
 
@@ -164,6 +165,18 @@ def _sort_key(h, entry, web=False):
     return [0 if ports else 1, -len(ports), (0 if h.http_up else 1) if web else 0, stamp]
 
 
+def _pages(hosts):
+    """``hosts`` (a Subdomain queryset) in id order, ``PAGE`` rows at a time, each page read by the last id of the one before (no OFFSET, and a host added
+    while the census runs is picked up or left for the next, never read twice). Yields lists of rows."""
+    last = 0
+    while True:
+        rows = list(hosts.filter(pk__gt=last).order_by('id')[:PAGE])
+        if not rows:
+            return
+        yield rows
+        last = rows[-1].pk
+
+
 def build_census(now=None):
     """The due checks of every project, from ``check_coverage``: ``{'at', 'projects': {id: {'slug', 'org', 'blocked', 'kinds': {kind: {'applicable', 'due',
     'awaiting', 'units': [{'u', 'd', 's', 'h'?}]}}}}}``. Read-only. ``u`` is the unit (``address:port`` or a host name), ``d`` its target, ``s`` its sort key and ``h``
@@ -191,13 +204,10 @@ def build_census(now=None):
             entry['blocked'], entry['note'] = True, 'the do-not-scan list could not be read'
             continue
         routed = set(RouteAuth.objects.filter(project_id=project.pk, retired_at__isnull=True).values_list('host', flat=True).distinct())
-        subs = list(Subdomain.objects.filter(latest_scan_q(), target_domain__project=project).exclude(scan_history__tasks__contains=[INTERNAL_PIPELINE_TASK])
-                    .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL).select_related('target_domain')
-                    .prefetch_related('ip_addresses__ports', 'technologies').order_by('id'))
-        seen = set()
-        for start in range(0, len(subs), PAGE):
-            page = [s for s in subs[start:start + PAGE] if s.name.lower() not in seen]
-            seen.update(s.name.lower() for s in page)
+        hosts = (Subdomain.objects.filter(latest_scan_q(), target_domain__project=project).exclude(scan_history__tasks__contains=[INTERNAL_PIPELINE_TASK])
+                 .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL).select_related('target_domain'))
+
+        def check_page(page):  # its own scope: what a page read (evidence, addresses, ports) is let go of when it returns, before the next page is read
             ev = cc.load([(s, [], project.pk) for s in page])
             for sub in page:
                 h = ev.facts[sub.id]
@@ -225,6 +235,15 @@ def build_census(now=None):
                             bucket['awaiting'] += 1  # the route check has not read this host yet: secrets_scan.plan would leave it out
                         elif len(bucket['units']) < MAX_UNITS_PER_PROJECT_KIND:
                             bucket['units'].append({'u': h.name, 'd': sub.target_domain_id, 's': _sort_key(h, check, web=True)})
+
+        seen = set()
+        for rows in _pages(hosts):
+            page = [s for s in rows if s.name.lower() not in seen]
+            seen.update(s.name.lower() for s in page)
+            # a page of hosts and what they carry (addresses, ports, technologies) is read, checked and let go before the next: the census used to hold every host
+            # of the project with all its ports in one list, so its memory grew with hosts x ports (the 1.3 GB census of the port-flood incident)
+            prefetch_related_objects(page, 'ip_addresses__ports', 'technologies')
+            check_page(page)
         _merge_endpoints(entry['kinds'].get('ssh_probe'))
     return out
 
