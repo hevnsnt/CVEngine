@@ -35,7 +35,9 @@ const tick = () => new Promise((r) => setImmediate(r));
 const text = () => root.textContent;
 const cells = () => root.querySelectorAll('div').filter((d) => /health-cell/.test(d.className));
 const cellNamed = (title) => cells().find((c) => c.textContent.startsWith(title));
-const waitingIn = (c) => c.querySelectorAll('div').some((d) => /\bwait\b/.test(d.className) && d.getAttribute('role') === 'status' && d.getAttribute('aria-live') === 'polite');
+// one live region per container: the page's own #health is aria-live (checked against the template below), so a placeholder inside it carries no
+// live role of its own and a reader says each line once
+const waitingIn = (c) => c.querySelectorAll('div').some((d) => /\bwait\b/.test(d.className) && !d.getAttribute('role') && !d.getAttribute('aria-live'));
 
 await import('../static/cve/scanners.js');
 
@@ -74,7 +76,8 @@ test('a Sentinel list that failed says it could not be read and offers Retry, ne
 test('the page frame in the template is a status region with a placeholder before any script runs', async () => {
   const {readFileSync} = await import('node:fs');
   const html = readFileSync(new URL('../cveFeed/templates/cveFeed/scanners.html', import.meta.url), 'utf8');
-  assert.match(html, /class="wait"[^>]*role="status"[^>]*aria-live="polite"/);
+  assert.match(html, /<div id="health" aria-live="polite"[^>]*>\s*<div class="wait">/);
+  assert.doesNotMatch(html, /class="wait"[^>]*(role|aria-live)=/, 'no live region nested inside the live one');
 });
 
 test('after the slow mark the line says it is taking longer than usual and the page fills in by itself', async () => {

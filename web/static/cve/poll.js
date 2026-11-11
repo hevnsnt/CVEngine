@@ -9,6 +9,35 @@
 
 export const JITTER_LOW = 0.85;
 export const JITTER_HIGH = 1.15;
+
+// How long a page waits for one read before it gives up and shows "could not be read" with Retry. The slowest answer that is still a real answer
+// is the Sentinels list on a cold cache, which has taken up to 55 seconds on the server (the worker inspection behind the Scanners page waits at
+// most 5 seconds, so it is far inside this). A limit under 55 seconds would cut off a good answer and show a false failure; 75 seconds leaves
+// room above it. The page says "taking longer than usual" after 4 seconds, so nobody waits in silence meanwhile.
+export const REQUEST_MS = 75000;
+
+/**
+ * fetch with a real time limit: the request is aborted after ``ms`` and the promise rejects with an Error named TimeoutError, so a request that
+ * never answers ends in the same failure path as one that failed. A signal the caller passes is honoured too.
+ */
+export function fetchWithin(url, init = {}, ms = REQUEST_MS, fetchImpl = (...a) => fetch(...a)) {
+  const control = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; control.abort(); }, ms);
+  if (timer && timer.unref) timer.unref(); // a pending limit never keeps a script or a test alive
+  if (init.signal) init.signal.addEventListener("abort", () => control.abort(), { once: true });
+  return fetchImpl(url, { ...init, signal: control.signal }).then(
+    (response) => { clearTimeout(timer); return response; },
+    (err) => {
+      clearTimeout(timer);
+      if (!timedOut) throw err;
+      const slow = new Error("The server did not answer in time.");
+      slow.name = "TimeoutError";
+      throw slow;
+    },
+  );
+}
+
 export const MAX_RETRY_AFTER_MS = 120000; // a server that says "come back in an hour" is waited on for two minutes, then asked again
 const MAX_FAILURE_DOUBLINGS = 4; // the wait doubles up to 16 times while requests keep failing
 
@@ -54,7 +83,7 @@ export function createPace(now = () => Date.now()) {
  * are conditional. A failure throws an Error with ``status`` and, on a 429 or 503, ``retryAfter`` (milliseconds) for ``createPace().fail``.
  * ``entries`` bounds the map: a poller whose URL carries a moving cursor would otherwise remember every cursor it ever used.
  */
-export function createGet({ fetchImpl = (...a) => fetch(...a), entries = 64, now = () => Date.now() } = {}) {
+export function createGet({ fetchImpl = (u, i) => fetchWithin(u, i), entries = 64, now = () => Date.now() } = {}) {
   const tags = new Map();
   return async function get(url, init = {}) {
     const headers = { ...(init.headers || {}) };

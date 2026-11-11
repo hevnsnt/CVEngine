@@ -434,6 +434,7 @@ export function sentinelLive(mount) {
   let data = null;
   let failure = null; // the words of a failed first read, shown with Retry
   let slowed = false;
+  const waitBoxes = new Set(); // every placeholder built (a redraw may keep an older one on screen), so stop() can end their own timers
   const pace = createPace();
   const conditional = createGet();
   const details = detailCache(() => paint());
@@ -456,10 +457,11 @@ export function sentinelLive(mount) {
       // nothing read yet: a placeholder while waiting, and when the read failed, say so with Retry; never "No Sentinel has registered yet"
       if (!failure) {
         const wait = waiting("Checking the Sentinels", { slow: slowed });
+        waitBoxes.add(wait);
         wait.setAttribute("data-keep-key", "wait");
         return [wait];
       }
-      const box = couldNotRead("The Sentinel list", () => { failure = null; slowed = false; paint(); reload(); }, failure);
+      const box = couldNotRead("The Sentinel list", () => { failure = null; arm(); paint(); reload(); }, failure);
       box.setAttribute("data-keep-key", "load-error");
       return [box];
     }
@@ -530,12 +532,24 @@ export function sentinelLive(mount) {
   }
   // One request at a time, jittered, paused while the tab is hidden; the detail of a Sentinel (settings, version, update) is asked for only when its live
   // row says it moved (``revision``), not on every round.
+  // the "taking longer than usual" mark: armed at the start and again on every Retry, so each wait has its own count
+  let slowTimer = null;
+  function arm() {
+    clearTimeout(slowTimer);
+    slowed = false;
+    slowTimer = setTimeout(() => { if (!data && !failure) { slowed = true; paint(); } }, SLOW_MS);
+    if (slowTimer.unref) slowTimer.unref();
+  }
+  arm();
   paint();
-  const slowTimer = setTimeout(() => { if (!data && !failure) { slowed = true; paint(); } }, SLOW_MS);
-  if (slowTimer.unref) slowTimer.unref();
   const live = every(reload, POLL_MS, { pace });
-  setInterval(tick, 1000);
-  return () => live.stop();
+  const ager = setInterval(tick, 1000);
+  return () => {
+    live.stop();
+    clearTimeout(slowTimer);
+    clearInterval(ager);
+    waitBoxes.forEach((w) => w.stop && w.stop()); // the placeholders' own "taking longer" timers
+  };
 }
 
 const mount = document.getElementById("live");

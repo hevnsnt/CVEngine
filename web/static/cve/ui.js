@@ -1,4 +1,5 @@
 import { fmtDateTime } from '/staticfiles/cve/prefs.js';
+import { fetchWithin } from '/staticfiles/cve/poll.js';
 
 // Small shared helpers for the account and administration pages (DOM built with textContent only).
 export const el = (tag, cls, text, attrs = {}) => {
@@ -17,11 +18,14 @@ export function csrfToken() {
 }
 
 export async function api(method, url, body) {
-  const res = await fetch(url, {
+  // A read has a time limit (poll.js REQUEST_MS), so a request that never answers ends as an error the page can show. A write has none: it may
+  // have been done by the time the limit passed, and "could not be saved" over a saved change would be wrong.
+  const init = {
     method, credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken() },
     body: body ? JSON.stringify(body) : undefined,
-  });
+  };
+  const res = method === 'GET' ? await fetchWithin(url, init) : await fetch(url, init);
   let data = {};
   try { data = await res.json(); } catch (_) { /* empty */ }
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
@@ -29,8 +33,36 @@ export async function api(method, url, body) {
 }
 
 // A message that says something went well goes by itself. An error stays until the person dismisses it (it is often the only explanation the
-// server gave), is announced as an alert, and sits in a stack so a second error does not cover the first. The same words are not stacked twice.
+// server gave) and is announced as an alert. The stack has a ceiling: at most MAX_ERRORS cards are drawn, the same words shown again are one card
+// with a count ("3 times"), and the rest are one line ("2 more errors. Dismiss to see them.") with its own Dismiss, so a failing page cannot
+// bury the screen in cards.
+export const MAX_ERRORS = 3;
 let errorStack = null;
+const errors = []; // [{message, count}], oldest first
+function drawErrors() {
+  if (!errorStack || !errorStack.isConnected) {
+    errorStack = el('div', 'toast-stack');
+    document.body.appendChild(errorStack);
+  }
+  const cards = errors.slice(0, MAX_ERRORS).map((entry) => {
+    const t = el('div', 'toast err stays', null, { role: 'alert' });
+    const close = el('button', 'toast-close', 'Dismiss', { type: 'button', 'aria-label': 'Dismiss this message' });
+    close.addEventListener('click', () => { errors.splice(errors.indexOf(entry), 1); drawErrors(); });
+    t.append(el('span', '', entry.count > 1 ? `${entry.message} (${entry.count} times)` : entry.message), close);
+    return t;
+  });
+  const hidden = errors.slice(MAX_ERRORS);
+  if (hidden.length) {
+    const extra = hidden.reduce((n, e) => n + e.count, 0);
+    const t = el('div', 'toast err stays', null, { role: 'alert' });
+    const close = el('button', 'toast-close', 'Dismiss', { type: 'button', 'aria-label': 'Dismiss the other messages' });
+    close.addEventListener('click', () => { errors.length = Math.min(errors.length, MAX_ERRORS); drawErrors(); });
+    t.append(el('span', '', `${extra} more ${extra === 1 ? 'error' : 'errors'}. Dismiss to see them.`), close);
+    cards.push(t);
+  }
+  errorStack.replaceChildren(...cards);
+  if (!cards.length) { errorStack.remove(); errorStack = null; }
+}
 export function toast(message, isError = false) {
   if (!isError) {
     const t = el('div', 'toast', message, { role: 'status' });
@@ -38,16 +70,10 @@ export function toast(message, isError = false) {
     setTimeout(() => t.remove(), 4000);
     return;
   }
-  if (!errorStack || !errorStack.isConnected) {
-    errorStack = el('div', 'toast-stack');
-    document.body.appendChild(errorStack);
-  }
-  if (errorStack.querySelectorAll('span').some((n) => n.textContent === message)) return;
-  const t = el('div', 'toast err stays', null, { role: 'alert' });
-  const close = el('button', 'toast-close', 'Dismiss', { type: 'button', 'aria-label': 'Dismiss this message' });
-  close.addEventListener('click', () => t.remove());
-  t.append(el('span', '', message), close);
-  errorStack.appendChild(t);
+  const same = errors.find((e) => e.message === message);
+  if (same) same.count += 1;
+  else errors.push({ message, count: 1 });
+  drawErrors();
 }
 
 // The technical detail behind a plain sentence (a variable name, a file, a command): closed by default, one word to open. For the few people who
@@ -63,8 +89,9 @@ export function details(...lines) {
 // plain line saying what is being checked. After SLOW_MS the line says it is taking longer than usual and that the page fills in by itself,
 // so a wait never reads as a stuck page. role=status and aria-live make a screen reader say the line. Replace the node when the answer arrives.
 export const SLOW_MS = 4000;
-export function waiting(what, { slowMs = SLOW_MS, bars = 2, slow = false } = {}) {
-  const box = el('div', 'wait', null, { role: 'status', 'aria-live': 'polite' });
+// live: false when the placeholder sits inside a region that is already live (one live region per container, or a reader says the line twice).
+export function waiting(what, { slowMs = SLOW_MS, bars = 2, slow = false, live = true } = {}) {
+  const box = el('div', 'wait', null, live ? { role: 'status', 'aria-live': 'polite' } : {});
   const line = el('p', 'note wait-line', `${what}...`);
   box.append(line);
   const longer = () => {

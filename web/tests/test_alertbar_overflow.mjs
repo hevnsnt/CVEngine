@@ -28,13 +28,25 @@ globalThis.setInterval = (...a) => { const t = realSetInterval(...a); t.unref?.(
 globalThis.__log = []; await import('../static/cve/alertbar.js').catch((e) => console.log('IMPORT', e));
 await new Promise((r) => setTimeout(r, 20));
 
-test('the overflow notice is a link to the Scanners page and does not mention the AI model', () => {
-  const more = globalThis.__notices.find((i) => i.kind === 'more');
+const alertRows = () => globalThis.__notices.filter((i) => i.kind === 'alert');
+const moreItem = () => globalThis.__notices.find((i) => i.kind === 'more');
+const toggleOf = (item) => item.node.querySelectorAll('button')[0];
+
+test('more than three alerts: the overflow line is a button, not a link to another page', () => {
+  const more = moreItem();
   assert.ok(more, 'an overflow notice');
-  const a = more.node.tagName.toLowerCase() === 'a' ? more.node : more.node.querySelectorAll('a')[0];
-  assert.ok(a, 'an anchor');
-  assert.equal(a.getAttribute('href'), '/cve/scanners/');
+  assert.equal(more.node.querySelectorAll('a').length, 0, 'no link: no other page lists the alerts');
   assert.match(more.node.textContent, /2 more alerts/);
-  assert.doesNotMatch(more.node.textContent, /AI model/);
-  assert.doesNotMatch(more.text, /AI model/);
+  assert.doesNotMatch(more.node.textContent, /AI model|Open Scanners/);
+  assert.equal(alertRows().length, 3);
+});
+
+test('pressing it opens the full list in place, and Show fewer folds it back', () => {
+  toggleOf(moreItem()).fire('click');
+  assert.equal(alertRows().length, 5, 'all five alerts are listed');
+  assert.deepEqual(alertRows().map((i) => i.text), ['Alert 0', 'Alert 1', 'Alert 2', 'Alert 3', 'Alert 4']);
+  assert.equal(toggleOf(moreItem()).getAttribute('aria-expanded'), 'true');
+  assert.match(moreItem().node.textContent, /Show fewer/);
+  toggleOf(moreItem()).fire('click');
+  assert.equal(alertRows().length, 3);
 });

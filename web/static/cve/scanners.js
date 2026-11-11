@@ -3,7 +3,8 @@
 //   /cve/api/scanner           the page strip's sentence when work waits with no scanner to take it
 //   /cve/api/admin/health      workers, scheduler heartbeat, scanning pause and scan counts (App Admin only; a short live inspection)
 // Nothing is hidden by this page: the server decides what each person may read. Text is set with textContent only.
-import { api, el, waiting, couldNotRead, SLOW_MS } from "/staticfiles/cve/ui.js";
+import { api, el, waiting, couldNotRead } from "/staticfiles/cve/ui.js";
+import { fetchWithin } from "/staticfiles/cve/poll.js";
 import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
 
 const root = document.getElementById("health");
@@ -56,6 +57,11 @@ function adminCells(h) {
   return out;
 }
 
+// One live region for the whole page (#health in the template is aria-live=polite); the placeholders inside it are plain boxes, so a screen reader
+// hears each change once. The verdict line and the grid are drawn separately, each cell is its own block with a key: a cell whose words did not
+// change is left alone, so a placeholder that is still waiting keeps its node (and its "taking longer" line) while another cell answers.
+let headBox = null;
+let grid = null;
 function paint(cells) {
   const problems = cells.map((c) => c.problem).filter(Boolean);
   const settled = cells.every((c) => c.settled);
@@ -63,71 +69,66 @@ function paint(cells) {
   // the verdict waits until every cell has answered: "All working" over a placeholder would be a guess
   if (settled || problems.length) head.append(el("span", `badge ${problems.length ? "high" : "success"}`, problems.length ? "Needs attention" : "All working"));
   if (problems.length) head.append(el("span", "note", problems.join(" ")));
-  const grid = el("div", "health-grid");
-  cells.forEach((c) => grid.append(c.node));
   head.setAttribute("data-keep-key", "health-line");
-  grid.setAttribute("data-keep-key", "health-grid");
+  if (!grid) {
+    headBox = el("div");
+    grid = el("div", "health-grid");
+    root.replaceChildren(headBox, grid); // takes away the static placeholder the page was sent with
+  }
   // the page asks again every few seconds: a refresh that changed nothing touches nothing, and one that did keeps what the person selected or scrolled
-  renderKeepingState(root, () => [head, grid]);
+  renderKeepingState(headBox, () => [head]);
+  renderKeepingState(grid, () => cells.map((c) => { c.node.setAttribute("data-keep-key", c.key); return c.node; }));
 }
 
 // Each cell has its own request and its own state: "wait" (a placeholder that says what is being checked), "ok" or "error" (could not be read,
-// with Retry). A cell fills in when its request answers, so a slow worker check never holds the Sentinels back. After SLOW_MS still waiting,
-// the placeholder says it is taking longer than usual; the count lives here so a redraw does not start it over.
+// with Retry). A cell fills in when its request answers, so a slow worker check never holds the Sentinels back. The placeholder moves itself to
+// "taking longer than usual" after SLOW_MS (ui.js waiting), so nothing here counts the wait.
 const slots = {
-  live: { state: "wait", slow: false, timer: null, data: null, error: "" },
+  live: { state: "wait", data: null, error: "" },
   strip: { data: null },
-  health: { state: isAdmin ? "wait" : "off", slow: false, timer: null, data: null, error: "" },
+  health: { state: isAdmin ? "wait" : "off", data: null, error: "" },
 };
 const READ = {
   live: () => api("GET", "/api/v1/sentinels/live"),
   health: () => api("GET", "/cve/api/admin/health"),
 };
 
-function placeholder(title, what, slot) {
+function placeholder(title, what) {
   const c = el("div", "card health-cell");
-  c.append(el("span", "eyebrow", title), waiting(what, { slow: slot.slow }));
-  return { node: c, problem: "", settled: false };
+  c.append(el("span", "eyebrow", title), waiting(what, { live: false }));
+  return { node: c, key: title, problem: "", settled: false };
 }
 
-function unreadable(title, what, slot) {
+function unreadable(title, what, name) {
   const c = el("div", "card health-cell warn");
-  c.append(el("span", "eyebrow", title), couldNotRead(what, () => refresh(slot === slots.live ? "live" : "health"), slot.error));
-  return { node: c, problem: `${what} could not be read.`, settled: true };
+  c.append(el("span", "eyebrow", title), couldNotRead(what, () => refresh(name), slots[name].error));
+  return { node: c, key: title, problem: `${what} could not be read.`, settled: true };
 }
+
+const done = (title, c) => ({ ...c, key: title, settled: true });
 
 function draw() {
   if (!root.isConnected) return;
   const { live, strip, health } = slots;
   const cells = [];
   if (live.state === "wait") {
-    cells.push(placeholder("Sentinels", "Checking the Sentinels", live), placeholder("Work waiting for a Sentinel", "Checking what is waiting", live));
+    cells.push(placeholder("Sentinels", "Checking the Sentinels"), placeholder("Work waiting for a Sentinel", "Checking what is waiting"));
   } else if (live.state === "error") {
-    cells.push(unreadable("Sentinels", "The Sentinel list", live), unreadable("Work waiting for a Sentinel", "The count of waiting work", live));
+    cells.push(unreadable("Sentinels", "The Sentinel list", "live"), unreadable("Work waiting for a Sentinel", "The count of waiting work", "live"));
   } else {
-    cells.push({ ...sentinelCell(live.data), settled: true }, { ...waitingCell(live.data, strip.data), settled: true });
+    cells.push(done("Sentinels", sentinelCell(live.data)), done("Work waiting for a Sentinel", waitingCell(live.data, strip.data)));
   }
-  if (health.state === "wait") cells.push(placeholder("Workers and scheduler", "Checking the workers and the scheduler", health));
-  else if (health.state === "error") cells.push(unreadable("Workers and scheduler", "The worker check", health));
-  else if (health.state === "ok") cells.push(...adminCells(health.data).map((c) => ({ ...c, settled: true })));
+  if (health.state === "wait") cells.push(placeholder("Workers and scheduler", "Checking the workers and the scheduler"));
+  else if (health.state === "error") cells.push(unreadable("Workers and scheduler", "The worker check", "health"));
+  else if (health.state === "ok") adminCells(health.data).forEach((c, i) => cells.push(done(["Workers", "Scheduler", "Scanning"][i], c)));
   paint(cells);
 }
 
-function arm(slot) {
-  clearTimeout(slot.timer);
-  slot.slow = false;
-  slot.timer = setTimeout(() => {
-    if (slot.state !== "wait") return;
-    slot.slow = true;
-    draw();
-  }, SLOW_MS);
-}
-
+// A read that fails or runs past the time limit (ui.js api: REQUEST_MS) ends as "could not be read" with Retry, so no cell waits for ever.
 async function refresh(name, quiet = false) {
   const slot = slots[name];
   if (!quiet || slot.state === "wait") {
     slot.state = "wait";
-    arm(slot);
     draw();
   }
   try {
@@ -137,13 +138,12 @@ async function refresh(name, quiet = false) {
     slot.state = "error";
     slot.error = err.message || "";
   }
-  clearTimeout(slot.timer);
   draw();
 }
 
-// The strip's sentence is extra: when it does not answer, the work cell simply has no extra sentence.
+// The strip's sentence is extra: when it does not answer (or not in time), the work cell simply has no extra sentence.
 async function readStrip() {
-  slots.strip.data = await fetch("/cve/api/scanner", { credentials: "same-origin", cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  slots.strip.data = await fetchWithin("/cve/api/scanner", { credentials: "same-origin", cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
   draw();
 }
 
@@ -154,19 +154,37 @@ async function load() {
   await Promise.all(reads);
 }
 
+// One polling chain: a round starts only when none is running, and the next is armed from one place (the end of a round). Showing the tab again
+// starts a round at once unless one is already on its way; it never adds a second chain.
 let timer = null;
-async function loop() {
-  try {
-    await load();
-  } catch (err) {
-    root.replaceChildren(el("p", "msg err", err.message));
-  }
-  timer = setTimeout(loop, EVERY_MS);
+let running = null;
+let stopped = false;
+function round() {
+  if (running || stopped) return running;
+  clearTimeout(timer);
+  running = (async () => {
+    try {
+      await load();
+    } catch (err) {
+      root.replaceChildren(el("p", "msg err", err.message));
+      grid = null;
+    } finally {
+      running = null;
+      if (!stopped) timer = setTimeout(round, EVERY_MS);
+    }
+  })();
+  return running;
+}
+// Leaving the page ends the polling (a page kept in the back/forward cache starts again when it is shown).
+function stop() {
+  stopped = true;
+  clearTimeout(timer);
 }
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") {
-    clearTimeout(timer);
-    loop();
-  }
+  if (document.visibilityState === "visible" && !running) round();
 });
-loop();
+if (globalThis.addEventListener) {
+  globalThis.addEventListener("pagehide", stop);
+  globalThis.addEventListener("pageshow", (e) => { if (e.persisted) { stopped = false; round(); } });
+}
+round();
