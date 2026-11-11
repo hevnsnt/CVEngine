@@ -18,6 +18,10 @@ awk -v installed="$installed" -v grace="$grace" -v needstatus="${3:-0}" '
   function bad(msg) { print "::error::" msg; failed = 1 }
   { t=$1; code=$2; marker=$3; api=$4; retry=$5; head=$6; n++ }
   head != installed && head != "none" && !changed { changed = 1; first_changed = n; print "files changed at sample " n " (" t ")" }
+  pending_auth && n == pending_auth + 1 {
+    if (!(code == 200 || code == 301 || code == 302 || code == 303 || code == 307 || code == 308)) bad("sample " pending_auth ": an API client got " pending_api " during the update (want 503)")
+    pending_auth = 0
+  }
   code == 503 && marker == 1 { seen++ }
   {
     ingrace = (changed && (n - first_changed) < grace)
@@ -30,7 +34,12 @@ awk -v installed="$installed" -v grace="$grace" -v needstatus="${3:-0}" '
       } else if (code == 503 && marker != 1) {
         bad("sample " n ": 503 without the maintenance page text")
       }
-      if (api != 503 && api != 000 && api != 502 && api != 504 && !(served)) bad("sample " n ": an API client got " api " during the update (want 503)")
+      # One sample asks for the page, then the API. Maintenance can end between the two: the page was the maintenance page and the API already
+      # reached the started application, which answers 401 or 403 to a request without a token. That is the end of the window, not an error,
+      # only when the NEXT sample finds the site answering; checked there (pending_auth). Any other code, or a 401 that is not followed by the
+      # site answering, fails as before.
+      if ((api == 401 || api == 403) && code == 503 && marker == 1 && !served) { pending_auth = n; pending_api = api }
+      else if (api != 503 && api != 000 && api != 502 && api != 504 && !(served)) bad("sample " n ": an API client got " api " during the update (want 503)")
       if (api == 503 && retry != 1 && !served) bad("sample " n ": the API 503 carried no Retry-After")
       if (n == first_changed && grace == 0 && !(code == 503 && marker == 1)) bad("the first sample with changed files (" code ", marker " marker ") was not the maintenance page: it went up after the files changed")
     }
@@ -42,6 +51,7 @@ awk -v installed="$installed" -v grace="$grace" -v needstatus="${3:-0}" '
       if (!("working:build" in steps)) bad("the live status never showed the build step (/maintenance-status.json)")
       if (!("working:starting" in steps) && !("working:verifying" in steps) && !("working:migrating" in steps)) bad("the live status never showed a later step")
     }
+    if (pending_auth) bad("sample " pending_auth ": an API client got " pending_api " during the update (want 503)")
     if (!changed) bad("the checkout never moved from " installed " during the probe")
     if (!seen) bad("the maintenance page (503 with its text) was never served")
     if (!served) bad("the site never answered again")
