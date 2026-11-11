@@ -13,7 +13,7 @@ if (mount) {
   days.value = "7";
   const output = el("div");
   const status = el("p", "note", "", { role: "status" });
-  const waitBox = waiting("Loading recorded AI attempts");
+  let waitBox = waiting("Loading recorded AI attempts");
   let drawn = false;
   tools.append(days, button("Refresh", load, "btn ghost sm"));
   output.append(waitBox);
@@ -185,7 +185,13 @@ if (mount) {
       // nothing drawn yet: say so where the list would be and offer the same read again; later failures leave what is on screen
       if (!drawn) {
         waitBox.stop?.();
-        const box = couldNotRead("The AI usage", () => { status.textContent = "Checking again..."; load(); }, error.message);
+        const box = couldNotRead("The AI usage", () => {
+          // the error box goes and the placeholder comes back while the same read runs again
+          status.textContent = "";
+          waitBox = waiting("Loading recorded AI attempts");
+          renderKeepingState(output, () => [waitBox]);
+          load();
+        }, error.message);
         box.setAttribute("data-keep-key", "usage-error");
         renderKeepingState(output, () => [box]);
       }

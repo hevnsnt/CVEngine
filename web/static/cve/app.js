@@ -4747,7 +4747,7 @@ pages.activity = function activity(mount) {
   if (ALL && root.dataset.appAdmin === "1") {
     const control = el("section", "card");
     const state = el("div", "note", null, { role: "status" });
-    state.append(waiting("Loading the global scanning state"));
+    state.append(waiting("Loading the global scanning state", { live: false })); // state is already a status region
     const actions = el("div", "tools");
     const pause = el("button", "btn", "Pause all scanning", { type: "button" });
     const resume = el("button", "btn ghost", "Resume scanning", { type: "button" });

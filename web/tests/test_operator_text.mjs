@@ -10,7 +10,13 @@ const bare = (s) => assert.doesNotMatch(String(s), /CVENGINE_|\.env\b|configMaxx
 
 test('the section keeps its name, with a plain sentence saying what it is for', () => {
   assert.equal(logic.SECTION_LABEL, 'configMaxxing');
-  assert.match(logic.WARNING_TEXT, /^configMaxxing: advanced performance settings\./);
+  assert.match(logic.WARNING_TEXT, /^configMaxxing is for advanced performance settings/);
+});
+
+test('the intro is one sentence that carries the name; the section text is no longer than it was before (three sentences)', () => {
+  const sentences = logic.WARNING_TEXT.split(/(?<=\.) /);
+  assert.equal(sentences.length, 3);
+  assert.match(sentences[0], /^configMaxxing is for advanced performance settings that cvENGINE tunes itself, so change them only if you like to tune things\.$/);
 });
 
 test('where a number comes from is said in plain words; the variable name is the Details line', () => {

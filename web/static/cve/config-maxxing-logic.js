@@ -6,7 +6,7 @@ export const SECTION_ID = "configmaxxing";
 export const SECTION_LABEL = "configMaxxing";
 export const STORAGE_KEY = "cve.settings.configmaxxing.open";
 export const WARNING_TEXT =
-  "configMaxxing: advanced performance settings. cvENGINE tunes these itself; change them only if you want to. Advanced settings for people who like to tune things. The defaults are safe, and auto-tuning (on by default) adjusts the throughput numbers for you. Changing these can make scans slower, use more memory or send more traffic to your targets.";
+  "configMaxxing is for advanced performance settings that cvENGINE tunes itself, so change them only if you like to tune things. The defaults are safe, and auto-tuning (on by default) adjusts the throughput numbers for you. Changing these can make scans slower, use more memory or send more traffic to your targets.";
 export const EXPLANATION_TEXT =
   "More at once scans faster but needs more CPU and memory. The memory gate still holds work back when the container is short on memory. " +
   "Scanning on a second machine (a Sentinel) is the best way to scale. Auto-tuning (the first card) moves the numbers nobody saved here; a number you save is pinned.";

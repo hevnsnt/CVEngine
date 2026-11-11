@@ -131,11 +131,13 @@ export async function apiKeysPanel(mount) {
   bar.append(scopeNote);
   head.append(bar);
   const body = el("div", "ak-body");
-  page.append(body);
+  // a read that failed is said above the list whenever it failed, also when the other read gave rows: the list is then only part of the truth
+  const notice = el("div", "ak-read-failed");
+  if (readFailed) notice.append(couldNotRead("The list of organizations or projects", () => { page.remove(); apiKeysPanel(mount); }, readFailed));
+  page.append(notice, body);
 
   if (!scopes.length && readFailed) {
     bar.setAttribute("hidden", "");
-    body.append(couldNotRead("The list of organizations and projects", () => { page.remove(); apiKeysPanel(mount); }, readFailed));
     return;
   }
   if (!scopes.length) {

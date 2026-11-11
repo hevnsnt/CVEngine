@@ -89,3 +89,14 @@ test('after the slow mark the line says it is taking longer than usual and the p
   assert.match(box.textContent, /fills in by itself/);
   assert.match(waiting('Checking', {slow: true}).textContent, /taking longer than usual/);
 });
+
+test('a placeholder is its own live region unless it sits inside one (live: false); the activity page does not nest them', async () => {
+  const {waiting} = await import('../static/cve/ui.js');
+  assert.equal(waiting('Checking').getAttribute('role'), 'status');
+  const quiet = waiting('Checking', {live: false});
+  assert.equal(quiet.getAttribute('role'), null);
+  assert.equal(quiet.getAttribute('aria-live'), null);
+  const {readFileSync} = await import('node:fs');
+  const app = readFileSync(new URL('../static/cve/app.js', import.meta.url), 'utf8');
+  assert.match(app, /state\.append\(waiting\("Loading the global scanning state", \{ live: false \}\)\)/);
+});
