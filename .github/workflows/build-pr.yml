@@ -61,6 +61,8 @@ jobs:
         run: printf 'XDG_CACHE_HOME=%s/cvengine-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Resolver fallback (only when the runner cannot find the Ubuntu package servers)
+        uses: ./.github/actions/resolver-fallback
       - name: Python 3.12
         uses: actions/setup-python@v5
         with:
@@ -144,6 +146,8 @@ jobs:
     steps:
       - name: 📥 Checkout the git repo
         uses: actions/checkout@v4
+      - name: Resolver fallback (only when the runner cannot find the Ubuntu package servers)
+        uses: ./.github/actions/resolver-fallback
 
       - name: 🏗️ Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -195,6 +199,8 @@ jobs:
     steps:
       - name: 📥 Checkout the git repo
         uses: actions/checkout@v4
+      - name: Resolver fallback (only when the runner cannot find the Ubuntu package servers)
+        uses: ./.github/actions/resolver-fallback
       - name: 🏗️ Build the reviewer image
         run: docker build -t cvengine-reviewer-ci reviewer/
       - name: 🧪 Run it the way compose runs it
