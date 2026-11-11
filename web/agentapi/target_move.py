@@ -95,6 +95,8 @@ def move_target(ctx, source, dest, name, discover=True, whole_target=False):
         for n in target_names:  # the old project's other targets must not find the name again and start tracking it
             HostMove.objects.update_or_create(project=source, host=n, defaults={'moved_to': dest, 'moved_by': ctx.user})
         counts = repoint(source, dest, domains, hosts)
+        from cveFeed import snapshot_cache
+        snapshot_cache.bump_on_commit()  # the hosts and findings now count in the other project
     scan_ids = []
     if discover:
         root = [d for d in _not_internal(dest, domains) if d.name.lower() == name]
