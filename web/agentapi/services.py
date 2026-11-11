@@ -2535,8 +2535,10 @@ def _heat_facets(project, qs):
     from cveFeed.models import CVEMatch
     from cveFeed.threat import SEVERITY_HEAT, finding_heat_rank_expr, match_heat_rank_expr
     from startScan.models import ScanActivity, Subdomain, Vulnerability
-    total = qs.count()
-    own = list(qs.order_by('id').values_list('id', 'scan_history_id')[:HEAT_FACET_CAP])
+    # one more than the cap is read, so "more matched than the cap" is known without a COUNT: when qs is the one-row-per-host collapse a COUNT is a second run of it
+    own = list(qs.order_by('id').values_list('id', 'scan_history_id')[:HEAT_FACET_CAP + 1])
+    truncated = len(own) > HEAT_FACET_CAP
+    own = own[:HEAT_FACET_CAP]
     ids = [i for i, _s in own]
     siblings = host_siblings(ids)
     wanted = set(ids) | {i for rows in siblings.values() for i, _n in rows}
@@ -2568,17 +2570,18 @@ def _heat_facets(project, qs):
             heat = 'clean' if any(i in has_finding or scans.get(i) in done for i in group) else 'unscanned'
         counts[heat] += 1
         heat_by_id[sub_id] = heat
-    return counts, heat_by_id, total > HEAT_FACET_CAP
+    return counts, heat_by_id, truncated
 
 
 def _heat_facets_walk(project, qs):
     """``({fire,smoke,ice,clean,unscanned: count}, {sub.id: heat}, truncated)`` for every host ``qs`` matches, up to
     HEAT_FACET_CAP, computed with the same group-merge logic _host() itself uses (so a chip's count and a host's own
     badge never disagree). ``truncated`` means more than the cap matched q; the count is then a lower bound."""
-    total = qs.count()
     subs = list(qs.select_related('target_domain').prefetch_related(
         'ip_addresses__ports', 'cve_matches__cve_entry', triage_prefetch('cve_matches__triage'), 'vulnerability_set', triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags',
-    ).order_by('id')[:HEAT_FACET_CAP])
+    ).order_by('id')[:HEAT_FACET_CAP + 1])
+    truncated = len(subs) > HEAT_FACET_CAP
+    subs = subs[:HEAT_FACET_CAP]
     others = _name_siblings(project, subs)
     _prime_nuclei(subs, *others.values())
     counts = {v: 0 for v in HEAT_FACET_VALUES}
@@ -2589,7 +2592,7 @@ def _heat_facets_walk(project, qs):
         heat = _host_heat_merged(sub, sibs, reasons)
         counts[heat] = counts.get(heat, 0) + 1
         heat_by_id[sub.id] = heat
-    return counts, heat_by_id, total > HEAT_FACET_CAP
+    return counts, heat_by_id, truncated
 
 
 HEAT_FACET_SECONDS = 15  # the least time the whole-match counts of a search (heat chips, facets, coverage) are served from the shared snapshot cache
@@ -2641,7 +2644,9 @@ def _unscannable_facet(qs, heat_by_id):
     ids = [i for i, h in heat_by_id.items() if h == 'unscanned']
     if not ids:
         return out
-    rows = list(qs.order_by().filter(id__in=ids, ip_addresses__isnull=True).values_list('target_domain__project_id', 'name').distinct())
+    # the ids ARE rows of ``qs`` (the heat walk read them from it): looking them up in the table runs ``qs`` (the host collapse) no second time
+    from startScan.models import Subdomain
+    rows = list(Subdomain.objects.filter(id__in=ids, ip_addresses__isnull=True).order_by().values_list('target_domain__project_id', 'name').distinct())
     notes = {(p, h): n for p, h, n in HostState.objects.filter(
         project_id__in={p for p, _n in rows}, host__in={n.lower() for _p, n in rows}).values_list('project_id', 'host', 'resolution_note')}
     for project_id, name in rows:
@@ -2758,6 +2763,7 @@ def search_hosts(ctx, slug, params):
     ``facets`` (comma-separated, among port|product|tech|os|country) adds the same whole-match counting for those fields,
     each up to ``facet_size`` values (default 10, max 50), highest count first. Each result says what matched. No ``q`` lists every
     host. Highest score first; ``sort=name`` for names."""
+    from startScan.models import Subdomain
     project, _ = get_project(ctx, slug)
     heat = params.get('heat') or ''
     if heat and heat not in HEAT_FACET_VALUES:
@@ -2790,9 +2796,15 @@ def search_hosts(ctx, slug, params):
         heat_counts, heat_by_id, heat_truncated, unscannable, search_facets = {}, {}, False, None, {}
     if heat:
         qs = qs.filter(id__in=[i for i, h in heat_by_id.items() if h == heat])
-    qs = qs.select_related('target_domain__project' if _is_all(project) else 'target_domain').prefetch_related(
-        'ip_addresses__ports', 'cve_matches__cve_entry', triage_prefetch('cve_matches__triage'), 'vulnerability_set', triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags', 'technologies').order_by(*_host_order(params))
-    page = _mark_zombies(project, _hosts_page(project, qs, params, page_extra=lambda subs, shared: _matched_for_page(subs, shared, terms)))
+    ordered = qs.order_by(*_host_order(params))
+
+    def load(ids):  # the page's rows with what the host cards read, in the order of ``ids``
+        rows = Subdomain.objects.filter(pk__in=ids).select_related('target_domain__project' if _is_all(project) else 'target_domain').prefetch_related(
+            'ip_addresses__ports', 'cve_matches__cve_entry', triage_prefetch('cve_matches__triage'), 'vulnerability_set', triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags', 'technologies')
+        by_id = {row.pk: row for row in rows}
+        return [by_id[i] for i in ids if i in by_id]
+    # the ids are read once and paged in Python (paginate_by_ids): the page used to run the collapse for its COUNT and again for its slice
+    page = _mark_zombies(project, _hosts_page(project, ordered, params, load=load, page_extra=lambda subs, shared: _matched_for_page(subs, shared, terms)))
     for row in page['results']:
         row['matched'] = list(dict.fromkeys([*_alias_reasons(row, terms), *row['matched']]))[:8]
     page['facets'] = None if no_facets else {'heat': heat_counts, 'truncated': heat_truncated, 'unscannable': unscannable,

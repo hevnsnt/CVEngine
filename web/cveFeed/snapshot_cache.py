@@ -11,6 +11,12 @@ busy moment piled those recomputations on top of each other until the proxy answ
 * a Redis outage never breaks a view: every cache call is guarded and the answer is computed directly, as it was before the cache existed;
 * ``bump_stats_revision`` (a finding was closed) makes every entry stale at once through the revision stored in each entry.
 
+A snapshot that is dear to compute is also **kept longer**: the snapshots named in ``ADAPTIVE`` stay fresh for ``COST_FACTOR`` times what their last
+computation took (at most ``COST_CEILING`` seconds), never less than the freshness they were asked for. On a fast install nothing changes (ten seconds); on
+one where the headline counts take eight seconds they are served for eighty, so the refresher and the polls do not keep the database computing them all the
+time. A closed finding still drops them at once (the revision), and ``building()`` tells a computation that it runs for a snapshot, so the pieces that
+several snapshots share (the collapsed host list, ``counts.snapshot_rep_ids``) are read once for all of them.
+
 Stage 1 adds a **refresher** (``cveFeed.live_refresh``, a celery beat task on a queue of its own): every request for a scope registers it as *hot*
 for a minute (``mark_hot``: the scope's key, the project ids it runs under and the parameters it was asked with), and the refresher recomputes
 the snapshots of the hot scopes before they go stale, so while it is alive (``refresher_alive``: it leaves a heartbeat every run) a request
@@ -19,6 +25,7 @@ asks for stops being refreshed within a minute. What the refresher stores sits u
 computed under exactly the project ids that key was hashed from, so a scope can never be served another scope's numbers. Hits, stale answers,
 misses and refreshes are counted per hour in the cache (``metrics``), for ``get_system_status``.
 """
+import contextvars
 import hashlib
 import json
 import logging
@@ -48,11 +55,34 @@ METRIC_TTL = 3 * 3600
 OUTCOMES = ('hit', 'stale', 'miss', 'waited', 'refreshed', 'skipped', 'overran')
 NAMES = ('stats', 'discovery-counts', 'graph-version', 'graph-live', 'search-facets', 'activity-days', 'refresher')
 
+INTERNAL = ('host-reps',)  # snapshots the others are built from: not counted as polls (the per-hour counters are what people asked for)
+ADAPTIVE = ('stats', 'discovery-counts', 'host-reps')  # snapshots whose freshness follows the cost of computing them
+COST_FACTOR = 10  # served for this many times the last computation's duration: a computation never takes more than a tenth of the time
+COST_CEILING = 120  # ...and never for more than this many seconds
+
 _hot_seen = {}  # (name, scope) -> when this process last registered it: a poll does not write to the cache each time
+_building = contextvars.ContextVar('cve_snapshot_building', default=False)
+
+
+def building():
+    """True while a snapshot (or the refresher) is computing one: the computation may share what it reads with the other snapshots of the scope."""
+    return _building.get()
+
+
+def fresh_for(name, fresh, entry):
+    """``fresh``, or longer for an ``ADAPTIVE`` snapshot whose last computation (``entry['took']``) was slow: ``COST_FACTOR`` times it, up to ``COST_CEILING``."""
+    if name not in ADAPTIVE or not isinstance(entry, dict):
+        return fresh
+    return max(fresh, min(COST_CEILING, COST_FACTOR * float(entry.get('took') or 0)))
 
 
 def _now():
     return time.time()
+
+
+def _elapsed():
+    """A clock for how long a computation took (``entry['took']``); apart from ``_now`` so a test that scripts the entries' clock is not disturbed."""
+    return time.monotonic()
 
 
 def _clock():
@@ -62,6 +92,8 @@ def _clock():
 
 def count(name, outcome, n=1):
     """Add to this hour's counter of ``outcome`` for the snapshot ``name`` (shared by every worker; a cache that does not answer counts nothing)."""
+    if name in INTERNAL:
+        return
     key = f'cve:snap:m:{int(_clock() // 3600)}:{name}:{outcome}'
     try:
         try:
@@ -230,8 +262,13 @@ def token_of(payload):
 
 
 def _build(compute, etag_of, rev, by='request'):
-    payload = compute()
-    return {'payload': payload, 'etag': (etag_of or token_of)(payload), 'at': _now(), 'rev': rev, 'by': by}
+    started = _elapsed()
+    flag = _building.set(True)
+    try:
+        payload = compute()
+    finally:
+        _building.reset(flag)
+    return {'payload': payload, 'etag': (etag_of or token_of)(payload), 'at': _now(), 'rev': rev, 'by': by, 'took': round(_elapsed() - started, 3)}
 
 
 def snapshot(name, scope, compute, fresh, etag_of=None, hot=None):
@@ -255,6 +292,7 @@ def snapshot(name, scope, compute, fresh, etag_of=None, hot=None):
         return _build(compute, etag_of, '')
     if entry is not None and entry['rev'] == rev:
         age = _now() - entry['at']
+        fresh = fresh_for(name, fresh, entry)
         if age < fresh:
             count(name, 'hit')
             return entry
@@ -311,9 +349,10 @@ def refresh(name, scope, compute, fresh, etag_of=None, due_age=None):
     ``compute`` raises (the lock is released first)."""
     key = f'cve:snap:{name}:{scope}'
     lock = f'{key}:lock'
-    due = fresh if due_age is None else due_age
     entry, rev = cache.get(key), revision()
     previous = entry if isinstance(entry, dict) and 'payload' in entry else None
+    longer = fresh_for(name, fresh, previous)
+    due = longer if due_age is None else due_age + (longer - fresh)  # a slow snapshot is due later by as much as it is kept longer
     if previous is not None and previous['rev'] == rev and _now() - previous['at'] < due:
         return 'fresh', previous, previous
     if not cache.add(lock, 1, LOCK_SECONDS):

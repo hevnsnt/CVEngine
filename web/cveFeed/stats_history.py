@@ -56,7 +56,7 @@ def compute_snapshot(project, date=None, with_fixed=True):
     from cveFeed import counts
     from targetApp.models import Domain
     domain_ids = list(Domain.objects.filter(project=project).values_list('id', flat=True))
-    host_qs = counts.host_reps(domain_ids=domain_ids)
+    host_qs = counts.reps_of(counts.rep_ids(domain_ids=domain_ids))  # collapsed once: the host count and the exposed count read the same ids
     hosts = host_qs.count()
     exposed_hosts = counts.exposed_among(host_qs, project_ids=[project.id]).count()
     open_findings, cve_matches = _open_findings_and_cve_matches(project)

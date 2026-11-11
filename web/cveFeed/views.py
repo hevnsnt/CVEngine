@@ -135,8 +135,9 @@ def graph_payload(domain_id=None, scan_id=None):
     if scan_id:
         subs = subs.filter(scan_history_id=scan_id)  # one scan asked for by id: exactly its rows
     else:
-        from cveFeed.counts import host_reps
-        subs = subs.filter(pk__in=host_reps(domain_id).values('pk'))  # otherwise each host once: the row the Hosts page shows
+        from cveFeed.counts import rep_ids, snapshot_rep_ids
+        # otherwise each host once: the row the Hosts page shows. The collapse runs once; the drawn hosts and the per-project totals below read its ids
+        subs = subs.filter(pk__in=snapshot_rep_ids() if not domain_id else rep_ids(domain_id))
     nodes, edges = {}, set()
     by_name = {}
 
@@ -340,7 +341,9 @@ def stats_payload():
     from startScan.models import Vulnerability
     from targetApp.models import Domain
     tiers = tier_counts()
-    reps = counts.host_reps()
+    # the inventory is collapsed to one row per host ONCE; the host counts, the exposed count and the internal share are all read from those ids
+    # (each used to collapse it again). While a snapshot is being built the ids are shared with the other snapshots of the scope (counts.snapshot_rep_ids)
+    reps = counts.reps_of(counts.snapshot_rep_ids())
     from django.db.models import Count
     host_counts = reps.aggregate(total=Count('pk', distinct=True), live=Count('pk', filter=counts.LIVE_HOST_Q, distinct=True))  # one pass over the hosts, not two
     oldest = counts.oldest_open()
@@ -360,12 +363,12 @@ def stats_payload():
         # 'matches' stays the per-host count it always was; this is the number beside it that says how many distinct findings that is
         **dict(zip(('match_groups', 'match_groups_truncated'), counts.match_group_count())),
         'scanner_findings': counts.actionable_findings(Vulnerability.objects.all()).count(),
-        'exposed_hosts': counts.exposed_host_count(),
+        'exposed_hosts': counts.exposed_host_count(reps),
         'oldest_open_days': oldest['days'],  # the longest a critical or high item has sat open, across CVE matches, scanner and hygiene findings
         'oldest_open_kind': oldest['kind'],  # 'cve', 'scanner' or 'hygiene'
         'oldest_open_id': oldest['id'],  # the row of that kind to link to
         'oldest_open_what': _oldest_open_what(oldest['kind'], oldest['id']) if oldest['id'] else None,  # {severity, title, host}
-        'internal': internal_view.summary(),  # the declared internal networks and their share of the numbers above (cveFeed.internal_view)
+        'internal': internal_view.summary(reps),  # the declared internal networks and their share of the numbers above (cveFeed.internal_view)
         'autofire_runs': AutoFireRun.objects.count(),
         'templates': GeneratedTemplate.objects.filter(status=GeneratedTemplate.STATUS_VALID).count(),
         'templates_pending': GeneratedTemplate.objects.filter(status=GeneratedTemplate.STATUS_DRAFT).count(),
@@ -1221,9 +1224,9 @@ def discovery_counts():
     The live hosts are read once (the one expensive part: the current inventory collapsed to a row per host), and the addresses and ports
     are then looked up through the link tables by id. The three counts used to be three nested queries that each repeated the whole host walk
     inside it; the ports one took 6 to 18 s on a 4,000-scan install, and several of them ran at once whenever the snapshot went cold."""
-    from cveFeed.counts import LIVE_HOST_Q, host_reps
+    from cveFeed.counts import LIVE_HOST_Q, reps_of, snapshot_rep_ids
     from startScan.models import IpAddress, Subdomain
-    live = set(host_reps().filter(LIVE_HOST_Q).values_list('pk', flat=True))
+    live = set(reps_of(snapshot_rep_ids()).filter(LIVE_HOST_Q).values_list('pk', flat=True))  # the collapsed host list, shared with the other snapshots of the scope
     ips = set()
     for chunk in _chunks(sorted(live)):
         ips.update(Subdomain.ip_addresses.through.objects.filter(subdomain_id__in=chunk).values_list('ipaddress_id', flat=True))
