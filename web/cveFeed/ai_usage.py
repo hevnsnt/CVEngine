@@ -40,6 +40,64 @@ def _templates():
     return templatevalidate.summary()
 
 
+_MILLION = Decimal(1_000_000)
+
+
+def _price_for(provider, model, db_rates):
+    """One model's rates as ``{input, output, cache_read, cache_write}`` from a price entered on the usage page (``AIPriceRate``), or None. No
+    price ships with the product: the operator enters their own, and an unpriced model shows tokens only."""
+    rate = db_rates.get((provider, model))
+    if rate is None:
+        return None
+    return {'input': rate.input_per_million_usd, 'output': rate.output_per_million_usd,
+            'cache_read': rate.cache_read_per_million_usd, 'cache_write': rate.cache_write_per_million_usd}
+
+
+def price_row(totals, price):
+    """List-price USD (string, 6 places) of ``totals`` (``input``, ``output``, ``cache_read``, ``cache_write`` token sums) at ``price``, or None
+    when there is no price, or cached tokens were used and the price has no cache rate. Anthropic's input_tokens excludes the cached ones."""
+    if not price:
+        return None
+    read, wrote = totals['cache_read'] or 0, totals['cache_write'] or 0
+    if (read and price['cache_read'] is None) or (wrote and price['cache_write'] is None):
+        return None
+    amount = (Decimal(totals['input'] or 0) * price['input'] + Decimal(totals['output'] or 0) * price['output']
+              + Decimal(read) * (price['cache_read'] or 0) + Decimal(wrote) * (price['cache_write'] or 0)) / _MILLION
+    return str(amount.quantize(Decimal('0.000001')))
+
+
+def cache_read_share(totals):
+    """Cached tokens read as a share of every prompt token (fresh input + cache read + cache write), 0 to 1, or None when there were none."""
+    total = (totals['input'] or 0) + (totals['cache_read'] or 0) + (totals['cache_write'] or 0)
+    return round((totals['cache_read'] or 0) / total, 4) if total else None
+
+
+def cost_by_stage_day(days=7, provider='anthropic'):
+    """The cost view: one row per (day, stage, model) of the ledger, newest day first: calls, failed calls, input, output, cache-read and
+    cache-write tokens, ``cache_read_share`` and ``list_usd`` at the price entered on the usage page (None when there is none). Only calls
+    with token counts are priced; ``unpriced_calls`` counts the rest. Read-only; one grouped query."""
+    from cveFeed.models import AIPriceRate, AIUsage
+
+    cutoff = timezone.now() - timedelta(days=days)
+    db_rates = {(r.provider, r.model): r for r in AIPriceRate.objects.filter(provider=provider)}
+    grouped = (AIUsage.objects.filter(provider=provider, started_at__gte=cutoff)
+               .annotate(day=TruncDate('started_at')).values('day', 'stage', 'model', 'actual_model')
+               .annotate(calls=Count('id'), failed=Count('id', filter=Q(status='failed')),
+                         missing=Count('id', filter=Q(input_tokens__isnull=True) | Q(output_tokens__isnull=True)),
+                         input=Sum('input_tokens'), output=Sum('output_tokens'),
+                         cache_read=Sum('cache_read_tokens'), cache_write=Sum('cache_write_tokens'))
+               .order_by('-day', 'stage', 'model'))
+    rows = []
+    for g in grouped:
+        model = g['actual_model'] or g['model']
+        price = _price_for(provider, model, db_rates)
+        rows.append({'day': _iso(g['day']), 'stage': g['stage'], 'model': model, 'calls': g['calls'], 'failed': g['failed'],
+                     'input_tokens': g['input'] or 0, 'output_tokens': g['output'] or 0, 'cache_read_tokens': g['cache_read'] or 0,
+                     'cache_write_tokens': g['cache_write'] or 0, 'cache_read_share': cache_read_share(g),
+                     'list_usd': price_row(g, price), 'unpriced_calls': g['missing']})
+    return rows
+
+
 def snapshot(days=7):
     from dashboard.models import AIProviderSettings
     from cveFeed.models import AIPriceRate, AIUsage
@@ -140,7 +198,7 @@ def snapshot(days=7):
             'priced_attempts': priced_attempts,
             'unknown_cost_attempts': unknown_cost_attempts, 'models': models,
             'daily': [{'day': _iso(d['day']), 'attempts': d['attempts'], 'errors': d['errors']} for d in daily],
-            'stages': stages, 'recent': recent, 'templates': _templates(),
+            'stages': stages, 'recent': recent, 'templates': _templates(), 'cost_by_stage_day': cost_by_stage_day(days),
             'rates': [{'provider': r.provider, 'model': r.model, 'input_per_million_usd': str(r.input_per_million_usd),
                        'output_per_million_usd': str(r.output_per_million_usd), 'cache_read_per_million_usd':
                        str(r.cache_read_per_million_usd) if r.cache_read_per_million_usd is not None else None,

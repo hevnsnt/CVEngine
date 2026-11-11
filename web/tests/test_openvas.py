@@ -913,16 +913,18 @@ class ComposeTests(SimpleTestCase):
         self.assertEqual(seen, programs)
 
     def test_the_scanner_is_pinned_to_a_digest_the_registry_still_serves(self):
-        # Greenbone removed sha256:5067aa68... (the registry answers 404, so a fresh pull of the add-on failed). Both services that run the scanner
-        # image (openvas-configure and openvas-openvasd) pin the stable digest read on 2026-11-02, the one the Sentinel client pins too.
-        withdrawn = '5067aa68bdb63038180cbdbb5cdc199c1908ec6b7d55997a41b6a51b14c12eee'
-        current = '7a7c440cf675a83ca1b6d8284eb28450893a8b05f5fed1f98e997df605792632'
+        # Greenbone removes the digest behind an old "stable" (the registry answers 404, so a fresh pull of the add-on fails): sha256:5067aa68...
+        # before 11/2, sha256:7a7c440c... (and the Sentinel's sha256:d6d8288c...) on 11/10. Both services that run the scanner image
+        # (openvas-configure and openvas-openvasd) pin the stable digest read on 2026-11-10, the one the Sentinel client pins too.
+        withdrawn = ('5067aa68bdb63038180cbdbb5cdc199c1908ec6b7d55997a41b6a51b14c12eee', '7a7c440cf675a83ca1b6d8284eb28450893a8b05f5fed1f98e997df605792632')
+        current = '5b2043df8abed6acff7cd4c08636ea87c57f73b95cd406c88dc2adcec24426dd'
         scanner = [s['image'] for s in self.openvas.values() if s['image'].rpartition('/')[2].startswith('openvas-scanner:')]
         self.assertEqual(len(scanner), 2)
         for image in scanner:
             self.assertEqual(image, f'registry.community.greenbone.net/community/openvas-scanner:stable@sha256:{current}')
         for path in ('docker-compose.yml', 'docs/OPENVAS.md'):
-            self.assertNotIn(f'sha256:{withdrawn}', (ROOT / path).read_text(), path)
+            for gone in withdrawn:
+                self.assertNotIn(f'sha256:{gone}', (ROOT / path).read_text(), path)
 
     def test_only_celery_mounts_gvmds_socket_and_read_only(self):
         for name, service in self.services.items():

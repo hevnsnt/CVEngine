@@ -40,7 +40,8 @@ def measured_call(server, stage, provider, system, user, schema, max_tokens, eff
             if not retry:
                 raise
         else:
-            report.update(status='succeeded', model=model, input_tokens=usage.get('input_tokens'), output_tokens=usage.get('output_tokens'))
+            report.update(status='succeeded', model=model, input_tokens=usage.get('input_tokens'), output_tokens=usage.get('output_tokens'),
+                          cache_read_tokens=usage.get('cache_read_tokens'), cache_write_tokens=usage.get('cache_write_tokens'))
             return text, usage, model
         finally:
             report['duration_ms'] = int((time.monotonic() - started) * 1000)

@@ -134,6 +134,8 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'django.contrib.humanize',
+    # Django 6.0 requires it for ArrayField (postgres.E005); it adds the Postgres field types and lookups only, no tables
+    'django.contrib.postgres',
     'rest_framework',
     'dashboard.apps.DashboardConfig',
     'targetApp.apps.TargetappConfig',
