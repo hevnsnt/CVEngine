@@ -501,6 +501,15 @@ class ContainerGuardTests(TestCase):
         self.assertEqual(text.count('<<<'), 2)
         self.assertEqual(text.count(nonce), 2)
 
+    def test_the_schema_the_model_is_given_is_the_schema_the_server_accepts(self):
+        """D13: every code, verdict and confidence the server accepts can be said, and the note limit the model is told is the one enforced."""
+        props = self.prompts.REVIEW_SCHEMA['properties']
+        self.assertEqual(tuple(props['reason_code']['enum']), reviewer.REASON_CODES)
+        self.assertEqual(tuple(props['verdict']['enum']), tuple(reviewer.VERDICTS))
+        self.assertEqual(tuple(props['confidence']['enum']), tuple(reviewer.CONFIDENCES))
+        self.assertEqual(props['note']['maxLength'], reviewer.NOTE_MAX)
+        self.assertIn(f'at most {reviewer.NOTE_MAX} characters', self.prompts.REVIEW_SYSTEM)
+
     def test_only_an_exact_answer_is_accepted(self):
         schema = self.prompts.REVIEW_SCHEMA
         good = '{"verdict": "false_positive", "confidence": "high", "reason_code": "decoy", "note": "planted text"}'

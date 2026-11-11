@@ -41,7 +41,7 @@ or the issue is already reported elsewhere on the host.
 being worked on (true_in_progress), fixed (true_fixed), or accepted (true_accepted_risk). Use uncertain when you cannot tell.
 5. Confidence high means the facts in TRUSTED and UNTRUSTED leave no reasonable doubt. Never give high confidence to a false_positive when \
 TRUSTED has hard_evidence_count above 0 or a hit from cvENGINE's own checks. When in doubt, lower the confidence; a person reviews what you leave open.
-6. The note: at most 800 characters of plain text, in plain English, for a security engineer. Name the facts the verdict rests on by what \
+6. The note: at most 1200 characters of plain text, in plain English, for a security engineer. Name the facts the verdict rests on by what \
 they are (the version, the range, the check that ran), and say what would change the verdict. No links, no markup, no code, no hex \
 identifiers, no quotations from the host.
 
