@@ -1109,16 +1109,18 @@ def _finding_to_nuclei_line(finding):
                      'tags': finding.get('tags') or []}}
 
 
-def _nuclei_target(kind, targets, kwargs, scan=None):
+def _nuclei_target(kind, targets, kwargs, scan=None, labels=None):
     """The target of a dispatched template task: the targets, the tags and severities the pass runs with, and the template policy it applies. The
     light pass is the technology fingerprint (tags ``tech``, severity ``info``), so the Sentinel is told that here, or it would run the whole
     template library at every severity and the stage would time out. ``etags`` are the tags every run leaves out (``cvengine_scanner.flags.NUCLEI_EXCLUDED_TAGS``, ``dos``) and
     ``template_policy`` names the template policy in force (the read-only set, or everything when an administrator allowed it), so the client runs
     nothing this server would not; its ``bundle_sha256`` is the sha256 of the approved template archive the client fetches from
     ``GET /api/v1/sentinel/template-policy/bundle`` (``None`` until that archive exists: it is packed here when the approved snapshot is already
-    cached, else on the first policy request). ``budget`` is the most one non-web host:port may receive from the task (``cvengine_scanner.flags.NUCLEI_SERVICE_BUDGET``)
-    and ``services`` (given ``scan``) labels each ``host:port`` of the targets with what speaks there (``cveFeed.nuclei_services``: ``web``, ``unknown`` or a
-    protocol class), so a Sentinel sends a port only the templates of its protocol: a bare host, an address or a URL has no label and is web."""
+    cached, else on the first policy request). ``budget`` is what one host:port may receive from the task (``cvengine_scanner.flags.NUCLEI_SERVICE_BUDGET``: the pause between
+    template runs on a non-web port, the seconds one is kept busy, and the per-host request rate of a web host) and ``services`` labels each ``host:port`` of
+    the targets with what speaks there (``cveFeed.nuclei_services``: ``web``, ``unknown`` or a protocol class), so a Sentinel sends a port only the templates
+    of its protocol: a bare host, an address or a URL has no label and is web. ``labels`` are the labels of the whole stream, read once
+    (``nuclei_services.labels_for``); without them (and given ``scan``) they are read here for ``targets``."""
     from cvengine_scanner import flags as scan_flags
 
     from agentapi import template_bundle
@@ -1133,7 +1135,9 @@ def _nuclei_target(kind, targets, kwargs, scan=None):
     target = {'targets': targets, 'tags': tags, 'severities': severities, 'etags': etags,
               'template_policy': {'rev': rev, 'read_only': rev == nuclei_scan.TEMPLATE_POLICY_REV, 'bundle_sha256': template_bundle.sha256_if_ready()},
               'budget': dict(scan_flags.NUCLEI_SERVICE_BUDGET)}
-    services = nuclei_services.labels_for(scan, targets) if scan is not None else {}
+    if labels is None:
+        labels = nuclei_services.labels_for(scan, targets) if scan is not None else {}
+    services = {t: labels[t] for t in targets if t in labels}
     if services:
         target['services'] = services
     return target
@@ -1151,7 +1155,15 @@ def _unreachable_of(result, chunk):
     """The targets of ``chunk`` that the Sentinel says it did not reach (``result['unreachable']``: bare hosts it could not resolve or connect to). A
     Sentinel that does not send the field reports none, which is what it did before it existed."""
     down = {str(h).strip().lower() for h in (result.get('unreachable') or []) if isinstance(h, str)}
-    return {t for t in chunk if _bare_host(t).lower() in down} if down else set()
+    # a service port is named as the Sentinel was asked for it (``name:22``): that target alone is unreachable, not the host's other ports; a bare
+    # host name or address names the target itself
+    return {t for t in chunk if t.strip().lower() in down or (':' not in t.strip().strip('[]') and _bare_host(t).lower() in down)} if down else set()
+
+
+def _not_checked_of(result):
+    """``[{'target', 'reason'}]`` a Sentinel says it did not fully check (``result['not_checked']``), as cleaned by the broker; none from a Sentinel that
+    sends no such field."""
+    return [row for row in (result.get('not_checked') or []) if isinstance(row, dict) and row.get('target')]
 
 
 def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
@@ -1159,6 +1171,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
     ``stream`` parameter: it hands the targets to a Sentinel in chunk tasks and yields the findings they report. The kind never runs on this
     server (``NEVER_LOCAL``): with no live scanner able to take it, ``ScannerUnavailable`` is raised here, and from the stream when a chunk could
     not be done, so the stage waits and the targets stay due. A chunk none of whose names resolves is not sent and not reported (nothing to run)."""
+    from cveFeed import nuclei_services
     project = scan.domain.project
     if internal:  # the target is inside a private network: only a Sentinel there can run it
         def internal_stream(targets_file, **kwargs):
@@ -1168,16 +1181,20 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
             except OSError:
                 targets = []
             internal_stream.unreached = set()
-            chunks = _chunks(targets)  # every target is sent: a stage that marks its whole list scanned must not have dropped the tail
-            with contextlib.closing(dispatch_many(project, kind, chunks, prepare=lambda chunk: (_nuclei_target(kind, chunk, kwargs, scan), []), scan=scan,
+            internal_stream.not_checked = []
+            labels = nuclei_services.labels_for(scan, targets)  # once for the whole stream, not once per chunk
+            chunks = nuclei_services.chunks(targets, labels, MAX_ADDRESSES)  # every target is sent: a stage that marks its whole list scanned must not have dropped the tail
+            with contextlib.closing(dispatch_many(project, kind, chunks, prepare=lambda chunk: (_nuclei_target(kind, chunk, kwargs, scan, labels), []), scan=scan,
                                                   internal=True, timeout=timeout, labeler=_targets_label)) as results:
                 for _index, result in results:
                     if result is None:
                         raise RuntimeError('no Sentinel inside the network answered (one must declare network:internal and cover this project)')
                     internal_stream.unreached.update(_unreachable_of(result, chunks[_index]))
+                    internal_stream.not_checked += _not_checked_of(result)
                     for finding in result.get('findings', []):
                         yield _finding_to_nuclei_line(finding)
         internal_stream.unreached = set()
+        internal_stream.not_checked = []
         internal_stream.chunks_itself = True  # the caller hands over the whole list: this splits it and runs the chunks side by side
         return internal_stream
     if not any_scanner_for(project, kind):
@@ -1185,6 +1202,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
 
     def stream(targets_file, **kwargs):
         stream.unreached = set()  # what this call could not reach (read by ``cveFeed.nuclei_scan.record_reached``): not scanned, whatever the call returns
+        stream.not_checked = []  # the ports a Sentinel named as not fully checked, with the reason (``record_reached`` writes them to the activity feed)
         try:
             with open(targets_file, encoding='utf-8') as handle:
                 targets = [line.strip() for line in handle if line.strip()]
@@ -1192,7 +1210,10 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
             targets = []
         if not targets:  # nothing readable to send
             return
-        chunks = _chunks(targets)  # one task per chunk of MAX_ADDRESSES, several at once: the caller marks the whole list scanned, so none may be dropped
+        labels = nuclei_services.labels_for(scan, targets)  # what speaks on each host:port, read once for the whole stream
+        # one task per chunk of MAX_ADDRESSES targets and at most MAX_SERVICE_PORTS ports that are not web, several at once: the caller marks the whole list
+        # scanned, so none may be dropped
+        chunks = nuclei_services.chunks(targets, labels, MAX_ADDRESSES)
 
         unresolved = set()  # the chunks (as tuples) nothing of which resolves: never offered to a Sentinel
 
@@ -1202,7 +1223,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
             if not live:
                 unresolved.add(tuple(chunk))
                 return None  # nothing in the chunk resolves: a Sentinel would be asked to do nothing, and nothing can run here
-            return _nuclei_target(kind, live, kwargs, scan), []
+            return _nuclei_target(kind, live, kwargs, scan, labels), []
         with contextlib.closing(dispatch_many(project, kind, chunks, prepare=prepare, scan=scan, timeout=timeout, labeler=_targets_label)) as results:
             for index, result in results:
                 if result is None:
@@ -1212,9 +1233,11 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                     from reNgine.resources import ScannerUnavailable
                     raise ScannerUnavailable(kind, 'no scanner returned a result for a chunk')
                 stream.unreached.update(_unreachable_of(result, chunks[index]))
+                stream.not_checked += _not_checked_of(result)
                 for finding in result.get('findings', []):
                     yield _finding_to_nuclei_line(finding)
     stream.unreached = set()
+    stream.not_checked = []
     stream.chunks_itself = True  # the caller hands over the whole list: this splits it and runs the chunks side by side
     stream.signed_in = signed_in_stream(scan, kind, timeout)
     return stream

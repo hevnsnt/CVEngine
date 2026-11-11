@@ -287,7 +287,22 @@ def record_reached(service, chunk, project, scan, stream):
     ledger.record(service, [t for t in chunk if t not in unreached], project, scan)
     if unreached:
         ledger.record(service, sorted(unreached), project, scan, 'failed')
+    _report_not_checked(stream, chunk, project, scan)
     return unreached
+
+
+def _report_not_checked(stream, chunk, project, scan):
+    """Say in the activity feed which ports of ``chunk`` the scanner did not fully check and why (``stream.not_checked``, from the Sentinel's result): a port\
+    nuclei skipped is never skipped in silence. Each is written once."""
+    from cveFeed import activity
+    rows = [row for row in getattr(stream, 'not_checked', ()) if row.get('target') in chunk]
+    if not rows:
+        return
+    shown = '; '.join(f"{row['target']} ({row.get('reason') or 'not fully checked'})" for row in rows[:5])
+    more = f' and {len(rows) - 5} more' if len(rows) > 5 else ''
+    activity.log('run_check', f'Nuclei did not fully check {len(rows)} port(s): {shown}{more}. They are scanned again later.', project=project,\
+                 scan_id=getattr(scan, 'id', None), status='done')
+    stream.not_checked = [row for row in stream.not_checked if row not in rows]
 
 
 def _chunk_size(stream, total):
