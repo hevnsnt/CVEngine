@@ -65,18 +65,19 @@ def _inventory_token(project):
 def _idle_known(kind, project):
     try:
         remembered = cache.get(_idle_key(kind, project))
-        return remembered is not None and remembered == _inventory_token(project)
+        return remembered is not None and remembered == _inventory_token(project)  # nothing remembered: no statement at all
     except Exception:  # noqa: BLE001 - without the cache every call reads the database, as before
         return False
 
 
-def _idle_remember(kind, project, took, token=None):
-    """Keep an empty answer that took ``took`` seconds to give, when that was slow enough to be worth sparing the database the next ask. ``token`` is
-    the inventory as it was before the answer was computed (``_inventory_token``), so a host that arrived during the read is not hidden."""
+def _idle_remember(kind, project, took):
+    """Keep an empty answer that took ``took`` seconds to give, when that was slow enough to be worth sparing the database the next ask, with the
+    inventory token read now. A quick answer (a small install) reads nothing extra, so it stays one statement. A host that arrived while a slow read was
+    running can be hidden for the memo's life (a minute at most); every later host or finished scan changes the token."""
     if took < IDLE_MIN_COST:
         return
     try:
-        cache.set(_idle_key(kind, project), token if token is not None else _inventory_token(project), int(min(IDLE_CEILING, IDLE_FACTOR * took)))
+        cache.set(_idle_key(kind, project), _inventory_token(project), int(min(IDLE_CEILING, IDLE_FACTOR * took)))
     except Exception:  # noqa: BLE001
         pass
 
@@ -105,7 +106,6 @@ def host_coverage_due(project, at, limit=1, need_count=True):
     if not need_count and _idle_known('due', project):  # nothing was due a moment ago, the inventory is as it was, and finding that out was slow: the same answer
         return None, []
     started = _monotonic()
-    token = None if need_count else _inventory_token(project)
     from django.db.models import Exists, OuterRef
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import HostAssessment, HostExclusion, HostState
@@ -145,7 +145,7 @@ def host_coverage_due(project, at, limit=1, need_count=True):
     due_ids = list(rows.order_by('id').values_list('id', flat=True)[:limit]) if limit else []
     count = (rows.order_by().values('name').distinct().count()) if need_count else None
     if not need_count and limit and not due_ids:
-        _idle_remember('due', project, _monotonic() - started, token)
+        _idle_remember('due', project, _monotonic() - started)
     return count, due_ids
 
 
@@ -290,7 +290,6 @@ def stalest_hosts(project, now, limit, gap):
     if _idle_known(memo, project):  # no host was stale a moment ago, the inventory is as it was, and finding that out was slow (it reads the whole inventory): the same answer
         return []
     started = _monotonic()
-    token = _inventory_token(project)
     current = list(Subdomain.objects.filter(latest_scan_q(), target_domain__project=project)
                    .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: never assessed on its own (host_assessment._admit refuses it too)
                    .values_list('id', 'name'))
@@ -323,7 +322,7 @@ def stalest_hosts(project, now, limit, gap):
         if len(out) >= limit:
             break
     if not out:
-        _idle_remember(memo, project, _monotonic() - started, token)
+        _idle_remember(memo, project, _monotonic() - started)
     return out
 
 
