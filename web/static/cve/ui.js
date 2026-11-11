@@ -34,6 +34,39 @@ export function toast(message, isError = false) {
   setTimeout(() => t.remove(), 4000);
 }
 
+// What a part of a page shows while its answer is on the way: a shimmering placeholder (still, when the person asked for less motion) and one
+// plain line saying what is being checked. After SLOW_MS the line says it is taking longer than usual and that the page fills in by itself,
+// so a wait never reads as a stuck page. role=status and aria-live make a screen reader say the line. Replace the node when the answer arrives.
+export const SLOW_MS = 4000;
+export function waiting(what, { slowMs = SLOW_MS, bars = 2, slow = false } = {}) {
+  const box = el('div', 'wait', null, { role: 'status', 'aria-live': 'polite' });
+  const line = el('p', 'note wait-line', `${what}...`);
+  box.append(line);
+  const longer = () => {
+    line.textContent = `${what} is taking longer than usual. This page fills in by itself when it answers.`;
+    box.classList.add('slow');
+  };
+  if (slow) longer(); // a page that redraws on its own passes what it knows, so a redraw does not restart the count
+  for (let i = 0; i < bars; i += 1) box.append(el('span', 'sk-bar wait-bar', null, { 'aria-hidden': 'true' }));
+  if (!slow) {
+    const timer = setTimeout(longer, slowMs);
+    if (timer && timer.unref) timer.unref();
+    box.stop = () => clearTimeout(timer);
+  }
+  return box;
+}
+
+// A part of a page that could not be read says so, in plain words, and offers the same request again.
+export function couldNotRead(what, retry, detail) {
+  const box = el('div', 'load-error', null, { role: 'alert' });
+  box.append(el('b', '', `${what} could not be read`));
+  if (detail) box.append(el('span', 'note', detail));
+  const again = el('button', 'btn ghost sm', 'Retry', { type: 'button' });
+  again.addEventListener('click', retry);
+  box.append(again);
+  return box;
+}
+
 // An empty list that says what it means and what to do next: an icon from the page's sprite, a short title, one line of why, and up
 // to two actions ({label, href} or {label, run}; the first is the primary button). tone "calm" is the good kind of empty, nothing to fix.
 export function emptyState({ icon, title, body, actions = [], tone = '' }) {

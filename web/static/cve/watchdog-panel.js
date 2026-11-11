@@ -1,7 +1,7 @@
 // The watchdog panel (Administration, Watchdog tab; App Admin only): the answer to "is something watching this for me, and what did it do?"
 //   /cve/api/admin/watchdog    each rule in words, what it changed and its last 20 actions (docs/WATCHDOG.md)
 // It polls every 30 s while its tab is open and draws through renderKeepingState, so nothing you opened closes. Text is set with textContent only.
-import { api, el, button, table } from "/staticfiles/cve/ui.js";
+import { api, el, button, couldNotRead, table, waiting } from "/staticfiles/cve/ui.js";
 import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
 import { fmtDateTime, zoneLabel } from "/staticfiles/cve/prefs.js";
 import { localTimes } from "/staticfiles/cve/watchdog-text.js";
@@ -65,14 +65,16 @@ async function loadWatchdog(wdRoot) {
   try {
     paintWatchdog(wdRoot, await api("GET", "/cve/api/admin/watchdog"));
   } catch (err) {
-    renderKeepingState(wdRoot, () => [el("h2", "", "Watchdog", { "data-keep-key": "wd-title" }), el("p", "msg err", err.message, { "data-keep-key": "wd-err" })]);
+    const again = couldNotRead("The watchdog", () => { loadWatchdog(wdRoot); }, err.message);
+    again.setAttribute("data-keep-key", "wd-err");
+    renderKeepingState(wdRoot, () => [el("h2", "", "Watchdog", { "data-keep-key": "wd-title" }), again]);
   }
 }
 
 // Mounted by the Administration tabs: draws now, then every 30 s for as long as this panel is on the page.
 export async function watchdogPanel(mount) {
   const root = el("section", "card watchdog", null, { id: "watchdog", "aria-live": "polite" });
-  root.append(el("h2", "", "Watchdog"), el("p", "note", "Checking the watchdog\u2026"));
+  root.append(el("h2", "", "Watchdog"), waiting("Checking the watchdog"));
   mount.append(root);
   const tick = async () => {
     if (!root.isConnected) return;  // another tab was opened: stop polling

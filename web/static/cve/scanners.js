@@ -3,7 +3,7 @@
 //   /cve/api/scanner           the page strip's sentence when work waits with no scanner to take it
 //   /cve/api/admin/health      workers, scheduler heartbeat, scanning pause and scan counts (App Admin only; a short live inspection)
 // Nothing is hidden by this page: the server decides what each person may read. Text is set with textContent only.
-import { api, el } from "/staticfiles/cve/ui.js";
+import { api, el, waiting, couldNotRead, SLOW_MS } from "/staticfiles/cve/ui.js";
 import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
 
 const root = document.getElementById("health");
@@ -58,8 +58,10 @@ function adminCells(h) {
 
 function paint(cells) {
   const problems = cells.map((c) => c.problem).filter(Boolean);
+  const settled = cells.every((c) => c.settled);
   const head = el("p", "health-line");
-  head.append(el("span", `badge ${problems.length ? "high" : "success"}`, problems.length ? "Needs attention" : "All working"));
+  // the verdict waits until every cell has answered: "All working" over a placeholder would be a guess
+  if (settled || problems.length) head.append(el("span", `badge ${problems.length ? "high" : "success"}`, problems.length ? "Needs attention" : "All working"));
   if (problems.length) head.append(el("span", "note", problems.join(" ")));
   const grid = el("div", "health-grid");
   cells.forEach((c) => grid.append(c.node));
@@ -69,27 +71,88 @@ function paint(cells) {
   renderKeepingState(root, () => [head, grid]);
 }
 
-// The Sentinel answers come back at once and are drawn at once; the worker inspection waits up to five seconds for the workers to reply,
-// so it fills in its own cell when it arrives instead of holding the page.
-async function load() {
-  const adminRead = isAdmin ? api("GET", "/cve/api/admin/health").catch((e) => ({ error: e.message })) : null;
-  const [live, strip] = await Promise.all([
-    api("GET", "/api/v1/sentinels/live").catch(() => null),
-    fetch("/cve/api/scanner", { credentials: "same-origin", cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null),
-  ]);
-  if (!root.isConnected) return;
-  const base = [sentinelCell(live), waitingCell(live, strip)];
-  if (!isAdmin) {
-    paint(base);
-    return;
-  }
-  paint([...base, { node: cell("Workers and scheduler", "Checking…", "Asking the workers; this can take a few seconds."), problem: "" }]);
-  const health = await adminRead;
-  if (!root.isConnected) return;
-  if (health && !health.error) paint([...base, ...adminCells(health)]);
-  else paint([...base, { node: cell("Workers and scheduler", "Not read", (health && health.error) || "The health check did not answer.", true), problem: "Workers and scheduler could not be read." }]);
+// Each cell has its own request and its own state: "wait" (a placeholder that says what is being checked), "ok" or "error" (could not be read,
+// with Retry). A cell fills in when its request answers, so a slow worker check never holds the Sentinels back. After SLOW_MS still waiting,
+// the placeholder says it is taking longer than usual; the count lives here so a redraw does not start it over.
+const slots = {
+  live: { state: "wait", slow: false, timer: null, data: null, error: "" },
+  strip: { data: null },
+  health: { state: isAdmin ? "wait" : "off", slow: false, timer: null, data: null, error: "" },
+};
+const READ = {
+  live: () => api("GET", "/api/v1/sentinels/live"),
+  health: () => api("GET", "/cve/api/admin/health"),
+};
+
+function placeholder(title, what, slot) {
+  const c = el("div", "card health-cell");
+  c.append(el("span", "eyebrow", title), waiting(what, { slow: slot.slow }));
+  return { node: c, problem: "", settled: false };
 }
 
+function unreadable(title, what, slot) {
+  const c = el("div", "card health-cell warn");
+  c.append(el("span", "eyebrow", title), couldNotRead(what, () => refresh(slot === slots.live ? "live" : "health"), slot.error));
+  return { node: c, problem: `${what} could not be read.`, settled: true };
+}
+
+function draw() {
+  if (!root.isConnected) return;
+  const { live, strip, health } = slots;
+  const cells = [];
+  if (live.state === "wait") {
+    cells.push(placeholder("Sentinels", "Checking the Sentinels", live), placeholder("Work waiting for a Sentinel", "Checking what is waiting", live));
+  } else if (live.state === "error") {
+    cells.push(unreadable("Sentinels", "The Sentinel list", live), unreadable("Work waiting for a Sentinel", "The count of waiting work", live));
+  } else {
+    cells.push({ ...sentinelCell(live.data), settled: true }, { ...waitingCell(live.data, strip.data), settled: true });
+  }
+  if (health.state === "wait") cells.push(placeholder("Workers and scheduler", "Checking the workers and the scheduler", health));
+  else if (health.state === "error") cells.push(unreadable("Workers and scheduler", "The worker check", health));
+  else if (health.state === "ok") cells.push(...adminCells(health.data).map((c) => ({ ...c, settled: true })));
+  paint(cells);
+}
+
+function arm(slot) {
+  clearTimeout(slot.timer);
+  slot.slow = false;
+  slot.timer = setTimeout(() => {
+    if (slot.state !== "wait") return;
+    slot.slow = true;
+    draw();
+  }, SLOW_MS);
+}
+
+async function refresh(name, quiet = false) {
+  const slot = slots[name];
+  if (!quiet || slot.state === "wait") {
+    slot.state = "wait";
+    arm(slot);
+    draw();
+  }
+  try {
+    slot.data = await READ[name]();
+    slot.state = "ok";
+  } catch (err) {
+    slot.state = "error";
+    slot.error = err.message || "";
+  }
+  clearTimeout(slot.timer);
+  draw();
+}
+
+// The strip's sentence is extra: when it does not answer, the work cell simply has no extra sentence.
+async function readStrip() {
+  slots.strip.data = await fetch("/cve/api/scanner", { credentials: "same-origin", cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  draw();
+}
+
+// The frame is drawn at once; the requests start together and none waits for another.
+async function load() {
+  const reads = [refresh("live", true), readStrip()];
+  if (isAdmin) reads.push(refresh("health", true));
+  await Promise.all(reads);
+}
 
 let timer = null;
 async function loop() {
