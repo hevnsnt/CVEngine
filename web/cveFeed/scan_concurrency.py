@@ -152,12 +152,6 @@ def effective(key, stored=None, auto=None):
     return resolve(key, stored, auto)['value']
 
 
-def admin_value(key):
-    """The value saved on the page for a key, or None."""
-    got = resolve(key)
-    return got['value'] if got['source'] == 'admin' else None
-
-
 # --- the published copy -----------------------------------------------------------------------------------------------
 
 def _redis():

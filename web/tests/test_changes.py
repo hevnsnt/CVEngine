@@ -7,7 +7,7 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from agentapi.auth import create_token
-from cveFeed import activity, changes, discovery
+from cveFeed import changes, discovery
 from cveFeed.models import AgentActivity, AssetChange, HostState
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType

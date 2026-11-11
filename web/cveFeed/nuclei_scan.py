@@ -620,7 +620,7 @@ def run_cve_checks(scan, subs, ai=False, cve_runner=None, force=False):
     if cve_runner is None:
         from cveFeed.templategen import run_cve_tests as cve_runner
     project = scan.domain.project_id
-    wanted, tier_of = {}, {}  # cve -> hosts; cve -> heat rank
+    wanted = {}  # cve -> hosts
     per_host = {}
     for m in CVEMatch.objects.filter(subdomain__in=subs).exclude(ai_verdict='not_affected').exclude(distro_status='patched') \
             .select_related('cve_entry', 'subdomain'):

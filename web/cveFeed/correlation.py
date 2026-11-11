@@ -282,11 +282,6 @@ PRODUCT_ALIASES = {
 }
 
 
-def tech_tokens(token):
-    """The tech token plus the product tokens it is an alias of."""
-    return {token} | PRODUCT_ALIASES.get(token, set())
-
-
 def parse_cpe(cpe):
     """'cpe:/a:apache:http_server:2.4.52' (2.2) or 'cpe:2.3:a:apache:http_server:2.4.52:...' -> (vendor, product,
     version) with vendor/product normalized like the index tokens; None for an OS/hardware CPE or an unparseable one."""

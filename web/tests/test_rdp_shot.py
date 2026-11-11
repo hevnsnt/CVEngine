@@ -258,7 +258,6 @@ class PipelineWiringTests(RouteFixture, TestCase):
 									 light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), **kw)
 
 	def test_the_pipeline_runs_the_stage_only_when_a_candidate_exists(self):
-		from cveFeed import discovery
 		scan = self.scan(names=('win.rt.test',), ports=())
 		sub = Subdomain.objects.get(scan_history=scan)
 		ip = sub.ip_addresses.get()

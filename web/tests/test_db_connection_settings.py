@@ -2,7 +2,6 @@
 seconds); the Celery workers do not (a gevent greenlet per task would each keep one)."""
 import re
 from pathlib import Path
-from unittest import mock
 
 from django.conf import settings
 from django.test import SimpleTestCase

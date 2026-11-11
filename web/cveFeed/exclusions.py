@@ -280,6 +280,3 @@ def drop_excluded(project_id, names, names_only=False):
     return [n for n in names if normalize(n) not in banned]
 
 
-def org_id_of(project_id):
-    from dashboard.models import Project
-    return Project._base_manager.filter(pk=project_id).values_list('org_id', flat=True).first()
