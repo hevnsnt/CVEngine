@@ -60,7 +60,7 @@ def _prebuild_graph(recipe, entry, previous):
     if previous is not None and previous['payload'] == entry['payload']:
         return
     args = recipe['args']
-    views.cached_graph(recipe['scope'], entry['payload'], args.get('domain_id'), args.get('scan_id'))  # one builder per version, here or in a request
+    views.cached_graph(recipe['scope'], entry['payload'], args.get('domain_id'), args.get('scan_id'), wait=False)  # one builder per version, here or in a request; the refresher never waits on a request's build
 
 
 def budget_seconds(interval=None):

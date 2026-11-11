@@ -954,18 +954,27 @@ def graph_cache_key(scope, version):
 
 
 GRAPH_LOCK_SECONDS = 45  # a builder that dies leaves its lock this long at most
-GRAPH_WAIT_SECONDS = 10.0  # a viewer that finds the graph being built waits this long for it before building it itself
+GRAPH_WAIT_SECONDS = 10.0  # a viewer that finds the graph being built waits this long for it, then is served the last good graph (marked stale) if there is one
 GRAPH_WAIT_STEP = 0.05
+GRAPH_LAST_SECONDS = 3600  # the last good graph of a scope is kept this long as the answer for a viewer who cannot wait for a build
 
 
-def cached_graph(scope, version, domain_id=None, scan_id=None):
+def cached_graph(scope, version, domain_id=None, scan_id=None, wait=True):
     """The graph payload of ``version`` for ``scope``: from the cache, else built by ONE caller. The key carries the version, which moves on every write
     during a scan, so every open graph of a scope finds its key empty at the same moment; each used to build the payload (1.2 s and 19 queries at 20,000
-    hosts). The first takes a short lock (``cache.add``) and builds; the others wait for its answer, and one that waits too long (the builder died) builds it
-    itself. A cache that does not answer gives the graph, built here, as before."""
+    hosts). The first takes a short lock (``cache.add``) and builds; the others wait for its answer while the lock is held. A build that takes longer than
+    ``GRAPH_WAIT_SECONDS`` (the host collapse alone takes up to 10 s on a large install) does not turn the waiters into builders: they are served the
+    last good graph of the scope with ``stale: true`` (its own ``version`` is the older one, so the page asks again on its next poll), and a viewer with
+    no earlier graph keeps waiting. A lock nobody holds any more (the builder died; it expires after ``GRAPH_LOCK_SECONDS``) is taken over.
+
+    ``wait=False`` is the refresher's: it never waits on the lock. When a request is building the graph it returns None (that request stores the payload).
+    A cache that does not answer gives the graph, built here, as before."""
+    import uuid
+
     from django.core.cache import cache
     key = graph_cache_key(scope, version)
-    lock = f'{key}:lock'
+    lock, last_key = f'{key}:lock', f'cve-graph-last:{scope}'
+    token = uuid.uuid4().hex
 
     def stored():
         try:
@@ -973,36 +982,58 @@ def cached_graph(scope, version, domain_id=None, scan_id=None):
         except Exception:  # noqa: BLE001 - the graph is computed when the cache is down
             return None
 
+    def last_good():
+        try:
+            return cache.get(last_key)
+        except Exception:  # noqa: BLE001
+            return None
+
     def build():
         payload = {**graph_payload(domain_id, scan_id), 'version': version}
         try:
             cache.set(key, payload, GRAPH_CACHE_SECONDS)
+            cache.set(last_key, payload, GRAPH_LAST_SECONDS)
         except Exception:  # noqa: BLE001
             pass
         return payload
+
+    def build_holding_lock():
+        try:
+            payload = stored()  # another caller may have stored it between the read above and winning the lock
+            return payload if payload is not None else build()
+        finally:
+            try:
+                if cache.get(lock) == token:  # not a later builder's lock, when this build outlived its own
+                    cache.delete(lock)
+            except Exception:  # noqa: BLE001
+                pass
     payload = stored()
     if payload is not None:
         return payload
     try:
-        won = cache.add(lock, 1, GRAPH_LOCK_SECONDS)
+        won = cache.add(lock, token, GRAPH_LOCK_SECONDS)
     except Exception:  # noqa: BLE001
         return build()
-    if not won:
-        deadline = time.monotonic() + GRAPH_WAIT_SECONDS
-        while time.monotonic() < deadline:
-            time.sleep(GRAPH_WAIT_STEP)
-            payload = stored()
-            if payload is not None:
-                return payload
-        return build()
-    try:
-        payload = stored()  # another caller may have stored it between the read above and winning the lock
-        return payload if payload is not None else build()
-    finally:
+    if won:
+        return build_holding_lock()
+    if not wait:
+        return None
+    deadline, gave_up = time.monotonic() + GRAPH_WAIT_SECONDS, False
+    while True:
+        time.sleep(GRAPH_WAIT_STEP)
+        payload = stored()
+        if payload is not None:
+            return payload
         try:
-            cache.delete(lock)
+            if cache.add(lock, token, GRAPH_LOCK_SECONDS):  # the builder let go without storing (it failed) or died: this caller builds
+                return build_holding_lock()
         except Exception:  # noqa: BLE001
-            pass
+            return build()
+        if not gave_up and time.monotonic() >= deadline:
+            gave_up = True
+            earlier = last_good()
+            if earlier is not None:
+                return {**earlier, 'stale': True}
 
 
 @require_GET
