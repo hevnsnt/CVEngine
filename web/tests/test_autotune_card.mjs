@@ -125,7 +125,8 @@ test('the kill switch disables the controls and says why', async () => {
   reply = {status: status({killed: true, effective_mode: 'off'}), concurrency: concurrency()};
   const host = new Node('div');
   await maxxing.cards()[0].build(host);
-  assert.match(host.textContent, /CVENGINE_AUTOTUNE=0 is set in the environment/);
+  assert.match(host.textContent, /Auto-tuning is switched off for this whole server by its administrator/);
+  assert.match(host.textContent, /Details\s*For the server's administrator: CVENGINE_AUTOTUNE=0 is set in the environment/);
   assert.equal(find(host, (n) => n.tag === 'select')[0].disabled, true);
   assert.equal(buttonNamed(host, 'Save')[0].disabled, true);
   reply = {status: status(), concurrency: concurrency()};
@@ -199,6 +200,6 @@ test('typing the number auto-tuning chose and saving pins it; an untouched box i
 
 test('an environment pin says where it comes from and offers no hand-back', () => {
   const line = logic.autoTuneLine({value: 1, autotune: {managed: true, pinned: true, pinned_by: null, pinned_env: 'HEAVY_MAX_NMAP=1'}}, 'auto');
-  assert.equal(line.text, 'Pinned by the environment (HEAVY_MAX_NMAP=1): remove it from .env, or save a value here');
+  assert.equal(line.text, "Fixed by the server's own settings: save a value here to take it over");
   assert.equal(line.release, false);
 });

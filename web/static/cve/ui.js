@@ -50,6 +50,15 @@ export function toast(message, isError = false) {
   errorStack.appendChild(t);
 }
 
+// The technical detail behind a plain sentence (a variable name, a file, a command): closed by default, one word to open. For the few people who
+// need it; everyone else reads the sentence above it. The body is text, never HTML.
+export function details(...lines) {
+  const box = el('details', 'tech');
+  box.append(el('summary', '', 'Details'));
+  lines.filter(Boolean).forEach((line) => box.append(el('p', 'note', line)));
+  return box;
+}
+
 // What a part of a page shows while its answer is on the way: a shimmering placeholder (still, when the person asked for less motion) and one
 // plain line saying what is being checked. After SLOW_MS the line says it is taking longer than usual and that the page fills in by itself,
 // so a wait never reads as a stuck page. role=status and aria-live make a screen reader say the line. Replace the node when the answer arrives.

@@ -1458,6 +1458,7 @@ a.bb-tile{text-decoration:none;color:inherit;display:block}a.bb-tile:focus-visib
 .load-error b{font-size:var(--fs-3)}
 .load-error.inline{margin-top:var(--s-3)}
 .wait{display:flex;flex-direction:column;gap:var(--s-2);min-width:0}.wait-line{margin:0}.wait-bar{width:60%}.wait-bar+.wait-bar{width:38%}.wait.slow .wait-line{color:var(--ink)}
+.tech{margin-top:var(--s-1)}.tech>summary{cursor:pointer;color:var(--muted);font-size:var(--fs-2);width:max-content}.tech>.note{margin:var(--s-1) 0 0;overflow-wrap:anywhere}
 @media (prefers-reduced-motion:reduce){.sk-bar,.skeleton{animation:none}}
 
 /* copy buttons: small, quiet until hovered or focused, a tick when done */

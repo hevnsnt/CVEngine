@@ -86,3 +86,17 @@ test('Switching the whole watchdog off asks too, and says every rule stops', asy
   assert.match(dlg.textContent, /every rule|all the rules|nothing is watched/i);
   press(button('Cancel', dlg));
 });
+
+test('a watchdog switched off by the server says so in plain words; the variable name is behind Details', async () => {
+  const off = {...state(true), env_off: true, enabled: true};
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ok: true, status: 200, headers: {get: () => null}, json: async () => off});
+  const box = new Page('div');
+  document.body.append(box);
+  await watchdogPanel(box);
+  const badges = box.querySelectorAll('span').filter((s) => /(^| )badge( |$)/.test(s.className)).map((s) => s.textContent);
+  assert.ok(badges.some((t) => /Switched off by the server's administrator/.test(t)), badges.join('|'));
+  assert.ok(!badges.some((t) => /CVENGINE_/.test(t)), 'no variable name in the badge');
+  assert.match(box.textContent, /Details/);
+  globalThis.fetch = realFetch;
+});

@@ -1,7 +1,7 @@
 // The watchdog panel (Administration, Watchdog tab; App Admin only): the answer to "is something watching this for me, and what did it do?"
 //   /cve/api/admin/watchdog    each rule in words, what it changed and its last 20 actions (docs/WATCHDOG.md)
 // It polls every 30 s while its tab is open and draws through renderKeepingState, so nothing you opened closes. Text is set with textContent only.
-import { api, ask, el, button, couldNotRead, table, waiting } from "/staticfiles/cve/ui.js";
+import { api, ask, el, button, couldNotRead, details, table, waiting } from "/staticfiles/cve/ui.js";
 import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
 import { fmtDateTime, zoneLabel } from "/staticfiles/cve/prefs.js";
 import { localTimes } from "/staticfiles/cve/watchdog-text.js";
@@ -32,7 +32,7 @@ function paintWatchdog(wdRoot, w, force = false) {
   const head = el("div", "wd-head", null, { "data-keep-key": "wd-head" });
   head.append(el("h2", "", "Watchdog"));
   let state = ["Watching this server", "success"];
-  if (w.env_off) state = ["Switched off (CVENGINE_WATCHDOG=0)", "info"];
+  if (w.env_off) state = ["Switched off by the server's administrator", "info"];
   else if (!w.enabled) state = ["Switched off in Settings", "info"];
   else if (!w.running) state = ["Not running", "critical"];
   head.append(el("span", `badge ${state[1]}`, state[0]));
@@ -46,6 +46,7 @@ function paintWatchdog(wdRoot, w, force = false) {
       paintWatchdog(wdRoot, await api("POST", "/cve/api/admin/watchdog", { enabled: !w.enabled }), true);
     }, "btn ghost sm"));
   }
+  if (w.env_off) head.append(details("For the server's administrator: CVENGINE_WATCHDOG=0 in the server's environment turns the watchdog off. Remove it and restart to switch it on again."));
   const intro = el("p", "note", "It runs outside the workers, so it keeps working when they stop. It restarts what has gone quiet, stands aside while an update runs, checks two minutes later that it worked, and tells you when it could not fix something.");
   const rules = el("ul", "wd-rules", null, { "data-keep-key": "wd-rules" });
   w.rules.forEach((r) => rules.append(wdRule(wdRoot, r)));
