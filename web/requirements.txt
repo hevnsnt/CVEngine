@@ -30,7 +30,7 @@ requests==2.34.2
 tldextract==5.4.0
 validators==0.36.0
 watchdog==6.0.0
-whatportis==0.8.2
+whatportis==0.8  # 0.8.2 pins requests==2.25.1, which cannot be installed beside requests 2.34
 weasyprint==70.0
 pypdf==7.0.1  # reads text back out of the generated report PDFs in the tests; pure Python, BSD-3-Clause
 xmltodict==1.0.4
