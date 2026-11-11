@@ -1,6 +1,5 @@
 """The live ticker's counts (hosts, addresses, open ports) cost a fixed handful of queries however many hosts there are, and count each
 address and port once however many hosts share it (a nested IN-subquery planned three times was 0.7 s at 3000 hosts)."""
-from django.contrib.auth.models import User
 from django.db import connection
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext

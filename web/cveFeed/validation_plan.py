@@ -5,7 +5,6 @@ arbitrary target. Its response can only select those checks or request a draft t
 """
 import hashlib
 import json
-import re
 from datetime import timedelta
 
 from django.db import connection, transaction

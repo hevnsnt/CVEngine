@@ -7,7 +7,7 @@ import requests
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import cve_now, seed, tasks
+from cveFeed import cve_now, tasks
 from cveFeed.models import CVEEntry
 
 

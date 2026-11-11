@@ -1,7 +1,6 @@
 """Which scanners run: the facts, the question the Update button asks, the endpoints, and the hand-over to the host (cveFeed/scanner_plan.py, docs/UPGRADE.md)."""
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile

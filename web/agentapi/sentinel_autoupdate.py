@@ -88,11 +88,6 @@ def _is_builtin(agent):
     return sentinel_broker.is_builtin(agent)
 
 
-def _same_build(version, other):
-    version, other = str(version or '').lower(), str(other or '').lower()
-    return bool(version and other and (other.startswith(version) or version.startswith(other)))
-
-
 def busy_with_heavy(agent):
     return SentinelTask.objects.filter(agent=agent, status__in=BUSY, kind__in=HEAVY_KINDS).exists()
 

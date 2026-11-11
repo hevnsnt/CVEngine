@@ -7,7 +7,6 @@ import json
 import logging
 import re
 from urllib.parse import quote
-from collections import Counter
 
 from django.db.models import F
 from django.db.models import Count
@@ -174,7 +173,7 @@ def graph_payload(domain_id=None, scan_id=None):
     from cveFeed.counts import host_siblings
     siblings = host_siblings(sub_ids)
     sibling_ids = {i for rows in siblings.values() for i, _ in rows}
-    sibling_matches, sibling_findings, sibling_seen = {}, {}, set()
+    sibling_matches, sibling_findings = {}, {}
     if sibling_ids:
         for m in CVEMatch.objects.filter(subdomain_id__in=sibling_ids).exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED).only(
                 'subdomain_id', 'ai_verdict', 'evidence', 'version_in_range', 'template_result', 'distro_status', 'source', 'cve_entry__cve_id', 'cve_entry__kev', 'cve_entry__epss_reached',
@@ -805,7 +804,6 @@ def api_feed(request):
     return JsonResponse({'items': [serialize_cve(e, counts.get(e.pk, 0)) for e in entries]})
 
 
-
 @require_GET
 @project_scoped
 def api_cves(request):
@@ -873,11 +871,6 @@ def cached_stats_snapshot(params=(), scope=None):
     the rows, not who asks."""
     return snapshot_cache.snapshot('stats', scope or snapshot_cache.scope_hash(*params), stats_payload, STATS_CACHE_SECONDS,
                                    hot={'params': params, 'args': {}})
-
-
-def cached_stats(params=()):
-    """``stats_payload`` of the current scope from the shared snapshot (see ``cached_stats_snapshot``)."""
-    return cached_stats_snapshot(params)['payload']
 
 
 @require_GET
@@ -1033,7 +1026,6 @@ def _ip_href(project_slug, address):
 
 def _match_href(project_slug, match_id):
     return f'/cve/{quote(project_slug)}/matches/#{match_id}'
-
 
 
 def _classification_suffix(match):

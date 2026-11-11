@@ -1371,10 +1371,6 @@ def _project_of(project_id):
     return Project.objects.select_related('org').filter(pk=project_id).first() if project_id else None
 
 
-def _netloc(host, port):
-    return f'[{host}]:{port}' if ':' in str(host) else f'{host}:{port}'
-
-
 # waf: one site, at the address the server vetted -------------------------------------------------------------------------------------------
 
 def waf_target(url, ip):

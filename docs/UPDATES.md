@@ -239,7 +239,7 @@ the request is its own machine's business:
 | Sentinel | What acts | How |
 | --- | --- | --- |
 | External, host updater installed (the default of its `setup.sh`) | `scripts/update.sh` on the Sentinel's host | It sees `requested` at its next hourly run, builds, drains and swaps, as for **Update now** |
-| External, `CVENGINE_SENTINEL_UPDATE_EXIT=1` and a supervisor that replaces the image | the Sentinel daemon | It takes no new work, waits for its running tasks, exits with code 76; `scripts/pull-on-exit.sh` (or any puller) brings the newest image and starts it |
+| External, `CVENGINE_SENTINEL_UPDATE_EXIT=1` and a supervisor that replaces the image | the Sentinel daemon | It takes no new work, waits for its running tasks, exits with code 76; the Sentinel repository's `scripts/pull-on-exit.sh` (or any puller) brings the newest image and starts it |
 | The built-in scanner | this server's host | The server writes `web/.scanner-update-requested`; `scripts/update-watch.sh` runs `scripts/scanner-update.sh` (drain, swap, rollback if the new image does not check in) |
 
 **Safety rails** (`agentapi/sentinel_autoupdate.py`, each one a test):

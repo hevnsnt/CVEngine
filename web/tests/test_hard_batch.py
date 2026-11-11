@@ -5,7 +5,7 @@ from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from cveFeed import hit_batch, notify, tasks
+from cveFeed import hit_batch, tasks
 from cveFeed.models import CVEEntry
 from dashboard.models import AIProviderSettings, Org, Project
 from scanEngine.models import Notification

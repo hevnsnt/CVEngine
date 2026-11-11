@@ -1,0 +1,42 @@
+name: Resolver fallback
+description: >-
+  When the runner's own DNS resolver cannot find the Ubuntu package servers, point the runner and its Docker daemon at public resolvers.
+  On 2026-11-11 the name servers of ubuntu.com stopped answering over IPv4 for hours; the runners' resolver returned nothing, so every
+  apt-get and every image build failed whatever the code was. Resolvers that reach those servers over IPv6 kept answering. Nothing is
+  changed when the runner's resolver works.
+inputs:
+  docker:
+    description: >-
+      Also point the Docker daemon at the public resolvers (it must be restarted for that). Set to "false" in a job that has service
+      containers: a daemon restart stops them, and they do not come back (the job's database would be gone).
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        WITH_DOCKER: ${{ inputs.docker }}
+      run: |
+        set -u
+        names="archive.ubuntu.com security.ubuntu.com ports.ubuntu.com"
+        finds() { for n in $names; do timeout 10 getent ahosts "$n" >/dev/null 2>&1 || return 1; done; }
+        if finds; then echo "The runner's resolver finds the Ubuntu package servers; nothing changed."; exit 0; fi
+        echo "::warning::The runner's resolver cannot find the Ubuntu package servers; using public resolvers for this job."
+        sudo mkdir -p /etc/systemd/resolved.conf.d
+        printf '[Resolve]\nDNS=1.1.1.1 9.9.9.9 1.0.0.1\nDomains=~.\n' | sudo tee /etc/systemd/resolved.conf.d/10-public-fallback.conf >/dev/null
+        sudo systemctl restart systemd-resolved
+        # containers and image builds take their resolvers from the Docker daemon, not from the runner's stub resolver
+        if [ "$WITH_DOCKER" = "true" ] && command -v docker >/dev/null 2>&1; then
+          cfg=/etc/docker/daemon.json
+          [ -s "$cfg" ] || echo '{}' | sudo tee "$cfg" >/dev/null
+          sudo jq '. + {"dns": ["1.1.1.1", "9.9.9.9", "1.0.0.1"]}' "$cfg" | sudo tee "$cfg.new" >/dev/null && sudo mv "$cfg.new" "$cfg"
+          sudo systemctl restart docker
+          for _ in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+        fi
+        # the resolver was restarted a moment ago, and during the outage even a public resolver misses now and then: ask for up to a minute
+        for _ in $(seq 1 12); do
+          if finds; then echo "Public resolvers find the Ubuntu package servers."; exit 0; fi
+          sleep 5
+        done
+        echo "::error::The Ubuntu package servers cannot be found through public resolvers either."
+        exit 1
