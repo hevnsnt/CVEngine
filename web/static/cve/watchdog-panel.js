@@ -1,7 +1,7 @@
 // The watchdog panel (Administration, Watchdog tab; App Admin only): the answer to "is something watching this for me, and what did it do?"
 //   /cve/api/admin/watchdog    each rule in words, what it changed and its last 20 actions (docs/WATCHDOG.md)
 // It polls every 30 s while its tab is open and draws through renderKeepingState, so nothing you opened closes. Text is set with textContent only.
-import { api, el, button, couldNotRead, table, waiting } from "/staticfiles/cve/ui.js";
+import { api, ask, el, button, couldNotRead, table, waiting } from "/staticfiles/cve/ui.js";
 import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
 import { fmtDateTime, zoneLabel } from "/staticfiles/cve/prefs.js";
 import { localTimes } from "/staticfiles/cve/watchdog-text.js";
@@ -16,11 +16,15 @@ function wdRule(wdRoot, rule) {
   const head = el("div", "wd-rule-head");
   head.append(el("span", `badge ${cls}`, word), el("strong", "", `${rule.code} ${rule.title}`));
   const toggle = button(rule.enabled ? "Switch off" : "Switch on", async () => {
+    // switching a safety rule off asks first and says what stops being watched; switching it on needs no question
+    if (rule.enabled && !(await ask(
+      `${rule.does} While it is off, the watchdog stops doing this and tells you nothing about it. You can switch it on again here at any time.`,
+      { title: `Stop watching: ${rule.title}?`, ok: "Switch it off" },
+    ))) return;
     paintWatchdog(wdRoot, await api("POST", "/cve/api/admin/watchdog", { rule: rule.code, enabled: !rule.enabled }), true);
   }, "btn ghost sm");
   head.append(toggle);
-  li.append(head, el("p", "note", localTimes(rule.text)));
-  li.title = rule.does;
+  li.append(head, el("p", "note wd-does", rule.does), el("p", "note", localTimes(rule.text)));
   return li;
 }
 
@@ -35,6 +39,10 @@ function paintWatchdog(wdRoot, w, force = false) {
   head.append(el("span", "note", w.tick_age_seconds == null ? "No pass yet." : `Last pass ${w.tick_age_seconds} s ago.`));
   if (!w.env_off) {
     head.append(button(w.enabled ? "Switch off" : "Switch on", async () => {
+      if (w.enabled && !(await ask(
+        "Every rule stops: nothing restarts what has gone quiet, nothing stands aside for an update and nothing tells you when something could not be fixed. You can switch it on again here at any time.",
+        { title: "Stop watching this server?", ok: "Switch it off" },
+      ))) return;
       paintWatchdog(wdRoot, await api("POST", "/cve/api/admin/watchdog", { enabled: !w.enabled }), true);
     }, "btn ghost sm"));
   }
