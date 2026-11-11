@@ -29,11 +29,42 @@ before picking their next deep-scan target: first-pass coverage everywhere outra
 port sweep or UDP exposure check. It reuses host_coverage_due() rather than a second query.
 """
 import logging
+import time
 from datetime import timedelta
 
+from django.core.cache import cache
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
+
+# An empty answer ("nothing is due") that took ``IDLE_MIN_COST`` seconds or more to give is kept for ``IDLE_FACTOR`` times that, at most ``IDLE_CEILING`` seconds:
+# four callers ask every minute (the Sentinel feed, the watchdog snapshot, the full-port and UDP gates) and each made the database evaluate every host of every
+# project to say so again. A quick answer is not kept, so a small install behaves exactly as before.
+IDLE_MIN_COST = 0.5
+IDLE_FACTOR = 10
+IDLE_CEILING = 300
+_monotonic = time.monotonic
+
+
+def _idle_key(kind, project):
+    return f'cve:topup:idle:{kind}:{getattr(project, "pk", project)}'
+
+
+def _idle_known(kind, project):
+    try:
+        return cache.get(_idle_key(kind, project)) is not None
+    except Exception:  # noqa: BLE001 - without the cache every call reads the database, as before
+        return False
+
+
+def _idle_remember(kind, project, took):
+    """Keep an empty answer that took ``took`` seconds to give, when that was slow enough to be worth sparing the database the next ask."""
+    if took < IDLE_MIN_COST:
+        return
+    try:
+        cache.set(_idle_key(kind, project), 1, int(min(IDLE_CEILING, IDLE_FACTOR * took)))
+    except Exception:  # noqa: BLE001
+        pass
 
 PROJECT_LIMIT = 100          # projects examined per run; today's installations have under ten
 MAX_ENQUEUED_PER_RUN = 20    # mirrors host_assessment's base global cap (it grows with the Sentinels' slots, see host_assessment.caps)
@@ -56,6 +87,9 @@ def host_coverage_due(project, at, limit=1, need_count=True):
     at least one" (the top-up and the full-port/UDP sweep gate) passes ``need_count=False`` to skip the DISTINCT aggregate below: with
     it off, this is a single bounded ``LIMIT`` query.
     """
+    if not need_count and _idle_known('due', project):  # nothing was due a moment ago and finding that out was slow: the same answer, from the cache
+        return None, []
+    started = _monotonic()
     from django.db.models import Exists, OuterRef
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import HostAssessment, HostExclusion, HostState
@@ -94,6 +128,8 @@ def host_coverage_due(project, at, limit=1, need_count=True):
             .filter(covered=False, recent_attempt=False, active_scan=False, excluded_name=False, archived_name=False, no_address=False))
     due_ids = list(rows.order_by('id').values_list('id', flat=True)[:limit]) if limit else []
     count = (rows.order_by().values('name').distinct().count()) if need_count else None
+    if not need_count and limit and not due_ids:
+        _idle_remember('due', project, _monotonic() - started)
     return count, due_ids
 
 
@@ -234,6 +270,9 @@ def stalest_hosts(project, now, limit, gap):
     from startScan.models import Subdomain
     from targetApp.models import Domain
 
+    if _idle_known('stale', project):  # no host was stale a moment ago and finding that out was slow (it reads the whole inventory): the same answer
+        return []
+    started = _monotonic()
     current = list(Subdomain.objects.filter(latest_scan_q(), target_domain__project=project)
                    .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: never assessed on its own (host_assessment._admit refuses it too)
                    .values_list('id', 'name'))
@@ -265,6 +304,8 @@ def stalest_hosts(project, now, limit, gap):
         out.append(row)
         if len(out) >= limit:
             break
+    if not out:
+        _idle_remember('stale', project, _monotonic() - started)
     return out
 
 
