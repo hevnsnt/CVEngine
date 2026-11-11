@@ -158,8 +158,9 @@ def render_chunked(chunks, out_path):
             if n == 0:
                 writer.add_metadata({k: v for k, v in (reader.metadata or {}).items() if isinstance(v, str)})
             for page in reader.pages:
-                page.merge_page(stamps[n])
-                writer.add_page(page).compress_content_streams()  # the merge leaves the page's content unpacked: 8 times the size
+                added = writer.add_page(page)  # pypdf 7 merges only into a page that belongs to a writer (replace_contents)
+                added.merge_page(stamps[n])
+                added.compress_content_streams()  # the merge leaves the page's content unpacked: 8 times the size
                 n += 1
         writer.compress_identical_objects()  # one copy of the stamp's font, not one per page
         with open(out_path, 'wb') as fh:

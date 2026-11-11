@@ -1,20 +1,16 @@
 """An autoscaler that works with the gevent pool every CVEngine worker runs (``celery-entrypoint.sh``: ``--pool=gevent --autoscale=N,1``).
 
-Celery's own ``Autoscaler`` was written for the prefork pool, and with gevent it never lets a worker run more than one task while that task
-runs. Two things go wrong together:
+Celery's own ``Autoscaler`` was written for the prefork pool. Before celery 5.7 it never let a gevent worker run more than one task while that
+task ran (it counted the greenlets running instead of the pool's limit, and its grow raised the semaphore counter without waking the consumer
+waiting in ``Pool.spawn``). Celery 5.7 fixed both, and this class now relies on that. Two gaps remain, and are what this class still does:
 
-* it counts the pool's size with ``pool.num_processes``, which for gevent is the number of greenlets running *now*, not the pool's limit.
-  With one long task running and one more message taken off the queue, it sees "1 of 1 busy, 2 wanted" and grows the pool, every second,
-  forever (the worker log fills with "Scaling up 1 processes.");
-* gevent's ``TaskPool.grow`` raises the pool's semaphore counter directly, which does not wake the greenlet already waiting on it. That
-  waiter is the worker's consumer, blocked in ``Pool.spawn`` with the next message, so no further message is taken until the running task
-  ends. Then the swollen pool lets everything waiting in at once, above the ceiling.
+* a ceiling lowered live (the ``autoscale`` remote control) while every slot is busy brings the pool back down to it, never under the floor;
+* a ceiling raised while nothing runs moves the consumer's prefetch with it.
 
-So a discovery worker with an autoscale ceiling of 8 ran one discovery or host assessment at a time for as long as that one ran (a discovery run
+Before 5.7, a discovery worker with an autoscale ceiling of 8 ran one discovery or host assessment at a time for as long as that one ran (a discovery run
 or an assessment waiting on Sentinels takes hours), with hundreds of messages waiting behind it. ``tests/test_gevent_autoscale.py`` pins it.
 
-This subclass counts the pool's limit (``Pool.size``) and grows it with ``Semaphore.release``, which wakes the waiting consumer: the worker
-takes one more message per second until it runs as many tasks as there is work, up to the ceiling. When there is less work it gives slots
+With celery 5.7 the worker takes one more message per second until it runs as many tasks as there is work, up to the ceiling. When there is less work it gives slots
 back, at the earliest ``keepalive`` (30 s) after its last scale-up. A live change of the ceiling moves the consumer's prefetch with it
 (``_update_consumer_prefetch_count``): for acks_late tasks (``run_bbot_discovery``, ``run_internal_scan``) the prefetch is what bounds how many
 run at once. ``reNgine/celery.py`` also turns off celery's prefetch reduction after a broker reconnect, whose restore reads the greenlets
@@ -61,20 +57,9 @@ class GeventAutoscaler(Autoscaler):
             (qos.increment_eventually if diff > 0 else qos.decrement_eventually)(abs(diff) * multiplier)
         return None
 
-    @property
-    def processes(self):
-        inner = _green_pool(self.pool)
-        return inner.size if inner is not None else self.pool.num_processes
-
-    def _grow(self, n):
-        inner = _green_pool(self.pool)
-        if inner is None or n <= 0:
-            return super()._grow(n)
-        from celery.utils.log import get_logger
-        get_logger(__name__).info('Scaling up %s greenlet slots (pool now %s).', n, inner.size + n)
-        inner.size += n
-        for _ in range(n):
-            inner._semaphore.release()  # release, not ``counter += 1``: it wakes the consumer waiting in Pool.spawn
+    # Celery 5.7 counts a gevent pool by its limit and grows it with ``Semaphore.release`` (celery/concurrency/gevent.py ``grow``), which were
+    # the two bugs this class first existed for: ``processes`` and ``_grow`` are celery's own again, so ``TaskPool.limit`` (what ``stats``
+    # reports) always matches the pool.
 
     def _shrink(self, n):
         inner = _green_pool(self.pool)
@@ -87,6 +72,5 @@ class GeventAutoscaler(Autoscaler):
             return None
         from celery.utils.log import get_logger
         get_logger(__name__).info('Scaling down %s greenlet slots (pool now %s).', n, inner.size - n)
-        inner.size -= n
-        inner._semaphore.counter -= n
+        self.pool.shrink(n)  # celery 5.7: lowers the semaphore, TaskPool.limit and the pool's size together
         return None
