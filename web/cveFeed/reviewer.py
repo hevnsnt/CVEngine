@@ -99,20 +99,19 @@ def ops_hours(row):
     return sorted(set(hours)) or list(DEFAULT_OPS_HOURS)
 
 
-def _ops_failed_since(last_ops_at, since):
-    """Whether a call of the operations job failed at or after ``since`` and after the last report that worked (``record_usage`` keeps them)."""
+def _ops_tried_since(since):
+    """Whether the container reported a call of the operations job at or after ``since`` (any outcome; a cut-off it then retried inside the
+    same attempt is not a try of its own). ``record_usage`` keeps them in the database, so this holds across a container restart."""
     from cveFeed.models import AIUsage
-    if last_ops_at and last_ops_at > since:
-        since = last_ops_at
-    return AIUsage.objects.filter(stage='operations_check', status='failed', started_at__gte=since).exclude(error_category='truncated_retried').exists()
+    return AIUsage.objects.filter(stage='operations_check', started_at__gte=since).exclude(error_category='truncated_retried').exists()
 
 
 def ops_due(row, now=None):
     """Whether the operations job should run now: a scheduled UTC hour has passed since it last reported."""
     now = now or timezone.now()
     last = row.last_ops_at
-    if _ops_failed_since(last, now - OPS_RETRY_WAIT):
-        return False  # the last try failed (the model refused, or cut off twice): once an hour, not on every pass of the loop
+    if _ops_tried_since(now - OPS_RETRY_WAIT):
+        return False  # a try in the last hour, whatever came of it (and whether or not the container restarted since): once an hour, a paid call
     for days_back in (0, 1):
         day = (now - timedelta(days=days_back)).date()
         for hour in sorted(ops_hours(row), reverse=True):
@@ -274,11 +273,11 @@ def floor_hold(kind, facts):
     triage's, "a model may clear a finding only when the evidence sets no floor", and it is read from there, not copied: a scanner finding
     with any floor (a template matcher that fired, a CVE template, a medium or higher rating) and a CVE match with any floor (a version
     inside the affected range, unless the triage itself finds concrete grounds in ``closure_basis`` or a patched distribution release; an
-    advisory with no version bound) are for a person or a published range, never for the model. Hygiene findings and database exposures
-    are judged by ``proof`` and the reviewer's own rules."""
+    advisory with no version bound) are for a person or a published range, never for the model. A database exposure is held the same way (its floor is set
+    whether or not the service answered). Hygiene findings are judged by ``proof`` and the reviewer's own rules."""
     from cveFeed import triage as triage_lib
     floor, found = triage_lib.hard_evidence(kind, facts or {})
-    if floor and kind in ('nuclei', 'cve_match'):
+    if floor and kind in ('nuclei', 'cve_match', 'db_exposure'):
         return '; '.join(found)
     return ''
 
@@ -626,6 +625,25 @@ def newest_review_q(prefix=''):
     newest = FindingReview.objects.filter(triage_id=OuterRef(prefix + 'id')).exclude(outcome=REFUSED).order_by('-created_at', '-id')
     return {'review_verdict': Subquery(newest.values('verdict')[:1], output_field=CharField()),
             'review_outcome': Subquery(newest.values('outcome')[:1], output_field=CharField())}
+
+
+def newest_review_row_q(prefix=''):
+    """The newest review of a finding as one subquery annotation, ``review_row`` (a JSON object of the fields ``_summary_of`` shows) and
+    ``review_at``, so a list reads each row's review in the query that reads the row, with no extra round trip (``summary_from_row``)."""
+    from django.db.models import DateTimeField, JSONField, OuterRef, Subquery
+    from django.db.models.functions import JSONObject
+    from cveFeed.models import FindingReview
+    newest = FindingReview.objects.filter(triage_id=OuterRef(prefix + 'id')).exclude(outcome=REFUSED).order_by('-created_at', '-id')
+    fields = ('verdict', 'confidence', 'reason_code', 'note', 'model', 'outcome', 'held_reason')
+    return {'review_row': Subquery(newest.annotate(j=JSONObject(**{f: f for f in fields})).values('j')[:1], output_field=JSONField()),
+            'review_at': Subquery(newest.values('created_at')[:1], output_field=DateTimeField())}
+
+
+def summary_from_row(obj):
+    """``_summary_of`` of the review annotated on ``obj`` by ``newest_review_row_q``; None when it has none."""
+    from types import SimpleNamespace
+    data, at = getattr(obj, 'review_row', None), getattr(obj, 'review_at', None)
+    return _summary_of(SimpleNamespace(**data, created_at=at)) if data and at else None
 
 
 # --------------------------------------------------------------------------------------------------------------- operations

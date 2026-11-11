@@ -3655,7 +3655,8 @@ def _finding_sources(project, params):
             qs = qs.filter(heat_rank=HEAT_FACETS[heat])
         if severity != 'all':
             qs = qs.filter(sev=inverse[severity])
-        sources[key] = qs.order_by('-heat_rank', '-sev', F('when').desc(nulls_last=True), '-id')
+        from cveFeed import reviewer
+        sources[key] = qs.annotate(**reviewer.newest_review_row_q('triage__')).order_by('-heat_rank', '-sev', F('when').desc(nulls_last=True), '-id')
     return sources
 
 
@@ -3697,13 +3698,21 @@ def _finding_row(kind, obj):
             'assignee': _user_brief(getattr(obj, 'assignee', None)), 'comment_count': getattr(obj, 'comment_count', 0),
             'agent_task': _agent_task_of(obj) if kind == 'cve' else None, 'detected': _iso(obj.when), 'first_seen': _iso(obj.when),
             'heat_override': _heat_override(_triage_of(obj)) if kind != 'hygiene' else None, 'triage': _triage_brief(_triage_of(obj)),
-            'ai_review': None, '_triage_id': getattr(_triage_of(obj), 'pk', None), **extra}
+            'ai_review': None, '_triage_id': getattr(_triage_of(obj), 'pk', None), '_review_read': hasattr(obj, 'review_row'),
+            '_review': _review_from_row(obj), **extra}
+
+
+def _review_from_row(obj):
+    from cveFeed import reviewer
+    return reviewer.summary_from_row(obj)
 
 
 def _attach_reviews(rows):
     """Fill ``ai_review`` (the newest AI review of the finding: verdict, confidence, reason, note, model, outcome in plain words) of every
     row of a list page. A grouped row (``group``) stands for several hosts: it shows the newest review across its members and says so
-    (``scope_text``: how many of its hosts the reviewer has looked at). Queries: one for the reviews, one more when a row is a group."""
+    (``scope_text``: how many of its hosts the reviewer has looked at). A row read by the list queries already carries its own review (one
+    subquery in the row's own query, ``reviewer.newest_review_row_q``); a query for reviews runs only for a group row's members (two) or a
+    row read some other way. Never a query per row."""
     from cveFeed import reviewer
     from cveFeed.models import Triage
     groups = {r['id']: r['group']['member_ids'] for r in rows if r.get('group') and r.get('kind') == 'match'}
@@ -3711,10 +3720,11 @@ def _attach_reviews(rows):
     if groups:
         wanted = {i for ids in groups.values() for i in ids}
         by_match = dict(Triage.objects.filter(match_id__in=wanted).values_list('match_id', 'pk'))
-    ids = [r.get('_triage_id') for r in rows] + list(by_match.values())
+    ids = [r.get('_triage_id') for r in rows if not r.get('_review_read')] + list(by_match.values())
     found = reviewer.review_summaries(ids)
     for row in rows:
-        own = found.get(row.pop('_triage_id', None))
+        own = row.pop('_review') if row.pop('_review_read') else found.get(row['_triage_id'])
+        row.pop('_triage_id', None)
         members = groups.get(row['id']) if row.get('group') and row.get('kind') == 'match' else None
         if members:
             seen = [found[by_match[m]] for m in members if by_match.get(m) in found]

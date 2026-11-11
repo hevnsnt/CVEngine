@@ -255,6 +255,22 @@ class ReviewTests(Fixture):
         self.assertIn('inside the affected range', data['reason'])
         self.assertEqual(CVEMatch.objects.get(pk=self.match.pk).remediation_status, 'open')
 
+    def test_a_database_exposure_is_held_by_triages_floor_with_or_without_a_reply(self):
+        for reply in ('', 'redis_version:7'):
+            facts = {'reply': reply}
+            floor, found = triage.hard_evidence('db_exposure', facts)
+            self.assertTrue(floor)  # the triage's own floor: set whether or not the service answered
+            self.assertEqual(reviewer.floor_hold('db_exposure', facts), '; '.join(found))
+        self.assertEqual(reviewer.floor_hold('hygiene', {}), '')  # hygiene stays with proof and the reviewer's own rules
+        vuln = Vulnerability.objects.create(name='Redis open', severity=2, subdomain=self.sub, target_domain=self.domain,
+                                            open_status=True, http_url='http://www.example.com:6379/', source='db_exposure')
+        triage.track([vuln])
+        packet = next(p for p in reviewer.next_packets(25) if p['kind'] == 'db_exposure')
+        data = self.verdict(packet)[1]
+        self.assertEqual(data['outcome'], 'held', data)
+        self.assertIn('hard evidence', data['reason'])
+        self.assertTrue(Vulnerability.objects.get(pk=vuln.pk).open_status)
+
     def test_a_version_outside_the_range_has_no_floor_and_the_reviewer_may_close_it(self):
         facts = triage.describe(Triage.objects.get(match=self.match).finding)['facts']
         self.assertEqual(reviewer.floor_hold('cve_match', facts), '')
@@ -507,6 +523,18 @@ class UnansweredReviewTests(Fixture):
         row.last_ops_at = now.replace(hour=2)
         AIUsage.objects.filter(error_category='refused').delete()
         self.assertTrue(reviewer.ops_due(row, now))
+
+    def test_a_try_inside_the_hour_blocks_the_next_ops_job_even_after_a_restart(self):
+        row = ReviewerSettings.current()
+        row.ops_hours = [3]
+        now = timezone.now().replace(hour=4, minute=0)
+        row.last_ops_at = now.replace(hour=2)
+        # a call that worked but whose report never arrived (the container restarted): the server remembers the try
+        reviewer.record_usage({'stage': 'operations_check', 'provider': 'anthropic', 'model': 'claude-haiku-5-5', 'status': 'succeeded'},
+                              now=now - timezone.timedelta(minutes=20))
+        self.assertFalse(reviewer.ops_due(row, now))
+        self.assertFalse(reviewer.config(now)['ops_due'])
+        self.assertTrue(reviewer.ops_due(row, now + timezone.timedelta(minutes=45)))
 
     def test_a_second_identical_refusal_is_the_same_answer_and_adds_no_row(self):
         packet = self.packet()
