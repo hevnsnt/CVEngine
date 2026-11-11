@@ -44,7 +44,7 @@ class MenuTests(TestCase):
 
 	def test_the_menu_order_and_labels(self):
 		self.assertEqual([l for l, _, _ in menu(self.page('/cve/alpha/hosts/'))],
-						['Overview', 'Findings', 'Hygiene', 'Assets', 'Suppliers', 'Scans', 'Scanners', 'Bug bounty'])
+						['Overview', 'Findings', 'Hygiene', 'Hosts', 'Suppliers', 'Scans', 'Scanners', 'Bug bounty'])
 
 	def test_every_link_opens_appears_once_and_has_a_name(self):
 		html = self.page('/cve/alpha/hosts/')
@@ -60,7 +60,8 @@ class MenuTests(TestCase):
 		for m in re.finditer(r'<a data-nav="([^"]+)"[^>]*>(.*?)</a>', block, re.S):
 			self.assertNotIn('aria-label', m.group(0).split('>')[0], m.group(1))
 			self.assertEqual(re.sub(r'<[^>]+>', '', m.group(2)).strip(), m.group(1))
-		self.assertEqual(re.findall(r'data-nav="Hygiene"', html).count('data-nav="Hygiene"'), 1)
+		# one visible link (the palette's hidden index lists the page under the same name; shell.js folds the same page and name into one row)
+		self.assertEqual(block.count('data-nav="Hygiene"'), 1)
 
 	def test_hygiene_and_suppliers_keep_their_original_icons_and_have_no_badge(self):
 		html = self.page('/cve/alpha/hosts/')
@@ -72,8 +73,8 @@ class MenuTests(TestCase):
 		expected = {
 			'/cve/alpha/vulns/': 'Findings', '/cve/alpha/matches/': 'Findings', '/cve/alpha/changes/': 'Findings', '/cve/cves/': 'Findings',
 			'/cve/alpha/hygiene/': 'Hygiene',  # the page's own entry wins; Findings is not also current
-			'/cve/alpha/hosts/': 'Assets', '/cve/alpha/targets/': 'Assets', '/cve/alpha/secrets/': 'Assets', '/cve/graph/': 'Assets',
-			'/cve/alpha/suppliers/': 'Suppliers',  # likewise: Assets is not also current
+			'/cve/alpha/hosts/': 'Hosts', '/cve/alpha/targets/': 'Hosts', '/cve/alpha/secrets/': 'Hosts', '/cve/graph/': 'Hosts',
+			'/cve/alpha/suppliers/': 'Suppliers',  # likewise: Hosts is not also current
 			'/cve/alpha/scans/': 'Scans', '/cve/alpha/activity/': 'Scans',
 			'/cve/scanners/': 'Scanners', '/cve/sentinels/': 'Scanners',
 		}
@@ -86,7 +87,7 @@ class MenuTests(TestCase):
 		self.assertEqual([l for l, _, c in menu(self.page('/cve/bounty/', self.pentester)) if c], ['Bug bounty'])
 
 	def test_no_entry_is_current_on_a_utility_page_the_account_is(self):
-		for path, item in (('/cve/admin/', 'Administration'), ('/cve/settings/', 'Settings'), ('/cve/about/', 'Help'), ('/cve/account/', 'My account'),
+		for path, item in (('/cve/admin/', 'Administration'), ('/cve/settings/', 'Settings'), ('/cve/about/', 'About'), ('/cve/account/', 'My account'),
 						  ('/cve/agents/', 'API keys')):
 			html = self.page(path)
 			self.assertEqual([l for l, _, c in menu(html) if c], [], path)
@@ -102,8 +103,8 @@ class MenuTests(TestCase):
 	def test_the_phone_sheet_offers_the_four_entries_the_bar_does_not_and_marks_the_current_one(self):
 		html = self.page('/cve/alpha/suppliers/')
 		bar = html[html.index('class="tabbar"'):html.index('id="more-btn"')]
-		self.assertEqual(re.findall(r'</svg>([^<]+)</a>', bar), ['Overview', 'Findings', 'Assets', 'Scans'])
-		self.assertNotRegex(bar, r'aria-current="page"[^>]*><svg[^>]*><use href="#i-server"')  # Assets is not current on Suppliers
+		self.assertEqual(re.findall(r'</svg>([^<]+)</a>', bar), ['Overview', 'Findings', 'Hosts', 'Scans'])
+		self.assertNotRegex(bar, r'aria-current="page"[^>]*><svg[^>]*><use href="#i-server"')  # Hosts is not current on Suppliers
 		sheet = html[html.index('id="sheet"'):html.index('id="acct-sheet"')]
 		self.assertEqual(re.findall(r'</svg>([^<]+)</a>', sheet)[:4], ['Hygiene', 'Suppliers', 'Scanners', 'Bug bounty'])
 		self.assertRegex(sheet, r'aria-current="page"><svg[^>]*><use href="#i-building"/></svg>Suppliers')
@@ -113,11 +114,11 @@ class MenuTests(TestCase):
 	def test_the_tab_strip_of_a_page_with_its_own_entry_is_named_for_its_family(self):
 		html = self.page('/cve/alpha/hygiene/')
 		self.assertIn('aria-label="Findings pages"', html)
-		self.assertRegex(html, r'<a href="[^"]+" aria-current="page">Config checks</a>')
+		self.assertRegex(html, r'<a href="[^"]+" aria-current="page">Hygiene</a>')
 
 	def test_without_a_project_the_menu_leaves_out_what_needs_one(self):
 		out = nav.build('about', None, bounty_enabled=False, sentinels_enabled=False)
-		self.assertEqual([e['label'] for e in out['rail']], ['Overview', 'Assets', 'Scanners'])
+		self.assertEqual([e['label'] for e in out['rail']], ['Overview', 'Graph', 'Scanners'])
 
 
 class RuleTests(SimpleTestCase):

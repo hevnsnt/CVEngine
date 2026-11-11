@@ -163,7 +163,7 @@ class StaleClaimTests(SimpleTestCase):
     def test_the_front_end_doc_names_the_eight_rail_entries(self):
         text = doc_text('docs/FRONTEND.md')
         from cveFeed import nav
-        for label in ('Overview', 'Findings', 'Hygiene', 'Assets', 'Suppliers', 'Scans', 'Scanners', 'Bug bounty'):
+        for label in ('Overview', 'Findings', 'Hygiene', 'Hosts', 'Suppliers', 'Scans', 'Scanners', 'Bug bounty'):
             self.assertIn(f'**{label}**', text)
         self.assertEqual(len(nav.SECTION_ICON), 8)
 

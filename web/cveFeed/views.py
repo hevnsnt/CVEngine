@@ -383,12 +383,27 @@ SECTIONS = {
     'activity': 'Activity',
     'vulns': 'Findings',
     'matches': 'CVE matches',
-    'hygiene': 'Config checks',
+    'hygiene': 'Hygiene',
     'secrets': 'Secrets',
-    'suppliers': 'Third parties',
+    'suppliers': 'Suppliers',
     'keys': 'API keys',
     'sentinels': 'Sentinels',
 }
+
+# The one plain sentence under each page title: what the page is for, in words a person who has never opened it can use.
+SECTION_PURPOSE = {
+    'targets': 'The domains and addresses this project looks at. Add one to start a first look at it.',
+    'scans': 'Every scan of this project, newest first, with its status and what it found.',
+    'hosts': 'Every machine found for this project, with how exposed it is and what was found on it.',
+    'changes': 'What changed since the last scan: new hosts, new findings and things that went away.',
+    'activity': 'What the engine is doing right now and what it did recently.',
+    'vulns': 'Everything found or matched, in one list. Filter it by type.',
+    'matches': 'Known vulnerabilities whose product and version match a host. The AI and the checks decide which ones are confirmed.',
+    'hygiene': 'Certificates, email settings and TLS configuration: problems that are usually quick to fix.',
+    'secrets': 'API keys, tokens and private keys your websites and scripts give away, and where each one was seen.',
+    'suppliers': 'Outside companies your hosts depend on, and what each one shows to the internet. These are never your own hosts.',
+}
+SCAN_PURPOSE = 'What this one scan did and what it found.'
 
 
 SCOPE_KEY = 'cve_scope'  # the session's last chosen project (or ALL_PROJECTS): pages with no project in their address keep it
@@ -526,7 +541,7 @@ def scan_page(request, slug, scan_id):
     if not project:
         raise Http404
     return render(request, 'cveFeed/section.html', {
-        'section': 'scan', 'title': f'Scan #{scan_id}', 'project': project, 'scan_id': scan_id,
+        'section': 'scan', 'title': f'Scan #{scan_id}', 'purpose': SCAN_PURPOSE, 'project': project, 'scan_id': scan_id,
         **ui_context(request, 'scans', slug),
     })
 
@@ -557,7 +572,7 @@ def project_page(request, slug, section):
             raise Http404  # a Sentinel's scope is per project; there is no combined view
         return render(request, 'cveFeed/project_sentinels.html', {'title': SECTIONS[section], 'project': project, **ui_context(request, 'project-sentinels', slug)})
     return render(request, 'cveFeed/section.html', {
-        'section': section, 'title': SECTIONS[section], 'project': project, **ui_context(request, section, slug),
+        'section': section, 'title': SECTIONS[section], 'purpose': SECTION_PURPOSE.get(section, ''), 'project': project, **ui_context(request, section, slug),
     })
 
 

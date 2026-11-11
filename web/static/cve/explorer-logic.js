@@ -47,7 +47,7 @@ export function cvePaletteRow(text) {
   if (q.length < 2 || /[:"]/.test(q) || q.startsWith("-")) return null;
   return {
     label: `Search CVEs for “${q}”`,
-    sub: looksLikeId(q) ? "Open it in the CVE explorer" : "Products, vendors and titles in the CVE catalog",
+    sub: looksLikeId(q) ? "Open it in the CVE catalog" : "Products, vendors and titles in the CVE catalog",
     hint: "CVE catalog",
     href: explorerHref(q),
     section: "Search",

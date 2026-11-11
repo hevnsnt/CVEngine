@@ -53,10 +53,10 @@ class ShellTests(TestCase):
 
 	def test_the_rail_has_eight_entries_or_seven_without_bug_bounty(self):
 		self.assertEqual([label for label, _ in rail(self.get(self.root, '/cve/?project=alpha&skip=1'))],
-						['Overview', 'Findings', 'Hygiene', 'Assets', 'Suppliers', 'Scans', 'Scanners', 'Bug bounty'])
+						['Overview', 'Findings', 'Hygiene', 'Hosts', 'Suppliers', 'Scans', 'Scanners', 'Bug bounty'])
 		for user in (self.analyst, self.org_admin):
 			self.assertEqual([label for label, _ in rail(self.get(user, '/cve/?project=alpha&skip=1'))],
-							['Overview', 'Findings', 'Hygiene', 'Assets', 'Suppliers', 'Scans', 'Scanners'], user.username)
+							['Overview', 'Findings', 'Hygiene', 'Hosts', 'Suppliers', 'Scans', 'Scanners'], user.username)
 		self.assertIn('Bug bounty', [label for label, _ in rail(self.get(self.pentester, '/cve/?project=alpha&skip=1'))])
 
 	def test_every_rail_entry_opens_a_page(self):
@@ -77,12 +77,12 @@ class ShellTests(TestCase):
 
 	def test_the_pages_that_moved_under_an_entry_are_a_tab_strip(self):
 		findings = tabs(self.get(self.root, '/cve/alpha/matches/'))
-		self.assertEqual([label for _, _, label in findings], ['All findings', 'CVE matches', 'Config checks', 'Changes', 'CVE catalog'])
+		self.assertEqual([label for _, _, label in findings], ['Findings', 'CVE matches', 'Hygiene', 'Changes', 'CVE catalog'])
 		self.assertEqual([label for _, current, label in findings if current], ['CVE matches'])
-		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/alpha/suppliers/'))], ['Hosts', 'Targets', 'Graph', 'Secrets', 'Third parties'])
+		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/alpha/suppliers/'))], ['Hosts', 'Targets', 'Graph', 'Secrets', 'Suppliers'])
 		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/alpha/activity/'))], ['Scans', 'Activity'])
 		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/graph/'))][:3], ['Hosts', 'Targets', 'Graph'])
-		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/sentinels/'))], ['Health', 'Sentinels'])
+		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/sentinels/'))], ['Scanners', 'Sentinels'])
 		self.assertEqual(tabs(self.get(self.root, '/cve/?skip=1')), [])  # Overview has no siblings
 
 	def test_the_current_page_marks_its_entry_in_the_rail(self):
@@ -90,12 +90,12 @@ class ShellTests(TestCase):
 		block = html[html.index('aria-label="Sections"'):html.index('<details class="acct">')]
 		self.assertRegex(block, r'data-nav="Hygiene"[^>]*aria-current="page"')  # Hygiene has its own entry again, and it wins over Findings
 		self.assertNotRegex(block, r'data-nav="Findings"[^>]*aria-current')
-		self.assertNotRegex(block, r'data-nav="Assets"[^>]*aria-current')
+		self.assertNotRegex(block, r'data-nav="Hosts"[^>]*aria-current')
 
 	def test_the_phone_bar_makes_findings_primary(self):
 		html = self.get(self.analyst, '/cve/alpha/hosts/')
 		bar = html[html.index('class="tabbar"'):html.index('id="more-btn"')]
-		self.assertEqual(re.findall(r'</svg>([^<]+)</a>', bar), ['Overview', 'Findings', 'Assets', 'Scans'])
+		self.assertEqual(re.findall(r'</svg>([^<]+)</a>', bar), ['Overview', 'Findings', 'Hosts', 'Scans'])
 		more = html[html.index('id="sheet"'):html.index('id="acct-sheet"')]
 		self.assertIn('Scanners', more)
 		self.assertNotIn('Bug bounty', more)  # not for this person
@@ -103,7 +103,7 @@ class ShellTests(TestCase):
 	def test_the_jump_palette_still_finds_every_old_page(self):
 		html = self.get(self.analyst, '/cve/alpha/hosts/')
 		index = html[html.index('id="nav-index"'):html.index('id="sheet-scrim"')]
-		for label in ('Findings', 'CVE matches', 'Config checks', 'Changes', 'Targets', 'Asset graph', 'Secrets', 'Third parties', 'Activity',
+		for label in ('Findings', 'CVE matches', 'Hygiene', 'Changes', 'Targets', 'Graph', 'Secrets', 'Suppliers', 'Activity',
 					'Sentinels', 'CVE catalog'):
 			self.assertIn(f'data-nav="{label}"', index)
 		self.assertIn('data-nav="API keys"', html)  # the account menu's own item: the palette reads every data-nav on the page
@@ -112,9 +112,9 @@ class ShellTests(TestCase):
 		def menu(user):
 			html = self.get(user, '/cve/about/')
 			return re.findall(r'<a data-nav="([^"]+)"', html[html.index('<details class="acct">'):html.index('</aside>')])
-		self.assertEqual(menu(self.root), ['My account', 'Administration', 'Connect AI model', 'Settings', 'API keys', 'Help'])
-		self.assertEqual(menu(self.org_admin), ['My account', 'Administration', 'API keys', 'Help'])
-		self.assertEqual(menu(self.analyst), ['My account', 'API keys', 'Help'])
+		self.assertEqual(menu(self.root), ['My account', 'Administration', 'Connect AI model', 'Settings', 'API keys', 'About'])
+		self.assertEqual(menu(self.org_admin), ['My account', 'Administration', 'API keys', 'About'])
+		self.assertEqual(menu(self.analyst), ['My account', 'API keys', 'About'])
 
 	def test_the_project_sentinels_tab_only_appears_for_a_project_that_has_one(self):
 		from unittest import mock
@@ -126,7 +126,7 @@ class ShellTests(TestCase):
 
 	def test_nav_builds_without_a_project(self):
 		built = nav.build('dashboard', None, bounty_enabled=False, sentinels_enabled=False)
-		self.assertEqual([e['label'] for e in built['rail']], ['Overview', 'Assets', 'Scanners'])
+		self.assertEqual([e['label'] for e in built['rail']], ['Overview', 'Graph', 'Scanners'])
 		self.assertEqual(built['rail'][1]['href'], '/cve/graph/')  # the one asset page that needs no project
 
 

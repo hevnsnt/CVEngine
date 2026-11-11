@@ -215,7 +215,7 @@ function collect() {
   const out = [];
   $$("[data-nav]").forEach((a) => {
     const label = a.dataset.nav;
-    const key = `${a.getAttribute("href")}|${label}`; // the same page under two names (Assets, Hosts) is two rows: either word finds it
+    const key = `${a.getAttribute("href")}|${label}`; // one name per page: the rail, its tab and the hidden index list a page under the same name, and this folds them into one row
     if (seen.has(key)) return;
     seen.add(key);
     out.push({ label, hint: "Go to", href: a.getAttribute("href"), section: "Go to" });

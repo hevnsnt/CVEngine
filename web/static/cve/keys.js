@@ -4,8 +4,8 @@
 import { dialog, el } from "/staticfiles/cve/ui.js";
 
 const GO_LETTERS = {
-  Live: "l",
-  "Asset graph": "a",
+  Overview: "l",
+  Graph: "a",
   Hosts: "h",
   Changes: "c",
   Activity: "v",
