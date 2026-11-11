@@ -56,7 +56,7 @@ OUTCOMES = ('hit', 'stale', 'miss', 'waited', 'refreshed', 'skipped', 'overran')
 NAMES = ('stats', 'discovery-counts', 'graph-version', 'graph-live', 'search-facets', 'activity-days', 'refresher')
 
 INTERNAL = ('host-reps',)  # snapshots the others are built from: not counted as polls (the per-hour counters are what people asked for)
-ADAPTIVE = ('stats', 'discovery-counts', 'host-reps')  # snapshots whose freshness follows the cost of computing them
+ADAPTIVE = ('stats', 'discovery-counts')  # snapshots whose freshness follows the cost of computing them ('host-reps' is not: the live host count stays at most its own 5 s old)
 COST_FACTOR = 10  # served for this many times the last computation's duration: a computation never takes more than a tenth of the time
 COST_CEILING = 120  # ...and never for more than this many seconds
 
@@ -254,6 +254,14 @@ def bump_revision():
         cache.set(REVISION_KEY, timezone.now().isoformat(), timeout=None)
     except Exception:  # noqa: BLE001
         logger.warning('could not bump the stats revision: the cache is not answering')
+
+
+def bump_on_commit():
+    """``bump_revision`` once the surrounding transaction commits (at once when there is none). Call it from every write that changes a number a
+    person reads on the live screen (a finding closed or reopened, a scan that ended, a host or target removed or restored): the snapshots may be
+    kept for minutes on a slow install, and the revision is the only thing that drops them early. A rolled back write bumps nothing."""
+    from django.db import transaction
+    transaction.on_commit(bump_revision)
 
 
 def token_of(payload):

@@ -847,7 +847,11 @@ def delete_targets(ctx, slug, ids=None, all_matching=False, q=''):
         chunk = todo[start:start + 200]
         scan_dirs = [f'{n}_{sid}' for sid, n in ScanHistory.objects.filter(domain_id__in=[i for i, _ in chunk])
                      .values_list('id', 'domain__name')]
-        Domain.objects.filter(project=project, id__in=[i for i, _ in chunk]).delete()
+        from django.db import transaction
+        with transaction.atomic():
+            Domain.objects.filter(project=project, id__in=[i for i, _ in chunk]).delete()
+            from cveFeed import snapshot_cache
+            snapshot_cache.bump_on_commit()  # the targets, hosts and findings under them leave the live screen's numbers
         for name in [n for _, n in chunk] + scan_dirs:  # exact directory names, never a prefix match
             safe_remove_path(os.path.join(SCAN_RESULTS_ROOT, name), SCAN_RESULTS_ROOT)
         deleted += len(chunk)
