@@ -166,15 +166,12 @@ def _sort_key(h, entry, web=False):
 
 
 def _pages(hosts):
-    """``hosts`` (a Subdomain queryset) in id order, ``PAGE`` rows at a time, each page read by the last id of the one before (no OFFSET, and a host added
-    while the census runs is picked up or left for the next, never read twice). Yields lists of rows."""
-    last = 0
-    while True:
-        rows = list(hosts.filter(pk__gt=last).order_by('id')[:PAGE])
-        if not rows:
-            return
-        yield rows
-        last = rows[-1].pk
+    """``hosts`` (a Subdomain queryset) in id order, ``PAGE`` rows at a time: the ids are read once (the current-inventory filter, a dear predicate, runs one time
+    and not once per page, and a list of ids is small), each page of rows is then read by its ids. Yields lists of rows."""
+    from startScan.models import Subdomain
+    ids = list(hosts.order_by('id').values_list('pk', flat=True))
+    for start in range(0, len(ids), PAGE):
+        yield list(Subdomain.objects.filter(pk__in=ids[start:start + PAGE]).select_related('target_domain').order_by('id'))
 
 
 def build_census(now=None):
@@ -205,7 +202,7 @@ def build_census(now=None):
             continue
         routed = set(RouteAuth.objects.filter(project_id=project.pk, retired_at__isnull=True).values_list('host', flat=True).distinct())
         hosts = (Subdomain.objects.filter(latest_scan_q(), target_domain__project=project).exclude(scan_history__tasks__contains=[INTERNAL_PIPELINE_TASK])
-                 .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL).select_related('target_domain'))
+                 .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL))
 
         def check_page(page):  # its own scope: what a page read (evidence, addresses, ports) is let go of when it returns, before the next page is read
             ev = cc.load([(s, [], project.pk) for s in page])
