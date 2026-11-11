@@ -72,7 +72,17 @@ function renderTokens(items) {
   $("none").style.display = count ? "none" : "";
 }
 
-async function loadTokens() { renderTokens((await api("GET", "/api/v1/tokens")).results || []); }
+// A list that could not be read says so and offers the same read again; it never falls back to "none yet".
+function unreadable(box, emptyNote, what, again, err) {
+  emptyNote.style.display = "none";
+  box.textContent = "";
+  box.append(couldNotRead(what, again, err && err.message));
+}
+
+async function loadTokens() {
+  try { renderTokens((await api("GET", "/api/v1/tokens")).results || []); }
+  catch (err) { unreadable($("list"), $("none"), "Your API keys", loadTokens, err); }
+}
 
 function renderAgents(items) {
   const box = $("agents");
@@ -106,4 +116,7 @@ window.addEventListener("pagehide", dismiss); // a page restored from the back b
 
 renderConnect();
 loadTokens();
-api("GET", "/api/v1/agents?page_size=50").then((x) => renderAgents(x.results || [])).catch(() => {});
+function loadAgents() {
+  api("GET", "/api/v1/agents?page_size=50").then((x) => renderAgents(x.results || [])).catch((err) => unreadable($("agents"), $("no-agents"), "The list of agents", loadAgents, err));
+}
+loadAgents();
