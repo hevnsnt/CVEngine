@@ -63,6 +63,8 @@ jobs:
         uses: actions/checkout@v4
       - name: Resolver fallback (only when the runner cannot find the Ubuntu package servers)
         uses: ./.github/actions/resolver-fallback
+        with:
+          docker: "false"  # this job has service containers (Postgres, Redis): a Docker restart would stop them
       - name: Python 3.12
         uses: actions/setup-python@v5
         with:

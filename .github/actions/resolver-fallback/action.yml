@@ -4,10 +4,18 @@ description: >-
   On 2026-11-11 the name servers of ubuntu.com stopped answering over IPv4 for hours; the runners' resolver returned nothing, so every
   apt-get and every image build failed whatever the code was. Resolvers that reach those servers over IPv6 kept answering. Nothing is
   changed when the runner's resolver works.
+inputs:
+  docker:
+    description: >-
+      Also point the Docker daemon at the public resolvers (it must be restarted for that). Set to "false" in a job that has service
+      containers: a daemon restart stops them, and they do not come back (the job's database would be gone).
+    default: "true"
 runs:
   using: composite
   steps:
     - shell: bash
+      env:
+        WITH_DOCKER: ${{ inputs.docker }}
       run: |
         set -u
         names="archive.ubuntu.com security.ubuntu.com ports.ubuntu.com"
@@ -18,7 +26,7 @@ runs:
         printf '[Resolve]\nDNS=1.1.1.1 8.8.8.8 2606:4700:4700::1111\nDomains=~.\n' | sudo tee /etc/systemd/resolved.conf.d/10-public-fallback.conf >/dev/null
         sudo systemctl restart systemd-resolved
         # containers and image builds take their resolvers from the Docker daemon, not from the runner's stub resolver
-        if command -v docker >/dev/null 2>&1; then
+        if [ "$WITH_DOCKER" = "true" ] && command -v docker >/dev/null 2>&1; then
           cfg=/etc/docker/daemon.json
           [ -s "$cfg" ] || echo '{}' | sudo tee "$cfg" >/dev/null
           sudo jq '. + {"dns": ["1.1.1.1", "8.8.8.8"]}' "$cfg" | sudo tee "$cfg.new" >/dev/null && sudo mv "$cfg.new" "$cfg"
