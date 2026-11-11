@@ -387,6 +387,25 @@ class StandDownTests(WatchdogCase):
         self.assertIsNone(self.request())
         self.assertIn('busy, not gone', self.state('R1').status_text)
 
+    def test_a_silent_lane_running_one_task_for_eight_minutes_is_not_restarted(self):
+        """A lane in one long task (a big port load) finishes nothing for minutes and misses its ping: busy, not dead."""
+        self.break_lanes()
+        quiet = {}  # no task finished in the last 90 seconds
+        started_eight_minutes_ago = {p: 480 for p in ('discovery', 'cve_feed', 'validation_priority', 'classic')}
+        with mock.patch('reNgine.lane_memory.recent_progress', return_value=quiet), mock.patch('reNgine.lane_memory.in_flight', return_value=started_eight_minutes_ago):
+            self.tick()
+            self.tick(400)
+        self.assertIsNone(self.request())
+        self.assertIn('busy', self.state('R1').status_text)
+        self.assertNotIn('stopped', self.state('R1').status_text)
+
+    def test_a_silent_lane_whose_task_started_over_thirty_minutes_ago_is_still_restarted(self):
+        self.break_lanes()
+        with mock.patch('reNgine.lane_memory.recent_progress', return_value={}), mock.patch('reNgine.lane_memory.in_flight', return_value={}):
+            self.tick()
+            self.tick(400)
+        self.assertIsNotNone(self.request())
+
     def test_an_unreadable_update_state_stands_it_down(self):
         self.break_lanes()
         self.probes.data['update'] = RuntimeError('cannot read')

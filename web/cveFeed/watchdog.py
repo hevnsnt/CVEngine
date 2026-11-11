@@ -135,18 +135,32 @@ def check_lanes(ctx):
     silent = [p for p, lane in status.items() if lane['present'] is False]
     try:
         from reNgine import lane_memory
-        working = lane_memory.recent_progress()
+        finished = lane_memory.recent_progress()
+        running = lane_memory.in_flight()
     except Exception:  # noqa: BLE001 - no evidence of work means the old rule: a silent lane is absent
-        working = {}
+        finished, running = {}, {}
+    working = set(finished) | set(running)
     absent = [p for p in silent if p.removesuffix('_worker') not in working]  # the lane table says cve_feed_worker, the memory report cve_feed
     queues = snap.get('queues') or {}
     if not absent:
         if silent:
-            return Check(False, f'All four worker lanes answer, except {_lanes_text(silent)}, which missed a ping but finished a task {min(working[p.removesuffix('_worker')] for p in silent)} seconds ago: busy, not gone.')
+            return Check(False, f'All four worker lanes answer, except {_lanes_text(silent)}, which missed a ping but is at work ({_work_evidence(silent, finished, running)}): busy, not gone.')
         return Check(False, 'All four worker lanes answer.')
     waiting = {LANE_WORDS.get(p, p): queues.get(status[p]['queue'], 0) for p in absent}
     parts = ', '.join(f'{w}: {n} waiting' for w, n in waiting.items())
     return Check(True, f'No answer from the {_lanes_text(absent)} lane{"s" if len(absent) != 1 else ""} ({parts}).', {'absent': absent, 'waiting': waiting})
+
+
+def _work_evidence(silent, finished, running):
+    """What shows that the silent lanes are working, in words (a task finished a moment ago, or a task has been running for some minutes)."""
+    bits = []
+    for p in silent:
+        lane = p.removesuffix('_worker')
+        if lane in finished:
+            bits.append(f'a task finished {finished[lane]} seconds ago')
+        elif lane in running:
+            bits.append(f'a task has been running for {max(1, running[lane] // 60)} minute(s)')
+    return '; '.join(dict.fromkeys(bits))
 
 
 def after_lanes_fixed(ctx, rule, state):

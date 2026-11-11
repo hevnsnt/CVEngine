@@ -55,3 +55,35 @@ class ProgressTests(SimpleTestCase):
         cache.set(lm.CACHE_PREFIX + 'cve_feed', json.dumps({'pid': 1, 'at': 1000.0, 'rss_mb': 5, 'peak_mb': 5, 'tasks': {}}), 600)
         cache.set(lm.CACHE_PREFIX + 'classic', json.dumps({'pid': 2, 'at': 800.0, 'rss_mb': 5, 'peak_mb': 5, 'tasks': {}}), 600)
         self.assertEqual(lm.recent_progress(now=1030.0), {'cve_feed': 30})  # classic last finished 230 s ago: not evidence of anything
+
+
+class InFlightTests(SimpleTestCase):
+    """A lane running one long task writes nothing when it ends, so the start of a task is recorded (the watchdog took such a lane for a dead one)."""
+
+    def setUp(self):
+        lm._state.update(lane=None, started={}, running={}, tasks={}, last_write=0.0, peak_mb=0.0)
+        for lane in lm.LANES:
+            cache.delete(lm.RUNNING_PREFIX + lane)
+
+    def test_a_task_that_started_is_in_flight_until_it_ends(self):
+        with mock.patch.object(lm, 'rss_mb', return_value=50.0), mock.patch.object(lm, 'lane_name', return_value='cve_feed'):
+            lm.before('a', 'cveFeed.tasks.port_load', now=1000.0)
+            self.assertEqual(lm.in_flight(now=1480.0), {'cve_feed': 480})
+            lm.after('a', 'cveFeed.tasks.port_load', now=1500.0)
+        self.assertEqual(lm.in_flight(now=1501.0), {})
+
+    def test_the_youngest_running_task_sets_the_age(self):
+        with mock.patch.object(lm, 'rss_mb', return_value=50.0), mock.patch.object(lm, 'lane_name', return_value='classic'):
+            lm.before('a', 't1', now=1000.0)
+            lm.before('b', 't2', now=1900.0)
+        self.assertEqual(lm.in_flight(now=2000.0), {'classic': 100})
+
+    def test_a_task_running_longer_than_the_limit_is_no_longer_evidence_of_life(self):
+        with mock.patch.object(lm, 'rss_mb', return_value=50.0), mock.patch.object(lm, 'lane_name', return_value='classic'):
+            lm.before('a', 't1', now=1000.0)
+        self.assertEqual(lm.in_flight(now=1000.0 + lm.IN_FLIGHT_SECONDS + 1), {})
+
+    def test_a_cache_that_fails_never_fails_the_task_start(self):
+        with mock.patch.object(lm, 'rss_mb', return_value=50.0), mock.patch.object(lm, 'lane_name', return_value='classic'), \
+                mock.patch('django.core.cache.cache.set', side_effect=OSError('redis down')):
+            lm.before('x', 't', now=5000.0)  # must not raise
