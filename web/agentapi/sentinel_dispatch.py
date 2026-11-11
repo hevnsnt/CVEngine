@@ -1051,27 +1051,39 @@ def _bare_host(target):
     return target.rsplit(':', 1)[0].strip() if target.count(':') == 1 else target.strip()
 
 
+REFUSED = 'refused'  # what ``_resolves`` answers for a name that resolves, but to an address a Sentinel will not scan
+
+
 def _resolves(host, timeout):
+    """True when ``host`` resolves to addresses a scanner may touch (or is an address itself), ``False`` when it does not resolve, ``REFUSED`` when any
+    answer is an address a Sentinel refuses (loopback, link-local, metadata, a private range: ``target_types.is_scannable_ip``, the rule the Sentinel
+    applies to a name it is handed). A name never has tailnet authority, so no project is passed."""
     import socket
+    from targetApp.target_types import is_scannable_ip
     try:
         ipaddress.ip_address(host)
-        return True  # a literal address needs no lookup
+        return True  # a literal address needs no lookup: the stage that built the target judged it
     except ValueError:
         pass
     try:
-        return bool(socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP))
+        answers = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     except (socket.gaierror, UnicodeError, OSError):
         return False
+    if not answers:
+        return False
+    return REFUSED if any(not is_scannable_ip(answer[4][0]) for answer in answers) else True
 
 
-def resolvable_targets(targets, workers=RESOLVE_WORKERS, timeout=RESOLVE_TIMEOUT):
+def resolvable_targets(targets, workers=RESOLVE_WORKERS, timeout=RESOLVE_TIMEOUT, refused=None):
     """The entries of ``targets`` whose host currently resolves, in order: a Sentinel is never handed a target this
     process cannot even look up, which would otherwise dispatch work for nothing and - because the stage that sent it
     marks its whole chunk scanned once the dispatched call returns, not target by target - leave a host that was never
     actually reached looking checked. A stale or deleted DNS record is the common case here (a host that resolved when
     it was first discovered may not resolve months later), not a name a tenant never controlled, so this is a plain
-    resolvability check, not ``targetApp.target_types``'s prohibited-range gate: a target already passed that when it
-    was added. One bounded parallel pass, like ``target_types.blocked_names``; never one lookup per target serially."""
+    resolvability check: a target already passed the prohibited-range gate when it was added. A name that resolves to an address a Sentinel refuses is
+    the other case (its answer changed since, or it was never a host of ours): the Sentinel would fail the task on every scan, so it is dropped here
+    too and, when ``refused`` (a set) is given, added to it so the stage can say why it was not scanned. One bounded parallel pass, like
+    ``target_types.blocked_names``; never one lookup per target serially."""
     from concurrent.futures import ThreadPoolExecutor, wait
     targets = list(targets)
     if not targets:
@@ -1086,9 +1098,12 @@ def resolvable_targets(targets, workers=RESOLVE_WORKERS, timeout=RESOLVE_TIMEOUT
         # name still unanswered then counts as not resolving (its thread ends when the resolver gives up), instead of one slow resolver holding
         # the whole stage.
         wait(futures.values(), timeout=timeout * -(-len(unique) // n_workers))
-        live = {h: f.done() and not f.cancelled() and f.exception() is None and f.result() for h, f in futures.items()}
+        state = {h: f.result() if f.done() and not f.cancelled() and f.exception() is None else False for h, f in futures.items()}
+        live = {h: answer is True for h, answer in state.items()}
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
+    if refused is not None:
+        refused.update(t for t in targets if state.get(hosts[t]) == REFUSED)
     return [t for t in targets if live.get(hosts[t])]
 
 def _finding_to_nuclei_line(finding):
@@ -1179,6 +1194,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
 
     def stream(targets_file, **kwargs):
         stream.unreached = set()  # what this call could not reach (read by ``cveFeed.nuclei_scan.record_reached``): not scanned, whatever the call returns
+        stream.refused = set()  # the part of it whose name resolves to an address a Sentinel refuses: never sent, and the stage says why
         try:
             with open(targets_file, encoding='utf-8') as handle:
                 targets = [line.strip() for line in handle if line.strip()]
@@ -1191,7 +1207,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
         unresolved = set()  # the chunks (as tuples) nothing of which resolves: never offered to a Sentinel
 
         def prepare(chunk):
-            live = resolvable_targets(chunk)
+            live = resolvable_targets(chunk, refused=stream.refused)
             stream.unreached.update(set(chunk) - set(live))  # a name that does not resolve was not scanned: the stage must not record it as done
             if not live:
                 unresolved.add(tuple(chunk))
@@ -1209,6 +1225,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                 for finding in result.get('findings', []):
                     yield _finding_to_nuclei_line(finding)
     stream.unreached = set()
+    stream.refused = set()
     stream.chunks_itself = True  # the caller hands over the whole list: this splits it and runs the chunks side by side
     stream.signed_in = signed_in_stream(scan, kind, timeout)
     return stream
