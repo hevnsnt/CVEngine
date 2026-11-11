@@ -141,6 +141,25 @@ class LivenessTests(SimpleTestCase):
             lm._state['running'].clear()
             self.assertFalse(lm.heartbeat_once(now=1060.0))
 
+    def test_a_task_that_blocks_the_worker_without_yielding_loses_its_protection(self):
+        # the hub is stalled, so the heartbeat greenlet never runs: the last beat is the one written at the start
+        self._start(1000.0)
+        self.assertEqual(lm.in_flight(now=1000.0 + lm.BEAT_STALE_SECONDS), {'cve_feed': lm.BEAT_STALE_SECONDS})
+        self.assertEqual(lm.in_flight(now=1000.0 + lm.BEAT_STALE_SECONDS + 1), {})  # the record is ignored, like a hung worker's
+
+    def test_a_ghost_entry_whose_postrun_never_fired_is_bounded_by_the_ceiling(self):
+        self._start(1000.0)  # a task that started and never reported its end: the beat goes on for as long as the process lives
+        with mock.patch.object(lm, 'lane_name', return_value='cve_feed'):
+            for beat in range(1030, 1000 + lm.IN_FLIGHT_MAX_SECONDS + 3600, 600):
+                lm.heartbeat_once(now=float(beat))
+            self.assertTrue(lm._state['running'])  # still a ghost, still beating
+            just_inside = 1000.0 + lm.IN_FLIGHT_MAX_SECONDS - 60
+            lm.heartbeat_once(now=just_inside - 5)
+            self.assertEqual(lm.in_flight(now=just_inside), {'cve_feed': lm.IN_FLIGHT_MAX_SECONDS - 60})
+            past = 1000.0 + lm.IN_FLIGHT_MAX_SECONDS + 60
+            lm.heartbeat_once(now=past - 5)
+            self.assertEqual(lm.in_flight(now=past), {})  # beating, but past the twelve hour ceiling
+
     def test_the_first_task_starts_one_heartbeat_thread(self):
         lm._state['beat_thread'] = None
         with mock.patch.object(lm.threading, 'Thread') as thread, mock.patch.object(lm, 'rss_mb', return_value=50.0), mock.patch.object(lm, 'lane_name', return_value='classic'):

@@ -129,7 +129,7 @@ def _heartbeat_loop():
 
 def _ensure_heartbeat():
     """Start the one thread that refreshes the record every ``HEARTBEAT_SECONDS`` (a greenlet under gevent, which the workers run: the heartbeat goes on while a
-    task is blocked in a socket or a subprocess, and stops when the process dies, which is the point). Never raises."""
+    task is blocked in a socket or a child process, and stops when the process dies, which is the point). Never raises."""
     thread = _state.get('beat_thread')
     if thread is not None and thread.is_alive():
         return
@@ -186,7 +186,7 @@ HEARTBEAT_SECONDS = 30  # how often a worker with a task running refreshes its r
 BEAT_STALE_SECONDS = 90  # a record whose beat is older than this (three missed beats) was written by a worker that is gone or stuck
 # The longest a task may be called busy on its heartbeat alone. A queue's hard time limit (reNgine/time_limits.py) is held below the broker's visibility
 # timeout (12 hours), so a task still "running" after that has outlived every limit it can have: the lane's heartbeat then proves the lane lives, not that the
-# task works, and the watchdog's other rules judge it again. Below the ceiling a healthy long task (a 45 minute port load) is never restarted.
+# task works, and the watchdog's other rules judge it again. Below the ceiling a healthy long task that lets the worker yield (a 45 minute port load) is not restarted; one that blocks the worker without yielding stops the beat and is judged like a hung worker.
 IN_FLIGHT_MAX_SECONDS = 12 * 3600
 
 
