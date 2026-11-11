@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # project to say so again. A quick answer is not kept, so a small install behaves exactly as before.
 IDLE_MIN_COST = 0.5
 IDLE_FACTOR = 10
-IDLE_CEILING = 300
+IDLE_CEILING = 60  # a host that becomes due without a new row (its retry window ends, it is restored) waits this long at most
 _monotonic = time.monotonic
 
 
@@ -50,21 +50,36 @@ def _idle_key(kind, project):
     return f'cve:topup:idle:{kind}:{getattr(project, "pk", project)}'
 
 
+def _inventory_token(project):
+    """What the project's inventory looked like when an empty answer was given: its newest host row and how many of its scans finished. A host that is
+    discovered adds a row, and a scan that finishes makes the hosts it holds current, so either one changes the token and the remembered answer is
+    not used. Two small indexed reads, against the per-host stage checks the answer spares."""
+    from django.db.models import Max
+    from startScan.models import ScanHistory, Subdomain
+    pk = getattr(project, 'pk', project)
+    newest = Subdomain.objects.filter(target_domain__project_id=pk).aggregate(n=Max('id'))['n']
+    finished = ScanHistory.objects.filter(domain__project_id=pk, scan_status=2).count()
+    return f'{newest}:{finished}'
+
+
 def _idle_known(kind, project):
     try:
-        return cache.get(_idle_key(kind, project)) is not None
+        remembered = cache.get(_idle_key(kind, project))
+        return remembered is not None and remembered == _inventory_token(project)
     except Exception:  # noqa: BLE001 - without the cache every call reads the database, as before
         return False
 
 
-def _idle_remember(kind, project, took):
-    """Keep an empty answer that took ``took`` seconds to give, when that was slow enough to be worth sparing the database the next ask."""
+def _idle_remember(kind, project, took, token=None):
+    """Keep an empty answer that took ``took`` seconds to give, when that was slow enough to be worth sparing the database the next ask. ``token`` is
+    the inventory as it was before the answer was computed (``_inventory_token``), so a host that arrived during the read is not hidden."""
     if took < IDLE_MIN_COST:
         return
     try:
-        cache.set(_idle_key(kind, project), 1, int(min(IDLE_CEILING, IDLE_FACTOR * took)))
+        cache.set(_idle_key(kind, project), token if token is not None else _inventory_token(project), int(min(IDLE_CEILING, IDLE_FACTOR * took)))
     except Exception:  # noqa: BLE001
         pass
+
 
 PROJECT_LIMIT = 100          # projects examined per run; today's installations have under ten
 MAX_ENQUEUED_PER_RUN = 20    # mirrors host_assessment's base global cap (it grows with the Sentinels' slots, see host_assessment.caps)
@@ -87,9 +102,10 @@ def host_coverage_due(project, at, limit=1, need_count=True):
     at least one" (the top-up and the full-port/UDP sweep gate) passes ``need_count=False`` to skip the DISTINCT aggregate below: with
     it off, this is a single bounded ``LIMIT`` query.
     """
-    if not need_count and _idle_known('due', project):  # nothing was due a moment ago and finding that out was slow: the same answer, from the cache
+    if not need_count and _idle_known('due', project):  # nothing was due a moment ago, the inventory is as it was, and finding that out was slow: the same answer
         return None, []
     started = _monotonic()
+    token = None if need_count else _inventory_token(project)
     from django.db.models import Exists, OuterRef
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import HostAssessment, HostExclusion, HostState
@@ -129,7 +145,7 @@ def host_coverage_due(project, at, limit=1, need_count=True):
     due_ids = list(rows.order_by('id').values_list('id', flat=True)[:limit]) if limit else []
     count = (rows.order_by().values('name').distinct().count()) if need_count else None
     if not need_count and limit and not due_ids:
-        _idle_remember('due', project, _monotonic() - started)
+        _idle_remember('due', project, _monotonic() - started, token)
     return count, due_ids
 
 
@@ -270,9 +286,11 @@ def stalest_hosts(project, now, limit, gap):
     from startScan.models import Subdomain
     from targetApp.models import Domain
 
-    if _idle_known('stale', project):  # no host was stale a moment ago and finding that out was slow (it reads the whole inventory): the same answer
+    memo = f'stale:{int(gap.total_seconds())}'  # one answer per gap: a shorter gap finds hosts a longer one leaves out
+    if _idle_known(memo, project):  # no host was stale a moment ago, the inventory is as it was, and finding that out was slow (it reads the whole inventory): the same answer
         return []
     started = _monotonic()
+    token = _inventory_token(project)
     current = list(Subdomain.objects.filter(latest_scan_q(), target_domain__project=project)
                    .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: never assessed on its own (host_assessment._admit refuses it too)
                    .values_list('id', 'name'))
@@ -305,7 +323,7 @@ def stalest_hosts(project, now, limit, gap):
         if len(out) >= limit:
             break
     if not out:
-        _idle_remember('stale', project, _monotonic() - started)
+        _idle_remember(memo, project, _monotonic() - started, token)
     return out
 
 
