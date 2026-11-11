@@ -81,3 +81,27 @@ class CensusPagingTests(TestCase):
         with mock.patch.object(check_coverage, 'load', spy):
             work_planner.build_census(timezone.now())
         self.assertEqual(names, [f'h{i}.pg.example.com' for i in range(HOSTS)])
+
+
+class PageIsFilteredAgainTests(TestCase):
+    def test_a_host_that_stopped_being_current_while_the_census_ran_is_not_checked(self):
+        """Review 621 defect 7: the ids are read once, so a page was loaded by id alone and a row that left the inventory meanwhile was still checked."""
+        from datetime import timedelta
+
+        from cveFeed.correlation import latest_scan_q
+        now = timezone.now()
+        org = Org.objects.create(name='Pf', slug='pf-org')
+        engine = EngineType.objects.create(engine_name='pf-engine', yaml_configuration='x', default_engine=True)
+        project = Project.objects.create(name='Pf', slug='pf-proj', org=org, insert_date=now)
+        domain = Domain.objects.create(name='pf.example.com', project=project, insert_date=now)
+        old = ScanHistory.objects.create(domain=domain, start_scan_date=now - timedelta(hours=2), scan_status=2, tasks=[], results_dir='x', scan_type=engine)
+        Subdomain.objects.bulk_create([Subdomain(name=f'h{i}.pf.example.com', target_domain=domain, scan_history=old) for i in range(5)])
+        hosts = Subdomain.objects.filter(latest_scan_q(), target_domain=domain)
+        with mock.patch.object(work_planner, 'PAGE', 3):
+            pages = work_planner._pages(hosts)
+            first = next(pages)
+            newer = ScanHistory.objects.create(domain=domain, start_scan_date=now, scan_status=2, tasks=[], results_dir='x', scan_type=engine)
+            Subdomain.objects.create(name='h9.pf.example.com', target_domain=domain, scan_history=newer)  # the old scan's rows are no longer current
+            rest = list(pages)
+        self.assertEqual(len(first), 3)
+        self.assertEqual([row for page in rest for row in page], [])

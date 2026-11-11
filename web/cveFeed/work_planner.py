@@ -167,11 +167,11 @@ def _sort_key(h, entry, web=False):
 
 def _pages(hosts):
     """``hosts`` (a Subdomain queryset) in id order, ``PAGE`` rows at a time: the ids are read once (the current-inventory filter, a dear predicate, runs one time
-    and not once per page, and a list of ids is small), each page of rows is then read by its ids. Yields lists of rows."""
-    from startScan.models import Subdomain
+    and not once per page, and a list of ids is small), each page of rows is then read by its ids, through the same filter again (cheap for 200 ids): a host deleted, or no longer current, since the ids were
+    read is not checked, and is not counted as the copy of its name that the other copies are then dropped for. Yields lists of rows."""
     ids = list(hosts.order_by('id').values_list('pk', flat=True))
     for start in range(0, len(ids), PAGE):
-        yield list(Subdomain.objects.filter(pk__in=ids[start:start + PAGE]).select_related('target_domain').order_by('id'))
+        yield list(hosts.filter(pk__in=ids[start:start + PAGE]).select_related('target_domain').order_by('id'))
 
 
 def build_census(now=None):

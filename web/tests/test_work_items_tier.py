@@ -59,3 +59,13 @@ class WorkItemsTierTests(TestCase):
     def test_the_tier_of_an_item_is_the_tier_asked_for(self):
         for tier in ('fire', 'smoke', 'ice'):
             self.assertEqual({i['cve']['tier'] for i in self.work(tier=tier)['results']} - {tier}, set())
+
+
+class WorkItemsDocsTests(TestCase):
+    def test_the_agent_api_doc_names_truncated_the_tier_filter_and_the_window(self):
+        """Review 621 defect 5: the docs say what ``truncated`` means (and that it is project-wide, before the asset filter) and that the tier filters in the database."""
+        from pathlib import Path
+        text = (Path(__file__).resolve().parents[2] / 'docs' / 'AGENT-API.md').read_text()
+        line = next(l for l in text.splitlines() if l.startswith('2. `get_remediation_work`'))
+        for needle in ('`truncated`', '?tier=fire|smoke|ice', 'in the database', '2,000', 'before `?assets=` narrows them'):
+            self.assertIn(needle, line)

@@ -70,3 +70,15 @@ class DetectionProgressUsesItsIndexTests(TestCase):
             CVEDetection.objects.create(cve_entry=entry, source=source, strategy=strategy)
         got = detection_author.progress()
         self.assertEqual((got['cves'], got['rules'], got['ai'], got['manual']), (5, 1, 1, 1))
+
+
+class IndexMigrationsAreConcurrentTests(TestCase):
+    def test_both_index_migrations_build_concurrently_outside_a_transaction(self):
+        """Review 621 defect 6: a large-table index is built CONCURRENTLY in a non-atomic migration, so an upgrade never blocks the feed or the Sentinels."""
+        import importlib
+
+        from django.contrib.postgres.operations import AddIndexConcurrently
+        for name in ('cveFeed.migrations.0159_cvedetection_source_filled_idx', 'agentapi.migrations.0022_sentineltask_unscrubbed_idx'):
+            migration = importlib.import_module(name).Migration
+            self.assertFalse(migration.atomic, name)
+            self.assertTrue(all(isinstance(op, AddIndexConcurrently) for op in migration.operations), name)

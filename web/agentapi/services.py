@@ -4237,7 +4237,8 @@ WORK_ITEMS_WINDOW = 2000  # the matches ``work_items`` reads, best ranked first 
 def work_items(ctx, slug, params):
     """Remediation handoff: confirmed or pending CVE-on-host matches still to fix, narrowed to the
     agent's registered assets (or ?assets=a,b) and optionally to a tier (``fire``, ``smoke`` or ``ice``, filtered in the database). At most ``WORK_ITEMS_WINDOW``
-    matches are read, best ranked first; ``truncated`` is true when there were more."""
+    matches are read, best ranked first; ``truncated`` is true when there were more. It refers to that project-wide window, before the asset filter (which looks only
+    at the window): with assets set it can be true when none of the window belongs to them."""
     from cveFeed.models import CVEMatch
     project, _ = get_one_project(ctx, slug)
     asked = [a.strip() for a in (params.get('assets') or '').split(',') if a.strip()]
