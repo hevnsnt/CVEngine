@@ -15,12 +15,15 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 
+from urllib.parse import urlsplit
+
 import requests
 
 from cveFeed.secret_redaction import redact_text
 from reNgine import ai_prompts
-from reNgine.ai_profiles import (DEFAULT_REPLY_CAP, NUMBER_SETTINGS, PROFILES, REASONING_LEVELS, STAGE_ANSWER_CAPS, STAGE_REPLY_CAPS, STRUCTURED_MODES,
-	AIRuntime, answer_room, clean_number, reasoning_plan, reply_total, retry_total, setting_applies, thinking_reserve)
+from reNgine.ai_profiles import (DEFAULT_REPLY_CAP, NUMBER_SETTINGS, PROFILES, REASONING_LEVELS, SETTING_ENV, STAGE_ANSWER_CAPS, STAGE_REPLY_CAPS, STRUCTURED_MODES,
+	AIRuntime, answer_room, cache_min_tokens, clean_number, reasoning_plan, reply_total, retry_total, setting_applies, stage_cache_ttl,
+	thinking_reserve)
 
 logger = logging.getLogger(__name__)
 _usage_stage = ContextVar('cvengine_ai_usage_stage', default='unspecified')
@@ -693,6 +696,29 @@ def _structured_post(provider, build):
 			raise
 
 
+def estimated_tokens(text):
+	"""A deliberately high estimate (3 characters a token; the real figure for English and JSON is 3 to 4), used only to skip a cache marker
+	on a prefix that is clearly under the model's minimum."""
+	return -(-len(text or '') // 3)
+
+
+def prompt_cache_ttl(provider, system):
+	"""'5m' or '1h' when this request's system prompt should carry a cache breakpoint, else None. The system prompt is the stable prefix of
+	every stage (the per-CVE, per-target and per-finding data is in the user turn and is never marked). None when ``CVENGINE_AI_PROMPT_CACHE``
+	is off (the switch back to the old request), when the stage's setting is 'off', when the prompt is under the model's minimum, or when the
+	request does not go to Anthropic's own host (a gateway may refuse the field)."""
+	if not isinstance(system, str) or not system:
+		return None
+	ttl = stage_cache_ttl(_usage_stage.get())  # 'off' for every stage when CVENGINE_AI_PROMPT_CACHE is off
+	if ttl not in ('5m', '1h'):
+		return None
+	if estimated_tokens(system) < cache_min_tokens(provider.model):
+		return None
+	if (urlsplit(provider._messages_url()).hostname or '').lower() != 'api.anthropic.com':
+		return None
+	return ttl
+
+
 class AnthropicProvider(AIProvider):
 	name = 'anthropic'
 
@@ -715,6 +741,9 @@ class AnthropicProvider(AIProvider):
 
 	def _body(self, system, messages):
 		cap = reply_limit(self)
+		ttl = prompt_cache_ttl(self, system)
+		if ttl:  # one breakpoint at the end of the system prompt: everything before the user turn is the cached prefix
+			system = [{'type': 'text', 'text': system, 'cache_control': {'type': 'ephemeral', **({'ttl': '1h'} if ttl == '1h' else {})}}]
 		return {'model': self.model, 'max_tokens': cap, 'system': system, 'messages': messages, **reasoning_fields(self, cap)}
 
 	def list_models(self):

@@ -513,12 +513,31 @@ def _on_commit(fn):
         fn()
 
 
+IMMEDIATE_SECONDS = 5  # a drive due this soon is a wake-up (a scan was stopped), not part of the run's slow rhythm
+
+
+def drive_key(pk):
+    return f'cvengine:stage-drive:{pk}'
+
+
 def _schedule_drive(pk, at):
+    """Queue the next drive of waiting run ``pk``. At most one delayed drive is pending per run: every call to ``drive`` schedules the next one, so with
+    the minute tick and the task-ended wake-ups also calling it, each extra caller started another chain that kept itself going for ever. On the VPS 9 waiting
+    runs had 1,378 delayed drives queued, and Celery counts delayed messages against a worker's prefetch limit, so they held the CVE-feed lane's slots
+    while it sat idle with 2,400 real tasks waiting (11/10). A wake-up (due within seconds) is always sent."""
     def send():
         try:
+            from django.core.cache import cache
             from cveFeed.tasks import stage_run_drive
             countdown = max(1, min(DRIVE_EVERY_SECONDS, (at - timezone.now()).total_seconds() + 0.5)) if at else DRIVE_EVERY_SECONDS
-            stage_run_drive.apply_async((pk,), countdown=countdown, queue=DRIVE_QUEUE, expires=countdown + 600)
+            guarded = countdown > IMMEDIATE_SECONDS
+            if guarded:
+                try:
+                    if not cache.add(drive_key(pk), 1, int(countdown) + 30):
+                        return  # one is already pending for this run
+                except Exception:  # noqa: BLE001 - no cache: send it, as before
+                    guarded = False
+            stage_run_drive.apply_async((pk,), kwargs={'guarded': guarded}, countdown=countdown, queue=DRIVE_QUEUE, expires=countdown + 600)
         except Exception:  # noqa: BLE001 - the minute tick drives it anyway
             logger.warning('could not queue the drive of stage run %s; the tick will', pk, exc_info=True)
     _on_commit(send)

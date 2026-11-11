@@ -311,10 +311,12 @@ class RecordingHandler(BaseHTTPRequestHandler):
 		body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
 		self.server.seen.append({'path': self.path, 'auth': self.headers.get('Authorization'), 'type': self.headers.get('Content-Type'), 'body': body})
 		status, text = self.server.answers.pop(0) if len(self.server.answers) > 1 else self.server.answers[0]
+		payload = text.encode()
 		self.send_response(status)
 		self.send_header('Content-Type', 'application/json')
+		self.send_header('Content-Length', str(len(payload)))  # without a length the body ends at the close, and curl on OpenSSL 3.5 refuses a TLS close with no close_notify
 		self.end_headers()
-		self.wfile.write(text.encode())
+		self.wfile.write(payload)
 
 	def log_message(self, *args):
 		pass

@@ -221,31 +221,47 @@ def refresh_gap():
 def stalest_hosts(project, now, limit, gap):
     """Up to ``limit`` ``Subdomain`` rows of ``project``'s current inventory whose last host assessment started longest ago (never assessed first),
     leaving out a host assessed inside ``gap``. One row per host name. This is for hosts that already have their first-pass coverage: the ones that
-    miss it are ``host_coverage_due``'s."""
-    from django.db.models import F, OuterRef, Q, Subquery
-    from django.db.models.functions import Lower
+    miss it are ``host_coverage_due``'s.
+
+    Four plain reads joined here, not one query. The single query (a correlated "last assessment of this host name" sub-select, a ``Lower(name)`` anti-join
+    for archived hosts and a sort on the sub-select) took 129 seconds for a project of 12,700 host rows on the VPS, because ``HostAssessment`` has no
+    index on the host and every outer row scanned the project's assessments again. The CVE-feed lane ran it for every project every minute and could do
+    nothing else while it ran (11/10). Each read below takes well under a second."""
+    from django.db.models import Max
+
     from cveFeed.correlation import latest_scan_q
-    from django.db.models import Exists
     from cveFeed.models import HostAssessment, HostState
     from startScan.models import Subdomain
     from targetApp.models import Domain
 
-    last = HostAssessment._base_manager.filter(project=project, host=OuterRef('lowered')).order_by('-created_at').values('created_at')[:1]
+    current = list(Subdomain.objects.filter(latest_scan_q(), target_domain__project=project)
+                   .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: never assessed on its own (host_assessment._admit refuses it too)
+                   .values_list('id', 'name'))
+    last = dict(HostAssessment._base_manager.filter(project=project).order_by().values('host').annotate(at=Max('created_at')).values_list('host', 'at'))
     # An archived host is never assessed (host_assessment._admit refuses it), so it never gets a newer assessment and stays the stalest host for ever: left in,
     # a few hundred of them filled the whole candidate window, every pass queued nothing and logged a line per host, and the Sentinels idled while real hosts
     # waited (the owner's VPS, 2026-11-09).
-    archived = HostState.objects.filter(project=project, host=OuterRef('lowered'), archived_at__isnull=False)
-    rows = (Subdomain.objects.filter(latest_scan_q(), target_domain__project=project).select_related('target_domain')
-            .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: never assessed on its own (host_assessment._admit refuses it too)
-            .annotate(lowered=Lower('name')).annotate(last_assessed=Subquery(last))
-            .filter(~Exists(archived))
-            .filter(Q(last_assessed__isnull=True) | Q(last_assessed__lt=now - gap))
-            .order_by(F('last_assessed').asc(nulls_first=True), 'id')[:limit * 4])
-    seen, out = set(), []
-    for row in rows:
-        if row.lowered in seen:
+    archived = set(HostState.objects.filter(project=project, archived_at__isnull=False).values_list('host', flat=True))
+    cutoff = now - gap
+    epoch = now.min.replace(tzinfo=now.tzinfo) if now.tzinfo else now.min
+    candidates = []
+    for pk, name in current:
+        lowered = name.lower()
+        if lowered in archived:
             continue
-        seen.add(row.lowered)
+        at = last.get(lowered)
+        if at is None or at < cutoff:
+            candidates.append((at is not None, at or epoch, pk, lowered))  # never assessed first, then the longest ago, then by id
+    candidates.sort()
+    chosen = candidates[:limit * 4]
+    rows = Subdomain.objects.select_related('target_domain').in_bulk([c[2] for c in chosen])
+    seen, out = set(), []
+    for _flag, _at, pk, lowered in chosen:
+        if lowered in seen or pk not in rows:
+            continue
+        seen.add(lowered)
+        row = rows[pk]
+        row.lowered = lowered
         out.append(row)
         if len(out) >= limit:
             break

@@ -252,3 +252,35 @@ class RefreshTests(Base):
         coverage_topup.refresh_for_sentinels(self.now)
         coverage_topup.refresh_for_sentinels(self.now)
         self.assertEqual(HostAssessment.objects.filter(status='queued').count(), 1)
+
+
+class FeedSentinelsSingleFlightTests(TestCase):
+    def test_a_second_run_does_not_start_while_the_first_is_going(self):
+        from django.core.cache import cache
+
+        from cveFeed import tasks
+        cache.delete(tasks.FEED_SENTINELS_LOCK)
+        calls = []
+
+        def slow():
+            calls.append('started')
+            nested = tasks.feed_sentinels.run()  # what a second beat tick would do while this one runs
+            calls.append(nested)
+            return {'ran': True}
+        with mock.patch.object(coverage_topup, 'feed_sentinels', side_effect=slow):
+            first = tasks.feed_sentinels.run()
+        self.assertEqual(first, {'ran': True})
+        self.assertEqual(calls, ['started', {'skipped': 'the previous run is still going'}])
+        self.assertTrue(cache.add(tasks.FEED_SENTINELS_LOCK, 1, 5))  # released afterwards
+        cache.delete(tasks.FEED_SENTINELS_LOCK)
+
+    def test_the_lock_is_released_when_the_run_fails(self):
+        from django.core.cache import cache
+
+        from cveFeed import tasks
+        cache.delete(tasks.FEED_SENTINELS_LOCK)
+        with mock.patch.object(coverage_topup, 'feed_sentinels', side_effect=RuntimeError('boom')):
+            with self.assertRaises(RuntimeError):
+                tasks.feed_sentinels.run()
+        self.assertTrue(cache.add(tasks.FEED_SENTINELS_LOCK, 1, 5))
+        cache.delete(tasks.FEED_SENTINELS_LOCK)

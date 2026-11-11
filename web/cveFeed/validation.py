@@ -1503,14 +1503,19 @@ def _adopt(row, check):
     return False
 
 
-def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_for=None, selected_kinds=None, unattended=True):
+def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_for=None, selected_kinds=None, unattended=True, budget_seconds=None):
     """Plan and run the checks for ``triage_ids`` (rows of ``project_id`` only: a row of another project is never touched), within the
     per-run, per-project and per-day caps and the ledger TTL, honouring the stop flag of ``scan_id``. Returns the counts. Never raises
     for one check's trouble: a failure is recorded on its row and retried later. ``unattended`` is False only for a person's own request
     (Validate now): it reaches every check's subject, so the bug bounty gate holds an automatic run to the project's confirmation and a
     person's own one to the program's scope only.
 
-    ``runners`` replaces the default check runners (tests); ``template_for(cve_id)`` replaces ``resolve_template``."""
+    ``runners`` replaces the default check runners (tests); ``template_for(cve_id)`` replaces ``resolve_template``.
+
+    ``budget_seconds``: stop starting new findings once this long has passed (after at least one), and say which were left in ``stats['deferred_ids']``.
+    A batch is up to 200 findings of network checks, minutes of one worker slot; the sweep's batches filled every slot of the CVE-feed lane while the
+    scheduler's own ticks waited behind them (11/10). The task re-queues what was left at the back of the queue, so a tick runs between slices."""
+    import time as _time
     from cveFeed import ledger, notify
     from cveFeed.models import Triage
     from reNgine import resources
@@ -1529,11 +1534,17 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
     hits = []
     from targetApp.models import narrowed_names
     narrowed = narrowed_names(project_id, [r.host for r in rows if r.host])  # once for the batch
+    started = _time.monotonic()
+    handled = 0
     with resources.scan_context(scan_id):
-        for row in rows:
+        for index, row in enumerate(rows):
             if scan_id is not None and resources.abort_requested(scan_id):
                 stats['stopped'] = True
                 break
+            if budget_seconds is not None and handled and _time.monotonic() - started > budget_seconds:
+                stats['deferred_ids'] = [r.pk for r in rows[index:]]
+                break
+            handled += 1
             if row.next_attempt_at and row.next_attempt_at > now:
                 continue
             findings = triage.load_findings([row])

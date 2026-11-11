@@ -41,6 +41,27 @@ def claude_version(model):
     return old_family, int(old_major), int(old_minor or 0)
 
 
+# The shortest prompt Anthropic will cache, by model: a COPY of ``web/reNgine/ai_profiles.cache_min_tokens`` (this image cannot import the
+# server). ``web/tests/test_ai_prompt_cache.py`` fails when the two differ. A shorter prefix marked for the cache is processed normally.
+CACHE_MIN_DEFAULT = 4096
+
+
+def cache_min_tokens(model):
+    version = claude_version(model)
+    if not version:
+        return CACHE_MIN_DEFAULT
+    family, major, minor = version
+    if family in ('fable', 'mythos'):
+        return 512
+    if family == 'opus':
+        return 512 if (major, minor) >= (5, 0) else 2048 if (major, minor) == (4, 7) else 4096 if (major, minor) in ((4, 5), (4, 6)) else 1024
+    if family == 'sonnet':
+        return 512 if (major, minor) >= (5, 5) else 1024
+    if family == 'haiku':
+        return 512 if (major, minor) >= (5, 5) else 4096 if (major, minor) >= (4, 5) else 2048
+    return CACHE_MIN_DEFAULT
+
+
 def _anthropic_reasoning(model):
     """``adaptive`` (``thinking: {"type": "adaptive"}`` plus ``output_config.effort``) from 4.6 on, and for every Fable and Mythos; ``budget``
     (``thinking: {"type": "enabled", "budget_tokens": N}``) from 3.7 up to 4.5; ``none`` before that (no extended thinking) and for a name that is

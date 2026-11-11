@@ -481,18 +481,65 @@ def _explained(link):
     return {'rows': ready[:100] + refused[:100], 'ready': len(ready), 'refused': len(refused), 'groups': group_reasons(r['reason'] for r in refused)}
 
 
+# The Sentinels page polls the OpenVAS queue. Working out one project's explanation takes up to a few seconds on a large install (``hot_names``
+# reads each domain's current inventory twice), and the page used to do it in the request whenever its one-minute cache had lapsed: about 9 s
+# for 15 projects on the production install, so the Sentinels took 10 to 20 s to appear. Now the last answer is kept for an hour and served at
+# once; once it is older than a minute the page asks the live_cache lane (a worker that never scans) to work it out again, one refresh per
+# project at a time. Only an explanation nobody has worked out yet (a new project, an emptied cache) is worked out in the request.
+QUEUE_FRESH_SECONDS = 60
+QUEUE_KEEP_SECONDS = 3600
+QUEUE_REFRESH_LOCK_SECONDS = 300
+
+
+def _queue_key(project_id):
+    return f'openvas-queue:v2:{project_id}'
+
+
+def refresh_queue(project_id):
+    """Work out one project's OpenVAS queue explanation and keep it (``queue_explained``). Returns it, or None when the project is not opted in."""
+    from django.core.cache import cache
+    try:
+        link = next((l for l in links_for([project_id]) if l.project_id == project_id), None)
+        if link is None:
+            cache.delete(_queue_key(project_id))
+            return None
+        value = _explained(link)
+        cache.set(_queue_key(project_id), {'at': time.time(), 'value': value}, QUEUE_KEEP_SECONDS)
+        return value
+    finally:
+        cache.delete(f'{_queue_key(project_id)}:refreshing')
+
+
+def queue_explained(link, now=None):
+    """One project's explanation for the page, without waiting: the kept answer, with a refresh asked for when it is over a minute old."""
+    from django.core.cache import cache
+    now = time.time() if now is None else now
+    held = cache.get(_queue_key(link.project_id))
+    if not isinstance(held, dict) or 'value' not in held:
+        value = _explained(link)
+        cache.set(_queue_key(link.project_id), {'at': now, 'value': value}, QUEUE_KEEP_SECONDS)
+        return value
+    if now - float(held.get('at') or 0) > QUEUE_FRESH_SECONDS and cache.add(f'{_queue_key(link.project_id)}:refreshing', 1, QUEUE_REFRESH_LOCK_SECONDS):
+        try:
+            from cveFeed.tasks import refresh_openvas_queue
+            refresh_openvas_queue.delay(link.project_id)
+        except Exception:  # noqa: BLE001 - a broker that cannot be reached leaves the kept answer; the page must still draw
+            cache.delete(f'{_queue_key(link.project_id)}:refreshing')
+            logger.warning('the OpenVAS queue refresh for project %s could not be queued', link.project_id, exc_info=True)
+    return held['value']
+
+
 def overview(project_ids, limit=12):
     """The OpenVAS queue for the Sentinels page, over the projects the viewer may read: the run in progress, the hosts due next in scan order
     and the hosts that are not due, each with the reason in plain words (Fire or Smoke only; never a CDN or a shared platform; scanned three days
-    ago). ``None`` while the add-on is off. The per-project explanation is cached for a minute: the page polls."""
-    from django.core.cache import cache
+    ago). ``None`` while the add-on is off. Each project's explanation is read from the cache (``queue_explained``): the page never waits for it."""
     from cveFeed.models import OpenvasRun, OpenvasSettings
     if not OpenvasSettings.current().enabled:
         return None
     run = OpenvasRun.objects.filter(status='running', project_id__in=project_ids).select_related('project').first()
     rows, ready_total, refused_total, groups = [], 0, 0, {}
     for link in links_for(project_ids):
-        found = cache.get_or_set(f'openvas-queue:{link.project_id}', lambda link=link: _explained(link), 60)
+        found = queue_explained(link)
         rows += [{**r, 'project': link.project.slug} for r in found['rows']]
         ready_total, refused_total = ready_total + found['ready'], refused_total + found['refused']
         for g in found['groups']:
