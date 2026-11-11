@@ -5,9 +5,9 @@
 
 # Versions are pinned so builds are reproducible. nuclei is pinned to the version the CI smoke test uses and bumped on purpose, after
 # scripts/check_tool_versions.py says a newer one exists: see "Pinned tools" in docs/UPDATES.md. Its TEMPLATES are not pinned: they refresh at runtime.
-ARG GOVERSION=1.27.4
-ARG GO_SHA256_AMD64=7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840
-ARG GO_SHA256_ARM64=3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92
+ARG GOVERSION=1.27.3
+ARG GO_SHA256_AMD64=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
+ARG GO_SHA256_ARM64=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49
 ARG NUCLEI_VERSION=3.11.1
 
 # Build stage: the Go toolchain (checksum verified) compiles nuclei; only the binary is copied on.

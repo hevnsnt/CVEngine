@@ -82,7 +82,7 @@ TOOLS = [
     tool('python-gvm-sentinel', 'python-gvm', GH + 'greenbone/python-gvm', 'scanners', '27.10.1', 'GPL-3.0-or-later',
          'The GMP client library behind the OpenVAS add-on, in the Sentinel image and in the server image', where='both',
          pins=[('web/requirements.txt', r'(?m)^python-gvm==([0-9.]+)'), (SENTINEL_REQUIREMENTS, r'(?m)^python-gvm==([0-9.]+)')]),
-    tool('go', 'Go toolchain', 'https://go.dev', 'scanners', '1.27.4', 'BSD-3-Clause',
+    tool('go', 'Go toolchain', 'https://go.dev', 'scanners', '1.27.3', 'BSD-3-Clause',
          'Builds nuclei and naabu; removed again in the same image layer, so no Go runs in either image', where='both',
          pins=[('web/Dockerfile', r'ARG GOVERSION=([0-9.]+)'), (SENTINEL_DOCKERFILE, r'ARG GOVERSION=([0-9.]+)')]),
     tool('tailscale', 'Tailscale', GH + 'tailscale/tailscale', 'scanners', '1.104.6', 'BSD-3-Clause',
