@@ -119,7 +119,7 @@ when it lands.
    to the container for a while with a fresh lease token. A stage may hold a job back on a day whose budget is spent: a triage queued on an
    earlier day is counted again against today's caps when it is handed out, so a reviewer that was off for a week never spends more than a
    day's budget in a day.
-3. **The container asks the model.** It fences each untrusted part between nonce markers (`guard.fence`), adds the trusted text as written,
+3. **The container asks the model.** It fences each untrusted part between nonce markers (`guard.fence`), adds the trusted facts (enums, counts, dates and flags, with any marker token defused) and puts the wording of cvENGINE's own results that can quote a host or a template (the heat reason, hard-evidence lines, check labels: a matcher name, a product name) in a second fenced block, `COMPUTED_TEXT`, as data,
    and makes the request the server used to make (`cvengine_reviewer.llm.complete`, ported from the server's provider layer): the same
    endpoints and bodies for Anthropic, the OpenAI-compatible servers (OpenAI, OpenRouter, vLLM, LM Studio) and Ollama, the same reply
    limits, structured output with its step-down when a server refuses it, the reasoning setting, Ollama's context window and keep-alive, and

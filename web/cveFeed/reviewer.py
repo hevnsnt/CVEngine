@@ -226,7 +226,8 @@ def due(limit=PACKET_LIMIT, now=None):
 
 def _raw_evidence(triage, finding):
     """What the scanner stored about the host for this finding, for the injection scan (never sent to the model)."""
-    out = [triage.validation_evidence]
+    out = [triage.validation_evidence, triage.hard_evidence,  # the wording of a hard-evidence line and of a check label can quote the host or a template
+           [step.get('label') for step in (triage.validation_steps or []) if isinstance(step, dict)]]
     if triage.kind == 'cve_match':
         out.append(finding.evidence)
     elif triage.kind == 'hygiene':

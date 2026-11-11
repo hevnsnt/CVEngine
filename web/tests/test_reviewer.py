@@ -199,6 +199,13 @@ class ReviewTests(Fixture):
         self.assertEqual(data['outcome'], 'held')
         self.assertIn('aimed at AI agents', data['reason'])
 
+    def test_instructions_planted_in_a_check_label_hold_the_closure(self):
+        Triage.objects.filter(match=self.match).update(validation_steps=[{'label': SPIKESTRIP[0], 'kind': 'script_read', 'result': 'clean'}],
+                                                       hard_evidence=[])
+        packet = self.packet()
+        self.assertIn('workflow_order', packet['trusted']['instructions_aimed_at_ai_found_in_evidence'])
+        self.assertEqual(self.verdict(packet)[1]['outcome'], 'held')
+
     def test_a_note_that_repeats_a_planted_marker_is_discarded(self):
         CVEMatch.objects.filter(pk=self.match.pk).update(evidence={'source': 'tech', 'build': 'a7c94e2b610f'})
         triage.track([CVEMatch.objects.get(pk=self.match.pk)])

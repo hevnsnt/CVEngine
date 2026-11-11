@@ -53,10 +53,22 @@ def measured_call(server, stage, provider, system, user, schema, max_tokens, eff
         limit, attempt = retry, attempt + 1
 
 
+# The words of cvENGINE's own results that quote what the host or a template author wrote: a matcher name, a product name in a check's label,
+# a person's reason for a heat. The result is cvENGINE's; the wording is not, so it goes into a fenced block as data (``COMPUTED_TEXT``).
+QUOTING_KEYS = ('heat_reason', 'hard_evidence', 'validation_checks', 'server_will_not_close_because')
+
+
 def review_message(packet):
-    trusted = json.dumps({'kind': packet.get('kind'), **(packet.get('trusted') or {})}, ensure_ascii=False, sort_keys=True, default=str)
+    """The user turn of one review: the TRUSTED facts cvENGINE computed (enums, counts, dates, flags, every string defused), the wording of
+    its results that can quote the host (``COMPUTED_TEXT``, fenced as data) and the host's own data (``UNTRUSTED``, fenced)."""
+    given = packet.get('trusted') or {}
+    quoting = {key: given[key] for key in QUOTING_KEYS if key in given}
+    facts = {'kind': packet.get('kind'), **{k: v for k, v in given.items() if k not in QUOTING_KEYS},
+             'hard_evidence_count': len(given.get('hard_evidence') or [])}
+    trusted = json.dumps(guard.defuse(facts), ensure_ascii=False, sort_keys=True, default=str)
+    computed = (guard.fence('COMPUTED_TEXT', quoting)[0] + '\n\n') if quoting else ''
     fenced, _ = guard.fence('UNTRUSTED', packet.get('untrusted') or {})
-    return (f'TRUSTED (computed by cvENGINE):\n{trusted}\n\n{fenced}\n\n'
+    return (f'TRUSTED (computed by cvENGINE):\n{trusted}\n\n{computed}{fenced}\n\n'
             'Judge this finding by the rules and answer with the JSON object.')
 
 
