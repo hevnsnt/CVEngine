@@ -85,7 +85,7 @@ TOOLS = [
     tool('go', 'Go toolchain', 'https://go.dev', 'scanners', '1.27.3', 'BSD-3-Clause',
          'Builds nuclei and naabu; removed again in the same image layer, so no Go runs in either image', where='both',
          pins=[('web/Dockerfile', r'ARG GOVERSION=([0-9.]+)'), (SENTINEL_DOCKERFILE, r'ARG GOVERSION=([0-9.]+)')]),
-    tool('tailscale', 'Tailscale', GH + 'tailscale/tailscale', 'scanners', '1.104.4', 'BSD-3-Clause',
+    tool('tailscale', 'Tailscale', GH + 'tailscale/tailscale', 'scanners', '1.104.6', 'BSD-3-Clause',
          'The optional sidecar that joins a tailnet so scans can reach it', where='server', optional='COMPOSE_PROFILES=tailscale',
          pins=[('docker-compose.yml', r'tailscale/tailscale:v([0-9.]+)')]),
     # -- OpenVAS add-on -----------------------------------------------------------------------------------------------------------------------------
@@ -108,7 +108,7 @@ TOOLS = [
          where='both', pins=[('web/Dockerfile', r'(?m)^FROM ubuntu:([0-9.]+)$'), (SENTINEL_DOCKERFILE, r'(?m)^FROM ubuntu:([0-9.]+)@')]),
     tool('python', 'Python', 'https://www.python.org', 'platform', 'distribution package', 'PSF License', 'The runtime of the server, the Sentinel client and the AI reviewer '
          '(the reviewer image is python:3.13-slim-bookworm)', where='both'),
-    tool('django', 'Django', 'https://www.djangoproject.com', 'platform', '5.2.18', 'BSD-3-Clause', 'The web framework and its REST framework',
+    tool('django', 'Django', 'https://www.djangoproject.com', 'platform', '5.2.19', 'BSD-3-Clause', 'The web framework and its REST framework',
          where='server', pins=[('web/requirements.txt', r'(?m)^Django==([0-9.]+)')]),
     tool('celery', 'Celery', GH + 'celery/celery', 'platform', '5.6.3', 'BSD-3-Clause', 'The task queue (with kombu, amqp, billiard and vine) and its beat scheduler',
          where='server', pins=[('web/requirements.txt', r'(?m)^celery==([0-9.]+)')]),
@@ -122,7 +122,7 @@ TOOLS = [
          'Redis 8 and later: RSALv2, SSPLv1 or AGPLv3 at your option; Redis 7.2 and earlier: BSD-3-Clause. The tag moves, so check the image you pulled',
          'The Celery broker, the cache and the locks', where='server'),
     tool('nginx', 'nginx', GH + 'nginx/nginx', 'platform', 'moving tag (nginx:alpine)', 'BSD-2-Clause', 'The reverse proxy that terminates TLS', where='server'),
-    tool('anthropic-sdk', 'Anthropic SDK', GH + 'anthropics/anthropic-sdk-python', 'platform', '2.3.0', 'Apache-2.0',
+    tool('anthropic-sdk', 'Anthropic SDK', GH + 'anthropics/anthropic-sdk-python', 'platform', '2.8.0', 'Apache-2.0',
          'The AI reviewer container\'s only dependency of note (with its pinned dependencies); OpenAI-compatible servers and Ollama are called with the standard library',
          where='server', optional='idles until an AI provider is set up', pins=[('reviewer/requirements.txt', r'(?m)^anthropic==([0-9.]+)')]),
 ]
