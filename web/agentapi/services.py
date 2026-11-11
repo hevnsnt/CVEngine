@@ -4205,9 +4205,13 @@ def register_assets(ctx, assets):
     return {'assets': ctx.token.assets}
 
 
+WORK_ITEMS_WINDOW = 2000  # the matches ``work_items`` reads, best ranked first (highest confidence)
+
+
 def work_items(ctx, slug, params):
     """Remediation handoff: confirmed or pending CVE-on-host matches still to fix, narrowed to the
-    agent's registered assets (or ?assets=a,b) and optionally to a tier."""
+    agent's registered assets (or ?assets=a,b) and optionally to a tier (``fire``, ``smoke`` or ``ice``, filtered in the database). At most ``WORK_ITEMS_WINDOW``
+    matches are read, best ranked first; ``truncated`` is true when there were more."""
     from cveFeed.models import CVEMatch
     project, _ = get_one_project(ctx, slug)
     asked = [a.strip() for a in (params.get('assets') or '').split(',') if a.strip()]
@@ -4227,8 +4231,14 @@ def work_items(ctx, slug, params):
         .prefetch_related('subdomain__ip_addresses')
     if params.get('include_fp') == '0':
         qs = qs.exclude(triage__classification__in=FALSE_POSITIVES)
+    tier = params.get('tier')
+    if tier:  # the tier is a filter of the query (the database form of the heat every list shows), not of the 2,000 rows that happened to rank first
+        from cveFeed.threat import HEAT_RANK, match_heat_rank_expr
+        qs = qs.annotate(_heat_rank=match_heat_rank_expr()).filter(_heat_rank=HEAT_RANK[tier]) if tier in HEAT_RANK else qs.none()
+    rows = list(qs[:WORK_ITEMS_WINDOW + 1])
+    truncated = len(rows) > WORK_ITEMS_WINDOW  # more matches than the window: the list below is the best-ranked part of them, and says so
     items = []
-    for m in qs[:2000]:
+    for m in rows[:WORK_ITEMS_WINDOW]:
         sub = m.subdomain
         ips = [ip.address for ip in sub.ip_addresses.all()] if sub else []
         if wanted:
@@ -4238,8 +4248,6 @@ def work_items(ctx, slug, params):
             if not placed[key]:
                 continue
         item = _match(m)
-        if params.get('tier') and item['cve']['tier'] != params['tier']:
-            continue
         item['ips'] = ips
         item['host_score'] = sub.score if sub else 0
         item['fixed_in'] = _fixed_versions(m.cve_entry, m.matched_product)
@@ -4250,7 +4258,7 @@ def work_items(ctx, slug, params):
     matches = len(items)
     items = _one_item_per_upgrade(items)
     page, size = page_args(params)
-    return {'count': len(items), 'matches': matches, 'registered_assets': patterns, 'page': page, 'page_size': size,
+    return {'count': len(items), 'matches': matches, 'truncated': truncated, 'registered_assets': patterns, 'page': page, 'page_size': size,
             'results': items[(page - 1) * size:page * size]}
 
 
