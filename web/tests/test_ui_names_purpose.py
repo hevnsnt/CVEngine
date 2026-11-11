@@ -51,9 +51,9 @@ class OneNamePerPageTests(TestCase):
 
 	def test_the_tabs_the_palette_and_the_menu_use_the_rail_words(self):
 		findings = [t for _, _, t in tabs(self.get(self.analyst, '/cve/alpha/vulns/'))]
-		self.assertEqual(findings, ['Findings', 'CVE matches', 'Hygiene', 'Changes', 'CVE catalog'])
+		self.assertEqual(findings, ['Findings', 'CVE matches', 'Changes', 'CVE catalog'])
 		hosts = [t for _, _, t in tabs(self.get(self.analyst, '/cve/alpha/hosts/'))]
-		self.assertEqual(hosts, ['Hosts', 'Targets', 'Graph', 'Secrets', 'Suppliers'])
+		self.assertEqual(hosts, ['Hosts', 'Targets', 'Graph', 'Secrets'])
 		self.assertEqual([t for _, _, t in tabs(self.get(self.root, '/cve/sentinels/'))][:2], ['Scanners', 'Sentinels'])
 		built = nav.build('hosts', 'alpha', bounty_enabled=False, sentinels_enabled=False)
 		names = [i['label'] for i in built['index']]
@@ -144,6 +144,39 @@ class PurposeCopyTests(SimpleTestCase):
 				self.assertTrue(text.endswith('.'), key)
 				self.assertNotIn('. ', text, key)
 				self.assertEqual(text.count('.'), 1, key)
+
+	def test_every_page_with_a_sub_line_has_exactly_one_sentence(self):
+		"""All templates (not only the list pages): the text under the title, with template tags taken out, is one sentence."""
+		templates = os.path.join(os.path.dirname(__file__), '..')
+		found = {}
+		for top in ('cveFeed/templates', 'templates'):
+			for root, _, files in os.walk(os.path.join(templates, top)):
+				if os.sep + 'report' in root or os.sep + 'email' in root:
+					continue
+				for name in files:
+					if not name.endswith('.html') or name == 'section.html':  # section.html: the two purpose tables above hold its sentence
+						continue
+					with open(os.path.join(root, name), encoding='utf-8') as f:
+						for m in re.finditer(r'<p class="sub"[^>]*>(.*?)</p>', f.read(), re.S):
+							found.setdefault(name, []).append(m.group(1))
+		for must in ('graph.html', 'cve_explorer.html', 'agents.html', 'scanners.html', 'sentinels.html', 'project_sentinels.html', 'onboarding.html', 'settings.html', 'dashboard.html', 'how.html'):
+			self.assertIn(must, found)
+		self.assertGreaterEqual(len(found), 15)
+		for name, subs in found.items():
+			for raw in subs:
+				text = re.sub(r'\{\{.*?\}\}', 'x', raw)
+				text = re.sub(r'\{%.*?%\}', '', text)
+				text = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', '', text)).strip()
+				if text == 'x':  # a message the view supplies
+					continue
+				self.assertRegex(text, r'[.?!]$', (name, text))
+				self.assertEqual(len(re.findall(r'[.?!](?:\s|$)', text)), 1, (name, text))
+				self.assertNotRegex(text, '[\u2013\u2014]|--', (name, text))
+
+	def test_the_one_sentence_check_catches_a_second_sentence(self):
+		for bad in ('One. Two.', 'Is it working? Yes.', 'One sentence. <span>live</span>'):
+			text = re.sub(r'<[^>]+>', '', bad).strip()
+			self.assertTrue(len(re.findall(r'[.?!](?:\s|$)', text)) != 1 or not re.search(r'[.?!]$', text), bad)
 
 	def test_the_matches_line_does_not_claim_a_confirmation_the_product_does_not_do(self):
 		self.assertNotRegex(SECTION_PURPOSE['matches'] + ALL_PROJECTS_PURPOSE['matches'], r'(?i)confirm')

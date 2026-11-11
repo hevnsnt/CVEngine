@@ -84,23 +84,57 @@ class MenuTests(TestCase):
 		# the More sheet is a dialog the bar opens: it is seen with the bar, over the page, not beside the tab strip
 		return {'desktop': links(rail, strip), 'narrow': links(bar, strip), 'narrow, More open': links(bar, sheet)}
 
-	# Owner decision S8 (open): a tab family repeats the rail entry of the page you are on as its first tab. These are the only repeats allowed.
-	TAB_FAMILY_REPEATS = {'Hygiene', 'Findings', 'Suppliers', 'Scanners', 'Hosts', 'Scans'}
+	# Owner decision S8 (open): a tab family repeats the rail entry of the page you are on as the FIRST tab of that page's tab strip. That is the only
+	# repeat allowed: the repeated label must be the current rail entry, the second copy must be the strip's first link, and nothing else may repeat.
+	@staticmethod
+	def first_tab_of_strip(html):
+		strips = re.findall(r'<nav class="pagetabs".*?</nav>', html, re.S)
+		if not strips:
+			return None
+		first = re.search(r'<a\b([^>]*)>(.*?)</a>', strips[0], re.S)
+		href = re.search(r'href="([^"]+)"', first.group(1))
+		return (re.sub(r'<[^>]+>', '', first.group(2)).strip(), href.group(1)) if href else None
 
 	def repeats(self, html):
-		"""Destinations shown twice on one surface, ignoring only the known tab-family repeat of the current page (label in TAB_FAMILY_REPEATS, twice at most),
-		and pages shown under two names."""
+		"""Destinations shown twice on one surface, ignoring only the first tab of the page's tab strip when it repeats the page's own current rail entry
+		(once, on that page), and pages shown under two names."""
 		bad = []
+		current = [(l, h) for l, h, c in menu(html) if c]
+		first = self.first_tab_of_strip(html)
+		strip_links = []
+		for strip in re.findall(r'<nav class="pagetabs".*?</nav>', html, re.S):
+			for attrs, inner in re.findall(r'<a\b([^>]*)>(.*?)</a>', strip, re.S):
+				href = re.search(r'href="([^"]+)"', attrs)
+				if href:
+					strip_links.append((re.sub(r'<[^>]+>', '', inner).strip(), href.group(1)))
+		allowed = first if first is not None and current == [first] and strip_links.count(first) == 1 else None
 		for surface, links in self.surfaces(html).items():
 			for dest in sorted(set(links)):
 				n = links.count(dest)
-				if n > 1 and not (n == 2 and dest[0] in self.TAB_FAMILY_REPEATS):
+				if n > 1 and not (n == 2 and dest == allowed):
 					bad.append((surface, dest, n))
 			by_href = {}
 			for label, href in set(links):
 				by_href.setdefault(href, set()).add(label)
 			bad += [(surface, h, sorted(ls)) for h, ls in by_href.items() if len(ls) > 1]
 		return bad
+
+	def test_a_repeat_is_allowed_only_as_the_first_tab_of_its_own_page(self):
+		hygiene = self.page('/cve/alpha/hygiene/')
+		self.assertEqual(self.repeats(hygiene), [])
+		self.assertEqual(self.first_tab_of_strip(hygiene)[0], 'Hygiene')
+		hosts = self.page('/cve/alpha/hosts/')
+		rail_hygiene = re.search(r'<a data-nav="Hygiene"[^>]*>.*?</a>', hosts, re.S).group(0)
+		# a second Hygiene link in the rail, on the Hygiene page and on another page
+		for name, html in (('hygiene', hygiene), ('hosts', hosts)):
+			doubled = html.replace('<details class="acct">', rail_hygiene.replace(' aria-current="page"', '') + '<details class="acct">', 1)
+			self.assertNotEqual(self.repeats(doubled), [], name)
+		# a Hygiene link in the tab strip of a page that is not Hygiene (Hosts is current there)
+		elsewhere = hosts.replace('<main', '<nav class="pagetabs"><a href="/cve/alpha/hygiene/">Hygiene</a></nav><main', 1)
+		self.assertNotEqual(self.repeats(elsewhere), [])
+		# the same repeat as a second, not-first tab of the Hygiene page
+		later = hygiene.replace('</nav>', '<a href="/cve/alpha/hygiene/">Hygiene</a></nav>', 1)
+		self.assertNotEqual(self.repeats(later), [])
 
 	def test_the_visible_duplicate_check_catches_a_second_link_to_a_page(self):
 		html = self.page('/cve/alpha/hosts/')

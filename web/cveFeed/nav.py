@@ -81,6 +81,11 @@ def build(active, slug, *, bounty_enabled, sentinels_enabled, all_projects=False
         entries.append(('bounty', 'Bug bounty', bounty_href))
     rail = [{'key': k, 'label': label, 'href': href, 'icon': SECTION_ICON[k], 'current': k == current} for k, label, href in entries]
     tabs = [{'key': k, 'label': label, 'href': href, 'current': k == active} for k, label, href in _tabs(group, slug, sentinels_enabled)]
+    # A strip never links to the rail entry of another page (Hygiene and Suppliers have their own; Findings and Hosts are the entries of
+    # the pages above them): the only rail entry it may repeat is the current one, as its first tab.
+    rail_href = {e['href']: e['current'] for e in rail}
+    tabs = [t for t in tabs if t['href'] not in rail_href or rail_href[t['href']]]
+    tabs.sort(key=lambda t: t['href'] not in rail_href)
     # one entry for the page strip is not a strip
     if len(tabs) < 2:
         tabs = []

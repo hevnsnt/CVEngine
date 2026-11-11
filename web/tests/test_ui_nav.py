@@ -76,9 +76,9 @@ class ShellTests(TestCase):
 
 	def test_the_pages_that_moved_under_an_entry_are_a_tab_strip(self):
 		findings = tabs(self.get(self.root, '/cve/alpha/matches/'))
-		self.assertEqual([label for _, _, label in findings], ['Findings', 'CVE matches', 'Hygiene', 'Changes', 'CVE catalog'])
+		self.assertEqual([label for _, _, label in findings], ['Findings', 'CVE matches', 'Changes', 'CVE catalog'])  # Hygiene has its own rail entry: not repeated in another page's strip
 		self.assertEqual([label for _, current, label in findings if current], ['CVE matches'])
-		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/alpha/suppliers/'))], ['Hosts', 'Targets', 'Graph', 'Secrets', 'Suppliers'])
+		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/alpha/suppliers/'))], ['Suppliers', 'Targets', 'Graph', 'Secrets'])  # its own entry first; Hosts is another page's entry
 		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/alpha/activity/'))], ['Scans', 'Activity'])
 		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/graph/'))][:3], ['Hosts', 'Targets', 'Graph'])
 		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/sentinels/'))], ['Scanners', 'Sentinels'])
