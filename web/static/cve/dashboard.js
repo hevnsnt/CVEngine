@@ -236,6 +236,7 @@ async function pollStats() {
     };
     Object.entries(flat).forEach(([k, v]) => setNum(`s-${k}`, v));
     statsNow = s;
+    paintFirstNote();
     paintMapCount();
     const groupNote = $("s-match_groups_note");
     if (groupNote) {
@@ -442,6 +443,14 @@ function paintMapCount() {
   const shown = mapDrawn != null && mapDrawn < mapEligible ? `Top ${mapDrawn} of ${mapEligible} scoring over ${MAP_SCORE_OVER}` : `${mapEligible} scoring over ${MAP_SCORE_OVER}`;
   n.textContent = `${shown} · ${live} live`;
   n.title = `One square per live host that scores more than ${MAP_SCORE_OVER} (a live host resolved to an address or answered over HTTP), highest score first. ${live} hosts are live and ${statsNow.hosts} are in the inventory; the rest are on the Hosts page.`;
+}
+
+// Arriving from the first-run wizard before any host exists: say that the first look is still under way, how long it usually takes and what to do
+// meanwhile. The note goes away on its own as soon as the first host is in the inventory.
+function paintFirstNote() {
+  const note = $("first-note");
+  if (!note) return;
+  note.hidden = !(dash.dataset.first && statsNow && !statsNow.hosts);
 }
 
 // An empty map says why it is empty: nothing added yet, or hosts known but none live (resolved or answering).
@@ -724,7 +733,7 @@ async function pollDiscovery() {
     if (d === null) return; // 304: no new events
     if (!d.scan) {
       $("d-status").style.display = "none";
-      $("d-target").textContent = "No discovery has run yet.";
+      $("d-target").textContent = "No discovery has run yet. Add a target to start one.";
       return;
     }
     if (shownScan !== d.scan.id) {
