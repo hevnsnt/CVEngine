@@ -226,6 +226,7 @@ function reviewerBlock(review) {
   box.append(el("p", "note", facts.join(". ")));
   box.append(el("p", "", review.outcome_text || ""));
   if (review.note) box.append(el("p", "gl-reviewer-note", review.note));
+  if (review.scope_text) box.append(el("p", "note", review.scope_text));
   return box;
 }
 

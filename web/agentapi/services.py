@@ -3702,11 +3702,26 @@ def _finding_row(kind, obj):
 
 def _attach_reviews(rows):
     """Fill ``ai_review`` (the newest AI review of the finding: verdict, confidence, reason, note, model, outcome in plain words) of every
-    row of a list page in one query."""
+    row of a list page. A grouped row (``group``) stands for several hosts: it shows the newest review across its members and says so
+    (``scope_text``: how many of its hosts the reviewer has looked at). Queries: one for the reviews, one more when a row is a group."""
     from cveFeed import reviewer
-    found = reviewer.review_summaries([r.get('_triage_id') for r in rows])
+    from cveFeed.models import Triage
+    groups = {r['id']: r['group']['member_ids'] for r in rows if r.get('group') and r.get('kind') == 'match'}
+    by_match = {}
+    if groups:
+        wanted = {i for ids in groups.values() for i in ids}
+        by_match = dict(Triage.objects.filter(match_id__in=wanted).values_list('match_id', 'pk'))
+    ids = [r.get('_triage_id') for r in rows] + list(by_match.values())
+    found = reviewer.review_summaries(ids)
     for row in rows:
-        row['ai_review'] = found.get(row.pop('_triage_id', None))
+        own = found.get(row.pop('_triage_id', None))
+        members = groups.get(row['id']) if row.get('group') and row.get('kind') == 'match' else None
+        if members:
+            seen = [found[by_match[m]] for m in members if by_match.get(m) in found]
+            own = max(seen, key=lambda r: r['at']) if seen else None
+            if own:
+                own = {**own, 'scope_text': f"This is the newest AI review of the {len(members)} hosts in this group; it has looked at {len(seen)} of them."}
+        row['ai_review'] = own
     return rows
 
 

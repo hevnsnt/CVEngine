@@ -65,8 +65,10 @@ reviewer is built on the assumption that every scanned byte is hostile.
    - the finding has no hard evidence: no template hit, no distribution-tracker or runZero report, no report from the host itself, no
      validation hit, and no confirmed library body (`match_policy.has_hard_evidence`, `triage.hard_evidence`);
    - the triage sets no floor under it that a model may not clear: a template finding with a fired matcher, a CVE template or a medium or
-     higher rating, and a CVE match whose advisory names no affected version (`match_policy.is_version_unknown`) are never closed by the
-     reviewer, whatever it says. They stay open with the reviewer's opinion recorded and the reason `hard evidence: ...`;
+     higher rating, a CVE match whose version is inside the affected range (unless the triage itself finds concrete grounds, or the
+     distribution's tracker says patched) and a CVE match whose advisory names no affected version (`match_policy.is_version_unknown`) are
+     never closed by the reviewer, whatever it says: it reads the floor from `triage.hard_evidence`, so the two cannot drift apart. The
+     reviewer never clears what triage says only a person or a published range may move. They stay open with the reviewer's opinion recorded and the reason `hard evidence: ...`;
    - no person has worked it: no status change, assignee, comment, heat set by hand or manual validation request (`match_policy.has_standing`
      and its equivalent for scanner and hygiene findings);
    - the evidence the model was shown carries no instructions aimed at an AI (`cveFeed.injection_guard`);
@@ -84,8 +86,11 @@ reviewer is built on the assumption that every scanned byte is hostile.
 6. **Each call is bounded.** Every call has a maximum reply length and a time limit. A daily cap limits the number of reviews, and the operations
    job runs at most once per scheduled slot. A task meant to burn tokens ends at the cap. A review the model refuses, answers with nothing,
    cuts off twice or answers outside the schema is recorded (with no verdict) and counts against the cap; the finding is asked about again
-   only when its host changes or 24 hours have passed. A failed operations call is tried again after an hour at the earliest, not on every
-   pass of the loop. A provider that is down (not the finding's fault) is not recorded; three failures in a row pause the work for 15 minutes.
+   only when its host changes or 24 hours have passed. Reporting it is idempotent: the same report again inside 24 hours returns the same
+   answer and adds no row, a state that already has a verdict takes none (409), no more than the daily cap are kept (429), and the body
+   is at most 4 KB (413). The operations job makes at most one model call an hour on every failure path (a refused report, an unreachable
+   server, any error): the container notes the attempt before it calls the model. A verdict is applied under a row lock on the finding, so
+   it cannot overwrite a person's change made at the same moment. A provider that is down (not the finding's fault) is not recorded; three failures in a row pause the work for 15 minutes.
 7. **The container is locked down.** It has:
    - its own small image, with only the reviewer package and two pinned libraries;
    - no cvENGINE source and no database or Redis credentials;

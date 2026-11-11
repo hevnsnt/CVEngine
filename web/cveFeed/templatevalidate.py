@@ -391,6 +391,6 @@ def problem(now=None):
                 'detail': f'{bad} AI-written checks were rejected or expired in the last seven days and none passed. The most common reason: {why}. '
                           'What you can do: check that the CVE feed carries product and version data for the CVEs that were tried, and that a Sentinel '
                           'that runs template checks is online. If the reason is a refused or empty AI answer, the AI Model Usage page shows the '
-                          'refusals. A different model is not the usual cure. Nothing here needs a review by hand.',
+                          'refusals. A different model is not the usual cure.',
                 'facts': {'rejected': bad, 'top_reason': why}}
     return None

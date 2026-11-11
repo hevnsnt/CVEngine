@@ -270,14 +270,15 @@ def proof(kind, triage, finding):
 
 
 def floor_hold(kind, facts):
-    """Why the triage's own floor (``triage.hard_evidence``) keeps this finding from being closed by a model, or ''. A scanner finding with
-    any floor (a template matcher that fired, a CVE template, a medium or higher rating) and a CVE match whose advisory gives no version
-    bound (``match_policy.is_version_unknown``, in ``facts['version_unknown']``) are for a person: the same rule the triage keeps for its own
-    model, "a model may clear a finding only when the evidence sets no floor". A version inside the range is a floor the reviewer may still
-    answer (a backported fix is a reason the matcher cannot see), as are hygiene findings and database exposures (``proof``)."""
+    """Why the triage's own floor (``triage.hard_evidence``) keeps this finding from being closed by a model, or ''. The rule is the
+    triage's, "a model may clear a finding only when the evidence sets no floor", and it is read from there, not copied: a scanner finding
+    with any floor (a template matcher that fired, a CVE template, a medium or higher rating) and a CVE match with any floor (a version
+    inside the affected range, unless the triage itself finds concrete grounds in ``closure_basis`` or a patched distribution release; an
+    advisory with no version bound) are for a person or a published range, never for the model. Hygiene findings and database exposures
+    are judged by ``proof`` and the reviewer's own rules."""
     from cveFeed import triage as triage_lib
     floor, found = triage_lib.hard_evidence(kind, facts or {})
-    if floor and (kind == 'nuclei' or (kind == 'cve_match' and (facts or {}).get('version_unknown'))):
+    if floor and kind in ('nuclei', 'cve_match'):
         return '; '.join(found)
     return ''
 
@@ -430,6 +431,17 @@ def _parse_verdict(body):
             'input_tokens': count('input_tokens'), 'output_tokens': count('output_tokens')}
 
 
+def _lock(triage):
+    """Lock the row of the finding and of its triage until the surrounding transaction ends, and return the triage read again under the lock
+    (with its finding): what a person saved a moment ago is in it. Call inside ``transaction.atomic``."""
+    from cveFeed.models import Triage
+    finding = triage.finding
+    if finding is not None:
+        type(finding).objects.select_for_update().filter(pk=finding.pk).first()
+    Triage.objects.select_for_update().filter(pk=triage.pk).first()
+    return _load(triage.pk)
+
+
 def apply_verdict(ref, body, now=None):
     """Take one verdict for the finding ``ref`` (``t<triage id>``). Returns ``{outcome, reason, review_id}``. Raises VerdictError for a
     malformed verdict, an unknown finding (404), or a verdict on a state that is no longer current (409: the finding changed, was closed, or
@@ -445,37 +457,43 @@ def apply_verdict(ref, body, now=None):
     triage = _load(int(match.group(1)))
     if triage is None or triage.finding is None or triage.kind not in KIND_ORDER:
         raise VerdictError('not found', 404)
-    if not Triage.objects.filter(open_q(), pk=triage.pk).exists():
-        raise VerdictError('the finding is no longer open', 409)
     fingerprint = _fingerprints({(triage.project_id, triage.host)}).get((triage.project_id, triage.host), '')
     key = review_key(triage, fingerprint)
     if parsed['review_key'] != key:
         raise VerdictError('the finding or its host changed since the packet was built', 409)
-    if FindingReview.objects.filter(triage=triage, review_key=key).exclude(outcome=REFUSED).exists():
-        raise VerdictError('this state of the finding was already reviewed', 409)
-    finding = triage.finding
-    d = triage_lib.describe(finding)
-    raw = _raw_evidence(triage, finding)
-    injection = injection_guard.families(raw, d.get('payload'), d.get('host_context'))
-    note = usable_note(parsed['note'], min_words=2)  # filler ("Placeholder") is no reason: the verdict stands, with no note
-    if injection_guard.repeats_marker(note, injection_guard.planted_markers(raw, d.get('payload'), d.get('host_context'))):
-        injection = sorted(set(injection) | {'echo_marker'})
-        note = 'The reviewer\'s note repeated an identifier planted in the evidence and was discarded.'
-        parsed['verdict'], parsed['confidence'] = 'uncertain', 'low'
-    outcome, held = 'recorded', ''
-    if parsed['verdict'] == 'false_positive':
-        blocked, held = close_gate(triage.kind, triage, finding, injection, d.get('facts'))
-        if blocked:
-            outcome = blocked
-        elif parsed['confidence'] != 'high':
-            outcome, held = 'held', f"the reviewer's confidence is {parsed['confidence']}, not high"
-        elif not settings_row().auto_close:
-            outcome, held = 'held', 'closing false positives is turned off in Settings'
-        else:
-            outcome = 'closed'
     model = parsed['model']
     now = now or timezone.now()
     with transaction.atomic():
+        # The finding's row is locked for the rest of the verdict: a person's change (status, assignee, comment) that is being saved now
+        # either finished before this read, so the gate below sees it and holds the closure, or waits until this verdict is done. A verdict
+        # can never overwrite a change made between the check and the save.
+        triage = _lock(triage)
+        if triage is None or triage.finding is None:
+            raise VerdictError('not found', 404)
+        if not Triage.objects.filter(open_q(), pk=triage.pk).exists():
+            raise VerdictError('the finding is no longer open', 409)
+        if FindingReview.objects.filter(triage=triage, review_key=key).exclude(outcome=REFUSED).exists():
+            raise VerdictError('this state of the finding was already reviewed', 409)
+        finding = triage.finding
+        d = triage_lib.describe(finding)
+        raw = _raw_evidence(triage, finding)
+        injection = injection_guard.families(raw, d.get('payload'), d.get('host_context'))
+        note = usable_note(parsed['note'], min_words=2)  # filler ("Placeholder") is no reason: the verdict stands, with no note
+        if injection_guard.repeats_marker(note, injection_guard.planted_markers(raw, d.get('payload'), d.get('host_context'))):
+            injection = sorted(set(injection) | {'echo_marker'})
+            note = 'The reviewer\'s note repeated an identifier planted in the evidence and was discarded.'
+            parsed['verdict'], parsed['confidence'] = 'uncertain', 'low'
+        outcome, held = 'recorded', ''
+        if parsed['verdict'] == 'false_positive':
+            blocked, held = close_gate(triage.kind, triage, finding, injection, d.get('facts'))
+            if blocked:
+                outcome = blocked
+            elif parsed['confidence'] != 'high':
+                outcome, held = 'held', f"the reviewer's confidence is {parsed['confidence']}, not high"
+            elif not settings_row().auto_close:
+                outcome, held = 'held', 'closing false positives is turned off in Settings'
+            else:
+                outcome = 'closed'
         review = FindingReview.objects.create(
             triage=triage, project_id=triage.project_id, review_key=key, verdict=parsed['verdict'], confidence=parsed['confidence'],
             reason_code=parsed['reason_code'], note=note, model=model, outcome=outcome, held_reason=held[:200], injection=injection,
@@ -509,7 +527,10 @@ def record_refusal(ref, body, now=None):
     """Take the container's report that the model gave no usable answer for the finding ``ref`` (``{review_key, category, model}``): it
     refused, answered with nothing, was cut off twice or answered outside the schema. One ``FindingReview`` row with outcome ``refused`` and
     no verdict is kept, so the call counts against the daily cap and ``due`` leaves the finding alone until its host changes or a day passes.
-    Raises VerdictError like ``apply_verdict`` (404 unknown finding, 409 a state that is no longer current)."""
+    Idempotent per finding and state: a second report for the same state inside 24 hours returns the first one's answer and adds no
+    row; a state that has a real verdict takes no refusal (409); no more rows than the daily cap are kept (429). Raises VerdictError like
+    ``apply_verdict`` (404 unknown finding, 409 a state that is no longer current)."""
+    from django.db import transaction
     from cveFeed.models import FindingReview, Triage
     if not isinstance(body, dict):
         raise VerdictError('body must be a JSON object')
@@ -520,14 +541,26 @@ def record_refusal(ref, body, now=None):
     triage = _load(int(match.group(1))) if match else None
     if triage is None or triage.finding is None or triage.kind not in KIND_ORDER:
         raise VerdictError('not found', 404)
-    if not Triage.objects.filter(open_q(), pk=triage.pk).exists():
-        raise VerdictError('the finding is no longer open', 409)
-    fingerprint = _fingerprints({(triage.project_id, triage.host)}).get((triage.project_id, triage.host), '')
-    if key != review_key(triage, fingerprint):
-        raise VerdictError('the finding or its host changed since the packet was built', 409)
     category = re.sub(r'[^a-z_]', '', str(body.get('category') or '').lower())[:40] or 'no_answer'
-    review = FindingReview.objects.create(triage=triage, project_id=triage.project_id, review_key=key, verdict='', confidence='low',
-                                          outcome=REFUSED, held_reason=category, model=str(body.get('model') or '')[:100])
+    now = now or timezone.now()
+    with transaction.atomic():
+        triage = _lock(triage)  # two reports of the same finding at once take turns: the second one finds the first one's row
+        if triage is None or triage.finding is None:
+            raise VerdictError('not found', 404)
+        if not Triage.objects.filter(open_q(), pk=triage.pk).exists():
+            raise VerdictError('the finding is no longer open', 409)
+        fingerprint = _fingerprints({(triage.project_id, triage.host)}).get((triage.project_id, triage.host), '')
+        if key != review_key(triage, fingerprint):
+            raise VerdictError('the finding or its host changed since the packet was built', 409)
+        rows = list(FindingReview.objects.filter(triage=triage, review_key=key).order_by('-created_at', '-id'))
+        if any(row.outcome != REFUSED for row in rows):
+            raise VerdictError('this state of the finding was already reviewed', 409)  # a real verdict stands: no refusal after it
+        if rows and now - rows[0].created_at < REFUSED_WAIT:
+            return {'outcome': REFUSED, 'reason': rows[0].held_reason, 'review_id': rows[0].pk}  # the same report again: the same answer, no new row
+        if reviews_today(now) >= settings_row().review_daily_max:
+            raise VerdictError('the daily limit of reviews is used up', 429)
+        review = FindingReview.objects.create(triage=triage, project_id=triage.project_id, review_key=key, verdict='', confidence='low',
+                                              outcome=REFUSED, held_reason=category, model=str(body.get('model') or '')[:100])
     cache.delete(f'cvengine:reviewer:lease:{triage.pk}')
     return {'outcome': REFUSED, 'reason': category, 'review_id': review.pk}
 
@@ -551,6 +584,8 @@ def outcome_words(outcome, held_reason=''):
         return ('The finding was kept open because cvENGINE has hard evidence that it is real' + (f' ({held_reason})' if held_reason else '')
                 + '. A person should look at it.')
     if outcome == 'held':
+        if held_reason == 'a person has worked this finding':
+            return 'The finding was kept open because a person has already worked on it. The AI reviewer does not overrule a person.'
         return f"The finding was kept open: {held_reason or 'the verdict did not meet the rules for closing'}. A person should look at it."
     return 'The opinion is recorded; nothing was changed on the finding.'
 
@@ -571,8 +606,10 @@ def review_summaries(triage_ids):
     ids = [i for i in triage_ids if i]
     if not ids:
         return out
-    for row in FindingReview.objects.filter(triage_id__in=ids).exclude(outcome=REFUSED).order_by('triage_id', '-created_at', '-id'):
-        out.setdefault(row.triage_id, _summary_of(row))
+    # newest first per finding; Postgres keeps the first row of each triage_id (DISTINCT ON), so the history is not loaded
+    for row in (FindingReview.objects.filter(triage_id__in=ids).exclude(outcome=REFUSED).order_by('triage_id', '-created_at', '-id')
+                .distinct('triage_id')):
+        out[row.triage_id] = _summary_of(row)
     return out
 
 

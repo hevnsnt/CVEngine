@@ -51,7 +51,7 @@ class Fixture(TestCase):
     def setUp(self):
         cache.clear()
         self.match = CVEMatch.objects.create(cve_entry=self.cve, subdomain=self.sub, source='tech', matched_product='lib-a',
-                                             matched_version='1.2', version_in_range=True, confidence=0.8, ai_verdict='uncertain',
+                                             matched_version='1.2', version_in_range=False, confidence=0.8, ai_verdict='uncertain',
                                              scan_history=self.scan, evidence={'source': 'tech'})
         triage.track([self.match])
         self.state = HostState.objects.create(project=self.proj, domain=self.domain, host='www.example.com', fingerprint='f' * 40)
@@ -240,6 +240,67 @@ class ReviewTests(Fixture):
         self.assertEqual(self.verdict(packets['hygiene'], reason_code='check_not_applicable')[1]['outcome'], 'closed')
         self.assertEqual(HygieneFinding.objects.get(pk=hyg.pk).remediation_status, 'false_positive')
 
+    def test_a_version_in_range_match_that_triage_floors_is_held_by_the_same_rule(self):
+        CVEMatch.objects.filter(pk=self.match.pk).update(version_in_range=True)
+        triage.track([CVEMatch.objects.get(pk=self.match.pk)])
+        row = Triage.objects.get(match=self.match)
+        facts = triage.describe(row.finding)['facts']
+        floor, found = triage.hard_evidence('cve_match', facts)
+        self.assertEqual(floor, 'needs_validation')  # the triage's own floor, read from triage.hard_evidence
+        self.assertEqual(reviewer.floor_hold('cve_match', facts), '; '.join(found))
+        packet = self.packet()
+        self.assertFalse(packet['trusted']['server_may_close'])
+        data = self.verdict(packet)[1]
+        self.assertEqual(data['outcome'], 'held', data)
+        self.assertIn('inside the affected range', data['reason'])
+        self.assertEqual(CVEMatch.objects.get(pk=self.match.pk).remediation_status, 'open')
+
+    def test_a_version_outside_the_range_has_no_floor_and_the_reviewer_may_close_it(self):
+        facts = triage.describe(Triage.objects.get(match=self.match).finding)['facts']
+        self.assertEqual(reviewer.floor_hold('cve_match', facts), '')
+        self.assertEqual(self.verdict(self.packet())[1]['outcome'], 'closed')
+
+    def test_a_verdict_takes_a_row_lock_on_the_finding_before_it_checks_and_saves(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        packet = self.packet()
+        with CaptureQueriesContext(connection) as queries:
+            self.assertEqual(self.verdict(packet)[0], 200)
+        sql = [q['sql'] for q in queries.captured_queries]
+        locks = [i for i, q in enumerate(sql) if 'FOR UPDATE' in q and 'cveFeed_cvematch' in q]
+        saves = [i for i, q in enumerate(sql) if q.startswith('UPDATE "cveFeed_cvematch"') and 'remediation_status' in q]
+        self.assertTrue(locks, 'the finding row is locked')
+        self.assertTrue(saves and min(locks) < min(saves))
+
+    def test_a_persons_change_made_before_the_lock_is_seen_and_never_overwritten(self):
+        real = reviewer._fingerprints
+
+        def person_acts_first(pairs):  # what a person saved after the packet was built and before the verdict took its lock
+            CVEMatch.objects.filter(pk=self.match.pk).update(remediation_status='accepted_risk', remediation_note='mine')
+            return real(pairs)
+        with mock.patch.object(reviewer, '_fingerprints', side_effect=person_acts_first):
+            status, data = self.verdict(self.packet())
+        self.assertEqual(status, 409, data)  # no longer open: nothing is recorded or closed
+        match = CVEMatch.objects.get(pk=self.match.pk)
+        self.assertEqual((match.remediation_status, match.remediation_note), ('accepted_risk', 'mine'))
+        self.assertEqual(FindingReview.objects.count(), 0)
+
+    def test_a_person_s_comment_made_before_the_lock_holds_the_closure(self):
+        real = reviewer._lock
+
+        def comment_first(triage_row):
+            FindingComment.objects.create(project=self.proj, finding_kind='match', finding_id=self.match.pk, author=self.alice, text='looking')
+            return real(triage_row)
+        with mock.patch.object(reviewer, '_lock', side_effect=comment_first):
+            data = self.verdict(self.packet())[1]
+        self.assertEqual((data['outcome'], data['reason']), ('held', 'a person has worked this finding'))
+        self.assertEqual(CVEMatch.objects.get(pk=self.match.pk).remediation_status, 'open')
+
+    def test_the_outcome_words_for_a_finding_a_person_worked_are_plain(self):
+        words = reviewer.outcome_words('held', 'a person has worked this finding')
+        self.assertIn('a person has already worked on it', words)
+        self.assertNotIn('A person should look at it', words)
+
     def test_a_fired_nuclei_matcher_or_an_unbounded_advisory_is_never_closed_by_the_reviewer(self):
         vuln = Vulnerability.objects.create(name='Debug page', severity=3, subdomain=self.sub, target_domain=self.domain, open_status=True,
                                             http_url='https://www.example.com/debug', source='nuclei', matcher_name='word-1')
@@ -323,6 +384,49 @@ class ShownVerdictTests(Fixture):
         self.assertEqual(call(self.full, 'GET', base + '&ai=disputed')[1]['total'], 1)
         self.assertEqual(call(self.full, 'GET', base + '&ai=real')[1]['total'], 0)
 
+    def test_a_refused_row_never_hides_an_earlier_verdict_or_matches_a_filter(self):
+        CVEMatch.objects.filter(pk=self.match.pk).update(template_result='vulnerable')
+        triage.track([CVEMatch.objects.get(pk=self.match.pk)])
+        packet = self.packet()
+        self.assertEqual(self.verdict(packet)[1]['outcome'], 'disputed')
+        FindingReview.objects.create(triage=Triage.objects.get(match=self.match), project_id=self.proj.pk, review_key='9' * 40, verdict='',
+                                     confidence='low', outcome='refused', held_reason='refused')  # newer than the verdict
+        review = self.detail()[1]['ai_review']
+        self.assertEqual((review['verdict'], review['outcome']), ('false_positive', 'disputed'))
+        base = f'/api/v1/projects/{self.proj.slug}/findings?type=cve'
+        self.assertEqual(call(self.full, 'GET', base + '&ai=disputed')[1]['total'], 1)
+        FindingReview.objects.filter(outcome='disputed').delete()  # only the refusal is left: nothing to show, nothing matches
+        self.assertIsNone(self.detail()[1]['ai_review'])
+        for ai in ('disputed', 'real'):
+            self.assertEqual(call(self.full, 'GET', base + f'&ai={ai}')[1]['total'], 0)
+
+    def test_a_verdict_of_another_project_is_not_shown_in_this_one(self):
+        from dashboard.models import ProjectMembership
+        self.verdict(self.packet(), verdict='true_open', confidence='high', reason_code='plausible_exposure')
+        other = Project.objects.create(name='Other', slug='rev-other', insert_date=timezone.now(), org=self.org)
+        bob = User.objects.create_user('rev-bob', password='x')
+        ProjectMembership.objects.create(user=bob, project=other, role='user')
+        _, bob_token = create_token(bob, 'bob')
+        listed = call(bob_token, 'GET', f'/api/v1/projects/{other.slug}/findings?type=cve&ai=real')[1]
+        self.assertEqual(listed['total'], 0)
+        self.assertNotIn('true_open', str(listed))
+        self.assertIn(call(bob_token, 'GET', f'/api/v1/projects/{other.slug}/findings/match/{self.match.pk}')[0], (403, 404))
+
+    def test_the_ai_filters_work_for_scanner_and_hygiene_findings(self):
+        vuln = Vulnerability.objects.create(name='Debug page', severity=3, subdomain=self.sub, target_domain=self.domain, open_status=True,
+                                            http_url='https://www.example.com/debug', source='nuclei', matcher_name='word-1')
+        hyg = HygieneFinding.objects.create(domain=self.domain, host='www.example.com', check_name='spf_missing', severity=2, title='No SPF')
+        triage.track([vuln, hyg])
+        packets = {p['ref']: p for p in reviewer.next_packets(25)}
+        for finding, kind in ((vuln, 'nuclei'), (hyg, 'hygiene')):
+            row = Triage.objects.get(**{'vulnerability' if finding is vuln else 'hygiene': finding})
+            self.assertEqual(self.verdict(packets[f't{row.pk}'], confidence='medium', reason_code='generic_match')[1]['outcome'], 'held')
+        for kind in ('scanner', 'hygiene'):
+            listed = call(self.full, 'GET', f'/api/v1/projects/{self.proj.slug}/findings?type={kind}&ai=disputed')[1]
+            self.assertEqual(listed['total'], 1, kind)
+            self.assertTrue(listed['results'][0]['ai_review']['disputed'])
+            self.assertEqual(call(self.full, 'GET', f'/api/v1/projects/{self.proj.slug}/findings?type={kind}&ai=real')[1]['total'], 0)
+
     def test_mcp_get_finding_and_list_findings_carry_it(self):
         self.verdict(self.packet(), verdict='true_open', confidence='high', reason_code='plausible_exposure')
         error, detail = tool_call(self.full, 'get_finding', {'project': self.proj.slug, 'kind': 'match', 'id': self.match.pk})
@@ -403,6 +507,63 @@ class UnansweredReviewTests(Fixture):
         row.last_ops_at = now.replace(hour=2)
         AIUsage.objects.filter(error_category='refused').delete()
         self.assertTrue(reviewer.ops_due(row, now))
+
+    def test_a_second_identical_refusal_is_the_same_answer_and_adds_no_row(self):
+        packet = self.packet()
+        first = self.refuse(packet)
+        second = self.refuse(packet, category='empty_response')
+        self.assertEqual((first[0], second[0]), (200, 200))
+        self.assertEqual(first[1], second[1])
+        self.assertEqual(FindingReview.objects.filter(triage__match=self.match).count(), 1)
+        self.assertEqual(reviewer.reviews_today(), 1)
+
+    def test_a_refusal_after_the_wait_is_a_new_attempt_and_is_recorded(self):
+        packet = self.packet()
+        self.refuse(packet)
+        FindingReview.objects.update(created_at=timezone.now() - timezone.timedelta(hours=25))
+        self.assertEqual(self.refuse(packet)[0], 200)
+        self.assertEqual(FindingReview.objects.count(), 2)
+
+    def test_a_refusal_is_never_recorded_after_a_verdict_for_the_same_state(self):
+        packet = self.packet()
+        self.assertEqual(self.verdict(packet, verdict='true_open', confidence='medium', reason_code='plausible_exposure')[0], 200)
+        status, data = self.refuse(packet)
+        self.assertEqual(status, 409, data)
+        self.assertEqual(FindingReview.objects.filter(outcome='refused').count(), 0)
+        self.assertEqual(FindingReview.objects.count(), 1)
+
+    def test_refusals_are_bounded_per_day_by_the_daily_cap(self):
+        row = ReviewerSettings.current()
+        row.review_daily_max = 1
+        row.save()
+        other = CVEMatch.objects.create(cve_entry=self.cve, subdomain=self.sub, source='tech', matched_product='lib-b', matched_version='2.0',
+                                        version_in_range=False, confidence=0.8, ai_verdict='uncertain', scan_history=self.scan,
+                                        evidence={'source': 'tech'})
+        triage.track([other])
+        mine = Triage.objects.get(match=self.match)
+        second = Triage.objects.get(match=other)
+        fingerprint = 'f' * 40
+        self.assertEqual(self.refuse({'ref': f't{mine.pk}', 'review_key': reviewer.review_key(mine, fingerprint)})[0], 200)
+        status, data = self.refuse({'ref': f't{second.pk}', 'review_key': reviewer.review_key(second, fingerprint)})
+        self.assertEqual(status, 429, data)
+        self.assertEqual(FindingReview.objects.count(), 1)
+
+    def test_a_token_that_is_not_the_reviewers_gets_403_on_the_refusal_route(self):
+        packet = self.packet()
+        body = {'review_key': packet['review_key'], 'category': 'refused'}
+        status, _ = call(self.admin_token, 'POST', f"/api/v1/reviewer/findings/{packet['ref']}/refusal", body)
+        self.assertEqual(status, 403)
+        status, _ = call(self.admin_token, 'POST', f"/api/v1/reviewer/findings/{packet['ref']}/verdict", {**body, 'verdict': 'uncertain', 'confidence': 'low'})
+        self.assertEqual(status, 403)
+        self.assertEqual(FindingReview.objects.count(), 0)
+
+    def test_a_refusal_body_over_the_size_cap_is_413(self):
+        packet = self.packet()
+        status, data = self.refuse(packet, category='x' * 5000)
+        self.assertEqual(status, 413, data)
+        self.assertEqual(FindingReview.objects.count(), 0)
+        self.assertEqual(self.refuse(packet)[0], 200)
+
 
 
 class InjectionGuardTests(TestCase):

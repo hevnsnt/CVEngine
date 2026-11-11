@@ -6,6 +6,7 @@ answer."""
 from agentapi.services import ApiError
 
 MAX_BODY_ITEMS = 50
+MAX_REFUSAL_BODY = 4096  # bytes: a refusal is a review key, a category and a model name
 
 
 def _require_reviewer(ctx):
@@ -44,8 +45,11 @@ def verdict(request, ctx, ref, body):
 
 
 def refusal(request, ctx, ref, body):
+    """``body`` is None when the request was bigger than ``MAX_REFUSAL_BODY`` (the route does not parse it)."""
     from cveFeed import reviewer
     _require_reviewer(ctx)
+    if body is None:
+        raise ApiError(413, f'a refusal is at most {MAX_REFUSAL_BODY} bytes')
     if not reviewer.enabled():
         raise ApiError(409, 'the reviewer is turned off')
     try:

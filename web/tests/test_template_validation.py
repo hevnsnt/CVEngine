@@ -397,6 +397,7 @@ class ReviewerCheckTests(Base):
         self.assertIn('the fixture did not match', text)  # what happened
         self.assertIn('what you can do', text)  # and what to do about it
         self.assertIn('product and version', text)
+        self.assertNotIn('needs a review by hand', text)  # no promise the alert cannot keep
 
     def test_fresh_pending_drafts_are_no_problem(self):
         self.draft()
