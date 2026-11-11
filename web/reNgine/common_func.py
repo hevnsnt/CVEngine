@@ -345,32 +345,6 @@ def get_task_title(task_name, scan_id=None, subscan_id=None):
 	return f'`{task_name}` [unbound]'
 
 
-def get_task_cache_key(func_name, *args, **kwargs):
-	args_str = '_'.join([str(arg) for arg in args])
-	kwargs_str = '_'.join([f'{k}={v}' for k, v in kwargs.items() if k not in RENGINE_TASK_IGNORE_CACHE_KWARGS])
-	return f'{func_name}__{args_str}__{kwargs_str}'
-
-
-def get_output_file_name(scan_history_id, subscan_id, filename):
-	title = f'#{scan_history_id}'
-	if subscan_id:
-		title += f'-{subscan_id}'
-	title += f'_{filename}'
-	return title
-
-
-def get_traceback_path(task_name, results_dir, scan_history_id=None, subscan_id=None):
-	path = results_dir
-	if scan_history_id:
-		path += f'/#{scan_history_id}'
-		if subscan_id:
-			path += f'-#{subscan_id}'
-	path += f'-{task_name}.txt'
-	return path
-
-
-
-
 #--------------#
 # CLI BUILDERS #
 #--------------#

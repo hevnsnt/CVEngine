@@ -4,12 +4,9 @@ from unittest import mock
 
 from django.contrib.auth.models import User
 from django.test import TestCase
-from django.utils import timezone
 
-from dashboard.models import AIProviderSettings, ChaosAPIKey, Org, OrgMembership, Project
+from dashboard.models import AIProviderSettings, ChaosAPIKey, Org, OrgMembership
 from scanEngine.models import EngineType, Notification, Proxy
-from startScan.models import ScanHistory
-from targetApp.models import Domain
 from tests.test_tenancy import client_for
 
 GOOD_YAML = 'subdomain_discovery:\n  uses_tools: [subfinder]\n'

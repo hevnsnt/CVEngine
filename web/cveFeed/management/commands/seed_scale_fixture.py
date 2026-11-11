@@ -102,7 +102,7 @@ class Command(BaseCommand):
         User.objects.filter(username__in=('scale-admin', 'scale-viewer')).delete()
 
     def build(self, n_hosts, rng, history_scans, TARGETS=TARGETS, n_sentinels=2, n_tasks=400, task_days=7, n_secrets=0):
-        from agentapi.models import Agent, SentinelTask
+        from agentapi.models import Agent
         from cveFeed.models import (AgentActivity, CVEEntry, CVEMatch, HostState, HygieneFinding, ServiceRun, StatsSnapshot, TlsCertificate,
                                     Triage)
         from dashboard.models import ApiToken, Org, OrgMembership, Project, ProjectMembership

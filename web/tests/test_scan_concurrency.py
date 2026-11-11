@@ -2,7 +2,6 @@
 admission and the conductor read, the AI tuner's bounds, the memory warning and the live resize of the discovery worker."""
 import json
 import os
-import re
 import unittest
 from pathlib import Path
 from unittest import mock

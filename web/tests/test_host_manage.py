@@ -11,8 +11,7 @@ from agentapi.auth import create_token
 from agentapi.services import ApiError, Ctx
 from cveFeed import ctmonitor, discovery, fullscan, route_auth as ra, tasks
 from cveFeed.exclusions import drop_excluded, excluded_names, is_excluded, normalize
-from cveFeed.models import (AssetChange, CVEEntry, CVEMatch, FindingComment, HostExclusion, HostLabel, HostProfile, HostState, RouteAuth,
-	ServiceRun)
+from cveFeed.models import (AssetChange, CVEEntry, CVEMatch, FindingComment, HostExclusion, HostLabel, HostProfile, HostState, RouteAuth)
 from cveFeed.nuclei_scan import scan_targets
 from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembership
 from reNgine import discovery_events as bbot_lib, resources

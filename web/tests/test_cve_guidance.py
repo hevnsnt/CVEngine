@@ -219,7 +219,6 @@ class IntakeTests(TestCase):
 		self.assertEqual(detection_author.mark_changed_for_revision(), 0)
 
 	def test_an_admin_updates_a_record_with_guidance_or_a_whole_strategy(self):
-		from unittest import mock
 		cve = self.entry('CVE-2099-7106')
 		admin = User.objects.create_user('intake-admin', password='x', is_superuser=True)
 		user = User.objects.create_user('intake-user', password='x')
@@ -254,7 +253,6 @@ class IntakeTests(TestCase):
 
 class CatalogueTests(TestCase):
 	def test_every_tier_is_covered_matchable_ones_first_and_progress_counts(self):
-		from unittest import mock
 		from dashboard.models import AIProviderSettings
 		now = timezone.now()
 		hot = CVEEntry.objects.create(cve_id='CVE-2099-7201', title='h', affected=NGINX, cvss=9.8, kev=True, published_at=now, original_description='d')

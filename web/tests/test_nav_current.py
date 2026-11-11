@@ -1,7 +1,6 @@
 """The left menu after Hygiene and Suppliers came back: every link opens, appears once and has a name, and exactly one entry (or none,
 on a utility page) is current. The rule is documented in docs/FRONTEND.md."""
 import re
-from datetime import timedelta
 
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase

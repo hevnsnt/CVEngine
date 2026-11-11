@@ -7,7 +7,7 @@ from cveFeed import wpscan_scan
 from cveFeed.models import ProbeObservation
 from reNgine import resources
 from tests.test_probes import page
-from tests.test_wordpress import LINK, WordPressFixture, PLUGIN_REPORT
+from tests.test_wordpress import LINK, WordPressFixture
 
 WP = {'/wp-login.php': page(200, headers=LINK, body='<form id="loginform">')}
 

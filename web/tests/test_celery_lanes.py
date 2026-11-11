@@ -5,7 +5,6 @@ The incident these pin (1.4.0, after the Update button): three of the four worke
 (a warm shutdown), then waited WITHOUT A LIMIT for them: the discovery worker held host assessments that wait on a Sentinel for hours, so the wait never
 ended and `restart: always` was never reached. See ``celery-entrypoint.sh`` (``stop_lanes``, ``supervise``) and ``celery_healthcheck.py``.
 """
-import json
 import os
 import re
 import shlex

@@ -186,12 +186,6 @@ def host_reps(domain_id=None, domain_ids=None, in_scope=False):
     return _one_per_host(base, per_project=True)
 
 
-def live_hosts(domain_id=None):
-    """The hosts the attack-surface map draws, one row each."""
-    from startScan.models import Subdomain
-    return Subdomain.objects.filter(pk__in=host_reps(domain_id).filter(LIVE_HOST_Q).values('pk'))
-
-
 def exposure_filter(prefix=''):
     """A Q over hosts (``prefix`` reaches the host from another model) that holds when the host is exposed."""
     from cveFeed.models import CVEMatch

@@ -246,7 +246,7 @@ def send_notif(
 		scan_history_id=None,
 		subscan_id=None,
 		**options):
-	if not 'title' in options:
+	if 'title' not in options:
 		message = enrich_notification(message, scan_history_id, subscan_id)
 	send_discord_message(message, **options)
 	send_slack_message(message)
@@ -534,15 +534,6 @@ def run_command(
 #-----------------#
 # Utils functions #
 #-----------------#
-
-def create_scan_activity(scan_history_id, message, status):
-	scan_activity = ScanActivity()
-	scan_activity.scan_of = ScanHistory.objects.get(pk=scan_history_id)
-	scan_activity.title = message
-	scan_activity.time = timezone.now()
-	scan_activity.status = status
-	scan_activity.save()
-	return scan_activity.id
 
 
 #--------------------#

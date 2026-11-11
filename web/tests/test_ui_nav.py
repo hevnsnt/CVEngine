@@ -3,7 +3,6 @@
 Every address that existed before the regroup still answers: the rail got shorter, no route went away.
 """
 import re
-from datetime import timedelta
 
 from django.contrib.auth.models import User
 from django.test import TestCase

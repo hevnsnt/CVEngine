@@ -10,6 +10,14 @@ To roll back, check out the previous commit and start it. It still uses the unto
 
 ## Upgrading to 1.4
 
+**Settings that do not fit your host are put right during the update.** You do not have to find them. Before anything is stopped the updater runs a host review (`scripts/host-review.py`, the same for the Update button, `scripts/update.sh`, cron and unattended runs). It looks at the host's cores, memory and free disk and puts right only what is plainly wrong for it, and each change is backed up first (`<file>.cvengine-review-<time>`) and written to the update log with the line it replaced:
+
+- A leftover `DISCOVERY_CONCURRENCY` below 4 in `.env` or the env file (a pin from 1.3, when that pool only ran discovery). On 1.4 a host assessment holds a discovery slot while it waits for a Sentinel, so the pin let one host be assessed at a time while the Sentinels idled. The line is removed and the number follows auto-tuning. Left alone on a host with under 4 GB of memory, and when nothing scans on the host.
+- A container memory ceiling below what its service needs: the database under 1 GB on a host with 6 GB or more (768 MB below that), the web server under 768 MB. The kernel kills a process that reaches its ceiling; a database held to 512 MB was killed this way. The value is raised in the file that sets it (your own compose overlay, or the env file when the ceiling is an environment default). A ceiling above the floor is yours and is never touched.
+- Said, never changed: container ceilings that together exceed 90 percent of the host (they are ceilings, not use), and a disk with less free space than the first 1.4 update needs.
+
+To see what it would do without changing anything, run `python3 scripts/host-review.py` in the install directory; add `--apply` to let it. It never asks a question and never blocks an update.
+
 What an operator needs to know in one place is in [1.4-OPERATOR-NOTES.md](1.4-OPERATOR-NOTES.md). Update from 1.3.x the way you always do: the in-app updater, `scripts/update.sh`, or automatic deployment ([UPDATES.md](UPDATES.md)). The update takes a database dump just before it migrates (`scripts/db-backup.sh`, the last 3 are kept) and a migration is never rolled back. 1.4 is still on the `1.4-develop` line; the version string it reports is `v1.4.0` (`web/.version`, shown on the About page). This is a version string only: no 1.4 release has been made, and nothing here tells you to wait for one. A fresh install needs none of this.
 
 **The one change that matters: the server no longer scans.** Every scan runs on a Sentinel ([SENTINELS.md](SENTINELS.md), [SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECTURE.md)).

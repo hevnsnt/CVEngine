@@ -11,7 +11,7 @@ def place_new_project(sender, instance, created, **kwargs):
     """A new project joins the creator's admin org (else the default org); the creator becomes its admin."""
     if not created:
         return
-    from dashboard.models import Org, OrgMembership, ProjectMembership
+    from dashboard.models import Org, ProjectMembership
     user = scope.current_user()
     org = None
     if instance.org_id is None:

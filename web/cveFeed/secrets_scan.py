@@ -152,12 +152,12 @@ def _send(project, domain, scan, rows, dispatch, force, summary):
                     ledger.record(SERVICE, hosts, project.pk, scan, status='failed')
                 continue
             filed = persist(project, domain, getattr(scan, 'id', None), target, result)
-            summary['hosts'] += len(hosts)
+            read = _record(hosts, result, project.pk, scan)
+            summary['hosts'] += len(read)
             summary['findings'] += filed['findings']
             summary['secrets'] += filed['secrets']
-            ledger.record(SERVICE, hosts, project.pk, scan)
             if validating_batch and filed['validated']:
-                ledger.record(secrets_validation.LEDGER, hosts, project.pk, scan)
+                ledger.record(secrets_validation.LEDGER, read, project.pk, scan)
 
 
 def run_for_hosts(project, domain, hosts, dispatch=None, priority=1):
@@ -215,12 +215,12 @@ def validate_hosts(project_id, hosts, user_id=None, dispatch=None):
                 summary['waiting'] += len(batch)
                 continue
             filed = persist(project, domain, None, target, result)
-            summary['hosts'] += len(batch)
+            read = _record(batch, result, project.pk)
+            summary['hosts'] += len(read)
             summary['findings'] += filed['findings']
             summary['secrets'] += filed['secrets']
-            ledger.record(SERVICE, batch, project.pk)
             if filed['validated']:
-                ledger.record(secrets_validation.LEDGER, batch, project.pk)
+                ledger.record(secrets_validation.LEDGER, read, project.pk)
     return summary
 
 
@@ -332,6 +332,26 @@ def _store_sourcemaps(domain, fetched, target):
 
 
 # ----------------------------------------------------------------------------- cleaning (agentapi.sentinel_broker)
+
+def read_hosts(result, hosts):
+    """The hosts of ``hosts`` the Sentinel got an answer from: a fetched URL on that host with an HTTP status. A host it skipped (its name did not resolve, its
+    address is one a scanner never touches) or could not connect to has none, and was not checked: it is recorded as failed and stays due, not as read
+    with nothing found."""
+    answered = {(urlsplit(f.get('url') or '').hostname or '').lower() for f in (result.get('fetched') or [])
+                if isinstance(f, dict) and isinstance(f.get('status'), int)}
+    return [h for h in hosts if str(h).lower() in answered]
+
+
+def _record(hosts, result, project_pk, scan=None):
+    """The ledger for one finished batch: read hosts done, the others failed (``read_hosts``)."""
+    from cveFeed import ledger
+    read = read_hosts(result, hosts)
+    ledger.record(SERVICE, read, project_pk, scan)
+    missed = [h for h in hosts if h not in set(read)]
+    if missed:
+        ledger.record(SERVICE, missed, project_pk, scan, status='failed')
+    return read
+
 
 def clean_result(body, task_target=None):
     """A Sentinel's ``secrets_scan`` report, typed and clipped: only the fields of the contract, a finding only for a URL it reports fetching on a
