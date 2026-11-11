@@ -43,6 +43,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Resolver fallback (only when the runner cannot find the Ubuntu package servers)
+        uses: ./.github/actions/resolver-fallback
       - name: Release candidate (the installed version plus what is being released)
         run: "$GITHUB_WORKSPACE/.github/rehearsal/prepare.sh"
       - name: Install the released version
@@ -71,6 +73,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Resolver fallback (only when the runner cannot find the Ubuntu package servers)
+        uses: ./.github/actions/resolver-fallback
       - name: Release candidate (the installed version plus what is being released)
         run: "$GITHUB_WORKSPACE/.github/rehearsal/prepare.sh"
       - name: A host service owns port 443
