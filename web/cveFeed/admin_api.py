@@ -496,6 +496,8 @@ def projects_delete(request, actor, project_id):
         raise AdminError(400, 'type the project name to confirm')
     name, org = project.name, project.org
     project.delete()  # cascades to its targets, scans and findings
+    from cveFeed import snapshot_cache
+    snapshot_cache.bump_on_commit()  # an All projects view counted them
     audit(actor, 'project.delete', name, org=org)
     return {'deleted': True}
 

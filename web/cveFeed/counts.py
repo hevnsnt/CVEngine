@@ -186,6 +186,38 @@ def host_reps(domain_id=None, domain_ids=None, in_scope=False):
     return _one_per_host(base, per_project=True)
 
 
+def rep_ids(domain_id=None, domain_ids=None, in_scope=False):
+    """The ids of ``host_reps``, read in ONE statement. The collapse is the dearest query CVEngine has (a window over every host's address set), so a request
+    that needs several numbers over the same hosts reads the ids once and derives each number from them (``reps_of``) instead of collapsing again per number."""
+    return list(host_reps(domain_id=domain_id, domain_ids=domain_ids, in_scope=in_scope).values_list('pk', flat=True))
+
+
+def reps_of(ids):
+    """The Subdomain rows with these ids (from ``rep_ids``): what ``host_reps`` returned, without running the collapse again."""
+    from startScan.models import Subdomain
+    return Subdomain.objects.filter(pk__in=ids)
+
+
+HOST_REPS_SECONDS = 5  # how long the live screen's snapshots of one scope share one collapse (the refresher's own beat)
+
+
+def snapshot_rep_ids():
+    """``rep_ids()`` of the caller's scope. Called while a live-screen snapshot is being built (stats, discovery counts, graph: ``snapshot_cache.building``),
+    the ids come from a snapshot of their own that all of them share for ``HOST_REPS_SECONDS``, one collapse for the three where each used to run its own
+    every 5 s. Called any other time (a request that wants the hosts as they are now, a test, a task) it reads the database, exactly as before. A finding
+    closed (``bump_stats_revision``) drops it with the other snapshots."""
+    from cveFeed import snapshot_cache
+    if not snapshot_cache.building():
+        return rep_ids()
+    return snapshot_cache.snapshot('host-reps', snapshot_cache.scope_hash('host-reps'), rep_ids, HOST_REPS_SECONDS, etag_of=lambda _ids: '')['payload']
+
+
+def live_hosts(domain_id=None):
+    """The hosts the attack-surface map draws, one row each."""
+    from startScan.models import Subdomain
+    return Subdomain.objects.filter(pk__in=host_reps(domain_id).filter(LIVE_HOST_Q).values('pk'))
+
+
 def exposure_filter(prefix=''):
     """A Q over hosts (``prefix`` reaches the host from another model) that holds when the host is exposed."""
     from cveFeed.models import CVEMatch
@@ -195,8 +227,9 @@ def exposure_filter(prefix=''):
     return Q(**{prefix + 'pk__in': matches}) | Q(**{prefix + 'pk__in': findings})
 
 
-def exposed_host_count():
-    return exposed_among(host_reps()).count()  # a machine once, however many names point at it
+def exposed_host_count(reps=None):
+    """``reps``: the hosts to count among (``reps_of(rep_ids())``) when the caller already collapsed the inventory; by default it is collapsed here."""
+    return exposed_among(host_reps() if reps is None else reps).count()  # a machine once, however many names point at it
 
 
 def exposed_matches():

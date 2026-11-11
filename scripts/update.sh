@@ -511,6 +511,11 @@ step 'Building application images while everything keeps running'
 if "${compose[@]}" config --services 2>/dev/null | grep -qx proxy; then
     "${compose[@]}" pull --quiet proxy || echo 'Could not pull the newest proxy image (offline, or the registry is limiting pulls); the one on this host is kept.' >&2
 fi
+# Redis and Postgres are moving tags inside one major version (redis:alpine, postgres:18-alpine). Fetched now too (the production stack only, as
+# for the proxy); recreated below only when moved.
+if "${compose[@]}" config --services 2>/dev/null | grep -qx proxy; then
+    "${compose[@]}" pull --quiet db redis || echo 'Could not pull the newest Redis and Postgres images (offline, or the registry is limiting pulls); the ones on this host are kept.' >&2
+fi
 SENTINEL_SHA=$(scripts/sentinel-ref.sh 2>/dev/null) || SENTINEL_SHA=''  # the newest Sentinel library, resolved now: a moved main rebuilds that layer
 export SENTINEL_SHA
 "${compose[@]}" build web celery celery-beat
@@ -829,6 +834,7 @@ fi
 # The database's own settings are in the compose file (max_connections). `up -d --no-deps db` recreates the db container only when its
 # definition changed since it was created (once, on the update that brings the change: a restart of a few seconds), and is a no-op otherwise.
 "${compose[@]}" up -d --no-deps db
+"${compose[@]}" up -d --no-deps redis  # recreated only when a newer image was pulled above
 for _ in $(seq 1 60); do "${compose[@]}" exec -T db pg_isready -q >/dev/null 2>&1 && break; sleep 1; done
 # A dump of the database first: a migration is never rolled back. A dump that fails stops the update here, before anything is changed (the
 # previous workers are resumed and the checkout is put back). CVENGINE_UPDATE_BACKUPS=0 skips it.
