@@ -57,20 +57,33 @@ test('a success toast still goes by itself after a few seconds', () => {
   assert.equal(document.body.querySelectorAll('*').filter((n) => /(^| )toast( |$)/.test(n.className) && /Saved/.test(n.textContent)).length, 0);
 });
 
-test('at most three error cards are drawn; the rest are one line with its own Dismiss that shows them as cards are dismissed', () => {
+test('at most three error cards are drawn; the rest are one line whose Show button draws them all, losing none', () => {
   const closeAll = () => { while (alerts().length) alerts()[0].querySelectorAll('button')[0].fire('click'); };
   closeAll();
   for (let i = 1; i <= 6; i += 1) toast(`Failure number ${i}.`, true);
   assert.equal(alerts().length, 4, 'three cards and one line for the other three');
-  assert.match(alerts()[3].textContent, /3 more errors\. Dismiss to see them\./);
+  assert.match(alerts()[3].textContent, /3 more errors\./);
+  assert.doesNotMatch(alerts()[3].textContent, /Dismiss to see/, 'the line does not promise what Dismiss does not do');
   assert.doesNotMatch(document.body.textContent, /Failure number 4/);
-  alerts()[0].querySelectorAll('button')[0].fire('click');
-  assert.match(document.body.textContent, /Failure number 4/, 'the next one shows when a card is dismissed');
-  assert.equal(alerts().length, 4);
-  alerts()[3].querySelectorAll('button')[0].fire('click');
-  assert.equal(alerts().length, 3, 'the line is gone, the three cards stay');
+  const show = alerts()[3].querySelectorAll('button')[0];
+  assert.match(show.textContent, /Show/);
+  show.fire('click');
+  assert.equal(alerts().length, 6, 'every error is a card now');
+  for (let i = 1; i <= 6; i += 1) assert.match(document.body.textContent, new RegExp(`Failure number ${i}\\.`));
+  assert.doesNotMatch(document.body.textContent, /more errors/);
   closeAll();
   assert.equal(alerts().length, 0);
+});
+
+test('Dismiss on a card still shows the next hidden one, and the line goes when none is hidden', () => {
+  for (let i = 1; i <= 5; i += 1) toast(`Again ${i}.`, true);
+  assert.equal(alerts().length, 4);
+  alerts()[0].querySelectorAll('button')[0].fire('click');
+  assert.match(document.body.textContent, /Again 4/);
+  assert.equal(alerts().length, 4, 'three cards and a line for the one left');
+  alerts()[0].querySelectorAll('button')[0].fire('click');
+  assert.equal(alerts().length, 3, 'nothing hidden, no line');
+  while (alerts().length) alerts()[0].querySelectorAll('button')[0].fire('click');
 });
 
 test('ten different errors never draw more than four alerts', () => {

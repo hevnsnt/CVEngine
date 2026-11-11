@@ -4,7 +4,7 @@
 //   /cve/api/admin/health      workers, scheduler heartbeat, scanning pause and scan counts (App Admin only; a short live inspection)
 // Nothing is hidden by this page: the server decides what each person may read. Text is set with textContent only.
 import { api, el, waiting, couldNotRead } from "/staticfiles/cve/ui.js";
-import { fetchWithin } from "/staticfiles/cve/poll.js";
+import { readWithin } from "/staticfiles/cve/poll.js";
 import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
 
 const root = document.getElementById("health");
@@ -143,7 +143,7 @@ async function refresh(name, quiet = false) {
 
 // The strip's sentence is extra: when it does not answer (or not in time), the work cell simply has no extra sentence.
 async function readStrip() {
-  slots.strip.data = await fetchWithin("/cve/api/scanner", { credentials: "same-origin", cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  slots.strip.data = await readWithin("/cve/api/scanner", { credentials: "same-origin", cache: "no-store" }, (r) => (r.ok ? r.json() : null)).catch(() => null);
   draw();
 }
 

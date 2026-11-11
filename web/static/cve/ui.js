@@ -1,5 +1,5 @@
 import { fmtDateTime } from '/staticfiles/cve/prefs.js';
-import { fetchWithin } from '/staticfiles/cve/poll.js';
+import { readWithin } from '/staticfiles/cve/poll.js';
 
 // Small shared helpers for the account and administration pages (DOM built with textContent only).
 export const el = (tag, cls, text, attrs = {}) => {
@@ -25,39 +25,45 @@ export async function api(method, url, body) {
     headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken() },
     body: body ? JSON.stringify(body) : undefined,
   };
-  const res = method === 'GET' ? await fetchWithin(url, init) : await fetch(url, init);
-  let data = {};
-  try { data = await res.json(); } catch (_) { /* empty */ }
+  // For a read the limit covers the body too: a server that sends headers and then stalls must not leave the page waiting for ever.
+  const read = async (r) => {
+    let body = {};
+    try { body = await r.json(); } catch (_) { /* empty */ }
+    return { res: r, data: body };
+  };
+  const { res, data } = method === 'GET' ? await readWithin(url, init, read) : await read(await fetch(url, init));
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
 }
 
 // A message that says something went well goes by itself. An error stays until the person dismisses it (it is often the only explanation the
 // server gave) and is announced as an alert. The stack has a ceiling: at most MAX_ERRORS cards are drawn, the same words shown again are one card
-// with a count ("3 times"), and the rest are one line ("2 more errors. Dismiss to see them.") with its own Dismiss, so a failing page cannot
-// bury the screen in cards.
+// with a count ("3 times"), and the rest are one line ("2 more errors.") with a Show button that draws them all (nothing is discarded to see it), so a failing
+// page cannot bury the screen in cards until the person asks for them.
 export const MAX_ERRORS = 3;
 let errorStack = null;
+let showAllErrors = false;
 const errors = []; // [{message, count}], oldest first
 function drawErrors() {
   if (!errorStack || !errorStack.isConnected) {
     errorStack = el('div', 'toast-stack');
     document.body.appendChild(errorStack);
   }
-  const cards = errors.slice(0, MAX_ERRORS).map((entry) => {
+  if (errors.length <= MAX_ERRORS) showAllErrors = false;
+  const cards = errors.slice(0, showAllErrors ? errors.length : MAX_ERRORS).map((entry) => {
     const t = el('div', 'toast err stays', null, { role: 'alert' });
     const close = el('button', 'toast-close', 'Dismiss', { type: 'button', 'aria-label': 'Dismiss this message' });
     close.addEventListener('click', () => { errors.splice(errors.indexOf(entry), 1); drawErrors(); });
     t.append(el('span', '', entry.count > 1 ? `${entry.message} (${entry.count} times)` : entry.message), close);
     return t;
   });
-  const hidden = errors.slice(MAX_ERRORS);
+  const hidden = showAllErrors ? [] : errors.slice(MAX_ERRORS);
   if (hidden.length) {
     const extra = hidden.reduce((n, e) => n + e.count, 0);
     const t = el('div', 'toast err stays', null, { role: 'alert' });
-    const close = el('button', 'toast-close', 'Dismiss', { type: 'button', 'aria-label': 'Dismiss the other messages' });
-    close.addEventListener('click', () => { errors.length = Math.min(errors.length, MAX_ERRORS); drawErrors(); });
-    t.append(el('span', '', `${extra} more ${extra === 1 ? 'error' : 'errors'}. Dismiss to see them.`), close);
+    const show = el('button', 'toast-close', 'Show them', { type: 'button', 'aria-label': `Show the ${extra} other ${extra === 1 ? 'error' : 'errors'}` });
+    show.addEventListener('click', () => { showAllErrors = true; drawErrors(); });
+    t.append(el('span', '', `${extra} more ${extra === 1 ? 'error' : 'errors'}.`), show);
     cards.push(t);
   }
   while (errorStack.firstChild) errorStack.removeChild(errorStack.firstChild);

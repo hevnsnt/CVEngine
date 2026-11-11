@@ -17,25 +17,36 @@ export const JITTER_HIGH = 1.15;
 export const REQUEST_MS = 75000;
 
 /**
- * fetch with a real time limit: the request is aborted after ``ms`` and the promise rejects with an Error named TimeoutError, so a request that
- * never answers ends in the same failure path as one that failed. A signal the caller passes is honoured too.
+ * Runs ``work(signal)`` with a real time limit that covers all of it: the limit stays armed until the promise ``work`` returns settles, so a
+ * server that sends its headers and then stalls the body is cut off too. After ``ms`` the signal aborts and the promise rejects with an Error
+ * named TimeoutError (it rejects at once, even when ``work`` ignores the signal and never settles). A signal the caller passes is honoured too.
  */
-export function fetchWithin(url, init = {}, ms = REQUEST_MS, fetchImpl = (...a) => fetch(...a)) {
+export function within(work, ms = REQUEST_MS, outer = null) {
   const control = new AbortController();
-  let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; control.abort(); }, ms);
-  if (timer && timer.unref) timer.unref(); // a pending limit never keeps a script or a test alive
-  if (init.signal) init.signal.addEventListener("abort", () => control.abort(), { once: true });
-  return fetchImpl(url, { ...init, signal: control.signal }).then(
-    (response) => { clearTimeout(timer); return response; },
-    (err) => {
-      clearTimeout(timer);
-      if (!timedOut) throw err;
+  let timer = null;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      control.abort();
       const slow = new Error("The server did not answer in time.");
       slow.name = "TimeoutError";
-      throw slow;
-    },
-  );
+      reject(slow);
+    }, ms);
+    if (timer && timer.unref) timer.unref(); // a pending limit never keeps a script or a test alive
+  });
+  if (outer) outer.addEventListener("abort", () => control.abort(), { once: true });
+  const job = Promise.resolve().then(() => work(control.signal));
+  job.catch(() => {}); // when the limit wins, a later failure of the abandoned work is not an unhandled rejection
+  return Promise.race([job, late]).finally(() => clearTimeout(timer));
+}
+
+/** fetch with a time limit on the response headers only: use ``readWithin`` when the body is read too. */
+export function fetchWithin(url, init = {}, ms = REQUEST_MS, fetchImpl = (...a) => fetch(...a)) {
+  return within((signal) => fetchImpl(url, { ...init, signal }), ms, init.signal);
+}
+
+/** fetch and read the body (``read(response)``, e.g. ``(r) => r.json()``) inside one time limit: headers, body and parsing all count. */
+export function readWithin(url, init = {}, read = (r) => r, ms = REQUEST_MS, fetchImpl = (...a) => fetch(...a)) {
+  return within(async (signal) => read(await fetchImpl(url, { ...init, signal })), ms, init.signal);
 }
 
 export const MAX_RETRY_AFTER_MS = 120000; // a server that says "come back in an hour" is waited on for two minutes, then asked again
@@ -83,9 +94,10 @@ export function createPace(now = () => Date.now()) {
  * are conditional. A failure throws an Error with ``status`` and, on a 429 or 503, ``retryAfter`` (milliseconds) for ``createPace().fail``.
  * ``entries`` bounds the map: a poller whose URL carries a moving cursor would otherwise remember every cursor it ever used.
  */
-export function createGet({ fetchImpl = (u, i) => fetchWithin(u, i), entries = 64, now = () => Date.now() } = {}) {
+export function createGet({ fetchImpl = (u, i) => fetch(u, i), entries = 64, now = () => Date.now(), ms = REQUEST_MS } = {}) {
   const tags = new Map();
-  return async function get(url, init = {}) {
+  return (url, init = {}) => within((signal) => read(url, { ...init, signal }), ms, init.signal);
+  async function read(url, init) {
     const headers = { ...(init.headers || {}) };
     const known = tags.get(url);
     if (known) headers["If-None-Match"] = known;
@@ -98,13 +110,14 @@ export function createGet({ fetchImpl = (u, i) => fetchWithin(u, i), entries = 6
       throw error;
     }
     const tag = response.headers && response.headers.get ? response.headers.get("ETag") : null;
+    const body = await response.json(); // read before the tag is kept: a body that never arrives must not leave a tag for a copy never held
     tags.delete(url);
     if (tag) {
       tags.set(url, tag);
       while (tags.size > entries) tags.delete(tags.keys().next().value);
     }
-    return response.json();
-  };
+    return body;
+  }
 }
 
 /**

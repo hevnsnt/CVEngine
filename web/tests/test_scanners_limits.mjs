@@ -32,7 +32,7 @@ globalThis.localStorage = {getItem: () => null, setItem() {}, removeItem() {}};
 // a fetch that never answers by itself, but honours the abort signal like the real one
 const calls = [];
 globalThis.fetch = (url, init = {}) => new Promise((resolve, reject) => {
-  const call = {url: String(url).split('?')[0], resolve, reject, done: false};
+  const call = {url: String(url).split('?')[0], resolve, reject, done: false, signal: init.signal};
   calls.push(call);
   if (init.signal) init.signal.addEventListener('abort', () => { call.done = true; reject(Object.assign(new Error('aborted'), {name: 'AbortError'})); });
 });
@@ -118,4 +118,38 @@ test('showing the tab again while a round is running does not start a second pol
   assert.equal(calls.length - start, 9, 'and again exactly one: a single chain');
   answerAll();
   await flush();
+});
+
+// The strip read (the one-sentence extra in the work cell) has the same limit as the cells: a round waits for it, so a strip that stalls would
+// stop the page polling. Observable: the round must end and the next one start. Swapped to a plain fetch, both tests fail (no abort, no next round).
+const roundAfterStall = async (answerStrip) => {
+  mock.timers.tick(30000); // the next round starts
+  await flush();
+  const mine = calls.filter((c) => !c.done);
+  assert.equal(mine.length, 3, 'a round of three requests');
+  for (const c of mine) {
+    if (c.url === '/cve/api/scanner') { answerStrip(c); continue; }
+    c.done = true;
+    c.resolve({ok: true, status: 200, json: async () => BODIES[c.url]});
+  }
+  await flush();
+  mock.timers.tick(REQUEST_MS + 1);
+  await flush();
+  const strip = mine.find((c) => c.url === '/cve/api/scanner');
+  assert.ok(strip.signal, 'the strip read carries an abort signal (it goes through the time limit)');
+  assert.equal(strip.signal.aborted, true, 'and the limit aborted it');
+  const before = calls.length;
+  mock.timers.tick(30000);
+  await flush();
+  assert.equal(calls.length - before, 3, 'the round ended, so the next one started');
+  answerAll();
+  await flush();
+};
+
+test('a strip read that never answers is cut off by the limit and does not stop the polling', async () => {
+  await roundAfterStall(() => {});
+});
+
+test('a strip read whose headers arrive but whose body stalls is cut off by the limit too', async () => {
+  await roundAfterStall((c) => { c.done = true; c.resolve({ok: true, status: 200, json: () => new Promise(() => {})}); });
 });
