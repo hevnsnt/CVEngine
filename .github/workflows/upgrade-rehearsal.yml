@@ -192,7 +192,17 @@ jobs:
           before=$(docker images -q --no-trunc | sort | md5sum)
           cp "$HOME/candidate.sha" web/.update-approved
           printf 'master\n' > web/.update-branch
-          scripts/apply-update.sh
+          # Exit 3 is "settling: a job on this server is still running, approval kept": the conductor starts scans of the seeded targets as soon
+          # as the stack restarts after the second update, so one can be in flight here (run 42914244629). The host watcher calls the script again
+          # a minute later, so this does too, as the second update's step above does; the script forces ahead after at most 60 seconds, so a few
+          # tries are enough. Anything other than 0 at the end still fails the step.
+          for attempt in $(seq 1 6); do
+            status=0
+            scripts/apply-update.sh || status=$?
+            [ "$status" = 3 ] || break
+            sleep 30
+          done
+          [ "$status" = 0 ] || { echo "::error::approving the same commit again ended with status $status"; exit 1; }
           grep -q 'already at' "$(python3 scripts/update-state.py directory)/update.log" || { echo "::error::the update log does not say 'already at'"; exit 1; }
           [ "$before" = "$(docker images -q --no-trunc | sort | md5sum)" ] || { echo "::error::an update that was already applied built an image"; exit 1; }
       - name: A third update, applied by the host watcher while the watchdog runs (it stands down and does not fight it)
