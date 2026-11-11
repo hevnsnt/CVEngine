@@ -50,7 +50,7 @@ class ContractTests(SimpleTestCase):
                 target = secrets_scan.build_target([HOST], rows, {'excluded.example.test'}, validate=validate)
                 self.assertEqual(list(schema.iter_errors(target)), [], validate)
         self.assertEqual(target['validate_rules'], secrets_validation.rule_ids())
-        self.assertEqual(target['validate_kingfisher'], '2.16.0')
+        self.assertEqual(target['validate_kingfisher'], '2.18.1')
 
     def test_the_bounds_equal_the_servers(self):
         target = contract.load()['$defs']['targets']['secrets_scan']['properties']
