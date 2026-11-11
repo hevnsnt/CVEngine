@@ -182,7 +182,7 @@ R2_SECONDS = 600
 
 def check_hung(ctx, state=None):
     """A lane answers, its queue is not empty and does not shrink, no task has finished in ten minutes, its pool has free slots and it has no task that
-    started less than 30 minutes ago (a pool full of long scans, or one long task, is busy, not hung)."""
+    is running and beating (a pool full of long scans, or one long task, is busy, not hung)."""
     snap = ctx.snap
     if not snap.get('redis_ok') or snap.get('lanes') is None:
         return Check(None, 'Could not ask the workers, so nothing is done.')
@@ -194,7 +194,9 @@ def check_hung(ctx, state=None):
     hung, busy, notes = [], [], []
     try:
         from reNgine import lane_memory
-        running = lane_memory.in_flight()
+        # the record of a task counts only when the worker that wrote it is the one answering now (a restarted worker has another process id)
+        pids = {p.removesuffix('_worker'): {work[n]['pid'] for n in lane['workers'] if n in (work or {}) and work[n].get('pid')} for p, lane in status.items()}
+        running = lane_memory.in_flight(pids={k: v for k, v in pids.items() if v})
     except Exception:  # noqa: BLE001 - no record of running tasks means the slot count alone decides, as before
         running = {}
     for prefix, lane in status.items():
@@ -218,7 +220,7 @@ def check_hung(ctx, state=None):
             busy.append(prefix)  # every slot is taken: long work, not a hung worker
             continue
         if prefix.removesuffix('_worker') in running:  # the lane table says cve_feed_worker, the memory records cve_feed
-            busy.append(prefix)  # a task that started less than 30 minutes ago is running: one long task is work, whatever the slot count
+            busy.append(prefix)  # a task is running and its worker beats: one long task is work, whatever the slot count
             continue
         hung.append(prefix)
         notes.append(f'{LANE_WORDS.get(prefix, prefix)}: queue grew from {win["depth"]} to {depth} in {int((ctx.epoch - win["since"]) // 60)} minutes with nothing finished and {capacity - active} free slot(s)')
@@ -349,6 +351,8 @@ def act_feed(ctx, chk):
 # R5 ----------------------------------------------------------------------------------------------------------------------------
 
 R5_SECONDS = 30 * 60
+R5_EVENT_SECONDS = 10 * 60   # a skipped return is written to the event log at most this often, not every 30 seconds
+R5_NOTICE_SECONDS = 30 * 60  # messages that cannot be told apart for this long become a notice with a next step
 
 
 def check_unacked(ctx):
@@ -356,13 +360,99 @@ def check_unacked(ctx):
     if u is None:
         return Check(None, 'Could not read the unacknowledged messages, so nothing is done.')
     if not u['count'] or u['oldest_age_seconds'] <= R5_SECONDS:
+        _note_stranded(ctx, 0, [])
         return Check(False, 'No message has been held unacknowledged for long.')
-    tags = orphan_tags(ctx, R5_SECONDS)  # a worker with a full pool legitimately holds messages it has not started: only what no worker holds counts
-    if tags is None:
-        return Check(None, 'Could not tell which unacknowledged messages a worker holds (a worker lane did not answer), so none are returned to the queue.')
-    if not tags:
-        return Check(False, f'{u["count"]} messages are held unacknowledged for a long time, and workers hold them (busy, not stuck).')
-    return Check(True, f'{len(tags)} messages have been unacknowledged for over {R5_SECONDS // 60} minutes and no worker holds them.', {'count': len(tags)})
+    tags, undecided, missing = orphan_split(ctx, R5_SECONDS)  # a worker with a full pool legitimately holds messages it has not started: only what no worker holds counts
+    _note_stranded(ctx, undecided, missing)
+    if tags:
+        more = f' {undecided} more are left where they are until every lane answers.' if undecided else ''
+        return Check(True, f'{len(tags)} messages have been unacknowledged for over {R5_SECONDS // 60} minutes and no worker holds them.{more}', {'count': len(tags)})
+    if undecided:
+        why = f'the {_lanes_text(missing)} lane did not answer' if missing else 'a worker did not answer every question'
+        return Check(None, f'Could not tell which unacknowledged messages a worker holds ({why}), so none are returned to the queue.')
+    return Check(False, f'{u["count"]} messages are held unacknowledged for a long time, and workers hold them (busy, not stuck).')
+
+
+def _workers_recreated_before(ctx):
+    """The epoch before which every worker process was killed by a restart the host carried out, or None. A message taken by a worker before that moment was
+    taken by a process that no longer exists (the recreated container starts new ones), so no live worker can hold it, whichever lane is silent now."""
+    state = (ctx.states or {}).get('R5')
+    return (state.data or {}).get('workers_recreated_before') if state else None
+
+
+def _skipped_event(ctx, missing):
+    """Write that unacknowledged messages were left where they are (at most every ``R5_EVENT_SECONDS``). Says why, in words."""
+    state = (ctx.states or {}).get('R5')
+    data = dict(state.data or {}) if state else {}
+    last = data.get('skipped_event_at')
+    if last is not None and ctx.epoch - last < R5_EVENT_SECONDS:
+        return
+    why = f'The {_lanes_text(missing)} lane did not answer' if missing else 'A worker did not answer every question'
+    event('R5', 'info', observation=f'{why}, so what the workers hold cannot be told.', action='none',
+          result='Unacknowledged messages were left where they are, so this return cannot run a task twice. They are looked at again when every lane answers.')
+    if state is not None:
+        state.data = {**data, 'skipped_event_at': ctx.epoch}
+
+
+def _note_stranded(ctx, undecided, missing):
+    """Track messages that cannot be told apart from a live worker's. The first time is written to the event log; after ``R5_NOTICE_SECONDS`` of it a notice says what
+    is waiting, why it is not put back and what happens next. It closes by itself when every message can be judged again."""
+    state = (ctx.states or {}).get('R5')
+    if state is None:
+        return
+    data = dict(state.data or {})
+    if not undecided:
+        if data.pop('stranded_since', None) is not None:
+            state.data = data
+            resolve_notice('R5')
+        return
+    _skipped_event(ctx, missing)
+    data = dict(state.data or {})
+    since = data.setdefault('stranded_since', ctx.epoch)
+    state.data = data
+    if ctx.epoch - since < R5_NOTICE_SECONDS:
+        return
+    lanes = _lanes_text(missing) + ' lane' if missing else 'a worker'
+    count = f'{undecided} message{"s" if undecided != 1 else ""}'
+    notice('R5', 'warning', f'Work is waiting on {lanes}, which is not answering',
+           f'{count} taken by the workers over {R5_SECONDS // 60} minutes ago {"has" if undecided == 1 else "have"} not been put back in the queue. '
+           'A worker that is still running may be doing that work, and putting it back could make it run twice, so the watchdog leaves it. '
+           'What happens next: the messages go back to their queues as soon as every lane answers again, or when the workers are restarted '
+           '(the watchdog restarts them itself when its limits allow it; a restart puts every unacknowledged message back and starts that work again). '
+           f'Next step: run `docker compose logs --tail 100 celery` to see why {"the " + _lanes_text(missing) + " lane is" if missing else "a worker is"} silent, '
+           'then `docker compose restart celery` once the cause is fixed.', undecided=undecided)
+
+
+def orphan_split(ctx, min_age):
+    """``(tags, undecided, missing)``: the delivery tags of unacknowledged messages older than ``min_age`` seconds that no live worker can hold, how many
+    messages are left where they are because that cannot be told, and the lanes that did not answer.
+    Every lane answered: a message is an orphan when no worker lists its task. A lane is silent or the inspect answer is partial: a busy worker may still hold
+    its messages and returning one would run the task twice, so nothing is returned, except the messages taken before the last restart the host carried out
+    (``_workers_recreated_before``): the process that took them is dead, so no live worker holds them even if a lane has not come back."""
+    try:
+        from cveFeed import broker_recovery
+        client = ctx.probes.redis() if ctx.probes else snapshot.Probes().redis()
+        rows = list(client.zrangebyscore(snapshot.UNACKED_INDEX_KEY, '-inf', ctx.epoch - min_age, withscores=True))
+        if not rows:
+            return [], 0, []
+        lanes = ctx.snap.get('lanes')
+        missing = [p for p, lane in snapshot.lane_status(ctx.snap).items() if lane['present'] is not True]
+        if missing or not lanes:
+            cutoff = _workers_recreated_before(ctx)
+            safe = [t for t, score in rows if cutoff is not None and score <= cutoff]
+            return safe, len(rows) - len(safe), missing
+        held = held_task_ids(lanes)
+        if held is None:
+            return [], len(rows), []
+        out = []
+        for tag, _score in rows:
+            raw = client.hget(snapshot.UNACKED_KEY, tag)
+            if not ((set(broker_recovery._task_ids(raw)) & held) if raw else set()):
+                out.append(tag)
+        return out, 0, []
+    except Exception:  # noqa: BLE001
+        logger.warning('watchdog: could not read the unacknowledged messages', exc_info=True)
+        return [], 1, []
 
 
 def act_unacked(ctx, chk):
@@ -390,42 +480,14 @@ def held_task_ids(lanes=None):
     return held
 
 
-def orphan_tags(ctx, min_age):
-    """The delivery tags of unacknowledged messages older than ``min_age`` seconds that no worker holds, or None when that cannot be told. It cannot be
-    told while any lane is silent or the answer of the workers is partial: a message is only an orphan when every lane answered and none holds it."""
-    try:
-        from cveFeed import broker_recovery
-        client = ctx.probes.redis() if ctx.probes else snapshot.Probes().redis()
-        tags = list(client.zrangebyscore(snapshot.UNACKED_INDEX_KEY, '-inf', ctx.epoch - min_age))
-        if not tags:
-            return []
-        lanes = ctx.snap.get('lanes')
-        if not lanes or any(lane['present'] is not True for lane in snapshot.lane_status(ctx.snap).values()):
-            return None
-        held = held_task_ids(lanes)
-        if held is None:
-            return None
-        out = []
-        for tag in tags:
-            raw = client.hget(snapshot.UNACKED_KEY, tag)
-            if not ((set(broker_recovery._task_ids(raw)) & held) if raw else set()):
-                out.append(tag)
-        return out
-    except Exception:  # noqa: BLE001
-        logger.warning('watchdog: could not read the unacknowledged messages', exc_info=True)
-        return None
-
-
 def requeue_orphans(ctx, min_age):
-    """Return the unacknowledged messages older than ``min_age`` seconds that no worker holds to their queues. Never raises; returns how many. When it
+    """Return the unacknowledged messages older than ``min_age`` seconds that no live worker can hold to their queues. Never raises; returns how many. When it
     cannot tell what the workers hold it returns nothing and says so in the event log: work must not run twice."""
     try:
         from cveFeed import broker_recovery
-        tags = orphan_tags(ctx, min_age)
-        if tags is None:
-            event('R5', 'info', observation='Not every worker lane answered, so what the workers hold cannot be told.', action='none',
-                  result='Unacknowledged messages were left where they are, so no task can run twice. They are looked at again when every lane answers.')
-            return 0
+        tags, undecided, missing = orphan_split(ctx, min_age)
+        if undecided:
+            _skipped_event(ctx, missing)
         return broker_recovery.requeue_tags(tags)
     except Exception:  # noqa: BLE001
         logger.warning('watchdog: could not return the unacknowledged messages', exc_info=True)
@@ -785,8 +847,22 @@ def _gate(rule, state, ctx):
     return None
 
 
+def _plain(detail):
+    """The host's refusal without its own "refused by the host:" prefix, which the sentence around it replaces."""
+    detail = str(detail or '').strip()
+    return detail[len('refused by the host:'):].strip() if detail.startswith('refused by the host:') else detail
+
+
+HOST_DOES = {'restart-celery': 'restart the workers', 'restart-celery-beat': 'restart the scheduler', 'prune-docker': 'run the disk cleanup'}
+
+
+def _gap_text(action, detail):
+    """What the host's gap between two runs of the same action refused, said from the action (the gap is 10 minutes for a restart and 30 for the cleanup)."""
+    return f'The host did not {HOST_DOES.get(action, action.replace("-", " "))}: {_plain(detail)} That is the host\'s own limit between two runs. The watchdog waits and tries again later.'
+
+
 def _limit_text(rule, what):
-    return f'The daily limit of restarts has been reached: {what} The watchdog waits and tries again later.' + (f' Next step: {rule.next_step}.' if rule.next_step else '')
+    return f'The daily limit of restarts has been reached: {_plain(what)} The watchdog waits and tries again later.' + (f' Next step: {rule.next_step}.' if rule.next_step else '')
 
 
 def _held(state, ctx):
@@ -857,9 +933,11 @@ def _escalate(rule, state, ctx, chk):
     state.escalated_at = ctx.now
     state.verify, state.verify_due = {}, None
     nxt = rule.next_step or 'look at the Health tab of the Scanners page'
-    later = 'ten minutes after the restart, long after the workers had time to start' if v.get('host_ok') else 'two minutes later'
+    waiting = (' Work waiting for a lane that is not running stays in its queue and will run when that lane starts; the watchdog tries again after the hour, '
+               'and the messages that lane had taken before the restart were put back by it.') if rule.code in ('R1', 'R2') else ''
+    later = 'ten minutes after the restart, and the workers still did not answer' if v.get('host_ok') else 'two minutes later'
     event(rule.code, 'problem', observation=evidence, action=v.get('action', ''), result=f'Not fixed after the action. Stopped acting on this rule for an hour. Next step: {nxt}.')
-    notice(rule.code, 'critical', f'{rule.notice_title or rule.title}; the watchdog could not fix it. Next step: {nxt}', f'{evidence} The watchdog acted at {human(datetime.fromisoformat(v["acted_at"])) if v.get("acted_at") else "an earlier time"} and the symptom was still there {later}, so it has stopped acting on this for an hour to avoid a restart loop.',
+    notice(rule.code, 'critical', f'{rule.notice_title or rule.title}; the watchdog could not fix it. Next step: {nxt}', f'{evidence} The watchdog acted at {human(datetime.fromisoformat(v["acted_at"])) if v.get("acted_at") else "an earlier time"} and the symptom was still there {later}, so it has stopped acting on this for an hour to avoid a restart loop.' + waiting,
            action=v.get('action', ''))
 
 
@@ -932,7 +1010,7 @@ def _process_host_result(ctx):
             limit = host_limit(result)
             if limit:  # the host's own limit said no: nothing was tried, so nothing failed and nothing counts
                 hold = HELD_DAY_SECONDS if limit == 'day' else HELD_GAP_SECONDS
-                text = _limit_text(rule, detail) if limit == 'day' else f'The host restarted this a moment ago and allows one restart at a time apart: {detail} The watchdog waits and tries again later.'
+                text = _limit_text(rule, detail) if limit == 'day' else _gap_text(result.get('action') or rule.host_action or '', detail)
                 state.verify, state.verify_due = {}, None
                 state.last_action_at = None
                 state.actions = list(state.actions or [])[:-1]
@@ -946,6 +1024,11 @@ def _process_host_result(ctx):
             state.verify = v
             if result.get('ok'):
                 state.verify = {**state.verify, 'host_ok': True}
+                if rule.host_action == 'restart-celery':  # every worker process that existed when this was asked for is gone: R5 may return what they held
+                    r5 = ctx.states['R5']
+                    requested = datetime.fromisoformat(v['requested_at']).timestamp() if v.get('requested_at') else done.timestamp()
+                    r5.data = {**(r5.data or {}), 'workers_recreated_before': max(requested, (r5.data or {}).get('workers_recreated_before') or 0)}
+                    r5.save()
                 state.verify_due = done + timedelta(seconds=rule.verify)
                 event(rule.code, 'action', action=result.get('action', ''), result='The host carried it out. ' + detail, request=result['id'])
             else:
@@ -1000,7 +1083,7 @@ def _process_rule(rule, ctx, stand):
             return
         if chk.firing is True and _still_warming_up(rule, state, ctx):
             state.verify_due = ctx.now + timedelta(seconds=VERIFY_RETRY_SECONDS)
-            _set(state, 'acting', 'The restart was carried out and the workers are still starting; checking again shortly.')
+            _set(state, 'acting', 'The restart was carried out; the workers have not answered yet (they may still be starting). The watchdog checks again for up to ten minutes after the restart.')
             return
         if chk.firing is True:
             _escalate(rule, state, ctx, chk)

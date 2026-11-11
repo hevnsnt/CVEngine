@@ -63,7 +63,7 @@ class Probes:
         return {name: [q.get('name') for q in (queues or [])] for name, queues in (answer or {}).items()}
 
     def lane_work(self, workers=None):
-        """{worker name: {'completed': tasks finished since it started, 'active': tasks running, 'capacity': its pool ceiling or None}}: what R2 needs, asked
+        """{worker name: {'completed': tasks finished since it started, 'active': tasks running, 'capacity': its pool ceiling or None, 'pid': its process id or None}}: what R2 needs, asked
         only while a queue has messages waiting, and only of the workers that answered (so it returns as soon as they have)."""
         from reNgine.celery import app
         inspector = app.control.inspect(timeout=PING_SECONDS, destination=list(workers) if workers else None, limit=len(workers) if workers else len(_lane_table()))
@@ -75,7 +75,8 @@ class Probes:
             pool = info.get('pool') or {}
             ceiling = (info.get('autoscaler') or {}).get('max') or pool.get('max-concurrency')
             out[name] = {'completed': sum(v for v in total.values() if isinstance(v, int)),
-                         'active': len(active.get(name) or []), 'capacity': ceiling if isinstance(ceiling, int) else None}
+                         'active': len(active.get(name) or []), 'capacity': ceiling if isinstance(ceiling, int) else None,
+                         'pid': info.get('pid') if isinstance(info.get('pid'), int) else None}
         return out
 
     def beat_age(self):

@@ -68,6 +68,7 @@ class InFlightTests(SimpleTestCase):
     def test_a_task_that_started_is_in_flight_until_it_ends(self):
         with mock.patch.object(lm, 'rss_mb', return_value=50.0), mock.patch.object(lm, 'lane_name', return_value='cve_feed'):
             lm.before('a', 'cveFeed.tasks.port_load', now=1000.0)
+            lm.heartbeat_once(now=1470.0)  # a worker with a task running keeps beating (a record nobody refreshes is ignored)
             self.assertEqual(lm.in_flight(now=1480.0), {'cve_feed': 480})
             lm.after('a', 'cveFeed.tasks.port_load', now=1500.0)
         self.assertEqual(lm.in_flight(now=1501.0), {})
@@ -76,14 +77,81 @@ class InFlightTests(SimpleTestCase):
         with mock.patch.object(lm, 'rss_mb', return_value=50.0), mock.patch.object(lm, 'lane_name', return_value='classic'):
             lm.before('a', 't1', now=1000.0)
             lm.before('b', 't2', now=1900.0)
+            lm.heartbeat_once(now=1990.0)
         self.assertEqual(lm.in_flight(now=2000.0), {'classic': 100})
 
-    def test_a_task_running_longer_than_the_limit_is_no_longer_evidence_of_life(self):
+    def test_a_task_running_longer_than_the_ceiling_is_no_longer_evidence_of_life(self):
         with mock.patch.object(lm, 'rss_mb', return_value=50.0), mock.patch.object(lm, 'lane_name', return_value='classic'):
             lm.before('a', 't1', now=1000.0)
-        self.assertEqual(lm.in_flight(now=1000.0 + lm.IN_FLIGHT_SECONDS + 1), {})
+        self.assertEqual(lm.in_flight(now=1000.0 + lm.IN_FLIGHT_MAX_SECONDS + 1), {})
 
     def test_a_cache_that_fails_never_fails_the_task_start(self):
         with mock.patch.object(lm, 'rss_mb', return_value=50.0), mock.patch.object(lm, 'lane_name', return_value='classic'), \
                 mock.patch('django.core.cache.cache.set', side_effect=OSError('redis down')):
             lm.before('x', 't', now=5000.0)  # must not raise
+
+
+class LivenessTests(SimpleTestCase):
+    """The in-flight record needs a sign that the worker that wrote it is alive: a heartbeat it keeps writing while a task runs, and its process id."""
+
+    def setUp(self):
+        lm._state.update(lane=None, started={}, running={}, tasks={}, last_write=0.0, peak_mb=0.0)
+        for lane in lm.LANES:
+            cache.delete(lm.RUNNING_PREFIX + lane)
+
+    def _start(self, now, lane='cve_feed'):
+        with mock.patch.object(lm, 'rss_mb', return_value=50.0), mock.patch.object(lm, 'lane_name', return_value=lane), mock.patch.object(lm, '_ensure_heartbeat'):
+            lm.before('a', 'cveFeed.tasks.port_load', now=now)
+
+    def test_a_record_whose_heartbeat_is_three_minutes_old_is_not_busy(self):
+        self._start(1000.0)
+        self.assertEqual(lm.in_flight(now=1000.0 + 60), {'cve_feed': 60})
+        self.assertEqual(lm.in_flight(now=1000.0 + 180), {})  # no beat for 3 minutes: the worker that wrote it is gone
+
+    def test_a_task_started_forty_five_minutes_ago_with_a_fresh_heartbeat_is_busy(self):
+        self._start(1000.0)
+        later = 1000.0 + 45 * 60
+        with mock.patch.object(lm, 'lane_name', return_value='cve_feed'):
+            lm.write_running(now=later - 10)  # the heartbeat
+        self.assertEqual(lm.in_flight(now=later), {'cve_feed': 45 * 60})
+
+    def test_a_heartbeating_task_older_than_the_ceiling_is_no_longer_evidence(self):
+        self._start(1000.0)
+        later = 1000.0 + lm.IN_FLIGHT_MAX_SECONDS + 60
+        with mock.patch.object(lm, 'lane_name', return_value='cve_feed'):
+            lm.write_running(now=later - 10)
+        self.assertEqual(lm.in_flight(now=later), {})
+
+    def test_a_record_written_by_a_process_that_is_not_the_answering_worker_is_not_busy(self):
+        self._start(1000.0)
+        me = lm.os.getpid()
+        self.assertEqual(lm.in_flight(now=1010.0, pids={'cve_feed': {me}}), {'cve_feed': 10})
+        self.assertEqual(lm.in_flight(now=1010.0, pids={'cve_feed': {me + 1}}), {})  # a new worker answers under another pid: the record is a dead process's
+        self.assertEqual(lm.in_flight(now=1010.0, pids={'classic': {me + 1}}), {'cve_feed': 10})  # another lane's pids say nothing about this one
+
+    def test_a_record_with_no_heartbeat_is_not_trusted(self):
+        cache.set(lm.RUNNING_PREFIX + 'classic', lm.json.dumps({'pid': 1, 'running': [{'name': 't', 'since': 990.0}]}), 600)  # the format before the heartbeat
+        self.assertEqual(lm.in_flight(now=1000.0), {})
+
+    def test_the_heartbeat_keeps_writing_while_a_task_runs_and_stops_when_none_does(self):
+        self._start(1000.0)
+        with mock.patch.object(lm, 'lane_name', return_value='cve_feed'):
+            self.assertTrue(lm.heartbeat_once(now=1030.0))
+            self.assertEqual(lm.in_flight(now=1100.0), {'cve_feed': 100})  # beat at 1030: fresh at 1100
+            lm._state['running'].clear()
+            self.assertFalse(lm.heartbeat_once(now=1060.0))
+
+    def test_the_first_task_starts_one_heartbeat_thread(self):
+        lm._state['beat_thread'] = None
+        with mock.patch.object(lm.threading, 'Thread') as thread, mock.patch.object(lm, 'rss_mb', return_value=50.0), mock.patch.object(lm, 'lane_name', return_value='classic'):
+            lm.before('a', 't', now=1000.0)
+            lm.before('b', 't', now=1001.0)
+        thread.assert_called_once()
+        thread.return_value.start.assert_called_once()
+        lm._state['beat_thread'] = None
+
+    def test_a_worker_that_shuts_down_cleanly_clears_its_record(self):
+        self._start(1000.0)
+        with mock.patch.object(lm, 'lane_name', return_value='cve_feed'):
+            lm.reset()
+        self.assertEqual(lm.in_flight(now=1001.0), {})
