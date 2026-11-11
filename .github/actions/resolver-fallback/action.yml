@@ -23,14 +23,20 @@ runs:
         if finds; then echo "The runner's resolver finds the Ubuntu package servers; nothing changed."; exit 0; fi
         echo "::warning::The runner's resolver cannot find the Ubuntu package servers; using public resolvers for this job."
         sudo mkdir -p /etc/systemd/resolved.conf.d
-        printf '[Resolve]\nDNS=1.1.1.1 8.8.8.8 2606:4700:4700::1111\nDomains=~.\n' | sudo tee /etc/systemd/resolved.conf.d/10-public-fallback.conf >/dev/null
+        printf '[Resolve]\nDNS=1.1.1.1 9.9.9.9 1.0.0.1\nDomains=~.\n' | sudo tee /etc/systemd/resolved.conf.d/10-public-fallback.conf >/dev/null
         sudo systemctl restart systemd-resolved
         # containers and image builds take their resolvers from the Docker daemon, not from the runner's stub resolver
         if [ "$WITH_DOCKER" = "true" ] && command -v docker >/dev/null 2>&1; then
           cfg=/etc/docker/daemon.json
           [ -s "$cfg" ] || echo '{}' | sudo tee "$cfg" >/dev/null
-          sudo jq '. + {"dns": ["1.1.1.1", "8.8.8.8"]}' "$cfg" | sudo tee "$cfg.new" >/dev/null && sudo mv "$cfg.new" "$cfg"
+          sudo jq '. + {"dns": ["1.1.1.1", "9.9.9.9", "1.0.0.1"]}' "$cfg" | sudo tee "$cfg.new" >/dev/null && sudo mv "$cfg.new" "$cfg"
           sudo systemctl restart docker
           for _ in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
         fi
-        if finds; then echo "Public resolvers find the Ubuntu package servers."; else echo "::error::The Ubuntu package servers cannot be found through public resolvers either."; exit 1; fi
+        # the resolver was restarted a moment ago, and during the outage even a public resolver misses now and then: ask for up to a minute
+        for _ in $(seq 1 12); do
+          if finds; then echo "Public resolvers find the Ubuntu package servers."; exit 0; fi
+          sleep 5
+        done
+        echo "::error::The Ubuntu package servers cannot be found through public resolvers either."
+        exit 1
