@@ -1052,6 +1052,17 @@ class TickSafetyTests(WatchdogCase):
         self.assertEqual(self.state('R1').status, 'unknown')
         self.assertEqual(self.request()['action'], 'restart-celery-beat')
 
+    def test_the_docs_name_the_tick_limits_the_code_uses(self):
+        """docs/WATCHDOG.md said 25 s and 33 s after the code moved to 40 s and 48 s; the host script's bounds are named too."""
+        from cveFeed.management.commands import watchdog_tick
+        doc = (Path(__file__).resolve().parents[2] / 'docs' / 'WATCHDOG.md').read_text()
+        self.assertIn(f'stops itself after {wd.TICK_SECONDS} seconds', doc)
+        self.assertIn(f'at {watchdog_tick.HARD_SECONDS} seconds', doc)
+        script = (Path(__file__).resolve().parents[2] / 'scripts' / 'watchdog.sh').read_text()
+        for bound in re.findall(r'timeout -k \d+ (\d+) "\$\{COMPOSE\[@\]\}" exec -T web timeout -k \d+ (\d+) python3 manage.py watchdog_tick', script):
+            for seconds in bound:
+                self.assertIn(f'{seconds} seconds', doc)
+
     def test_a_probe_that_hangs_is_cut_off_by_the_time_limit(self):
         probes = FakeProbes(lanes=lambda: time.sleep(30))
         started = time.time()
