@@ -250,11 +250,28 @@ def proof(kind, triage, finding):
     return ''
 
 
-def close_gate(kind, triage, finding, injection):
-    """``(outcome if not closable, reason)``: ``('', '')`` when the server may close this finding as a false positive."""
+def floor_hold(kind, facts):
+    """Why the triage's own floor (``triage.hard_evidence``) keeps this finding from being closed by a model, or ''. A scanner finding with
+    any floor (a template matcher that fired, a CVE template, a medium or higher rating) and a CVE match whose advisory gives no version
+    bound (``match_policy.is_version_unknown``, in ``facts['version_unknown']``) are for a person: the same rule the triage keeps for its own
+    model, "a model may clear a finding only when the evidence sets no floor". A version inside the range is a floor the reviewer may still
+    answer (a backported fix is a reason the matcher cannot see), as are hygiene findings and database exposures (``proof``)."""
+    from cveFeed import triage as triage_lib
+    floor, found = triage_lib.hard_evidence(kind, facts or {})
+    if floor and (kind == 'nuclei' or (kind == 'cve_match' and (facts or {}).get('version_unknown'))):
+        return '; '.join(found)
+    return ''
+
+
+def close_gate(kind, triage, finding, injection, facts=None):
+    """``(outcome if not closable, reason)``: ``('', '')`` when the server may close this finding as a false positive. ``facts`` is the
+    finding's ``triage.describe`` facts (what the floors read)."""
     reason = proof(kind, triage, finding)
     if reason:
         return 'disputed', reason
+    reason = floor_hold(kind, facts)
+    if reason:
+        return 'held', 'hard evidence: ' + reason
     if worked_by_person(kind, finding):
         return 'held', 'a person has worked this finding'
     if injection:
@@ -294,7 +311,7 @@ def build_packet(triage, key):
     d = triage_lib.describe(finding)
     kind = triage.kind
     injection = injection_guard.families(_raw_evidence(triage, finding), d.get('payload'), d.get('host_context'))
-    blocked, why = close_gate(kind, triage, finding, injection)
+    blocked, why = close_gate(kind, triage, finding, injection, d.get('facts'))
     heat, heat_reason = _heat(kind, finding)
     steps = [{'check': str(s.get('label') or s.get('kind') or '')[:80], 'result': str(s.get('result') or '')[:40]}
              for s in (triage.validation_steps or [])[:10] if isinstance(s, dict)]
@@ -428,7 +445,7 @@ def apply_verdict(ref, body, now=None):
         parsed['verdict'], parsed['confidence'] = 'uncertain', 'low'
     outcome, held = 'recorded', ''
     if parsed['verdict'] == 'false_positive':
-        blocked, held = close_gate(triage.kind, triage, finding, injection)
+        blocked, held = close_gate(triage.kind, triage, finding, injection, d.get('facts'))
         if blocked:
             outcome = blocked
         elif parsed['confidence'] != 'high':

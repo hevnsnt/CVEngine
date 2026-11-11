@@ -233,6 +233,26 @@ class ReviewTests(Fixture):
         self.assertEqual(self.verdict(packets['hygiene'], reason_code='check_not_applicable')[1]['outcome'], 'closed')
         self.assertEqual(HygieneFinding.objects.get(pk=hyg.pk).remediation_status, 'false_positive')
 
+    def test_a_fired_nuclei_matcher_or_an_unbounded_advisory_is_never_closed_by_the_reviewer(self):
+        vuln = Vulnerability.objects.create(name='Debug page', severity=3, subdomain=self.sub, target_domain=self.domain, open_status=True,
+                                            http_url='https://www.example.com/debug', source='nuclei', matcher_name='word-1')
+        unbounded = CVEMatch.objects.create(cve_entry=CVEEntry.objects.create(cve_id='CVE-2099-7702', cvss=9.8, published_at=timezone.now(),
+                                                                              affected=[]),
+                                            subdomain=self.sub, source='tech', matched_product='lib-b', matched_version='3.1',
+                                            version_in_range=None, confidence=0.5, ai_verdict='uncertain', scan_history=self.scan,
+                                            evidence={'source': 'tech', 'unbounded': True})
+        triage.track([vuln, unbounded])
+        packets = {p['ref']: p for p in reviewer.next_packets(25)}
+        for finding in (vuln, unbounded):
+            row = Triage.objects.get(**{'vulnerability' if finding is vuln else 'match': finding})
+            packet = packets[f't{row.pk}']
+            self.assertFalse(packet['trusted']['server_may_close'], packet['kind'])
+            data = self.verdict(packet, reason_code='generic_match')[1]
+            self.assertEqual(data['outcome'], 'held', (packet['kind'], data))
+            self.assertTrue(data['reason'].startswith('hard evidence: '), data)
+        self.assertTrue(Vulnerability.objects.get(pk=vuln.pk).open_status)
+        self.assertEqual(CVEMatch.objects.get(pk=unbounded.pk).remediation_status, 'open')
+
 
 class InjectionGuardTests(TestCase):
     def test_spikestrip_decoys_are_recognised(self):

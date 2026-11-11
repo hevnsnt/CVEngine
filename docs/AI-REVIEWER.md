@@ -64,6 +64,9 @@ reviewer is built on the assumption that every scanned byte is hostile.
    - the verdict is `false_positive` with `high` confidence, and automatic closing is on;
    - the finding has no hard evidence: no template hit, no distribution-tracker or runZero report, no report from the host itself, no
      validation hit, and no confirmed library body (`match_policy.has_hard_evidence`, `triage.hard_evidence`);
+   - the triage sets no floor under it that a model may not clear: a template finding with a fired matcher, a CVE template or a medium or
+     higher rating, and a CVE match whose advisory names no affected version (`match_policy.is_version_unknown`) are never closed by the
+     reviewer, whatever it says. They stay open with the reviewer's opinion recorded and the reason `hard evidence: ...`;
    - no person has worked it: no status change, assignee, comment, heat set by hand or manual validation request (`match_policy.has_standing`
      and its equivalent for scanner and hygiene findings);
    - the evidence the model was shown carries no instructions aimed at an AI (`cveFeed.injection_guard`);
