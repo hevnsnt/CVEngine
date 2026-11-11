@@ -20,12 +20,12 @@ def _open_findings_and_cve_matches(project):
     open_findings = {band: 0 for band in OPEN_FINDING_BANDS}
     cve_matches = {heat: 0 for heat in CVE_MATCH_HEATS}
     for kind, qs in _finding_sources(project, {'status': 'actionable'}).items():
-        for row in qs.values('sev').annotate(n=Count('id')):
+        # the CVE matches are grouped by severity band and heat in ONE pass (they were two passes over the same set, each a CASE over every match)
+        for row in qs.values('sev', 'heat_rank').annotate(n=Count('id')) if kind == 'cve' else qs.values('sev').annotate(n=Count('id')):
             band = SEVERITY_NAMES.get(row['sev'])
             if band in open_findings:
                 open_findings[band] += row['n']
-        if kind == 'cve':
-            for row in qs.values('heat_rank').annotate(n=Count('id')):
+            if kind == 'cve':
                 heat = heat_names.get(row['heat_rank'])
                 if heat in cve_matches:
                     cve_matches[heat] += row['n']
@@ -68,7 +68,7 @@ def compute_snapshot(project, date=None, with_fixed=True):
     from cveFeed import counts
     from targetApp.models import Domain
     domain_ids = list(Domain.objects.filter(project=project).values_list('id', flat=True))
-    host_qs = counts.host_reps(domain_ids=domain_ids)
+    host_qs = counts.reps_of(counts.rep_ids(domain_ids=domain_ids))  # collapsed once: the host count and the exposed count read the same ids
     hosts = host_qs.count()
     exposed_hosts = counts.exposed_among(host_qs, project_ids=[project.id]).count()
     open_findings, cve_matches = _open_findings_and_cve_matches(project)
