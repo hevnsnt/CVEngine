@@ -484,13 +484,26 @@ def _last_scan(ids):
     return ScanHistory.objects.filter(domain__project_id__in=ids, scan_status=2).aggregate(at=Max('start_scan_date'))['at']
 
 
-def ranked(ids):
-    """Every situation of the projects in rank order, without items: ``(groups, hosts)``."""
+SITUATIONS_SECONDS = 10  # how long one scope's ranking is shared (a finding closed or reopened drops it at once: the revision bump)
+
+
+def _rank(ids):
     groups, hosts = _build_groups(list(ids))
     for g in groups:
         _finish(g)
     groups.sort(key=lambda g: g['key'])
     return groups, hosts
+
+
+def ranked(ids):
+    """Every situation of the projects in rank order, without items: ``(groups, hosts)``. Ranking every host is the dear part (the host collapse, four
+    grouped queries over all findings, a sort), and the list, the detail of a host and the REST and MCP calls all need all of it, so it is a shared snapshot
+    (``cveFeed.snapshot_cache``: one request computes while the others read the last copy, a finding closed drops it) keyed by the project ids and the
+    caller's allowed projects. Only the items of the hosts that are shown are read per request (``_read_items``)."""
+    from cveFeed import snapshot_cache
+    ids = sorted(ids)
+    scope = snapshot_cache.scope_hash('situations', ids)
+    return snapshot_cache.snapshot('situations', scope, lambda: _rank(ids), SITUATIONS_SECONDS, etag_of=lambda _ranking: '')['payload']
 
 
 WORST_AT_LEAST = {'all': MINOR, 'exposure': EXPOSURE, 'likely': LIKELY, 'proven': PROVEN}  # the ``tier`` filter: keep a situation whose worst tier is at least this

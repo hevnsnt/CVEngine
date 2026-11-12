@@ -8,6 +8,7 @@ from datetime import timedelta
 from unittest import mock
 
 from django.contrib.auth.models import User
+from django.core.cache import cache
 from django.db import connection
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
@@ -112,6 +113,9 @@ class Seeded(Fixture):
 		cls.other_host = cls.host('b.sb.test', domain=cls.db)
 		cls.match(cls.other_host, cls.kev)
 
+	def setUp(self):
+		cache.clear()  # the ranking of a project is a shared snapshot (10 s): a test must not read another one's
+
 	def api(self, path, token=None, **params):
 		from urllib.parse import urlencode
 		status, data = call(token or self.token, 'GET', f'/api/v1/{path}' + (f'?{urlencode(params)}' if params else ''))
@@ -205,6 +209,7 @@ class RankTests(Seeded):
 		self.assertEqual((row['counts']['proven'], row['counts']['minor']), (0, 1))
 		self.assertIn('heat set by you', row['rank_reason'])
 		m = self.match(self.hygiene, self.cold, heat='fire')  # a cold CVE the person made fire: at least likely
+		cache.clear()  # the ranking is a snapshot: a person's change reaches it through the revision bump, which the test's direct writes do not make
 		row = [r for r in self.api('projects/sa/situations')[1]['results'] if r['host'] == 'hygiene.sa.test'][0]
 		self.assertEqual(row['counts']['likely'], 1)
 		self.assertIn(m.pk, [i['id'] for i in row['findings'] if i['kind'] == 'match'])
@@ -374,6 +379,27 @@ class QueryCountTests(Seeded):
 		self.assertEqual(few, many, 'the number of queries must not grow with the number of hosts on the page')
 		self.assertLess(many, 40)
 
+	def test_the_ranking_is_computed_once_and_a_closed_finding_drops_it(self):
+		# DB-2: every list, detail, REST and MCP call used to rank every host of the project; now one snapshot per scope
+		with mock.patch('cveFeed.internal_view.table', return_value={}), mock.patch('agentapi.auth.LAST_USED_RESOLUTION', timedelta(days=3650)):
+			self.api('projects/sa/situations')  # warms the token
+			cache.clear()
+
+			def run(path, **params):
+				with CaptureQueriesContext(connection) as ctx:
+					self.assertEqual(self.api(path, **params)[0], 200)
+				return len(ctx)
+			cold, warm = run('projects/sa/situations', page_size=2), run('projects/sa/situations', page_size=2)
+			self.assertEqual(cold - warm, 6, 'the second request must not rank again (2 inventory and 4 grouped queries)')
+			detail = run('projects/sa/situations/proven.sa.test')
+			self.assertLess(detail, warm + 3, 'the detail of a host reads the same ranking and then only that host')
+			before = self.names()
+			from cveFeed import snapshot_cache
+			CVEMatch.objects.filter(pk=self.m_proven.pk).update(remediation_status='fixed')  # a person closes the proven finding ...
+			self.assertEqual(self.names(), before)  # ... within the 10 seconds the old copy is served,
+			snapshot_cache.bump_revision()  # ... but the close drops it at once (services.update_finding_status does this on commit)
+			self.assertNotIn('proven.sa.test', self.names())
+
 	def test_the_detail_reads_a_fixed_number_of_queries(self):
 		with CaptureQueriesContext(connection) as ctx:
 			self.api('projects/sa/situations/proven.sa.test')
@@ -399,6 +425,7 @@ class ReviewerTests(Seeded):
 		row = [r for r in self.api('projects/sa/situations')[1]['results'] if r['host'] == 'likely-kev.sa.test'][0]
 		self.assertEqual((row['counts']['likely'], row['counts']['minor']), (0, 1))  # a person should look, but it is not the likely kind
 		FindingReview.objects.create(triage=triage, project=self.pa, review_key='k2', verdict='true_open', outcome='recorded', model='m')
+		cache.clear()  # (a snapshot: see the heat test)
 		row = [r for r in self.api('projects/sa/situations')[1]['results'] if r['host'] == 'likely-kev.sa.test'][0]
 		self.assertEqual(row['counts']['likely'], 1)  # the newest review decides
 
