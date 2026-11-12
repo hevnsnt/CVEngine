@@ -300,6 +300,60 @@ class NotCheckedTests(DispatchBase):
         self.assertNotIn('scanned again later', text)
 
 
+class NoCheckExistsTests(DispatchBase):
+    """Fifth pass: a Sentinel that answers ``no_templates: True`` for a task without a tag filter has no check for the service ports of the chunk (the allowlist is
+    missing or empty, or has no template of the class: postgres, ldap). Such a port is not checked, never scanned clean: it is named in ``not_checked`` with the
+    plain reason, stays due, is asked again at most once a day and is said in the activity feed."""
+    REASON = 'no check exists for this service'
+
+    def streamed(self, result, targets, labels, kind='nuclei_deep', **kwargs):
+        with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False, encoding='utf-8') as handle:
+            handle.write('\n'.join(targets) + '\n')
+        self.addCleanup(__import__('os').unlink, handle.name)
+        calls = []
+
+        def fake_many(project, kind_, chunks, **kw):
+            calls.append(chunks)
+            return (row for row in [(0, result)])
+        with mock.patch.object(dispatch, 'any_scanner_for', return_value=True), mock.patch.object(dispatch, 'dispatch_many', fake_many), \
+                mock.patch.object(dispatch, 'resolvable_targets', lambda chunk, **kw: list(chunk)), mock.patch.object(nuclei_services, 'labels_for', return_value=labels), \
+                mock.patch.object(dispatch, 'signed_in_stream', return_value=None):
+            stream = dispatch.wrap_nuclei_stream(self.scan, kind)
+            found = list(stream(handle.name, **kwargs))
+        stream.calls, stream.found = calls, found
+        return stream
+
+    LABELS = {HOST: 'web', f'{HOST}:5432': 'postgres', f'{HOST}:22': 'ssh'}
+
+    def test_a_no_templates_answer_makes_each_service_port_of_the_chunk_not_checked(self):
+        stream = self.streamed({'findings': [], 'no_templates': True}, [HOST, f'{HOST}:5432', f'{HOST}:22'], self.LABELS)
+        self.assertEqual(stream.not_checked, [{'target': f'{HOST}:5432', 'reason': self.REASON}, {'target': f'{HOST}:22', 'reason': self.REASON}])  # not the web host
+
+    def test_a_port_the_sentinel_already_named_is_not_named_twice(self):
+        stream = self.streamed({'findings': [], 'no_templates': True, 'not_checked': [{'target': f'{HOST}:5432', 'reason': 'its time ran out'}]},
+                               [HOST, f'{HOST}:5432'], self.LABELS)
+        self.assertEqual(stream.not_checked, [{'target': f'{HOST}:5432', 'reason': 'its time ran out'}])
+
+    def test_a_task_with_a_tag_filter_or_the_light_pass_is_not_read_that_way(self):
+        """With a filter, no template matching it is an answer, not a missing check."""
+        result = {'findings': [], 'no_templates': True}
+        self.assertEqual(self.streamed(result, [f'{HOST}:5432'], self.LABELS, tags=['wordpress']).not_checked, [])
+        self.assertEqual(self.streamed(result, [f'{HOST}:5432'], self.LABELS, kind='nuclei_light').not_checked, [])
+        self.assertEqual(self.streamed({'findings': []}, [f'{HOST}:5432'], self.LABELS).not_checked, [])  # the Sentinel did not say so
+
+    def test_such_a_port_is_recorded_failed_not_done_backed_off_for_a_day_and_said(self):
+        from cveFeed import ledger
+        from cveFeed.models import AgentActivity, ServiceRun
+        chunk = [HOST, f'{HOST}:5432']
+        stream = self.streamed({'findings': [], 'no_templates': True}, chunk, self.LABELS)
+        unreached = nuclei_scan.record_reached('nuclei_deep', chunk, self.project, self.scan, stream)
+        self.assertEqual(unreached, {f'{HOST}:5432'})
+        self.assertEqual(ServiceRun.objects.get(service='nuclei_deep', asset=f'{HOST}:5432').status, 'failed')  # never scanned clean
+        self.assertEqual(ledger.fresh('nuclei_deep', chunk, self.project), {HOST})
+        self.assertTrue(ServiceRun.objects.filter(service=ledger.failed_service('nuclei_deep'), asset=f'{HOST}:5432', status='done').exists())  # asked again after a day, not sooner
+        self.assertIn(f'{HOST}:5432 ({self.REASON})', ' '.join(AgentActivity.objects.values_list('message', flat=True)))
+
+
 class PartlyCheckedBackOffTests(DispatchBase):
     """Fourth pass, N9: a target a Sentinel left not_checked is asked again at most once a day, through the ledger's failed-row back-off."""
     SERVICE = 'nuclei-deep-target:rev1'

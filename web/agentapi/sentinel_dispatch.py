@@ -1182,6 +1182,21 @@ def _not_checked_of(result):
     return [row for row in (result.get('not_checked') or []) if isinstance(row, dict) and row.get('target')]
 
 
+NO_CHECK_REASON = 'no check exists for this service'  # the Sentinel's own words for a class it has no allowlisted template for (``client.tools.NO_CHECK_REASON``)
+
+
+def _no_check_of(result, chunk, labels, kind, kwargs, named=()):
+    """``[{'target', 'reason'}]`` for the service ports of ``chunk`` when the Sentinel answered the whole chunk ``no_templates: True`` for a task with no tag or
+    severity filter: its allowlist is missing, unreadable or empty, or names no template of the port's class (postgres, ldap...), so nothing was checked and the
+    port must not be recorded as scanned clean. With a filter (and the light pass, which is one), no matching template is an answer, not a missing check; a web
+    host is not a service port. A port already in ``named`` (the Sentinel's own ``not_checked``) is not named again."""
+    if result.get('no_templates') is not True or kind == 'nuclei_light' or kwargs.get('tags') or kwargs.get('severities'):
+        return []
+    from cveFeed import nuclei_services
+    taken = {str(row.get('target') or '').strip().lower() for row in named}
+    return [{'target': t, 'reason': NO_CHECK_REASON} for t in chunk if labels.get(t, nuclei_services.WEB) != nuclei_services.WEB and t.strip().lower() not in taken]
+
+
 def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
     """A ``stream(targets_file, **kwargs) -> iterable of result-line dicts`` for ``run_light_nuclei``/``run_targeted_nuclei``/``run_nuclei``'s
     ``stream`` parameter: it hands the targets to a Sentinel in chunk tasks and yields the findings they report. The kind never runs on this
@@ -1206,7 +1221,8 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                     if result is None:
                         raise RuntimeError('no Sentinel inside the network answered (one must declare network:internal and cover this project)')
                     internal_stream.unreached.update(_unreachable_of(result, chunks[_index]))
-                    internal_stream.not_checked += _not_checked_of(result)
+                    named = _not_checked_of(result)
+                    internal_stream.not_checked += named + _no_check_of(result, chunks[_index], labels, kind, kwargs, named)
                     for finding in result.get('findings', []):
                         yield _finding_to_nuclei_line(finding)
         internal_stream.unreached = set()
@@ -1250,7 +1266,8 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                     from reNgine.resources import ScannerUnavailable
                     raise ScannerUnavailable(kind, 'no scanner returned a result for a chunk')
                 stream.unreached.update(_unreachable_of(result, chunks[index]))
-                stream.not_checked += _not_checked_of(result)
+                named = _not_checked_of(result)
+                stream.not_checked += named + _no_check_of(result, chunks[index], labels, kind, kwargs, named)
                 for finding in result.get('findings', []):
                     yield _finding_to_nuclei_line(finding)
     stream.unreached = set()
