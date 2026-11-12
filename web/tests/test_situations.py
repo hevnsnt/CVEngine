@@ -355,10 +355,12 @@ class ParityTests(Seeded):
 class QueryCountTests(Seeded):
 	def count(self, **params):
 		# the first request of a process reads its caches (the token) and the internal ranges are cached for a minute: neither is the page's own work
-		with mock.patch('cveFeed.internal_view.table', return_value={}):
+		# and the token middleware writes last_used_at when it is over a minute old (agentapi.auth.LAST_USED_RESOLUTION): one more UPDATE for a request that
+		# lands on the wrong side of the minute, so the test never lets it write (the count is then the same whatever the clock says)
+		with mock.patch('cveFeed.internal_view.table', return_value={}), mock.patch('agentapi.auth.LAST_USED_RESOLUTION', timedelta(days=3650)):
 			self.api('projects/sa/situations')
-			with CaptureQueriesContext(connection) as ctx:
-				self.assertEqual(self.api('projects/sa/situations', **params)[0], 200)
+			with CaptureQueriesContext(connection) as ctx, mock.patch('agentapi.auth.timezone.now', return_value=timezone.now() + timedelta(seconds=125)):
+				self.assertEqual(self.api('projects/sa/situations', **params)[0], 200)  # a clock two minutes on: last_used_at would be stale, and is still not written
 		return len(ctx)
 
 	def test_no_query_per_row(self):
