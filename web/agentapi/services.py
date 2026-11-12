@@ -3559,6 +3559,20 @@ FINDING_TYPES = {'cve': 'match', 'scanner': 'vulnerability', 'hygiene': 'hygiene
 FINDING_STATUS_FACETS = ('actionable', 'closed', 'fixed', 'accepted_risk', 'false_positive', 'all')
 HEAT_FACETS = {'fire': 3, 'smoke': 2, 'ice': 1}
 MAX_FINDINGS = 2000  # rows the merged list can page through; the counts stay exact beyond it
+# the Findings list's AI facet: what the AI reviewer's newest verdict on a finding says. disputed: it called the finding a false positive and
+# the server did not close it (a person should look); real: it called the finding real (any true_* verdict)
+AI_FACETS = ('disputed', 'real', 'all')
+
+
+def _ai_facet(qs, facet):
+    """``qs`` (findings with a ``triage`` row) narrowed to the ones whose newest AI review says ``facet`` (``reviewer.review_summary``)."""
+    from django.db.models import Q
+
+    from cveFeed import reviewer
+    qs = qs.annotate(**reviewer.newest_review_q('triage__'))
+    if facet == 'disputed':
+        return qs.filter(review_verdict='false_positive').exclude(review_outcome='closed')
+    return qs.filter(Q(review_verdict__in=reviewer.REAL_VERDICTS))
 
 
 def _kev_only(params):
@@ -3584,6 +3598,9 @@ def _finding_sources(project, params):
     wanted = params.get('type') or 'all'
     if wanted != 'all' and wanted not in FINDING_TYPES:
         raise ApiError(400, f'type must be all or one of {", ".join(FINDING_TYPES)}')
+    ai = str(params.get('ai') or 'all')
+    if ai not in AI_FACETS:
+        raise ApiError(400, f'ai must be {", ".join(AI_FACETS[:-1])} or {AI_FACETS[-1]}')
     kev = _kev_only(params)
     if kev:
         wanted = 'cve' if wanted in ('all', 'cve') else None  # a scanner or hygiene finding has no KEV listing: none of them is KEV
@@ -3648,11 +3665,14 @@ def _finding_sources(project, params):
                  else internal_view.internal_q('', 'host', 'domain__project_id'))
             sources[key] = qs.filter(q) if only else qs.exclude(q)
     for key, qs in sources.items():
+        if ai != 'all':
+            qs = _ai_facet(qs, ai)
         if heat != 'all':
             qs = qs.filter(heat_rank=HEAT_FACETS[heat])
         if severity != 'all':
             qs = qs.filter(sev=inverse[severity])
-        sources[key] = qs.order_by('-heat_rank', '-sev', F('when').desc(nulls_last=True), '-id')
+        from cveFeed import reviewer
+        sources[key] = qs.annotate(**reviewer.newest_review_row_q('triage__')).order_by('-heat_rank', '-sev', F('when').desc(nulls_last=True), '-id')
     return sources
 
 
@@ -3693,7 +3713,42 @@ def _finding_row(kind, obj):
             'status_changed_by': _user_brief(getattr(obj, 'remediation_by', None)), **_closure_fields(FINDING_TYPES[kind], obj),
             'assignee': _user_brief(getattr(obj, 'assignee', None)), 'comment_count': getattr(obj, 'comment_count', 0),
             'agent_task': _agent_task_of(obj) if kind == 'cve' else None, 'detected': _iso(obj.when), 'first_seen': _iso(obj.when),
-            'heat_override': _heat_override(_triage_of(obj)) if kind != 'hygiene' else None, 'triage': _triage_brief(_triage_of(obj)), **extra}
+            'heat_override': _heat_override(_triage_of(obj)) if kind != 'hygiene' else None, 'triage': _triage_brief(_triage_of(obj)),
+            'ai_review': None, '_triage_id': getattr(_triage_of(obj), 'pk', None), '_review_read': hasattr(obj, 'review_row'),
+            '_review': _review_from_row(obj), **extra}
+
+
+def _review_from_row(obj):
+    from cveFeed import reviewer
+    return reviewer.summary_from_row(obj)
+
+
+def _attach_reviews(rows):
+    """Fill ``ai_review`` (the newest AI review of the finding: verdict, confidence, reason, note, model, outcome in plain words) of every
+    row of a list page. A grouped row (``group``) stands for several hosts: it shows the newest review across its members and says so
+    (``scope_text``: how many of its hosts the reviewer has looked at). A row read by the list queries already carries its own review (one
+    subquery in the row's own query, ``reviewer.newest_review_row_q``); a query for reviews runs only for a group row's members (two) or a
+    row read some other way. Never a query per row."""
+    from cveFeed import reviewer
+    from cveFeed.models import Triage
+    groups = {r['id']: r['group']['member_ids'] for r in rows if r.get('group') and r.get('kind') == 'match'}
+    by_match = {}
+    if groups:
+        wanted = {i for ids in groups.values() for i in ids}
+        by_match = dict(Triage.objects.filter(match_id__in=wanted).values_list('match_id', 'pk'))
+    ids = [r.get('_triage_id') for r in rows if not r.get('_review_read')] + list(by_match.values())
+    found = reviewer.review_summaries(ids)
+    for row in rows:
+        own = row.pop('_review') if row.pop('_review_read') else found.get(row['_triage_id'])
+        row.pop('_triage_id', None)
+        members = groups.get(row['id']) if row.get('group') and row.get('kind') == 'match' else None
+        if members:
+            seen = [found[by_match[m]] for m in members if by_match.get(m) in found]
+            own = max(seen, key=lambda r: r['at']) if seen else None
+            if own:
+                own = {**own, 'scope_text': f"This is the newest AI review of the {len(members)} hosts in this group; it has looked at {len(seen)} of them."}
+        row['ai_review'] = own
+    return rows
 
 
 def _finding_project(kind, obj):
@@ -3736,6 +3791,7 @@ def list_findings(ctx, slug, params):
             owner = _finding_project(key, obj)
             row['project'], row['project_name'] = (owner.slug, owner.name) if owner else (None, None)
         results.append(row)
+    _attach_reviews(results)
     return {'count': min(total, MAX_FINDINGS), 'total': total, 'truncated': total > MAX_FINDINGS, 'page': page,
             'page_size': size, 'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'results': results}
 
@@ -3796,6 +3852,7 @@ def _grouped_findings(project, sources, counts, page, size):
             owner = _finding_project(key, obj)
             row['project'], row['project_name'] = (owner.slug, owner.name) if owner else (None, None)
         results.append(row)
+    _attach_reviews(results)
     return {'count': min(total, MAX_FINDINGS), 'total': total, 'truncated': total > MAX_FINDINGS, 'page': page, 'page_size': size,
             'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'group': 'cve', 'row_counts': row_counts,
             'findings_total': sum(counts.values()), 'groups': len(multi), 'grouped_findings': sum(len(g['members']) for g in multi),
@@ -4380,6 +4437,13 @@ def _library_read_step(steps):
     return library_read_step(steps)
 
 
+def _review_of(t):
+    """The AI reviewer's newest verdict on a finding (``cveFeed.reviewer.review_summary``: verdict, confidence, reason_code, note, model,
+    outcome, held_reason, at, and verdict_text, outcome_text, disputed, says_real in plain words), or None while it has not reviewed it."""
+    from cveFeed import reviewer
+    return reviewer.review_summary(t.pk) if t is not None else None
+
+
 def _triage_brief(t):
     """What a list card needs to show the classification and validation badges without a second request."""
     from cveFeed import triage as triage_lib
@@ -4601,6 +4665,7 @@ def finding_detail(ctx, slug, kind, finding_id):
         'host_reported': kind == 'match' and obj.source == 'host', 'assessment_status': assessment_status,
         'assessment_reason': obj.ai_reason if assessment_status == 'closed_not_applicable' else '',
         'automatic_validation': automatic,
+        'ai_review': _review_of(t),
         'severity': SEVERITY_NAMES.get(base) if base is not None else None, 'severity_ai': severity_ai,
         'first_seen': _iso(first), 'last_seen': _iso(last), 'history': _history(project, host),
         'why_it_matters': text['impact'],

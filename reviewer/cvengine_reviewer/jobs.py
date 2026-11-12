@@ -53,16 +53,38 @@ def measured_call(server, stage, provider, system, user, schema, max_tokens, eff
         limit, attempt = retry, attempt + 1
 
 
+# The words of cvENGINE's own results that quote what the host or a template author wrote: a matcher name, a product name in a check's label,
+# a person's reason for a heat. The result is cvENGINE's; the wording is not, so it goes into a fenced block as data (``COMPUTED_TEXT``).
+QUOTING_KEYS = ('heat_reason', 'hard_evidence', 'validation_checks', 'server_will_not_close_because')
+
+
 def review_message(packet):
-    trusted = json.dumps({'kind': packet.get('kind'), **(packet.get('trusted') or {})}, ensure_ascii=False, sort_keys=True, default=str)
+    """The user turn of one review: the TRUSTED facts cvENGINE computed (enums, counts, dates, flags, every string defused), the wording of
+    its results that can quote the host (``COMPUTED_TEXT``, fenced as data) and the host's own data (``UNTRUSTED``, fenced)."""
+    given = packet.get('trusted') or {}
+    quoting = {key: given[key] for key in QUOTING_KEYS if key in given}
+    facts = {'kind': packet.get('kind'), **{k: v for k, v in given.items() if k not in QUOTING_KEYS},
+             'hard_evidence_count': len(given.get('hard_evidence') or [])}
+    trusted = json.dumps(guard.defuse(facts), ensure_ascii=False, sort_keys=True, default=str)
+    computed = (guard.fence('COMPUTED_TEXT', quoting)[0] + '\n\n') if quoting else ''
     fenced, _ = guard.fence('UNTRUSTED', packet.get('untrusted') or {})
-    return (f'TRUSTED (computed by cvENGINE):\n{trusted}\n\n{fenced}\n\n'
+    return (f'TRUSTED (computed by cvENGINE):\n{trusted}\n\n{computed}{fenced}\n\n'
             'Judge this finding by the rules and answer with the JSON object.')
 
 
+def report_unanswered(server, provider, packet, category):
+    """Tell the server the model gave no usable answer for this packet (refused, empty, cut off twice, outside the schema). The server
+    records it, counts it against the daily cap and does not hand the finding out again until its host changes or a day has passed. Best
+    effort: when the server does not take it the lease simply runs out, as before."""
+    try:
+        server.refusal(packet.get('ref'), {'review_key': packet.get('review_key'), 'category': category, 'model': str(provider.get('model') or '')[:100]})
+    except Exception as exc:  # noqa: BLE001 - the report must never change what the loop does next
+        logger.info('review of %s: the missing answer was not reported (%s)', packet.get('ref'), type(exc).__name__)
+
+
 def review_one(server, provider, packet):
-    """Review one packet and send the verdict. Returns the server's answer, or None when the model failed (the packet's lease runs out
-    and the server hands it out again later)."""
+    """Review one packet and send the verdict. Returns the server's answer, or None when the model gave no usable answer (reported to the
+    server, which keeps the finding out of the queue for a day) or a call failed (the lease runs out and it is handed out again later)."""
     try:
         text, usage, model = measured_call(server, 'finding_review', provider, prompts.REVIEW_SYSTEM, review_message(packet), prompts.REVIEW_SCHEMA,
                                            REVIEW_MAX_TOKENS, effort='medium')
@@ -72,6 +94,7 @@ def review_one(server, provider, packet):
         raise
     except guard.ReplyError as exc:
         logger.warning('review of %s: unusable answer (%s)', packet.get('ref'), exc)
+        report_unanswered(server, provider, packet, 'unusable_answer')
         return None
     body = {'review_key': packet.get('review_key'), 'verdict': answer['verdict'], 'confidence': answer['confidence'],
             'reason_code': answer['reason_code'], 'note': guard.scrub(answer['note'], NOTE_LIMIT), 'model': str(model)[:100],

@@ -170,3 +170,5 @@ web container after editing a static file.
 
 Checks used while building these: axe-core (WCAG 2.0 and 2.1 A and AA) on 18 pages in light, dark and auto, with zero
 violations, plus a computed-style comparison showing the light theme is unchanged by the token work.
+
+- **The AI reviewer's verdict is shown on the finding.** The AI assessment card of a finding's detail has an **AI reviewer** block (verdict, confidence, reason, model, what cvENGINE did, and its note as plain text), and the Findings list has an **AI reviewer** filter (`?ai=disputed` or `?ai=real`, kept in the URL and saved views).

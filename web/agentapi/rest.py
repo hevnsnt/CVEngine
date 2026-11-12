@@ -393,7 +393,7 @@ ROUTES = [
      lambda r, c, slug, **k: tailscale.tailscale_devices(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/tailscale/sync', 'Sync the project\'s tailnet now: devices, findings and (if enabled) scans (administrators only)',
      lambda r, c, slug, **k: (tailscale.tailscale_sync(c, slug), 202)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/findings', 'Every finding in one list, hottest first: CVE matches, scanner and hygiene findings (type=all|cve|scanner|hygiene, heat=fire|smoke|ice, severity=, status=actionable|all, host=, '
+    ('GET', r'projects/(?P<slug>[-\w]+)/findings', 'Every finding in one list, hottest first: CVE matches, scanner and hygiene findings (ai=disputed|real: what the AI reviewer said, type=all|cve|scanner|hygiene, heat=fire|smoke|ice, severity=, status=actionable|all, host=, '
      'group=none|cve: cve folds the same client-side JavaScript library file on sibling hosts of one site into one row with its member ids and statuses; '
      'servers and other products never group; the default none is one row per host)',
      lambda r, c, slug, **k: svc.list_findings(c, slug, r.GET)),
@@ -511,8 +511,10 @@ ROUTES = [
      lambda r, c, **k: reviewer_api.config(r, c)),
     ('GET', r'reviewer/findings/next', 'AI reviewer token only: up to ?limit= (at most 25) review packets of open findings not yet reviewed in their current state, each leased for 15 minutes: {packets: [{ref, review_key, kind, trusted: {...}, untrusted: {...}}]}',
      lambda r, c, **k: reviewer_api.next_findings(r, c)),
-    ('POST', r'reviewer/findings/(?P<ref>t\d{1,12})/verdict', 'AI reviewer token only: one verdict {review_key, verdict, confidence, reason_code, note, model, usage: {input_tokens, output_tokens}}; answers {outcome: closed|recorded|disputed|held, reason, review_id}, 409 when the finding or its host changed since the packet',
+    ('POST', r'reviewer/findings/(?P<ref>t\d{1,12})/verdict', 'AI reviewer token only: one verdict {review_key, verdict, confidence, reason_code, note, model, usage: {input_tokens, output_tokens}}; answers {outcome: closed|recorded|disputed|held, reason, review_id}, 409 when the finding or its host changed since the packet or it already has a verdict, 429 at the daily cap, 413 over 4 KB; the same report again answers the same and adds no row',
      lambda r, c, ref, **k: reviewer_api.verdict(r, c, ref, _body(r))),
+    ('POST', r'reviewer/findings/(?P<ref>t\d{1,12})/refusal', 'AI reviewer token only: the model gave no usable answer for one finding {review_key, category, model} (refused, empty, cut off twice, outside the schema); recorded with no verdict, counted against the daily cap, and the finding is not handed out again until its host changes or 24 hours pass; answers {outcome: refused, reason, review_id}, 409 when the finding or its host changed since the packet',
+     lambda r, c, ref, **k: reviewer_api.refusal(r, c, ref, _body(r) if len(r.body or b'') <= reviewer_api.MAX_REFUSAL_BODY else None)),
     ('GET', r'reviewer/ops/snapshot', 'AI reviewer token only: the operations checks {checks: [{code, state, severity, title, detail, facts, actions}], actions}; ?templates_release= and templates_published_at= pass the newest nuclei-templates release',
      lambda r, c, **k: reviewer_api.ops_snapshot(r, c)),
     ('POST', r'reviewer/ops/report', 'AI reviewer token only: the operations job\'s report {alerts: [{code, severity, diagnosis}], actions: [feed_sentinels|refresh_nuclei_templates], model, templates_release}; an action runs only when a current check offers it',
