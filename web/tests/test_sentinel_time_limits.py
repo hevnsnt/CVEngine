@@ -8,6 +8,16 @@ from django.test import SimpleTestCase
 from agentapi import sentinel_broker, sentinel_dispatch
 
 SENTINEL_TOOL_SECONDS = {'testssl': 900, 'nmap_udp': 1500, 'nmap_full': 1500, 'wpscan': 900, 'discover': 900, 'nuclei_validate': 540, 'waf': 60}
+
+def _probe_worst_cases():
+    """What the in-process probe kinds may take by the limits in their own code, one after another (cvengine_scanner.probes): the identity batch asks up to
+    MAX_DNS questions and MAX_CERTS certificates with no batch deadline; a page read stops starting reads at BATCH_SECONDS and the one in progress may read
+    scripts for js_libraries.DEFAULT_MAX_SECONDS."""
+    from cvengine_scanner.probes import identity, js_libraries, page_read
+    return {'identity_check': identity.MAX_DNS * identity.DNS_TIMEOUT + identity.MAX_CERTS * identity.TLS_TIMEOUT,
+            'page_read': page_read.BATCH_SECONDS + js_libraries.DEFAULT_MAX_SECONDS}
+
+
 REPORT_ALLOWANCE = 60  # time for the finished result to travel
 
 
@@ -28,3 +38,11 @@ class WaitAtLeastAsLongAsTheTool(SimpleTestCase):
         for kind in ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep'):
             for count in (1, 8, 24, 64):
                 self.assertGreaterEqual(sentinel_dispatch._dispatch_timeout(kind, count), flags.task_seconds(kind, count) + 20, f'{kind} x {count}')
+
+
+    def test_the_probe_kinds_wait_longer_than_their_batch_may_run_and_than_the_watchdog_lets_them(self):
+        from client import watchdog
+        for kind, worst in _probe_worst_cases().items():
+            ceiling = sentinel_dispatch._dispatch_timeout(kind)
+            self.assertGreaterEqual(ceiling, worst + REPORT_ALLOWANCE, f'{kind}: the stage gives up while the batch may still run (worst case {worst} s)')
+            self.assertGreaterEqual(ceiling, watchdog.deadline_seconds(kind) + REPORT_ALLOWANCE, f'{kind}: the stage gives up before the Sentinel\'s own hard stop')
