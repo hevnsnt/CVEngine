@@ -2100,6 +2100,15 @@ class TriageApiTests(TestCase):
 		d = self.get(f'findings/match/{self.match.id}')[1]
 		self.assertEqual((d['ai']['classification'], d['ai']['status'], d['why_it_matters']), ('', 'untracked', ''))
 
+	def test_the_detail_says_whether_an_ai_model_is_connected_to_triage_it(self):
+		# the pane says "Waiting for AI triage." only while a model is there to do it (app.js waitingForNobody)
+		from unittest import mock
+		path = f'findings/match/{self.match.id}'
+		with mock.patch('cveFeed.ai_jobs.ai_on', return_value=False):
+			self.assertIs(self.get(path)[1]['ai']['connected'], False)
+		with mock.patch('cveFeed.ai_jobs.ai_on', return_value=True):
+			self.assertIs(self.get(path)[1]['ai']['connected'], True)
+
 	def test_list_triage_filters(self):
 		self.triaged('likely_false_positive')
 		everything = self.get('triage')[1]

@@ -2,16 +2,18 @@
 {% load assets %}
 {% block title %}CVEngine · Sentinels{% endblock %}
 {% block content %}
-<div class="page-head"><div>
+<div class="page-head one-line"><div>
 <h1>Sentinels</h1>
-<p class="sub">A Sentinel is a scanner you run on any machine, so you can deploy one or a hundred to spread this project's scanning: it registers itself, pulls scan work off this project's queue (nmap, naabu, the nuclei passes, TLS audits, UDP sweeps, WPScan, OpenVAS and, on an internal network, host discovery), runs it and reports typed results back, while a scan with no live Sentinel runs the external stages locally and work on an internal network only ever runs on a Sentinel inside it.</p>
+<p class="sub" title="A Sentinel is a scanner you run on any machine, so you can deploy one or a hundred to spread this project's scanning: it registers itself, pulls scan work off this project's queue (nmap, naabu, the nuclei passes, TLS audits, UDP sweeps, WPScan, OpenVAS and, on an internal network, host discovery), runs it and reports typed results back, while a scan with no live Sentinel runs the external stages locally and work on an internal network only ever runs on a Sentinel inside it.">A Sentinel is a scanner you run on any machine, so you can deploy one or a hundred to spread this project's scanning: it registers itself, pulls scan work off this project's queue (nmap, naabu, the nuclei passes, TLS audits, UDP sweeps, WPScan, OpenVAS and, on an internal network, host discovery), runs it and reports typed results back, while a scan with no live Sentinel runs the external stages locally and work on an internal network only ever runs on a Sentinel inside it.</p>
 </div></div>
 
 <div class="grid main sentinels-grid">
   <div>
-    <div class="card">
-      <h2 class="card-h">Registered Sentinels</h2>
-      <p class="note" id="sentinel-contract-source" style="margin-bottom:8px">{{ sentinel_contract_line }}.</p>
+    <div class="card sl-main">
+      <div class="sl-main-head">
+        <h2 class="card-h">Registered Sentinels</h2>
+        <p class="note" id="sentinel-contract-source" title="{{ sentinel_contract_line }}.">{{ sentinel_contract_line }}.</p>
+      </div>
       <div id="live" aria-live="polite"></div>
     </div>
     <div class="card" id="plan-card" hidden></div>

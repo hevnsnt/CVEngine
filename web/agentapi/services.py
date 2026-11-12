@@ -4466,6 +4466,15 @@ def _library_read_step(steps):
     return library_read_step(steps)
 
 
+def _ai_connected():
+    """Whether an AI provider that can make a request is set up: without one a finding is never triaged, so it is not waiting for it."""
+    try:
+        from cveFeed import ai_jobs
+        return ai_jobs.ai_on()
+    except Exception:  # noqa: BLE001 - an unreadable setting is "not connected", never a failed detail pane
+        return False
+
+
 def _review_of(t):
     """The AI reviewer's newest verdict on a finding (``cveFeed.reviewer.review_summary``: verdict, confidence, reason_code, note, model,
     outcome, held_reason, at, and verdict_text, outcome_text, disputed, says_real in plain words), or None while it has not reviewed it."""
@@ -4699,6 +4708,7 @@ def finding_detail(ctx, slug, kind, finding_id):
         'first_seen': _iso(first), 'last_seen': _iso(last), 'history': _history(project, host),
         'why_it_matters': text['impact'],
         'ai': {'classification': t.classification if t else '', 'status': t.status if t else 'untracked',
+               'connected': _ai_connected(),  # "Waiting for AI triage" is only true while a model is connected to do it
                'reason': f'AI review failed ({diagnostic["category"]}); retry scheduled.' if diagnostic else t.reason if t else '',
                'diagnostic': diagnostic,
                'overridden': triage_lib.overridden(v, t),

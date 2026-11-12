@@ -2654,3 +2654,112 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 @media (pointer:coarse){.api-keys-page .seg-btn,.api-keys-page .code .copy{min-height:44px}}
 .visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 .api-keys-page #secret[hidden]{display:none}
+
+/* ---- first screen: the user's data comes first (Hygiene, Sentinels, Overview) ---- */
+/* A page head of one line: the title, then its purpose cut at the line's end (the full sentence is the tooltip and stays in the page for screen readers) */
+.page-head.one-line{margin-bottom:var(--s-3)}
+.page-head.one-line>div{display:flex;align-items:baseline;gap:var(--s-3);flex:1 1 0;min-width:0}
+.page-head.one-line h1{font-size:var(--fs-6);line-height:32px;margin:0;flex:none}
+.page-head.one-line .sub{margin:0;max-width:none;min-width:0;font-size:var(--fs-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wrap:has(#view>.table-page) .page-head .sub{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+@media (min-width:900px){
+  /* tabs and head share a line, as on the table pages */
+  .wrap:has(>.pagetabs+.page-head.one-line){display:flex;flex-wrap:wrap;align-items:center;column-gap:var(--s-4);padding-top:var(--s-3)}
+  .wrap:has(>.pagetabs+.page-head.one-line)>*{flex:none;margin-top:0;margin-bottom:0}
+  .wrap:has(>.pagetabs+.page-head.one-line)>.page-head{flex:1 1 0;min-width:0}
+  .wrap:has(>.pagetabs+.page-head.one-line)>:not(.pagetabs):not(.page-head){flex:1 0 100%;min-width:0;margin-top:var(--s-3)}
+  .wrap:has(#view>.table-page)>.page-head{flex:1 1 0;min-width:0}
+}
+@media (max-width:899px){
+  .page-head.one-line h1{font-size:var(--fs-5);line-height:28px}
+}
+@media (max-width:639px){
+  /* the tabs say which page this is, so on a phone the title is read aloud and not drawn */
+  .wrap:has(>.pagetabs+.page-head.one-line)>.page-head{position:absolute;width:1px;height:1px;margin:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+}
+
+/* Hygiene: one line of numbers, the certificates one line until opened */
+.tiles.slim{display:flex;flex-wrap:wrap;gap:var(--s-2);margin-bottom:var(--s-2)}
+.tiles.slim .tile{flex-direction:row;align-items:baseline;gap:var(--s-2);padding:var(--s-1) var(--s-3);border-radius:var(--r)}
+.tiles.slim .tile b{font:var(--fw-semi) var(--fs-5)/1.3 var(--font);letter-spacing:0}
+@media (max-width:639px){.tiles.slim{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}.tiles.slim::-webkit-scrollbar{display:none}.tiles.slim .tile{flex:none}}
+.hy-certs{margin:var(--s-3) 0 0;padding:var(--s-2) var(--s-4)}
+.hy-certs-sum{list-style:none;cursor:pointer;display:flex;align-items:baseline;flex-wrap:wrap;gap:var(--s-1) var(--s-4)}
+.hy-certs-sum::-webkit-details-marker{display:none}
+.hy-certs-sum::before{content:"";align-self:center;width:7px;height:7px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(-45deg);transition:transform .15s var(--ease)}
+.hy-certs[open]>.hy-certs-sum::before{transform:rotate(45deg)}
+.hy-certs-sum h2{margin:0}
+.hy-certs-sum .note{margin:0;min-width:0}
+.hy-certs-body{margin-top:var(--s-3)}
+
+/* Sentinels: one row each, the rest of the card opens from it */
+.sl-main{padding:var(--s-3) var(--s-4)}
+.sl-main-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:var(--s-1) var(--s-4);margin-bottom:var(--s-2)}
+.sl-main-head .card-h,.sl-main-head .note{margin:0}
+.sl-sum{display:flex;flex-wrap:nowrap;margin-bottom:var(--s-2)}
+.sl-sum div{flex:1 1 auto;min-width:0;flex-direction:row;align-items:baseline;gap:var(--s-2);padding:var(--s-2) var(--s-4)}
+.sl-sum b{flex:none}
+.sl-sum span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sl-sum b{font-size:var(--fs-4)}
+.sl-notes{margin-bottom:var(--s-2)}
+.sl-notes>summary{cursor:pointer;font:var(--fw-medium) var(--fs-2)/1.5 var(--font);color:var(--muted)}
+.sl-notes .sl-planner-line{display:none}
+.sl-notes .sl-planner,.sl-notes .note{margin:var(--s-2) 0 0}
+.sl-org{margin-top:var(--s-3);padding-top:var(--s-2)}
+.sl-org>summary{margin-bottom:var(--s-2)}
+.sl-grid{display:flex;flex-direction:column;gap:var(--s-1)}
+.sl-card{padding:0;gap:0}
+.sl-card>.sl-head{list-style:none;cursor:pointer;display:grid;grid-template-columns:auto auto minmax(260px,1fr) minmax(0,1.4fr) auto auto;align-items:center;gap:var(--s-1) var(--s-4);padding:var(--s-2) var(--s-4)}
+.sl-card>.sl-head::-webkit-details-marker{display:none}
+.sl-card>.sl-head::before{content:"";width:7px;height:7px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(-45deg);transition:transform .15s var(--ease)}
+.sl-card[open]>.sl-head::before{transform:rotate(45deg)}
+.sl-card .sl-state{display:block}
+.sl-glance{margin:0;min-width:0;font-size:var(--fs-2);color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sl-card .sl-beat{white-space:nowrap}
+.sl-body{display:flex;flex-direction:column;gap:var(--s-3);padding:var(--s-3) var(--s-4) var(--s-4);border-top:1px solid var(--line)}
+@media (min-width:640px) and (max-width:1279px){
+  /* a narrower page: what it is doing goes under the name, the last check-in and the buttons stay at the right */
+  .sl-card>.sl-head{grid-template-columns:auto auto minmax(0,1fr) auto auto}
+  .sl-card>.sl-head::before,.sl-card>.sl-head>.thinking-orb{grid-row:1/3}
+  .sl-card>.sl-head .sl-title{grid-column:3;grid-row:1}
+  .sl-card>.sl-head .sl-glance{grid-column:3;grid-row:2}
+  .sl-card>.sl-head .sl-beat{grid-column:4;grid-row:1/3}
+  .sl-card>.sl-head .sl-actions{grid-column:5;grid-row:1/3}
+}
+@media (max-width:639px){
+  /* three short lines: the name and state, what it is doing, then the last check-in beside the buttons */
+  .sl-card>.sl-head{grid-template-columns:auto auto minmax(0,1fr) auto;gap:var(--s-1) var(--s-3)}
+  .sl-card>.sl-head .sl-title{grid-column:3/-1}
+  .sl-card>.sl-head .sl-glance{grid-column:2/-1}
+  .sl-card>.sl-head .sl-beat{grid-column:1/4}
+  .sl-card>.sl-head .sl-actions{grid-column:4}
+  /* the counts are one line that scrolls sideways */
+  .sl-sum{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
+  .sl-sum::-webkit-scrollbar{display:none}
+  .sl-sum div{flex:none}
+  /* the heading and the contract line share one line, the organization heading is not set apart */
+  .sl-main{padding:var(--s-2) var(--s-4)}
+  .sl-main-head{flex-wrap:nowrap;margin-bottom:var(--s-1)}
+  .sl-main-head .note{flex:1 1 0;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sl-org,.sl-org:first-of-type{margin-top:0;padding-top:0;border-top:0}
+}
+
+/* Overview: the exposure summary and the live discovery card fit one screen together (1000px and wider) */
+@media (min-width:1000px){
+  .panel.ticks{grid-template-columns:minmax(0,4fr) minmax(0,3.4fr) minmax(0,2.6fr)}
+  #c-map .map{min-height:0}
+  .ai-cell .agent{min-height:0}
+  #c-exposed p{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .strip.in-cell{display:flex;flex-wrap:wrap;align-content:flex-start}
+  .strip.in-cell a,.strip.in-cell a.wide{flex:1 1 30%;border-right:0;border-left:1px solid var(--line);margin-left:-1px}
+  .strip.in-cell a.wide{flex:2 1 60%}
+  .strip.in-cell #n-matches,.strip.in-cell #n-coverage,.strip.in-cell #n-oldest{border-right:0}
+  .hero>.card.discovery{height:auto;display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);grid-template-areas:"head head" "target target" "scan scan" "graph counts" "graph ticker";grid-template-rows:auto auto auto auto 1fr;column-gap:var(--s-4);align-content:start}
+  .discovery>.card-head{grid-area:head}
+  .discovery>#d-target{grid-area:target}
+  .discovery>#d-scanning{grid-area:scan}
+  .discovery>.graph-box{grid-area:graph;flex:none;min-height:0;display:flex}
+  .discovery>.counts{grid-area:counts;margin-top:var(--s-2)}
+  .discovery>.ticker{grid-area:ticker;height:auto;min-height:0;max-height:96px;padding-bottom:var(--s-4)}
+  .hero #d-graph{flex:1;height:auto;min-height:clamp(144px,calc(100dvh - 620px),440px)}
+}

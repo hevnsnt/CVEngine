@@ -725,23 +725,33 @@ async function pollGraph() {
   }
 }
 
+let askAgain = false; // the next discovery read is a second one for the same cursor, so it must not be answered by the tag of the first
 async function pollDiscovery() {
   try {
+    const fresh = askAgain;
+    askAgain = false;
     const d = await get(
-      `/cve/api/discovery?scan=${followScan}&after=${lastEvent}${projParam ? "&" + projParam : ""}`,
+      `/cve/api/discovery?scan=${followScan}&after=${lastEvent}${projParam ? "&" + projParam : ""}${fresh ? "&fresh=1" : ""}`,
     );
     setOnline(true);
     if (d === null) return; // 304: no new events
     if (!d.scan) {
       $("d-status").style.display = "none";
       $("d-target").textContent = "Nothing has run yet. Add a target to start a first look.";
+      $("d-target").hidden = false;
       return;
     }
     if (shownScan !== d.scan.id) {
+      const cursor = lastEvent;
       shownScan = d.scan.id;
       lastEvent = 0;
       $("d-ticker").textContent = "";
-      return pollDiscovery();
+      // Only a cursor from another scan needs the events again, from the start. With none (the first answer), this answer already is that
+      // read: asking the same URL again would come back 304 (the tag of this very answer) and the line below would never be drawn.
+      if (cursor) {
+        askAgain = true;
+        return pollDiscovery();
+      }
     }
     // a badge for a scan that is queued, running or went wrong; a finished one is already said by the line below
     const badge = $("d-status");
@@ -756,6 +766,7 @@ async function pollDiscovery() {
     if (followedProject) badge.href = `/cve/${encodeURIComponent(followedProject)}/scans/${d.scan.id}/`;
     else badge.removeAttribute("href");
     const target = $("d-target");
+    target.hidden = false;
     target.textContent = "";
     linkify(
       target,
