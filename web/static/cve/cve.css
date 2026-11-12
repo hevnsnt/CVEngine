@@ -2825,3 +2825,8 @@ a.score-label:hover{text-decoration-color:var(--ink)}
   /* the last check-in is whole; the buttons keep their own cell */
   .sl-card .sl-beat{white-space:normal;min-width:0}
 }
+
+/* ---- UI-6: Suppliers row buttons wrap under the text instead of leaving the screen (Remove was cut off at the right edge) ---- */
+.table-page .supplier-head{flex-wrap:wrap;row-gap:var(--s-1)}
+.table-page .supplier-actions{flex:0 1 auto;flex-wrap:wrap;margin-left:auto;justify-content:flex-end;min-width:0}
+.table-page .supplier-head h3{flex:0 1 auto;max-width:100%}
