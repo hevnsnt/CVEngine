@@ -224,7 +224,7 @@ function summary(data) {
   const working = rows.filter((r) => r.state === "working").length;
   const bar = el("div", "sl-sum", null, { "data-keep-key": "summary" });
   const cell = (n, label) => {
-    const d = el("div");
+    const d = el("div", "", null, { title: `${n} ${label}` }); // the strip is one line: a long wording is cut at its end and is whole in the tooltip
     d.append(el("b", "", String(n)), el("span", "", label));
     return d;
   };

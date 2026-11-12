@@ -2667,8 +2667,10 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 .sl-main{padding:var(--s-3) var(--s-4)}
 .sl-main-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:var(--s-1) var(--s-4);margin-bottom:var(--s-2)}
 .sl-main-head .card-h,.sl-main-head .note{margin:0}
-.sl-sum{display:flex;flex-wrap:wrap;margin-bottom:var(--s-2)}
-.sl-sum div{flex:1 1 auto;flex-direction:row;align-items:baseline;gap:var(--s-2);padding:var(--s-2) var(--s-4)}
+.sl-sum{display:flex;flex-wrap:nowrap;margin-bottom:var(--s-2)}
+.sl-sum div{flex:1 1 auto;min-width:0;flex-direction:row;align-items:baseline;gap:var(--s-2);padding:var(--s-2) var(--s-4)}
+.sl-sum b{flex:none}
+.sl-sum span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sl-sum b{font-size:var(--fs-4)}
 .sl-notes{margin-bottom:var(--s-2)}
 .sl-notes>summary{cursor:pointer;font:var(--fw-medium) var(--fs-2)/1.5 var(--font);color:var(--muted)}
