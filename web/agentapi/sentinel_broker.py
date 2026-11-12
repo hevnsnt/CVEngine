@@ -130,6 +130,11 @@ def register(ctx, body):
 
 
 def heartbeat(ctx, body=None):
+    with sentinel_policy.shared_lookups():  # the defaults, the user's reach and sign-in facts are read once for the whole call, not once by each step of it
+        return _heartbeat(ctx, body)
+
+
+def _heartbeat(ctx, body=None):
     """Say the Sentinel is alive. The same call as any agent's: it already extends SentinelTask leases too (see
     ``agent_broker.heartbeat``). An optional ``running`` list (the ids of the tasks the Sentinel is working on) ends, as expired, any of its own
     claimed or running tasks it does not list once they were accepted more than ``RUNNING_GRACE`` ago, so a task a restart or a crash lost
@@ -154,6 +159,13 @@ def heartbeat(ctx, body=None):
     return out
 
 
+def _in_update_grace(now=None):
+    """``scan_control.in_update_grace``, read once inside ``sentinel_policy.shared_lookups`` (the reaper, the lease extension and the unreported-task check of one heartbeat ask it
+    each, and a read of the control row is a query)."""
+    from cveFeed import scan_control
+    return sentinel_policy.shared(('update-grace',), lambda: scan_control.in_update_grace(now))
+
+
 def _clean_running(body):
     """The set of task ids in a heartbeat's ``running``, or ``None`` when the field is absent (or null)."""
     value = body.get('running') if isinstance(body, dict) else None
@@ -169,8 +181,7 @@ def _end_unreported(agent_id, running):
     """End this Sentinel's own claimed or running tasks that are not in ``running`` and were accepted (or, never accepted, claimed) more than
     ``RUNNING_GRACE`` ago, through ``expire`` (so the dispatcher falls back and the slot frees). Returns the set of ended task ids. Another
     Sentinel's tasks are never in the query."""
-    from cveFeed import scan_control
-    if scan_control.in_update_grace():  # the Sentinel may have been talking to a server that was down: what it does not list now is not lost yet
+    if _in_update_grace():  # the Sentinel may have been talking to a server that was down: what it does not list now is not lost yet
         return set()
     cutoff = timezone.now() - RUNNING_GRACE
     ended = set()
@@ -1718,8 +1729,7 @@ def reap_expired(now=None):
     dispatcher that normally expires it is gone when its worker died, so without this an orphan would stay claimable, and counted as waiting
     work, for ever. Called by every broker entry point, like ``agent_broker.reap_expired``."""
     now = now or timezone.now()
-    from cveFeed import scan_control
-    if scan_control.in_update_grace(now):  # an update is running (or has just ended): Sentinels were talking to a server that was down, nothing is judged lost yet
+    if _in_update_grace(now):  # an update is running (or has just ended): Sentinels were talking to a server that was down, nothing is judged lost yet
         return 0
     stale = (Q(status='queued', kind='openvas', created_at__lt=now - queued_ttl('openvas'))
              | (Q(status='queued', created_at__lt=now - queued_ttl('nmap')) & ~Q(kind='openvas')))
@@ -1805,8 +1815,7 @@ def max_runtime(task):
 def extend_leases(agent, now):
     """Extend the lease of every SentinelTask this agent is running, the same way ``agent_broker.heartbeat`` extends
     AgentTask leases (and capped like them, at ``max_runtime`` after it was accepted); called from there so one heartbeat call covers both."""
-    from cveFeed import scan_control
-    grace = scan_control.in_update_grace(now)  # a lease that lapsed while the server was down is taken up again, not left for the reaper
+    grace = _in_update_grace(now)  # a lease that lapsed while the server was down is taken up again, not left for the reaper
     leases = []
     for task in SentinelTask.objects.filter(agent=agent, status__in=('claimed', 'running')).order_by('id'):
         if task.status == 'running' and agent.status == 'active':

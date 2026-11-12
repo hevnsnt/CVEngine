@@ -79,3 +79,46 @@ class ListScreens(Fleet):
         self.assertLessEqual(len(q), 8, [x['sql'][:90] for x in q.captured_queries])  # the sign-in checks of the request, nothing of the page
         sentinels_live = 'sentineltask'
         self.assertFalse([x for x in q.captured_queries if sentinels_live in x['sql']])
+
+
+class OneSentinelCalls(Fleet):
+    """What a Sentinel's own steady-state calls cost: they run every few seconds per Sentinel."""
+
+    def setUp(self):
+        self.add_sentinels(1)
+        self.agent = Agent.objects.get(name=f'qc-{self.n:03d}')
+        self.token = self.raw[self.agent.pk]
+        cache.clear()
+
+    def measure(self, path, body):
+        with steady_caches():
+            call(self.token, 'POST', path, body)
+            with CaptureQueriesContext(connection) as q:
+                status, out = call(self.token, 'POST', path, body)
+        self.assertEqual(status, 200, out)
+        return q
+
+    def test_heartbeat_does_not_repeat_its_lookups(self):
+        q = self.measure('/api/v1/sentinel/heartbeat', {'running': []})
+        self.assertLessEqual(len(q), 20, len(q))  # 32 before
+        self.assertEqual(sum('agentapi_sentineldefaults' in x['sql'] for x in q.captured_queries), 1)  # 4 before
+        self.assertLessEqual(sum('cveFeed_scancontrol' in x['sql'] for x in q.captured_queries), 1)  # 3 before
+        self.assertLessEqual(sum('dashboard_userprofile' in x['sql'] for x in q.captured_queries), 1)  # the sign-in check of the request is not asked again
+
+    def test_an_empty_tasks_next_does_not_repeat_its_lookups(self):
+        q = self.measure('/api/v1/sentinel/tasks/next', {'wait': 0, 'kinds': ['nmap', 'naabu']})
+        self.assertLessEqual(len(q), 20, len(q))  # 22 before
+        self.assertEqual(sum('agentapi_sentineldefaults' in x['sql'] for x in q.captured_queries), 1)
+        self.assertLessEqual(sum('dashboard_userprofile' in x['sql'] for x in q.captured_queries), 1)
+
+    def test_a_decision_is_never_carried_to_the_next_call(self):
+        """What is read once is read once per call: suspending, then revoking, takes effect on the very next heartbeat and tasks/next."""
+        self.assertEqual(call(self.token, 'POST', '/api/v1/sentinel/heartbeat', {})[0], 200)
+        self.assertEqual(call(self.token, 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})[0], 200)
+        Agent.objects.filter(pk=self.agent.pk).update(status='suspended')
+        self.assertEqual(call(self.token, 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})[0], 403)
+        Agent.objects.filter(pk=self.agent.pk).update(status='active')
+        self.assertEqual(call(self.token, 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})[0], 200)
+        self.agent.token.__class__.objects.filter(pk=self.agent.token_id).update(revoked=True)
+        self.assertEqual(call(self.token, 'POST', '/api/v1/sentinel/heartbeat', {})[0], 401)
+        self.assertEqual(call(self.token, 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})[0], 401)
