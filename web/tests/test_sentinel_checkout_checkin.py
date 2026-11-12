@@ -14,6 +14,11 @@ from tests.test_sentinels import SentinelBase, register_sentinel
 NMAP_HOST = {'ip': '192.0.2.50', 'os_guess': 'Linux', 'ports': [{'number': 22, 'protocol': 'tcp', 'state': 'open', 'service_name': 'ssh'}]}
 
 
+def without_marker(result):
+	"""What a task stored apart from the key that names the Sentinel that held it when it expired (``sentinels.EXPIRED_AGENT``): scan data."""
+	return {key: value for key, value in (result or {}).items() if key != sentinels.EXPIRED_AGENT}
+
+
 class CheckOutCheckIn(SentinelBase):
     def setUp(self):
         super().setUp()
@@ -90,7 +95,7 @@ class CheckOutCheckIn(SentinelBase):
         status, out = call(self.t['dana'], 'POST', self.url('result'), {'outcome': 'done', 'hosts': [NMAP_HOST]})
         self.assertEqual((status, out['duplicate'], out['late']), (200, True, True))  # the report call first expires the lapsed lease, then says late
         task = SentinelTask.objects.get(pk=self.task.pk)
-        self.assertEqual((task.status, task.result), ('expired', {}))  # nothing stored: the targets stay due
+        self.assertEqual((task.status, without_marker(task.result)), ('expired', {}))  # nothing stored: the targets stay due (the result only names the Sentinel that held it)
 
     def test_a_result_after_the_task_expired_is_discarded_and_marked_late(self):
         self.claim('dana')
@@ -119,5 +124,5 @@ class CheckOutCheckIn(SentinelBase):
         self.assertEqual((task.status, task.agent_id), ('expired', None))  # the stage that waited for it dispatches again: the broker never requeues
         status, out = call(self.t['dana'], 'POST', self.url('result'), {'outcome': 'done', 'hosts': [NMAP_HOST]})
         self.assertEqual((status, out['late']), (200, True))
-        self.assertEqual(SentinelTask.objects.get(pk=self.task.pk).result, {})
+        self.assertEqual(without_marker(SentinelTask.objects.get(pk=self.task.pk).result), {})
         self.assertEqual(call(self.t['carol'], 'POST', self.url('result'), {'outcome': 'done', 'hosts': [NMAP_HOST]})[0], 404)  # nor can another Sentinel file it
