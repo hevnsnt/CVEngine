@@ -32,8 +32,10 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 # wall clock ran out. A Sentinel that stops heartbeating loses its lease on its own (``sentinel_broker.reap_expired``, five minutes) and
 # the wait ends then, so the ceiling only bounds a Sentinel that is alive but never finishes. Every kind is here except those in
 # ``scanner_state.NO_STAGE`` (no stage waits for them yet), which ``tests.test_sentinel_contract`` holds to.
-COMPLETION_CEILING = {'nmap': 900, 'naabu': 1020, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 600,
-                      'nmap_udp': 900, 'wpscan': 1800, 'wpscan_thorough': 12 * 3600 + 600, 'openvas': 3600, 'discover': 1200, 'waf': 300, 'http_probe': 1500, 'dns_resolve': 300,
+# testssl: the Sentinel's limit is 900 s and nmap_udp's 1500 s (client/tools.py), and the wait is that and a minute to report; both were 600 and 900, so a run the
+# Sentinel was still allowed to finish was given up on and its result discarded as late (tests.test_sentinel_time_limits holds the relation).
+COMPLETION_CEILING = {'nmap': 900, 'naabu': 1020, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 1020,
+                      'nmap_udp': 1560, 'wpscan': 1800, 'wpscan_thorough': 12 * 3600 + 600, 'openvas': 3600, 'discover': 1200, 'waf': 300, 'http_probe': 1500, 'dns_resolve': 300,
                       'secrets_scan': 1800, 'nmap_full': 1800, 'nmap_verify': 300, 'node2shell': 600, 'rdp_shot': 180, 'db_probe': 120, 'path_probe': 300,
                       'nuclei_validate': 600, 'alive_check': 900, 'bucket_check': 1800, 'vhost_probe': 1800, 'subdir_probe': 1800, 'supplier_check': 1800, 'hygiene_check': 1800, 'dangling_dns_check': 900, 'route_probe': 1800, 'route_probe_signed': 1800, 'page_read': 600, 'identity_check': 300, 'web_screenshot': 900, 'ssh_probe': 600,
                       'bbot_discovery': 6 * 3600 + 600}  # a streamed run: its own time limit (the target's timeout_seconds) decides, see sentinel_stream

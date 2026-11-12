@@ -1,0 +1,76 @@
+{
+ "kind": "hygiene_check",
+ "name": "hygiene_check",
+ "payload": {
+  "certs": [
+   {
+    "cert": {
+     "chain_error": "EE certificate key too weak",
+     "cipher": "ECDHE-RSA-AES256-GCM-SHA384",
+     "host": "192.0.2.11",
+     "issuer": "wrong-name.invalid",
+     "key_description": "RSA 1024",
+     "legacy_handshake": {
+      "cipher": "ECDHE-RSA-AES256-SHA",
+      "protocol": "TLSv1.1"
+     },
+     "legacy_tls": true,
+     "not_after": "2024-11-27T00:00:00+00:00",
+     "not_before": "2023-10-24T00:00:00+00:00",
+     "port": 443,
+     "protocol": "TLSv1.2",
+     "sans": [],
+     "signature_algorithm": "sha256 (sha256WithRSAEncryption)",
+     "subject": "wrong-name.invalid"
+    },
+    "found": true,
+    "host": "192.0.2.11",
+    "port": 443
+   },
+   {
+    "found": false,
+    "host": "192.0.2.10",
+    "port": 443
+   }
+  ],
+  "mail": [],
+  "outcome": "done",
+  "refused": [],
+  "touched": [
+   "192.0.2.11",
+   "192.0.2.10"
+  ]
+ },
+ "sentinel_seconds": 0.0,
+ "target": {
+  "confirm_resolvers": [],
+  "mail": [],
+  "rdap": false,
+  "scope": {
+   "addresses": [
+    "192.0.2.11",
+    "192.0.2.10"
+   ],
+   "blocked": [],
+   "domains": [],
+   "excluded": [],
+   "excluded_trees": [],
+   "hosts": [
+    "192.0.2.11",
+    "192.0.2.10"
+   ],
+   "private": true
+  },
+  "tls": [
+   {
+    "host": "192.0.2.11",
+    "port": 443
+   },
+   {
+    "host": "192.0.2.10",
+    "port": 443
+   }
+  ]
+ },
+ "tool_rows": null
+}

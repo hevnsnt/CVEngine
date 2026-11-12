@@ -1,0 +1,24 @@
+{
+ "kind": "nuclei_light",
+ "name": "nuclei_empty_tags",
+ "payload": {
+  "findings": [],
+  "no_templates": true,
+  "outcome": "done",
+  "templates_release": "image:v10.5.1",
+  "unreachable": []
+ },
+ "sentinel_seconds": 6.8,
+ "target": {
+  "severities": [
+   "critical"
+  ],
+  "tags": [
+   "haproxy"
+  ],
+  "targets": [
+   "http://192.0.2.10"
+  ]
+ },
+ "tool_rows": 0
+}

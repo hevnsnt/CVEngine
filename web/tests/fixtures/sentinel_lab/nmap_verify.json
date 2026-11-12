@@ -1,0 +1,22 @@
+{
+ "kind": "nmap_verify",
+ "name": "nmap_verify",
+ "payload": {
+  "outcome": "done",
+  "xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nmaprun>\n<?xml-stylesheet href=\"file:///usr/local/share/nmap/nmap.xsl\" type=\"text/xsl\"?>\n<!-- Nmap 7.993 scan initiated Thu Nov 12 16:07:13 2026 as: nmap -sV -Pn -n -&#45;version-all -&#45;script http-server-header,http-title -&#45;script-timeout 20s -&#45;host-timeout 90s -p 80 -oX - 192.0.2.10 -->\n<nmaprun scanner=\"nmap\" args=\"nmap -sV -Pn -n -&#45;version-all -&#45;script http-server-header,http-title -&#45;script-timeout 20s -&#45;host-timeout 90s -p 80 -oX - 192.0.2.10\" start=\"1794499633\" startstr=\"Thu Nov 12 16:07:13 2026\" version=\"7.993\" xmloutputversion=\"1.05\">\n<scaninfo type=\"syn\" protocol=\"tcp\" numservices=\"1\" services=\"80\"/>\n<verbose level=\"0\"/>\n<debugging level=\"0\"/>\n<hosthint><status state=\"up\" reason=\"arp-response\" reason_ttl=\"0\"/>\n<address addr=\"192.0.2.10\" addrtype=\"ipv4\"/>\n<address addr=\"12:60:A0:9D:2E:6E\" addrtype=\"mac\"/>\n<hostnames>\n</hostnames>\n</hosthint>\n<host starttime=\"1794499633\" endtime=\"1794499640\"><status state=\"up\" reason=\"arp-response\" reason_ttl=\"0\"/>\n<address addr=\"192.0.2.10\" addrtype=\"ipv4\"/>\n<address addr=\"12:60:A0:9D:2E:6E\" addrtype=\"mac\"/>\n<hostnames>\n</hostnames>\n<ports><port protocol=\"tcp\" portid=\"80\"><state state=\"open\" reason=\"syn-ack\" reason_ttl=\"64\"/><service name=\"http\" product=\"nginx\" version=\"1.31.8\" method=\"probed\" conf=\"10\"><cpe>cpe:/a:igor_sysoev:nginx:1.31.8</cpe></service><script id=\"http-title\" output=\"cvtv lab blog\"><elem key=\"title\">cvtv lab blog</elem>\n</script><script id=\"http-server-header\" output=\"nginx/1.31.8\"><elem>nginx/1.31.8</elem>\n</script></port>\n</ports>\n<times srtt=\"62\" rttvar=\"3752\" to=\"100000\"/>\n</host>\n<runstats><finished time=\"1794499640\" timestr=\"Thu Nov 12 16:07:20 2026\" summary=\"Nmap done at Thu Nov 12 16:07:20 2026; 1 IP address (1 host up) scanned in 6.19 seconds\" elapsed=\"6.19\" exit=\"success\"/><hosts up=\"1\" down=\"0\" total=\"1\"/>\n</runstats>\n</nmaprun>\n"
+ },
+ "sentinel_seconds": 6.2,
+ "target": {
+  "address": "192.0.2.10",
+  "host_timeout": 90,
+  "ports": [
+   80
+  ],
+  "scripts": [
+   "http-server-header",
+   "http-title"
+  ],
+  "version_all": true
+ },
+ "tool_rows": null
+}

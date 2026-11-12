@@ -1,0 +1,90 @@
+{
+ "kind": "vhost_probe",
+ "name": "vhost_probe",
+ "payload": {
+  "addresses": [
+   {
+    "default": {
+     "fingerprint": {
+      "length": 437,
+      "location": "",
+      "server": "nginx/1.31.8",
+      "status": 200,
+      "title": "cvtv lab blog"
+     },
+     "state": "answered"
+    },
+    "id": "192.0.2.10",
+    "names": [
+     {
+      "fingerprint": {
+       "length": 437,
+       "location": "",
+       "server": "nginx/1.31.8",
+       "status": 200,
+       "title": "cvtv lab blog"
+      },
+      "name": "web.lab.test",
+      "state": "answered"
+     },
+     {
+      "fingerprint": {
+       "length": 437,
+       "location": "",
+       "server": "nginx/1.31.8",
+       "status": 200,
+       "title": "cvtv lab blog"
+      },
+      "name": "other.lab.test",
+      "state": "answered"
+     }
+    ]
+   }
+  ],
+  "outcome": "done",
+  "refused": [],
+  "touched": [
+   "192.0.2.10",
+   "web.lab.test",
+   "other.lab.test"
+  ]
+ },
+ "sentinel_seconds": 0.4,
+ "target": {
+  "addresses": [
+   {
+    "address": "192.0.2.10",
+    "id": "192.0.2.10",
+    "names": [
+     {
+      "name": "web.lab.test"
+     },
+     {
+      "name": "other.lab.test"
+     }
+    ],
+    "port": 80,
+    "scheme": "http"
+   }
+  ],
+  "gap": 0.1,
+  "scope": {
+   "addresses": [
+    "192.0.2.10",
+    "web.lab.test",
+    "other.lab.test"
+   ],
+   "blocked": [],
+   "domains": [],
+   "excluded": [],
+   "excluded_trees": [],
+   "hosts": [
+    "192.0.2.10",
+    "web.lab.test",
+    "other.lab.test"
+   ],
+   "private": true
+  }
+ },
+ "tool_rows": null
+}

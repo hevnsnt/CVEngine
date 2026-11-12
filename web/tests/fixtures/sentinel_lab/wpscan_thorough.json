@@ -1,0 +1,142 @@
+{
+ "kind": "wpscan_thorough",
+ "name": "wpscan_thorough",
+ "payload": {
+  "outcome": "done",
+  "report": {
+   "cached_requests": 5,
+   "command_line": "wpscan --url http://192.0.2.10/ --format json --no-banner --random-user-agent --throttle 100 --request-timeout 30 --connect-timeout 15 --detection-mode mixed --plugins-detection mixed --themes-detection mixed --disable-tls-checks --enumerate ap,at,tt --max-scan-duration 570 -o /tmp/wpscan-5ee9261k/report.json",
+   "data_received": 27332255,
+   "data_received_humanised": "26.066 MB",
+   "data_sent": 1531769,
+   "data_sent_humanised": "1.461 MB",
+   "db_files_updated": [
+    "metadata.json",
+    "wp_fingerprints.json",
+    "timthumbs-v3.txt",
+    "config_backups.txt",
+    "db_exports.txt",
+    "backup_folders.txt",
+    "dynamic_finders.yml",
+    "LICENSE",
+    "sponsor.txt"
+   ],
+   "db_update_finished": true,
+   "db_update_started": true,
+   "effective_url": "http://192.0.2.10/",
+   "elapsed": 565,
+   "hostname": "a7223a20311d",
+   "interesting_findings": [
+    {
+     "confidence": 100,
+     "confirmed_by": {},
+     "found_by": "Headers (Passive Detection)",
+     "interesting_entries": [
+      "Server: nginx/1.31.8"
+     ],
+     "references": {},
+     "to_s": "Headers",
+     "type": "headers",
+     "url": "http://192.0.2.10/"
+    },
+    {
+     "confidence": 100,
+     "confirmed_by": {},
+     "found_by": "Direct Access (Aggressive Detection)",
+     "interesting_entries": [],
+     "references": {},
+     "to_s": "WordPress readme found: http://192.0.2.10/readme.html",
+     "type": "readme",
+     "url": "http://192.0.2.10/readme.html"
+    }
+   ],
+   "main_theme": {
+    "active_installs": 300000,
+    "author": null,
+    "author_uri": null,
+    "confidence": 70,
+    "confirmed_by": {},
+    "description": null,
+    "directory_listing": false,
+    "error_log_url": null,
+    "found_by": "Css Style In Homepage (Passive Detection)",
+    "interesting_entries": [],
+    "last_updated": "2026-08-19T00:00:00Z",
+    "last_updated_relative": "2 months ago",
+    "last_updated_source": "WordPress.org",
+    "latest_version": "1.6",
+    "license": null,
+    "license_uri": null,
+    "location": "http://192.0.2.10/wp-content/themes/twentytwentythree/",
+    "outdated": true,
+    "parents": [],
+    "readme_url": false,
+    "slug": "twentytwentythree",
+    "style_name": "Twenty Twenty-Three",
+    "style_uri": null,
+    "style_url": "http://192.0.2.10/wp-content/themes/twentytwentythree/style.css?ver=1.2",
+    "tags": null,
+    "template": null,
+    "text_domain": null,
+    "version": {
+     "confidence": 80,
+     "confirmed_by": {},
+     "found_by": "Style (Passive Detection)",
+     "interesting_entries": [
+      "http://192.0.2.10/wp-content/themes/twentytwentythree/style.css?ver=1.2, Match: 'Version: 1.2'"
+     ],
+     "number": "1.2"
+    },
+    "vulnerabilities": []
+   },
+   "requests_done": 5471,
+   "response_status_codes": {
+    "200": 28,
+    "403": 3,
+    "404": 5437,
+    "failed": 3
+   },
+   "response_status_codes_warning": false,
+   "response_status_codes_warnings": [],
+   "scan_aborted": "Max Scan Duration Reached",
+   "start_memory": 61280256,
+   "start_time": 1794499588,
+   "stop_time": 1794500153,
+   "target_ip": "192.0.2.10",
+   "target_url": "http://192.0.2.10/",
+   "used_memory": 564297728,
+   "used_memory_humanised": "538.156 MB",
+   "version": {
+    "confidence": 100,
+    "confirmed_by": {
+     "Most Common Wp Includes Query Parameter In Homepage (Passive Detection)": {
+      "confidence": 40,
+      "interesting_entries": [
+       "http://192.0.2.10/wp-includes/js/wp-embed.min.js?ver=6.4.1"
+      ]
+     }
+    },
+    "found_by": "Meta Generator (Passive Detection)",
+    "interesting_entries": [
+     "http://192.0.2.10/, Match: 'WordPress 6.4.1'"
+    ],
+    "number": "6.4.1",
+    "release_date": "2023-11-09",
+    "status": "insecure",
+    "vulnerabilities": []
+   },
+   "vuln_api": {
+    "error": "No WPScan API Token given, as a result vulnerability data has not been output.\nYou can get a free API token with 25 daily requests by registering at https://wpscan.com/register"
+   }
+  },
+  "returncode": 4,
+  "stderr_tail": ""
+ },
+ "sentinel_seconds": 570.6,
+ "target": {
+  "timeout_seconds": 600,
+  "token": "",
+  "url": "http://192.0.2.10/"
+ },
+ "tool_rows": null
+}

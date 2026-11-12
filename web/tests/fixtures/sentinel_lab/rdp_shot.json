@@ -1,0 +1,14 @@
+{
+ "kind": "rdp_shot",
+ "name": "rdp_shot",
+ "payload": {
+  "outcome": "done",
+  "painted": false
+ },
+ "sentinel_seconds": 0.1,
+ "target": {
+  "address": "192.0.2.10",
+  "port": 3389
+ },
+ "tool_rows": null
+}

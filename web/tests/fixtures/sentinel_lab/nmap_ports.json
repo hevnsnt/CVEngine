@@ -1,0 +1,89 @@
+{
+ "kind": "nmap",
+ "name": "nmap_ports",
+ "payload": {
+  "hosts": [
+   {
+    "ip": "192.0.2.10",
+    "os_guess": "Linux 4.15 - 5.19",
+    "ports": [
+     {
+      "number": 80,
+      "product": "nginx",
+      "protocol": "tcp",
+      "service_name": "http",
+      "state": "open",
+      "version": "1.31.8"
+     }
+    ]
+   },
+   {
+    "ip": "192.0.2.11",
+    "os_guess": "Linux 4.15 - 5.19",
+    "ports": [
+     {
+      "number": 443,
+      "product": "nginx",
+      "protocol": "tcp",
+      "service_name": "http",
+      "state": "open",
+      "version": "1.31.8"
+     }
+    ]
+   },
+   {
+    "ip": "192.0.2.13",
+    "os_guess": "Linux 4.15 - 5.19",
+    "ports": [
+     {
+      "number": 6379,
+      "product": "Redis key-value store",
+      "protocol": "tcp",
+      "service_name": "redis",
+      "state": "open",
+      "version": "8.10.3"
+     }
+    ]
+   },
+   {
+    "ip": "192.0.2.14",
+    "os_guess": "Linux 4.15 - 5.19",
+    "ports": [
+     {
+      "number": 5432,
+      "product": "PostgreSQL DB",
+      "protocol": "tcp",
+      "service_name": "postgresql",
+      "state": "open",
+      "version": ""
+     }
+    ]
+   },
+   {
+    "ip": "192.0.2.12",
+    "os_guess": "",
+    "ports": []
+   }
+  ],
+  "os_reliable": true,
+  "outcome": "done"
+ },
+ "sentinel_seconds": 33.7,
+ "target": {
+  "addresses": [
+   "192.0.2.10",
+   "192.0.2.11",
+   "192.0.2.12",
+   "192.0.2.13",
+   "192.0.2.14"
+  ],
+  "ports": [
+   22,
+   80,
+   443,
+   5432,
+   6379
+  ]
+ },
+ "tool_rows": 4
+}
