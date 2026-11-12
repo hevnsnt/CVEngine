@@ -2772,6 +2772,18 @@ a.score-label:hover{text-decoration-color:var(--ink)}
   .wrap:has(>.pagetabs+.page-head.one-line.with-actions)>.page-head{flex:1 0 100%}
 }
 
+/* ---- UI-5: Changes shows its first change on the first screen ---- */
+/* the daily chart is closed under its own line; the kind chips are one line that scrolls sideways instead of two or three lines that wrap */
+.changes-trend{margin:0 0 var(--s-2)}
+.changes-trend[hidden]{display:none}
+.changes-trend>summary{display:flex;align-items:center;min-height:36px;cursor:pointer;font:var(--fw-semi) var(--fs-3) var(--font);color:var(--ink-2)}
+.changes-trend[open]>summary{margin-bottom:var(--s-2)}
+.changes-trend:not([open])>.chart{display:none}
+#section[data-kind="changes"] .tools{margin-bottom:var(--s-2)}
+#section[data-kind="changes"] .picker{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;margin-bottom:var(--s-2);padding-bottom:2px}
+#section[data-kind="changes"] .picker::-webkit-scrollbar{display:none}
+#section[data-kind="changes"] .picker button{flex:none}
+
 /* ---- UI-2: Findings and CVE matches rows keep the severity chip whole and clear of the row menu ---- */
 /* the chip is on the title's line (static/cve/app.js, `lead`), right of the title; the title is what gives way. The row menu keeps its own corner. */
 .host-row>.row-head{display:flex;align-items:center;gap:var(--s-2);min-width:0;min-height:24px;padding-right:var(--s-8)}

@@ -4764,12 +4764,19 @@ pages.changes = function changes(mount) {
     count,
     () => list.reload(),
   );
-  const trend = el("div", "chart-slot");
+  // the daily chart is closed under its own line (the changes come first on the screen) and opens on the same 7 days the list starts on
+  const trend = el("details", "chart-slot changes-trend", null, { "data-keep-key": "changes-chart" });
+  trend.hidden = true;
+  const trendSum = el("summary", "", "Changes per day");
+  trend.append(trendSum);
   mount.append(trend, tools, kinds.node);
   // counted by the server, exactly: the newest 200 changes are a page, and the chart's total is the sum of what it is given
   api("GET", `${base}/activity-days?${query({ days: 60, series: "changes", tz: displayZone() })}`)
     .then((r) => {
-      if (r.changes.total) trend.append(areaChart({ title: "Changes per day", unit: "changes", ranges: [["7D", 7], ["30D", 30]], perDay: r.changes.days, compare: false }));
+      if (!r.changes.total) return;
+      trendSum.textContent = `Changes per day, chart (${r.changes.total} in the last 60 days)`;
+      trend.append(areaChart({ title: "Changes per day", unit: "changes", ranges: [["7D", 7], ["30D", 30]], perDay: r.changes.days, compare: false, defaultRange: "7D" }));
+      trend.hidden = false;
     })
     .catch(() => {});
   const list = createList({
