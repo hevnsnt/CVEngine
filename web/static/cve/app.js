@@ -4601,9 +4601,12 @@ pages.hygiene = function hygiene(mount) {
       countOf("hygiene", {}),
     ]);
     tiles.textContent = "";
+    // a phone has one tile for both certificate numbers (one 44px button instead of two), a screen with room keeps the two
+    const narrow = typeof matchMedia === "function" && matchMedia("(max-width:639px)").matches;
     tiles.append(
-      tile("Certificates tracked", tracked, { onClick: openCerts }),
-      tile("Expiring in 30 days", expiring, { hot: "smoke", onClick: openCerts }),
+      ...(narrow
+        ? [tile(`Certificates tracked, ${expiring == null ? "-" : expiring} expiring in 30 days`, tracked, { hot: expiring ? "smoke" : "", onClick: openCerts })]
+        : [tile("Certificates tracked", tracked, { onClick: openCerts }), tile("Expiring in 30 days", expiring, { hot: "smoke", onClick: openCerts })]),
       tile("Critical or high issues", crit == null ? null : crit + (high || 0), { hot: "fire" }),
       tile("Open issues", open, { hot: "ice" }),
     );

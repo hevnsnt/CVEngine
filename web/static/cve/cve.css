@@ -2846,3 +2846,13 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 .table-page .supplier-head{flex-wrap:wrap;row-gap:var(--s-1)}
 .table-page .supplier-actions{flex:0 1 auto;flex-wrap:wrap;margin-left:auto;justify-content:flex-end;min-width:0}
 .table-page .supplier-head h3{flex:0 1 auto;max-width:100%}
+
+/* ---- UI-9: a finger on a phone, the Hygiene tile buttons and the project switcher are 44px ---- */
+@media (pointer:coarse){
+  .tiles.slim .tile,button.tile,a.tile{min-height:var(--hit)}
+  .scope-row .scope{min-height:var(--hit);height:var(--hit)}
+  /* a trend row's label link answers the whole 44px row (its number is not a button, so a tap on it reaches the link), and the rows do not move */
+  .mx-lead{position:relative}
+  .mx-lead a.eyebrow::after{content:"";position:absolute;inset:0}
+  .mx-lead a.eyebrow~.mx-total{pointer-events:none}
+}
