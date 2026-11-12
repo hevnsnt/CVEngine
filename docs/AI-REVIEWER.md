@@ -214,7 +214,7 @@ Size of each system prompt, in characters (about 3.5 characters a token), before
 
 - **Which findings.** Every finding with a triage record whose remediation status is open or in progress: CVE matches (Fire, Smoke and Ice),
   scanner findings and hygiene findings. Web routes have no remediation workflow and are left out. Fire comes first, then Smoke, then the rest,
-  newest first.
+  newest first. Each project with open findings gets an equal share of every batch, so one large project cannot use the whole daily cap while another has work.
 - **Once per state.** A review is keyed by the finding's evidence key and its host's state fingerprint (`HostState.fingerprint`: IPs, ports
   with service and version, technologies, HTTP status and title). The same key is never reviewed twice. A new port, a new version or new
   evidence makes a new key, and the finding is read again.
@@ -272,7 +272,7 @@ The page has one **Connection** block (provider, API key, address, and a status 
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| Enabled | on | The reviewer works only when an AI provider is configured and this is on. |
+| Enabled | on | The reviewer works only when an AI provider is configured (enabled, with its key, or with its server address for a self-hosted one) and this is on. |
 | Review model | empty: `claude-sonnet-5-5` on Anthropic, else the default model | The model for finding review. The page offers it as "Same as the default model" (on Anthropic: "Built-in: claude-sonnet-5-5", because that is what empty means there). |
 | Operations model | empty: `claude-haiku-5-5` on Anthropic, else the default model | The model for the operations check. |
 | Close false positives | on | Off: the reviewer records its verdicts and closes nothing. |

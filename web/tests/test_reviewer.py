@@ -3,6 +3,7 @@ the injection guard, the operations checks and alerts, and the reviewer containe
 import os
 import sys
 import tempfile
+from datetime import timedelta
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -242,6 +243,41 @@ class ReviewTests(Fixture):
         triage.track([other])
         FindingComment.objects.create(project=self.proj, finding_kind='match', finding_id=other.pk, author=self.alice, text='other host')
         self.assertFalse(reviewer.worked_by_person('cve_match', self.match))
+
+    def test_a_provider_with_no_key_or_no_address_is_not_a_provider_for_the_reviewer(self):
+        AIProviderSettings.objects.update(api_key='')
+        cfg = reviewer.config()
+        self.assertFalse(cfg['enabled'])
+        self.assertIn('key or server address', cfg['why'])
+        self.assertEqual(reviewer.next_packets(25), [])
+        AIProviderSettings.objects.update(api_key='sk-test-key')
+        self.assertTrue(reviewer.config()['enabled'])
+        AIProviderSettings.objects.update(provider='vllm', api_key='', base_url='')  # a self-hosted one needs an address
+        self.assertFalse(reviewer.config()['enabled'])
+        AIProviderSettings.objects.update(base_url='http://llm.internal:8000')
+        self.assertTrue(reviewer.config()['enabled'])
+
+    def test_one_project_does_not_take_the_whole_batch_while_another_has_work(self):
+        now = timezone.now()
+        other_proj = Project.objects.create(name='Rev2', slug='rev-proj-2', insert_date=now, org=self.org)
+        other_dom = Domain.objects.create(name='example.org', project=other_proj, insert_date=now)
+        other_sub = Subdomain.objects.create(name='www.example.org', target_domain=other_dom, scan_history=ScanHistory.objects.create(
+            domain=other_dom, scan_type=self.scan.scan_type, scan_status=2, start_scan_date=now))
+        for i in range(6):  # the first project has the newest work, and more of it
+            cve = CVEEntry.objects.create(cve_id=f'CVE-2099-77{i + 10}', cvss=9.8, published_at=now, affected=[])
+            m = CVEMatch.objects.create(cve_entry=cve, subdomain=self.sub, source='tech', matched_product='lib-b', matched_version='1.0',
+                                        version_in_range=False, confidence=0.8, ai_verdict='uncertain', scan_history=self.scan, evidence={'source': 'tech'})
+            triage.track([m])
+        m2 = CVEMatch.objects.create(cve_entry=self.cve, subdomain=other_sub, source='tech', matched_product='lib-a', matched_version='1.2',
+                                     version_in_range=False, confidence=0.8, ai_verdict='uncertain', scan_history=other_sub.scan_history, evidence={'source': 'tech'})
+        triage.track([m2])
+        Triage.objects.filter(match=m2).update(last_seen=now - timedelta(days=5))
+        picked = reviewer.due(4)
+        projects = [Triage.objects.get(pk=pk).project_id for pk, _ in picked]
+        self.assertEqual(len(picked), 4)
+        self.assertEqual(sorted(set(projects)), sorted({self.proj.pk, other_proj.pk}))
+        self.assertGreaterEqual(projects.count(other_proj.pk), 1)
+        self.assertEqual(len(reviewer.due(10)), 4)  # eight open in all: what is left is handed out
 
     def test_a_verdict_on_a_state_that_changed_is_refused(self):
         packet = self.packet()

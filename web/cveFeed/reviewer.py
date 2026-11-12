@@ -67,8 +67,14 @@ def settings_row():
 
 
 def provider_row():
+    """The AI provider the reviewer may use: the pipeline's own (``ai_jobs.provider_row``), so a row with no key or no server address is none."""
+    from cveFeed import ai_jobs
+    return ai_jobs.provider_row()
+
+
+def _any_provider():
     from dashboard.models import AIProviderSettings
-    return AIProviderSettings.objects.filter(enabled=True).first()
+    return AIProviderSettings.objects.filter(enabled=True).exists()
 
 
 def paused():
@@ -155,7 +161,7 @@ def config(now=None):
         out['jobs_why'] = jobs_why
     if not on:
         out['why'] = ('turned off in .env (CVENGINE_REVIEWER=0)' if not env_enabled() else
-                      'turned off in Settings' if not row.enabled else 'no AI provider is configured' if not provider else
+                      'turned off in Settings' if not row.enabled else ('no AI provider is configured' if not _any_provider() else 'the AI provider has no key or server address') if not provider else
                       'scanning is paused')
         return out
     base = {'provider': provider.provider, 'base_url': reachable_url(provider.base_url) if provider.base_url else '',
@@ -206,14 +212,34 @@ def _reviewed(triages, fingerprints):
 
 def due(limit=PACKET_LIMIT, now=None):
     """Up to ``limit`` ``(triage, review_key)`` pairs to review now: open findings whose current key has no review, CVE matches first.
-    The open findings are read in pages of WINDOW in that order until ``limit`` are found or none are left, so a finding is reached
-    however many reviewed ones come before it."""
+    Each project with open findings gets an equal share of the batch (what one has too little of goes to the others), so a large project
+    cannot take the whole of the daily cap while another has work."""
+    from cveFeed.models import Triage
+    projects = sorted(Triage.objects.filter(open_q()).exclude(kind='route_auth').order_by().values_list('project_id', flat=True).distinct())
+    now = now or timezone.now()
+    picked, active = [], list(projects)
+    while active and len(picked) < limit:
+        share = max(1, -(-(limit - len(picked)) // len(active)))
+        full = []
+        for project_id in active:
+            got = _due_in(project_id, min(share, limit - len(picked)), now)
+            picked += got
+            if len(got) >= share:
+                full.append(project_id)  # it may have more
+            if len(picked) >= limit:
+                break
+        active = full
+    return picked
+
+
+def _due_in(project_id, limit, now):
+    """``due`` for one project. The open findings are read in pages of WINDOW in that order until ``limit`` are found or none are left, so a
+    finding is reached however many reviewed ones come before it."""
     from django.db.models import Case, IntegerField, Value, When
     from cveFeed.models import Triage
     rank = Case(*[When(kind=k, then=Value(v)) for k, v in KIND_ORDER.items()], default=Value(9), output_field=IntegerField())
-    qs = (Triage.objects.filter(open_q()).exclude(kind='route_auth').annotate(kind_rank=rank).order_by('kind_rank', '-last_seen', '-id')
+    qs = (Triage.objects.filter(open_q(), project_id=project_id).exclude(kind='route_auth').annotate(kind_rank=rank).order_by('kind_rank', '-last_seen', '-id')
           .only('id', 'kind', 'project_id', 'host', 'evidence_key', 'signature'))
-    now = now or timezone.now()
     picked = []
     offset = 0
     while len(picked) < limit:
