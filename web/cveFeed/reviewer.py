@@ -659,13 +659,15 @@ def review_summary(triage_id):
 
 
 def newest_review_q(prefix=''):
-    """The newest review's verdict and outcome of a finding as two subquery annotations, ``review_verdict`` and ``review_outcome``
-    (``prefix`` reaches the Triage row's id from the finding: ``triage__``)."""
+    """The newest review's verdict, outcome, confidence and held reason of a finding as subquery annotations, ``review_verdict``,
+    ``review_outcome``, ``review_confidence`` and ``review_held`` (``prefix`` reaches the Triage row's id from the finding: ``triage__``)."""
     from django.db.models import CharField, OuterRef, Subquery
     from cveFeed.models import FindingReview
     newest = FindingReview.objects.filter(triage_id=OuterRef(prefix + 'id')).exclude(outcome=REFUSED).order_by('-created_at', '-id')
     return {'review_verdict': Subquery(newest.values('verdict')[:1], output_field=CharField()),
-            'review_outcome': Subquery(newest.values('outcome')[:1], output_field=CharField())}
+            'review_outcome': Subquery(newest.values('outcome')[:1], output_field=CharField()),
+            'review_confidence': Subquery(newest.values('confidence')[:1], output_field=CharField()),
+            'review_held': Subquery(newest.values('held_reason')[:1], output_field=CharField())}
 
 
 def newest_review_row_q(prefix=''):

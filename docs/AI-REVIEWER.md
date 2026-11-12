@@ -75,7 +75,10 @@ reviewer is built on the assumption that every scanned byte is hostile.
    - the packet the verdict answers is still the current one: same evidence, same host state, and the finding is still open.
 
    Anything else is recorded as the reviewer's opinion, shown on the finding, and changes nothing. A `false_positive` the server holds back on a
-   finding with hard evidence is recorded as **disputed**, for a person to look at.
+   finding with hard evidence is recorded as **disputed**, for a person to look at. Only one held verdict changes any ranking: in Situations a
+   `false_positive` with `high` confidence that the server held because a person worked the finding (or it is a critical scanner finding, or closing
+   is switched off) moves it from Likely to Minor. A verdict held for hard evidence, a floor or instructions aimed at an AI in the evidence, a verdict
+   of low or medium confidence, and a finding whose retest still reproduces it never demote it (see [SITUATIONS.md](SITUATIONS.md)).
 4. **Everything shown to the model is data inside a fenced block.** It reuses the triage sanitiser: forbidden keys (raw requests, responses,
    bodies, secrets) are dropped, host names become `[host]`, control, bidi and zero-width characters are stripped, length is capped, and
    sentences that address an AI are cut out. What is left sits between random-nonce markers the text cannot close. The system prompt tells the
