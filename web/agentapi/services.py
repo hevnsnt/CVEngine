@@ -3673,7 +3673,7 @@ def _finding_sources(project, params):
     if wanted in ('all', 'scanner'):
         qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project') \
             .select_related('subdomain', 'triage__verdict', 'triage__heat_override_by', 'remediation_by', 'assignee',
-                            *(['target_domain__project'] if everywhere else [])) \
+                            'target_domain__project' if everywhere else 'target_domain') \
             .annotate(heat_rank=finding_heat_rank_expr(), sev=F('severity'), when=F('discovered_date'),
                       comment_count=_comment_count_annotation('vulnerability'))
         if status == 'actionable':
