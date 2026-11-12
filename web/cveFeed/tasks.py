@@ -1339,8 +1339,8 @@ def automatic_validate_finding(job_id):
         AutomaticValidation.objects.filter(pk=job.pk, status='running').update(
             status=status, result=result, finished_at=timezone.now(),
             next_attempt_at=retry_at, error='a check or AI review failed or was deferred by a cap' if failed else '')
-        outcome = hot_validation.outcome_words(failed, bool(checks.get('failed')) or ai_state == 'failed', capped_only)
-        activity.settle(progress, hot_validation.line_status(failed, bool(checks.get('failed')) or ai_state == 'failed'),
+        line_status, outcome = hot_validation.line_outcome(checks, check_state, ai_state, capped_only)
+        activity.settle(progress, line_status,
                         f'Automatic validation #{job.pk} {outcome}: checks {check_state}; ' +
                         ('no AI model is connected, so no AI review' if not ai_connected and ai_state == 'unavailable' else f'AI {ai_state}'),
                         check_state=check_state, ai_state=ai_state)
@@ -1662,6 +1662,8 @@ def deep_scan_apexes():
             domain = Domain.objects.create(name=apex, project_id=project_id, insert_date=timezone.now(),
                                            description="Added for the weekly deep discovery of its subdomains")
         domains.append(domain)
+    from cveFeed.discovery import without_refused
+    domains = without_refused(domains)  # a target the private-address guard refused lately is not queued again by the weekly sweep
     scans = start_discoveries(domains, "deep", quiet=True) if domains else []
     for project_id in {d.project_id for d in domains}:
         count = sum(1 for d in domains if d.project_id == project_id)
@@ -2229,7 +2231,7 @@ def _reap_stuck_jobs():
     counts = reaper.reap()
     if counts:
         activity.log('validate', 'Expired stuck jobs a restarted worker left behind: '
-                     + ', '.join(f'{n} {key.replace(":", " ")}' for key, n in counts.items()), status='failed', **counts)
+                     + ', '.join(f'{n} {key.replace(":", " ")}' for key, n in counts.items()), status='notice', **counts)  # clean-up after a restart, not a failure of anything
     orphaned = reaper.expire_orphaned_running()
     if orphaned:
         activity.log('discovery', 'Closed scans/assessments a restarted worker left running with no Celery task behind: '

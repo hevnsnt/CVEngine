@@ -329,7 +329,8 @@ def queue_scans(link, pending, now):
     from cveFeed.discovery import start_in_stored_modes
     from cveFeed.models import TailscaleDevice
     batch = pending[:link.max_devices]
-    domains = [r.domain for r in batch if r.domain is not None]
+    from cveFeed.discovery import without_refused
+    domains = without_refused([r.domain for r in batch if r.domain is not None])
     try:
         start_in_stored_modes(domains, quiet=True)
     except RuntimeError as exc:  # no scan engine configured

@@ -11,6 +11,7 @@ import os
 from contextlib import contextmanager
 
 from django.conf import settings
+from django.core.cache import cache
 from django.utils import timezone
 
 from cveFeed import scanner_wait, snapshot_cache
@@ -185,7 +186,7 @@ def _flush(scan, ctx, batch, observed, stored=0):
 def _report_key_problems(problems, extra_args, scan):
     """One activity line per service whose key the scanner rejected (or never received). The scanner skips such a module and carries on, so without
     this a stored key that is wrong looks like a service that found nothing."""
-    from cveFeed import activity
+    from cveFeed import activity, key_limits
     from cveFeed.api_credentials import service_for_module
     configured = {a.split('=', 1)[0].split('.')[1] for prev, a in zip(extra_args, extra_args[1:])
                   if prev == '-c' and a.startswith('modules.') and '=' in a}
@@ -195,6 +196,11 @@ def _report_key_problems(problems, extra_args, scan):
         if module not in configured or not service or service[0] in said:
             continue
         said.add(service[0])
+        if key_limits.is_limit(reason):  # over its plan or rate limited: a notice once per pause, never a failure per discovery
+            if key_limits.paused(scan.domain.project_id, service[0]) or not key_limits.pause(scan.domain.project_id, service[0]):
+                continue
+            activity.log('discovery', key_limits.notice_text(service[1]), project=scan.domain.project_id, status='notice', service=service[0])
+            continue
         activity.log('discovery', f'{service[1]}: the key was not accepted ({reason[:120]}); {module} did not run on {scan.domain.name}',
                      project=scan.domain.project_id, status='failed', scan_id=scan.id)
 
@@ -322,6 +328,37 @@ def _discover_on_sentinel(scan, mode, ctx, extra_args, stored, shown):
             'incomplete': final.get('incomplete') or ('' if out['result'] is not None else out.get('error') or 'the Sentinel did not finish the run')}
 
 
+class TargetRefused(ValueError):
+    """The target is one this server must not scan from here (it resolves to a loopback, link-local or internal address): a refusal, not a failure."""
+
+
+REFUSED_RETRY_SECONDS = 6 * 3600   # a refused target is not queued again by the conductor or a sweep for this long; then its name is looked up once more
+REFUSED_LINE_SECONDS = 24 * 3600   # and the activity line about it is written once per host in this long
+_REFUSED_KEY = 'cvengine:discovery:refused:'
+
+
+def refusal_pending(domain_id):
+    """Whether this target was refused lately and is not to be tried again yet (the work conductor and the sweeps skip it)."""
+    try:
+        return bool(cache.get(f'{_REFUSED_KEY}{domain_id}'))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def note_refused(domain_id):
+    """Remember a refusal. True when the activity line for this host should be written now (the first in ``REFUSED_LINE_SECONDS``)."""
+    try:
+        cache.set(f'{_REFUSED_KEY}{domain_id}', 1, REFUSED_RETRY_SECONDS)
+        return bool(cache.add(f'{_REFUSED_KEY}line:{domain_id}', 1, REFUSED_LINE_SECONDS))
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def without_refused(domains):
+    """The domains of a sweep that were not refused lately."""
+    return [d for d in domains if not refusal_pending(d.id)]
+
+
 def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
     """Body of the celery task: the discovery runs on a Sentinel (``bbot_discovery``) and never on this server. With no Sentinel able to take it the
     scan ends as waiting for a scanner and the target stays due."""
@@ -336,6 +373,7 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
     shown = set()  # the scanner reports the same name from several modules; show each thing once
     status, error, partial = SUCCESS, '', ''
     waited = False  # it only waited for a free Sentinel slot: shown as waiting, never as a failure
+    refused = False  # the private-address guard refused the target: shown as skipped, never as a failure
     from cveFeed import activity
     from cveFeed.models import DiscoveryEvent
     from reNgine.resources import ScanAborted, ScannerUnavailable
@@ -351,11 +389,11 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
         # that currently resolves to a loopback, link-local, metadata or (unless allowed) internal address.
         from targetApp.target_types import resolves_to_blocked, sentinel_only_target
         if sentinel_only_target(scan.domain.name, scan.domain.project_id):
-            raise ValueError(f'{scan.domain.name} is inside an internal range of this project: only a Sentinel inside that network scans it, '
-                             'never this server')
+            raise TargetRefused(f'{scan.domain.name} is inside an internal range of this project: only a Sentinel inside that network scans it, '
+                                'never this server')
         if resolves_to_blocked(scan.domain.name, project=scan.domain.project_id):
-            raise ValueError(f'{scan.domain.name} resolves to a loopback, link-local or internal address; '
-                             'discovery refused (CVENGINE_ALLOW_PRIVATE_TARGETS=1 allows internal ranges)')
+            raise TargetRefused(f'{scan.domain.name} resolves to a loopback, link-local or internal address; '
+                                'discovery refused (CVENGINE_ALLOW_PRIVATE_TARGETS=1 allows internal ranges)')
         remote = _discover_on_sentinel(scan, mode, ctx, extra_args, stored, shown)
         stored, finished_mode, web_events = remote['stored'], remote['mode'], remote['web_events']
         problems[:], hard_failures[:], partial = remote['problems'], remote['hard_failures'], remote['incomplete'][:290]
@@ -365,6 +403,9 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
     except ScanAborted:  # stopped by a person: the stop already marked the scan and its activities aborted
         activity.settle(running, 'failed', message=f'Discovery of {scan.domain.name} was stopped')
         return {'scan_id': scan.id, 'status': ABORTED, 'error': 'stopped'}
+    except TargetRefused as exc:  # the guard working as designed: nothing ran, and it is said once per host, as skipped (not failed)
+        status, error, refused = FAILED, f'not scanned: refused. {exc}'[:290], True
+        logger.info('discovery of scan %s refused: %s', scan_id, exc)
     except ScannerUnavailable as exc:  # no Sentinel could take it and it may not run here: nothing ran, the target stays due
         status, error = FAILED, (f'not scanned: {exc.refusal}' if hasattr(exc, 'refusal') else f'waiting for a scanner: {exc}')[:290]  # a do-not-scan refusal is not a wait
         waited = bool(getattr(exc, 'waiting', False))
@@ -380,7 +421,13 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
         snapshot_cache.bump_on_commit()  # a scan that ended changes which hosts are current
     from startScan.models import Subdomain
     found = Subdomain.objects.filter(scan_history=scan).count()
-    if waited and status != SUCCESS:  # the scan record still reads "waiting for a scanner" (the target stays due and is queued again); the line is amber, not red
+    if refused:
+        if note_refused(scan.domain_id):
+            activity.settle(running, 'skipped', message=f'Discovery of {scan.domain.name} was refused: it resolves to an address this server never scans '
+                            '(loopback, link-local or internal); it is not tried again while it does (CVENGINE_ALLOW_PRIVATE_TARGETS=1 allows internal ranges)', scan_id=scan.id)
+        else:
+            activity.discard(running)
+    elif waited and status != SUCCESS:  # the scan record still reads "waiting for a scanner" (the target stays due and is queued again); the line is amber, not red
         activity.settle_waiting(running, f'Discovery of {scan.domain.name} is waiting for a free Sentinel; it is asked again',
                                 scan_id=scan.id, hosts=found)
     else:

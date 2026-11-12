@@ -485,6 +485,8 @@ def review_summary(triage_id):
 ACTIONS = {'feed_sentinels': timedelta(minutes=15), 'refresh_nuclei_templates': timedelta(hours=1)}
 ACTIVITY_ERROR_PROBLEM = 20     # failed activity lines of one kind in six hours
 SENTINEL_FAILED_PROBLEM = 5     # failed or expired Sentinel tasks of one Sentinel and kind in six hours
+SENTINEL_ERROR_SHARE = 0.05     # ...and they are an alert only when they are also this share of the tasks that finished (or no Sentinel is live, or none completed)
+RESTART_GRACE = timedelta(minutes=15)  # a task that stopped reporting this close to an update restart of a Sentinel, or of the server's workers, is the restart's doing
 
 
 def _admin():
@@ -508,6 +510,29 @@ def _check(code, state, title, detail, facts=None, actions=(), severity=None):
             'title': title, 'detail': detail, 'facts': facts or {}, 'actions': list(actions)}
 
 
+def _restart_q(since):
+    """A ``Q`` for the expired tasks that ended within ``RESTART_GRACE`` of a restart: a Sentinel's own update (what its updater reported, ``info.update.at``) or
+    the clean-up line the server writes after its workers restarted. A task a restart cut off is no sign that anything is wrong. ``None`` when there was none."""
+    from agentapi.models import Agent
+    from cveFeed.models import AgentActivity
+    moments = []
+    for info in Agent.objects.filter(kind='scanner').values_list('info', flat=True)[:200]:
+        at = ((info or {}).get('update') or {}).get('at') if isinstance(info, dict) else None
+        try:
+            moment = datetime.fromisoformat(str(at)) if at else None
+        except ValueError:
+            moment = None
+        if moment is not None:
+            moments.append(moment if moment.tzinfo else moment.replace(tzinfo=dt_timezone.utc))
+    moments += list(AgentActivity.objects.filter(created_at__gte=since - RESTART_GRACE, message__contains='a restarted worker left')
+                    .values_list('created_at', flat=True)[:50])
+    q = None
+    for moment in {m for m in moments if m >= since - RESTART_GRACE}:
+        part = Q(finished_at__gte=moment - RESTART_GRACE, finished_at__lte=moment + RESTART_GRACE)
+        q = part if q is None else q | part
+    return None if q is None else Q(status='expired') & q
+
+
 def ops_checks(now=None, templates_release=None):
     """The operations checks (docs/AI-REVIEWER.md), from ``system_status`` and the database. ``templates_release`` is the newest
     nuclei-templates release the reviewer container read from GitHub, ``{tag, published_at}``, when it has one."""
@@ -515,7 +540,7 @@ def ops_checks(now=None, templates_release=None):
     from agentapi.services import Ctx
     from agentapi.system_status import system_status
     from cveFeed.models import AgentActivity, AIUsage
-    from django.db.models import Count
+    from django.db.models import Count, Q
     now = now or timezone.now()
     admin = _admin()
     status = system_status(Ctx(user=admin)) if admin else {'problems': [], 'system': None}
@@ -581,32 +606,66 @@ def ops_checks(now=None, templates_release=None):
     else:
         checks.append(_check('nuclei_templates', 'ok', 'nuclei templates are current', '', {'installed': installed}))
 
-    # Sentinel task failures, by Sentinel and kind
+    # Sentinel task failures, by Sentinel and kind, judged against how much work was done and whether the Sentinels are live
     six = now - timedelta(hours=6)
     from agentapi import sentinel_broker
+    from cveFeed import fleet as fleet_lib
+    fleet = fleet_lib.fleet_facts(now)
     not_waiting = ~sentinel_broker.waiting_q()  # a task that expired waiting for a free slot is back-pressure, counted below, not a failure
-    groups = list(SentinelTask.objects.filter(not_waiting, status__in=('failed', 'expired'), finished_at__gte=six)
-                  .values('agent__name', 'kind').annotate(n=Count('id')).order_by('-n')[:10])
+    ended = SentinelTask.objects.filter(not_waiting, status__in=('failed', 'expired'), finished_at__gte=six)
+    restart_q = _restart_q(six)
+    restart_cut = ended.filter(restart_q).count() if restart_q is not None else 0
+    counted = ended.exclude(restart_q) if restart_q is not None else ended
+    completed = SentinelTask.objects.filter(status='done', finished_at__gte=six).count()
+    groups = list(counted.values('agent__name', 'kind').annotate(n=Count('id')).order_by('-n')[:10])
     bad = [g for g in groups if g['n'] >= SENTINEL_FAILED_PROBLEM]
-    if bad:
+    failed_total = counted.count()
+    share = failed_total / (failed_total + completed) if failed_total + completed else 1.0
+    # an alert needs volume: a handful of stopped tasks beside thousands that completed, with Sentinels live, is nothing to act on
+    if bad and (not fleet['live_sentinels'] or not completed or share >= SENTINEL_ERROR_SHARE):
         samples = {}
         for g in bad[:5]:
-            err = (SentinelTask.objects.filter(not_waiting, status__in=('failed', 'expired'), finished_at__gte=six, agent__name=g['agent__name'], kind=g['kind'])
-                   .exclude(error='').order_by('-finished_at').values_list('error', flat=True).first())
+            err = (counted.filter(agent__name=g['agent__name'], kind=g['kind']).exclude(error='').order_by('-finished_at').values_list('error', flat=True).first())
             samples[f"{g['agent__name']}/{g['kind']}"] = str(err or '')[:200]
         checks.append(_check('sentinel_errors', 'problem', 'Sentinel tasks are failing',
-                             '; '.join(f"{g['agent__name'] or 'a Sentinel'}: {g['n']} {g['kind']} task(s) failed or stopped reporting" for g in bad) + '.',
-                             {'groups': [{'sentinel': g['agent__name'], 'kind': g['kind'], 'failed': g['n']} for g in bad], 'last_errors': samples}))
+                             '; '.join(f"{g['agent__name'] or 'a Sentinel'}: {g['n']} {g['kind']} task(s) failed or stopped reporting" for g in bad)
+                             + f". In the last six hours {failed_total} of {failed_total + completed} finished tasks failed or stopped reporting ({share * 100:.1f}%), "
+                               f"{completed} completed, with {fleet_lib.sentinels_text(fleet['live_sentinels'])}"
+                             + (f'; {restart_cut} that stopped reporting around an update restart are not counted' if restart_cut else '') + '.',
+                             {'groups': [{'sentinel': g['agent__name'], 'kind': g['kind'], 'failed': g['n']} for g in bad], 'last_errors': samples,
+                              'failed': failed_total, 'completed': completed, 'live_sentinels': fleet['live_sentinels'], 'restart_cut': restart_cut,
+                              'builtin_scanner': fleet['builtin_scanner']}))
     else:
         checks.append(_check('sentinel_errors', 'ok', 'Sentinel tasks succeed', '', {}))
     # tasks that expired only because every Sentinel slot was busy: the targets stay due and are asked again, so a note, never a failure
-    held = list(SentinelTask.objects.filter(sentinel_broker.waiting_q(), finished_at__gte=six).values('kind').annotate(n=Count('id')).order_by('-n')[:10])
+    held_rows = SentinelTask.objects.filter(sentinel_broker.waiting_q(), finished_at__gte=six)
+    held = list(held_rows.values('kind').annotate(n=Count('id')).order_by('-n')[:10])
     waited = sum(r['n'] for r in held)
     if waited >= SENTINEL_FAILED_PROBLEM:
+        recent = held_rows.filter(finished_at__gte=now - timedelta(hours=3)).count()
+        earlier = waited - recent
+        queued_now = SentinelTask.objects.filter(status='queued').count()
+        growing = recent > earlier * 1.25
+        slots = fleet['slots']
+        # falling behind: no Sentinel is live to do the work, or the waits are growing and the queue already holds more than every slot is busy with
+        behind = not fleet['live_sentinels'] or (growing and queued_now >= max(slots, 1))
+        where = (f"The install has {slots} slot{'s' if slots != 1 else ''} across {fleet_lib.sentinels_text(fleet['live_sentinels'])}; "
+                 f'{completed} completed in the same six hours and {queued_now} are queued now.')
+        if not fleet['live_sentinels']:
+            advice = 'No Sentinel is live, so none of this work is being done: bring a Sentinel online on the Sentinels page.'
+        elif behind:
+            advice = (f'Work is falling behind: waits grew from {earlier} in the earlier three hours to {recent} in the latest three, and the queue holds '
+                      f'{queued_now} against {slots} slots. Add a Sentinel, or give the ones you have more slots.')
+        elif growing:
+            advice = f'Waits grew ({earlier} then {recent}) but only {queued_now} are queued against {slots} slots, so work is not falling behind.'
+        else:
+            advice = f'The backlog is not growing ({earlier} waits in the earlier three hours, {recent} in the latest three): the Sentinels are keeping up and no action is needed.'
         checks.append(_check('sentinel_waiting', 'warning', 'Sentinel tasks are waiting for a free slot',
                              f"{waited} task(s) waited for a Sentinel slot in the last six hours ({', '.join(str(r['n']) + ' ' + r['kind'] for r in held[:5])}); "
-                             'their targets stay due and are asked again. The Sentinels are busy: add one, or give the one you have more slots.',
-                             {'waited': waited, 'by_kind': {r['kind']: r['n'] for r in held}}, severity='info'))
+                             f'their targets stay due and are asked again. {where} {advice}',
+                             {'waited': waited, 'by_kind': {r['kind']: r['n'] for r in held}, 'slots': slots, 'completed': completed, 'queued_now': queued_now,
+                              'waited_earlier': earlier, 'waited_recent': recent, 'growing': growing, 'falling_behind': behind,
+                              'live_sentinels': fleet['live_sentinels']}, severity='info'))
 
     # failed activity lines, by kind
     failed_kinds = list(AgentActivity.objects.filter(status='failed', created_at__gte=six).values('kind').annotate(n=Count('id')).order_by('-n')[:10])
@@ -661,7 +720,8 @@ def ops_checks(now=None, templates_release=None):
 
 
 def _digest(check):
-    keep = {k: v for k, v in (check.get('facts') or {}).items() if k not in ('last_errors', 'last_messages', 'hours_since_refresh', 'done_2h')}
+    keep = {k: v for k, v in (check.get('facts') or {}).items() if k not in ('last_errors', 'last_messages', 'hours_since_refresh', 'done_2h', 'completed', 'queued_now', 'live_sentinels', 'slots',
+                                                                       'restart_cut', 'waited_earlier', 'waited_recent', 'growing')}
     return hashlib.sha1(json.dumps([check['code'], check['state'], keep], sort_keys=True, default=str).encode()).hexdigest()
 
 
@@ -709,7 +769,8 @@ def _watchdog_events(limit=10):
 
 def snapshot(now=None, templates_release=None):
     checks = ops_checks(now, templates_release)
-    return {'at': (now or timezone.now()).isoformat(), 'checks': checks, 'watchdog': _watchdog_events(),
+    from cveFeed import fleet
+    return {'at': (now or timezone.now()).isoformat(), 'checks': checks, 'watchdog': _watchdog_events(), 'fleet': fleet.fleet_facts(now),
             'actions': {name: f'at most once every {int(gap.total_seconds() // 60)} minutes' for name, gap in ACTIONS.items()}}
 
 
@@ -771,6 +832,8 @@ def apply_ops_report(body, now=None):
     release = body.get('templates_release') if isinstance(body.get('templates_release'), dict) else None
     checks = ops_checks(now, release)
     sync_alerts(checks, now)
+    from cveFeed import fleet
+    facts = fleet.fleet_facts(now)
     by_code = {c['code']: c for c in checks}
     model = str(body.get('model') or '')[:100]
     updated = 0
@@ -784,6 +847,8 @@ def apply_ops_report(body, now=None):
         if alert is None:
             continue
         alert.ai_detail = usable_note(item.get('diagnosis'), min_words=DIAGNOSIS_MIN_WORDS)[:NOTE_MAX]  # nothing, not filler, when the model gave no real diagnosis
+        if alert.ai_detail and fleet.contradicts_fleet(alert.ai_detail, facts):
+            alert.ai_detail = ''  # it says no Sentinel is online while one is, or to start a built-in Sentinel this install does not have: the facts win
         alert.ai_model = model if alert.ai_detail else ''
         if item.get('severity') in ('info', 'warning', 'critical') and check['state'] != 'problem':
             alert.severity = item['severity'] if item['severity'] != 'critical' else 'warning'  # only a problem the server sees is critical
@@ -810,12 +875,16 @@ def apply_ops_report(body, now=None):
 def open_alerts(user=None):
     """The open alerts an App Admin sees: not resolved, and not dismissed unless the problem changed since."""
     from cveFeed.models import AdminAlert
-    rows = AdminAlert.objects.filter(resolved_at__isnull=True).order_by('-last_seen')[:20]
+    rows = list(AdminAlert.objects.filter(resolved_at__isnull=True).order_by('-last_seen')[:20])
+    from cveFeed import fleet
+    facts = fleet.fleet_facts() if any(a.ai_detail for a in rows) else {}
     out = []
     for a in rows:
         if a.dismissed_at and a.dismissed_digest == a.digest:
             continue
         ai_detail = usable_note(a.ai_detail, min_words=DIAGNOSIS_MIN_WORDS)  # a row stored before filler was refused is not shown either
+        if ai_detail and fleet.contradicts_fleet(ai_detail, facts):
+            ai_detail = ''  # nor is advice stored before this guard that the facts now contradict
         out.append({'id': a.pk, 'code': a.code, 'severity': a.severity, 'title': a.title, 'detail': a.detail, 'ai_detail': ai_detail,
                     'ai_model': a.ai_model if ai_detail else '', 'first_seen': a.first_seen.isoformat(), 'last_seen': a.last_seen.isoformat()})
     return out

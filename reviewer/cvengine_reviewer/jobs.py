@@ -85,7 +85,10 @@ def ops_message(snapshot):
         checks.append({'code': check.get('code'), 'state': check.get('state'), 'title': check.get('title'),
                        'actions_offered': check.get('actions') or [], 'description': check.get('detail'), 'facts': check.get('facts')})
     fenced, _ = guard.fence('CHECKS', checks)
-    return f'{fenced}\n\nDiagnose every check that is not ok and choose actions, then answer with the JSON object.'
+    fleet = snapshot.get('fleet') if isinstance(snapshot.get('fleet'), dict) else {}
+    counts = {key: fleet[key] for key in ('live_sentinels', 'live_remote', 'builtin_scanner', 'builtin_live', 'slots')
+              if isinstance(fleet.get(key), (int, bool))}  # the server's own numbers, whitelisted: nothing else is passed through unfenced
+    return f'The server\'s own count of its Sentinels: {json.dumps(counts, sort_keys=True)}\n\n{fenced}\n\nDiagnose every check that is not ok and choose actions, then answer with the JSON object.'
 
 
 def run_ops(server, provider, release=None):

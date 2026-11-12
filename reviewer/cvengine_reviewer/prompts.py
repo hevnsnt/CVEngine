@@ -70,6 +70,12 @@ For every check that is not ok, write a diagnosis for the server's administrator
 do, in at most 600 characters of plain text. Name settings, pages and commands the administrator can use (for example Settings, the \
 Sentinels page, docker compose logs celery). No links, no markup.
 
+The message also holds the server's own count of its Sentinels (live_sentinels, live_remote, builtin_scanner, slots). It is a fact, not a guess: \
+never say that no Sentinel is online when live_sentinels is above 0, and never tell the administrator to start, enable or update a built-in \
+Sentinel or scanner when builtin_scanner is false (the install uses only its own remote Sentinels). Judge failures against the numbers a check \
+gives (failed, completed, live Sentinels): a few stopped tasks beside thousands that completed is no reason to act. Only advise adding \
+Sentinels or slots when a check says work is falling behind.
+
 Then choose actions, only from the actions a check offers: feed_sentinels gives idle Sentinels due hosts now, refresh_nuclei_templates \
 fetches the newest nuclei templates. Choose an action only when its check is not ok and the action addresses it. The server runs an \
 action only when its own check still offers it.

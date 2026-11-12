@@ -370,11 +370,21 @@ def problem(now=None):
         try:
             sentinel_dispatch.nuclei_validate_ready(None)
         except ScannerUnavailable:
-            return {'code': 'no_sentinel', 'title': 'AI-written checks cannot be tested yet',
-                    'detail': f'{old} AI-written check(s) are waiting because no Sentinel that runs template checks is online. They are tested by themselves '
-                              'as soon as one is, and closed as expired if none is within '
-                              f'{expiry_days()} days. Fix: start the built-in Sentinel or bring it up to date on the Sentinels page.',
-                    'facts': {'pending': old}}
+            from cveFeed import fleet as fleet_lib
+            facts = {'pending': old, **{k: v for k, v in fleet_lib.fleet_facts(now).items() if k in ('live_sentinels', 'builtin_scanner', 'builtin_live')}}
+            lead = f'{old} AI-written check(s) are waiting because no Sentinel that runs template checks is online. '
+            tail = f'They are tested by themselves as soon as a Sentinel that runs template checks is available, and closed as expired if none is within {expiry_days()} days.'
+            if facts['builtin_scanner'] and not facts['builtin_live']:
+                fix = ' Fix: start the built-in Sentinel or bring it up to date on the Sentinels page.'
+            elif facts['builtin_scanner']:
+                fix = ' Fix: bring the built-in Sentinel up to date on the Sentinels page.'
+            elif facts['live_sentinels']:  # remote Sentinels only: there is no built-in one to start, and nothing to do on this side
+                lead = (f"{old} AI-written check(s) are waiting: this install's {fleet_lib.sentinels_text(facts['live_sentinels'])} are all remote and none of "
+                        'them runs template checks yet. ')
+                fix = ' Nothing needs starting here.'
+            else:
+                fix = ' Fix: bring a Sentinel online (see the Sentinels page).'
+            return {'code': 'no_sentinel', 'title': 'AI-written checks cannot be tested yet', 'detail': lead + tail + fix, 'facts': facts}
         if not ai_jobs.ai_on():
             return {'code': 'ai_off', 'title': 'AI-written checks cannot be tested yet',
                     'detail': f'{old} AI-written check(s) are waiting because the AI provider is not turned on, and the second-pass review needs it. '

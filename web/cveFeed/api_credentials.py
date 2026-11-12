@@ -86,8 +86,11 @@ def bbot_config_args(project):
     resolved = resolve_for_project(project)
     if not any(resolved.get('chaos', {}).values()) and _global_chaos_key():
         resolved['chaos'] = {'api_key': _global_chaos_key()}
+    from cveFeed import key_limits
     for service, fields in resolved.items():
         _, _, mapping = SERVICES.get(service, (None, None, []))
+        if mapping and project is not None and key_limits.paused(project.pk, service):
+            continue  # the provider said this key is over its limit a short while ago: the module runs without it until the pause ends
         for path, field in mapping:
             names = field if isinstance(field, tuple) else (field,)
             parts = [fields.get(n) for n in names]
