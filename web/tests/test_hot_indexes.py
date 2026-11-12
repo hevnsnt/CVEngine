@@ -7,7 +7,7 @@
 * ``detection_author.progress`` (get_system_status, the Settings AI page): ``GROUP BY source`` over the CVE detections that have checks, filtering on
   the ``strategy`` JSON of all of the 38,000 rows (up to 6.4 s). The partial index holds the rows that have checks, with their source.
 
-The tables here are tiny, so each plan is read with sequential scans switched off: with no index the only plan left is the table scan.
+The tables here are tiny, so each plan is read with sequential and bitmap scans switched off: with no index the only plan left is the table scan.
 """
 from datetime import timedelta
 
@@ -25,6 +25,7 @@ from dashboard.models import Org, Project
 def plan(queryset):
     with connection.cursor() as cursor:
         cursor.execute('SET LOCAL enable_seqscan = off')
+        cursor.execute('SET LOCAL enable_bitmapscan = off')  # a tiny table with stale statistics may be read by a bitmap scan of another index; the question is which index serves the query
         return queryset.explain()
 
 
