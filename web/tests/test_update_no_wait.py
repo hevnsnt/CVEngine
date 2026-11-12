@@ -259,6 +259,23 @@ class AdoptionTests(SentinelBase):
         self.scan.refresh_from_db()
         self.assertEqual(ScanHistory.objects.get(pk=self.scan.pk).scan_status, 0)  # the scan record stays interrupted
 
+    def test_a_late_naabu_result_leaves_the_addresses_the_sentinel_did_not_finish_due(self):
+        task = self.held(kind='naabu', ips=('192.0.2.50', '192.0.2.51'))
+        self.interrupted()
+        status, out = self.report(task, {'outcome': 'done', 'ports': {'192.0.2.50': [22]}, 'incomplete': True, 'unfinished': ['192.0.2.51']})
+        self.assertEqual((status, out['adopted']), (200, True), out)
+        self.assertEqual(list(ServiceRun.objects.filter(service='naabu', asset='192.0.2.50').values_list('status', flat=True)), ['done'])
+        self.assertEqual(list(ServiceRun.objects.filter(service='naabu', asset='192.0.2.51').values_list('status', flat=True)), ['failed'])  # a failed scan is not a clean host
+
+    def test_a_late_nmap_result_does_not_file_or_mark_a_host_nmap_timed_out_on(self):
+        task = self.held(kind='nmap', ips=('192.0.2.50', '192.0.2.51'))
+        self.interrupted()
+        body = {'outcome': 'done', 'hosts': [NMAP_RESULT['hosts'][0], {'ip': '192.0.2.51', 'os_guess': '', 'ports': [], 'timed_out': True}]}
+        status, out = self.report(task, body)
+        self.assertEqual((status, out['adopted']), (200, True), out)
+        self.assertTrue(ServiceRun.objects.filter(service='nmap-fast', asset='192.0.2.50', status='done').exists())
+        self.assertFalse(ServiceRun.objects.filter(service='nmap-fast', asset='192.0.2.51').exists())  # left due
+
     def test_the_second_delivery_is_a_duplicate_and_files_nothing_again(self):
         task = self.held()
         self.interrupted()
