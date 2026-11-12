@@ -57,6 +57,15 @@ def kind_since(kind):
     return load()['kind_since'][kind]
 
 
+def external_since(kind):
+    """The contract version from which a Sentinel that is not the built-in scanner may be offered ``kind``, one of the kinds the built-in scanner keeps
+    while it is in use (``external_since``, contract 4: ``nuclei_validate`` 4, ``path_probe`` 3; ``agentapi.ai_checks``), or ``None``: never offered
+    outside. Read fail closed: an installed library whose contract has no such table (older than 4) offers neither kind outside, as before.
+    (The library's own ``contract.external_since`` is not called, so an older installed library cannot fail on it.)"""
+    since = (load().get('external_since') or {}).get(kind)
+    return since if isinstance(since, int) and not isinstance(since, bool) else None
+
+
 def can_run(reported, kind):
     """Whether a Sentinel that declared contract version ``reported`` (``None``: it never said, which is every client from before the field,
     and is taken to speak version 1) can be handed a ``kind`` task. A kind this file does not know is never offered."""

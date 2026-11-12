@@ -87,8 +87,7 @@ def _nmap(task, result, agent):
     chunk = {str(i) for i in (task.ips or (task.target or {}).get('addresses') or [])}
     inventory = [{'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': None, 'ports': host.get('ports', [])}
                  for host in result.get('hosts', []) if host.get('ip') in chunk]
-    ran_here = sentinel_dispatch.Result(result, agent_id=getattr(agent, 'pk', None)).ran_here
-    reliable = None if ran_here else result.get('os_reliable') is not False
+    reliable = sentinel_dispatch.os_reliable(sentinel_dispatch.Result(result, agent_id=getattr(agent, 'pk', None)))
     done = persist_inventory(inventory, org_id=org_id_of_project(task.project_id), os_reliable=reliable) if inventory else {}
     if inventory:
         ledger.record(port_stage.FAST_SERVICE, [host['ip'] for host in inventory], task.project_id, task.scan)
