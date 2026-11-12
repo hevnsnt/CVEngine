@@ -1,6 +1,6 @@
 """Scoped, deduplicated assessments of individual inventoried hosts.
 
-Every host has its own ``HostAssessment`` row (status, history, the Live page, the API), but the feed does not run one pipeline per host: hosts of one
+Every host has its own ``HostAssessment`` row (status, history, the Overview, the API), but the feed does not run one pipeline per host: hosts of one
 target that are due together are carried through one pipeline run (``enqueue_batch`` / ``execute_batch``), so each Sentinel stage is handed many
 targets at once instead of one tiny task per host that the pipeline then waits for. ``CVENGINE_ASSESS_BATCH`` sets how many (default 8, 1 to 64;
 1 is one pipeline per host, as before)."""

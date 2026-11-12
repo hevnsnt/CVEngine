@@ -4213,7 +4213,7 @@ const pages = {
     const q = searchBox("Filter by host", () => reload());
     q.value = wanted.get("host") || "";
     // findings on hosts inside a network a project declared internal (scanned only by a Sentinel there) can be told apart and filtered
-    const scope = select("Scope", [["", "All findings"], ["0", "External only"], ["1", "Internal only"]], () => reload());
+    const scope = select("Scope", [["", "All scopes"], ["0", "External only"], ["1", "Internal only"]], () => reload());
     scope.value = ["0", "1"].includes(wanted.get("internal")) ? wanted.get("internal") : "";
     // KEV whatever the heat: a KEV match whose version is not proven is smoke, so heat alone does not find every exploited CVE
     const kev = select("Known exploited", [["", "Any CVE"], ["1", "Known exploited (KEV) only"]], () => reload());
@@ -4662,7 +4662,7 @@ pages.changes = function changes(mount) {
       list.reload();
     },
   );
-  // /changes/?since=<ISO time> arrives from "changes since you last looked" on the Live page: offer it as one more choice
+  // /changes/?since=<ISO time> arrives from "changes since you last looked" on the Overview: offer it as one more choice
   const sinceParam = new URLSearchParams(location.search).get("since") || "";
   if (Number.isFinite(Date.parse(sinceParam)) && !/^\d+[hdw]$/.test(sinceParam)) {
     since.prepend(Object.assign(el("option", "", "Since you last looked"), { value: sinceParam }));
