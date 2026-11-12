@@ -287,6 +287,13 @@ def record_reached(service, chunk, project, scan, stream):
     ledger.record(service, [t for t in chunk if t not in unreached], project, scan)
     if unreached:
         ledger.record(service, sorted(unreached), project, scan, 'failed')
+    refused = sorted(t for t in unreached if t in getattr(stream, 'refused', ()))
+    if refused:  # a name that now points at an address no scanner may touch: say so, or the host reads as a scan that failed for no reason
+        from cveFeed import activity
+        shown = ', '.join(refused[:5]) + (f' and {len(refused) - 5} more' if len(refused) > 5 else '')
+        activity.log('run_check', f'Not scanned: resolves to a refused address ({shown}). The name now points at an address that is never scanned '
+                     '(this computer, a private network or a cloud metadata address); fix its DNS record or exclude the host.',
+                     project=getattr(project, 'pk', project), scan_id=getattr(scan, 'pk', scan))
     return unreached
 
 
