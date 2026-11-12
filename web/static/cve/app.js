@@ -1167,7 +1167,7 @@ const technologyTable = (h) => {
 const WP_STATE_LABELS = {
   scanned: "Scanned", detected: "WordPress detected, not scanned yet", candidate: "Signs of WordPress, not confirmed",
   blocked: "Blocked by the edge", failed: "Scan failed", waiting: "Waiting for the next scan", queued: "Queued, the scan runs on it in the background", unavailable: "Scan not available",
-  not_wordpress: "Not WordPress",
+  not_wordpress: "Not WordPress", unreachable: "Site did not answer", redirected: "Redirects to another site", not_scannable: "Not scannable by WPScan",
 };
 // The thorough pass asks the site for every plugin and theme the scanner knows (hours per site) after the quick pass, in the background, on a Sentinel.
 const WP_THOROUGH_LABELS = {

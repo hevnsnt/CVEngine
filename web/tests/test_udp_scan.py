@@ -64,13 +64,18 @@ def udp_xml(address, states, extra=''):
 	        f'<host><status state="up"/><address addr="{address}" addrtype="ipv4"/><ports>{body}</ports></host></nmaprun>')
 
 
-def run_udp(runner=None, **kwargs):
+def run_udp(runner=None, agent=None, **kwargs):
     """``udp_scan.run`` with ``runner(targets, flags, timeout)`` standing in for the Sentinel: its raw XML is read exactly as ``try_nmap_udp`` reads
     a Sentinel's report (the one parser, the host named by the address); a report that names no host leaves the address due."""
 
     def try_nmap_udp(project, address, scan=None, timeout=None):
         text = runner([address], [], '20m')
-        host = udp_scan.host_from_report(text or '', address)
+        try:
+            host = udp_scan.host_from_report(text or '', address)
+        except udp_scan.NoIpv6Route as exc:
+            exc.agent_id = agent  # what ``try_nmap_udp`` adds: the Sentinel that said it
+            raise
+        host['sentinel'] = agent
         return host
     with mock.patch('agentapi.sentinel_dispatch.try_nmap_udp', try_nmap_udp):
         return udp_scan.run(**kwargs)
@@ -94,11 +99,11 @@ class UdpBase(TestCase):
 			p.start()
 		self.addCleanup(mock.patch.stopall)
 		client = getattr(resources.get_store(), 'r', None)
-		for key in ('cvengine:sweep:udp-unavailable-note', 'cvengine:sweep:udp-kick', udp_scan.STATUS_KEY, udp_scan.CLAIM_KEY, udp_scan.NO_IPV6_KEY):
+		for key in ('cvengine:sweep:udp-unavailable-note', 'cvengine:sweep:udp-kick', udp_scan.STATUS_KEY, udp_scan.CLAIM_KEY):
 			if client is not None:  # a key a previous test run left in Redis would hide what this one checks
 				client.delete(key)
 		udp_scan._last_status.clear()
-		udp_scan._ipv6_local.clear()
+		udp_scan.forget_ipv6_state()
 		for name in ('CVENGINE_UDPSCAN', 'CVENGINE_UDPSCAN_PORTS', 'CVENGINE_ALLOW_PRIVATE_TARGETS', 'CVENGINE_UDPSCAN_MAX_RATE'):
 			os.environ.pop(name, None)
 
