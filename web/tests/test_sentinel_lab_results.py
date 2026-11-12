@@ -36,7 +36,7 @@ def load(name):
 
 
 def all_fixtures():
-    return sorted(os.path.basename(p)[:-5] for p in glob.glob(os.path.join(FIXTURES, '*.json')))
+    return sorted(os.path.basename(p)[:-5] for p in glob.glob(os.path.join(FIXTURES, '*.json')) if not p.endswith('_partial.json'))
 
 
 def leaf_paths(value, path=''):
@@ -198,12 +198,23 @@ class LabResults(TestCase):
         self.assertEqual((out['findings'], out['unreachable']), ([], []))
         self.assertTrue(fixture['payload']['no_templates'])  # the Sentinel says why; the server keeps what the stage acts on
 
-    def test_the_bbot_style_incomplete_text_is_tolerated_by_the_predicates_that_read_incomplete(self):
-        from agentapi import sentinel_adopt
+    def test_a_bbot_batch_keeps_what_was_found_and_the_closing_result_keeps_the_incomplete_text(self):
+        from agentapi import sentinel_stream
+        fixture = load('bbot_discovery_partial')
+        task = self.task_for(fixture)
+        task.target = fixture['target']
+        batch = sentinel_stream.clean_partial(task, fixture['payload'])
+        self.assertEqual(batch['ips'], fixture['payload']['ips'])
+        self.assertEqual(len(batch['events']), len(fixture['payload']['events']))
+        final = load('bbot_discovery')['payload']
+        self.assertEqual(sentinel_stream.clean_bbot_result(final)['incomplete'], '')
         text = 'bbot reached its time limit of 21600 seconds'
-        self.assertTrue(sentinel_adopt._incomplete({'outcome': 'done', 'incomplete': text}) if hasattr(sentinel_adopt, '_incomplete') else True)
-        for value, expected in ((text, True), ('', False), (None, False), (True, True), (False, False)):
-            self.assertEqual(bool(value), expected)
-        cleaned = sb.clean_result('naabu', {'outcome': 'done', 'ports': {}, 'incomplete': text, 'unfinished': ['192.0.2.10']})
-        self.assertEqual(cleaned['ports'], {})  # a text where a boolean belongs is not read as "incomplete": nothing is invented from it
-        self.assertNotIn('incomplete', cleaned)
+        cut = sentinel_stream.clean_bbot_result({**final, 'incomplete': text})
+        self.assertEqual(cut['incomplete'], text)  # the bbot kind writes text where naabu writes a boolean, and the server keeps it as text
+        self.assertTrue(cut['incomplete'] and not sentinel_stream.clean_bbot_result(final)['incomplete'])  # what ``not result.get('incomplete')`` in the adopter and the ledger read
+
+    def test_a_naabu_run_that_ran_out_of_time_keeps_its_boolean_and_the_addresses_left_due(self):
+        cleaned = sb.clean_result('naabu', {'outcome': 'done', 'ports': {'192.0.2.10': [80]}, 'incomplete': True, 'unfinished': ['192.0.2.11', '192.0.2.12']})
+        self.assertEqual((cleaned['incomplete'], cleaned['unfinished']), (True, ['192.0.2.11', '192.0.2.12']))
+        text = sb.clean_result('naabu', {'outcome': 'done', 'ports': {}, 'incomplete': 'ran out', 'unfinished': ['192.0.2.11']})
+        self.assertNotIn('incomplete', text)  # text where a boolean belongs is not read as incomplete

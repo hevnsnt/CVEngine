@@ -1,0 +1,63 @@
+{
+ "kind": "bbot_discovery",
+ "name": "bbot_discovery_partial",
+ "payload": {
+  "edges": [],
+  "events": [
+   {
+    "host": "192.0.2.10",
+    "label": "http://192.0.2.10/",
+    "module": "http",
+    "parent_host": "192.0.2.10",
+    "type": "URL"
+   },
+   {
+    "host": "192.0.2.10",
+    "label": "192.0.2.10",
+    "module": "host",
+    "parent_host": "192.0.2.10",
+    "type": "IP_ADDRESS"
+   }
+  ],
+  "findings": [],
+  "http": [],
+  "ips": [
+   "192.0.2.10"
+  ],
+  "ports": [],
+  "resolutions": [],
+  "scan_name": "surreal_william",
+  "screenshots": [],
+  "seq": 1,
+  "subdomains": [],
+  "technologies": [],
+  "urls": []
+ },
+ "sentinel_seconds": 2.850167751312256,
+ "target": {
+  "api_keys": false,
+  "domain": "web.lab.test",
+  "exclude_modules": [],
+  "force": true,
+  "mode": "passive",
+  "presets": [
+   "subdomain-enum"
+  ],
+  "require_flags": [
+   "safe"
+  ],
+  "scope": {
+   "deny_ranges": [],
+   "exact_host": false,
+   "exclusions": [],
+   "in_scope_domains": [
+    "web.lab.test",
+    "192.0.2.10"
+   ]
+  },
+  "strict_scope": false,
+  "timeout_seconds": 600,
+  "trufflehog": false
+ },
+ "tool_rows": null
+}
