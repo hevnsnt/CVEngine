@@ -48,6 +48,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | project settings | `GET/PUT projects/{slug}/settings` | `get_project_settings`, `set_project_settings` |
 | stats history | `GET projects/{slug}/stats/history?days=90` | `stats_history` |
 | activity per day | `GET projects/{slug}/activity-days?days=90&tz=&series=findings,changes,scans` | `activity_days` |
+| situations (what needs you, one host at a time, ranked, with a plain narrative; `?q=`, `tier=all|exposure|likely|proven`, `page`, `page_size`; [the rank rule and the fields](SITUATIONS.md)) | `GET projects/{slug}/situations`, `GET projects/{slug}/situations/{host}` | `list_situations`, `get_situation` |
 | all findings | `GET projects/{slug}/findings?type=&heat=&severity=&status=&host=&ai=&group=` (`group=cve`: [one row per script on sibling hosts](#grouped-findings)) | `list_findings` |
 | scanner findings | `GET projects/{slug}/vulnerabilities` | `list_vulnerabilities` |
 | finding detail | `GET projects/{slug}/findings/{match,vulnerability,route,hygiene}/{id}` | `get_finding` |
@@ -283,7 +284,7 @@ Each target carries `scope_mode` and `host_scoped`. See [Shared provider domains
 
 ## All projects
 
-The reserved slug `_all` means every project you can see. The list endpoints and tools accept it in place of a project slug and return one combined, read-only list: `targets`, `scans`, `hosts`, `search`, `findings`, `vulnerabilities`, `matches`, `changes`, `activity`, `hygiene`, `certificates`, and `routes`. Every row carries `project` (use this slug for anything you do next) and `project_name`. Only your own projects contribute rows, and `count` is the total. Everything else needs a real project: a write or a per-item call with `_all` is a `400`. Add `?org=<organization slug>` to narrow `_all` to that organization's projects (an organization you have no projects in is ignored, so it never widens or empties the view). In the web app the switcher sets it: choose an organization, then **All projects**; the browser session remembers it for the pages and polls that do not name it, and **All organizations** clears it.
+The reserved slug `_all` means every project you can see. The list endpoints and tools accept it in place of a project slug and return one combined, read-only list: `targets`, `scans`, `hosts`, `search`, `findings`, `situations`, `vulnerabilities`, `matches`, `changes`, `activity`, `hygiene`, `certificates`, and `routes`. Every row carries `project` (use this slug for anything you do next) and `project_name`. Only your own projects contribute rows, and `count` is the total. Everything else needs a real project: a write or a per-item call with `_all` is a `400`. Add `?org=<organization slug>` to narrow `_all` to that organization's projects (an organization you have no projects in is ignored, so it never widens or empties the view). In the web app the switcher sets it: choose an organization, then **All projects**; the browser session remembers it for the pages and polls that do not name it, and **All organizations** clears it.
 
 ## Host management
 
