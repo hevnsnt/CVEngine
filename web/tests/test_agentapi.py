@@ -16,6 +16,9 @@ from tests import ai_queue
 
 
 def call(token, method, path, body=None):
+	if path.endswith('/sentinels/bootstrap'):  # the call is counted per client address (SN-13), and every test is 127.0.0.1: a test that is not about the limit starts with none
+		from django.core.cache import cache
+		cache.delete('agentapi:bootstrap:addr:127.0.0.1')
 	c = Client()
 	headers = {'HTTP_AUTHORIZATION': f'Bearer {token}'} if token else {}
 	kwargs = dict(content_type='application/json', **headers)
