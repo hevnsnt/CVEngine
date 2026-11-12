@@ -3,6 +3,7 @@ the injection guard, the operations checks and alerts, and the reviewer containe
 import os
 import sys
 import tempfile
+from datetime import timedelta
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -162,6 +163,121 @@ class ReviewTests(Fixture):
         again = [p for p in reviewer.next_packets(25) if p['ref'] == packet['ref']]
         self.assertEqual(len(again), 1)
         self.assertNotEqual(again[0]['review_key'], packet['review_key'])
+
+    def test_the_review_reaches_older_and_other_kinds_of_findings_once_the_newest_window_is_reviewed(self):
+        from datetime import timedelta
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        now = timezone.now()
+        extra = []
+        for i in range(7):
+            cve = CVEEntry.objects.create(cve_id=f'CVE-2099-88{i:02d}', cvss=9.8, published_at=now, affected=[])
+            m = CVEMatch.objects.create(cve_entry=cve, subdomain=self.sub, source='tech', matched_product='lib-b', matched_version='1.0',
+                                        version_in_range=False, confidence=0.8, ai_verdict='uncertain', scan_history=self.scan,
+                                        evidence={'source': 'tech'})
+            triage.track([m])
+            extra.append(m)
+        Triage.objects.filter(match=self.match).update(last_seen=now - timedelta(days=3))  # the oldest one, never reviewed
+        for m in extra:
+            Triage.objects.filter(match=m).update(last_seen=now)
+        hygiene = HygieneFinding.objects.create(domain=self.domain, host='www.example.com', check_name='spf_missing', severity=2, title='No SPF')
+        triage.track([hygiene])
+        for m in extra:  # more reviewed matches than one page holds
+            t = Triage.objects.get(match=m)
+            FindingReview.objects.create(triage=t, project=self.proj, review_key=reviewer.review_key(t, self.state.fingerprint), verdict='true_open',
+                                         confidence='high', outcome='recorded')
+        with mock.patch.object(reviewer, 'WINDOW', 3), CaptureQueriesContext(connection) as queries:
+            picked = {pk for pk, _ in reviewer.due(25)}
+        self.assertEqual(picked, {Triage.objects.get(match=self.match).pk, Triage.objects.get(hygiene=hygiene).pk})
+        self.assertLessEqual(len(queries), 12)  # three pages of three rows, three queries each, and no query per finding
+
+    def _rescan_copy(self):
+        from startScan.models import ScanHistory as Scan
+        scan2 = Scan.objects.create(domain=self.domain, scan_type=self.scan.scan_type, scan_status=2, start_scan_date=timezone.now())
+        sub2 = Subdomain.objects.create(name='www.example.com', target_domain=self.domain, scan_history=scan2)
+        m2 = CVEMatch.objects.create(cve_entry=self.cve, subdomain=sub2, source='tech', matched_product='lib-a', matched_version='1.2',
+                                     version_in_range=False, confidence=0.8, ai_verdict='uncertain', scan_history=scan2, evidence={'source': 'tech'})
+        triage.track([m2])
+        cache.clear()
+        return m2
+
+    def test_a_rescans_new_copy_of_a_reviewed_finding_is_not_reviewed_again(self):
+        self.verdict(self.packet(), verdict='true_open', confidence='high', reason_code='plausible_exposure')
+        m2 = self._rescan_copy()
+        old, new = Triage.objects.get(match=self.match), Triage.objects.get(match=m2)
+        self.assertEqual(reviewer.review_key(old, self.state.fingerprint), reviewer.review_key(new, self.state.fingerprint))
+        self.assertNotIn(new.pk, dict(reviewer.due(25)))
+        self.state.fingerprint = 'e' * 40  # the host changed: the copy is asked again
+        self.state.save()
+        self.assertIn(new.pk, dict(reviewer.due(25)))
+
+    def test_a_persons_work_on_an_earlier_copy_protects_the_rescans_new_copy(self):
+        from cveFeed.models import FindingComment
+        FindingComment.objects.create(project=self.proj, finding_kind='match', finding_id=self.match.pk, author=self.alice, text='real, on it')
+        m2 = self._rescan_copy()
+        self.assertTrue(reviewer.worked_by_person('cve_match', m2))
+        triage_row = Triage.objects.get(match=m2)
+        blocked, why = reviewer.close_gate('cve_match', triage_row, CVEMatch.objects.get(pk=m2.pk), [])
+        self.assertEqual((blocked, why), ('held', 'a person has worked this finding'))
+
+    def test_an_audit_event_a_manual_validation_or_an_owner_on_an_earlier_copy_counts_as_work(self):
+        from cveFeed.models import OnDemandValidation
+        m2 = self._rescan_copy()
+        self.assertFalse(reviewer.worked_by_person('cve_match', m2))
+        FindingAuditEvent.objects.create(project=self.proj, finding_kind='match', finding_id=self.match.pk, event='status', actor=self.alice,
+                                         before={'status': 'open'}, after={'status': 'open'})
+        self.assertTrue(reviewer.worked_by_person('cve_match', m2))
+        FindingAuditEvent.objects.all().delete()
+        self.assertFalse(reviewer.worked_by_person('cve_match', m2))
+        OnDemandValidation.objects.create(match=self.match, project=self.proj, source='manual')
+        self.assertTrue(reviewer.worked_by_person('cve_match', m2))
+        OnDemandValidation.objects.all().delete()
+        CVEMatch.objects.filter(pk=m2.pk).update(remediation_by=self.alice)
+        self.assertTrue(reviewer.worked_by_person('cve_match', CVEMatch.objects.get(pk=m2.pk)))
+
+    def test_the_work_of_a_person_on_another_hosts_finding_does_not_protect_this_one(self):
+        from cveFeed.models import FindingComment
+        other = CVEMatch.objects.create(cve_entry=self.cve, subdomain=Subdomain.objects.create(name='api.example.com', target_domain=self.domain, scan_history=self.scan),
+                                        source='tech', matched_product='lib-a', matched_version='1.2', version_in_range=False, confidence=0.8,
+                                        ai_verdict='uncertain', scan_history=self.scan, evidence={'source': 'tech'})
+        triage.track([other])
+        FindingComment.objects.create(project=self.proj, finding_kind='match', finding_id=other.pk, author=self.alice, text='other host')
+        self.assertFalse(reviewer.worked_by_person('cve_match', self.match))
+
+    def test_a_provider_with_no_key_or_no_address_is_not_a_provider_for_the_reviewer(self):
+        AIProviderSettings.objects.update(api_key='')
+        cfg = reviewer.config()
+        self.assertFalse(cfg['enabled'])
+        self.assertIn('key or server address', cfg['why'])
+        self.assertEqual(reviewer.next_packets(25), [])
+        AIProviderSettings.objects.update(api_key='sk-test-key')
+        self.assertTrue(reviewer.config()['enabled'])
+        AIProviderSettings.objects.update(provider='vllm', api_key='', base_url='')  # a self-hosted one needs an address
+        self.assertFalse(reviewer.config()['enabled'])
+        AIProviderSettings.objects.update(base_url='http://llm.internal:8000')
+        self.assertTrue(reviewer.config()['enabled'])
+
+    def test_one_project_does_not_take_the_whole_batch_while_another_has_work(self):
+        now = timezone.now()
+        other_proj = Project.objects.create(name='Rev2', slug='rev-proj-2', insert_date=now, org=self.org)
+        other_dom = Domain.objects.create(name='example.org', project=other_proj, insert_date=now)
+        other_sub = Subdomain.objects.create(name='www.example.org', target_domain=other_dom, scan_history=ScanHistory.objects.create(
+            domain=other_dom, scan_type=self.scan.scan_type, scan_status=2, start_scan_date=now))
+        for i in range(6):  # the first project has the newest work, and more of it
+            cve = CVEEntry.objects.create(cve_id=f'CVE-2099-77{i + 10}', cvss=9.8, published_at=now, affected=[])
+            m = CVEMatch.objects.create(cve_entry=cve, subdomain=self.sub, source='tech', matched_product='lib-b', matched_version='1.0',
+                                        version_in_range=False, confidence=0.8, ai_verdict='uncertain', scan_history=self.scan, evidence={'source': 'tech'})
+            triage.track([m])
+        m2 = CVEMatch.objects.create(cve_entry=self.cve, subdomain=other_sub, source='tech', matched_product='lib-a', matched_version='1.2',
+                                     version_in_range=False, confidence=0.8, ai_verdict='uncertain', scan_history=other_sub.scan_history, evidence={'source': 'tech'})
+        triage.track([m2])
+        Triage.objects.filter(match=m2).update(last_seen=now - timedelta(days=5))
+        picked = reviewer.due(4)
+        projects = [Triage.objects.get(pk=pk).project_id for pk, _ in picked]
+        self.assertEqual(len(picked), 4)
+        self.assertEqual(sorted(set(projects)), sorted({self.proj.pk, other_proj.pk}))
+        self.assertGreaterEqual(projects.count(other_proj.pk), 1)
+        self.assertEqual(len(reviewer.due(10)), 4)  # eight open in all: what is left is handed out
 
     def test_a_verdict_on_a_state_that_changed_is_refused(self):
         packet = self.packet()
