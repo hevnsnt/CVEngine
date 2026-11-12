@@ -209,6 +209,27 @@ function clamped(text, cls = "") {
   return box;
 }
 
+const CONFIDENCE_WORDS = { high: "High", medium: "Medium", low: "Low" };
+
+// The AI reviewer's newest verdict on this finding (cvENGINE's review, not the triage): what it thinks, how sure, why, and what the
+// server did about it. The sentences come from the server; the model's own note is set as text, never as markup.
+function reviewerBlock(review) {
+  if (!review) return null;
+  const box = el("div", "gl-reviewer");
+  box.append(el("h4", "gl-h2", "AI reviewer"));
+  box.append(el("p", "gl-reviewer-verdict", review.verdict_text || ""));
+  const facts = [
+    `Confidence: ${CONFIDENCE_WORDS[review.confidence] || "not stated"}`,
+    review.reason_code ? `Reason: ${String(review.reason_code).replace(/_/g, " ")}` : null,
+    review.model ? `Model: ${review.model}` : null,
+  ].filter(Boolean);
+  box.append(el("p", "note", facts.join(". ")));
+  box.append(el("p", "", review.outcome_text || ""));
+  if (review.note) box.append(el("p", "gl-reviewer-note", review.note));
+  if (review.scope_text) box.append(el("p", "note", review.scope_text));
+  return box;
+}
+
 function aiCard(d, aiBadge, note) {
   const card = el("section", "gl-card gl-ai");
   card.append(el("h3", "gl-h", "AI assessment"));
@@ -218,6 +239,8 @@ function aiCard(d, aiBadge, note) {
   const verdict = el("div", "gl-verdict");
   verdict.append(aiBadge);
   left.append(verdict);
+  const reviewer = reviewerBlock(d.ai_review);
+  if (reviewer) left.append(reviewer);
   if (d.ai.overridden && d.ai.model_classification) {
     const said = el("p", "gl-override");
     said.append(
