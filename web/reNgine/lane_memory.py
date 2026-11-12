@@ -20,6 +20,11 @@ WRITE_EVERY = 20  # seconds between writes from one process
 KEEP_SECONDS = 6 * 3600
 MAX_TASKS = 30
 
+RESTARTS_PREFIX = 'lane_restarts:'  # the worker starts seen on this lane (a different process than the one that wrote the last record), kept a week
+RESTARTS_KEEP_SECONDS = 7 * 86400
+MAX_RESTARTS = 20
+PROCESS_STARTED = time.time()  # a restarted container often hands the new worker the same pid, so the start time says whether it is the same process
+
 _state = {'lane': None, 'started': {}, 'running': {}, 'tasks': {}, 'last_write': 0.0, 'peak_mb': 0.0, 'beat_thread': None}
 MAX_RUNNING = 50  # tasks listed as in flight in one record
 
@@ -83,10 +88,62 @@ def write(now, size):
         return
     try:
         from django.core.cache import cache
-        cache.set(CACHE_PREFIX + lane, json.dumps({'pid': os.getpid(), 'at': now, 'rss_mb': round(size, 1), 'peak_mb': round(_state['peak_mb'], 1),
-                                                   'tasks': _state['tasks']}), KEEP_SECONDS)
+        cache.set(CACHE_PREFIX + lane, json.dumps({'pid': os.getpid(), 'started': PROCESS_STARTED, 'at': now, 'rss_mb': round(size, 1), 'peak_mb': round(_state['peak_mb'], 1),
+                                                   'limit_mb': container_limit_mb(), 'tasks': _state['tasks']}), KEEP_SECONDS)
     except Exception:  # noqa: BLE001 - a measurement must never fail a task
         pass
+
+
+def container_limit_mb():
+    """The memory limit of the container this worker runs in (every lane of it shares it), in MB: a number, 0 when the container has no limit, None when
+    its cgroup cannot be read."""
+    try:
+        from reNgine import resources
+        limit, used = resources.cgroup_memory()
+    except Exception:  # noqa: BLE001 - a measurement must never fail a task
+        return None
+    if used is None:
+        return None
+    return limit // (1 << 20) if limit else 0
+
+
+def record_start(now=None):
+    """A worker started: when the lane's last record was written by another process, that process is gone, so this is a restart. It is remembered with what
+    the lane last held (its size and the time it was last heard from), then the lane's record is written again for this process. The first start of a lane
+    has no earlier record and counts nothing. Never raises."""
+    lane = _state['lane'] or lane_name()
+    _state['lane'] = lane
+    if not lane:
+        return
+    now = time.time() if now is None else now
+    try:
+        from django.core.cache import cache
+        raw = cache.get(CACHE_PREFIX + lane)
+        prior = json.loads(raw) if raw else None
+        if isinstance(prior, dict) and (prior.get('pid') != os.getpid() or ('started' in prior and prior['started'] != PROCESS_STARTED)):
+            try:
+                events = json.loads(cache.get(RESTARTS_PREFIX + lane) or '[]')
+            except ValueError:
+                events = []
+            events = [e for e in events if isinstance(e, dict) and now - e.get('at', 0) < RESTARTS_KEEP_SECONDS]
+            events.append({'at': now, 'last_heard_at': prior.get('at'), 'last_rss_mb': prior.get('rss_mb'), 'peak_mb': prior.get('peak_mb')})
+            cache.set(RESTARTS_PREFIX + lane, json.dumps(events[-MAX_RESTARTS:]), RESTARTS_KEEP_SECONDS)
+        _state['last_write'] = now
+        write(now, rss_mb())
+    except Exception:  # noqa: BLE001 - a measurement must never stop a worker from starting
+        pass
+
+
+def restarts(lane, now=None, within=86400):
+    """The restarts of ``lane`` seen in the last ``within`` seconds, oldest first: ``[{at, last_heard_at, last_rss_mb, peak_mb}]``. Raises when the cache cannot
+    be read; a record that is not what was written reads as none."""
+    from django.core.cache import cache
+    now = time.time() if now is None else now
+    try:
+        events = json.loads(cache.get(RESTARTS_PREFIX + lane) or '[]')
+    except ValueError:
+        return []
+    return [e for e in events if isinstance(e, dict) and isinstance(e.get('at'), (int, float)) and now - e['at'] <= within] if isinstance(events, list) else []
 
 
 def reset():
@@ -144,7 +201,7 @@ def _ensure_heartbeat():
 def install():
     from celery.signals import task_postrun, task_prerun, worker_ready, worker_shutdown
 
-    worker_ready.connect(lambda **kw: reset(), weak=False, dispatch_uid='lane-memory-ready')
+    worker_ready.connect(lambda **kw: (record_start(), reset()), weak=False, dispatch_uid='lane-memory-ready')
     worker_shutdown.connect(lambda **kw: reset(), weak=False, dispatch_uid='lane-memory-shutdown')
     task_prerun.connect(lambda task_id=None, task=None, **kw: before(task_id, getattr(task, 'name', '?')), weak=False, dispatch_uid='lane-memory-pre')
     task_postrun.connect(lambda task_id=None, task=None, **kw: after(task_id, getattr(task, 'name', '?')), weak=False, dispatch_uid='lane-memory-post')
@@ -163,11 +220,15 @@ def report(now=None):
             data = None
         if not data:
             continue
-        tasks = data.get('tasks') or {}
-        out.append({'lane': lane, 'rss_mb': data.get('rss_mb'), 'peak_mb': data.get('peak_mb'), 'age_seconds': int(now - data.get('at', now)),
-                    'by_size': [{'task': n, 'runs': t['n'], 'max_rss_mb': t['max_rss_mb']} for n, t in sorted(tasks.items(), key=lambda i: -i[1]['max_rss_mb'])[:5]],
-                    'by_growth': [{'task': n, 'runs': t['n'], 'max_growth_mb': t['max_growth_mb']} for n, t in sorted(tasks.items(), key=lambda i: -i[1]['max_growth_mb'])[:5]
-                                  if t['max_growth_mb'] > 0]})
+        try:
+            tasks = data.get('tasks') or {}
+            out.append({'lane': lane, 'rss_mb': data.get('rss_mb'), 'peak_mb': data.get('peak_mb'), 'age_seconds': int(now - data.get('at', now)),
+                        'limit_mb': data.get('limit_mb'),
+                        'by_size': [{'task': n, 'runs': t['n'], 'max_rss_mb': t['max_rss_mb']} for n, t in sorted(tasks.items(), key=lambda i: -i[1]['max_rss_mb'])[:5]],
+                        'by_growth': [{'task': n, 'runs': t['n'], 'max_growth_mb': t['max_growth_mb']} for n, t in sorted(tasks.items(), key=lambda i: -i[1]['max_growth_mb'])[:5]
+                                      if t['max_growth_mb'] > 0]})
+        except (AttributeError, KeyError, TypeError):  # a record that is not what ``write`` wrote is skipped, never allowed to hide the other lanes
+            continue
     return sorted(out, key=lambda r: -(r['rss_mb'] or 0))
 
 
