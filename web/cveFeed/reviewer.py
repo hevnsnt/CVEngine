@@ -675,6 +675,12 @@ def installed_templates_version():
     return str(data.get('nuclei-templates-version') or '')[:40] if isinstance(data, dict) else ''
 
 
+# Every code ops_checks can return, in the order it computes them. The snapshot sends it to the reviewer container, which builds the model's answer
+# format from it; tests/test_ai_prompts.py holds it equal to the codes written in ops_checks and to the container's fallback copy.
+OPS_CODES = ('sentinels_idle', 'workers_down', 'nuclei_templates', 'sentinel_errors', 'sentinel_waiting', 'sentinels_offline', 'scan_errors', 'system',
+             'generated_templates', 'ai_errors')
+
+
 def _check(code, state, title, detail, facts=None, actions=(), severity=None):
     return {'code': code, 'state': state, 'severity': severity or ('critical' if state == 'problem' else 'warning' if state == 'warning' else 'info'),
             'title': title, 'detail': detail, 'facts': facts or {}, 'actions': list(actions)}
@@ -1005,7 +1011,7 @@ def _watchdog_events(limit=10):
 def snapshot(now=None, templates_release=None):
     checks = ops_checks(now, templates_release)
     from cveFeed import fleet
-    return {'at': (now or timezone.now()).isoformat(), 'checks': checks, 'watchdog': _watchdog_events(), 'fleet': fleet.fleet_facts(now),
+    return {'at': (now or timezone.now()).isoformat(), 'checks': checks, 'codes': list(OPS_CODES), 'watchdog': _watchdog_events(), 'fleet': fleet.fleet_facts(now),
             'actions': {name: f'at most once every {int(gap.total_seconds() // 60)} minutes' for name, gap in ACTIONS.items()}}
 
 
