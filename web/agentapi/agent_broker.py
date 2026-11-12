@@ -1153,7 +1153,9 @@ def list_agents(ctx, params):
     page = svc.paginate(qs.order_by('name', 'id'), params, lambda a: a)
     counts = _counts([a.pk for a in page['results']])
     builtin_id = _sentinel().builtin_pk() if any(a.kind == 'scanner' for a in page['results']) else None  # once for the page, not per row
-    page['results'] = [agent_dict(a, counts=counts.get(a.pk), viewer=ctx.user, builtin_id=builtin_id) for a in page['results']]
+    from agentapi import sentinel_policy
+    with sentinel_policy.shared_lookups():  # the instance defaults are read once for the page, not once per Sentinel (four times each)
+        page['results'] = [agent_dict(a, counts=counts.get(a.pk), viewer=ctx.user, builtin_id=builtin_id) for a in page['results']]
     return page
 
 
