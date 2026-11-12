@@ -589,6 +589,17 @@ def _work_problem(work, beat_state=None):
     return None
 
 
+def _signals(queues):
+    """The maintainer's measurements (``agentapi.maintainer_signals``): lane and container memory against limits, oom kills, restarts, queue ages, refused
+    claims, database and Redis size, AI spend against its caps. Each is ``known``, ``partial`` or ``unknown`` and is never healthy by default."""
+    from agentapi import maintainer_signals
+    try:
+        client = _broker_client()
+    except Exception:  # noqa: BLE001 - the queue and Redis signals then say unknown
+        client = None
+    return maintainer_signals.collect(queues if isinstance(queues, dict) and 'error' not in queues else None, client)
+
+
 def _system(user, problems, notes):
     out = {}
     out['database'] = _probe(problems, 'database', _database)
@@ -637,6 +648,9 @@ def _system(user, problems, notes):
             problems.append(f'feeds: the CVE feed has not been dispatched for {int(age)} hours')
     out['os_detection'] = _probe(problems, 'os_detection', _os_detection)
     out['ai'] = _probe(problems, 'ai', lambda: _ai(problems))
+    out['signals'] = _probe(problems, 'signals', lambda: _signals(out.get('queues')))
+    if isinstance(out['signals'], dict) and out['signals'].get('unknown'):
+        notes.append('maintainer signals not fully known: ' + ', '.join(out['signals']['unknown']) + ' (see system.signals for why)')
     out['autotune'] = _probe(problems, 'autotune', _autotune)
     if (out['autotune'] or {}).get('discovery_pin'):
         notes.append(out['autotune']['discovery_pin']['text'])

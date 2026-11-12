@@ -1473,8 +1473,10 @@ def nmap_hosts(xml, address):
     counted, at least that many when the Sentinel cut its report): a Sentinel's own ``cvengine-note`` element says so, and a report from one that does
     not (an older Sentinel, up to the size cap) is cut here the same way. No field is added to the wire: the note is inside the report text."""
     from cveFeed.port_inventory import parse_xml
+    from cveFeed.udp_scan import normalize_address  # nmap prints ``2001:db8::1`` for what the database may hold as ``2001:0db8::1``: both sides, as the UDP path does
     text = xml or ''
-    hosts = [h for h in parse_xml(text, strict=True) if h.get('ip') == address]
+    asked = normalize_address(address)
+    hosts = [h for h in parse_xml(text, strict=True) if normalize_address(h.get('ip')) == asked]
     note = _TARPIT_ELEMENT.search(text)
     reported = int(note.group(1)) if note else 0
     for host in hosts:

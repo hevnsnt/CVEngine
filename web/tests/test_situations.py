@@ -418,16 +418,36 @@ class PureTests(TestCase):
 
 
 class ReviewerTests(Seeded):
-	def test_a_finding_the_ai_reviewer_calls_a_false_positive_is_not_likely(self):
+	def likely_counts(self):
+		cache.clear()  # Situations is a snapshot: a review written straight to the database shows at the next ranking
+		row = [r for r in self.api('projects/sa/situations')[1]['results'] if r['host'] == 'likely-kev.sa.test'][0]
+		return row['counts']['likely'], row['counts']['minor']
+
+	def review(self, key, **fields):
 		from cveFeed.models import FindingReview
 		triage = Triage.objects.get(match__subdomain=self.likely_kev)
-		FindingReview.objects.create(triage=triage, project=self.pa, review_key='k', verdict='false_positive', outcome='disputed', model='m')
-		row = [r for r in self.api('projects/sa/situations')[1]['results'] if r['host'] == 'likely-kev.sa.test'][0]
-		self.assertEqual((row['counts']['likely'], row['counts']['minor']), (0, 1))  # a person should look, but it is not the likely kind
-		FindingReview.objects.create(triage=triage, project=self.pa, review_key='k2', verdict='true_open', outcome='recorded', model='m')
-		cache.clear()  # (a snapshot: see the heat test)
-		row = [r for r in self.api('projects/sa/situations')[1]['results'] if r['host'] == 'likely-kev.sa.test'][0]
-		self.assertEqual(row['counts']['likely'], 1)  # the newest review decides
+		return FindingReview.objects.create(triage=triage, project=self.pa, review_key=key, model='m', **fields)
+
+	def test_a_finding_the_ai_reviewer_calls_a_false_positive_with_high_confidence_but_the_server_kept_open_is_not_likely(self):
+		self.review('k', verdict='false_positive', confidence='high', outcome='held', held_reason='a person has worked this finding')
+		self.assertEqual(self.likely_counts(), (0, 1))  # a person should look, but it is not the likely kind
+		self.review('k2', verdict='true_open', confidence='high', outcome='recorded')
+		self.assertEqual(self.likely_counts(), (1, 0))  # the newest review decides
+
+	def test_a_verdict_the_server_refused_for_its_evidence_or_its_confidence_does_not_demote_the_finding(self):
+		for key, fields in (
+				('inj', dict(confidence='high', outcome='held', held_reason='its evidence carries text aimed at AI agents (instruction_override)')),
+				('hard', dict(confidence='high', outcome='held', held_reason='hard evidence: a version inside the affected range')),
+				('proof', dict(confidence='high', outcome='disputed', held_reason="one of cvENGINE's own read-only checks reproduced it")),
+				('low', dict(confidence='low', outcome='held', held_reason="the reviewer's confidence is low, not high")),
+				('medium', dict(confidence='medium', outcome='held', held_reason="the reviewer's confidence is medium, not high"))):
+			self.review(key, verdict='false_positive', **fields)
+			self.assertEqual(self.likely_counts(), (1, 0), key)
+
+	def test_a_reopened_finding_whose_retest_still_reproduces_is_not_demoted(self):
+		Triage.objects.filter(match__subdomain=self.likely_kev).update(retest_state='still_reproduces')
+		self.review('k', verdict='false_positive', confidence='high', outcome='held', held_reason='a person has worked this finding')
+		self.assertEqual(self.likely_counts(), (1, 0))
 
 
 class PageTests(Seeded):

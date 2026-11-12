@@ -39,8 +39,11 @@ logger = logging.getLogger(__name__)
 def _body(request):
     try:
         data = json.loads(request.body or b'{}')
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):  # a body of nested arrays raises RecursionError on some Pythons and parses on others
         raise ApiError(400, 'body must be valid JSON')
+    from agentapi.mcp import MAX_JSON_DEPTH, _nesting_exceeds  # the depth the MCP path allows, so no body is left to recurse in storage_safe.clean below
+    if _nesting_exceeds(data, MAX_JSON_DEPTH):
+        raise ApiError(400, f'body must be valid JSON nested at most {MAX_JSON_DEPTH} levels deep')
     if not isinstance(data, dict):
         raise ApiError(400, 'body must be a JSON object')
     return storage_safe.clean(data)  # a NUL byte or a lone surrogate in any string is refused by Postgres or the encoder: cleaned once, here (review 2 F3)
@@ -156,6 +159,8 @@ def _sentinel_instance_enroll(request, ctx, **_):
 
 
 def _sentinel_bootstrap(request, ctx, **_):
+    from reNgine.client_ip import client_ip
+    sentinels.limit_address(client_ip(request))  # before the body is read: this call has no token, so the address is what is counted
     out = sentinels.bootstrap(_body(request))
     return out, 201
 
