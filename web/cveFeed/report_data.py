@@ -139,9 +139,13 @@ def _status_counts(sources):
     report's status legend when it includes closed findings."""
     tally = Counter()
     for qs in sources.values():
-        for row in qs.order_by().values('remediation_status').annotate(n=Count('id')):
-            tally[row['remediation_status']] += row['n']
-    return {STATUS_LABELS.get(k, clean(k, 24)): tally[k] for k in (*closure.STATUSES, *sorted(set(tally) - set(closure.STATUSES))) if tally[k]}
+        for row in qs.order_by().values('remediation_status', 'triage__retest_state').annotate(n=Count('id')):
+            # fixed is two rows of the legend: what a retest verified, and what was only marked fixed
+            key = 'verified_fixed' if row['remediation_status'] == 'fixed' and row['triage__retest_state'] == 'verified_fixed' else row['remediation_status']
+            tally[key] += row['n']
+    labels = {**STATUS_LABELS, 'fixed': 'Marked fixed, not verified', 'verified_fixed': 'Verified fixed'}
+    order = (*closure.STATUSES[:2], 'verified_fixed', *closure.STATUSES[2:])
+    return {labels.get(k, clean(k, 24)): tally[k] for k in (*order, *sorted(set(tally) - set(order))) if tally[k]}
 
 
 def _per_host(sources):
@@ -169,10 +173,21 @@ def _proof(triage):
     return out
 
 
+def _status_label(status, triage):
+    """The status a report prints: a finding a retest verified is "Verified fixed", one only marked fixed is "Marked fixed, not verified" (or "... cannot be
+    re-checked" when no check could repeat it), and one a retest reopened says so (``cveFeed.fix_retest``); every other status keeps its name."""
+    from cveFeed import fix_retest
+    state = fix_retest.summary(status, triage)['state']
+    return {fix_retest.VERIFIED: 'Verified fixed', fix_retest.REPRODUCES: 'Open, reopened: a retest still reproduced it',
+            fix_retest.NO_CHECK: 'Marked fixed, cannot be re-checked'}.get(state) or (
+        'Marked fixed, not verified' if status == 'fixed' else STATUS_LABELS.get(status, clean(status, 24)))
+
+
 def _tracking(obj):
     """The remediation state a person or agent recorded: status, assignee, note and when it last changed. ``closed``: the status closes the
     finding (fixed, accepted risk, false positive), so the note is printed as why it was closed."""
-    return {'status': STATUS_LABELS.get(obj.remediation_status, clean(obj.remediation_status, 24)), 'closed': closure.is_closed(obj.remediation_status),
+    from agentapi import services as svc
+    return {'status': _status_label(obj.remediation_status, svc._triage_of(obj)), 'closed': closure.is_closed(obj.remediation_status),
             'assignee': _person(getattr(obj, 'assignee', None)), 'note': clean(obj.remediation_note, 800),
             'changed': _stamp(obj.remediation_updated_at), 'changed_by': _person(getattr(obj, 'remediation_by', None))}
 

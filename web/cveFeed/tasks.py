@@ -1224,8 +1224,32 @@ def reconcile_library_provenance(limit=LIBRARY_SWEEP_BATCH, seconds=LIBRARY_SWEE
 
 @app.task(name='queue_hot_validations', bind=False, queue='cve_feed_queue')
 def queue_hot_validations():
+    from cveFeed import fix_retest
     from cveFeed.hot_validation import sweep
-    return sweep()
+    stats = sweep()
+    try:
+        stats['retests'] = fix_retest.sweep()['queued']  # the retests that could not tell and are due (a day or more apart): queued, not run here
+    except Exception:  # noqa: BLE001 - a retest sweep never stops the validation sweep
+        logger.exception('retest sweep failed')
+    return stats
+
+
+@app.task(name='retest_fixed_finding', bind=False, queue='validation_priority_queue')
+def retest_fixed_finding(retest_id):
+    """Re-run, on a Sentinel, the check that proved a finding that was marked fixed (``cveFeed.fix_retest``). The finding and project come from the
+    stored retest, never from an argument."""
+    from cveFeed import fix_retest
+    try:
+        return fix_retest.run(retest_id)
+    except Exception as exc:  # noqa: BLE001 - never a task failure; the sweep tries a retest that could not finish again
+        logger.exception('retest %s failed', retest_id)
+        from django.utils import timezone
+
+        from cveFeed.models import FixRetest
+        job = FixRetest.objects.filter(pk=retest_id, status__in=('queued', 'running')).first()
+        if job is not None:
+            fix_retest._settle_not_verified(job, f'the retest failed ({type(exc).__name__})', None, '', timezone.now())
+        return {'error': 'retest failed'}
 
 
 def _skip_automatic_validation(job, progress, reason):

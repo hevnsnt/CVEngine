@@ -36,6 +36,7 @@ import { scoreList } from "/staticfiles/cve/score-detail.js";
 import { openSecret } from "/staticfiles/cve/secret-panel.js";
 import * as FG from "/staticfiles/cve/finding-groups-logic.js";
 import * as CL from "/staticfiles/cve/closure-logic.js";
+import * as RT from "/staticfiles/cve/retest-logic.js";
 import { askClosureNote } from "/staticfiles/cve/closure-note.js";
 import * as LM from "/staticfiles/cve/loadmore-logic.js";
 
@@ -1961,6 +1962,27 @@ function findingStatusControl(d) {
     why.textContent = CL.closureText(r) || r.note || "";
     why.hidden = !why.textContent;
   };
+  // what a re-check found after it was marked fixed, and Retest now (POST .../retest: runs the check that proved it again on a Sentinel)
+  const retestLine = el("p", "note retest-line");
+  const retestNow = el("button", "btn ghost sm", "Retest now", { type: "button", title: "Run the check that proved this finding again, on a Sentinel" });
+  const paintRetest = () => {
+    const r = RT.retestOf(d);
+    retestLine.textContent = r ? RT.sentence(r) : "";
+    retestLine.hidden = !r;
+    retestNow.hidden = !RT.canRetestNow({ retest: d.retest, remediation_status: d.remediation.status });
+  };
+  retestNow.onclick = async () => {
+    retestNow.disabled = true;
+    try {
+      const r = await api("POST", `${base}/findings/${kind}/${d.id}/retest`);
+      d.retest = r.retest;
+      paintRetest();
+      toast(r.queued ? "Retest queued" : r.retest.text);
+    } catch (err) {
+      toast(err.message, true);
+    }
+    retestNow.disabled = false;
+  };
   const s = select("Remediation status", CL.STATUS_OPTIONS, async () => {
     const value = s.value;
     let body = { status: value }; // no note when not closing: the route leaves the stored one alone, and ours may be stale
@@ -1978,7 +2000,9 @@ function findingStatusControl(d) {
         status: r.remediation_status, note: r.remediation_note, closure_note: r.closure_note, closed_by: r.closed_by,
         closed_at: r.closed_at, closed_automatically: r.closed_automatically,
       });
+      d.retest = r.retest || null;
       paint();
+      paintRetest();
       toast(`Marked ${CL.statusLabel(value).toLowerCase()}`);
     } catch (err) {
       s.value = d.remediation.status;
@@ -1987,8 +2011,9 @@ function findingStatusControl(d) {
   });
   s.value = d.remediation.status;
   const box = el("div", "tools");
-  box.append(el("span", "note", "Remediation status"), s, why);
+  box.append(el("span", "note", "Remediation status"), s, why, retestLine, retestNow);
   paint();
+  paintRetest();
   return box;
 }
 
@@ -2044,6 +2069,13 @@ function findingHeatControl(d, onChange) {
 
 // A row's status chip when it is not open, its tooltip the closure line (who, when, why). null for an open finding.
 function statusBadge(item) {
+  // a finding marked fixed shows what its retest found (Fixed, verifying / Verified fixed / Fixed, not verified / ...), a reopened one says so
+  const retest = RT.retestOf(item);
+  if (retest) {
+    const chip = badge(retest.label, RT.toneOf(retest));
+    chip.title = [RT.sentence(retest), CL.closureText(item)].filter(Boolean).join(" ");
+    return chip;
+  }
   const status = item.status ?? item.remediation_status;
   if (!status || ["open", "actionable"].includes(status)) return null;
   const chip = badge(CL.statusLabel(status).toLowerCase(), status === "false_positive" ? "fp" : "");
@@ -4251,11 +4283,11 @@ const pages = {
     // closed: fixed, accepted risk and false positive together; false positive alone, to review those decisions
     const status = picker(
       "Status",
-      [["actionable", "Actionable"], ["closed", "Closed"], ["false_positive", "False positive"], ["all", "Everything"]],
+      [["actionable", "Actionable"], ["closed", "Closed"], ["false_positive", "False positive"], ...RT.FILTERS, ["all", "Everything"]],
       countOf((key) => ({ status: key })),
       () => reload(),
     );
-    const ALLOWED = { type: ["all", "cve", "scanner", "hygiene"], severity: ["all", "critical", "high", "medium", "low", "info"], status: ["actionable", "closed", "false_positive", "all"] };
+    const ALLOWED = { type: ["all", "cve", "scanner", "hygiene"], severity: ["all", "critical", "high", "medium", "low", "info"], status: ["actionable", "closed", "false_positive", ...RT.FILTERS.map(([key]) => key), "all"] };
     const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "", internal: "", kev: "", ai: "", group: FG.GROUPED };
     const setPicker = (p, key, value) => {
       p.value = value;

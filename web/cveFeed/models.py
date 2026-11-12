@@ -1284,6 +1284,13 @@ class Triage(models.Model):
     heat_override_reason = models.TextField(blank=True, default="", db_default="")
     heat_override_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     heat_override_at = models.DateTimeField(null=True, blank=True)
+    # The newest result of re-checking this finding after it was marked fixed (cveFeed.retest): '' (never marked fixed, or reset when the status
+    # changed by hand), verifying, verified_fixed, still_reproduces, not_verified or no_check. The columns sit on the row the lists already join, so a
+    # list shows the state with no query of its own. The full record of each try is FixRetest. db_default: old code still inserting rows during an update.
+    retest_state = models.CharField(max_length=16, blank=True, default="", db_default="")
+    retest_at = models.DateTimeField(null=True, blank=True)
+    retest_reason = models.CharField(max_length=300, blank=True, default="", db_default="")
+    retest_sentinel = models.CharField(max_length=120, blank=True, default="", db_default="")
     first_seen = models.DateTimeField(default=timezone.now)
     last_seen = models.DateTimeField(default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1312,6 +1319,35 @@ class Triage(models.Model):
 
     def __str__(self):
         return f"{self.kind} {self.host} [{self.classification or self.status}]"
+
+
+class FixRetest(models.Model):
+    """One re-check of a finding that was marked fixed: the same check that produced its proof, run again on a Sentinel through the validation
+    dispatch (cveFeed.retest). ``outcome`` is verified_fixed (the check ran and no longer reproduces it), still_reproduces (it does: the finding was
+    reopened and ``evidence`` is the new exchange) or not_verified (it could not be told: no Sentinel, host not reachable, the check failed; the
+    finding stays fixed, not verified, and is tried again with back-off). Never a result without the time and the Sentinel that ran it."""
+
+    triage = models.ForeignKey('cveFeed.Triage', on_delete=models.CASCADE, related_name='fix_retests')
+    project = models.ForeignKey('dashboard.Project', on_delete=models.CASCADE, related_name='+')
+    source = models.CharField(max_length=12, default='automatic', db_default='automatic')  # automatic (marked fixed) | manual (Retest now) | retry
+    requested_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    status = models.CharField(max_length=12, default='queued', db_default='queued')  # queued | running | done | failed
+    outcome = models.CharField(max_length=16, blank=True, default='', db_default='')  # verified_fixed | still_reproduces | not_verified
+    reason = models.CharField(max_length=300, blank=True, default='', db_default='')
+    check_run = models.JSONField(default=dict, blank=True)  # {kind, label, display, target} of the check that was run again
+    sentinel = models.CharField(max_length=120, blank=True, default='', db_default='')
+    evidence = models.JSONField(default=dict, blank=True)  # summary and the request / response excerpts of the new exchange
+    attempts = models.PositiveSmallIntegerField(default=1, db_default=1)
+    next_attempt_at = models.DateTimeField(null=True, blank=True)  # a not_verified retest: when it may be tried again; None once given up
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['project', 'status', 'created_at'], name='fixretest_proj_status_idx'),
+                   models.Index(fields=['outcome', 'next_attempt_at'], name='fixretest_due_idx')]
+        constraints = [models.UniqueConstraint(fields=['triage'], condition=models.Q(status__in=['queued', 'running']),
+                                               name='one_active_fixretest_per_finding')]
 
 
 class UpdateSettings(models.Model):
@@ -1617,7 +1653,7 @@ class FindingAuditEvent(models.Model):
     when, and (status/assignee) what changed from and to. Written alongside the action itself (agentapi.services),
     never derived after the fact."""
 
-    EVENTS = ("status", "assignee", "comment", "heat")
+    EVENTS = ("status", "assignee", "comment", "heat", "retest")
     project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
     finding_kind = models.CharField(max_length=16, choices=[(k, k) for k in FINDING_KINDS])
     finding_id = models.PositiveIntegerField()

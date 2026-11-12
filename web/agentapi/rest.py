@@ -420,7 +420,7 @@ ROUTES = [
      'One finding in full: why it matters, how it was found, first and last seen with history, AI classification, remediation, every validation check with its exact command and result',
      lambda r, c, slug, kind, finding_id, **k: svc.finding_detail(c, slug, kind, int(finding_id))),
     ('PATCH', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|route|hygiene)/(?P<finding_id>\d+)',
-     'Set remediation status (open, in_progress, fixed, accepted_risk, false_positive), note (why; at most 2000 characters, kept as the closure note with who and when) and/or assignee (at least one of status/assignee); a web route has no remediation workflow (400)',
+     'Set remediation status (open, in_progress, fixed, accepted_risk, false_positive), note (why; at most 2000 characters, kept as the closure note with who and when) and/or assignee (at least one of status/assignee); a web route has no remediation workflow (400). Setting fixed queues a retest of the check that proved the finding (see GET .../retest)',
      lambda r, c, slug, kind, finding_id, **k: svc.update_finding_status(c, slug, kind, int(finding_id), _body(r).get('status'),
                                                                         note=_body(r).get('note'), **_assignee_kw(_body(r)))),
     ('POST', r'projects/(?P<slug>[-\w]+)/findings/status', 'Set the same remediation status and note on up to 200 findings at once (the note goes on each; false_positive closes like fixed); '
@@ -435,6 +435,18 @@ ROUTES = [
     ('POST', r'projects/(?P<slug>[-\w]+)/findings/heat', 'Re-rate up to 500 findings by hand at once with one heat and one reason; '
      "body {items: [{kind: match|vulnerability, id}, ...], heat: fire|smoke|ice or null to clear, reason}; each is audited on its own; returns {updated, unchanged, failed: [{kind, id, error}]}",
      lambda r, c, slug, **k: svc.bulk_set_finding_heat(c, slug, _body(r).get('items'), _body(r).get('heat'), _body(r).get('reason'))),
+    ('GET', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|hygiene)/(?P<finding_id>\d+)/retest',
+     'The retest of one finding marked fixed: {kind, id, status, retest: {state, label, text, at, sentinel, reason, can_retest}, history: [{id, status, '
+     'outcome, reason, source, sentinel, checks, evidence, attempt, requested, finished, next_attempt, requested_by}]}. state is "" (not marked fixed), '
+     'verifying (a retest is queued or running), verified_fixed (the check that proved it ran on a Sentinel and no longer reproduces it), still_reproduces '
+     '(it does: the finding was reopened and the new exchange is its proof), not_verified (fixed, not verified: no Sentinel, host did not answer, check '
+     'failed; tried again with back-off, at most daily) or no_check (marked fixed, cannot be re-checked automatically: no stored check or evidence)',
+     lambda r, c, slug, kind, finding_id, **k: svc.get_finding_retest(c, slug, kind, int(finding_id))),
+    ('POST', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|hygiene)/(?P<finding_id>\d+)/retest',
+     'Retest now: run again, on a Sentinel, the check that proved a finding marked fixed (marking it fixed already does this once). 400 unless the finding '
+     'is fixed; one already being retested is not queued twice; one with no check to repeat answers state no_check. Answers what GET answers, plus queued, '
+     'with status 202. Same permissions as changing the status; nothing runs on the server',
+     lambda r, c, slug, kind, finding_id, **k: (svc.start_finding_retest(c, slug, kind, int(finding_id)), 202)),
     ('POST', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|route|hygiene)/(?P<finding_id>\d+)/retriage',
      'Look at a finding again; CVE matches use the bounded per-match validation queue',
      lambda r, c, slug, kind, finding_id, **k: (svc.retriage_finding(c, slug, kind, int(finding_id)), 202)),
