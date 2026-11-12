@@ -327,5 +327,5 @@ class OpsFleetFactsTests(unittest.TestCase):
 
     def test_the_system_prompt_forbids_the_two_false_claims(self):
         from cvengine_reviewer import prompts
-        self.assertIn('never say that no Sentinel is online when live_sentinels is above 0', prompts.OPS_SYSTEM)
-        self.assertIn('when builtin_scanner is false', prompts.OPS_SYSTEM)
+        self.assertIn('Never say no Sentinel is online if live_sentinels > 0', prompts.OPS_SYSTEM)
+        self.assertIn('if builtin_scanner is false', prompts.OPS_SYSTEM)
