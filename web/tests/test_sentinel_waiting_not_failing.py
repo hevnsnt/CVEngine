@@ -30,6 +30,8 @@ class WaitingIsNotFailingTests(Fixture):
         self.assertEqual(self.check('sentinel_errors')['state'], 'ok')
 
     def test_they_are_counted_apart_in_plain_words(self):
+        from tests.fake_scanner import FakeScanner
+        FakeScanner(external=True, name='sentinel-1', kinds=['web_screenshot']).start_for(self)  # a live Sentinel: with none the note is a warning (see test_alerts_tell_the_truth)
         self.add(13, 'expired', WAIT)
         note = self.check('sentinel_waiting')
         self.assertEqual((note['state'], note['severity']), ('warning', 'info'))

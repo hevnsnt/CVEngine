@@ -79,7 +79,7 @@ action only when its own check still offers it.
 
 Answer with the JSON object the schema describes and nothing else."""
 
-OPS_CODES = ['sentinels_idle', 'nuclei_templates', 'sentinel_errors', 'scan_errors', 'system', 'generated_templates', 'ai_errors']
+OPS_CODES = ['sentinels_idle', 'sentinels_offline', 'nuclei_templates', 'sentinel_errors', 'scan_errors', 'system', 'generated_templates', 'ai_errors']
 
 OPS_SCHEMA = {
     'type': 'object', 'additionalProperties': False,

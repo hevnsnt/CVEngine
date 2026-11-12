@@ -111,7 +111,9 @@ def ops_message(snapshot):
     fleet = snapshot.get('fleet') if isinstance(snapshot.get('fleet'), dict) else {}
     counts = {key: fleet[key] for key in ('live_sentinels', 'live_remote', 'builtin_scanner', 'builtin_live', 'slots')
               if isinstance(fleet.get(key), (int, bool))}  # the server's own numbers, whitelisted: nothing else is passed through unfenced
-    return f'The server\'s own count of its Sentinels: {json.dumps(counts, sort_keys=True)}\n\n{fenced}\n\nDiagnose every check that is not ok and choose actions, then answer with the JSON object.'
+    head = (f'The server\'s own count of its Sentinels: {json.dumps(counts, sort_keys=True)}' if counts
+            else 'The server did not send its count of Sentinels (an older server): say nothing about how many Sentinels are live or whether there is a built-in scanner.')
+    return f'{head}\n\n{fenced}\n\nDiagnose every check that is not ok and choose actions, then answer with the JSON object.'
 
 
 def run_ops(server, provider, release=None):

@@ -186,7 +186,7 @@ def _flush(scan, ctx, batch, observed, stored=0):
 def _report_key_problems(problems, extra_args, scan):
     """One activity line per service whose key the scanner rejected (or never received). The scanner skips such a module and carries on, so without
     this a stored key that is wrong looks like a service that found nothing."""
-    from cveFeed import activity, key_limits
+    from cveFeed import activity, api_credentials, key_limits
     from cveFeed.api_credentials import service_for_module
     configured = {a.split('=', 1)[0].split('.')[1] for prev, a in zip(extra_args, extra_args[1:])
                   if prev == '-c' and a.startswith('modules.') and '=' in a}
@@ -197,10 +197,18 @@ def _report_key_problems(problems, extra_args, scan):
             continue
         said.add(service[0])
         if key_limits.is_limit(reason):  # over its plan or rate limited: a notice once per pause, never a failure per discovery
-            if key_limits.paused(scan.domain.project_id, service[0]) or not key_limits.pause(scan.domain.project_id, service[0]):
+            fp = api_credentials.key_fingerprint_from_args(service[0], extra_args)
+            project_id = scan.domain.project_id
+            started = None if key_limits.paused(project_id, service[0], fp) else key_limits.pause(project_id, service[0], fp)
+            if started is False or (started is None and key_limits.paused(project_id, service[0], fp)):
                 continue
-            activity.log('discovery', key_limits.notice_text(service[1]), project=scan.domain.project_id, status='notice', service=service[0])
-            continue
+            if started:
+                activity.log('discovery', key_limits.notice_text(service[1]), project=project_id, status='notice', service=service[0])
+                count = key_limits.streak(project_id, service[0], fp)
+                if count == key_limits.STREAK_WARNING:  # not a passing limit: said once, as a failure to look at
+                    activity.log('discovery', key_limits.streak_text(service[1], count), project=project_id, status='failed', scan_id=scan.id)
+                continue
+            # the pause could not be taken (no cache): the key would be sent and refused again, so the refusal is reported, as before
         activity.log('discovery', f'{service[1]}: the key was not accepted ({reason[:120]}); {module} did not run on {scan.domain.name}',
                      project=scan.domain.project_id, status='failed', scan_id=scan.id)
 

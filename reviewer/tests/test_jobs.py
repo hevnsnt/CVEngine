@@ -329,3 +329,12 @@ class OpsFleetFactsTests(unittest.TestCase):
         from cvengine_reviewer import prompts
         self.assertIn('Never say no Sentinel is online if live_sentinels > 0', prompts.OPS_SYSTEM)
         self.assertIn('if builtin_scanner is false', prompts.OPS_SYSTEM)
+
+    def test_an_older_server_that_sends_no_fleet_is_said_to_have_sent_none(self):
+        text = jobs.ops_message({'checks': [{'code': 'sentinel_errors', 'state': 'problem', 'title': 't', 'detail': 'd', 'facts': {}}]})
+        self.assertNotIn('count of its Sentinels: {}', text)
+        self.assertIn('did not send', text)
+
+    def test_the_new_check_may_be_diagnosed(self):
+        from cvengine_reviewer import prompts
+        self.assertIn('sentinels_offline', prompts.OPS_CODES)

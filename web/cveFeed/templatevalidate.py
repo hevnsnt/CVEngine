@@ -379,8 +379,8 @@ def problem(now=None):
             elif facts['builtin_scanner']:
                 fix = ' Fix: bring the built-in Sentinel up to date on the Sentinels page.'
             elif facts['live_sentinels']:  # remote Sentinels only: there is no built-in one to start, and nothing to do on this side
-                lead = (f"{old} AI-written check(s) are waiting: this install's {fleet_lib.sentinels_text(facts['live_sentinels'])} are all remote and none of "
-                        'them runs template checks yet. ')
+                lead = (f"{old} AI-written check(s) are waiting: this install's {fleet_lib.sentinels_text(facts['live_sentinels'])} {'is' if facts['live_sentinels'] == 1 else 'are all'} remote and none of "
+                        f"{'it' if facts['live_sentinels'] == 1 else 'them'} runs template checks yet. ")
                 fix = ' Nothing needs starting here.'
             else:
                 fix = ' Fix: bring a Sentinel online (see the Sentinels page).'

@@ -526,7 +526,7 @@ class AgentActivity(models.Model):
              "remediation", "saved_search", "runzero")
     kind = models.CharField(max_length=24)
     message = models.CharField(max_length=500)
-    status = models.CharField(max_length=10, default="done")  # running | done | failed
+    status = models.CharField(max_length=10, default="done")  # running | done | failed | waiting (back-pressure) | notice (said once, nothing wrong) | skipped (refused on purpose) | deferred (put off, retried)
     project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
     cve_id = models.CharField(max_length=64, blank=True, default="")
     detail = models.JSONField(default=dict, blank=True)

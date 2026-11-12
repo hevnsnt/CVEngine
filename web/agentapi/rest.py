@@ -327,7 +327,7 @@ ROUTES = [
      lambda r, c, slug, **k: svc.activity_days(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/stats/history', 'Daily snapshots of hosts, exposed hosts, open findings by severity, CVE matches by heat, fixed count and mean days to fix, oldest first (?days=90, capped at 365)',
      lambda r, c, slug, **k: svc.stats_history(c, slug, r.GET)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/activity', 'What the AI engine did, newest first: this project plus system-wide entries (?kind=)',
+    ('GET', r'projects/(?P<slug>[-\w]+)/activity', 'What the AI engine did, newest first: this project plus system-wide entries (?kind=). Each entry has a status: running, done, failed, waiting (back-pressure), notice (said once, nothing wrong), skipped (refused on purpose) or deferred (put off and retried); only failed is a failure',
      lambda r, c, slug, **k: svc.list_activity(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/secrets', 'Exposed secrets, worst first, masked: never a value (status=open|quiet|all|<status>, class=P|S|I, provider=, severity=, host=, q=, paged)',
      lambda r, c, slug, **k: secrets_api.list_secrets(c, slug, r.GET)),

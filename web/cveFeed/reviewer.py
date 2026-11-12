@@ -651,8 +651,10 @@ def summary_from_row(obj):
 ACTIONS = {'feed_sentinels': timedelta(minutes=15), 'refresh_nuclei_templates': timedelta(hours=1)}
 ACTIVITY_ERROR_PROBLEM = 20     # failed activity lines of one kind in six hours
 SENTINEL_FAILED_PROBLEM = 5     # failed or expired Sentinel tasks of one Sentinel and kind in six hours
-SENTINEL_ERROR_SHARE = 0.05     # ...and they are an alert only when they are also this share of the tasks that finished (or no Sentinel is live, or none completed)
-RESTART_GRACE = timedelta(minutes=15)  # a task that stopped reporting this close to an update restart of a Sentinel, or of the server's workers, is the restart's doing
+SENTINEL_ERROR_SHARE = 0.05     # ...the overall rule: that many in a group and this share of all the tasks that finished (or no Sentinel is live, or none completed) is an alert
+RESTART_GRACE = timedelta(minutes=15)  # a task a Sentinel had claimed before its own finished update restart, and that stopped reporting up to this long after it, is the restart's doing
+WAIT_SATURATED_SHARE = 0.10     # this share of the tasks that finished or waited having waited for a slot is saturation, trend or not
+GROUP_FAILED_SHARE = 0.5        # a Sentinel and kind whose failed share of their own finished tasks is this high, with SENTINEL_FAILED_PROBLEM failures, is an alert whatever the rest of the fleet does
 
 
 def _admin():
@@ -676,25 +678,37 @@ def _check(code, state, title, detail, facts=None, actions=(), severity=None):
             'title': title, 'detail': detail, 'facts': facts or {}, 'actions': list(actions)}
 
 
+def _who():
+    """The id of the Sentinel behind a task: its agent, or, for a task that expired (the broker clears the agent then), the one that held it."""
+    from agentapi.sentinel_broker import EXPIRED_AGENT
+    from django.db.models import IntegerField
+    from django.db.models.fields.json import KeyTextTransform
+    from django.db.models.functions import Cast, Coalesce
+    return Coalesce('agent_id', Cast(KeyTextTransform(EXPIRED_AGENT, 'result'), IntegerField()))
+
+
 def _restart_q(since):
-    """A ``Q`` for the expired tasks that ended within ``RESTART_GRACE`` of a restart: a Sentinel's own update (what its updater reported, ``info.update.at``) or
-    the clean-up line the server writes after its workers restarted. A task a restart cut off is no sign that anything is wrong. ``None`` when there was none."""
+    """A ``Q`` for the expired tasks a Sentinel's own update restart cut off: tasks of that Sentinel, claimed before the moment its updater reported
+    (``info.update.at``, only when ``info.update.status`` is ``done``), that stopped reporting from that moment to ``RESTART_GRACE`` after it. Needs the
+    ``who`` annotation (``_who``). ``None`` when there was none. Nothing else opens a window: not another Sentinel's update, not a failed one, not the
+    server's clean-up line (it is about the server's own workers, and the Sentinel tasks are not touched by it), and never a task that stopped
+    reporting before the restart."""
     from agentapi.models import Agent
-    from cveFeed.models import AgentActivity
-    moments = []
-    for info in Agent.objects.filter(kind='scanner').values_list('info', flat=True)[:200]:
-        at = ((info or {}).get('update') or {}).get('at') if isinstance(info, dict) else None
+    q = None
+    for pk, info in Agent.objects.filter(kind='scanner').values_list('pk', 'info')[:200]:
+        update = (info or {}).get('update') if isinstance(info, dict) else None
+        if not isinstance(update, dict) or update.get('status') != 'done':
+            continue
         try:
-            moment = datetime.fromisoformat(str(at)) if at else None
+            moment = datetime.fromisoformat(str(update.get('at'))) if update.get('at') else None
         except ValueError:
             moment = None
-        if moment is not None:
-            moments.append(moment if moment.tzinfo else moment.replace(tzinfo=dt_timezone.utc))
-    moments += list(AgentActivity.objects.filter(created_at__gte=since - RESTART_GRACE, message__contains='a restarted worker left')
-                    .values_list('created_at', flat=True)[:50])
-    q = None
-    for moment in {m for m in moments if m >= since - RESTART_GRACE}:
-        part = Q(finished_at__gte=moment - RESTART_GRACE, finished_at__lte=moment + RESTART_GRACE)
+        if moment is None:
+            continue
+        moment = moment if moment.tzinfo else moment.replace(tzinfo=dt_timezone.utc)
+        if moment < since - RESTART_GRACE:
+            continue
+        part = Q(who=pk, claimed_at__lt=moment, finished_at__gte=moment, finished_at__lte=moment + RESTART_GRACE)
         q = part if q is None else q | part
     return None if q is None else Q(status='expired') & q
 
@@ -775,30 +789,47 @@ def ops_checks(now=None, templates_release=None):
     # Sentinel task failures, by Sentinel and kind, judged against how much work was done and whether the Sentinels are live
     six = now - timedelta(hours=6)
     from agentapi import sentinel_broker
+    from agentapi.models import Agent
     from cveFeed import fleet as fleet_lib
     fleet = fleet_lib.fleet_facts(now)
-    not_waiting = ~sentinel_broker.waiting_q()  # a task that expired waiting for a free slot is back-pressure, counted below, not a failure
-    ended = SentinelTask.objects.filter(not_waiting, status__in=('failed', 'expired'), finished_at__gte=six)
+    not_waiting = ~sentinel_broker.waiting_q() & ~Q(error='cancelled by a person')  # a task that expired waiting for a free slot is back-pressure, counted below, and one a person cancelled is no failure
+    who = _who()
+    ended = SentinelTask.objects.annotate(who=who).filter(not_waiting, status__in=('failed', 'expired'), finished_at__gte=six)
     restart_q = _restart_q(six)
     restart_cut = ended.filter(restart_q).count() if restart_q is not None else 0
     counted = ended.exclude(restart_q) if restart_q is not None else ended
-    completed = SentinelTask.objects.filter(status='done', finished_at__gte=six).count()
-    groups = list(counted.values('agent__name', 'kind').annotate(n=Count('id')).order_by('-n')[:10])
-    bad = [g for g in groups if g['n'] >= SENTINEL_FAILED_PROBLEM]
+    done_rows = SentinelTask.objects.filter(status='done', finished_at__gte=six)
+    completed = done_rows.count()
+    done_by = {(r['agent_id'], r['kind']): r['n'] for r in done_rows.values('agent_id', 'kind').annotate(n=Count('id'))}
+    names = dict(Agent.objects.filter(kind='scanner').values_list('pk', 'name'))
+    groups = []
+    for g in counted.values('who', 'kind').annotate(n=Count('id')).order_by('-n')[:60]:
+        g['done'] = done_by.get((g['who'], g['kind']), 0)
+        g['name'] = names.get(g['who']) or 'a Sentinel'
+        g['share'] = g['n'] / (g['n'] + g['done'])
+        groups.append(g)
     failed_total = counted.count()
     share = failed_total / (failed_total + completed) if failed_total + completed else 1.0
-    # an alert needs volume: a handful of stopped tasks beside thousands that completed, with Sentinels live, is nothing to act on
-    if bad and (not fleet['live_sentinels'] or not completed or share >= SENTINEL_ERROR_SHARE):
+    # each Sentinel and kind is judged on its own numbers: a kind that fails every time, or a Sentinel whose tasks all stop reporting, is an alert at any
+    # volume of work beside it. The fleet-wide share only decides for the groups with several failures when nothing group-wise says so (an install with no
+    # live Sentinel, or nothing completed, or 5 percent of everything that finished)
+    # (a task whose Sentinel is not known, an old row or a dispatch that timed out before any claim, has no numbers of its own: only the overall rule judges it)
+    own = [g for g in groups if g['who'] is not None and ((g['n'] >= SENTINEL_FAILED_PROBLEM and g['share'] >= GROUP_FAILED_SHARE) or not g['done'])]
+    several = [g for g in groups if g['n'] >= SENTINEL_FAILED_PROBLEM]
+    overall = bool(several) and (not fleet['live_sentinels'] or not completed or share >= SENTINEL_ERROR_SHARE)
+    bad = sorted({id(g): g for g in own + (several if overall else [])}.values(), key=lambda g: -g['n'])[:10]
+    if bad:
         samples = {}
         for g in bad[:5]:
-            err = (counted.filter(agent__name=g['agent__name'], kind=g['kind']).exclude(error='').order_by('-finished_at').values_list('error', flat=True).first())
-            samples[f"{g['agent__name']}/{g['kind']}"] = str(err or '')[:200]
+            err = (counted.filter(who=g['who'], kind=g['kind']).exclude(error='').order_by('-finished_at').values_list('error', flat=True).first())
+            samples[f"{g['name']}/{g['kind']}"] = str(err or '')[:200]
         checks.append(_check('sentinel_errors', 'problem', 'Sentinel tasks are failing',
-                             '; '.join(f"{g['agent__name'] or 'a Sentinel'}: {g['n']} {g['kind']} task(s) failed or stopped reporting" for g in bad)
+                             '; '.join(f"{g['name']}: {g['n']} {g['kind']} task(s) failed or stopped reporting"
+                                       + (f", {g['done']} completed" if g['done'] else ', none completed') for g in bad)
                              + f". In the last six hours {failed_total} of {failed_total + completed} finished tasks failed or stopped reporting ({share * 100:.1f}%), "
                                f"{completed} completed, with {fleet_lib.sentinels_text(fleet['live_sentinels'])}"
                              + (f'; {restart_cut} that stopped reporting around an update restart are not counted' if restart_cut else '') + '.',
-                             {'groups': [{'sentinel': g['agent__name'], 'kind': g['kind'], 'failed': g['n']} for g in bad], 'last_errors': samples,
+                             {'groups': [{'sentinel': g['name'], 'kind': g['kind'], 'failed': g['n'], 'completed': g['done']} for g in bad], 'last_errors': samples,
                               'failed': failed_total, 'completed': completed, 'live_sentinels': fleet['live_sentinels'], 'restart_cut': restart_cut,
                               'builtin_scanner': fleet['builtin_scanner']}))
     else:
@@ -817,21 +848,43 @@ def ops_checks(now=None, templates_release=None):
         behind = not fleet['live_sentinels'] or (growing and queued_now >= max(slots, 1))
         where = (f"The install has {slots} slot{'s' if slots != 1 else ''} across {fleet_lib.sentinels_text(fleet['live_sentinels'])}; "
                  f'{completed} completed in the same six hours and {queued_now} are queued now.')
+        share_waited = waited / (waited + completed)
+        saturated = bool(slots) and (share_waited >= WAIT_SATURATED_SHARE or queued_now >= 3 * slots)  # whatever the trend: a good part of the work finds no free slot
         if not fleet['live_sentinels']:
             advice = 'No Sentinel is live, so none of this work is being done: bring a Sentinel online on the Sentinels page.'
         elif behind:
             advice = (f'Work is falling behind: waits grew from {earlier} in the earlier three hours to {recent} in the latest three, and the queue holds '
                       f'{queued_now} against {slots} slots. Add a Sentinel, or give the ones you have more slots.')
+        elif saturated:
+            advice = (f'The Sentinels are at capacity: {waited} of {waited + completed} tasks ({share_waited * 100:.0f}%) found no free slot in six hours '
+                      f'({earlier} then {recent}, so it is not getting worse). Nothing is broken; raise the slot count of a Sentinel or bring another online '
+                      'if you want this work done sooner.')
         elif growing:
             advice = f'Waits grew ({earlier} then {recent}) but only {queued_now} are queued against {slots} slots, so work is not falling behind.'
         else:
             advice = f'The backlog is not growing ({earlier} waits in the earlier three hours, {recent} in the latest three): the Sentinels are keeping up and no action is needed.'
-        checks.append(_check('sentinel_waiting', 'warning', 'Sentinel tasks are waiting for a free slot',
+        facts = {'waited': waited, 'by_kind': {r['kind']: r['n'] for r in held}, 'slots': slots, 'completed': completed, 'queued_now': queued_now,
+                 'waited_earlier': earlier, 'waited_recent': recent, 'growing': growing, 'falling_behind': behind, 'saturated': saturated,
+                 'live_sentinels': fleet['live_sentinels']}
+        # with no Sentinel live nothing is being done at all: that is a problem (a warning, not a note); with Sentinels live it is back-pressure, a note
+        checks.append(_check('sentinel_waiting', 'warning' if fleet['live_sentinels'] else 'problem', 'Sentinel tasks are waiting for a free slot',
                              f"{waited} task(s) waited for a Sentinel slot in the last six hours ({', '.join(str(r['n']) + ' ' + r['kind'] for r in held[:5])}); "
-                             f'their targets stay due and are asked again. {where} {advice}',
-                             {'waited': waited, 'by_kind': {r['kind']: r['n'] for r in held}, 'slots': slots, 'completed': completed, 'queued_now': queued_now,
-                              'waited_earlier': earlier, 'waited_recent': recent, 'growing': growing, 'falling_behind': behind,
-                              'live_sentinels': fleet['live_sentinels']}, severity='info'))
+                             f'their targets stay due and are asked again. {where} {advice}', facts,
+                             severity='info' if fleet['live_sentinels'] else 'warning'))
+
+    # a Sentinel that was registered and approved, was heard from this week, and now none is live: nothing runs, whether or not tasks wait
+    if not fleet['live_sentinels']:
+        gone = list(Agent.objects.filter(kind='scanner', status='active', token__revoked=False, last_seen__gte=now - timedelta(days=7))
+                    .order_by('name').values_list('name', flat=True)[:10])
+        if gone:
+            checks.append(_check('sentinels_offline', 'problem', 'No Sentinel is live',
+                                 f"No Sentinel has been heard from lately, so no scan work is being done. Registered and approved, but silent: {', '.join(gone)}. "
+                                 'Check that the Sentinel is running and can reach this server (the Sentinels page shows when each was last seen).',
+                                 {'silent': gone}, severity='warning'))
+        else:
+            checks.append(_check('sentinels_offline', 'ok', 'Sentinels are heard from', '', {}))
+    else:
+        checks.append(_check('sentinels_offline', 'ok', 'Sentinels are heard from', '', {}))
 
     # failed activity lines, by kind
     failed_kinds = list(AgentActivity.objects.filter(status='failed', created_at__gte=six).values('kind').annotate(n=Count('id')).order_by('-n')[:10])
@@ -1013,8 +1066,8 @@ def apply_ops_report(body, now=None):
         if alert is None:
             continue
         alert.ai_detail = usable_note(item.get('diagnosis'), min_words=DIAGNOSIS_MIN_WORDS)[:NOTE_MAX]  # nothing, not filler, when the model gave no real diagnosis
-        if alert.ai_detail and fleet.contradicts_fleet(alert.ai_detail, facts):
-            alert.ai_detail = ''  # it says no Sentinel is online while one is, or to start a built-in Sentinel this install does not have: the facts win
+        if alert.ai_detail and fleet.contradicts_fleet(alert.ai_detail, facts):  # a sentence says no Sentinel is online while one is, or to start a built-in one this install does not have: the facts win, the rest stays
+            alert.ai_detail = usable_note(fleet.without_contradictions(alert.ai_detail, facts), min_words=DIAGNOSIS_MIN_WORDS)[:NOTE_MAX]
         alert.ai_model = model if alert.ai_detail else ''
         if item.get('severity') in ('info', 'warning', 'critical') and check['state'] != 'problem':
             alert.severity = item['severity'] if item['severity'] != 'critical' else 'warning'  # only a problem the server sees is critical
@@ -1049,8 +1102,8 @@ def open_alerts(user=None):
         if a.dismissed_at and a.dismissed_digest == a.digest:
             continue
         ai_detail = usable_note(a.ai_detail, min_words=DIAGNOSIS_MIN_WORDS)  # a row stored before filler was refused is not shown either
-        if ai_detail and fleet.contradicts_fleet(ai_detail, facts):
-            ai_detail = ''  # nor is advice stored before this guard that the facts now contradict
+        if ai_detail and fleet.contradicts_fleet(ai_detail, facts):  # advice stored before this guard keeps only the sentences the facts do not contradict
+            ai_detail = usable_note(fleet.without_contradictions(ai_detail, facts), min_words=DIAGNOSIS_MIN_WORDS)
         out.append({'id': a.pk, 'code': a.code, 'severity': a.severity, 'title': a.title, 'detail': a.detail, 'ai_detail': ai_detail,
                     'ai_model': a.ai_model if ai_detail else '', 'first_seen': a.first_seen.isoformat(), 'last_seen': a.last_seen.isoformat()})
     return out

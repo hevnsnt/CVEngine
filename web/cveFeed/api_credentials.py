@@ -80,6 +80,24 @@ def service_for_module(module):
     return None
 
 
+def _pairs(mapping, fields):
+    """``[(path, value)]`` of a service's usable settings (a pair like Censys's id and secret is only usable whole)."""
+    out = []
+    for path, field in mapping:
+        names = field if isinstance(field, tuple) else (field,)
+        parts = [fields.get(n) for n in names]
+        if all(parts):
+            out.append((path, ':'.join(parts)))
+    return out
+
+
+def key_fingerprint_from_args(service, args):
+    """The fingerprint (``key_limits.fingerprint``) of the key a scanner's ``-c`` arguments carry for ``service``, so a pause of that key ends when the key changes."""
+    from cveFeed import key_limits
+    paths = {path for path, _ in SERVICES.get(service, (None, None, []))[2]}
+    return key_limits.fingerprint([a.split('=', 1)[1] for prev, a in zip(args, args[1:]) if prev == '-c' and '=' in a and a.split('=', 1)[0] in paths])
+
+
 def bbot_config_args(project):
     """``-c path=value`` flags for every configured service, ready to hand to the scanner."""
     args = []
@@ -89,13 +107,11 @@ def bbot_config_args(project):
     from cveFeed import key_limits
     for service, fields in resolved.items():
         _, _, mapping = SERVICES.get(service, (None, None, []))
-        if mapping and project is not None and key_limits.paused(project.pk, service):
-            continue  # the provider said this key is over its limit a short while ago: the module runs without it until the pause ends
-        for path, field in mapping:
-            names = field if isinstance(field, tuple) else (field,)
-            parts = [fields.get(n) for n in names]
-            if all(parts):  # a pair like Censys's id and secret is only usable whole
-                args += ['-c', f'{path}={":".join(parts)}']
+        pairs = _pairs(mapping, fields)
+        if pairs and project is not None and key_limits.paused(project.pk, service, key_limits.fingerprint([v for _, v in pairs])):
+            continue  # the provider said this key is over its limit a short while ago: the module runs without it until the pause ends (or the key is replaced)
+        for path, value in pairs:
+            args += ['-c', f'{path}={value}']
     return args
 
 

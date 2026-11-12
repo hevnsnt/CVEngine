@@ -311,7 +311,7 @@ TOOLS = [
     ('list_changes', 'Inventory changes since a time (ISO or 24h/7d/30d): hosts appearing or retiring, ports opened or closed, product/version, technology, certificate and auth-state changes.', _schema(
         _page_props({'project': SLUG_OR_ALL, 'since': {'type': 'string'}, 'kind': {'type': 'string'}, 'host': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_changes(c, a.get('project'), a), False),
-    ('list_activity', 'The AI activity log, newest first: what the engine read, checked, wrote, ran and validated, for this project plus system-wide entries. kind: feed|inventory|target|confirm|write_check|run_check|validate|discovery|scan|hygiene|changes|remediation.', _schema(
+    ('list_activity', 'The AI activity log, newest first: what the engine read, checked, wrote, ran and validated, for this project plus system-wide entries. kind: feed|inventory|target|confirm|write_check|run_check|validate|discovery|scan|hygiene|changes|remediation. Each entry has a status: running, done, failed, waiting, notice, skipped or deferred; only failed is a failure.', _schema(
         _page_props({'project': SLUG_OR_ALL, 'kind': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_activity(c, a.get('project'), a), False),
     ('stats_history', "Daily snapshots of a project's inventory and findings counts, oldest first, for trend charts: {date, hosts, exposed_hosts, open_findings: {critical..info}, cve_matches: {fire, smoke, ice}, fixed, mean_days_to_fix}. days (default 90, capped at 365).", _schema(

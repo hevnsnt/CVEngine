@@ -1271,6 +1271,9 @@ a.bb-tile{text-decoration:none;color:inherit;display:block}a.bb-tile:focus-visib
 .agent li.a-failed::before{background:var(--fire);border-color:var(--fire)}
 .agent li.a-waiting::before{background:var(--smoke);border-color:var(--smoke)}
 .a-waiting .a-msg{color:var(--smoke-ink)}
+.agent li.a-notice::before,.agent li.a-deferred::before{background:var(--smoke);border-color:var(--smoke)}
+.agent li.a-skipped::before{background:var(--surface);border-color:var(--smoke)}
+.a-notice .a-msg,.a-skipped .a-msg,.a-deferred .a-msg{color:var(--smoke-ink)}
 .agent-backlog{margin:0 0 var(--s-2);padding:var(--s-2) var(--s-3);border-radius:var(--r-s);background:var(--smoke-bg);color:var(--smoke-ink);box-shadow:inset 0 0 0 1px var(--ring-smoke);font-size:var(--fs-2)}
 .agent-backlog[hidden]{display:none}
 .agent li.a-done::before,.agent li.a-success::before{background:var(--ok);border-color:var(--ok)}
