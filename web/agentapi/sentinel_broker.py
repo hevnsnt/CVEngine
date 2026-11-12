@@ -2471,6 +2471,10 @@ def _clean_nuclei_result(body):
     unreachable = body.get('unreachable')
     if isinstance(unreachable, list):  # the hosts the Sentinel could not resolve or connect to: not scanned, whatever the findings say
         out['unreachable'] = sorted({_text(h, 260).strip().lower() for h in unreachable[:MAX_ADDRESSES * 4] if isinstance(h, str) and h.strip()})
+    checked = body.get('not_checked')
+    if isinstance(checked, list):  # the ports a Sentinel did not fully check, and why: shown to the owner, never silent
+        out['not_checked'] = [{'target': _text(row['target'], 260).strip(), 'reason': _text(row.get('reason') or '', 200).strip()}
+                              for row in checked[:MAX_ADDRESSES] if isinstance(row, dict) and isinstance(row.get('target'), str) and row['target'].strip()]
     if isinstance(body.get('templates_release'), str) and body['templates_release'].strip():
         out['templates_release'] = _text(body['templates_release'], 40)  # the nuclei template release the run used: a stale run is visible
     return out

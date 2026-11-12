@@ -42,6 +42,13 @@ def nuclei_tag_service(tags):
     return f'nuclei:{joined}'
 
 
+def failed_service(service):
+    """The ledger key under which a target that was only partly checked is remembered, for the same run (``nuclei:<tags>`` becomes ``nuclei-failed:<tags>``): a row
+    there that is younger than its TTL (``nuclei-failed``, 24 h) means the target is asked again tomorrow, not at the next scan."""
+    base, colon, rest = service.partition(':')
+    return f'{base}-failed{colon}{rest}'
+
+
 def ttl(service):
     """Seconds a finished run of ``service`` stays fresh. Override with CVENGINE_TTL_<SERVICE> in hours."""
     base = service.split(':')[0]
