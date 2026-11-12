@@ -632,6 +632,22 @@ function emptyNode(empty, data) {
   const v = typeof empty === "function" ? empty(data) : empty;  // a function may read the answer that came back (Situations: the server's state)
   return typeof v === "string" ? el("p", "empty", v) : emptyState(v);
 }
+// A project with no scan at all has nothing to report "fine" about: the Findings and Hygiene lists say so, and what to do, instead of "everything is fixed" or
+// "looks healthy". The answer is asked for only when a list came back empty (an all-projects view has no single project to ask about).
+async function neverScanned() {
+  if (ALL) return false;
+  try {
+    return (await api("GET", `${base}/scans?${query({ page_size: 0 })}`)).count === 0;
+  } catch (_) {
+    return false;
+  }
+}
+const nothingScanned = (what) => ({
+  icon: "target",
+  title: "Nothing has been scanned yet",
+  body: `${what} appear once a scan has looked at your hosts. Add a target to start one.`,
+  actions: addTargetsAction(),
+});
 // The empty Targets page's next step: the shell's own Add targets button, when this page has one
 function addTargetsAction() {
   const add = document.querySelector("[data-add-targets]");
@@ -2465,7 +2481,10 @@ function findingPage(mount, cfg) {
       lh.refresh();
       if (cfg.onLoaded) cfg.onLoaded(data, reset, quiet);
     },
-    prepare: (items) => Promise.all([...new Set(items.map(projectOf))].map(loadSla)),
+    prepare: async (items) => {
+      await Promise.all([...new Set(items.map(projectOf))].map(loadSla));
+      if (!items.length && cfg.askScanned) cfg.askScanned(await neverScanned());
+    },
     // quiet: a refresh nobody asked for. The rows are drawn aside and handed to renderKeepingState, so a disclosure the reader opened in a row (the hosts of a
     // finding group) and the scroll of the list survive it (static/cve/keep-state.js)
     render: (_, items, reset, quiet) => {
@@ -4369,6 +4388,7 @@ const pages = {
       box.append(list);
       return box;
     };
+    let unscanned = false; // the project has no scan at all (asked for when the list is empty): the empty state says so
     const list = findingPage(mount, {
       bulk: true,
       seenPage: "findings",
@@ -4399,6 +4419,7 @@ const pages = {
       filters: [views.node, q, scope, kev, ai, type.node, sev.node, status.node, everyHost],
       params,
       exportParams: filtersNow, // the CSV is one line per host finding whatever the list shows
+      askScanned: (none) => (unscanned = none),
       empty: () => {
         const narrowed = type.value !== "all" || sev.value !== "all" || q.value.trim() || scope.value || kev.value;
         if (narrowed)
@@ -4419,6 +4440,7 @@ const pages = {
               },
             ],
           };
+        if (unscanned) return nothingScanned("Findings");
         if (status.value === "actionable")
           return {
             icon: "shield",
@@ -4644,14 +4666,20 @@ pages.hygiene = function hygiene(mount) {
   const metaRow = el("div", "list-meta");
   metaRow.append(countLine, tools);
   const lh = listHead({ page: "hygiene", lead: [q], panelNodes: [sev.node, kind], meta: metaRow });
+  let unscanned = false; // the project has no scan at all (asked for when the list is empty): the empty state says so
   root.append(lh.head);
   const list = createList({
     mount: root,
     path: `${base}/hygiene`,
     params: () => ({ severity: sev.value, check: kind.value, q: q.value }),
+    prepare: async (items) => {
+      unscanned = !items.length && (await neverScanned());
+    },
     empty: () =>
       sev.value || kind.value || q.value.trim()
         ? { icon: "search", title: "No issue matches these filters" }
+        : unscanned
+        ? nothingScanned("Hygiene checks (certificates, TLS, email settings, cleartext services)")
         : {
             icon: "shield",
             tone: "calm",
