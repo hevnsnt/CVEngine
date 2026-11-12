@@ -845,7 +845,7 @@ def generate_template(cve, project=None, candidate_only=True):
     from cveFeed import activity, ai_jobs
     key = _generation_lease(cve)
     try:
-        sentinel_dispatch.nuclei_validate_ready(project)  # raises ScannerUnavailable before the AI is asked for a template nothing could check
+        sentinel_dispatch.nuclei_validate_ready(project, cve=cve)  # raises ScannerUnavailable before the AI is asked for a template nothing could check
         # the reply is a template, whose literal values (a JWT in a header, a Basic credential, a PEM header matcher) must survive: only the
         # prompt is masked
         job = ai_jobs.enqueue('template_generation', 'template_generation', system=SYSTEM_PROMPT, parts=prompt_parts(cve_info_for(cve)),
@@ -881,6 +881,11 @@ def job_answer(job, text):
         tmpl.save()
         activity.log('write_check', f'The AI-written check for {cve.cve_id} failed the static check', project=project, cve_id=cve.cve_id)
         return None
+    # the draft row exists before its first check: a Sentinel that is not the built-in scanner checks only the exact text of a draft row
+    # (agentapi.ai_checks.binding_problem). It waits under the 'syntax' stage, which the automatic validator does not pick up before the hour is out
+    # (and then simply runs the same check again, cveFeed.templatevalidate.step).
+    tmpl.status, tmpl.validation_stage, tmpl.validation_next_at = GeneratedTemplate.STATUS_DRAFT, 'syntax', timezone.now() + datetime.timedelta(hours=1)
+    tmpl.save()
     with activity.step('validate', f'Validating the check for {cve.cve_id} (safety gate and nuclei -validate)',
                        project=project, cve_id=cve.cve_id) as handle:
         try:
@@ -889,6 +894,7 @@ def job_answer(job, text):
             valid, output = False, f'not validated: no scanner could take this work ({exc.kind}); the CVE is tried again later'
         handle.done_message = f'Check for {cve.cve_id} {"passed" if valid else "failed"} validation'
     tmpl.status = GeneratedTemplate.STATUS_DRAFT if valid else GeneratedTemplate.STATUS_INVALID
+    tmpl.validation_stage, tmpl.validation_next_at = '', None
     tmpl.validation_output = (output + '\nPending automatic validation: a positive fixture test and a second-pass review run before it may run on a host.'
                               if valid else output)
     if not valid:

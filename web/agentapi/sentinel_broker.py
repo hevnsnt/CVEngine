@@ -2127,8 +2127,9 @@ def accept_task(ctx, task_id):
 
 
 def approved_check(ctx, task_id):
-    """``GET sentinel/tasks/<id>/check``: the hash and mode of the AI-written check (``nuclei_validate``) the server approves for a task the calling
-    Sentinel holds (claimed or running): ``{task_id, template_sha256, mode}``. The Sentinel asks it apart from the task it was handed and runs the
+    """``GET sentinel/tasks/<id>/check``: the hash, mode and sorted targets of the AI-written check (``nuclei_validate``) the server approves for a task
+    the calling Sentinel holds (claimed or running): ``{task_id, template_sha256, mode, targets}`` (``targets`` is empty for a draft). The hash
+    catches a check changed in transit or edited after dispatch; it does not protect against a compromised server, which answers this itself. The Sentinel asks it apart from the task it was handed and runs the
     text only when its own hash of the file it wrote is this one (client/daemon.py). The answer is worked out now from the server's own stored task
     (``ai_checks.task_problem``: the text still hashes to the task's hash and is still approved, and for a Sentinel other than the built-in scanner,
     read-only and aimed only at the task's own target and port). Anything else, a task of another Sentinel or kind included, is a 404 and audited."""
@@ -2141,7 +2142,9 @@ def approved_check(ctx, task_id):
         audit.record(ctx.user, 'sentinel.check.refused', f'sentinel task #{_int(task_id)}', org=task.project.org_id if task else None,
                      task_id=_int(task_id), agent_id=agent.pk, agent=agent.name, reason=why[:300])
         raise ApiError(404, 'no approved check for this task')
-    return {'task_id': task.pk, 'template_sha256': task.target['template_sha256'], 'mode': task.target['mode']}
+    targets = task.target.get('targets') if task.target.get('mode') == 'test' else []
+    return {'task_id': task.pk, 'template_sha256': task.target['template_sha256'], 'mode': task.target['mode'],
+            'targets': sorted(t for t in targets or [] if isinstance(t, str))}
 
 
 def get_task(ctx, task_id):

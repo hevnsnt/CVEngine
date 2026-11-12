@@ -1504,58 +1504,91 @@ def os_reliable(result):
 
 # nuclei_validate: an AI-written or approved check, on the built-in scanner or the project's own Sentinels (agentapi.ai_checks) ---------------
 
-def _carrier_project(project):
-    """The project a ``nuclei_validate`` task in mode ``validate`` is filed under: the one the work is for, else the oldest project a scanner can take
-    the kind for (the built-in scanner's scope is the whole instance; with none, the oldest project one of its own Sentinels covers), else the oldest.
-    The task carries only a template written from public CVE data, never a host, and runs against a loopback page of the scanner's own."""
-    if project is not None and not isinstance(project, int):
-        return project
-    if project:
-        return _project_of(project)
-    from dashboard.models import Project
-    projects = Project.objects.select_related('org').order_by('id')
-    for candidate in projects[:200]:
-        if any_scanner_for(candidate, 'nuclei_validate'):
-            return candidate
-    return projects.first()
+def _carrier_project(project, text=None):
+    """The project a ``nuclei_validate`` task in mode ``validate`` (the AI's own draft, checked before promotion) is filed under, or ``None``.
 
-
-def nuclei_validate_ready(project=None):
-    """Raise ``ScannerUnavailable`` when a new template could not be checked now (no live scanner that may take the kind: the built-in scanner, or
-    with none a contract-4 Sentinel of the project; the kind never runs here), so the AI is not asked for one first. Records nothing."""
-    carrier = _carrier_project(project)
-    if carrier is None or not any_scanner_for(carrier, 'nuclei_validate'):
-        from reNgine.resources import ScannerUnavailable
-        raise ScannerUnavailable('nuclei_validate', 'no live scanner can check a new template (the built-in scanner, or a Sentinel of contract 4 '
-                                                    'or newer when there is none)')
-
-
-def _gate(mode, text):
-    """Why ``text`` is not sent as a check in ``mode`` at all, or "": the server's approval (``ai_checks.approval_problem``) and, while the install
-    has no built-in scanner (so a Sentinel of a customer network runs it), read-only and only the task's own target and port. Nothing that fails is
-    ever put in a task."""
+    While the install has a built-in scanner (whose scope is the whole instance): the one the work is for, else the oldest. With none, the draft runs
+    on a tenant's own Sentinel, so it goes only to a project that owns a target matched to the draft's CVE (``ai_checks.draft_projects``, review D7):
+    the one the work is for when it is such a project, else the oldest such project one of its own Sentinels can take it for. Never another
+    tenant's Sentinel: with no such project, ``None``, and the draft waits."""
     from agentapi import ai_checks
-    problem = ai_checks.approval_problem(mode, text, builtin=True)
-    if problem or ai_checks.builtin_in_use():
-        return problem
-    if mode == 'test' and not ai_checks.validation_readonly(text):
-        return ai_checks.NOT_READ_ONLY  # an installed template Settings allows, but only for the built-in scanner
-    return ai_checks.external_problem(text)
+    if ai_checks.builtin_in_use():
+        if project is not None and not isinstance(project, int):
+            return project
+        if project:
+            return _project_of(project)
+        from dashboard.models import Project
+        return Project.objects.select_related('org').order_by('id').first()
+    owners = ai_checks.draft_projects(text) if text else []
+    if project is not None:
+        project_id = getattr(project, 'pk', project)
+        return (project if not isinstance(project, int) else _project_of(project)) if project_id in owners else None
+    for project_id in owners[:200]:
+        candidate = _project_of(project_id)
+        if candidate is not None and any_scanner_for(candidate, 'nuclei_validate'):
+            return candidate
+    return None
+
+
+def nuclei_validate_ready(project=None, cve=None):
+    """Raise ``ScannerUnavailable`` when a new template could not be checked now, so the AI is not asked for one first. Records nothing. While the
+    install has a built-in scanner: a live one. With none (review D7): a live contract-4 Sentinel of ``project`` (the project the work is for), or
+    with no project, of a project that owns a target matched to ``cve`` (any project's own Sentinel when neither is named, which only answers
+    whether anything could run checks at all; no task is filed by this)."""
+    from agentapi import ai_checks
+    from reNgine.resources import ScannerUnavailable
+    if ai_checks.builtin_in_use():
+        carrier = _carrier_project(project)
+        ok = carrier is not None and any_scanner_for(carrier, 'nuclei_validate')
+    elif project is not None:
+        carrier = project if not isinstance(project, int) else _project_of(project)
+        ok = carrier is not None and any_scanner_for(carrier, 'nuclei_validate')
+    else:
+        from dashboard.models import Project
+        candidates = Project.objects.select_related('org').order_by('id')
+        if cve is not None:
+            from cveFeed.models import CVEMatch
+            candidates = candidates.filter(pk__in=CVEMatch.objects.filter(cve_entry=cve).values('subdomain__target_domain__project_id'))
+        ok = any(any_scanner_for(p, 'nuclei_validate') for p in candidates[:200])
+    if not ok:
+        raise ScannerUnavailable('nuclei_validate', 'no live scanner can check a new template (the built-in scanner, or a Sentinel of contract 4 '
+                                                    'or newer of a project that owns a target of this CVE when there is none)')
+
+
+def _gate(mode, text, project=None, targets=None):
+    """Why ``text`` is not sent as a check in ``mode`` at all, or "": the server's approval (``ai_checks.approval_problem``). While the install has a
+    built-in scanner it is the built-in rule; with none (a Sentinel of a customer network runs it), the content rules and the approval record of
+    exactly this text, bound to ``project`` and ``targets`` (review D3). Nothing that fails is ever put in a task."""
+    from agentapi import ai_checks
+    builtin = ai_checks.builtin_in_use()
+    return ai_checks.approval_problem(mode, text, builtin=builtin, project=project, targets=None if builtin else targets)
 
 
 def try_nuclei_validate(text, project=None):
-    """``(valid, output, fixture_ok, fixture_note)`` for a template's syntax check and benign-fixture run on a scanner (``ai_checks``: the built-in
-    scanner while the install has one, else a Sentinel of the project). A draft the server's gate refuses is answered here as not valid and never
-    sent. Raises ``ScannerUnavailable`` when no scanner can take it: the check never runs on this server."""
+    """``(valid, output, fixture_ok, fixture_note)`` for a draft's syntax check and benign-fixture run on a scanner (``ai_checks``: the built-in
+    scanner while the install has one, else a Sentinel of a project that owns a target of the draft's CVE). A draft the server's gate refuses is
+    answered here as not valid and never sent. Raises ``ScannerUnavailable`` when no scanner can take it: the check never runs on this server, and
+    never on another tenant's Sentinel (it waits)."""
     from agentapi import ai_checks
-    problem = _gate('validate', text)
+    from reNgine.resources import ScannerUnavailable
+    if not ai_checks.builtin_in_use():
+        problem = ai_checks.content_problem('validate', text)
+        if problem:
+            return False, problem, None, ''
+    carrier = _carrier_project(project, text)
+    if carrier is None:
+        named = _project_of(project) if isinstance(project, int) else project
+        if named is not None and not ai_checks.builtin_in_use() and any_scanner_for(named, 'nuclei_validate'):
+            problem = ai_checks.binding_problem('validate', text, named, None)
+            if problem and not ai_checks.draft_rows(text).exists():
+                return False, problem, None, ''  # no draft holds this text: it never will, so it is refused rather than left waiting
+        raise ScannerUnavailable('nuclei_validate', 'no Sentinel of a project that owns a target of this CVE can check the template now')
+    problem = _gate('validate', text, project=carrier)
     if problem:
         return False, problem, None, ''
-    carrier = _carrier_project(project)
     scanner_or_local(carrier, 'nuclei_validate')  # raises when no scanner is live
     result = dispatch_or_none(carrier, 'nuclei_validate', ai_checks.target('validate', text))
     if result is None:
-        from reNgine.resources import ScannerUnavailable
         raise ScannerUnavailable('nuclei_validate', 'the scanner returned no result for the template check')
     return result.get('valid') is True, result.get('output') or '', result.get('fixture_ok'), result.get('fixture_note') or ''
 
@@ -1573,7 +1606,7 @@ def try_template_test(text, hosts, project):
     from reNgine.resources import ScannerUnavailable
     project = _project_of(project) if isinstance(project, int) else project
     hosts = list(hosts)
-    problem = _gate('test', text)
+    problem = _gate('test', text, project=project, targets=hosts)
     if problem:
         why = problem if problem.startswith('not tested') else f'not tested: {problem}'
         return [{'host': host, 'vulnerable': False, 'output': '', 'error': why[:300]} for host in hosts]
