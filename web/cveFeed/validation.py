@@ -60,7 +60,7 @@ READONLY_METHODS = {'GET', 'HEAD', 'OPTIONS'}
 # code or file access. The installed community templates are not held to the generated-template gate (matchers, request counts),
 # but never to less than this.
 READONLY_FORBIDDEN_KEYS = {'payloads', 'attack', 'fuzzing', 'iterate-all', 'body', 'unsafe', 'race', 'pipeline', 'cookie-reuse',
-                           'code', 'javascript', 'headless', 'file', 'flow', 'workflows', 'self-contained'}
+                           'code', 'javascript', 'headless', 'file', 'flow', 'workflows', 'self-contained', 'protocol-redirects'}
 MAX_INSTALLED_TEMPLATE_BYTES = 200_000
 # Out of band: the {{interactsh-url}} placeholder, the interactsh_* match parts, or an interactsh page as the evidence (an
 # SSRF check that makes the target fetch one). A matcher that only recognizes an interactsh server by its

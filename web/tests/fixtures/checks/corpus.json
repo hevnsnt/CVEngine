@@ -854,6 +854,13 @@
       "read_only": false,
       "own_target": false,
       "sentinel": false
+    },
+    {
+      "name": "protocol_redirects",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    protocol-redirects: true\n    path: [\"{{BaseURL}}/\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
     }
   ]
 }
