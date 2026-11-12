@@ -218,3 +218,15 @@ class LabResults(TestCase):
         self.assertEqual((cleaned['incomplete'], cleaned['unfinished']), (True, ['192.0.2.11', '192.0.2.12']))
         text = sb.clean_result('naabu', {'outcome': 'done', 'ports': {}, 'incomplete': 'ran out', 'unfinished': ['192.0.2.11']})
         self.assertNotIn('incomplete', text)  # text where a boolean belongs is not read as incomplete
+
+    def test_a_discover_result_is_cut_to_the_chunk_the_sweep_asked_about(self):
+        import ipaddress
+
+        from cveFeed.internal_discovery import _usable
+        fixture, out = self.cleaned('discover')
+        net = ipaddress.ip_network(fixture['target']['cidr'])
+        found = [_usable(net, h['ip']) for h in out['hosts']]
+        self.assertTrue(all(found), found)
+        self.assertGreaterEqual(len(found), 5)
+        stranger = sb.clean_result('discover', {'outcome': 'done', 'hosts': [{'ip': '192.0.2.200', 'hostnames': []}, {'ip': '198.51.100.9', 'hostnames': []}]})
+        self.assertEqual([_usable(net, h['ip']) for h in stranger['hosts']], [None, None])  # the server never trusts a Sentinel's address to be in the range
