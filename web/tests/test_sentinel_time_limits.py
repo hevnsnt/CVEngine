@@ -18,6 +18,7 @@ def _probe_worst_cases():
             'page_read': page_read.BATCH_SECONDS + js_libraries.DEFAULT_MAX_SECONDS}
 
 
+WATCHDOG_HARD_STOP = 900 + 300  # the Sentinel's watchdog for a probe kind: DEFAULT_BUDGET_SECONDS + GRACE_SECONDS (client/watchdog.py, which the server's CI does not carry)
 REPORT_ALLOWANCE = 60  # time for the finished result to travel
 
 
@@ -41,8 +42,7 @@ class WaitAtLeastAsLongAsTheTool(SimpleTestCase):
 
 
     def test_the_probe_kinds_wait_longer_than_their_batch_may_run_and_than_the_watchdog_lets_them(self):
-        from client import watchdog
         for kind, worst in _probe_worst_cases().items():
             ceiling = sentinel_dispatch._dispatch_timeout(kind)
             self.assertGreaterEqual(ceiling, worst + REPORT_ALLOWANCE, f'{kind}: the stage gives up while the batch may still run (worst case {worst} s)')
-            self.assertGreaterEqual(ceiling, watchdog.deadline_seconds(kind) + REPORT_ALLOWANCE, f'{kind}: the stage gives up before the Sentinel\'s own hard stop')
+            self.assertGreaterEqual(ceiling, WATCHDOG_HARD_STOP + REPORT_ALLOWANCE, f'{kind}: the stage gives up before the Sentinel\'s own hard stop')
