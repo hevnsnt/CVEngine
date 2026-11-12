@@ -230,3 +230,11 @@ class LabResults(TestCase):
         self.assertGreaterEqual(len(found), 5)
         stranger = sb.clean_result('discover', {'outcome': 'done', 'hosts': [{'ip': '192.0.2.200', 'hostnames': []}, {'ip': '198.51.100.9', 'hostnames': []}]})
         self.assertEqual([_usable(net, h['ip']) for h in stranger['hosts']], [None, None])  # the server never trusts a Sentinel's address to be in the range
+
+    def test_a_template_test_names_the_host_nothing_answered_as_an_error_never_a_negative_test(self):
+        _f, out = self.cleaned('nuclei_test')
+        by_host = {o['host']: o for o in out['outcomes']}
+        self.assertTrue(by_host['http://192.0.2.10']['vulnerable'])
+        dead = by_host['http://192.0.2.99']
+        self.assertFalse(dead['vulnerable'])
+        self.assertIn('never reached', dead['error'])

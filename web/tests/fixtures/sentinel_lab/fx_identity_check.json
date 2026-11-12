@@ -1,0 +1,94 @@
+{
+ "kind": "identity_check",
+ "name": "fx_identity_check",
+ "payload": {
+  "certs": [
+   {
+    "error": "not run: '192.0.2.10' is not allowed (that address is never scanned (loopback, link-local, metadata, multicast, reserved or documentation space))",
+    "id": "c1",
+    "names": [],
+    "status": "unknown"
+   }
+  ],
+  "dns": [
+   {
+    "error": "NoNameservers",
+    "id": "d1",
+    "records": [],
+    "status": "unknown"
+   },
+   {
+    "error": "NoNameservers",
+    "id": "d2",
+    "records": [],
+    "status": "unknown"
+   },
+   {
+    "error": "NoNameservers",
+    "id": "d3",
+    "records": [],
+    "status": "unknown"
+   },
+   {
+    "error": "not run: '192.0.2.10' is not allowed (that address is never scanned (loopback, link-local, metadata, multicast, reserved or documentation space))",
+    "id": "d4",
+    "records": [],
+    "status": "unknown"
+   }
+  ],
+  "outcome": "done",
+  "refused": [
+   "192.0.2.10"
+  ],
+  "touched": [
+   "www.example.com",
+   "example.com"
+  ]
+ },
+ "sentinel_seconds": 0.0,
+ "target": {
+  "certs": [
+   {
+    "host": "192.0.2.10",
+    "id": "c1",
+    "port": 443
+   }
+  ],
+  "dns": [
+   {
+    "id": "d1",
+    "name": "www.example.com",
+    "type": "CNAME"
+   },
+   {
+    "id": "d2",
+    "name": "example.com",
+    "type": "NS"
+   },
+   {
+    "id": "d3",
+    "name": "example.com",
+    "type": "MX"
+   },
+   {
+    "id": "d4",
+    "name": "192.0.2.10",
+    "type": "PTR"
+   }
+  ],
+  "scope": {
+   "addresses": [],
+   "blocked": [],
+   "domains": [],
+   "excluded": [],
+   "excluded_trees": [],
+   "hosts": [
+    "www.example.com",
+    "example.com",
+    "192.0.2.10"
+   ],
+   "private": false
+  }
+ },
+ "tool_rows": null
+}
