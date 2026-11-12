@@ -1,3 +1,4 @@
+import { foldNav } from "/staticfiles/cve/nav-fold.js";
 import { hostRow, previewHosts, suggestions, syntaxHelp } from "/staticfiles/cve/palette-search.js";
 
 // App shell behaviour: project switcher, mobile "More" sheet, account menu, and the jump palette (Ctrl/Cmd+K or "/").
@@ -211,15 +212,7 @@ const slugNow = () => {
 };
 
 function collect() {
-  const seen = new Set();
-  const out = [];
-  $$("[data-nav]").forEach((a) => {
-    const label = a.dataset.nav;
-    const key = `${a.getAttribute("href")}|${label}`; // the same page under two names (Assets, Hosts) is two rows: either word finds it
-    if (seen.has(key)) return;
-    seen.add(key);
-    out.push({ label, hint: "Go to", href: a.getAttribute("href"), section: "Go to" });
-  });
+  const out = foldNav($$("[data-nav]").map((a) => ({ label: a.dataset.nav, href: a.getAttribute("href") })));
   if ($("[data-add-targets]")) out.push({ label: "Add targets", hint: "Action", run: () => $("[data-add-targets]").click(), section: "Go to" });
   // commands registered by page scripts (keys.js, saved views): { label, hint, run, when? }
   (window.cveCommands || []).forEach((c) => {
@@ -250,7 +243,7 @@ function collect() {
   return out;
 }
 
-const helpRow = { label: "Search syntax", sub: "port:443 product:nginx -host:test", hint: "Help", run: syntaxHelp, section: "Help" };
+const helpRow = { label: "Search syntax", sub: "port:443 product:nginx -host:test", hint: "Syntax", run: syntaxHelp, section: "Syntax" };
 
 // Everything the palette lists for what is typed, in order, each row tagged with the section it belongs to.
 function rowsFor(raw) {

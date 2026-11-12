@@ -20,7 +20,7 @@
 ---
 
 <p align="center">
-  <img src="docs/images/cvengine-tour-1.3.gif" alt="What is new in 1.3: the Live page with hosts inside private networks counted apart, the Hosts page filtered to internal hosts, the Sentinels that scan them from inside the network, provisioning a Sentinel from a list of your organizations, the regrouped Settings tabs and the new Email tab" width="900">
+  <img src="docs/images/cvengine-tour-1.3.gif" alt="What is new in 1.3: the Overview with hosts inside private networks counted apart, the Hosts page filtered to internal hosts, the Sentinels that scan them from inside the network, provisioning a Sentinel from a list of your organizations, the regrouped Settings tabs and the new Email tab" width="900">
 </p>
 
 ## Know what you expose. Fix what's exploitable first.
@@ -63,7 +63,7 @@ The server runs no scan tool. Every install starts a **built-in scanner** next t
 - **AI reviewer.** A [boxed-in container](docs/AI-REVIEWER.md) reviews every open finding once and checks operations.
 - **OpenVAS** is a Greenbone stack on a Sentinel, off until you turn it on ([OpenVAS](docs/OPENVAS.md)).
 - **Screenshots** are taken by a Sentinel's headless Chromium.
-- **The left rail has 6 links** (Overview, Findings, Assets, Scans, Scanners, Bug bounty); Settings, Administration and Help are in the footer.
+- **The left rail has 6 links** (Overview, Findings, Hosts, Scans, Scanners, Bug bounty); Settings, Administration and About are in the footer.
 
 Upgrading from 1.3: [upgrading to 1.4](docs/UPGRADE.md#upgrading-to-14). Everything the product is built from, with versions and licenses, is on the About page and in [THIRD-PARTY.md](THIRD-PARTY.md).
 

@@ -35,6 +35,12 @@ def _defuse(value, depth=0):
     return _defuse(str(value), depth + 1)
 
 
+def defuse(value):
+    """``value`` with every string in it made safe to sit in a prompt: control characters removed and the marker tokens ``<<<`` and ``>>>``
+    replaced, so no text can forge or close a fence. For data that goes outside a fence."""
+    return _defuse(value)
+
+
 def fence(label, data):
     """``(text, nonce)``: ``data`` as JSON inside nonce markers the data cannot forge."""
     nonce = secrets.token_hex(8)

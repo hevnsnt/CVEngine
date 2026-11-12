@@ -1,4 +1,4 @@
-// The CVE explorer's logic that needs no browser: what the address says (?q=, severity, kev, page, id), the API address for it, the
+// The CVE catalog's logic that needs no browser: what the address says (?q=, severity, kev, page, id), the API address for it, the
 // Ctrl+K palette row that opens the explorer, and the small formatters the rows use. explorer.js draws; tests/test_cve_explorer.mjs checks this.
 
 export const SEVERITIES = ["critical", "high", "medium", "low"];
@@ -47,7 +47,7 @@ export function cvePaletteRow(text) {
   if (q.length < 2 || /[:"]/.test(q) || q.startsWith("-")) return null;
   return {
     label: `Search CVEs for “${q}”`,
-    sub: looksLikeId(q) ? "Open it in the CVE explorer" : "Products, vendors and titles in the CVE catalog",
+    sub: looksLikeId(q) ? "Open it in the CVE catalog" : "Products, vendors and titles in the CVE catalog",
     hint: "CVE catalog",
     href: explorerHref(q),
     section: "Search",

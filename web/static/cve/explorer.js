@@ -1,4 +1,4 @@
-// The CVE explorer page (/cve/cves/): search the whole catalog by id or technology, fifty rows a page, and open one CVE in a drawer with
+// The CVE catalog page (/cve/cves/): search the whole catalog by id or technology, fifty rows a page, and open one CVE in a drawer with
 // its summary, CVSS, affected ranges, references and the hosts of yours it matches. The address keeps the search (?q=, severity, kev,
 // page) and the open CVE (?id=), so a link shows the same thing. DOM is built with textContent only.
 import { emptyState, el } from "/staticfiles/cve/ui.js";

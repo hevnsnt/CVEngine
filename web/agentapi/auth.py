@@ -27,7 +27,7 @@ INVENTORY_PATH = re.compile(r'^/api/v1/projects/(?P<slug>[-\w]+)/inventory/?$')
 SENTINEL_PATH = re.compile(r'^/api/v1/sentinel(?:/heartbeat|/template-policy(?:/bundle)?|/tasks/next|/tasks/\d+(?:/(?:accept|result|partial|release|secret|check))?)?/?$')
 # The AI reviewer container (docs/AI-REVIEWER.md) and nothing else: its configuration, review packets and verdicts, the operations snapshot
 # and report, and the pipeline's AI jobs and their answers (cveFeed.ai_jobs). The routes themselves also refuse any other token and any session (agentapi.reviewer_api), so the two checks guard each other.
-REVIEWER_PATH = re.compile(r'^/api/v1/reviewer/(?:config|findings/next|findings/t\d{1,12}/verdict|ops/snapshot|ops/report|usage|jobs/next|jobs/\d{1,12}/result)/?$')
+REVIEWER_PATH = re.compile(r'^/api/v1/reviewer/(?:config|findings/next|findings/t\d{1,12}/(?:verdict|refusal)|ops/snapshot|ops/report|usage|jobs/next|jobs/\d{1,12}/result)/?$')
 DENIED_MESSAGE = ('this token is not allowed to do that (an inventory token can only post inventory reports to its own project, '
                   'a sentinel token can only call the sentinel endpoints)')
 

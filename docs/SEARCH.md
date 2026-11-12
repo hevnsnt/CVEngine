@@ -22,14 +22,14 @@ Use the slug `_all` to search every project you can see.
 
 ### Your inventory or the CVE catalog
 
-Host search (everything above) answers "which of my hosts...". To look up a CVE itself, or every CVE for a technology, use the **CVE explorer** at `/cve/cves/`: type an id (`CVE-2024-6387`, `2024-6387`) or a product (`ssh`, `php`, `tomcat`). Each row says how many of your hosts that CVE matches, and the detail drawer lists them. In `Ctrl+K`, a bare word or id also offers **Search CVEs for "..."**. The API is `GET /cve/api/cves?q=...` ([FRONTEND.md](FRONTEND.md#cve-explorer)).
+Host search (everything above) answers "which of my hosts...". To look up a CVE itself, or every CVE for a technology, use the **CVE catalog** at `/cve/cves/`: type an id (`CVE-2024-6387`, `2024-6387`) or a product (`ssh`, `php`, `tomcat`). Each row says how many of your hosts that CVE matches, and the detail drawer lists them. In `Ctrl+K`, a bare word or id also offers **Search CVEs for "..."**. The API is `GET /cve/api/cves?q=...` ([FRONTEND.md](FRONTEND.md#cve-catalog)).
 
 | You want | Use |
 | --- | --- |
 | Hosts running OpenSSH | Hosts page: `product:openssh` |
 | Hosts matched by one CVE | Hosts page: `cve:CVE-2024-6387` |
-| Every OpenSSH CVE, and how many of your hosts each one hits | CVE explorer: `ssh` |
-| One CVE's summary, ranges and references | CVE explorer: `CVE-2024-6387` |
+| Every OpenSSH CVE, and how many of your hosts each one hits | CVE catalog: `ssh` |
+| One CVE's summary, ranges and references | CVE catalog: `CVE-2024-6387` |
 
 ## The syntax
 

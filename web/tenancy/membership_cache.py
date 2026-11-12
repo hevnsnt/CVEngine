@@ -1,7 +1,7 @@
 """A short per-user cache of the project ids a user may see, for the Live screen's polls only.
 
 ``roles.allowed_project_ids`` (project memberships, organization memberships, the projects of those organizations: three queries) runs at the
-start of every authenticated request, and the Live page polls a handful of endpoints every few seconds from every open tab. For those polls
+start of every authenticated request, and the Overview polls a handful of endpoints every few seconds from every open tab. For those polls
 (``GET`` of ``LIVE_PATHS``, nothing that changes data) the answer is kept per user for ``CVENGINE_AUTH_CACHE_SECONDS`` (15, at most 30, ``0``
 turns it off). Every other request reads it fresh, as before.
 

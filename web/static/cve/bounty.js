@@ -657,7 +657,7 @@ function watchLoad(panel, progress, since, first) {
     progress.hidden = false;
     const waited = Math.round((Date.now() - since) / 1000);
     progress.textContent = loading.running ? "Loading the catalogue now…"
-      : waited > 120 ? `Queued ${Math.round(waited / 60)} minutes ago and not started yet. The load runs on the CVE feed worker: it starts when that worker is free, and waits while scanning is paused. Administration, Scheduler health shows the workers and queues.`
+      : waited > 120 ? `Queued ${Math.round(waited / 60)} minutes ago and not started yet. The load runs on the CVE feed worker: it starts when that worker is free, and waits while scanning is paused. Administration, Scheduler detail shows the workers and queues.`
       : "Queued; waiting for a worker to pick it up…";
   };
   if (first) show(first);

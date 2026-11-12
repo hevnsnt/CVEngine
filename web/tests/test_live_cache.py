@@ -1,4 +1,4 @@
-"""Stage 0 of the live-screen caching plan: shared per-scope snapshots, conditional GETs, and query ceilings for what the Live page polls."""
+"""Stage 0 of the live-screen caching plan: shared per-scope snapshots, conditional GETs, and query ceilings for what the Overview polls."""
 import contextlib
 import json
 import threading

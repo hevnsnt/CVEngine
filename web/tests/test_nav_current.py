@@ -43,7 +43,7 @@ class MenuTests(TestCase):
 
 	def test_the_menu_order_and_labels(self):
 		self.assertEqual([l for l, _, _ in menu(self.page('/cve/alpha/hosts/'))],
-						['Overview', 'Findings', 'Hygiene', 'Assets', 'Suppliers', 'Scans', 'Scanners', 'Bug bounty'])
+						['Overview', 'Findings', 'Hygiene', 'Hosts', 'Suppliers', 'Scans', 'Scanners', 'Bug bounty'])
 
 	def test_every_link_opens_appears_once_and_has_a_name(self):
 		html = self.page('/cve/alpha/hosts/')
@@ -59,7 +59,94 @@ class MenuTests(TestCase):
 		for m in re.finditer(r'<a data-nav="([^"]+)"[^>]*>(.*?)</a>', block, re.S):
 			self.assertNotIn('aria-label', m.group(0).split('>')[0], m.group(1))
 			self.assertEqual(re.sub(r'<[^>]+>', '', m.group(2)).strip(), m.group(1))
-		self.assertEqual(re.findall(r'data-nav="Hygiene"', html).count('data-nav="Hygiene"'), 1)
+		self.assertEqual(self.repeats(html), [], 'a page shows the same destination twice')
+
+	@staticmethod
+	def surfaces(html):
+		"""[(label, href)] of each set of navigation links a user sees together. Desktop: the rail (with its account menu) and the page's tab strip.
+		Narrow screens: the bottom bar and the tab strip, and the bottom bar with its More sheet open. The palette's hidden index is left out: shell.js folds it into one row per page and name."""
+		def links(*blocks):
+			out = []
+			for block in blocks:
+				for attrs, inner in re.findall(r'<a\b([^>]*)>(.*?)</a>', block, re.S):
+					if 'class="brand' in attrs:  # the logo is the home link, not a page entry
+						continue
+					href = re.search(r'href="([^"]+)"', attrs)
+					label = re.sub(r'<[^>]+>', '', inner).strip()
+					if href and label and not href.group(1).startswith(('#', 'javascript')):
+						out.append((label, href.group(1)))
+			return out
+		rail = re.search(r'<aside class="rail".*?</aside>', html, re.S).group(0)
+		strip = ''.join(re.findall(r'<nav class="pagetabs".*?</nav>', html, re.S))
+		bar = re.search(r'<nav class="tabbar".*?</nav>', html, re.S).group(0)
+		sheet = html[html.index('<div class="sheet" id="sheet"'):]
+		sheet = sheet[:sheet.index('</div>\n</div>') + 6]
+		# the More sheet is a dialog the bar opens: it is seen with the bar, over the page, not beside the tab strip
+		return {'desktop': links(rail, strip), 'narrow': links(bar, strip), 'narrow, More open': links(bar, sheet)}
+
+	# Owner decision S8 (open): a tab family repeats the rail entry of the page you are on as the FIRST tab of that page's tab strip. That is the only
+	# repeat allowed: the repeated label must be the current rail entry, the second copy must be the strip's first link, and nothing else may repeat.
+	@staticmethod
+	def first_tab_of_strip(html):
+		strips = re.findall(r'<nav class="pagetabs".*?</nav>', html, re.S)
+		if not strips:
+			return None
+		first = re.search(r'<a\b([^>]*)>(.*?)</a>', strips[0], re.S)
+		href = re.search(r'href="([^"]+)"', first.group(1))
+		return (re.sub(r'<[^>]+>', '', first.group(2)).strip(), href.group(1)) if href else None
+
+	def repeats(self, html):
+		"""Destinations shown twice on one surface, ignoring only the first tab of the page's tab strip when it repeats the page's own current rail entry
+		(once, on that page), and pages shown under two names."""
+		bad = []
+		current = [(l, h) for l, h, c in menu(html) if c]
+		first = self.first_tab_of_strip(html)
+		strip_links = []
+		for strip in re.findall(r'<nav class="pagetabs".*?</nav>', html, re.S):
+			for attrs, inner in re.findall(r'<a\b([^>]*)>(.*?)</a>', strip, re.S):
+				href = re.search(r'href="([^"]+)"', attrs)
+				if href:
+					strip_links.append((re.sub(r'<[^>]+>', '', inner).strip(), href.group(1)))
+		allowed = first if first is not None and current == [first] and strip_links.count(first) == 1 else None
+		for surface, links in self.surfaces(html).items():
+			for dest in sorted(set(links)):
+				n = links.count(dest)
+				if n > 1 and not (n == 2 and dest == allowed):
+					bad.append((surface, dest, n))
+			by_href = {}
+			for label, href in set(links):
+				by_href.setdefault(href, set()).add(label)
+			bad += [(surface, h, sorted(ls)) for h, ls in by_href.items() if len(ls) > 1]
+		return bad
+
+	def test_a_repeat_is_allowed_only_as_the_first_tab_of_its_own_page(self):
+		hygiene = self.page('/cve/alpha/hygiene/')
+		self.assertEqual(self.repeats(hygiene), [])
+		self.assertEqual(self.first_tab_of_strip(hygiene)[0], 'Hygiene')
+		hosts = self.page('/cve/alpha/hosts/')
+		rail_hygiene = re.search(r'<a data-nav="Hygiene"[^>]*>.*?</a>', hosts, re.S).group(0)
+		# a second Hygiene link in the rail, on the Hygiene page and on another page
+		for name, html in (('hygiene', hygiene), ('hosts', hosts)):
+			doubled = html.replace('<details class="acct">', rail_hygiene.replace(' aria-current="page"', '') + '<details class="acct">', 1)
+			self.assertNotEqual(self.repeats(doubled), [], name)
+		# a Hygiene link in the tab strip of a page that is not Hygiene (Hosts is current there)
+		elsewhere = hosts.replace('<main', '<nav class="pagetabs"><a href="/cve/alpha/hygiene/">Hygiene</a></nav><main', 1)
+		self.assertNotEqual(self.repeats(elsewhere), [])
+		# the same repeat as a second, not-first tab of the Hygiene page
+		later = hygiene.replace('</nav>', '<a href="/cve/alpha/hygiene/">Hygiene</a></nav>', 1)
+		self.assertNotEqual(self.repeats(later), [])
+
+	def test_the_visible_duplicate_check_catches_a_second_link_to_a_page(self):
+		html = self.page('/cve/alpha/hosts/')
+		self.assertEqual(self.repeats(html), [])
+		doubled = html.replace('<main', '<nav class="pagetabs"><a href="/cve/alpha/targets/">Targets</a></nav><main', 1)
+		self.assertNotEqual(self.repeats(doubled), [])
+		renamed = html.replace('<main', '<nav class="pagetabs"><a href="/cve/alpha/targets/">Aims</a></nav><main', 1)
+		self.assertNotEqual(self.repeats(renamed), [])
+
+	def test_a_page_in_the_tab_family_repeats_its_rail_entry_only_once(self):
+		for path in ('/cve/alpha/hygiene/', '/cve/alpha/vulns/', '/cve/alpha/suppliers/', '/cve/scanners/', '/cve/alpha/hosts/', '/cve/alpha/scans/', '/cve/graph/', '/cve/alpha/targets/'):
+			self.assertEqual(self.repeats(self.page(path)), [], path)
 
 	def test_hygiene_and_suppliers_keep_their_original_icons_and_have_no_badge(self):
 		html = self.page('/cve/alpha/hosts/')
@@ -71,8 +158,8 @@ class MenuTests(TestCase):
 		expected = {
 			'/cve/alpha/vulns/': 'Findings', '/cve/alpha/matches/': 'Findings', '/cve/alpha/changes/': 'Findings', '/cve/cves/': 'Findings',
 			'/cve/alpha/hygiene/': 'Hygiene',  # the page's own entry wins; Findings is not also current
-			'/cve/alpha/hosts/': 'Assets', '/cve/alpha/targets/': 'Assets', '/cve/alpha/secrets/': 'Assets', '/cve/graph/': 'Assets',
-			'/cve/alpha/suppliers/': 'Suppliers',  # likewise: Assets is not also current
+			'/cve/alpha/hosts/': 'Hosts', '/cve/alpha/targets/': 'Hosts', '/cve/alpha/secrets/': 'Hosts', '/cve/graph/': 'Hosts',
+			'/cve/alpha/suppliers/': 'Suppliers',  # likewise: Hosts is not also current
 			'/cve/alpha/scans/': 'Scans', '/cve/alpha/activity/': 'Scans',
 			'/cve/scanners/': 'Scanners', '/cve/sentinels/': 'Scanners',
 		}
@@ -85,7 +172,7 @@ class MenuTests(TestCase):
 		self.assertEqual([l for l, _, c in menu(self.page('/cve/bounty/', self.pentester)) if c], ['Bug bounty'])
 
 	def test_no_entry_is_current_on_a_utility_page_the_account_is(self):
-		for path, item in (('/cve/admin/', 'Administration'), ('/cve/settings/', 'Settings'), ('/cve/about/', 'Help'), ('/cve/account/', 'My account'),
+		for path, item in (('/cve/admin/', 'Administration'), ('/cve/settings/', 'Settings'), ('/cve/about/', 'About'), ('/cve/account/', 'My account'),
 						  ('/cve/agents/', 'API keys')):
 			html = self.page(path)
 			self.assertEqual([l for l, _, c in menu(html) if c], [], path)
@@ -101,8 +188,8 @@ class MenuTests(TestCase):
 	def test_the_phone_sheet_offers_the_four_entries_the_bar_does_not_and_marks_the_current_one(self):
 		html = self.page('/cve/alpha/suppliers/')
 		bar = html[html.index('class="tabbar"'):html.index('id="more-btn"')]
-		self.assertEqual(re.findall(r'</svg>([^<]+)</a>', bar), ['Overview', 'Findings', 'Assets', 'Scans'])
-		self.assertNotRegex(bar, r'aria-current="page"[^>]*><svg[^>]*><use href="#i-server"')  # Assets is not current on Suppliers
+		self.assertEqual(re.findall(r'</svg>([^<]+)</a>', bar), ['Overview', 'Findings', 'Hosts', 'Scans'])
+		self.assertNotRegex(bar, r'aria-current="page"[^>]*><svg[^>]*><use href="#i-server"')  # Hosts is not current on Suppliers
 		sheet = html[html.index('id="sheet"'):html.index('id="acct-sheet"')]
 		self.assertEqual(re.findall(r'</svg>([^<]+)</a>', sheet)[:4], ['Hygiene', 'Suppliers', 'Scanners', 'Bug bounty'])
 		self.assertRegex(sheet, r'aria-current="page"><svg[^>]*><use href="#i-building"/></svg>Suppliers')
@@ -112,11 +199,11 @@ class MenuTests(TestCase):
 	def test_the_tab_strip_of_a_page_with_its_own_entry_is_named_for_its_family(self):
 		html = self.page('/cve/alpha/hygiene/')
 		self.assertIn('aria-label="Findings pages"', html)
-		self.assertRegex(html, r'<a href="[^"]+" aria-current="page">Config checks</a>')
+		self.assertRegex(html, r'<a href="[^"]+" aria-current="page">Hygiene</a>')
 
 	def test_without_a_project_the_menu_leaves_out_what_needs_one(self):
 		out = nav.build('about', None, bounty_enabled=False, sentinels_enabled=False)
-		self.assertEqual([e['label'] for e in out['rail']], ['Overview', 'Assets', 'Scanners'])
+		self.assertEqual([e['label'] for e in out['rail']], ['Overview', 'Graph', 'Scanners'])
 
 
 class RuleTests(SimpleTestCase):

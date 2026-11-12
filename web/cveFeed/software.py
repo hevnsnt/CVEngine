@@ -31,7 +31,7 @@ def tool(key, name, url, group, version, license, purpose, where='sentinel', opt
 # The Sentinel commit the Sentinel versions below were read from (its Dockerfile and requirements.txt). tests/test_about_page.py holds it equal to
 # the floor commit of scanner.lock.json and to the sha web/requirements.txt pins: raising the floor means reading the Sentinel's pins again, then changing this line.
 # (The built-in scanner image follows the newest published build; the page says what it was read at, not that it runs exactly this.)
-SENTINEL_PINS_COMMIT = 'cf29610a513cc3135c1a81f004cd02e0b0c0e604'
+SENTINEL_PINS_COMMIT = '71a24de919ef64e5be433b4607231ade9196f8dc'
 
 GH = 'https://github.com/'
 SENTINEL_DOCKERFILE = 'sentinel:Dockerfile'
@@ -49,7 +49,7 @@ TOOLS = [
     tool('nuclei-templates', 'nuclei-templates', GH + 'projectdiscovery/nuclei-templates', 'scanners', 'v10.5.1', 'MIT',
          'The community template library. The Sentinel image carries this pinned release as a fallback; the server refreshes its own set daily from the '
          'project and hands Sentinels the approved bundle', where='both', pins=[(SENTINEL_DOCKERFILE, r'ARG NUCLEI_TEMPLATES_VERSION=(v[0-9.]+)')]),
-    tool('testssl', 'testssl.sh', GH + 'testssl/testssl.sh', 'scanners', '3.2.4', 'GPL-2.0 (a separate program, never linked)',
+    tool('testssl', 'testssl.sh', GH + 'testssl/testssl.sh', 'scanners', '3.2.5', 'GPL-2.0 (a separate program, never linked)',
          'TLS audit: protocols, ciphers and the named TLS vulnerabilities', pins=[(SENTINEL_DOCKERFILE, r'ARG TESTSSL_VERSION=([0-9.]+)')]),
     tool('wpscan', 'WPScan', GH + 'wpscanteam/wpscan', 'scanners', '4.2.0', 'WPScan Public Source License',
          'WordPress core, plugin and theme checks (free for testing your own systems; a commercial license is needed for managed or hosted use)',
@@ -67,13 +67,13 @@ TOOLS = [
          'check runs: it never submits a credential', pins=[(SENTINEL_DOCKERFILE, r'ARG SSHAMBLE_VERSION=([0-9.]+)')]),
     tool('badkeys-data', 'badkeys blocklist data', 'https://badkeys.info', 'scanners', '', 'Unknown (the badkeys software is MIT; no license for the data is stated)',
          'Known-weak SSH host keys. The Sentinel refreshes it daily with `sshamble badkeys-update`; turn that off with CVENGINE_BADKEYS_REFRESH=0 on an air-gapped Sentinel'),
-    tool('playwright', 'Playwright', GH + 'microsoft/playwright-python', 'scanners', '1.64.1', 'Apache-2.0',
+    tool('playwright', 'Playwright', GH + 'microsoft/playwright-python', 'scanners', '1.65.0', 'Apache-2.0',
          'Drives the headless Chromium that takes the screenshot of every web page of every host, in the Sentinel image',
          pins=[(SENTINEL_REQUIREMENTS, r'(?m)^playwright==([0-9.]+)')]),
-    tool('chromium', 'Chromium (Playwright headless shell)', 'https://www.chromium.org/', 'scanners', '156.0.8078.4',
-         'BSD-3-Clause, plus the licenses of what it bundles', 'The browser behind the screenshots, pinned to the build Playwright 1.64.1 drives',
+    tool('chromium', 'Chromium (Playwright headless shell)', 'https://www.chromium.org/', 'scanners', '158.0.8127.18',
+         'BSD-3-Clause, plus the licenses of what it bundles', 'The browser behind the screenshots, pinned to the build Playwright 1.65.0 drives',
          pins=[(SENTINEL_DOCKERFILE, r'ARG PLAYWRIGHT_CHROMIUM_VERSION=([0-9.]+)')]),
-    tool('aardwolf', 'aardwolf', GH + 'skelsec/aardwolf', 'scanners', '0.2.16', 'MIT', 'The headless RDP client behind the login-screen screenshot',
+    tool('aardwolf', 'aardwolf', GH + 'skelsec/aardwolf', 'scanners', '0.2.17', 'MIT', 'The headless RDP client behind the login-screen screenshot',
          pins=[(SENTINEL_REQUIREMENTS, r'(?m)^aardwolf==([0-9.]+)')]),
     tool('node2shell', 'node2shell-scanner', GH + 'assetnote/node2shell-scanner', 'scanners', 'commit bf2dc38', 'MIT',
          'Read-only detection of CVE-2026-111497, from Assetnote (vendored into the Sentinel client, off by default on the server)', optional='CVENGINE_NODE2SHELL=1'),
@@ -82,7 +82,7 @@ TOOLS = [
     tool('python-gvm-sentinel', 'python-gvm', GH + 'greenbone/python-gvm', 'scanners', '27.10.1', 'GPL-3.0-or-later',
          'The GMP client library behind the OpenVAS add-on, in the Sentinel image and in the server image', where='both',
          pins=[('web/requirements.txt', r'(?m)^python-gvm==([0-9.]+)'), (SENTINEL_REQUIREMENTS, r'(?m)^python-gvm==([0-9.]+)')]),
-    tool('go', 'Go toolchain', 'https://go.dev', 'scanners', '1.27.3', 'BSD-3-Clause',
+    tool('go', 'Go toolchain', 'https://go.dev', 'scanners', '1.27.4', 'BSD-3-Clause',
          'Builds nuclei and naabu; removed again in the same image layer, so no Go runs in either image', where='both',
          pins=[('web/Dockerfile', r'ARG GOVERSION=([0-9.]+)'), (SENTINEL_DOCKERFILE, r'ARG GOVERSION=([0-9.]+)')]),
     tool('tailscale', 'Tailscale', GH + 'tailscale/tailscale', 'scanners', '1.104.6', 'BSD-3-Clause',
@@ -131,8 +131,8 @@ LIBRARY_NOTE = ('Python libraries are pinned in web/requirements.txt (server) an
 
 # Python packages only the Sentinel image installs (the server ones come from web/requirements.txt, read below).
 SENTINEL_LIBRARIES = (
-    ('aardwolf', '0.2.16', 'MIT'), ('h11', '0.16.0', 'MIT'), ('Pillow', '>=13.0.0,<14', 'MIT-CMU'), ('PyMySQL', '1.2.3', 'MIT'),
-    ('pymongo', '4.19.0', 'Apache-2.0'), ('playwright', '1.64.1', 'Apache-2.0'),
+    ('aardwolf', '0.2.17', 'MIT'), ('h11', '0.16.0', 'MIT'), ('Pillow', '>=13.0.0,<14', 'MIT-CMU'), ('PyMySQL', '1.2.4', 'MIT'),
+    ('pymongo', '4.19.0', 'Apache-2.0'), ('playwright', '1.65.0', 'Apache-2.0'),
 )
 
 

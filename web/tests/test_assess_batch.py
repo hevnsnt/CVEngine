@@ -375,7 +375,7 @@ class ExecuteBatchTests(Base):
         self.assertEqual(len(nmap), 1)  # and one nmap call naming both addresses: what a Sentinel is given as one multi-target task
         self.assertEqual(len(nmap[0]), 2)
         rows = {j.host: HostAssessment.objects.get(pk=j.pk) for j in jobs}
-        self.assertEqual({r.scan_id for r in rows.values()}, {rows['ok1.a1.example'].scan_id})  # the shared scan, for the Live page and the stages
+        self.assertEqual({r.scan_id for r in rows.values()}, {rows['ok1.a1.example'].scan_id})  # the shared scan, for the Overview and the stages
         self.assertEqual({h: r.status for h, r in rows.items()}, {'ok1.a1.example': 'completed', 'ok2.a1.example': 'completed',
                                                                     'nodns.a1.example': 'inconclusive'})
         self.assertEqual(rows['nodns.a1.example'].result['resolved'], 0)

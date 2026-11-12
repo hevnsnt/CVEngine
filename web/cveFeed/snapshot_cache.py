@@ -1,6 +1,6 @@
 """Short-lived snapshots of the live screen's expensive answers, shared by every web worker and every viewer of the same scope.
 
-The Live page polls a handful of endpoints every few seconds; two of them (the headline counts and the discovery counts) walk the whole
+The Overview polls a handful of endpoints every few seconds; two of them (the headline counts and the discovery counts) walk the whole
 inventory. They used to be cached in a dict of each gunicorn worker, per user, so W workers x U users recomputed them every ten seconds, and a
 busy moment piled those recomputations on top of each other until the proxy answered 502. They now live in the Django cache (Redis), where:
 

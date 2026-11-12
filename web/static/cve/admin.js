@@ -1018,7 +1018,7 @@ async function healthTab(panel) {
     projects: { label: "Projects", open: projectsTab },
   };
   if (me.is_superuser) defs.timings = { label: "Timings", open: timingsTab };
-  if (me.is_superuser) defs.health = { label: "Scheduler health", open: healthTab };
+  if (me.is_superuser) defs.health = { label: "Scheduler detail", open: healthTab };
   if (me.is_superuser) defs.watchdog = { label: "Watchdog", open: watchdogPanel };
   defs.openvas = { label: "OpenVAS", open: openvasPanel };
   defs.audit = { label: "Audit log", open: auditTab };

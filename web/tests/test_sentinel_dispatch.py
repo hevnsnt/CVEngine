@@ -265,7 +265,7 @@ class NaabuDispatchTests(DispatchBase):
 
 class DispatchActivityLoggingTests(DispatchBase):
     """Every dispatch attempt gets one `run_check` activity line, settled once the wait ends: this is what makes
-    Sentinel hand-off and check-in visible on the Live page and the Activity page, which share the same feed."""
+    Sentinel hand-off and check-in visible on the Overview and the Activity page, which share the same feed."""
 
     def _entries(self):
         from cveFeed.models import AgentActivity

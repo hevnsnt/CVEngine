@@ -1,4 +1,4 @@
-"""The CVE explorer: search the whole CVE catalog (CVEEntry) by id, part of an id, or a technology, and say how many of the caller's own
+"""The CVE catalog: search the whole CVE catalog (CVEEntry) by id, part of an id, or a technology, and say how many of the caller's own
 hosts each CVE matches.
 
 The catalog is shared by everyone; the host counts and the matching hosts come from CVEMatch, whose default manager is scoped to the

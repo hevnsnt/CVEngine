@@ -17,7 +17,7 @@ class AboutPageTests(TestCase):
 	def test_page_opens_for_any_signed_in_user_and_shows_the_version(self):
 		from django.conf import settings
 		r = self.page()
-		self.assertContains(r, 'About CVEngine')
+		self.assertContains(r, '<h1>About</h1>', html=True)  # one name per page: the menu says About, so the title does (it was About CVEngine)
 		self.assertContains(r, settings.RENGINE_CURRENT_VERSION)
 
 	def test_page_names_its_contributors(self):
