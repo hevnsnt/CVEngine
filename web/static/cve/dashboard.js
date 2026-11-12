@@ -9,6 +9,7 @@ import { activityMatrix, displayZone, sparkline } from "/staticfiles/cve/charts.
 import { reportButton } from "/staticfiles/cve/report-export.js";
 import { createGet, createPace, every } from "/staticfiles/cve/poll.js";
 import { dialog } from "/staticfiles/cve/ui.js";
+import { firstNoteHidden } from "/staticfiles/cve/first-note-logic.js";
 import { scoreList } from "/staticfiles/cve/score-detail.js";
 import { scoreLines } from "/staticfiles/cve/score-detail-logic.js";
 import { openSecret } from "/staticfiles/cve/secret-panel.js";
@@ -236,6 +237,7 @@ async function pollStats() {
     };
     Object.entries(flat).forEach(([k, v]) => setNum(`s-${k}`, v));
     statsNow = s;
+    paintFirstNote();
     paintMapCount();
     const groupNote = $("s-match_groups_note");
     if (groupNote) {
@@ -442,6 +444,14 @@ function paintMapCount() {
   const shown = mapDrawn != null && mapDrawn < mapEligible ? `Top ${mapDrawn} of ${mapEligible} scoring over ${MAP_SCORE_OVER}` : `${mapEligible} scoring over ${MAP_SCORE_OVER}`;
   n.textContent = `${shown} · ${live} live`;
   n.title = `One square per live host that scores more than ${MAP_SCORE_OVER} (a live host resolved to an address or answered over HTTP), highest score first. ${live} hosts are live and ${statsNow.hosts} are in the inventory; the rest are on the Hosts page.`;
+}
+
+// Arriving from the first-run wizard before any host exists: say that the first look is still under way, how long it usually takes and what to do
+// meanwhile. The note goes away on its own as soon as the first host is in the inventory.
+function paintFirstNote() {
+  const note = $("first-note");
+  if (!note) return;
+  note.hidden = firstNoteHidden(dash.dataset.first, statsNow);
 }
 
 // An empty map says why it is empty: nothing added yet, or hosts known but none live (resolved or answering).
@@ -724,7 +734,7 @@ async function pollDiscovery() {
     if (d === null) return; // 304: no new events
     if (!d.scan) {
       $("d-status").style.display = "none";
-      $("d-target").textContent = "No discovery has run yet.";
+      $("d-target").textContent = "Nothing has run yet. Add a target to start a first look.";
       return;
     }
     if (shownScan !== d.scan.id) {
@@ -951,7 +961,7 @@ poll(pollAgent, 2000);
 poll(pollFeed, 6000);
 
 // --- changes since you last looked ---------------------------------------------------------------
-// A one-line strip above the instrument panel: how many inventory changes arrived since this browser last had the Live page
+// A one-line strip above the instrument panel: how many inventory changes arrived since this browser last had the Overview
 // open, with a link to the Changes page narrowed to that moment. The baseline is per browser and moves forward when you leave.
 (async () => {
   if (!slug) return;

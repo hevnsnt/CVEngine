@@ -89,7 +89,7 @@ class Check:
 @dataclass
 class Rule:
     code: str
-    title: str                 # plain language name, shown on the Health tab
+    title: str                 # plain language name, shown in the Watchdog panel of the Scanners page
     does: str                  # what it does about it, in a sentence
     confirm: int               # seconds the symptom must hold before the rule acts (hysteresis)
     gap: int                   # minimum seconds between two actions
@@ -913,7 +913,7 @@ def _fixed(rule, state, ctx, extra=''):
         event(rule.code, 'fixed', observation='Hosts assessed at once is at the minimum.', action=v.get('action', ''), result='Verified: the pool ceiling holds. The watchdog keeps it until .env stops holding it down or a person saves a value.')
         return text
     event(rule.code, 'fixed', observation='The symptom is gone two minutes after the action.', action=v.get('action', ''), result='Verified: ' + text + (f'. {extra}' if extra else ''))
-    notice(rule.code, 'info', text, (extra + ' ' if extra else '') + 'Nothing more is needed. Details: Scanners, Health.', verified=True)
+    notice(rule.code, 'info', text, (extra + ' ' if extra else '') + 'Nothing more is needed. Details: Scanners, Scheduler detail.', verified=True)
     return text
 
 
@@ -932,7 +932,7 @@ def _escalate(rule, state, ctx, chk):
     state.hold_until = ctx.now + timedelta(seconds=HOLD_SECONDS)
     state.escalated_at = ctx.now
     state.verify, state.verify_due = {}, None
-    nxt = rule.next_step or 'look at the Health tab of the Scanners page'
+    nxt = rule.next_step or 'look at Scheduler detail on the Scanners page'
     waiting = (' Work waiting for a lane that is not running stays in its queue and will run when that lane starts; the watchdog tries again after the hour, '
                'and the messages that lane had taken before the restart were put back by it.') if rule.code in ('R1', 'R2') else ''
     later = 'ten minutes after the restart, and the workers still did not answer' if v.get('host_ok') else 'two minutes later'
@@ -1087,7 +1087,7 @@ def _process_rule(rule, ctx, stand):
             return
         if chk.firing is True:
             _escalate(rule, state, ctx, chk)
-            _set(state, 'problem', f'Could not fix it. Next step: {rule.next_step or "see the Health tab"}.')
+            _set(state, 'problem', f'Could not fix it. Next step: {rule.next_step or "see Scheduler detail on the Scanners page"}.')
             return
     if (state.verify or {}).get('host_id') and (ctx.now - datetime.fromisoformat(state.verify['requested_at'])).total_seconds() > HOST_WAIT_SECONDS:
         clear_request()
@@ -1237,7 +1237,7 @@ def _tick(now, probes, out):
     return out
 
 
-# --- what the Health tab shows ---------------------------------------------------------------------------------------------------
+# --- what the Watchdog panel shows ---------------------------------------------------------------------------------------------------
 
 TICK_STALE_SECONDS = 150
 
@@ -1247,7 +1247,7 @@ def status_color(status):
 
 
 def view(now=None):
-    """The payload of the Health tab panel: state per rule, the last 20 actions, what the watchdog changed and still holds."""
+    """The payload of the Watchdog panel: state per rule, the last 20 actions, what the watchdog changed and still holds."""
     from cveFeed.models import WatchdogEvent, WatchdogState
     now = now or timezone.now()
     rows = {s.rule: s for s in WatchdogState.objects.all()}

@@ -248,7 +248,7 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
   </dl>
   {% if r.method.services %}
   <table class="grid" style="margin-top:8pt">
-    <thead><tr><th>Check</th><th class="num">Assets</th><th>Most recent run</th></tr></thead>
+    <thead><tr><th>Check</th><th class="num">Hosts</th><th>Most recent run</th></tr></thead>
     <tbody>{% for s in r.method.services %}<tr><td>{{ s.name }}</td><td class="num">{{ s.assets }}</td><td>{{ s.last }}</td></tr>{% endfor %}</tbody>
   </table>{% else %}<p class="mute">No scanner runs are recorded for this scope.</p>{% endif %}
 

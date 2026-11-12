@@ -389,6 +389,8 @@ def problem(now=None):
         why = top[0]['reason'] if top else 'no reason recorded'
         return {'code': 'all_rejected', 'title': 'Every AI-written check was rejected this week',
                 'detail': f'{bad} AI-written checks were rejected or expired in the last seven days and none passed. The most common reason: {why}. '
-                          'Fix: choose a more capable model in Settings, AI, or check that the CVE feed carries product and version data.',
+                          'What you can do: check that the CVE feed carries product and version data for the CVEs that were tried, and that a Sentinel '
+                          'that runs template checks is online. If the reason is a refused or empty AI answer, the AI Model Usage page shows the '
+                          'refusals. A different model is not the usual cure.',
                 'facts': {'rejected': bad, 'top_reason': why}}
     return None

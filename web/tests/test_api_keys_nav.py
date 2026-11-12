@@ -10,7 +10,7 @@ from dashboard.models import AIProviderSettings, Org, OrgMembership
 from tests.test_tenancy import client_for
 
 STATIC = Path(__file__).resolve().parents[1] / 'static' / 'cve'
-WORDS = 'API keys for MCP and agents'
+WORDS = 'API keys'  # 1.4.0 (B-ui N1): the page title is the menu word; it was 'API keys for MCP and agents'
 
 
 def menu_labels(html):

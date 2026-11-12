@@ -105,11 +105,12 @@ class AccessTests(WizardBase):
         for gone in ('Building your workspace', 'The first discovery is running', 'Discovery running', 'Hosts found', 'Sentinel ready', 'found so far',
                      'Giving discovery', 'Latest:', 'build-steps', 'build-wait', 'really happening', 'Time given to discovery'):
             self.assertNotIn(gone, js)
-        for said in ('Getting everything ready', 'This takes about a minute.', 'Opening your dashboard'):
+        for said in ('Getting everything ready', 'This usually takes about', 'Opening your dashboard'):
             self.assertIn(said, build)
         # every string the screen can show to the person
         words = ' '.join(re.findall(r"'([^']*)'", re.sub(r'(?m)\s//.*$', '', build)))
-        self.assertNotRegex(words, r'(?i)scan|discover|sentinel|\bhosts?\b|subdomain|running')
+        # 1.4.0 (B-ui W1): the screen may say "hosts" and "found" so that the wait says what is happening; the gate 6 words stay out
+        self.assertNotRegex(words, r'(?i)scan|discover|sentinel|subdomain|running')
         self.assertIn("'aria-live': 'polite'", build)
         self.assertNotIn('builtin_state', build)  # no internals are read by it
         html = open(os.path.join(base, 'cveFeed', 'templates', 'cveFeed', 'welcome.html'), encoding='utf-8').read()

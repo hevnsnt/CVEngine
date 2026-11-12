@@ -4193,7 +4193,7 @@ const pages = {
     mount.append(header);
     // grouped by default: the same client-side library file (jQuery, Bootstrap, ...) on sibling hosts of one site is one row; "Show every host" lists each host's finding
     let groupMode = wanted.get("group") === FG.EVERY_HOST ? FG.EVERY_HOST : FG.GROUPED;
-    const filtersNow = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value, ...(scope.value ? { internal: scope.value } : {}), ...(kev.value ? { kev: kev.value } : {}) });
+    const filtersNow = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value, ...(scope.value ? { internal: scope.value } : {}), ...(kev.value ? { kev: kev.value } : {}), ...(ai.value ? { ai: ai.value } : {}) });
     const params = () => FG.listParams(filtersNow(), groupMode);
     const everyHost = el("button", "new-toggle every-host", "Show every host", {
       type: "button",
@@ -4213,11 +4213,14 @@ const pages = {
     const q = searchBox("Filter by host", () => reload());
     q.value = wanted.get("host") || "";
     // findings on hosts inside a network a project declared internal (scanned only by a Sentinel there) can be told apart and filtered
-    const scope = select("Scope", [["", "All findings"], ["0", "External only"], ["1", "Internal only"]], () => reload());
+    const scope = select("Scope", [["", "All scopes"], ["0", "External only"], ["1", "Internal only"]], () => reload());
     scope.value = ["0", "1"].includes(wanted.get("internal")) ? wanted.get("internal") : "";
     // KEV whatever the heat: a KEV match whose version is not proven is smoke, so heat alone does not find every exploited CVE
     const kev = select("Known exploited", [["", "Any CVE"], ["1", "Known exploited (KEV) only"]], () => reload());
     kev.value = wanted.get("kev") === "1" ? "1" : "";
+    // what the AI reviewer said: disputed = it called the finding a false positive and cvENGINE kept it open, so a person should look
+    const ai = select("AI reviewer", [["", "Any verdict"], ["disputed", "AI disputed (kept open, look at these)"], ["real", "AI says real"]], () => reload());
+    ai.value = ["disputed", "real"].includes(wanted.get("ai")) ? wanted.get("ai") : "";
     const type = picker(
       "Type",
       [["all", "All"], ["cve", "CVE matches"], ["scanner", "Scanner"], ["hygiene", "Hygiene"]],
@@ -4250,7 +4253,7 @@ const pages = {
       () => reload(),
     );
     const ALLOWED = { type: ["all", "cve", "scanner", "hygiene"], severity: ["all", "critical", "high", "medium", "low", "info"], status: ["actionable", "closed", "false_positive", "all"] };
-    const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "", internal: "", kev: "", group: FG.GROUPED };
+    const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "", internal: "", kev: "", ai: "", group: FG.GROUPED };
     const setPicker = (p, key, value) => {
       p.value = value;
       p.node.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String(ALLOWED[key][i] === value)));
@@ -4261,14 +4264,14 @@ const pages = {
     });
     // the filters live in the URL (type=, severity=, status=, host=) so a view can be bookmarked or sent; defaults stay out of it
     const syncUrl = () => {
-      writeParams({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, kev: kev.value, group: groupMode }, FINDING_DEFAULTS);
+      writeParams({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, kev: kev.value, ai: ai.value, group: groupMode }, FINDING_DEFAULTS);
       views.refresh();
     };
     const views = savedViews({
       page: "findings",
       slug,
       defaults: FINDING_DEFAULTS,
-      read: () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, kev: kev.value, group: groupMode }),
+      read: () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, kev: kev.value, ai: ai.value, group: groupMode }),
       apply: (v) => {
         setGroupMode(v.group);
         setPicker(type, "type", v.type);
@@ -4277,6 +4280,7 @@ const pages = {
         q.value = v.host;
         scope.value = v.internal || "";
         kev.value = v.kev || "";
+        ai.value = v.ai || "";
         reload();
       },
     });
@@ -4351,7 +4355,7 @@ const pages = {
       noun: "finding",
       plural: "findings",
       path: `${base}/findings`,
-      filters: [views.node, q, scope, kev, type.node, sev.node, status.node, everyHost],
+      filters: [views.node, q, scope, kev, ai, type.node, sev.node, status.node, everyHost],
       params,
       exportParams: filtersNow, // the CSV is one line per host finding whatever the list shows
       empty: () => {
@@ -4662,7 +4666,7 @@ pages.changes = function changes(mount) {
       list.reload();
     },
   );
-  // /changes/?since=<ISO time> arrives from "changes since you last looked" on the Live page: offer it as one more choice
+  // /changes/?since=<ISO time> arrives from "changes since you last looked" on the Overview: offer it as one more choice
   const sinceParam = new URLSearchParams(location.search).get("since") || "";
   if (Number.isFinite(Date.parse(sinceParam)) && !/^\d+[hdw]$/.test(sinceParam)) {
     since.prepend(Object.assign(el("option", "", "Since you last looked"), { value: sinceParam }));

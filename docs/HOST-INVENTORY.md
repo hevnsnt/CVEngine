@@ -13,7 +13,7 @@ Nothing here changes a host. The scripts only read.
 
 ## Quick start
 
-1. Open **Assets, Hosts**, then **Host inventory** (or a host's **Inventory** tab, **Set up host reporting**). Pick the platform.
+1. Open **Hosts**, then **Host inventory** (or a host's **Inventory** tab, **Set up host reporting**). Pick the platform.
 2. **Create a reporter token.** It belongs to one project and can only post that project's inventory reports (see [Safety](#safety)).
 3. Copy the command for the platform and run it on the machine (as root or Administrator for the fullest report). The dialog fills in your
    server address and the project. The command asks for the token (paste it when it asks): **no command contains the token**, so it never

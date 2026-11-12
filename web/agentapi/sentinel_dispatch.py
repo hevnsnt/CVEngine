@@ -486,7 +486,7 @@ def dispatch_or_none(project, kind, target, host='', ips=None, scan=None, timeou
     timeout, failure, or no Sentinel: for work that is not internal ``ScannerUnavailable`` is raised instead (the kind never runs here, the targets stay
     due); ``None`` is only for internal work, whose caller fails it. The hand-off
     and the check-in each get one ``run_check`` activity line (same kind every other scan-stage line already uses, so
-    both the Live page and the Activity page show them with no changes of their own), so it is visible, in one place,
+    both the Overview and the Activity page show them with no changes of their own), so it is visible, in one place,
     whenever work actually left this server for a Sentinel and whether it came back.
 
     ``redact_target``, when given, is called with ``target`` once the task reaches a terminal state (done, failed or
