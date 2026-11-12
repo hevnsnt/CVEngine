@@ -66,6 +66,7 @@ RATES = {'claim': broker.RATES['claim'], 'report': broker.RATES['report'], 'rele
          'policy': (60, 60), 'bundle': (12, 60),  # the template policy is a cheap read, the bundle a download of several MiB
          'secret': (6, 60),  # a stored credential is read once per signed-in task; more than a few a minute is a caller gone wrong, or guessing ids
          'partial': (240, 60),  # a streamed task posts a batch every few seconds while it runs (sentinel_stream.report_partial)
+         'bootstrap': (30, 60),  # per client address, and the one call that needs no bearer token (``limit_address``): a throttle on what an unknown caller can make the server hash and query
          'check': (60, 60)}  # an AI-written check's approval is asked once per nuclei_validate task (approved_check)
 # Kinds the built-in scanner keeps to itself while the install has one (``builtin_only_kind``). ``route_probe_signed`` is its alone whatever happens: it
 # reads a stored sign-in (secret_ref), which only a built-in image that reads one is offered. ``path_probe`` (the path a scanner's packets leave from) and
@@ -203,6 +204,15 @@ def _limit(token, action, limit=None):
     if not (broker._hit(f'agentapi:{action}:{token.key_hash[:16]}', limit, window)
             and broker._hit(f'agentapi:{action}:user:{token.user_id}', limit * broker.USER_RATE_FACTOR, window)):
         raise ApiError(429, f'too many {action} calls: at most {limit} per {window} seconds', retry_after_seconds=broker._window_left(f'agentapi:{action}:{token.key_hash[:16]}', window))
+
+
+def limit_address(address, action='bootstrap'):
+    """Count one call of ``action`` against the caller's address (``agent_broker._hit``: every call counts, a refused or failed one too), 429 with ``Retry-After`` past it.
+    For the call that has no token to count against. ``address`` is ``reNgine.client_ip.client_ip`` (behind a trusted proxy, the real client)."""
+    limit, window = RATES[action]
+    name = f'agentapi:{action}:addr:{address or "unknown"}'
+    if not broker._hit(name, limit, window):
+        raise ApiError(429, f'too many {action} calls from this address: at most {limit} per {window} seconds', retry_after_seconds=broker._window_left(name, window))
 
 
 def _template_bundle(ctx, action):
@@ -761,6 +771,19 @@ def _bare(host):
     """The hostname or address inside a nuclei target or result host (a bare host, ``host:port`` or a URL), lowercased."""
     from cvengine_scanner.flags import host_of
     return host_of({'host': host if isinstance(host, str) else ''})
+
+
+def _port_of(value):
+    """The port a nuclei target or result host names (``host:port``, ``[v6]:port``, a URL with or without one: its scheme's default), 0 when it names none."""
+    text = str(value or '').strip().lower()
+    scheme = text.split('://', 1)[0] if '://' in text else ''
+    text = text.split('://', 1)[-1].split('/', 1)[0]
+    port = text.split(']', 1)[1].lstrip(':') if text.startswith('[') else (text.rsplit(':', 1)[1] if text.count(':') == 1 else '')
+    return int(port) if port.isdigit() else {'https': 443, 'http': 80}.get(scheme, 0)
+
+
+def _hit_port(*values):
+    return next((p for p in map(_port_of, values) if p), 0)
 
 
 def task_hosts(task):
@@ -2855,8 +2878,14 @@ def _bind_to_task(kind, result, task):
             dropped = len(result['ports']) - len(kept)
             result = {**result, 'ports': kept}
     else:
-        asked = {_bare(t) for t in target.get('targets') or [] if isinstance(t, str)} - {''}
-        kept = [f for f in result['findings'] if _bare(f['host'] or f['matched_at']) in asked]
+        ports = {}  # host -> the ports the task named for it; 0 stands for a target with none (any port of that host is then its own)
+        for t in target.get('targets') or []:
+            if isinstance(t, str) and _bare(t):
+                ports.setdefault(_bare(t), set()).add(_port_of(t))
+        def on_asked_port(f):
+            asked_ports = ports.get(_bare(f['host'] or f['matched_at']))
+            return asked_ports is not None and (0 in asked_ports or _hit_port(f['matched_at'], f['host']) in (0, *asked_ports))
+        kept = [f for f in result['findings'] if on_asked_port(f)]
         dropped = len(result['findings']) - len(kept)
         result = {**result, 'findings': kept}
     return {**result, 'dropped': dropped} if dropped else result
@@ -2873,7 +2902,8 @@ def _held_to_its_host(outcome):
         return outcome
     own = _bare(outcome['host'])
     named = {_bare(hit[k]) for k in ('host', 'matched-at') if isinstance(hit.get(k), str) and hit[k].strip()}
-    if named and named != {own}:
+    port, hit_port = _port_of(outcome['host']), _hit_port(hit.get('matched-at'), hit.get('host'))
+    if (named and named != {own}) or (port and hit_port and port != hit_port):  # a hit on another port of the host is not a hit on the port asked
         return {**outcome, 'vulnerable': False, 'hit': None, 'output': '', 'error': OTHER_HOST_HIT}
     return outcome
 

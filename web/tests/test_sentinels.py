@@ -1,6 +1,8 @@
 """Sentinels: identity, enrollment, scan-stage task queueing/leasing, dispatch-or-local, the admin surface."""
 import base64
+import json
 from datetime import timedelta
+from unittest import mock
 
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
@@ -121,6 +123,30 @@ class EnrollmentTests(SentinelBase):
     def test_unknown_or_bad_secret_is_refused(self):
         status, _ = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': 'senr_not-a-real-one', 'name': 'x'})
         self.assertEqual(status, 403)
+
+    def test_bootstrap_is_throttled_per_address(self):
+        """SN-13: the one call with no bearer token hashes and queries on every try; past the limit an address gets 429 with the seconds left, another address is not
+        affected, and a refused call costs no enrollment."""
+        from django.core.cache import cache
+        from django.test import Client
+        keys = [f'agentapi:bootstrap:addr:{a}' for a in ('203.0.113.9', '203.0.113.10')]
+        for key in keys:
+            cache.delete(key)
+            self.addCleanup(cache.delete, key)
+
+        def boot(address, token='senr_not-a-real-one'):
+            response = Client().post('/api/v1/sentinels/bootstrap', json.dumps({'enrollment_token': token, 'name': 'x'}), content_type='application/json',
+                                     REMOTE_ADDR=address)
+            return response.status_code, response
+        with mock.patch.dict(sentinels.RATES, {'bootstrap': (2, 60)}):
+            self.assertEqual([boot('203.0.113.9')[0] for _ in range(2)], [403, 403])
+            status, response = boot('203.0.113.9')
+            self.assertEqual(status, 429)
+            self.assertTrue(1 <= int(response['Retry-After']) <= 60)
+            self.assertEqual(boot('203.0.113.10')[0], 403)  # another address has its own window
+            _, out = call(self.t['dana'], 'POST', '/api/v1/projects/sen-a/sentinels/enroll')
+            self.assertEqual(boot('203.0.113.9', out['enrollment_token'])[0], 429)  # over the limit: refused before the secret is looked at
+            self.assertEqual(boot('203.0.113.10', out['enrollment_token'])[0], 201)
 
     def test_non_admin_cannot_generate_an_enrollment_secret(self):
         status, _ = call(self.t['alice'], 'POST', '/api/v1/projects/sen-a/sentinels/enroll')
@@ -681,6 +707,17 @@ class HeartbeatTests(SentinelBase):
         task.refresh_from_db()
         self.assertGreaterEqual(task.lease_expires_at, first_lease)
         self.assertEqual(len(hb['leases']), 1)
+
+
+    def test_a_deeply_nested_body_is_a_clean_400_not_a_500(self):
+        """SN-7: nested arrays a Sentinel (or any token) sends make ``json.loads`` raise RecursionError on some Pythons and parse on others: both are a 400 now."""
+        from django.test import Client
+        for depth in (100000, 40):
+            with self.subTest(depth=depth):
+                body = '{"enrollment_token": ' + '[' * depth + ']' * depth + '}'
+                response = Client(raise_request_exception=False).post('/api/v1/sentinels/bootstrap', body, content_type='application/json', REMOTE_ADDR='203.0.113.77')
+                self.assertEqual(response.status_code, 400)
+                self.assertIn('JSON', response.json()['error'])
 
 
 class TestsslResultCleanerTests(SimpleTestCase):
