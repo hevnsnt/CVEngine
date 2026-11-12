@@ -22,6 +22,7 @@ import os
 import re
 import time
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 from django.utils import timezone
 
@@ -30,6 +31,8 @@ logger = logging.getLogger(__name__)
 SERVICE = 'wpscan'
 PARTIAL_SERVICE = 'wpscan-partial'  # a run that finished but could not check vulnerability data: asked again soon
 PROBE_SERVICE = 'wp-probe'
+REDIRECT_SERVICE = 'wpscan-redirected'  # a site that sent the scan to another site: asked again in a few hours, never the week a scanned site rests
+NOT_SCANNABLE_SERVICE = 'wpscan-not-scannable'  # WordPress that WPScan will not scan (hosted on wordpress.com): looked at again tomorrow
 DEFAULT_MAX_SITES = 20
 DEFAULT_STAGE_SECONDS = 60 * 60
 QUEUE = 'wpscan_queue'
@@ -80,7 +83,8 @@ BUDGET_ERROR = re.compile(r'limit|quota|exhaust|too many|requests', re.I)
 # any of these in a technology name says the host runs (or is hosted for) WordPress
 WP_TECH = re.compile(r'^(wordpress|woocommerce|wp ?engine|elementor|wpml|yoast|wp-)', re.I)
 WP_URL = r'/wp-(content|includes|json|login\.php|admin)|/xmlrpc\.php'
-STATES = ('not_wordpress', 'candidate', 'detected', 'scanned', 'blocked', 'failed', 'waiting', 'queued', 'unavailable')
+STATES = ('not_wordpress', 'candidate', 'detected', 'scanned', 'blocked', 'failed', 'waiting', 'queued', 'unavailable', 'unreachable', 'redirected', 'not_scannable')
+RECENT_PROBE = timedelta(days=1)  # a site the WordPress probe read this recently that now reads as down is a failure to retry, not a site that is gone
 QUICK_ATTEMPTS = 6   # a deferred site is asked again this many times, a little later each time, before it waits for the next scan
 QUICK_DELAY = 120    # seconds; the n-th retry waits n times this
 
@@ -724,7 +728,8 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
         if probe_waiting is not None:  # nothing could be asked: not 'no WordPress here', and every site stays due
             return {**summary, 'skipped': f'no scanner could take this work ({probe_waiting.kind}); the sites stay due until one can'}
         return summary
-    fresh = set() if force else ledger.fresh(SERVICE, wanted, project) | ledger.fresh(PARTIAL_SERVICE, wanted, project)
+    fresh = set() if force else (ledger.fresh(SERVICE, wanted, project) | ledger.fresh(PARTIAL_SERVICE, wanted, project)
+                                | ledger.fresh(REDIRECT_SERVICE, wanted, project) | ledger.fresh(NOT_SCANNABLE_SERVICE, wanted, project))
     summary['reused'] = len([h for h in wanted if h in fresh])
     history = ledger.last_run(SERVICE, wanted, project)
     epoch = timezone.now() - timedelta(days=36500)
@@ -748,6 +753,7 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
     running = activity.log('run_check', f'The WordPress scan is checking {len(todo)} WordPress site(s) of {domain.name}'
                            + ('' if token else ' (no API token: versions, plugins and exposures only)'),
                            project=project, status='running', scan_id=scan.id)
+    down, attempted, followed = [], 0, set()  # sites that read as down, sites the scan was asked about, redirect targets added to this run
     errors, notes, scanned, token_ok = [], [], [], bool(token)  # errors: the scan went wrong; notes: a site that is not scannable (down, moved, not WordPress)
     no_scanner = None
     if real_runner:
@@ -764,6 +770,7 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
             break
         sub, url = by_name[host], _base_of(by_name[host])
         use = token if token_ok else ''
+        attempted += 1
         try:
             report = _scan_site(runner, url, use, sub, project)
         except ValueError as exc:  # NotWordPress (or any ValueError a runner raises): the scan says the site is up and is not WordPress
@@ -784,18 +791,31 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
             record_state(project, domain.id, host, 'blocked', _hint(str(exc), token))
             errors.append(f'{host}: blocked by the edge')
             continue
-        except SiteUnreachable as exc:  # nothing was read and nothing is wrong with the scan: asked again at the next scan, never a failed stage
+        except SiteUnreachable as exc:  # nothing was read: asked again at the next scan
             ledger.record(SERVICE, [host], project, scan, 'failed')
-            record_state(project, domain.id, host, 'unreachable', _redact(str(exc), token))
+            reason = _redact(str(exc), token)
+            if _probe_recent(project, host):  # WordPress was read on this site within a day and it does not answer now: a failure to retry, not a quiet skip
+                record_state(project, domain.id, host, 'failed', f'{reason}; the WordPress probe read this site within the last day, so the Sentinel or its network may be at fault')
+                errors.append(f'{host}: the site answered the WordPress probe within a day and does not answer the scan')
+                continue
+            record_state(project, domain.id, host, 'unreachable', reason)
+            down.append((host, reason))
             notes.append(f'{host}: not reachable')
             continue
-        except RedirectsElsewhere as exc:  # the site sends visitors to another site; that one is scanned under its own name, if it is a target
-            ledger.record(SERVICE, [host], project, scan)
-            record_state(project, domain.id, host, 'redirected', f'the site redirects to {exc.target}, another site; it is not scanned under this name')
-            notes.append(f'{host}: redirects to another site')
+        except RedirectsElsewhere as exc:  # the site sends visitors to another site; a target of this project is scanned under its own name
+            ledger.record(REDIRECT_SERVICE, [host], project, scan)  # its own record with a short window: a passing redirect (maintenance, login) does not hide the site for a week
+            target = (urlsplit(exc.target).hostname or '').lower().rstrip('.')
+            if target and target in by_name and target != host and target not in todo and target not in followed and target not in fresh and _target_permitted(target, project):
+                followed.add(target)
+                todo.append(target)  # scanned in this run, under its own name
+                record_state(project, domain.id, host, 'redirected', f'the site redirects to {exc.target}, another target of this project; that name is scanned instead')
+                notes.append(f'{host}: redirects to {target}, which is scanned')
+            else:
+                record_state(project, domain.id, host, 'redirected', f'the site redirects to {exc.target}, another site; it is not scanned under this name (asked again in a few hours)')
+                notes.append(f'{host}: redirects to another site')
             continue
         except NotScannable as exc:  # WordPress, but not one WPScan can scan
-            ledger.record(SERVICE, [host], project, scan)
+            ledger.record(NOT_SCANNABLE_SERVICE, [host], project, scan)
             record_state(project, domain.id, host, 'not_scannable', str(exc))
             notes.append(f'{host}: not scannable by WPScan')
             continue
@@ -834,6 +854,14 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
         summary['findings'] += new
         summary['technologies'] += techs
         scanned.append(host)
+    if down and not scanned and len(down) == attempted and attempted >= 2:
+        # not one site could be scanned and every one read as down: more likely the Sentinel's own DNS or route out is broken than that every site is gone.
+        # The sites stay recorded as unreachable and asked again, and the stage is kept as failed, naming the Sentinel
+        sentinel = getattr(runner, 'last_sentinel', '') or 'the Sentinel that ran it'
+        errors.append(f'every one of the {attempted} sites read as down; {sentinel} may have broken DNS or no route out (check that Sentinel)')
+        for host, reason in down:
+            record_state(project, domain.id, host, 'unreachable', f'{reason}; every site of this scan read as down, so the Sentinel may be at fault')
+        notes = [n for n in notes if not n.endswith('not reachable')]
     summary['scanned'] = len(scanned)
     summary['deferred'] = queue_quick(scan, deferred, attempt, dispatch=real_runner and not internal)
     summary['thorough_queued'] = queue_thorough(project, scanned, domain.id, dispatch=real_runner) if scanned and not internal else 0
@@ -1072,6 +1100,21 @@ def _scan_site(runner, url, token, sub, project):
         if not host or host not in probes.allowed_names(sub) or host == (urlsplit(url).hostname or '').lower() or not probes._permitted(host, project):
             raise
         return runner(found.group(1).rstrip('/.,)'), token)
+
+
+def _probe_recent(project_id, host):
+    """Whether the WordPress probe read a signature on this host within the last day."""
+    from cveFeed.models import ProbeObservation
+    return ProbeObservation.objects.filter(project_id=project_id, host=host.lower(), probe='wordpress-detect', kind='wordpress', outcome='found',
+                                           observed_at__gte=timezone.now() - RECENT_PROBE).exists()
+
+
+def _target_permitted(host, project):
+    from cveFeed import probes
+    try:
+        return bool(probes._permitted(host, project))
+    except Exception:  # noqa: BLE001 - a name that cannot be checked is not followed
+        return False
 
 
 def _probe_positive(project_id, host):

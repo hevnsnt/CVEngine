@@ -113,8 +113,8 @@ class ClassifyEveryEndTests(SimpleTestCase):
             self.assertNotIn('tok-secret', getattr(error, 'what', ''))
 
 
-class OutcomeStageTests(RouteFixture, TestCase):
-    """Through the stage: what each ending is recorded as, and whether the host's assessment fails because of it."""
+class StageBase(RouteFixture, TestCase):
+    __test__ = False
 
     def setUp(self):
         super().setUp()
@@ -134,6 +134,11 @@ class OutcomeStageTests(RouteFixture, TestCase):
         from cveFeed.models import AgentActivity
         return list(AgentActivity.objects.order_by('id').values_list('status', 'message'))
 
+
+class OutcomeStageTests(StageBase):
+    """Through the stage: what each ending is recorded as, and whether the host's assessment fails because of it."""
+    __test__ = True
+
     def test_a_site_that_is_down_does_not_fail_the_stage_and_says_so(self):
         out = self.go(mock.Mock(side_effect=wpscan_scan.SiteUnreachable('the site did not answer the scan (Could not connect to server)')))
         self.assertNotIn('error', out)
@@ -150,21 +155,67 @@ class OutcomeStageTests(RouteFixture, TestCase):
         self.assertNotIn('error', out)
         self.assertEqual(self.state()['state'], 'redirected')
         self.assertIn('http://other.example.test/', self.state()['reason'])
-        self.assertEqual(ServiceRun.objects.get(service='wpscan', asset='www.rt.test').status, 'done')
+        self.assertFalse(ServiceRun.objects.filter(service='wpscan', asset='www.rt.test', status='done').exists())  # not the week a scanned site rests
+        self.assertEqual(ServiceRun.objects.get(service=wpscan_scan.REDIRECT_SERVICE, asset='www.rt.test').status, 'done')  # its own short record
         self.assertEqual(self.activity()[-1][0], 'done')
 
     def test_a_site_wpscan_will_not_scan_does_not_fail_the_stage(self):
         out = self.go(mock.Mock(side_effect=wpscan_scan.NotScannable('hosted on WordPress.com, which WPScan does not scan')))
         self.assertNotIn('error', out)
         self.assertEqual(self.state()['state'], 'not_scannable')
-        self.assertEqual(ServiceRun.objects.get(service='wpscan', asset='www.rt.test').status, 'done')
+        self.assertFalse(ServiceRun.objects.filter(service='wpscan', asset='www.rt.test', status='done').exists())
+        self.assertEqual(ServiceRun.objects.get(service=wpscan_scan.NOT_SCANNABLE_SERVICE, asset='www.rt.test').status, 'done')
 
-    def test_a_probe_that_saw_wordpress_does_not_turn_a_down_site_into_a_scan_that_could_not_see_it(self):
-        ProbeObservation.objects.create(project=self.project, domain=self.domain, host='www.rt.test', probe='wordpress-detect', port=0, kind='wordpress',
-                                        product='WordPress', outcome='found', confidence=0.9, source='probe')
+    def probe_saw_wordpress(self, age_hours=0):
+        from datetime import timedelta
+        from django.utils import timezone
+        row = ProbeObservation.objects.create(project=self.project, domain=self.domain, host='www.rt.test', probe='wordpress-detect', port=0, kind='wordpress',
+                                              product='WordPress', outcome='found', confidence=0.9, source='probe')
+        ProbeObservation.objects.filter(pk=row.pk).update(observed_at=timezone.now() - timedelta(hours=age_hours))
+        from cveFeed import ledger
+        ledger.record(wpscan_scan.PROBE_SERVICE, ['www.rt.test'], self.project)  # the probe ran lately: this run does not ask the site again
+
+    def test_a_site_the_probe_read_within_a_day_that_now_reads_down_is_a_failure_to_retry(self):
+        self.probe_saw_wordpress(age_hours=2)
+        out = self.go(mock.Mock(side_effect=wpscan_scan.SiteUnreachable('the site did not answer the scan')))
+        self.assertIn('answered the WordPress probe within a day', out['error'])
+        self.assertEqual(self.state()['state'], 'failed')
+        self.assertEqual(self.activity()[-1][0], 'failed')
+        self.assertEqual(ServiceRun.objects.get(service='wpscan', asset='www.rt.test').status, 'failed')
+
+    def test_a_probe_from_longer_ago_does_not_make_a_down_site_a_failure(self):
+        self.probe_saw_wordpress(age_hours=48)
         out = self.go(mock.Mock(side_effect=wpscan_scan.SiteUnreachable('the site did not answer the scan')))
         self.assertNotIn('error', out)
         self.assertEqual(self.state()['state'], 'unreachable')
+
+    def two_sites(self):
+        other = Subdomain.objects.create(name='blog.rt.test', target_domain=self.domain, scan_history=self.scan_obj)
+        other.technologies.add(Technology.objects.get(name='WordPress'))
+
+    def test_every_site_of_a_scan_reading_as_down_keeps_the_stage_failed_and_names_the_sentinel(self):
+        self.two_sites()
+        runner = mock.Mock(side_effect=wpscan_scan.SiteUnreachable("the site did not answer the scan (Couldn't resolve host name)"))
+        runner.last_sentinel = 'edge-sentinel-1'
+        out = self.go(runner)
+        self.assertIn('every one of the 2 sites read as down', out['error'])
+        self.assertIn('edge-sentinel-1', out['error'])
+        self.assertEqual(self.activity()[-1][0], 'failed')
+        self.assertEqual(self.state()['state'], 'unreachable')  # the sites still say what was seen, and are asked again
+        self.assertEqual(ServiceRun.objects.filter(service='wpscan', status='failed').count(), 2)
+
+    def test_two_down_sites_and_one_scanned_is_not_a_failed_stage(self):
+        self.two_sites()
+        third = Subdomain.objects.create(name='shop.rt.test', target_domain=self.domain, scan_history=self.scan_obj)
+        third.technologies.add(Technology.objects.get(name='WordPress'))
+
+        def runner(url, token):
+            if 'shop' in url:
+                return REPORT
+            raise wpscan_scan.SiteUnreachable('the site did not answer the scan')
+        out = self.go(runner)
+        self.assertEqual(out['scanned'], 1)
+        self.assertNotIn('error', out)
 
     def test_a_real_tool_failure_still_fails_the_stage_and_the_feed_says_what_failed(self):
         failure = wpscan_scan.ToolFailure("this Sentinel's WPScan vulnerability database is missing or could not be updated", 'detail')
@@ -199,3 +250,57 @@ class OutcomeStageTests(RouteFixture, TestCase):
         entry = AgentActivity.objects.filter(message__contains='www.rt.test').order_by('-id').first()
         self.assertEqual(entry.status, 'done')
         self.assertNotIn('diagnostic', entry.message)
+
+
+class NewStatesAreRegisteredTests(SimpleTestCase):
+    def test_every_state_the_stage_writes_is_listed(self):
+        for state in ('unreachable', 'redirected', 'not_scannable'):
+            self.assertIn(state, wpscan_scan.STATES)
+
+    def test_the_host_page_has_a_plain_label_for_each(self):
+        import os
+        text = open(os.path.join(os.path.dirname(__file__), '..', 'static', 'cve', 'app.js')).read()
+        block = text[text.index('const WP_STATE_LABELS'):text.index('const WP_THOROUGH_LABELS')]
+        for state in wpscan_scan.STATES:
+            self.assertIn(state, block)
+        self.assertIn('Site did not answer', block)
+
+    def test_the_docs_name_them(self):
+        import os
+        text = open(os.path.join(os.path.dirname(__file__), '..', '..', 'docs', 'PIPELINE.md')).read()
+        for state in ('unreachable', 'redirected', 'not_scannable'):
+            self.assertIn(f'`{state}`', text)
+
+    def test_the_short_windows_exist(self):
+        from cveFeed import ledger
+        self.assertEqual(ledger.ttl(wpscan_scan.REDIRECT_SERVICE), 6 * 3600)
+        self.assertEqual(ledger.ttl(wpscan_scan.NOT_SCANNABLE_SERVICE), 24 * 3600)
+
+
+class RedirectToATargetTests(StageBase):
+    __test__ = True
+
+
+    def test_a_redirect_to_another_target_of_the_project_scans_that_name(self):
+        seen = []
+
+        def runner(url, token):
+            seen.append(url)
+            if 'www.rt.test' in url:
+                raise wpscan_scan.RedirectsElsewhere('https://plain.rt.test/')
+            return REPORT
+        out = self.go(runner)
+        self.assertTrue(any('plain.rt.test' in u for u in seen), seen)
+        self.assertEqual(out['scanned'], 1)
+        self.assertEqual(self.state()['state'], 'redirected')
+        self.assertIn('scanned instead', self.state()['reason'])
+
+    def test_a_redirect_to_a_name_that_is_no_target_is_not_followed_and_is_asked_again_in_hours(self):
+        seen = []
+
+        def runner(url, token):
+            seen.append(url)
+            raise wpscan_scan.RedirectsElsewhere('https://elsewhere.example.net/')
+        self.go(runner)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(ServiceRun.objects.get(service=wpscan_scan.REDIRECT_SERVICE, asset='www.rt.test').status, 'done')
