@@ -43,6 +43,10 @@ app.autodiscover_tasks()
 from reNgine import lane_memory
 
 lane_memory.install()
+# Every message carries the time it was published, so the system status can say how long a queue's oldest message has waited (reNgine/queue_age.py)
+from reNgine import queue_age
+
+queue_age.install()
 
 
 @setup_logging.connect()
