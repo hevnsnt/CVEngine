@@ -62,10 +62,12 @@ function drawDots() {
 }
 
 // The last screen only covers a first minute with nothing to show. Ask the server first: with a host already found (or no discovery coming) it is never drawn.
-const toDashboard = async (follow) => {
+// ``first`` is true when the wait ended with no host yet: the dashboard then says that the first look is still under way (first=1).
+const toDashboard = async (follow, first) => {
   stop();
   try { const r = await welcome('POST', 'finish'); follow = follow || r.follow; } catch (_) { /* the dashboard opens regardless */ }
-  window.location.href = follow ? `/cve/?follow=${follow}` : '/cve/';
+  const query = [follow ? `follow=${follow}` : '', first ? 'first=1' : ''].filter(Boolean).join('&');
+  window.location.href = query ? `/cve/?${query}` : '/cve/';
 };
 let gate = null; // what the server said when the last screen was asked for: kept for the screen itself
 async function show(i) {
@@ -169,7 +171,7 @@ const steps = {
     const authWrap = el('label', 'check', null, { for: 'authorized' });
     authWrap.append(auth, document.createTextNode('I am authorized to test this domain.'));
     const hint = el('div', 'live-hint');
-    hint.append(document.createTextNode('We will set things up while you answer a few questions.'));
+    hint.append(document.createTextNode('We will set things up while you answer a few questions. Continue starts a first look at this domain, and you can keep answering while it works.'));
     form(node, {
       title: 'Let us get you set up',
       lead: 'Name your organization and first project, and give one domain you own.',
@@ -408,8 +410,9 @@ const steps = {
   },
 
   build(node) {
-    // Nothing here says what is going on underneath: no scanning, no counts, no names. It is a calm wait of about a minute that ends the moment a
-    // host exists (or when the time is up), whatever the server is doing.
+    // It says what is happening in plain words (a first look at the domain), how long it usually takes and what comes next, and keeps the words the
+    // owner's copy gate bans out (no "scanning", no "discovery running"). It ends the moment a host exists (or when the time is up), whatever the
+    // server is doing; when the time is up with no host, the dashboard opens with a note that the first look is still under way.
     const heading = el('h1', '', 'Getting everything ready', { tabindex: '-1', id: 'build-heading' });
     const status = el('p', 'lead', '', { id: 'build-status', role: 'status', 'aria-live': 'polite' });
     node.append(heading, status);
@@ -427,9 +430,10 @@ const steps = {
     let leaving = false;
     const leave = (follow) => {
       if (leaving) return; leaving = true; clearTimeout(cap);
-      status.textContent = 'Opening your dashboard';
+      const empty = !(gate && gate.build && gate.build.hosts_present); // nothing is on the dashboard yet: it will say so
+      status.textContent = empty ? 'Opening your dashboard. Hosts will keep appearing there as they are found.' : 'Opening your dashboard';
       try { frame.contentWindow.postMessage({ state: 'Opening your dashboard' }, '*'); } catch (_) { /* not loaded yet */ }
-      toDashboard(follow);
+      toDashboard(follow, empty);
     };
     const say = (text) => { try { frame.contentWindow.postMessage({ state: text }, '*')  /* status words only; a srcdoc frame can have an opaque origin */; } catch (_) { /* not loaded yet */ } };
     frame.addEventListener('load', () => say('Getting ready.'));
@@ -444,7 +448,11 @@ const steps = {
       gate = r;
       if (!r.build.show) leave(r.discovery_scan); // the first host exists (or the time is up)
     };
-    requestAnimationFrame(() => { status.textContent = 'This takes about a minute.'; }); // inserted after the region exists, so it is announced
+    const domain = state && state.seed ? state.seed.domain : '';
+    const minutes = Math.max(1, Math.round(total / 60));
+    const wait = minutes === 1 ? 'a minute' : `${minutes} minutes`;
+    const said = `${domain ? `Looking up ${domain}.` : 'Getting your first look ready.'} This usually takes about ${wait}. Hosts appear on your dashboard as they are found, and it opens by itself.`;
+    requestAnimationFrame(() => { status.textContent = said; }); // inserted after the region exists, so it is announced
     heading.focus({ preventScroll: true });
     timer = setInterval(poll, 2000);
   },

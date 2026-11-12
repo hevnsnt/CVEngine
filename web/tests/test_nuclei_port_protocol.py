@@ -99,7 +99,7 @@ class DeepBase(DispatchBase):
                 sent.append(task[0])
             return (x for x in ())
         with tempfile.NamedTemporaryFile('w', suffix='.txt') as handle, mock.patch('agentapi.sentinel_dispatch.any_scanner_for', return_value=True), \
-                mock.patch('agentapi.sentinel_dispatch.resolvable_targets', side_effect=lambda chunk: list(chunk)), \
+                mock.patch('agentapi.sentinel_dispatch.resolvable_targets', side_effect=lambda chunk, **kw: list(chunk)), \
                 mock.patch('agentapi.sentinel_dispatch.dispatch_many', side_effect=capture), \
                 mock.patch('cveFeed.validation.all_templates_allowed', return_value=False):
             handle.write('\n'.join(targets) + '\n')
@@ -255,7 +255,7 @@ class NotCheckedTests(DispatchBase):
 
     def test_the_ports_not_checked_are_said_in_the_activity_feed(self):
         from cveFeed.models import AgentActivity
-        stream = mock.Mock(unreached={f'{HOST}:22'}, not_checked=[{'target': f'{HOST}:22', 'reason': 'nothing answered on this port'},
+        stream = mock.Mock(unreached={f'{HOST}:22'}, refused=set(), not_checked=[{'target': f'{HOST}:22', 'reason': 'nothing answered on this port'},
                                                                   {'target': f'{HOST}:25', 'reason': 'its time ran out after 3 of 13 templates'}])
         nuclei_scan.record_reached('nuclei_deep', [HOST, f'{HOST}:22', f'{HOST}:25'], self.project, self.scan, stream)
         text = ' '.join(AgentActivity.objects.values_list('message', flat=True))
@@ -268,7 +268,7 @@ class NotCheckedTests(DispatchBase):
         fixed Sentinel, in ``unreachable``; a Sentinel that sends only ``not_checked`` is read the same way. The ledger never records such a port as done."""
         from cveFeed import ledger
         chunk = [HOST, f'{HOST}:22', f'{HOST}:25']
-        stream = mock.Mock(unreached=set(), not_checked=[{'target': f'{HOST}:25', 'reason': 'its time ran out after 3 of 13 templates'}])
+        stream = mock.Mock(unreached=set(), refused=set(), not_checked=[{'target': f'{HOST}:25', 'reason': 'its time ran out after 3 of 13 templates'}])
         unreached = nuclei_scan.record_reached('nuclei_deep', chunk, self.project, self.scan, stream)
         self.assertEqual(unreached, {f'{HOST}:25'})
         self.assertEqual(ledger.fresh('nuclei_deep', chunk, self.project), {HOST, f'{HOST}:22'})  # :25 is still due
@@ -278,7 +278,7 @@ class NotCheckedTests(DispatchBase):
     def test_the_target_of_a_not_checked_row_is_matched_however_it_is_spelled(self):
         from cveFeed import ledger
         chunk = [HOST, f'{HOST}:25']
-        stream = mock.Mock(unreached=set(), not_checked=[{'target': f'WWW.Example.Test:25 ', 'reason': '1 of 13 template runs failed'}])
+        stream = mock.Mock(unreached=set(), refused=set(), not_checked=[{'target': f'WWW.Example.Test:25 ', 'reason': '1 of 13 template runs failed'}])
         self.assertEqual(nuclei_scan.record_reached('nuclei_deep', chunk, self.project, self.scan, stream), {f'{HOST}:25'})
         self.assertEqual(ledger.fresh('nuclei_deep', chunk, self.project), {HOST})
 
@@ -286,15 +286,77 @@ class NotCheckedTests(DispatchBase):
         from cveFeed import ledger
         from cveFeed.models import AgentActivity
         chunk = [HOST, f'{HOST}:25']
-        stream = mock.Mock(unreached=set(), not_checked=[])
+        stream = mock.Mock(unreached=set(), refused=set(), not_checked=[])
         self.assertEqual(nuclei_scan.record_reached('nuclei_deep', chunk, self.project, self.scan, stream), set())
         self.assertEqual(ledger.fresh('nuclei_deep', chunk, self.project), set(chunk))
         self.assertFalse(AgentActivity.objects.filter(message__contains='did not fully check').exists())
 
     def test_the_activity_text_says_only_what_is_true(self):
         from cveFeed.models import AgentActivity
-        stream = mock.Mock(unreached=set(), not_checked=[{'target': f'{HOST}:25', 'reason': 'its time ran out after 3 of 13 templates'}])
+        stream = mock.Mock(unreached=set(), refused=set(), not_checked=[{'target': f'{HOST}:25', 'reason': 'its time ran out after 3 of 13 templates'}])
         nuclei_scan.record_reached('nuclei_deep', [HOST, f'{HOST}:25'], self.project, self.scan, stream)
         text = ' '.join(AgentActivity.objects.values_list('message', flat=True))
         self.assertIn('stay due', text)
         self.assertNotIn('scanned again later', text)
+
+
+class PartlyCheckedBackOffTests(DispatchBase):
+    """Fourth pass, N9: a target a Sentinel left not_checked is asked again at most once a day, through the ledger's failed-row back-off."""
+    SERVICE = 'nuclei-deep-target:rev1'
+
+    def make_stream(self):
+        calls = []
+
+        def stream(path, **kwargs):
+            with open(path, encoding='utf-8') as handle:
+                calls.append(handle.read().split())
+            stream.not_checked = [{'target': f'{HOST}:25', 'reason': 'its time ran out after 3 of 13 templates'}]
+            return iter(())
+        stream.unreached, stream.not_checked, stream.calls = set(), [], calls
+        return stream
+
+    def run_once(self, stream, **kwargs):
+        return nuclei_scan._run_nuclei(self.scan.id, stream=stream, targets=[HOST, f'{HOST}:25'], service_override=self.SERVICE, **kwargs)
+
+    def test_the_failed_row_is_written_under_the_runs_own_failed_service(self):
+        from cveFeed import ledger
+        self.assertEqual(ledger.failed_service('nuclei-deep-target:rev1'), 'nuclei-deep-target-failed:rev1')
+        self.assertEqual(ledger.failed_service('nuclei'), 'nuclei-failed')
+        self.assertEqual(ledger.ttl(ledger.failed_service('nuclei-deep-target:rev1')), 24 * 3600)
+
+    def test_a_target_left_not_checked_is_not_asked_again_inside_a_day(self):
+        from cveFeed.models import ServiceRun
+        stream = self.make_stream()
+        self.run_once(stream)
+        self.assertEqual(stream.calls, [[HOST, f'{HOST}:25']])
+        self.assertEqual(ServiceRun.objects.get(service=self.SERVICE, asset=f'{HOST}:25').status, 'failed')  # due for any other reason
+        self.assertTrue(ServiceRun.objects.filter(service='nuclei-deep-target-failed:rev1', asset=f'{HOST}:25', status='done').exists())
+        for _again in range(3):  # a second, third and fourth scan the same day
+            self.run_once(stream)
+        self.assertEqual(len(stream.calls), 1)
+
+    def test_it_is_asked_again_after_the_day_and_when_a_person_forces_it(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        from cveFeed.models import ServiceRun
+        stream = self.make_stream()
+        self.run_once(stream)
+        self.run_once(stream, force=True)
+        self.assertEqual(len(stream.calls), 2)  # a forced stage ignores the back-off
+        ServiceRun.objects.filter(service='nuclei-deep-target-failed:rev1').update(finished_at=timezone.now() - timedelta(hours=25))
+        self.run_once(stream)
+        self.assertEqual(stream.calls[-1], [f'{HOST}:25'])  # only the target that was due: the other is fresh
+        self.assertEqual(len(stream.calls), 3)
+
+    def test_a_target_that_was_fully_checked_later_is_done_and_leaves_the_back_off_alone(self):
+        from cveFeed import ledger
+        stream = self.make_stream()
+        self.run_once(stream)
+        calls = []
+
+        def clean(path, **kwargs):
+            calls.append(open(path, encoding='utf-8').read().split())
+            return iter(())
+        clean.unreached, clean.not_checked = set(), []
+        self.run_once(clean, force=True)
+        self.assertEqual(ledger.fresh(self.SERVICE, [HOST, f'{HOST}:25'], self.project), {HOST, f'{HOST}:25'})

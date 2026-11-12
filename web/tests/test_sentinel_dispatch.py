@@ -265,7 +265,7 @@ class NaabuDispatchTests(DispatchBase):
 
 class DispatchActivityLoggingTests(DispatchBase):
     """Every dispatch attempt gets one `run_check` activity line, settled once the wait ends: this is what makes
-    Sentinel hand-off and check-in visible on the Live page and the Activity page, which share the same feed."""
+    Sentinel hand-off and check-in visible on the Overview and the Activity page, which share the same feed."""
 
     def _entries(self):
         from cveFeed.models import AgentActivity
@@ -484,7 +484,7 @@ class NucleiDispatchTests(DispatchBase):
                 return {'outcome': 'done', 'findings': []}
             raise ScannerUnavailable(kind, 'the third chunk is not taken by a Sentinel')
 
-        with mock.patch.object(dispatch, 'dispatch_or_none', fake_dispatch), mock.patch.object(dispatch, 'resolvable_targets', lambda t: list(t)):
+        with mock.patch.object(dispatch, 'dispatch_or_none', fake_dispatch), mock.patch.object(dispatch, 'resolvable_targets', lambda t, **kw: list(t)):
             with self.assertRaises(ScannerUnavailable):
                 list(dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=5)(path))
         self.assertEqual(sent[0] + sent[1] + sent[2], targets)
@@ -639,6 +639,61 @@ class ResolvableTargetsTests(DispatchBase):
                 path = f.name
             self.assertEqual(list(stream(path)), [])
         sent.assert_not_called()
+
+
+class RefusedAddressTargetsTests(DispatchBase):
+    """A name that resolves to an address a Sentinel refuses (loopback, link-local, a private range) fails on every scan if it is dispatched: it is
+    never sent, and the stage says it was not scanned and why."""
+
+    @staticmethod
+    def _answers(host, *a, **k):
+        import socket
+        table = {'loop.example.test': '127.0.0.1', 'meta.example.test': '169.254.169.254', 'live.example.test': '203.0.113.9'}
+        if host not in table:
+            raise socket.gaierror(-2, 'Name or service not known')
+        return [(2, 1, 6, '', (table[host], 0))]
+
+    def test_a_name_that_resolves_to_a_refused_address_is_dropped_and_reported(self):
+        refused = set()
+        with mock.patch('socket.getaddrinfo', side_effect=self._answers):
+            kept = dispatch.resolvable_targets(['live.example.test', 'loop.example.test:8443', 'meta.example.test', 'dead.example.test'], refused=refused)
+        self.assertEqual(kept, ['live.example.test'])
+        self.assertEqual(refused, {'loop.example.test:8443', 'meta.example.test'})  # a name that does not exist at all is not "refused"
+
+    def test_a_name_with_one_refused_answer_among_good_ones_is_refused(self):
+        def mixed(host, *a, **k):
+            return [(2, 1, 6, '', ('203.0.113.9', 0)), (2, 1, 6, '', ('127.0.0.1', 0))]
+        with mock.patch('socket.getaddrinfo', side_effect=mixed):
+            self.assertEqual(dispatch.resolvable_targets(['both.example.test']), [])
+
+    def test_the_nuclei_stream_never_sends_a_refused_name_and_lists_it(self):
+        self.make_sentinel(['nuclei_light'])
+        stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=5)
+        with mock.patch('socket.getaddrinfo', side_effect=self._answers), mock.patch('agentapi.sentinel_dispatch.dispatch_or_none') as sent:
+            sent.return_value = {'outcome': 'done', 'findings': []}
+            import tempfile
+            with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as f:
+                f.write('live.example.test\nloop.example.test\n')
+                path = f.name
+            list(stream(path))
+        self.assertEqual(sent.call_args.args[2]['targets'], ['live.example.test'])
+        self.assertEqual(stream.refused, {'loop.example.test'})
+        self.assertIn('loop.example.test', stream.unreached)  # never recorded as scanned
+
+    def test_the_stage_shows_why_a_host_was_not_scanned(self):
+        from cveFeed import nuclei_scan
+        from cveFeed.models import AgentActivity, ServiceRun
+
+        def stream(path):
+            return iter(())
+        stream.unreached = {'loop.example.test'}
+        stream.refused = {'loop.example.test'}
+        nuclei_scan.record_reached('nuclei', ['live.example.test', 'loop.example.test'], self.project.pk, self.scan, stream)
+        self.assertEqual(ServiceRun.objects.get(service='nuclei', asset='loop.example.test').status, 'failed')
+        line = AgentActivity.objects.filter(project_id=self.project.pk).order_by('-id').first()
+        self.assertIsNotNone(line)
+        self.assertIn('not scanned: resolves to a refused address', line.message.lower())
+        self.assertIn('loop.example.test', line.message)
 
 
 class WpscanDispatchTests(DispatchBase):

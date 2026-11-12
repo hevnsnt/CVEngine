@@ -386,12 +386,40 @@ SECTIONS = {
     'activity': 'Activity',
     'vulns': 'Findings',
     'matches': 'CVE matches',
-    'hygiene': 'Config checks',
+    'hygiene': 'Hygiene',
     'secrets': 'Secrets',
-    'suppliers': 'Third parties',
+    'suppliers': 'Suppliers',
     'keys': 'API keys',
     'sentinels': 'Sentinels',
 }
+
+# The one plain sentence under each page title: what the page is for, in words a person who has never opened it can use.
+SECTION_PURPOSE = {
+    'targets': 'The domains and addresses this project looks at; add one to start a first look.',
+    'scans': 'Every scan of this project, newest first, with its status and what it found.',
+    'hosts': 'Every machine found for this project, with how exposed it is and what was found on it.',
+    'changes': 'What changed since the last scan: new hosts, new findings and things that went away.',
+    'activity': 'What the engine is doing right now and what it did recently.',
+    'vulns': 'Everything found or matched, in one list that you can filter by type.',
+    'matches': 'Known vulnerabilities whose product and version match a host, unless the AI has ruled them out.',
+    'hygiene': 'Certificates, email settings and TLS configuration: problems that are usually quick to fix.',
+    'secrets': 'API keys, tokens and private keys your websites and scripts give away, and where each one was seen.',
+    'suppliers': 'Outside companies your hosts depend on and what each one shows to the internet; these are never your own hosts.',
+}
+# The same sentences for the all-projects view, which has no single project to point at.
+ALL_PROJECTS_PURPOSE = {
+    'targets': 'The domains and addresses every project you can access looks at.',
+    'scans': 'Every scan across your projects, newest first, with its status and what it found.',
+    'hosts': 'Every machine found across your projects, with how exposed it is and what was found on it.',
+    'changes': 'What changed since the last scan: new hosts, new findings and things that went away.',
+    'activity': 'What the engine is doing right now and what it did recently.',
+    'vulns': 'Everything found or matched across your projects, in one list that you can filter by type.',
+    'matches': 'Known vulnerabilities whose product and version match a host, unless the AI has ruled them out.',
+    'hygiene': 'Certificates, email settings and TLS configuration across your projects: problems that are usually quick to fix.',
+    'secrets': 'API keys, tokens and private keys your websites and scripts give away, and where each one was seen.',
+    'suppliers': 'Outside companies your hosts depend on and what each one shows to the internet; these are never your own hosts.',
+}
+SCAN_PURPOSE = 'What this one scan did and what it found.'
 
 
 SCOPE_KEY = 'cve_scope'  # the session's last chosen project (or ALL_PROJECTS): pages with no project in their address keep it
@@ -529,7 +557,7 @@ def scan_page(request, slug, scan_id):
     if not project:
         raise Http404
     return render(request, 'cveFeed/section.html', {
-        'section': 'scan', 'title': f'Scan #{scan_id}', 'project': project, 'scan_id': scan_id,
+        'section': 'scan', 'title': f'Scan #{scan_id}', 'purpose': SCAN_PURPOSE, 'project': project, 'scan_id': scan_id,
         **ui_context(request, 'scans', slug),
     })
 
@@ -560,7 +588,7 @@ def project_page(request, slug, section):
             raise Http404  # a Sentinel's scope is per project; there is no combined view
         return render(request, 'cveFeed/project_sentinels.html', {'title': SECTIONS[section], 'project': project, **ui_context(request, 'project-sentinels', slug)})
     return render(request, 'cveFeed/section.html', {
-        'section': section, 'title': SECTIONS[section], 'project': project, **ui_context(request, section, slug),
+        'section': section, 'title': SECTIONS[section], 'purpose': (ALL_PROJECTS_PURPOSE if slug == ALL_PROJECTS else SECTION_PURPOSE).get(section, ''), 'project': project, **ui_context(request, section, slug),
     })
 
 
@@ -742,7 +770,7 @@ def scanners_page(request):
 
 
 def cve_explorer_page(request):
-    """The CVE explorer: the whole catalog searched by id or technology (static/cve/explorer.js reads /cve/api/cves). ?q= is the search."""
+    """The CVE catalog: the whole catalog searched by id or technology (static/cve/explorer.js reads /cve/api/cves). ?q= is the search."""
     from cveFeed.cve_explorer import SEVERITIES, clean_query
     severity = request.GET.get('severity', '')
     return render(request, 'cveFeed/cve_explorer.html', {

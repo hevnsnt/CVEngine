@@ -209,7 +209,10 @@ class BudgetTests(SimpleTestCase):
         while the Sentinel still works, and the late result is discarded: the work repeats on the next scan."""
         for addresses in range(1, dispatch.MAX_ADDRESSES + 1):
             self.assertGreaterEqual(dispatch._dispatch_timeout('nmap', addresses), min(3600, max(600, 90 * addresses)), addresses)
-        self.assertGreaterEqual(dispatch._dispatch_timeout('naabu', dispatch.NAABU_CHUNK), 900)
+        from cvengine_scanner import flags
+        for addresses in range(1, dispatch.MAX_ADDRESSES + 1):  # the Sentinel's own limit grows with the chunk: the wait is never below it
+            self.assertGreater(dispatch._dispatch_timeout('naabu', addresses), flags.task_seconds('naabu', addresses), addresses)
+        self.assertLessEqual(dispatch.NAABU_CHUNK, flags.hosts_per_task('naabu'))  # a chunk the Sentinel can finish inside its largest limit
 
     def test_a_naabu_task_names_few_enough_addresses_to_finish(self):
         self.assertEqual([len(c) for c in dispatch._chunks(list(range(20)), dispatch.NAABU_CHUNK)], [8, 8, 4])

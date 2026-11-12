@@ -1,16 +1,21 @@
 {% extends 'cveFeed/base.html' %}
 {% load static assets %}
-{% block title %}CVEngine{% endblock %}
+{% block title %}CVEngine · Overview{% endblock %}
 {% block content %}
-<div class="page-head compact">
+<div class="page-head">
   <div>
-    <h1 class="sr">Live</h1>
+    <h1>Overview</h1>
+    <p class="sub">What is exposed to the internet and what to fix first, updated as scans run.</p>
     <span class="live" id="live" style="display:none">live</span>
   </div>
   {% if not ai_ready and is_app_admin %}<a class="btn sm" href="{% url 'cve_welcome' %}?again=1">Connect your AI model</a>{% endif %}
 </div>
 
 <a class="since-strip" id="since-strip" href="#" hidden></a>
+<div class="since-strip" id="first-note" role="status" hidden>
+  <span>Your first look is still under way. Hosts appear here as they are found, usually within the next few minutes. You can add more domains at any time.</span>
+  <button class="btn sm" type="button" data-add-targets>Add targets</button>
+</div>
 
 <section class="panel ticks" aria-label="Exposure">
   <div class="cell-stack">
@@ -60,14 +65,14 @@
 
 
 
-<section class="grid hero" id="dash" data-slug="{{ slug|default:'' }}" data-follow="{{ request.GET.follow }}">
+<section class="grid hero" id="dash" data-slug="{{ slug|default:'' }}" data-follow="{{ request.GET.follow }}" data-first="{{ request.GET.first }}">
   {% csrf_token %}
   <div class="card discovery">
     <div class="card-head">
       <h2>Live discovery</h2>
       <span class="card-tools"><button class="btn ghost sm" id="d-pods" type="button" aria-pressed="true" title="Fold each host's CVEs into its bubble. Double-click a host to open its pod.">Group CVEs</button><a class="badge" id="d-status" style="display:none"></a></span>
     </div>
-    <p class="note" id="d-target" style="margin:2px 0 10px">Waiting for a scan.</p>
+    <p class="note" id="d-target" style="margin:2px 0 10px">Nothing has run yet. Add a target to start a first look.</p>
     <div class="scanning-now" id="d-scanning" hidden aria-live="polite"></div>
     <div class="graph-box">
       <div id="d-graph" role="group" aria-label="Live graph of what discovery is finding"></div>

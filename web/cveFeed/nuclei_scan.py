@@ -279,6 +279,12 @@ def _echo_ports(subs):
     return out
 
 
+def backed_off(service, targets, project):
+    """The targets of ``targets`` a Sentinel only partly checked within the last day (``ledger.failed_service``): not asked again before that day is over."""
+    from cveFeed import ledger
+    return set(ledger.fresh(ledger.failed_service(service), targets, project))
+
+
 def record_reached(service, chunk, project, scan, stream):
     """Write the ledger for one chunk the stream returned from: the targets it reached as done, the ones it could not (a name that did not resolve, a host
     the Sentinel could not connect to: ``stream.unreached``, and a port it only partly checked: ``stream.not_checked``) as failed. A pass that finds nothing on a host it never reached is not a clean host."""
@@ -289,7 +295,17 @@ def record_reached(service, chunk, project, scan, stream):
     ledger.record(service, [t for t in chunk if t not in unreached], project, scan)
     if unreached:
         ledger.record(service, sorted(unreached), project, scan, 'failed')
+    retry_later = sorted(t for t in chunk if t.strip().lower() in partly)
+    if retry_later:  # only partly checked: due again, but not before a day has gone by (the ledger's failed-row back-off, ``nuclei-failed``), however many scans ask
+        ledger.record(ledger.failed_service(service), retry_later, project, scan)
     _report_not_checked(stream, chunk, project, scan)
+    refused = sorted(t for t in unreached if t in getattr(stream, 'refused', ()))
+    if refused:  # a name that now points at an address no scanner may touch: say so, or the host reads as a scan that failed for no reason
+        from cveFeed import activity
+        shown = ', '.join(refused[:5]) + (f' and {len(refused) - 5} more' if len(refused) > 5 else '')
+        activity.log('run_check', f'Not scanned: resolves to a refused address ({shown}). The name now points at an address that is never scanned '
+                     '(this computer, a private network or a cloud metadata address); fix its DNS record or exclude the host.',
+                     project=getattr(project, 'pk', project), scan_id=getattr(scan, 'pk', scan))
     return unreached
 
 
@@ -346,7 +362,11 @@ def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, servi
         return {'targets': 0, 'findings': 0}
     service = service_override or (ledger.nuclei_tag_service(tags) if tags else 'nuclei')
     covered = set() if force else ledger.fresh(service, targets, project)
-    todo = [t for t in targets if t not in covered]
+    held = set() if force else backed_off(service, [t for t in targets if t not in covered], project)
+    todo = [t for t in targets if t not in covered and t not in held]
+    if held:
+        activity.log('run_check', f'Nuclei on {domain.name}: {len(held)} target(s) were only partly checked in the last {ledger.ttl_label(ledger.failed_service(service))} '
+                     'and are asked again after that', project=project, scan_id=scan.id)
     counts = {name: 0 for name in ('info', 'low', 'medium', 'high', 'critical', 'unknown')}
     new = 0
     reused = hosts_reused = 0
@@ -357,7 +377,7 @@ def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, servi
                          f'the last {ledger.ttl_label(service)}', project=project, scan_id=scan.id)
     if not todo:
         activity.log('run_check', f'Nuclei skipped for {domain.name}: all {len(targets)} targets were scanned in the last '
-                     f'{ledger.ttl_label(service)}', project=project, scan_id=scan.id)
+                     f'{ledger.ttl_label(service)}' + (f' (or only partly checked, and asked again after a day)' if held else ''), project=project, scan_id=scan.id)
         return {'targets': len(targets), 'findings': 0, 'reused': reused, **counts}
 
     # one lookup table per run instead of two queries per result line
@@ -545,7 +565,8 @@ def run_light_nuclei(scan_id, stream, force=False):
         return {'targets': 0, 'technologies': 0, 'hosts': 0, 'techs': {}}
     service = LIGHT_SERVICE
     covered = set() if force else ledger.fresh(service, targets, project)
-    todo = [t for t in targets if t not in covered]
+    held = set() if force else backed_off(service, [t for t in targets if t not in covered], project)  # only partly checked within the day: asked again after it
+    todo = [t for t in targets if t not in covered and t not in held]
     reused = reuse_technologies(scan, project, {host_of({'host': t}) for t in covered}) if covered else 0
     by_name = {s.name: s for s in Subdomain.objects.filter(scan_history=scan)}
     by_ip = {}
@@ -564,7 +585,7 @@ def run_light_nuclei(scan_id, stream, force=False):
         won_targets = [t for t in todo if t in set(won)]
         if not won_targets:
             activity.log('run_check', f'Nuclei technology pass for {domain.name}: ' + (
-                f'all {len(targets)} targets were scanned in the last {ledger.ttl_label(service)}' if not todo else
+                f'all {len(targets)} targets were scanned in the last {ledger.ttl_label(service)}' + (' or only partly checked' if held else '') if not todo else
                 'its targets are being scanned by another scan') + (f', {reused} host(s) reused' if reused else ''),
                 project=project, scan_id=scan.id)
             return {'targets': len(targets), 'technologies': 0, 'hosts': 0, 'techs': {}, 'reused': reused}

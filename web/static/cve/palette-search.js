@@ -113,7 +113,7 @@ export function suggestions(text) {
     }
   }
   const rows = out.slice(0, 6);
-  // "Search CVEs for ...": opens the CVE explorer (/cve/cves/?q=) with a bare word or id; a CVE id goes first, anything else after the
+  // "Search CVEs for ...": opens the CVE catalog (/cve/cves/?q=) with a bare word or id; a CVE id goes first, anything else after the
   // filter completions
   const cve = cvePaletteRow(text);
   if (cve) {

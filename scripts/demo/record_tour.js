@@ -61,7 +61,7 @@ const overlay = `
   // 1. Live
   await p.goto(BASE + '/cve/', { waitUntil: 'domcontentloaded' }); await sleep(1500);
   await p.mouse.move(700, 300, { steps: 10 });
-  await cap('<b>Live</b>: every host, how far it has been scanned, and what is exposed');
+  await cap('<b>Overview</b>: every host, how far it has been scanned, and what is exposed');
   await sleep(1800);
   await scrollBy(330, 1100); await cap('Hosts inside <b>private networks</b> have their own tile');
   await sleep(1500);
