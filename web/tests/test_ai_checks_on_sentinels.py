@@ -17,6 +17,7 @@ nothing changes. With none, they go to the project's own Sentinels under these g
 The server reads ``external_since`` from the installed scanner library (cvengine_scanner, the commit pinned in web/requirements.txt), fail closed: with a
 library that has no such table nothing here is offered outside the built-in scanner."""
 import json
+import pathlib
 from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
@@ -559,6 +560,39 @@ class DraftRowTests(Base):
 
 # ============================================================================== one read-only rule on both sides
 
+CORPUS_COPY = pathlib.Path(__file__).resolve().parent / "fixtures" / "checks" / "corpus.json"
+
+
+class ServerCorpusTests(SimpleTestCase):
+    """D1, D2: the hostile corpus is a fixture of this repo too (a copy of the Sentinel library's), judged by the server's own rules only, so it
+    holds with any installed library. ``SameVerdictTests`` checks the copy has not drifted from the library's and that both judge alike."""
+
+    def corpus(self):
+        return json.loads(CORPUS_COPY.read_text(encoding="utf-8"))["cases"]
+
+    def test_the_server_judges_every_corpus_case_as_the_corpus_says(self):
+        corpus = self.corpus()
+        self.assertGreaterEqual(len(corpus), 100)
+        for case in corpus:
+            with self.subTest(case=case["name"]):
+                self.assertEqual(validation.readonly_problem(case["template"]) == "", case["read_only"])
+                self.assertEqual(ai_checks.external_problem(case["template"]) == "", case["read_only"] and case["own_target"] and case["sentinel"])
+
+    def test_every_hostile_case_is_refused_by_the_allowlist_with_the_servers_reason(self):
+        hostile = [c for c in self.corpus() if c["read_only"] and c["own_target"] and not c["sentinel"]]
+        self.assertGreaterEqual(len(hostile), 40)
+        for case in hostile:
+            with self.subTest(case=case["name"]):
+                self.assertTrue(ai_checks.external_problem(case["template"]).startswith("template not validated: "))
+
+    def test_the_named_tricks_are_in_the_corpus_and_refused(self):
+        refused = {c["name"] for c in self.corpus() if not c["sentinel"]}
+        for name in ("resolve_in_header", "resolve_in_dsl_matcher", "resolve_in_variable", "second_document", "duplicate_top_key", "merge_key",
+                     "anchor_and_alias_for_a_header", "explicit_tag", "raw_get_with_body", "raw_two_requests", "host_header", "authorization_header",
+                     "cookie_header", "post_method"):
+            self.assertIn(name, refused)
+
+
 class SameVerdictTests(SimpleTestCase):
     def test_the_server_and_the_sentinel_judge_every_corpus_template_alike(self):
         from cvengine_scanner import checks
@@ -580,6 +614,10 @@ class SameVerdictTests(SimpleTestCase):
                      'FORBIDDEN_HEADERS', 'MAX_HEADERS', 'MAX_EXPRESSION'):
             with self.subTest(table=name):
                 self.assertEqual(getattr(check_allowlist, name), getattr(library, name))
+
+    def test_the_corpus_copy_of_this_repo_is_the_librarys(self):
+        from cvengine_scanner import contract as library
+        self.assertEqual(CORPUS_COPY.read_bytes(), (library.FIXTURES / "checks" / "corpus.json").read_bytes())
 
     def test_no_hostile_case_reaches_a_sentinel_from_the_server(self):
         from cvengine_scanner import contract as library
