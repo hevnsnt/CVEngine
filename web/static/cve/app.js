@@ -2481,7 +2481,13 @@ function findingPage(mount, cfg) {
         const title = el("span", "cve-id");
         if (r.title instanceof Node) title.append(r.title);
         else title.textContent = r.title;
-        row.append(title);
+        // the chip that says how bad it is (r.lead) sits on the title's line, after the title, so it is never at the end of a long second line
+        const lead = (r.lead || []).filter(Boolean);
+        if (lead.length) {
+          const top = el("span", "row-head");
+          top.append(title, ...lead);
+          row.append(top);
+        } else row.append(title);
         // a row is two lines: the title, then one line of meta that opens with the host (and product) and carries the badges; what does not fit
         // on that line (the description, the badges past the edge) is in the pane, and the row's tooltip says all of it
         const meta = el("span", "host-meta");
@@ -2498,7 +2504,7 @@ function findingPage(mount, cfg) {
         if (aging) meta.append(...ageTags(item));
         if (aging && aging.overdueBy) row.dataset.overdue = "1";
         row.append(meta);
-        row.title = [title.textContent, ...[...meta.children].map((c) => c.textContent.trim()), ...lines.filter((n) => typeof n === "string")].filter(Boolean).join("\n");
+        row.title = [title.textContent, ...lead.map((c) => c.textContent.trim()), ...[...meta.children].map((c) => c.textContent.trim()), ...lines.filter((n) => typeof n === "string")].filter(Boolean).join("\n");
         const rowName = item.title || (item.cve && item.cve.id) || `finding ${item.id}`;
         attachRowMenu(row, rowName, () => {
           const was = item.status ?? item.remediation_status;
@@ -4430,7 +4436,8 @@ const pages = {
       row: (f) => ({
         heat: f.heat,
         title: f.type === "cve" && projectOf(f) ? cveAnchor(projectOf(f), f.title, f.id) : f.title,
-        meta: [badge(TYPE_LABEL[f.type] || f.type), FG.isGroup(f) ? badge(`${f.group.hosts} hosts`, "info") : null, f.internal ? internalBadge() : null, badge(f.severity, f.severity), f.kev ? kevBadge(f.heat_capped) : null, f.type === "cve" ? heatWhy(f.heat_reason) : null, aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
+        lead: [badge(f.severity, f.severity)],
+        meta: [badge(TYPE_LABEL[f.type] || f.type), FG.isGroup(f) ? badge(`${f.group.hosts} hosts`, "info") : null, f.internal ? internalBadge() : null, f.kev ? kevBadge(f.heat_capped) : null, f.type === "cve" ? heatWhy(f.heat_reason) : null, aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
                !FG.isGroup(f) ? statusBadge(f) : null, agentTag(f.agent_task), projChip(f)],
         notes: FG.isGroup(f)
           ? [rowLine(`${f.group.registrable_domain}`, f.note ? ` · ${f.note}` : ""), groupHosts(f), f.description || ""]
@@ -4515,7 +4522,8 @@ const pages = {
       row: (m) => ({
         heat: m.cve.tier,
         title: projectOf(m) ? cveAnchor(projectOf(m), m.cve.cve_id, m.id) : m.cve.cve_id,
-        meta: [heatBadge(m.cve.tier, m.heat_reason), m.cve.kev ? kevBadge(m.cve.heat_capped) : null, heatWhy(m.heat_reason), m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), statusBadge({ ...m, status: m.remediation_status }), agentTag(m.agent_task), projChip(m)],
+        lead: [heatBadge(m.cve.tier, m.heat_reason)],
+        meta: [m.cve.kev ? kevBadge(m.cve.heat_capped) : null, heatWhy(m.heat_reason), m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), statusBadge({ ...m, status: m.remediation_status }), agentTag(m.agent_task), projChip(m)],
         notes: [rowLine(m.host ? hostLink(m.host, projectOf(m)) : "-", ` · ${[m.product, m.version].filter(Boolean).join(" ") || "-"}`), m.cve.short_description || "Description unavailable in the CVE feed."],
       }),
     });

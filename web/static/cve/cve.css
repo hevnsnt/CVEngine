@@ -2771,3 +2771,20 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 @media (min-width:900px){
   .wrap:has(>.pagetabs+.page-head.one-line.with-actions)>.page-head{flex:1 0 100%}
 }
+
+/* ---- UI-2: Findings and CVE matches rows keep the severity chip whole and clear of the row menu ---- */
+/* the chip is on the title's line (static/cve/app.js, `lead`), right of the title; the title is what gives way. The row menu keeps its own corner. */
+.host-row>.row-head{display:flex;align-items:center;gap:var(--s-2);min-width:0;min-height:24px;padding-right:var(--s-8)}
+.host-row>.row-head>.cve-id{flex:1 1 auto;min-width:0;padding-right:0}
+.host-row>.row-head>.badge{flex:none;white-space:nowrap}
+@media (pointer:coarse){.host-row>.row-head{padding-right:var(--hit)}}
+/* the second line shows the chips that fit WHOLE: a chip that does not fit wraps below and is hidden with the line's fixed height, never drawn cut in half and
+   never faded (the tooltip and the pane hold all of them); the host's note and the reason text give way first, with an ellipsis */
+.split>.split-list>.host-rows .host-row:has(>.row-head) .host-meta{flex-wrap:wrap;height:24px;min-height:24px;overflow:hidden;-webkit-mask-image:none;mask-image:none}
+.split>.split-list>.host-rows .host-row:has(>.row-head) .host-meta>.host-why{flex:1 1 0;min-width:min(22ch,100%);max-width:100%}
+.split>.split-list>.host-rows .host-row:has(>.row-head) .host-meta>.heat-why{flex:1 1 0;min-width:10ch;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media (max-width:639px){
+  /* a phone has no room for both: the host is read whole, the reason takes what is left */
+  .split>.split-list>.host-rows .host-row:has(>.row-head) .host-meta>.host-why{flex:0 1 auto}
+  .split>.split-list>.host-rows .host-row:has(>.row-head) .host-meta>.heat-why{min-width:0}
+}
