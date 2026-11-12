@@ -17,7 +17,7 @@ SCRIPT = (ROOT.parent / 'scripts' / 'ui_list_viewport.py').read_text()
 class ListViewportTests(SimpleTestCase):
 	def test_findings_matches_and_hosts_share_one_head(self):
 		self.assertEqual(len(re.findall(r'function listHead\(', APP)), 1)
-		self.assertEqual(len(re.findall(r'= listHead\(\{', APP)), 3)  # findingPage (Findings, CVE matches), Hosts and Scans; Secrets and Third parties get the same function passed in
+		self.assertEqual(len(re.findall(r'= listHead\(\{', APP)), 4)  # findingPage (Findings, CVE matches), Hosts, Scans and Hygiene; Secrets and Third parties get the same function passed in
 		self.assertIn('side.append(lh.head, ...(bulk ? [bulk.note, bulk.bar] : []), rows);', APP)
 		self.assertIn('side.append(lh.head, bulk.bar, rows, gallery);', APP)
 
