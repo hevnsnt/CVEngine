@@ -397,6 +397,11 @@ ROUTES = [
      'group=none|cve: cve folds the same client-side JavaScript library file on sibling hosts of one site into one row with its member ids and statuses; '
      'servers and other products never group; the default none is one row per host)',
      lambda r, c, slug, **k: svc.list_findings(c, slug, r.GET)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/situations', 'What needs you, one host at a time, ranked: each row is a host with a plain narrative, counts (proven, likely, exposure, minor), the first action, '
+     'the reason for its rank and its top findings with links (q= part of a host name, tier=all|exposure|likely|proven keeps the situations whose worst tier is at least that, page, page_size; state is attention, clear or unscanned)',
+     lambda r, c, slug, **k: svc.list_situations(c, slug, r.GET)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/situations/(?P<host>[^/]+)', 'One situation in full: the narrative and up to 200 findings of the host, each with its link (404 when nothing open there needs a person)',
+     lambda r, c, slug, host, **k: svc.get_situation(c, slug, host)),
     ('GET', r'projects/(?P<slug>[-\w]+)/vulnerabilities', 'Scanner findings (severity, open filters)',
      lambda r, c, slug, **k: svc.list_vulnerabilities(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/matches', 'CVE-on-host matches (status, verdict, host filters)',
@@ -546,6 +551,8 @@ ROUTES = [
     ('POST', r'sentinel/tasks/next', 'Lease the best eligible SentinelTask, or none; body {wait: seconds up to 20, kinds: [nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, wpscan_thorough, openvas, discover, waf, bbot_discovery, secrets_scan]}',
      lambda r, c, **k: sentinels.next_task(c, _body(r))),
     ('GET', r'sentinel/tasks/(?P<task_id>\d+)', 'One of your SentinelTasks with its target', lambda r, c, task_id, **k: sentinels.get_task(c, task_id)),
+    ('GET', r'sentinel/tasks/(?P<task_id>\d+)/check', 'Sentinel token only: the hash and mode of the AI-written check (nuclei_validate) the server approves for a task you hold (claimed or running): {task_id, template_sha256, mode}. Asked apart from the task, so a check is run only when the text the Sentinel was handed hashes to what the server approves now; 404 for any other task, a changed or no longer approved check (audited as sentinel.check.refused)',
+     lambda r, c, task_id, **k: sentinels.approved_check(c, task_id)),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/accept', 'Accept a leased SentinelTask and start work', lambda r, c, task_id, **k: sentinels.accept_task(c, task_id)),
     ('POST', r'sentinel/tasks/(?P<task_id>\d+)/result', 'Report the outcome of a SentinelTask: {outcome: done|error, ...the typed result fields for its kind, or error}',
      lambda r, c, task_id, **k: sentinels.report_result(c, task_id, _body(r))),

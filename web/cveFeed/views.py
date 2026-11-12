@@ -389,6 +389,7 @@ SECTIONS = {
     'hygiene': 'Hygiene',
     'secrets': 'Secrets',
     'suppliers': 'Suppliers',
+    'situations': 'Situations',
     'keys': 'API keys',
     'sentinels': 'Sentinels',
 }
@@ -405,6 +406,7 @@ SECTION_PURPOSE = {
     'hygiene': 'Certificates, email settings and TLS configuration: problems that are usually quick to fix.',
     'secrets': 'API keys, tokens and private keys your websites and scripts give away, and where each one was seen.',
     'suppliers': 'Outside companies your hosts depend on and what each one shows to the internet; these are never your own hosts.',
+    'situations': 'What needs you, one host at a time: what is proven, likely or exposed on each, with the first thing to do, most urgent first.',
 }
 # The same sentences for the all-projects view, which has no single project to point at.
 ALL_PROJECTS_PURPOSE = {
@@ -418,6 +420,7 @@ ALL_PROJECTS_PURPOSE = {
     'hygiene': 'Certificates, email settings and TLS configuration across your projects: problems that are usually quick to fix.',
     'secrets': 'API keys, tokens and private keys your websites and scripts give away, and where each one was seen.',
     'suppliers': 'Outside companies your hosts depend on and what each one shows to the internet; these are never your own hosts.',
+    'situations': 'What needs you across your projects, one host at a time, with the first thing to do, most urgent first.',
 }
 SCAN_PURPOSE = 'What this one scan did and what it found.'
 

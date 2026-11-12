@@ -13,24 +13,25 @@ from reNgine import resources
 from tests.test_udp_empty_report import REAL_NO_ROUTE, REAL_DOWN_ON_LINK, host_xml, report
 from tests.test_udp_scan import UdpBase, run_udp
 
-V6 = ['2603:1036:1::10', '2603:1036:1::11', '2600:9000:2::20']
+V6 = ['2001:db8:1::10', '2001:db8:1::11', '2001:db8:2::20']
 NOTICE = 'cannot reach IPv6 addresses'
+AGENT = 101
 
 
 class Ipv6UdpBase(UdpBase):
     def setUp(self):
         super().setUp()
-        udp_scan._ipv6_local.clear()
-        client = getattr(resources.get_store(), 'r', None)
-        if client is not None:
-            client.delete(udp_scan.NO_IPV6_KEY)
-        self.addCleanup(udp_scan._ipv6_local.clear)
+        udp_scan.forget_ipv6_state()
+        self.addCleanup(udp_scan.forget_ipv6_state)
+        patcher = mock.patch('cveFeed.udp_scan.live_sentinel_ids', return_value={AGENT})  # the one Sentinel of this tenant
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def messages(self):
         return list(AgentActivity.objects.order_by('id').values_list('message', flat=True))
 
     def sweep(self, runner):
-        return run_udp(runner=runner)
+        return run_udp(runner=runner, agent=AGENT)
 
 
 class ReadingTheReportTests(Ipv6UdpBase):
@@ -50,12 +51,12 @@ class ReadingTheReportTests(Ipv6UdpBase):
         self.assertEqual(udp_scan.host_from_report(REAL_DOWN_ON_LINK, 'fd00:dead:beef:77::99')['status'], 'down')
 
     def test_an_ipv6_host_that_was_scanned_is_still_its_record(self):
-        xml = report(up=1, total=1, hosts=host_xml('2603:1036:1::10'))
-        self.assertEqual(udp_scan.host_from_report(xml, '2603:1036:1::10')['ip'], '2603:1036:1::10')
+        xml = report(up=1, total=1, hosts=host_xml('2001:db8:1::10'))
+        self.assertEqual(udp_scan.host_from_report(xml, '2001:db8:1::10')['ip'], '2001:db8:1::10')
 
 
 class SweepTests(Ipv6UdpBase):
-    def test_the_first_ipv6_address_is_one_notice_not_a_failed_scan(self):
+    def test_the_first_ipv6_address_is_one_note_not_a_failed_scan(self):
         ip = self.ip(V6[0])
         result = self.sweep(lambda t, f, h: REAL_NO_ROUTE)['scanned'][0]
         self.assertFalse(result['ok'])
@@ -64,11 +65,12 @@ class SweepTests(Ipv6UdpBase):
         self.assertTrue(ledger.fresh(udp_scan.NO_IPV6_SERVICE, [udp_scan.asset_of(ip)]))
         entry = AgentActivity.objects.get(message__contains=V6[0])
         self.assertNotEqual(entry.status, 'failed')
-        self.assertIn(NOTICE, entry.message)
+        self.assertIn('no Sentinel has an IPv6 route to this address', entry.message)  # one address: not yet a statement about the Sentinel
+        self.assertFalse(udp_scan.sentinel_cannot_ipv6(AGENT))
         self.assertNotIn('UdpScanError', entry.message)
         self.assertNotIn('diagnostic', entry.message)
 
-    def test_the_other_ipv6_addresses_are_not_sent_to_a_sentinel_and_say_nothing(self):
+    def test_two_global_addresses_in_a_row_make_one_notice_and_the_rest_are_not_sent_to_that_sentinel(self):
         for address in V6:
             self.ip(address)
         sent = []
@@ -77,7 +79,7 @@ class SweepTests(Ipv6UdpBase):
             sent.extend(targets)
             return REAL_NO_ROUTE
         self.sweep(runner)
-        self.assertEqual(len(sent), 1)  # one probe, not three tasks
+        self.assertEqual(len(sent), 2)  # two probes, not three tasks: the second made it a Sentinel with no IPv6
         notices = [m for m in self.messages() if NOTICE in m]
         self.assertEqual(len(notices), 1)
         self.assertEqual([m for m in self.messages() if 'failed' in m], [])
@@ -103,28 +105,29 @@ class SweepTests(Ipv6UdpBase):
         result = self.sweep(lambda t, f, h: report())['scanned'][0]
         self.assertFalse(result['ok'])
         self.assertTrue(ledger.fresh(udp_scan.FAILED_SERVICE, [udp_scan.asset_of(ip)]))
-        self.assertFalse(udp_scan._ipv6_blocked())
+        self.assertFalse(udp_scan.sentinel_cannot_ipv6(AGENT))
 
-    def test_one_probe_a_day_after_the_block_expires_and_a_working_route_lifts_it(self):
-        ip = self.ip(V6[0])
+    def test_a_blocked_sentinel_is_probed_again_when_its_day_ends_and_a_working_route_lifts_it(self):
+        self.ip(V6[0])
+        self.ip(V6[1])
         self.sweep(lambda t, f, h: REAL_NO_ROUTE)
-        self.assertTrue(udp_scan._ipv6_blocked())
-        udp_scan._ipv6_unblock()  # what the passing of the block's day does
-        other = self.ip(V6[1])
-        xml = report(up=1, total=1, hosts=host_xml(V6[1]))
+        self.assertTrue(udp_scan.sentinel_cannot_ipv6(AGENT))
+        udp_scan.forget_ipv6_state()  # what the passing of the block's day does
+        other = self.ip(V6[2])
+        xml = report(up=1, total=1, hosts=host_xml(V6[2]))
         out = self.sweep(lambda t, f, h: xml)['scanned']
-        self.assertEqual([r['ip'] for r in out], [V6[1]])
+        self.assertEqual([r['ip'] for r in out], [V6[2]])
         self.assertTrue(out[0]['ok'])
-        self.assertFalse(udp_scan._ipv6_blocked())
+        self.assertFalse(udp_scan.sentinel_cannot_ipv6(AGENT))
         self.assertTrue(ledger.fresh(udp_scan.SERVICE, [udp_scan.asset_of(other)]))
 
-    def test_the_block_does_not_need_redis(self):
+    def test_the_flags_do_not_need_redis(self):
         with mock.patch('cveFeed.udp_scan._store', return_value=None):
-            self.assertFalse(udp_scan._ipv6_blocked())
-            udp_scan._ipv6_block()
-            self.assertTrue(udp_scan._ipv6_blocked())
-            udp_scan._ipv6_unblock()
-            self.assertFalse(udp_scan._ipv6_blocked())
+            self.assertFalse(udp_scan.sentinel_cannot_ipv6(AGENT))
+            udp_scan._flag_set(udp_scan._flag_key('agent', AGENT))
+            self.assertTrue(udp_scan.sentinel_cannot_ipv6(AGENT))
+            udp_scan.forget_ipv6_state()
+            self.assertFalse(udp_scan.sentinel_cannot_ipv6(AGENT))
 
     def test_the_not_scanned_record_ages_out_by_its_own_ttl(self):
         self.assertEqual(ledger.ttl(udp_scan.NO_IPV6_SERVICE), 24 * 3600)

@@ -1,0 +1,10 @@
+{
+  "outcome": "done",
+  "checks": [
+    {"id": "old.example.com|93.184.215.14:443", "alive": true},
+    {"id": "old.example.com|93.184.215.14:80", "alive": false},
+    {"id": "gone.example.com|198.51.100.7:22", "alive": false, "error": "not run: the address is outside the scope policy"}
+  ],
+  "touched": ["93.184.215.14"],
+  "refused": ["198.51.100.7"]
+}

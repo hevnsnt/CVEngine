@@ -3,5 +3,6 @@
   "valid": true,
   "output": "[INF] All templates validated successfully",
   "fixture_ok": true,
-  "fixture_note": "no match on benign local fixture; positive detection remains unverified"
+  "fixture_note": "no match on benign local fixture; positive detection remains unverified",
+  "template_sha256": "eb1ea52e9442419e1e90749f5ffbe126e3cf1ace1780de52d83059563741422c"
 }

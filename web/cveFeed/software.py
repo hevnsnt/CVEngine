@@ -31,7 +31,7 @@ def tool(key, name, url, group, version, license, purpose, where='sentinel', opt
 # The Sentinel commit the Sentinel versions below were read from (its Dockerfile and requirements.txt). tests/test_about_page.py holds it equal to
 # the floor commit of scanner.lock.json and to the sha web/requirements.txt pins: raising the floor means reading the Sentinel's pins again, then changing this line.
 # (The built-in scanner image follows the newest published build; the page says what it was read at, not that it runs exactly this.)
-SENTINEL_PINS_COMMIT = '71a24de919ef64e5be433b4607231ade9196f8dc'
+SENTINEL_PINS_COMMIT = 'c06860c64bcf7253ed0107042dce5f13188a13f9'
 
 GH = 'https://github.com/'
 SENTINEL_DOCKERFILE = 'sentinel:Dockerfile'
@@ -60,7 +60,7 @@ TOOLS = [
          'Discovery of domains, subdomains and addresses', pins=[(SENTINEL_DOCKERFILE, r'ARG BBOT_VERSION=([0-9.]+)')]),
     tool('gowitness', 'gowitness', GH + 'sensepost/gowitness', 'scanners', '', 'GPL-3.0',
          'Older discovery-time screenshots, installed and run by bbot (the host page falls back to them)'),
-    tool('kingfisher', 'Kingfisher', GH + 'mongodb/kingfisher', 'scanners', '2.16.0', 'Apache-2.0',
+    tool('kingfisher', 'Kingfisher', GH + 'mongodb/kingfisher', 'scanners', '2.18.1', 'Apache-2.0',
          'Finds exposed secrets in pages and scripts, on the Sentinel only (the `secrets_scan` kind)', pins=[(SENTINEL_DOCKERFILE, r'ARG KINGFISHER_VERSION=([0-9.]+)')]),
     tool('sshamble', 'sshamble', GH + 'runZeroInc/sshamble', 'scanners', '0.5.1', 'BSD-2-Clause',
          'Reads an SSH service\'s own handshake (banner, host keys, algorithms) and checks the host keys against the badkeys blocklist. Only that one host key '
