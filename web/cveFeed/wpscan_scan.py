@@ -93,6 +93,33 @@ class Blocked(RuntimeError):
     """The scan was refused or challenged by an edge (a 403, 429 or 503, a captcha or a challenge page)."""
 
 
+class SiteUnreachable(Exception):
+    """The site did not answer the scan (down, no such name, refused the connection, timed out). Not a failed scan and not "not WordPress": nothing was
+    read, and the site is asked again at the next scan."""
+
+
+class RedirectsElsewhere(RuntimeError):
+    """The site redirects to another site the scan will not be carried to (``Sentinel`` follows redirects within one site only). A RuntimeError so that
+    ``_scan_site`` still follows a redirect to a name of the host's own group. Not a failed scan: the other site is scanned under its own name."""
+
+    def __init__(self, target):
+        self.target = target
+        super().__init__(f'The URL supplied redirects to {target}')
+
+
+class NotScannable(Exception):
+    """A site WPScan will not scan (hosted on wordpress.com). It is WordPress, so it is not "not WordPress", and nothing can be read: not a failure."""
+
+
+class ToolFailure(RuntimeError):
+    """WPScan itself failed (it crashed, ran out of time, was killed, or could not update its own database). ``what`` is a fixed sentence that says
+    what failed, safe for the activity feed; the text of the exception is the tool's own last line, redacted, for the host page and the worker log."""
+
+    def __init__(self, what, detail=''):
+        self.what = what
+        super().__init__(detail or what)
+
+
 def max_sites():
     try:
         return max(1, int(os.environ.get('CVENGINE_WPSCAN_MAX_SITES', DEFAULT_MAX_SITES)))
@@ -204,33 +231,72 @@ def last_line(text):
 
 # what the scanner's own exit codes mean when nothing else says why it stopped
 EXIT_MEANING = {1: 'the scan refused its options or the address it was given', 2: 'the scan was interrupted', 3: 'the scan hit an unexpected error'}
+_DOWN = re.compile(r"seems to be down(?: \((.*)\))?|^HTTP Error: \S+ \((?!status: )(.*)\)", re.I | re.S)  # WPScan's TargetDown, and an HTTP error with no status
+_WPSCAN_REDIRECT = re.compile(r'The URL supplied redirects to (https?://\S+?)\.?(?:\s|$)')
+_HOSTED = re.compile(r'hosted on WordPress\.com', re.I)
+_DURATION = re.compile(r'Max Scan Duration Reached', re.I)
+_UPDATE = re.compile(r'Update required|checksums do not match|Unable to get https?://data\.wpscan\.org|database file is missing', re.I)
+DB_FAILURE = "this Sentinel's WPScan vulnerability database is missing or could not be updated"
+TIME_FAILURE = 'the scan ran out of its time limit before it read anything'
+
+
+def _aborted(reason, token, otherwise=None):
+    """The ending ``reason`` (WPScan's ``scan_aborted`` text, or the last line it printed) is, raised as what it is. Order matters: a site that is down
+    is told apart before an edge's refusal, and the tool's own failures before the unknown."""
+    if NOT_WORDPRESS.search(reason):
+        raise NotWordPress('the scan says the site is up and is not running WordPress')
+    if _HOSTED.search(reason):
+        raise NotScannable('the site is hosted on WordPress.com, which WPScan does not scan')
+    found = _DOWN.search(reason)
+    if found:
+        why = _redact((found.group(1) or found.group(2) or '').strip(), token)[:120]
+        raise SiteUnreachable('the site did not answer the scan' + (f' ({why})' if why else ''))
+    found = _WPSCAN_REDIRECT.search(reason)
+    if found and _URL_SHAPE.match(found.group(1)):
+        raise RedirectsElsewhere(found.group(1))
+    if _UPDATE.search(reason):
+        raise ToolFailure(DB_FAILURE, _redact(reason, token))
+    if _DURATION.search(reason):
+        raise ToolFailure(TIME_FAILURE, _redact(reason, token))
+    if BLOCKED.search(reason):
+        raise Blocked(_redact(reason, token))
+    if otherwise is not None:
+        raise otherwise(_redact(reason, token))
+    raise RuntimeError(_redact(reason or 'the scan did not finish', token))
+
+
+_URL_SHAPE = re.compile(r'^https?://[A-Za-z0-9][A-Za-z0-9.:_/%?&=~+-]{0,300}$')
 
 
 def _classify(report, returncode, stderr='', token=''):
     """A Sentinel's reported outcome of one WordPress scan - the scanner's exit code, its JSON report if it wrote one, and the tail of stderr if it
-    did not - turned into a report dict, or raised as ``NotWordPress``/``Blocked``/``RuntimeError``. The one function every dispatched site goes
-    through (``agentapi.sentinel_dispatch.wrap_wpscan_runner``), so what counts as "not WordPress" or "blocked" is decided here and nowhere
-    else. Nothing in the report or the text is trusted: the text is clipped and the token redacted.
+    did not - turned into a report dict, or raised as what it is. The one function every dispatched site goes through
+    (``agentapi.sentinel_dispatch.wrap_wpscan_runner``), so what each ending means is decided here and nowhere else. Nothing in the report or the
+    text is trusted: the text is clipped and the token redacted.
 
-    Exit code 4 means the scan did not finish; the report's ``scan_aborted`` text says why: ``NotWordPress`` (the scan says the site is up and
-    is not WordPress), ``Blocked`` (an edge refused or challenged the scan) or a ``RuntimeError`` (including no report at all). A report that has
-    results despite the abort is returned, marked ``cvengine_partial``."""
+    Exit code 4 means the scan did not finish; the report's ``scan_aborted`` text says why (``_aborted``): ``NotWordPress`` (the site is up and
+    is not WordPress), ``NotScannable`` (hosted on wordpress.com), ``SiteUnreachable`` (down), ``RedirectsElsewhere`` (it redirects to another
+    site), ``Blocked`` (an edge refused or challenged the scan), ``ToolFailure`` (out of time, or its own database could not be updated) or a
+    ``RuntimeError`` (anything else, with the tool's own words). A report that has results despite the abort is returned, marked
+    ``cvengine_partial``. Any other exit code but 0 and 5 is the tool failing: ``ToolFailure`` says which."""
     if returncode == 4:
         if report is None:
-            raise RuntimeError('the scan did not finish and wrote no report')  # not "not WordPress": nothing was read
+            said = last_line(stderr)
+            if said:  # the tool printed why and wrote no report: the same endings, read from that line
+                _aborted(said, token, otherwise=lambda text: ToolFailure('the scan did not finish and wrote no report', text))
+            raise ToolFailure('the scan did not finish and wrote no report', 'the scan did not finish and wrote no report')  # not "not WordPress": nothing was read
         reason = str(report.get('scan_aborted') or '')
         if any(report.get(k) for k in ('version', 'plugins', 'themes', 'interesting_findings')):
             return {**report, 'cvengine_partial': reason[:120] or 'the scan did not finish'}  # what it read before it stopped
-        if NOT_WORDPRESS.search(reason):
-            raise NotWordPress('the scan says the site is up and is not running WordPress')
-        if BLOCKED.search(reason):
-            raise Blocked(_redact(reason, token))
-        raise RuntimeError(_redact(reason or 'the scan did not finish', token))
+        _aborted(reason, token)
     if returncode not in OK_EXIT_CODES:
         said = last_line(stderr)
-        raise RuntimeError(_redact(said or f'{EXIT_MEANING.get(returncode, "the scan stopped")} (exit {returncode})', token))
+        if isinstance(returncode, int) and returncode < 0:
+            raise ToolFailure('the scan was killed before it finished, usually at its time limit', _redact(said, token) or f'the scan was killed (signal {-returncode})')
+        meaning = EXIT_MEANING.get(returncode, 'the scan stopped')
+        raise ToolFailure(meaning, _redact(said or f'{meaning} (exit {returncode})', token))
     if report is None:
-        raise RuntimeError('the scan wrote no usable report')
+        raise ToolFailure('the scan wrote no usable report', 'the scan wrote no usable report')
     return report
 
 
@@ -682,7 +748,7 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
     running = activity.log('run_check', f'The WordPress scan is checking {len(todo)} WordPress site(s) of {domain.name}'
                            + ('' if token else ' (no API token: versions, plugins and exposures only)'),
                            project=project, status='running', scan_id=scan.id)
-    errors, scanned, token_ok = [], [], bool(token)
+    errors, notes, scanned, token_ok = [], [], [], bool(token)  # errors: the scan went wrong; notes: a site that is not scannable (down, moved, not WordPress)
     no_scanner = None
     if real_runner:
         # waiting on Sentinels without the worker (agentapi.stage_runs): every site's task is sent first, and the loop below runs once they are all
@@ -711,12 +777,27 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
                 continue
             ledger.record(SERVICE, [host], project, scan)
             record_state(project, domain.id, host, 'not_wordpress', str(exc))
-            errors.append(f'{host}: not running WordPress')
+            notes.append(f'{host}: not running WordPress')
             continue
         except Blocked as exc:
             ledger.record(SERVICE, [host], project, scan, 'failed')
             record_state(project, domain.id, host, 'blocked', _hint(str(exc), token))
             errors.append(f'{host}: blocked by the edge')
+            continue
+        except SiteUnreachable as exc:  # nothing was read and nothing is wrong with the scan: asked again at the next scan, never a failed stage
+            ledger.record(SERVICE, [host], project, scan, 'failed')
+            record_state(project, domain.id, host, 'unreachable', _redact(str(exc), token))
+            notes.append(f'{host}: not reachable')
+            continue
+        except RedirectsElsewhere as exc:  # the site sends visitors to another site; that one is scanned under its own name, if it is a target
+            ledger.record(SERVICE, [host], project, scan)
+            record_state(project, domain.id, host, 'redirected', f'the site redirects to {exc.target}, another site; it is not scanned under this name')
+            notes.append(f'{host}: redirects to another site')
+            continue
+        except NotScannable as exc:  # WordPress, but not one WPScan can scan
+            ledger.record(SERVICE, [host], project, scan)
+            record_state(project, domain.id, host, 'not_scannable', str(exc))
+            notes.append(f'{host}: not scannable by WPScan')
             continue
         except (resources.ScanAborted, resources.MemoryBusy) as exc:  # stopped, or no memory for it: not the site's fault, and nothing after it can run
             no_scanner = exc if isinstance(exc, resources.ScannerUnavailable) else None  # a scanner that is offline is not memory pressure
@@ -731,7 +812,8 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
             ledger.record(SERVICE, [host], project, scan, 'failed')
             record_state(project, domain.id, host, 'failed', _redact(str(exc), token))
             activity.diagnostic(f'WordPress scan on {host}', _redact(str(exc), token))  # the raw text goes to the worker log, not the feed
-            errors.append(f'{host}: the scan failed (see the host page)')
+            what = getattr(exc, 'what', '')  # a ToolFailure's own fixed sentence says what failed and holds nothing of the site or the token
+            errors.append(f'{host}: {what} (see the host page)' if what else f'{host}: the scan failed (see the host page)')
             continue
         titles = {} if internal else plugin_titles(scan, sub, url, report)  # before the report is saved: a wait for a scanner repeats this pass
         new, techs = persist_report(scan, sub, url, report)
@@ -755,10 +837,11 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
     summary['scanned'] = len(scanned)
     summary['deferred'] = queue_quick(scan, deferred, attempt, dispatch=real_runner and not internal)
     summary['thorough_queued'] = queue_thorough(project, scanned, domain.id, dispatch=real_runner) if scanned and not internal else 0
-    failed_all = bool(errors) and not scanned and all('not running WordPress' not in e for e in errors)
+    failed_all = bool(errors) and not scanned  # a site that is down, moved or not WordPress is a note, never a failure of the stage
     message = (f'WordPress scan finished {domain.name}: {len(scanned)} site(s), {summary["findings"]} new finding(s)'
                + ('; the API token budget ran out, so later sites were scanned without vulnerability data' if token and not token_ok else '')
                + (f'; {len(errors)} problem(s): {errors[0]}' if errors else '')
+               + (f'; not scanned: {"; ".join(notes[:3])}' + (f' and {len(notes) - 3} more' if len(notes) > 3 else '') if notes else '')
                + (f'; no scanner could take the remaining sites ({no_scanner.kind}), so they stay due until one can' if no_scanner else ''))
     activity.settle(running, 'failed' if failed_all else 'done', message=message, **summary)
     if failed_all:
@@ -941,7 +1024,14 @@ def run_thorough(project_id, runner=None):
                 record_thorough(project_id, domain_id, host, 'pending', 'the pass was stopped or memory was short; it runs again later')
                 activity.settle(running, 'done', message=f'Thorough WordPress scan pass on {host}: stopped before it finished ({type(exc).__name__}); the host stays waiting')
                 return {**summary, 'skipped': 'scanning was stopped or memory was short: the hosts stay waiting'}
-            except Exception as exc:  # noqa: BLE001 - ValueError (not WordPress), a timeout, a crash: recorded, and the next host goes on
+            except (SiteUnreachable, RedirectsElsewhere, NotScannable, NotWordPress) as exc:  # the site cannot be scanned: said as that, not as a failure
+                reason = _redact(str(exc), token)
+                record_thorough(project_id, domain_id, host, 'failed', reason)
+                ledger.record(THOROUGH_SERVICE, [host], project_id, scan, 'failed')
+                summary['failed'] += 1
+                activity.settle(running, 'done', message=f'Thorough WordPress scan pass on {host}: not scanned: {reason}')
+                continue
+            except Exception as exc:  # noqa: BLE001 - a timeout, a crash: recorded, and the next host goes on
                 reason = _redact(str(exc), token) or 'the thorough scan failed'
                 record_thorough(project_id, domain_id, host, 'failed', reason)
                 ledger.record(THOROUGH_SERVICE, [host], project_id, scan, 'failed')

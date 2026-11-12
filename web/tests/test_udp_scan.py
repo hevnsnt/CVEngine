@@ -94,10 +94,11 @@ class UdpBase(TestCase):
 			p.start()
 		self.addCleanup(mock.patch.stopall)
 		client = getattr(resources.get_store(), 'r', None)
-		for key in ('cvengine:sweep:udp-unavailable-note', 'cvengine:sweep:udp-kick', udp_scan.STATUS_KEY, udp_scan.CLAIM_KEY):
+		for key in ('cvengine:sweep:udp-unavailable-note', 'cvengine:sweep:udp-kick', udp_scan.STATUS_KEY, udp_scan.CLAIM_KEY, udp_scan.NO_IPV6_KEY):
 			if client is not None:  # a key a previous test run left in Redis would hide what this one checks
 				client.delete(key)
 		udp_scan._last_status.clear()
+		udp_scan._ipv6_local.clear()
 		for name in ('CVENGINE_UDPSCAN', 'CVENGINE_UDPSCAN_PORTS', 'CVENGINE_ALLOW_PRIVATE_TARGETS', 'CVENGINE_UDPSCAN_MAX_RATE'):
 			os.environ.pop(name, None)
 
