@@ -4883,8 +4883,9 @@ MAX_SLA_DAYS = 3650
 
 def _project_settings(project, sla):
     from agentapi.inventory import project_policy
+    from cveFeed import host_review
     from cveFeed.models import DEFAULT_SLA_DAYS
-    return {'sla_days': sla, 'sla_defaults': DEFAULT_SLA_DAYS, 'inventory': project_policy(project)}
+    return {'sla_days': sla, 'sla_defaults': DEFAULT_SLA_DAYS, 'inventory': project_policy(project), 'host_review_mode': host_review.mode_of(project)}
 
 
 def get_project_settings(ctx, slug):
@@ -4900,9 +4901,19 @@ def set_project_settings(ctx, slug, body):
     """Change this project's settings. ``sla_days`` is a partial update: send only the severities to change, each a whole
     number of days from 1 to 3650, or ``null`` to go back to the default. Anyone with a write role may change it, like the
     project's API keys; a read-only token or the audit role may not. ``inventory`` ({create_hosts, stale_days}) changes the host
-    inventory policy instead of, or as well as, the SLA."""
+    inventory policy instead of, or as well as, the SLA. ``host_review_mode`` (``auto``, ``recommend`` or ``off``) sets what the AI host review may do
+    in this project: ``auto`` starts its read-only next step by itself, ``recommend`` only proposes it, ``off`` stops reviewing hosts here."""
     from cveFeed.models import DEFAULT_SLA_DAYS, ProjectSettings
     project, _ = get_one_project(ctx, slug, write=True)
+    if isinstance(body, dict) and 'host_review_mode' in body:
+        mode = body['host_review_mode']
+        if mode not in ProjectSettings.HOST_REVIEW_MODES:
+            raise ApiError(400, f'host_review_mode must be one of: {", ".join(ProjectSettings.HOST_REVIEW_MODES)}')
+        row, _created = ProjectSettings.objects.get_or_create(project=project)
+        row.host_review_mode, row.updated_by = mode, ctx.user
+        row.save(update_fields=['host_review_mode', 'updated_by', 'updated_at'])
+        if 'sla_days' not in body and 'inventory' not in body:
+            return _project_settings(project, ProjectSettings.sla_for(project))
     if isinstance(body, dict) and 'inventory' in body:  # the host inventory policy (agentapi.inventory), alone or beside sla_days
         from agentapi.inventory import set_policy
         set_policy(ctx, project, body['inventory'])
