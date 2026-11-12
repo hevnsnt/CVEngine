@@ -249,21 +249,47 @@ def _raw_evidence(triage, finding):
     return out
 
 
+def _copies(kind, finding):
+    """The ids of the earlier copies of this finding (a rescan makes a new row for the same finding and carries its status over, but not the
+    comments and audit events kept by the old row's id): the rows of the same project, host, kind and evidence key, and, for a CVE match, the
+    ones its triage was carried from (``Triage.carried_from``). Empty when it has no triage row."""
+    from cveFeed.models import Triage
+    triage = getattr(finding, 'triage', None)
+    if triage is None:
+        return []
+    column = {'cve_match': 'match_id', 'hygiene': 'hygiene_id'}.get(kind, 'vulnerability_id')
+    ids = set()
+    if triage.evidence_key:
+        ids |= set(Triage.objects.filter(project_id=triage.project_id, host=triage.host, kind=kind, evidence_key=triage.evidence_key)
+                   .exclude(**{column: None}).values_list(column, flat=True)[:50])
+    seen, match_id = set(), triage.carried_from if kind == 'cve_match' else None
+    for _ in range(6):
+        if not match_id or match_id in seen:
+            break
+        seen.add(match_id)
+        ids.add(match_id)
+        match_id = Triage.objects.filter(match_id=match_id).values_list('carried_from', flat=True).first()
+    ids.discard(finding.pk)
+    return sorted(ids)
+
+
 def worked_by_person(kind, finding):
-    """Whether a person has worked this finding: a status other than open, an assignee, a comment, a status change or heat set by hand,
-    or (for a CVE match) a manual validation request. Such a finding is never closed automatically: a person's work wins."""
+    """Whether a person has worked this finding: a status other than open, an assignee, a remediation date or owner, a comment, a status
+    change or heat set by hand, or (for a CVE match) a manual validation request, on this copy of it or on an earlier copy a rescan replaced
+    (``_copies``). Such a finding is never closed automatically: a person's work wins."""
     from cveFeed.models import FindingAuditEvent, FindingComment, OnDemandValidation
     audit_kind = AUDIT_KIND.get(kind, kind)
-    if finding.remediation_status != 'open' or getattr(finding, 'assignee_id', None):
+    if finding.remediation_status != 'open' or getattr(finding, 'assignee_id', None) or getattr(finding, 'remediation_by_id', None):
         return True
-    if FindingComment.objects.filter(finding_kind=audit_kind, finding_id=finding.pk).exists():
+    ids = [finding.pk] + _copies(kind, finding)
+    if FindingComment.objects.filter(finding_kind=audit_kind, finding_id__in=ids).exists():
         return True
-    if FindingAuditEvent.objects.filter(finding_kind=audit_kind, finding_id=finding.pk, actor__isnull=False).exists():
+    if FindingAuditEvent.objects.filter(finding_kind=audit_kind, finding_id__in=ids, actor__isnull=False).exists():
         return True
     triage = getattr(finding, 'triage', None)
     if triage is not None and triage.heat_override:
         return True
-    return kind == 'cve_match' and OnDemandValidation.objects.filter(match=finding, source='manual').exists()
+    return kind == 'cve_match' and OnDemandValidation.objects.filter(match_id__in=ids, source='manual').exists()
 
 
 def proof(kind, triage, finding):

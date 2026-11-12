@@ -190,6 +190,59 @@ class ReviewTests(Fixture):
         self.assertEqual(picked, {Triage.objects.get(match=self.match).pk, Triage.objects.get(hygiene=hygiene).pk})
         self.assertLessEqual(len(queries), 12)  # three pages of three rows, three queries each, and no query per finding
 
+    def _rescan_copy(self):
+        from startScan.models import ScanHistory as Scan
+        scan2 = Scan.objects.create(domain=self.domain, scan_type=self.scan.scan_type, scan_status=2, start_scan_date=timezone.now())
+        sub2 = Subdomain.objects.create(name='www.example.com', target_domain=self.domain, scan_history=scan2)
+        m2 = CVEMatch.objects.create(cve_entry=self.cve, subdomain=sub2, source='tech', matched_product='lib-a', matched_version='1.2',
+                                     version_in_range=False, confidence=0.8, ai_verdict='uncertain', scan_history=scan2, evidence={'source': 'tech'})
+        triage.track([m2])
+        cache.clear()
+        return m2
+
+    def test_a_rescans_new_copy_of_a_reviewed_finding_is_not_reviewed_again(self):
+        self.verdict(self.packet(), verdict='true_open', confidence='high', reason_code='plausible_exposure')
+        m2 = self._rescan_copy()
+        old, new = Triage.objects.get(match=self.match), Triage.objects.get(match=m2)
+        self.assertEqual(reviewer.review_key(old, self.state.fingerprint), reviewer.review_key(new, self.state.fingerprint))
+        self.assertNotIn(new.pk, dict(reviewer.due(25)))
+        self.state.fingerprint = 'e' * 40  # the host changed: the copy is asked again
+        self.state.save()
+        self.assertIn(new.pk, dict(reviewer.due(25)))
+
+    def test_a_persons_work_on_an_earlier_copy_protects_the_rescans_new_copy(self):
+        from cveFeed.models import FindingComment
+        FindingComment.objects.create(project=self.proj, finding_kind='match', finding_id=self.match.pk, author=self.alice, text='real, on it')
+        m2 = self._rescan_copy()
+        self.assertTrue(reviewer.worked_by_person('cve_match', m2))
+        triage_row = Triage.objects.get(match=m2)
+        blocked, why = reviewer.close_gate('cve_match', triage_row, CVEMatch.objects.get(pk=m2.pk), [])
+        self.assertEqual((blocked, why), ('held', 'a person has worked this finding'))
+
+    def test_an_audit_event_a_manual_validation_or_an_owner_on_an_earlier_copy_counts_as_work(self):
+        from cveFeed.models import OnDemandValidation
+        m2 = self._rescan_copy()
+        self.assertFalse(reviewer.worked_by_person('cve_match', m2))
+        FindingAuditEvent.objects.create(project=self.proj, finding_kind='match', finding_id=self.match.pk, event='status', actor=self.alice,
+                                         before={'status': 'open'}, after={'status': 'open'})
+        self.assertTrue(reviewer.worked_by_person('cve_match', m2))
+        FindingAuditEvent.objects.all().delete()
+        self.assertFalse(reviewer.worked_by_person('cve_match', m2))
+        OnDemandValidation.objects.create(match=self.match, project=self.proj, source='manual')
+        self.assertTrue(reviewer.worked_by_person('cve_match', m2))
+        OnDemandValidation.objects.all().delete()
+        CVEMatch.objects.filter(pk=m2.pk).update(remediation_by=self.alice)
+        self.assertTrue(reviewer.worked_by_person('cve_match', CVEMatch.objects.get(pk=m2.pk)))
+
+    def test_the_work_of_a_person_on_another_hosts_finding_does_not_protect_this_one(self):
+        from cveFeed.models import FindingComment
+        other = CVEMatch.objects.create(cve_entry=self.cve, subdomain=Subdomain.objects.create(name='api.example.com', target_domain=self.domain, scan_history=self.scan),
+                                        source='tech', matched_product='lib-a', matched_version='1.2', version_in_range=False, confidence=0.8,
+                                        ai_verdict='uncertain', scan_history=self.scan, evidence={'source': 'tech'})
+        triage.track([other])
+        FindingComment.objects.create(project=self.proj, finding_kind='match', finding_id=other.pk, author=self.alice, text='other host')
+        self.assertFalse(reviewer.worked_by_person('cve_match', self.match))
+
     def test_a_verdict_on_a_state_that_changed_is_refused(self):
         packet = self.packet()
         self.state.fingerprint = 'd' * 40
