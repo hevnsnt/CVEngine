@@ -43,10 +43,12 @@ class HostFromReportTests(UdpBase):
         self.assertEqual((host['status'], host['ports']), ('down', []))
 
     def test_nmap_scanning_nothing_is_an_error_not_a_wait(self):  # no route: the exact report of a Sentinel with no IPv6
-        with self.assertRaises(udp_scan.UdpScanError) as caught:
+        with self.assertRaises(udp_scan.NoIpv6Route) as caught:
             udp_scan.host_from_report(report(), '2600:1900:4001:370:8000:1a0::')
         self.assertNotIsInstance(caught.exception, ScannerUnavailable)
         self.assertIn('no route', str(caught.exception))
+        with self.assertRaises(udp_scan.UdpScanError):
+            udp_scan.host_from_report(report(), '192.0.2.10')
 
     def test_an_empty_cut_short_or_other_address_report_is_counted_nothing(self):
         for xml in ('', '<nmaprun><scaninfo/></nmaprun>', report(up=1, total=1, hosts=host_xml('2001:db8::9'))):
@@ -67,8 +69,8 @@ class EmptyReportSweepTests(UdpBase):
         self.assertEqual(run_udp(runner=lambda t, f, h: self.fail('asked again'))['scanned'], [])
         self.assertEqual(ip.ports.count(), 0)
 
-    def test_a_target_nmap_could_not_reach_is_failed_for_a_day_not_waiting(self):
-        ip = self.ip('2600:1900:4001:370:8000:1a0::')
+    def test_an_ipv4_target_nmap_could_not_reach_is_failed_for_a_day_not_waiting(self):  # an IPv6 one is not a failure: tests.test_udp_ipv6_unreachable
+        ip = self.ip('192.0.2.10')
         result = self.sweep(report())
         self.assertFalse(result['ok'])
         self.assertNotIn('waiting', result)
