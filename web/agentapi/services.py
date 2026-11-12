@@ -3567,6 +3567,9 @@ def list_matches(ctx, slug, params):
     if params.get('status') == 'closed':  # any closing status: fixed, accepted_risk or false_positive
         from cveFeed.counts import CLOSED
         qs = qs.filter(remediation_status__in=CLOSED)
+    elif params.get('status') in RETEST_FACETS:  # verified_fixed, unverified_fixed, reopened: the same retest states the Findings list filters on
+        from cveFeed import counts as counts_lib
+        qs = qs.filter(counts_lib.retest_q(params['status'], 'triage__'))
     elif params.get('status'):
         qs = qs.filter(remediation_status=params['status'])
     if params.get('verdict') == 'active':  # not ruled out by the AI: the dashboard's CVE matches count

@@ -4506,7 +4506,7 @@ const pages = {
     );
     const status = picker(
       "Remediation status",
-      [["", "All"], ...CL.STATUS_OPTIONS, ["closed", "Any closed"]],
+      [["", "All"], ...CL.STATUS_OPTIONS, ["closed", "Any closed"], ...RT.FILTERS],
       async (key) => (await api("GET", `${base}/matches?${query({ status: key, host: q.value, classification: cls.value, verdict: verdict.value, cve: cveOnly, kev: kev.value, page_size: 0 })}`)).count,
       () => list.reload(),
     );

@@ -456,6 +456,20 @@ class ListTests(Base):
         self.assertEqual(counts.retest_counts([self.proj.pk]), {'verified_fixed': 1, 'unverified_fixed': 1, 'reopened': 1})
         self.assertEqual(counts.retest_counts([self.other.pk]), {'verified_fixed': 0, 'unverified_fixed': 0, 'reopened': 0})  # another project's findings never count
 
+    def test_the_cve_matches_list_filters_on_the_same_retest_states(self):
+        """The CVE matches page offers the three retest chips the Findings list has, so its status filter takes the same three values (UI-10)."""
+        verified = self.other_match(1)
+        self.match.remediation_status = 'fixed'
+        self.match.save()
+        reopened = self.other_match(2)
+        CVEMatch.objects.filter(pk=reopened.pk).update(remediation_status='open')
+        Triage.objects.filter(match=reopened).update(retest_state='still_reproduces')
+        ids = lambda status: sorted(r['id'] for r in call(self.t_alice, 'GET', f'{self.base}/matches?status={status}&verdict=')[1]['results'])  # noqa: E731
+        self.assertEqual(ids('verified_fixed'), [verified.pk])
+        self.assertEqual(ids('unverified_fixed'), [self.match.pk])
+        self.assertEqual(ids('reopened'), [reopened.pk])
+        self.assertEqual(ids('fixed'), sorted([verified.pk, self.match.pk]))  # the plain remediation statuses still filter on the status itself
+
     def test_a_list_of_fixed_findings_costs_no_query_per_row(self):
         def queries(n):
             for i in range(n):
