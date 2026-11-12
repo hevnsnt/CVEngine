@@ -97,7 +97,7 @@ def extract_yaml(text):
     return (fence.group(1) if fence else (text or "")).strip()
 
 
-FORBIDDEN_KEYS = {"self-contained", "redirects", "host-redirects", "max-redirects", "unsafe", "race", "pipeline",
+FORBIDDEN_KEYS = {"self-contained", "redirects", "host-redirects", "max-redirects", "protocol-redirects", "unsafe", "race", "pipeline",
                   "code", "javascript", "headless", "file", "flow", "workflows", "resolvers", "proxy",
                   # request multipliers and stateful tricks: an inline payload list or thread count multiplies the
                   # requests MAX_REQUESTS counts, and the check must stay a handful of read-only requests
