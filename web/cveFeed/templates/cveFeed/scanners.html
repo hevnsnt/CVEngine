@@ -7,7 +7,7 @@
 <p class="sub">Is scanning working? The Sentinels that take scan work{% if is_app_admin %}, the workers and scheduler on this server and the scanning pause{% endif %} in one place. When no Sentinel is online, this server runs the external stages itself.</p>
 </div></div>
 <div id="health" aria-live="polite" data-app-admin="{% if is_app_admin %}1{% endif %}">
-  <p class="note">Checking the scanners…</p>
+  <div class="wait"><p class="note wait-line">Checking the scanners. Be back shortly...</p><span class="sk-bar wait-bar" aria-hidden="true"></span><span class="sk-bar wait-bar" aria-hidden="true"></span></div>
 </div>
 <div class="health-links">
   <a class="btn sm" href="{% url 'cve_sentinels' %}">Sentinels and Provision</a>

@@ -24,7 +24,7 @@ const ALLOWED_REDRAWS = {
   'bounty.js': [17, 'person-triggered tab panels; the 8 s workbench poll (renderWorkbench) goes through renderKeepingState'],
   'dashboard.js': [11, 'the Live page counters, tiles, legend and ticker: no disclosure and no field in them; the activity feed adds lines, it does not rebuild'],
   'graph.js': [2, 'a canvas and its legend'],
-  'scanners.js': [1, 'the error line shown when the health page could not be read: nothing to keep in it'],
+  'scanners.js': [1, 'the first frame: takes away the static placeholder the page was sent with, once, before the verdict line and the cells are drawn through renderKeepingState'],
   'seed-card.js': [1, 'a result block of download links that exists only while a seed file is being built'],
 };
 

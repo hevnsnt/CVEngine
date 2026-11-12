@@ -1,9 +1,9 @@
 // The Auto-tuning card of Settings, configMaxxing (cveFeed/autotune.py): the mode (Auto by default, Suggest, Off), the AI advisor switch, the
 // last run and the tuning history with Revert and Apply. The rows of the other cards carry each setting's own badge (pinned, auto-tuned,
 // suggested). Everything from the server is set with textContent or value.
-import { api, ask, button, el, selectOf, shortDate, toast } from "/staticfiles/cve/ui.js";
+import { api, ask, button, details, el, selectOf, shortDate, toast } from "/staticfiles/cve/ui.js";
 import { API, registerCard } from "/staticfiles/cve/config-maxxing.js";
-import { AUTOTUNE_INTRO, AUTOTUNE_MODES, AUTOTUNE_OFF_HELP, decisionText, lastRunText, modeNotice } from "/staticfiles/cve/config-maxxing-logic.js";
+import { AUTOTUNE_INTRO, AUTOTUNE_MODES, AUTOTUNE_OFF_DETAIL, AUTOTUNE_OFF_HELP, decisionText, lastRunText, modeDetail, modeNotice } from "/staticfiles/cve/config-maxxing-logic.js";
 
 const PATH = `${API}/autotune`;
 
@@ -38,9 +38,10 @@ export async function build(host, ctx = {}) {
   const reload = async () => (ctx.reload ? ctx.reload() : build(host, ctx));
   const card = el("div", "card", null, { style: "max-width:720px" });
   card.append(el("h2", "", "Auto-tuning", { style: "margin-bottom:12px" }), el("p", "note", AUTOTUNE_INTRO, { style: "margin:0 0 8px" }));
-  card.append(el("p", "note", AUTOTUNE_OFF_HELP, { style: "margin:0 0 12px" }));
+  card.append(el("p", "note", AUTOTUNE_OFF_HELP, { style: "margin:0 0 8px" }), details(AUTOTUNE_OFF_DETAIL));
   const notice = el("p", data.killed ? "msg err" : "note", modeNotice(data), { style: "margin:0 0 12px", role: "status" });
   card.append(notice);
+  if (modeDetail(data)) card.append(details(modeDetail(data)));
 
   const id = "autotune-mode";
   const select = selectOf(AUTOTUNE_MODES, data.mode);
