@@ -176,6 +176,15 @@ def _ask(stage, provider, system, user, notes=None):
 	return None
 
 
+CREDENTIAL_TAGS = frozenset({'default-login', 'bruteforce'})  # templates that send credentials: never picked unless an App Admin allowed them (``refused_tags``)
+
+
+def refused_tags():
+	"""The tags no pass may pick right now: the credential tags, unless Settings > Scan policy > "Allow checks that send credentials" is on."""
+	from cveFeed import validation
+	return frozenset() if validation.credential_checks_allowed() else CREDENTIAL_TAGS
+
+
 def static_tags_for(tech_names):
 	"""Pure: tags from the hardcoded table for the given technology names (case-insensitive)."""
 	tags = set()
@@ -210,7 +219,7 @@ def ai_tags_for(tech_names, provider):
 	reply = _ask('nuclei_tag_selection', provider, system, user)
 	if reply is None:
 		return set()
-	allowed = set(CANDIDATE_TAGS)
+	allowed = set(CANDIDATE_TAGS) - refused_tags()
 	return {t for t in _parse_ai_tags(reply) if isinstance(t, str) and t in allowed}
 
 
@@ -224,7 +233,7 @@ def select_tags(scan):
 		tech_names.update(t.name for t in sub.technologies.all() if t.name)
 	if not tech_names:
 		return set()
-	tags = static_tags_for(tech_names)
+	tags = static_tags_for(tech_names) - refused_tags()
 	from reNgine.ai_settings import get_configured_provider
 	provider = get_configured_provider()
 	if provider:
@@ -446,10 +455,11 @@ def pertinent_tags(signatures, allowed, limit=OFFER_MAX, index=None):
 		raw = [w for w in re.split(r'[^a-z0-9]+', str(name).lower()) if w and w not in STOP_WORDS and not re.fullmatch(r'v?\d[\w.]*', w)]
 		pairs |= {''.join(raw[k:k + n]) for n in (2, 3) for k in range(len(raw) - n + 1)}
 	scored = {}
+	refused = refused_tags()
 
 	def give(tag, kind, rank=0):
 		score = SCORES[kind] - rank * 0.01  # rank orders the matches of one word, so each name gets its share of a short offer
-		if tag in allowed and tag not in NEVER_PICKED and score > scored.get(tag, 0):
+		if tag in allowed and tag not in NEVER_PICKED and tag not in refused and score > scored.get(tag, 0):
 			scored[tag] = score
 	for tag in static_tags_for_names(names):
 		give(tag, 'static')
@@ -507,7 +517,7 @@ def ai_plan(signatures, provider, allowed, offered=None, notes=None):
 	for key, choice in (data.items() if isinstance(data, dict) else ()):
 		if not (isinstance(choice, dict) and str(key).isdigit() and int(key) < len(signatures)):
 			continue
-		tags = {t for t in choice.get('tags') or [] if isinstance(t, str) and t in allowed and t not in NEVER_PICKED}
+		tags = {t for t in choice.get('tags') or [] if isinstance(t, str) and t in allowed and t not in NEVER_PICKED and t not in refused_tags()}
 		sevs = tuple(s for s in SEVERITY_CHOICES if s in (choice.get('severities') or []))
 		out[int(key)] = (tags, sevs)
 	return out

@@ -80,6 +80,33 @@ class LightNucleiPolicyTests(DispatchBase):
                 self.assertEqual(target['etags'], ['dos'], kind)  # scan_flags.NUCLEI_EXCLUDED_TAGS: the tags no run ever runs
                 self.assertEqual(target['template_policy'], {'rev': nuclei_scan.TEMPLATE_POLICY_REV, 'read_only': True, 'bundle_sha256': None}, kind)  # no snapshot is cached here, so no bundle yet
 
+    def test_a_task_carries_allow_credential_checks_only_when_a_person_turned_it_on(self):
+        from dashboard.models import ScanPolicy
+        for kind in ('nuclei_light', 'nuclei_targeted', 'nuclei_deep'):
+            self.assertNotIn('allow_credential_checks', dispatch._nuclei_target(kind, ['www.example.test'], {}), kind)  # off: absent, an older Sentinel is the same
+        ScanPolicy.objects.create(allow_credential_checks=True)
+        for kind in ('nuclei_light', 'nuclei_targeted', 'nuclei_deep'):
+            self.assertIs(dispatch._nuclei_target(kind, ['www.example.test'], {})['allow_credential_checks'], True, kind)
+        ScanPolicy.objects.update(allow_credential_checks=False)
+        self.assertNotIn('allow_credential_checks', dispatch._nuclei_target('nuclei_deep', ['www.example.test'], {}))
+
+    def test_a_focused_pass_that_asks_only_for_credential_checks_does_not_run_and_does_not_widen(self):
+        stream = mock.Mock()
+        out = nuclei_scan.run_nuclei(self.scan.id, stream, tags=['default-login', 'bruteforce'], targets=['www.example.test'])
+        self.assertEqual(out, {'targets': 0, 'findings': 0})
+        stream.assert_not_called()  # not every template either
+        from cveFeed.models import AgentActivity
+        self.assertTrue(AgentActivity.objects.filter(message__contains='send credentials').exists())
+
+    def test_the_credential_switch_changes_the_template_revision_so_hosts_become_due(self):
+        from dashboard.models import ScanPolicy
+        with mock.patch('cveFeed.validation.all_templates_allowed', return_value=True):
+            off = nuclei_scan.policy_rev()
+            ScanPolicy.objects.create(allow_credential_checks=True)
+            on = nuclei_scan.policy_rev()
+        self.assertNotEqual(off, on)
+        self.assertNotEqual(off, 'all-1')  # the pass that used to run default-login is not the one that ran before
+
     def test_a_policy_that_allows_every_template_is_said_so(self):
         with mock.patch('cveFeed.validation.all_templates_allowed', return_value=True):
             target = dispatch._nuclei_target('nuclei_targeted', ['www.example.test'], {})

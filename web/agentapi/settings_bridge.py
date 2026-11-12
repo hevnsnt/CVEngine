@@ -27,7 +27,7 @@ ENTRIES = {
     'ai_test': ('settings', 'ai/test', 'Test the AI connection with one small call. Action.', None),
     'ai_models': ('settings', 'ai/models', 'List the models the provider offers for the key saved. Action.', None),
     'reviewer': ('settings', 'reviewer', 'The AI reviewer of AI-written checks: its model and whether it is on.', None),
-    'scan_policy': ('settings', 'scan_policy', 'What the scanners may run (every template check, or only read-only ones).', None),
+    'scan_policy': ('settings', 'scan_policy', 'What the scanners may run (every template check, or only read-only ones) and whether checks that send credentials (default logins) may run (off by default).', None),
     'scan_concurrency': ('settings', 'scan_concurrency', 'How many scans and assessments run at once.', None),
     'tunables': ('settings', 'tunables', 'The throughput settings (the ones auto-tuning manages), with the pinned value of each.', None),
     'autotune': ('settings', 'autotune', 'Auto-tuning: mode and advisor. (Also set_tuning_mode.)', None),
