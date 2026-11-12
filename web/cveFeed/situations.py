@@ -6,7 +6,7 @@ A **situation** is one host of a project together with everything open on it tha
    on this host" card), unless a person set its heat to ice;
 2. **likely**: a CVE match or scanner finding that shows fire or smoke (``cveFeed.threat``: the one definition of heat, including a heat a
    person set by hand), not proven, and not called a false positive by the AI reviewer;
-3. **exposure**: an open database (``source == 'db_exposure'``), a dangling DNS record (baddns), an open admin or cleartext service
+3. **exposure**: an open database (``source == 'db_exposure'``), a dangling DNS record (the dangling-DNS check), an open admin or cleartext service
    (Telnet, FTP, r-services, a tailnet admin port) or an exposed secret that counts (not public by design, accepted, revoked or a false positive);
 4. **minor**: everything else that is still open: hygiene findings and ice-heat matches and findings.
 
@@ -65,7 +65,7 @@ HEAT_NAMES = {rank: name for name, rank in HEAT_RANK.items()}
 # hygiene findings that are an open service (cveFeed.cleartext, cveFeed.tailscale_checks), not a configuration slip
 EXPOSURE_HYGIENE = ('cleartext_telnet', 'cleartext_ftp', 'cleartext_rservices', 'ts_remote_admin_exposed')
 SOURCE_DB = 'db_exposure'
-DANGLING_PREFIX = 'dangling '
+DANGLING_NAMES = ('dangling ns', 'dangling cname')  # the names the dangling-DNS check gives its findings (cveFeed.dangling_dns)
 
 _PRODUCT = re.compile(r'^[A-Za-z0-9][A-Za-z0-9 ._/+()-]{0,59}$')
 _SPACES = re.compile(r'\s+')
@@ -119,7 +119,10 @@ def _matches(ids):
 
 
 def _exposure_q():
-    return Q(source=SOURCE_DB) | Q(source='bbot', name__istartswith=DANGLING_PREFIX)
+    q = Q(source=SOURCE_DB)
+    for prefix in DANGLING_NAMES:
+        q |= Q(name__istartswith=prefix)
+    return q
 
 
 def _vulns(ids):
