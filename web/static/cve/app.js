@@ -30,6 +30,7 @@ import { loadSignIns, signInButton } from "/staticfiles/cve/authcheck.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
 import { STORED, canDiscover, defaultChoice, discoverBody, discoverHint, discoverOptions, modeAfter, modeText, startedText } from "/staticfiles/cve/discover-mode-logic.js";
 import { suppliersPage } from "/staticfiles/cve/suppliers.js";
+import { situationsPage } from "/staticfiles/cve/situations.js";
 import { secretsPage } from "/staticfiles/cve/secrets.js";
 import { scoreList } from "/staticfiles/cve/score-detail.js";
 import { openSecret } from "/staticfiles/cve/secret-panel.js";
@@ -373,13 +374,13 @@ function createList({
         // they typed in or a menu they have open is still there after it (static/cve/keep-state.js). The render function closes over the table it drew (a later
         // "Load more" appends to it), so these blocks are always replaced, never kept.
         const aside = el("div");
-        if (!items.length) aside.append(emptyNode(empty));
+        if (!items.length) aside.append(emptyNode(empty, data));
         else render(aside, items, true, true);
         aside.childNodes.forEach((n) => n.setAttribute && n.setAttribute("data-keep-fresh", ""));
         renderKeepingState(body, () => Array.from(aside.childNodes));
       } else {
         if (reset) body.textContent = "";
-        if (reset && !items.length) body.append(emptyNode(empty));
+        if (reset && !items.length) body.append(emptyNode(empty, data));
         else render(body, items, reset);
       }
       if (onLoaded) onLoaded(data, reset, quiet);
@@ -627,8 +628,8 @@ const whenCell = (iso) => {
 
 // What an empty list shows: a plain sentence, emptyState() options, or a function returning either, so a list can tell "nothing yet"
 // (say what to do next) from "nothing matches these filters" (offer to clear them).
-function emptyNode(empty) {
-  const v = typeof empty === "function" ? empty() : empty;
+function emptyNode(empty, data) {
+  const v = typeof empty === "function" ? empty(data) : empty;  // a function may read the answer that came back (Situations: the server's state)
   return typeof v === "string" ? el("p", "empty", v) : emptyState(v);
 }
 // The empty Targets page's next step: the shell's own Add targets button, when this page has one
@@ -1168,7 +1169,7 @@ const technologyTable = (h) => {
 const WP_STATE_LABELS = {
   scanned: "Scanned", detected: "WordPress detected, not scanned yet", candidate: "Signs of WordPress, not confirmed",
   blocked: "Blocked by the edge", failed: "Scan failed", waiting: "Waiting for the next scan", queued: "Queued, the scan runs on it in the background", unavailable: "Scan not available",
-  not_wordpress: "Not WordPress",
+  not_wordpress: "Not WordPress", unreachable: "Site did not answer", redirected: "Redirects to another site", not_scannable: "Not scannable by WPScan",
 };
 // The thorough pass asks the site for every plugin and theme the scanner knows (hours per site) after the quick pass, in the background, on a Sentinel.
 const WP_THOROUGH_LABELS = {
@@ -5091,5 +5092,8 @@ pages.suppliers = (mount) => suppliersPage(mount, { slug, all: ALL, listHead });
 
 // Exposed secrets: the secrets inventory, masked values only (static/cve/secrets.js); the API refuses a change the caller's role does not allow
 pages.secrets = (mount) => secretsPage(mount, { slug, all: ALL, canWrite: !ALL, listHead });
+
+// Situations: what needs a person, one host at a time, ranked (static/cve/situations.js)
+pages.situations = (mount) => situationsPage(mount, { slug, all: ALL, listHead, createList, selectableRow, addTargets: addTargetsAction });
 
 pages[kind](root.querySelector("#view"));

@@ -12,7 +12,7 @@ The server runs no scan of its own. Every install starts a built-in scanner next
 
 ## What a Sentinel runs
 
-Thirty-six kinds of work (`contract_version` 3), each a capability the Sentinel declares. The list is `kind_since` in the contract, `cvengine_scanner/contract/sentinel_contract.json` in the [Sentinel repository](https://github.com/hevnsnt/cvENGINE-sentinel) (ten kinds since contract version 1, one since 2, twenty-five since 3); the code reads it from the installed library, and `tests/test_docs_accuracy.py` fails when this table and the contract disagree. **The server runs none of them**: every kind but `discover` is in `sentinel_dispatch.NEVER_LOCAL`, and `discover` is Sentinel-only by design.
+Thirty-six kinds of work (`contract_version` 4), each a capability the Sentinel declares. The list is `kind_since` in the contract, `cvengine_scanner/contract/sentinel_contract.json` in the [Sentinel repository](https://github.com/hevnsnt/cvENGINE-sentinel) (ten kinds since contract version 1, one since 2, twenty-five since 3); the code reads it from the installed library, and `tests/test_docs_accuracy.py` fails when this table and the contract disagree. **The server runs none of them**: every kind but `discover` is in `sentinel_dispatch.NEVER_LOCAL`, and `discover` is Sentinel-only by design.
 
 | Kind                                             | Work (the tool that does it)                                                 |
 | ------------------------------------------------ | ---------------------------------------------------------------------------- |
@@ -21,7 +21,7 @@ Thirty-six kinds of work (`contract_version` 3), each a capability the Sentinel 
 | `nmap_verify`                                    | Service detection with the reviewed NSE scripts on named ports (nmap) |
 | `nmap_udp`                                       | The UDP exposure sweep (nmap)                                                |
 | `nuclei_light`, `nuclei_targeted`, `nuclei_deep` | The HTTP and technology pass, the AI-targeted pass, and the weekly deep pass (nuclei) |
-| `nuclei_validate`                                | The test of an AI-written template (nuclei; built-in scanner only) |
+| `nuclei_validate`                                | The test of an AI-written template (nuclei; the built-in scanner while there is one, else your own Sentinels of contract 4 under the checks in [AI-REVIEWER.md](AI-REVIEWER.md#ai-written-checks-on-your-own-sentinels)) |
 | `testssl`                                        | The TLS audit, one `host:port` per task (testssl.sh)                         |
 | `wpscan`, `wpscan_thorough`                      | WPScan on a WordPress site: the quick pass, and the thorough pass of hours per site (WPScan) |
 | `waf`                                            | WAF fingerprinting of a web host (wafw00f)          |
@@ -41,11 +41,11 @@ Thirty-six kinds of work (`contract_version` 3), each a capability the Sentinel 
 | `hygiene_check`, `dangling_dns_check`            | DNS, mail and certificate hygiene (SPF, DMARC, DKIM, CAA, MailFail), and the zone-cut checks of dangling-DNS findings |
 | `dns_resolve`, `identity_check`                  | Name lookups for discovery, and the alias, name server, reverse name and certificate-name reads of a name or address |
 | `alive_check`                                    | Whether a retired name's last known addresses still answer |
-| `path_probe`                                     | The plain SYN and the FIN+PSH+URG probe that measure the path scans leave from (built-in scanner only) |
+| `path_probe`                                     | The plain SYN and the FIN+PSH+URG probe that measure the path scans leave from (the built-in scanner while there is one, else your own Sentinels, each measuring its own path) |
 | `openvas`                                        | A Greenbone scan, only when the [OpenVAS add-on](OPENVAS.md) is on           |
 | `discover`                                       | A live-host sweep of a declared internal network                             |
 
-Three kinds are offered only to the built-in scanner (`sentinel_broker.BUILTIN_KINDS`): `path_probe`, `nuclei_validate` and `route_probe_signed`. The server itself keeps the plans, the schedules, the budgets and the storing and judging of what comes back.
+Three kinds stay with the built-in scanner while the install has one (`sentinel_broker.BUILTIN_KINDS`): `path_probe`, `nuclei_validate` and `route_probe_signed`. `route_probe_signed` never leaves it (it reads a stored sign-in); with no built-in scanner, `path_probe` and `nuclei_validate` go to the project's own Sentinels whose contract version is at least the kind's `external_since` (`path_probe` 3, `nuclei_validate` 4). The server itself keeps the plans, the schedules, the budgets and the storing and judging of what comes back.
 
 ## External or internal, full or light
 
@@ -195,6 +195,8 @@ The tests tie the file to the server: every task kind has a schema, one fixture 
 A Sentinel says which contract it speaks: `info.contract_version` (a whole number, 1 to 1000) in its registration and heartbeat. A client from before the field is taken to speak version 1. The file lists `kind_since` (the version that introduced each kind) and `min_supported_contract_version` (the server speaks the current contract and the one before it), and a Sentinel is offered only the kinds its version can run; one older than the server still speaks is offered nothing and shows as `unsupported`. Every register and heartbeat answer carries `contract: {version, min_supported}` so the client can see for itself that it is behind, and the Sentinels list shows each one's `contract_version` and `contract_state` (`current`, `previous`, `unsupported`, `newer` or `unreported`).
 
 Contract version 2 adds one kind, `waf` (wafw00f against the root of one web host): the target is `{host, ip, port, scheme}` and the result is `{outcome, products: [{name, manufacturer?}], generic}`, at most 20 products with names cut to 100 characters. The server stores a `waf` result through `cveFeed.waf_fingerprint.persist_waf_result`, and the WAF stage dispatches it. `waf` is offered only to a Sentinel that declares `contract_version` 2 or higher and lists `waf` in its capabilities; a Sentinel that declares 1, or nothing, is never offered it even if it lists it. `min_supported_contract_version` stays 1, so a Sentinel declaring 1 shows as `previous`.
+
+Contract version 4 adds no kind. A `nuclei_validate` target carries `template_sha256` (the sha256 of its template text, required), its result may name the same hash, and the new top-level table `external_since` names the contract version from which a Sentinel other than the built-in scanner may be offered a kind the built-in scanner used to keep (`nuclei_validate` 4, `path_probe` 3). A contract-4 Sentinel runs a check only after asking `GET sentinel/tasks/{id}/check` which hash its server approves for the task ([AI-REVIEWER.md](AI-REVIEWER.md#ai-written-checks-on-your-own-sentinels)). The frozen fixtures of version 3 are in `web/tests/fixtures/sentinel_results/v3/`.
 
 ## Troubleshooting
 

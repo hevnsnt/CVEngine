@@ -108,6 +108,12 @@ def record_path(result, now=None):
     from django.core.cache import cache
     from django.utils import timezone
     earlier = path_state()
+    if result.get('vantage') == 'sentinels':
+        # measured on the Sentinels and kept per Sentinel (record_sentinel_path): not this install's own path, whose verdict stands; what they
+        # measured is shown beside it (status)
+        kept = {**earlier, 'sentinels': result.get('sentinels') or {}, 'sentinels_at': (now or timezone.now()).isoformat()}
+        cache.set(PATH_CACHE_KEY, kept, PATH_TTL)
+        return kept
     before = earlier.get('state')
     stamp = (now or timezone.now()).isoformat()
     after = result.get('state')
@@ -126,11 +132,51 @@ def record_path(result, now=None):
     return stored
 
 
+SENTINEL_PATH_KEY = PATH_CACHE_KEY + ':sentinel:{}'  # one Sentinel's own measured path (path_probe run by it, cveFeed.path_probe._per_sentinel)
+
+
+def sentinel_path_state(agent_id):
+    """The last measured verdict of the path of the Sentinel ``agent_id`` (``record_sentinel_path``), ``{'state': 'unknown'}`` when none."""
+    if agent_id is None:
+        return {'state': 'unknown'}
+    try:
+        from django.core.cache import cache
+        return cache.get(SENTINEL_PATH_KEY.format(int(agent_id))) or {'state': 'unknown'}
+    except Exception:  # noqa: BLE001 - a cache problem is "not measured", never a failed scan
+        return {'state': 'unknown'}
+
+
+def record_sentinel_path(agent_id, result, now=None):
+    """Keep the path verdict a Sentinel measured for itself (no built-in scanner in use, ``cveFeed.path_probe``). As ``record_path``: an ``unknown``
+    leaves an earlier verdict standing until it expires. Returns the stored dict."""
+    from django.core.cache import cache
+    from django.utils import timezone
+    earlier = sentinel_path_state(agent_id)
+    stamp = (now or timezone.now()).isoformat()
+    key = SENTINEL_PATH_KEY.format(int(agent_id))
+    if result.get('state') == 'unknown' and earlier.get('state') not in (None, 'unknown'):
+        kept = {**earlier, 'checked_at': stamp}
+        cache.set(key, kept, PATH_TTL)
+        return kept
+    stored = {**result, 'at': stamp}
+    cache.set(key, stored, PATH_TTL)
+    if result.get('state') != earlier.get('state'):
+        logger.warning('operating system detection path of Sentinel %s: %s -> %s', agent_id, earlier.get('state') or 'unmeasured', result.get('state'))
+    return stored
+
+
+def sentinel_guess_believed(agent_id):
+    """Whether an OS guess the Sentinel ``agent_id`` reports may be stored as believed: not while its own measured path loses the malformed probes
+    (``sentinel_path_state`` is ``interfering``). ``CVENGINE_OS_DETECTION`` is applied where a guess is shown (``guess_believed``), as before."""
+    return sentinel_path_state(agent_id).get('state') != 'interfering'
+
+
 def status():
     """What an operator sees (get_system_status): whether guesses are believed, why not, how it was measured, and what to do."""
     why = cause()
     measured = path_state()
-    out = {'trusted': why is None, 'cause': why, 'path': {k: measured.get(k) for k in ('state', 'answered', 'lost', 'hosts', 'at', 'why')
+    out = {'trusted': why is None, 'cause': why, 'path': {k: measured.get(k) for k in ('state', 'answered', 'lost', 'hosts', 'at', 'why', 'sentinels',
+                                                                                     'sentinels_at')
                                                          if measured.get(k) is not None}}
     if why in ('docker-desktop', 'translated'):
         out['remedy'] = REMEDY

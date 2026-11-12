@@ -40,11 +40,12 @@ def _compute(now):
         return _empty()
     offered, denied, live_pks = set(), set(), set()
     cooling = {}  # kind -> the live Sentinel that has it and is withholding it after repeated failures
+    builtin_only = {k for k in sentinel_broker.BUILTIN_KINDS if sentinel_broker.builtin_only_kind(k)}  # asked once, not per Sentinel
     for eff in sentinel_broker._live_scanners(now):
         for kind, info in (getattr(eff, 'withheld', None) or {}).items():
             if kind in (eff.agent.capabilities or []) and (kind not in cooling or info['retry_at'] > cooling[kind][1]['retry_at']):
                 cooling[kind] = (eff.agent, info)
-        offered |= eff.caps if eff.builtin else eff.caps - set(sentinel_broker.BUILTIN_KINDS)  # only the built-in scanner takes those
+        offered |= eff.caps if eff.builtin else eff.caps - builtin_only  # only the built-in scanner takes those now
         live_pks.add(eff.agent.pk)
         # a kind it has (declared, or turned off on its machine) and its policy turns off
         denied |= {k for k in eff.denied if k in (eff.agent.capabilities or []) or eff.policy[k]['machine']}

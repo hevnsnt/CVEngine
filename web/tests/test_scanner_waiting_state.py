@@ -124,10 +124,17 @@ class HelperTests(SentinelWorld, TestCase):
         self.assertTrue(scanner_state.is_waiting('testssl'))
 
     def test_a_kind_only_the_built_in_scanner_takes_waits_while_only_an_external_sentinel_declares_it(self):
+        self.sentinel(['nmap'], builtin=True, seen='old')  # the install has a built-in scanner (offline now): the kinds stay its own
         self.sentinel(ALL_KINDS)
         self.assertEqual(scanner_state.state()['kinds'], [k for k in ALL_KINDS if k in sentinel_broker.BUILTIN_KINDS])
         self.assertTrue(scanner_state.is_waiting('path_probe'))
         self.assertFalse(scanner_state.is_waiting('waf'))
+
+    def test_with_no_built_in_scanner_only_the_signed_in_route_check_waits_for_one(self):
+        self.sentinel(ALL_KINDS)  # speaks the current contract: path_probe and nuclei_validate are offered to it (external_since)
+        self.assertEqual(scanner_state.state()['kinds'], ['route_probe_signed'])
+        self.assertFalse(scanner_state.is_waiting('path_probe'))
+        self.assertFalse(scanner_state.is_waiting('nuclei_validate'))
 
     def test_a_live_sentinel_for_every_kind_is_not_offline(self):
         self.sentinel(ALL_KINDS)

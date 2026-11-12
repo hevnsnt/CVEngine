@@ -2920,6 +2920,35 @@ def list_certificates(ctx, slug, params):
     return paginate(qs, params, _tagged(_cert, lambda c: c.domain.project) if everywhere else _cert)
 
 
+def _situation_ids(project):
+    return list(project.ids) if _is_all(project) else [project.pk]
+
+
+def list_situations(ctx, slug, params):
+    """What needs a person, one host at a time, ranked (cveFeed.situations: the rank rule and the narrative are documented there). ``q``: part of a
+    host name. Paged (``page``, ``page_size``); ``state`` is ``attention``, ``clear`` (scanned, nothing needs you) or ``unscanned``. The all-projects
+    view ranks across the projects the caller can see; each row names its project."""
+    from cveFeed import situations
+    project, _ = get_project(ctx, slug)
+    page, size = page_args(params, zero_ok=True)
+    q = str(params.get('q') or '').strip()[:200]
+    tier = str(params.get('tier') or 'all').strip().lower()
+    if tier not in situations.WORST_AT_LEAST:
+        raise ApiError(400, f'tier must be {", ".join(situations.WORST_AT_LEAST)}')
+    return situations.listing(_situation_ids(project), q=q, page=page, size=size, tier=tier)
+
+
+def get_situation(ctx, slug, host):
+    """One situation with its narrative and up to 200 of its findings, each with the link that opens it. 404 when nothing open on the host needs a person
+    (or it is not in the project). Needs one project: a host name can exist in two."""
+    from cveFeed import situations
+    project, _ = get_one_project(ctx, slug)
+    row = situations.one([project.pk], host)
+    if row is None:
+        raise ApiError(404, 'no situation for this host: nothing open on it needs a person')
+    return row
+
+
 def _hygiene(f):
     return {'id': f.id, 'host': f.host, 'check': f.check_name, 'severity': SEVERITY_NAMES.get(f.severity, str(f.severity)),
             'title': f.title, 'detail': f.detail, 'evidence': f.evidence, 'status': f.status,

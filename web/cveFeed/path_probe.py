@@ -1,4 +1,4 @@
-"""Whether the network path the built-in scanner scans from leaves a packet alone.
+"""Whether the network path a scanner scans from leaves a packet alone (the built-in scanner's, or with none, each Sentinel's own).
 
 The operating system detection of a scanner sends sixteen probes, some of them deliberately malformed (a TCP segment with FIN, PSH and URG set, a
 segment to a closed port with an odd option layout), and reads how the target's stack answers each. That only works if the probes arrive as
@@ -109,9 +109,12 @@ def candidates(limit=MAX_TARGETS, days=14):
 
 
 def check():
-    """Survey ``candidates()`` on the built-in scanner and return ``{'state', 'answered', 'lost', 'hosts', 'vantage'}``, or ``{'state': 'unknown', 'why': ...}``
+    """Survey ``candidates()`` on a scanner and return ``{'state', 'answered', 'lost', 'hosts', 'vantage'}``, or ``{'state': 'unknown', 'why': ...}``
     when there is too little to probe or no scanner can take the work. The path that matters is the one the scans leave from: the survey is one task
-    per project that holds the addresses (so no task names another tenant's address) and the ``vantage`` is ``scanner``. It never runs here."""
+    per project that holds the addresses (so no task names another tenant's address). Run by the built-in scanner, its verdict is this install's
+    (``vantage`` ``scanner``, kept by ``os_detection.record_path``). With no built-in scanner the project's own Sentinels run it, and each one's rows
+    are judged apart and kept as that Sentinel's own verdict (``os_detection.record_sentinel_path``): ``vantage`` ``sentinels``, ``sentinels``
+    ``{agent id: state}``, and the install-wide verdict is left alone. It never runs here."""
     from agentapi import sentinel_dispatch
     from reNgine.resources import ScannerUnavailable
     targets = candidates()
@@ -127,5 +130,24 @@ def check():
         return {'state': 'unknown', 'why': f'no scanner could take this work ({exc.kind})', 'hosts': len(targets)}
     if rows is None:
         return {'state': 'unknown', 'why': 'no address is in scope of a project any more', 'hosts': len(targets)}
+    by_sentinel = {}
+    for row in rows:
+        if row.get('sentinel') is not None:
+            by_sentinel.setdefault(row['sentinel'], []).append(row)
+    if by_sentinel:
+        return _per_sentinel(by_sentinel, len(targets))
     state, answered, lost = verdict(rows)
     return {'state': state, 'answered': answered, 'lost': lost, 'hosts': len(targets), 'vantage': 'scanner'}
+
+
+def _per_sentinel(by_sentinel, hosts):
+    """Judge and keep the rows of each Sentinel that ran the survey as that Sentinel's verdict (``os_detection.record_sentinel_path``). The
+    install-wide verdict is not touched: these rows describe the Sentinels' paths, not this install's."""
+    from cveFeed import os_detection
+    states = {}
+    for agent_id, rows in by_sentinel.items():
+        state, answered, lost = verdict(rows)
+        kept = os_detection.record_sentinel_path(agent_id, {'state': state, 'answered': answered, 'lost': lost, 'hosts': len(rows)})
+        states[str(agent_id)] = kept.get('state', 'unknown')
+    return {'state': 'unknown', 'why': "measured on this install's own Sentinels, each one's path kept as its own", 'hosts': hosts,
+            'vantage': 'sentinels', 'sentinels': states}

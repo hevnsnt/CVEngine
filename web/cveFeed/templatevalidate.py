@@ -225,7 +225,7 @@ def step(tmpl, now=None):
             return 'busy'
         _save(tmpl, validation_stage=stage.split(':', 1)[1])  # the job ended without an applied answer (expired, lost): that was a try
         return _retry(tmpl, 'the AI job ended without an answer', now)
-    if stage == '':
+    if stage in ('', 'syntax'):  # 'syntax': a draft whose first check (templategen.job_answer) never finished; the same check again
         outcome = _sentinel_gate(tmpl, now)
         if outcome:
             return outcome

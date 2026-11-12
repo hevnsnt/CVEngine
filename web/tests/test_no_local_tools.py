@@ -109,6 +109,7 @@ ALLOWED = {
     ],
     'nuclei': [
         'Dockerfile',
+        'agentapi/ai_checks.py',  # 1.4.0 AI-written checks on Sentinels: the rules a nuclei_validate task must keep, runs nothing (the Sentinel runs the tool)
         'agentapi/egress.py',  # 1.3.4 outbound connection log (develop): names the tools whose probe plans it records, runs nothing
         'agentapi/mcp.py',
         'agentapi/models.py',
@@ -122,6 +123,7 @@ ALLOWED = {
         'cveFeed/auth_checks.py',
         'cveFeed/auth_nuclei.py',  # T8 nuclei: ledger service keys (nuclei-auth, nuclei-auth-refused) are stored data, plus activity text; runs nothing, the signed-in pass is the built-in scanner's
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
+        'cveFeed/check_allowlist.py',  # 1.4.0 AI-written checks on Sentinels: the allowlist a nuclei template must meet (it names nuclei's parser and helpers), runs nothing
         'cveFeed/check_coverage.py',
         'cveFeed/conductor.py',
         'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing

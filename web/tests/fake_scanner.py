@@ -304,7 +304,12 @@ class FakeScanner:
     def result_for(self, task):
         responder = self.responders.get(task['kind'])
         if responder is None:
-            return fixture(task['kind'], version=self.contract_version)
+            body = fixture(task['kind'], version=self.contract_version)
+            if task['kind'] == 'nuclei_validate' and 'template_sha256' in body:
+                # a correct contract-4 client names the hash of the check it was handed, not the fixture's own (agentapi.ai_checks.result_problem)
+                sent = (task.get('target') or {}).get('template_sha256')
+                body = {**body, 'template_sha256': sent} if sent else {k: v for k, v in body.items() if k != 'template_sha256'}
+            return body
         return copy.deepcopy(responder(task) if callable(responder) else responder)
 
     def serve_once(self):
