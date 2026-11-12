@@ -1055,6 +1055,9 @@ def record_usage(body, now=None):
     return {'recorded': True}
 
 
+SEVERITY_RANK = {'info': 0, 'warning': 1, 'critical': 2}
+
+
 def apply_ops_report(body, now=None):
     """Take the operations job's report: ``{alerts: [{code, severity, diagnosis}], actions: [names], model, templates_release}``. The
     checks are computed again here; a diagnosis is kept only for a check that is not ``ok``, and an action runs only when that check offers
@@ -1086,7 +1089,9 @@ def apply_ops_report(body, now=None):
             alert.ai_detail = usable_note(fleet.without_contradictions(alert.ai_detail, facts), min_words=DIAGNOSIS_MIN_WORDS)[:NOTE_MAX]
         alert.ai_model = model if alert.ai_detail else ''
         if item.get('severity') in ('info', 'warning', 'critical') and check['state'] != 'problem':
-            alert.severity = item['severity'] if item['severity'] != 'critical' else 'warning'  # only a problem the server sees is critical
+            wanted = item['severity'] if item['severity'] != 'critical' else 'warning'  # only a problem the server sees is critical
+            if SEVERITY_RANK[wanted] > SEVERITY_RANK.get(alert.severity, 0):  # the model may raise a note to a warning, never quiet what the server's own check says
+                alert.severity = wanted
         alert.save(update_fields=['ai_detail', 'ai_model', 'severity'])
         updated += 1
     ran, refused = [], []

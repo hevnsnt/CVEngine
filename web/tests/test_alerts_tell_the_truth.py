@@ -700,3 +700,28 @@ class DismissedAlertStaysDismissedTests(Base):
         one = [{'sentinel': 's1', 'kind': 'nmap', 'failed': 12, 'completed': 0}]
         self.assertEqual(reviewer._digest(failing([{**one[0], 'failed': 15}])), reviewer._digest(failing(one)))
         self.assertNotEqual(reviewer._digest(failing(one + [{'sentinel': 's2', 'kind': 'nmap', 'failed': 12, 'completed': 0}])), reviewer._digest(failing(one)))
+
+
+class TheModelCannotQuietAWarningTests(Base):
+    """AM-12: the operations model's severity is taken upwards only."""
+
+    def report(self, severity, state='warning', check_severity=None):
+        from cveFeed.models import AdminAlert
+        check = {'code': 'sentinels_offline', 'state': state, 'severity': check_severity or ('critical' if state == 'problem' else 'warning'),
+                 'title': 'No Sentinel is live', 'detail': 'd', 'facts': {}, 'actions': []}
+        with mock.patch.object(reviewer, 'ops_checks', return_value=[check]):
+            reviewer.apply_ops_report({'alerts': [{'code': 'sentinels_offline', 'severity': severity, 'diagnosis': 'Check that the Sentinel is running and can reach this server, then look at the Sentinels page.'}],
+                                       'actions': [], 'model': 'm'})
+        return AdminAlert.objects.get(code='sentinels_offline', resolved_at__isnull=True).severity
+
+    def test_info_does_not_lower_a_warning(self):
+        self.assertEqual(self.report('info'), 'warning')
+
+    def test_warning_stays_and_critical_is_not_taken_for_a_warning_check(self):
+        self.assertEqual(self.report('warning'), 'warning')
+        self.assertEqual(self.report('critical'), 'warning')
+
+    def test_a_note_can_be_raised_to_a_warning_and_a_problem_is_never_changed(self):
+        self.assertEqual(self.report('warning', state='warning', check_severity='info'), 'warning')
+        self.assertEqual(self.report('info', state='warning', check_severity='info'), 'info')
+        self.assertEqual(self.report('info', state='problem'), 'critical')
