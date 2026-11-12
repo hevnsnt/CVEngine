@@ -1,0 +1,417 @@
+{
+ "kind": "nuclei_light",
+ "name": "nuclei_light",
+ "payload": {
+  "findings": [
+   {
+    "description": "A web application firewall was detected.",
+    "extracted_results": [],
+    "host": "192.0.2.11",
+    "matched_at": "https://192.0.2.11",
+    "matcher_name": "nginxgeneric",
+    "name": "WAF Detection",
+    "references": [
+     "https://github.com/Ekultek/WhatWaf"
+    ],
+    "request": "POST / HTTP/1.1\r\nHost: 192.0.2.11\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1\r\nContent-Length: 27\r\nContent-Type: application/x-www-form-urlencoded\r\nAccept-Encoding: gzip\r\n\r\n_=<script>alert(1)</script>",
+    "response": "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: keep-alive\r\nContent-Type: application/octet-stream\r\nDate: Thu, 12 Nov 2026 16:06:37 GMT\r\nServer: nginx/1.31.8\r\n\r\ntls lab\n",
+    "severity": "info",
+    "tags": [
+     "waf",
+     "tech",
+     "misc",
+     "discovery"
+    ],
+    "template_id": "waf-detect",
+    "type": "http"
+   },
+   {
+    "description": "A web application firewall was detected.",
+    "extracted_results": [],
+    "host": "192.0.2.10",
+    "matched_at": "http://192.0.2.10",
+    "matcher_name": "nginxgeneric",
+    "name": "WAF Detection",
+    "references": [
+     "https://github.com/Ekultek/WhatWaf"
+    ],
+    "request": "POST / HTTP/1.1\r\nHost: 192.0.2.10\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36\r\nContent-Length: 27\r\nContent-Type: application/x-www-form-urlencoded\r\nAccept-Encoding: gzip\r\n\r\n_=<script>alert(1)</script>",
+    "response": "HTTP/1.1 405 Not Allowed\r\nContent-Length: 559\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: Thu, 12 Nov 2026 16:06:37 GMT\r\nServer: nginx/1.31.8\r\n\r\n<html>\r\n<head><title>405 Not Allowed</title></head>\r\n<body>\r\n<center><h1>405 Not Allowed</h1></center>\r\n<hr><center>nginx/1.31.8</center>\r\n</body>\r\n</html>\r\n<!-- a padding to disable MSIE and Chrome friendly error page -->\r\n<!-- a padding to disable MSIE and Chrome friendly error page -->\r\n<!-- a padding to disable MSIE and Chrome friendly error page -->\r\n<!-- a padding to disable MSIE and Chrome friendly error page -->\r\n<!-- a padding to disable MSIE and Chrome friendly error page -->\r\n<!-- a padding to disable MSIE and Chrome friendly error page -->\r\n",
+    "severity": "info",
+    "tags": [
+     "waf",
+     "tech",
+     "misc",
+     "discovery"
+    ],
+    "template_id": "waf-detect",
+    "type": "http"
+   },
+   {
+    "description": "",
+    "extracted_results": [
+     "5.7.1"
+    ],
+    "host": "192.0.2.10",
+    "matched_at": "http://192.0.2.10/wp-content/plugins/contact-form-7/readme.txt",
+    "matcher_name": "outdated_version",
+    "name": "Contact Form 7 Detection",
+    "references": [
+     "https://wordpress.org/plugins/contact-form-7/"
+    ],
+    "request": "GET /wp-content/plugins/contact-form-7/readme.txt HTTP/1.1\r\nHost: 192.0.2.10\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 12_3_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.3 Safari/605.1.15\r\nAccept: */*\r\nAccept-Language: en\r\nAccept-Encoding: gzip\r\n\r\n",
+    "response": "HTTP/1.1 200 OK\r\nContent-Length: 41\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\nContent-Type: text/plain\r\nDate: Thu, 12 Nov 2026 16:06:38 GMT\r\nEtag: \"6af5dd90-29\"\r\nLast-Modified: Thu, 12 Nov 2026 15:38:56 GMT\r\nServer: nginx/1.31.8\r\n\r\n=== Contact Form 7 ===\nStable tag: 5.7.1\n",
+    "severity": "info",
+    "tags": [
+     "tech",
+     "wordpress",
+     "wp-plugin",
+     "top-100",
+     "top-200",
+     "discovery"
+    ],
+    "template_id": "wordpress-contact-form-7",
+    "type": "http"
+   },
+   {
+    "description": "Some nginx servers have the version on the response header. Useful when you need to find specific CVEs on your targets.",
+    "extracted_results": [
+     "nginx/1.31.8"
+    ],
+    "host": "192.0.2.11",
+    "matched_at": "https://192.0.2.11",
+    "matcher_name": "",
+    "name": "Nginx version detect",
+    "request": "GET / HTTP/1.1\r\nHost: 192.0.2.11\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:86.0) Gecko/20100101 Firefox/86.0\r\nAccept: */*\r\nAccept-Language: en\r\nAccept-Encoding: gzip\r\n\r\n",
+    "response": "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: keep-alive\r\nContent-Type: application/octet-stream\r\nDate: Thu, 12 Nov 2026 16:06:41 GMT\r\nServer: nginx/1.31.8\r\n\r\ntls lab\n",
+    "severity": "info",
+    "tags": [
+     "tech",
+     "nginx",
+     "discovery"
+    ],
+    "template_id": "nginx-version",
+    "type": "http"
+   },
+   {
+    "description": "Detected WordPress versions that have reached End-of-Life (EOL) and no longer receive security updates.\n",
+    "extracted_results": [
+     "6.4.1"
+    ],
+    "host": "192.0.2.10",
+    "matched_at": "http://192.0.2.10",
+    "matcher_name": "",
+    "name": "WordPress End-of-Life - Detect",
+    "references": [
+     "https://endoflife.date/wordpress",
+     "https://wordpress.org/documentation/article/wordpress-versions/"
+    ],
+    "request": "GET / HTTP/1.1\r\nHost: 192.0.2.10\r\nUser-Agent: Mozilla/5.0 (Macintosh, Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15\r\nAccept: */*\r\nAccept-Language: en\r\nAccept-Encoding: gzip\r\n\r\n",
+    "response": "HTTP/1.1 200 OK\r\nContent-Length: 437\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: Thu, 12 Nov 2026 16:06:41 GMT\r\nEtag: \"6af5dd90-1b5\"\r\nLast-Modified: Thu, 12 Nov 2026 15:38:56 GMT\r\nServer: nginx/1.31.8\r\n\r\n<!DOCTYPE html><html><head><title>cvtv lab blog</title>\n<meta name=\"generator\" content=\"WordPress 6.4.1\" />\n<link rel=\"stylesheet\" href=\"/wp-content/themes/twentytwentythree/style.css?ver=1.2\" />\n<script src=\"/wp-includes/js/wp-embed.min.js?ver=6.4.1\"></script>\n<link rel=\"stylesheet\" href=\"/wp-content/plugins/contact-form-7/includes/css/styles.css?ver=5.7.1\" />\n</head><body><h1>lab</h1><a href=\"/wp-login.php\">login</a></body></html>\n",
+    "severity": "info",
+    "tags": [
+     "tech",
+     "wordpress",
+     "eol"
+    ],
+    "template_id": "wordpress-eol",
+    "type": "http"
+   },
+   {
+    "description": "Some nginx servers have the version on the response header. Useful when you need to find specific CVEs on your targets.",
+    "extracted_results": [
+     "nginx/1.31.8"
+    ],
+    "host": "192.0.2.10",
+    "matched_at": "http://192.0.2.10",
+    "matcher_name": "",
+    "name": "Nginx version detect",
+    "request": "GET / HTTP/1.1\r\nHost: 192.0.2.10\r\nUser-Agent: Mozilla/5.0 (Macintosh, Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15\r\nAccept: */*\r\nAccept-Language: en\r\nAccept-Encoding: gzip\r\n\r\n",
+    "response": "HTTP/1.1 200 OK\r\nContent-Length: 437\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: Thu, 12 Nov 2026 16:06:41 GMT\r\nEtag: \"6af5dd90-1b5\"\r\nLast-Modified: Thu, 12 Nov 2026 15:38:56 GMT\r\nServer: nginx/1.31.8\r\n\r\n<!DOCTYPE html><html><head><title>cvtv lab blog</title>\n<meta name=\"generator\" content=\"WordPress 6.4.1\" />\n<link rel=\"stylesheet\" href=\"/wp-content/themes/twentytwentythree/style.css?ver=1.2\" />\n<script src=\"/wp-includes/js/wp-embed.min.js?ver=6.4.1\"></script>\n<link rel=\"stylesheet\" href=\"/wp-content/plugins/contact-form-7/includes/css/styles.css?ver=5.7.1\" />\n</head><body><h1>lab</h1><a href=\"/wp-login.php\">login</a></body></html>\n",
+    "severity": "info",
+    "tags": [
+     "tech",
+     "nginx",
+     "discovery"
+    ],
+    "template_id": "nginx-version",
+    "type": "http"
+   },
+   {
+    "description": "Generic CMS Detection using html meta generator tag",
+    "extracted_results": [
+     "WordPress 6.4.1"
+    ],
+    "host": "192.0.2.10",
+    "matched_at": "http://192.0.2.10",
+    "matcher_name": "",
+    "name": "Metatag CMS Detection",
+    "references": [
+     "https://www.w3schools.com/tags/att_meta_name.asp"
+    ],
+    "request": "GET / HTTP/1.1\r\nHost: 192.0.2.10\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36\r\nAccept: */*\r\nAccept-Language: en\r\nAccept-Encoding: gzip\r\n\r\n",
+    "response": "HTTP/1.1 200 OK\r\nContent-Length: 437\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: Thu, 12 Nov 2026 16:06:44 GMT\r\nEtag: \"6af5dd90-1b5\"\r\nLast-Modified: Thu, 12 Nov 2026 15:38:56 GMT\r\nServer: nginx/1.31.8\r\n\r\n<!DOCTYPE html><html><head><title>cvtv lab blog</title>\n<meta name=\"generator\" content=\"WordPress 6.4.1\" />\n<link rel=\"stylesheet\" href=\"/wp-content/themes/twentytwentythree/style.css?ver=1.2\" />\n<script src=\"/wp-includes/js/wp-embed.min.js?ver=6.4.1\"></script>\n<link rel=\"stylesheet\" href=\"/wp-content/plugins/contact-form-7/includes/css/styles.css?ver=5.7.1\" />\n</head><body><h1>lab</h1><a href=\"/wp-login.php\">login</a></body></html>\n",
+    "severity": "info",
+    "tags": [
+     "tech",
+     "cms",
+     "discovery"
+    ],
+    "template_id": "metatag-cms",
+    "type": "http"
+   },
+   {
+    "description": "",
+    "extracted_results": [],
+    "host": "192.0.2.10",
+    "matched_at": "http://192.0.2.10",
+    "matcher_name": "nginx",
+    "name": "Wappalyzer Technology Detection",
+    "request": "GET / HTTP/1.1\r\nHost: 192.0.2.10\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36\r\nAccept: */*\r\nAccept-Language: en\r\nAccept-Encoding: gzip\r\n\r\n",
+    "response": "HTTP/1.1 200 OK\r\nContent-Length: 437\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: Thu, 12 Nov 2026 16:06:44 GMT\r\nEtag: \"6af5dd90-1b5\"\r\nLast-Modified: Thu, 12 Nov 2026 15:38:56 GMT\r\nServer: nginx/1.31.8\r\n\r\n<!DOCTYPE html><html><head><title>cvtv lab blog</title>\n<meta name=\"generator\" content=\"WordPress 6.4.1\" />\n<link rel=\"stylesheet\" href=\"/wp-content/themes/twentytwentythree/style.css?ver=1.2\" />\n<script src=\"/wp-includes/js/wp-embed.min.js?ver=6.4.1\"></script>\n<link rel=\"stylesheet\" href=\"/wp-content/plugins/contact-form-7/includes/css/styles.css?ver=5.7.1\" />\n</head><body><h1>lab</h1><a href=\"/wp-login.php\">login</a></body></html>\n",
+    "severity": "info",
+    "tags": [
+     "tech",
+     "discovery"
+    ],
+    "template_id": "tech-detect",
+    "type": "http"
+   },
+   {
+    "description": "",
+    "extracted_results": [],
+    "host": "192.0.2.11",
+    "matched_at": "https://192.0.2.11",
+    "matcher_name": "nginx",
+    "name": "Wappalyzer Technology Detection",
+    "request": "GET / HTTP/1.1\r\nHost: 192.0.2.11\r\nUser-Agent: Mozilla/5.0 (Debian; Linux i686) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36\r\nAccept: */*\r\nAccept-Language: en\r\nAccept-Encoding: gzip\r\n\r\n",
+    "response": "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: keep-alive\r\nContent-Type: application/octet-stream\r\nDate: Thu, 12 Nov 2026 16:06:44 GMT\r\nServer: nginx/1.31.8\r\n\r\ntls lab\n",
+    "severity": "info",
+    "tags": [
+     "tech",
+     "discovery"
+    ],
+    "template_id": "tech-detect",
+    "type": "http"
+   },
+   {
+    "description": "Detects installed WordPress plugins by analyzing HTTP responses and common plugin paths\n",
+    "extracted_results": [],
+    "host": "192.0.2.10",
+    "matched_at": "http://192.0.2.10",
+    "matcher_name": "contact-form-7",
+    "name": "Wordpress Plugin Detection",
+    "references": [
+     "https://wordpress.org/plugins/"
+    ],
+    "request": "GET / HTTP/1.1\r\nHost: 192.0.2.10\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36\r\nAccept: */*\r\nAccept-Language: en\r\nAccept-Encoding: gzip\r\n\r\n",
+    "response": "HTTP/1.1 200 OK\r\nContent-Length: 437\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: Thu, 12 Nov 2026 16:06:44 GMT\r\nEtag: \"6af5dd90-1b5\"\r\nLast-Modified: Thu, 12 Nov 2026 15:38:56 GMT\r\nServer: nginx/1.31.8\r\n\r\n<!DOCTYPE html><html><head><title>cvtv lab blog</title>\n<meta name=\"generator\" content=\"WordPress 6.4.1\" />\n<link rel=\"stylesheet\" href=\"/wp-content/themes/twentytwentythree/style.css?ver=1.2\" />\n<script src=\"/wp-includes/js/wp-embed.min.js?ver=6.4.1\"></script>\n<link rel=\"stylesheet\" href=\"/wp-content/plugins/contact-form-7/includes/css/styles.css?ver=5.7.1\" />\n</head><body><h1>lab</h1><a href=\"/wp-login.php\">login</a></body></html>\n",
+    "severity": "info",
+    "tags": [
+     "tech",
+     "wp",
+     "wordpress",
+     "plugin",
+     "detection",
+     "wp-plugin",
+     "discovery"
+    ],
+    "template_id": "wordpress-plugin-detect",
+    "type": "http"
+   },
+   {
+    "description": "Detects installed WordPress themes by analyzing HTTP responses and theme-specific paths.\n",
+    "extracted_results": [],
+    "host": "192.0.2.10",
+    "matched_at": "http://192.0.2.10",
+    "matcher_name": "twentytwentythree",
+    "name": "Wordpress Theme Detection",
+    "references": [
+     "https://wordpress.org/themes/"
+    ],
+    "request": "GET / HTTP/1.1\r\nHost: 192.0.2.10\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36\r\nAccept: */*\r\nAccept-Language: en\r\nAccept-Encoding: gzip\r\n\r\n",
+    "response": "HTTP/1.1 200 OK\r\nContent-Length: 437\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: Thu, 12 Nov 2026 16:06:44 GMT\r\nEtag: \"6af5dd90-1b5\"\r\nLast-Modified: Thu, 12 Nov 2026 15:38:56 GMT\r\nServer: nginx/1.31.8\r\n\r\n<!DOCTYPE html><html><head><title>cvtv lab blog</title>\n<meta name=\"generator\" content=\"WordPress 6.4.1\" />\n<link rel=\"stylesheet\" href=\"/wp-content/themes/twentytwentythree/style.css?ver=1.2\" />\n<script src=\"/wp-includes/js/wp-embed.min.js?ver=6.4.1\"></script>\n<link rel=\"stylesheet\" href=\"/wp-content/plugins/contact-form-7/includes/css/styles.css?ver=5.7.1\" />\n</head><body><h1>lab</h1><a href=\"/wp-login.php\">login</a></body></html>\n",
+    "severity": "info",
+    "tags": [
+     "tech",
+     "wp",
+     "wordpress",
+     "theme",
+     "detection",
+     "wp-theme",
+     "discovery"
+    ],
+    "template_id": "wordpress-theme-detect",
+    "type": "http"
+   },
+   {
+    "description": "Passively enumerates WordPress plugins and themes through REST API discovery and HTML source analysis without brute-forcing, based on wpprobe methodology.\n",
+    "extracted_results": [
+     "contact-form-7"
+    ],
+    "host": "192.0.2.10",
+    "matched_at": "http://192.0.2.10/?rest_route=/",
+    "matcher_name": "",
+    "name": "WordPress Passive Detection - Plugins & Themes",
+    "references": [
+     "https://developer.wordpress.org/rest-api/using-the-rest-api/discovery/",
+     "https://github.com/Chocapikk/wpprobe",
+     "https://chocapikk.com/posts/2025/wpprobe/"
+    ],
+    "request": "GET /?rest_route=/ HTTP/1.1\r\nHost: 192.0.2.10\r\nUser-Agent: Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.61 Safari/537.36\r\nAccept: */*\r\nAccept-Language: en\r\nAccept-Encoding: gzip\r\n\r\n",
+    "response": "HTTP/1.1 200 OK\r\nContent-Length: 437\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: Thu, 12 Nov 2026 16:06:48 GMT\r\nEtag: \"6af5dd90-1b5\"\r\nLast-Modified: Thu, 12 Nov 2026 15:38:56 GMT\r\nServer: nginx/1.31.8\r\n\r\n<!DOCTYPE html><html><head><title>cvtv lab blog</title>\n<meta name=\"generator\" content=\"WordPress 6.4.1\" />\n<link rel=\"stylesheet\" href=\"/wp-content/themes/twentytwentythree/style.css?ver=1.2\" />\n<script src=\"/wp-includes/js/wp-embed.min.js?ver=6.4.1\"></script>\n<link rel=\"stylesheet\" href=\"/wp-content/plugins/contact-form-7/includes/css/styles.css?ver=5.7.1\" />\n</head><body><h1>lab</h1><a href=\"/wp-login.php\">login</a></body></html>\n",
+    "severity": "info",
+    "tags": [
+     "tech",
+     "wordpress",
+     "cms",
+     "wp",
+     "plugin",
+     "theme",
+     "discovery",
+     "passive",
+     "enum"
+    ],
+    "template_id": "wordpress-passive-detection",
+    "type": "http"
+   },
+   {
+    "description": "Passively enumerates WordPress plugins and themes through REST API discovery and HTML source analysis without brute-forcing, based on wpprobe methodology.\n",
+    "extracted_results": [
+     "twentytwentythree"
+    ],
+    "host": "192.0.2.10",
+    "matched_at": "http://192.0.2.10/?rest_route=/",
+    "matcher_name": "",
+    "name": "WordPress Passive Detection - Plugins & Themes",
+    "references": [
+     "https://developer.wordpress.org/rest-api/using-the-rest-api/discovery/",
+     "https://github.com/Chocapikk/wpprobe",
+     "https://chocapikk.com/posts/2025/wpprobe/"
+    ],
+    "request": "GET /?rest_route=/ HTTP/1.1\r\nHost: 192.0.2.10\r\nUser-Agent: Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.61 Safari/537.36\r\nAccept: */*\r\nAccept-Language: en\r\nAccept-Encoding: gzip\r\n\r\n",
+    "response": "HTTP/1.1 200 OK\r\nContent-Length: 437\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: Thu, 12 Nov 2026 16:06:48 GMT\r\nEtag: \"6af5dd90-1b5\"\r\nLast-Modified: Thu, 12 Nov 2026 15:38:56 GMT\r\nServer: nginx/1.31.8\r\n\r\n<!DOCTYPE html><html><head><title>cvtv lab blog</title>\n<meta name=\"generator\" content=\"WordPress 6.4.1\" />\n<link rel=\"stylesheet\" href=\"/wp-content/themes/twentytwentythree/style.css?ver=1.2\" />\n<script src=\"/wp-includes/js/wp-embed.min.js?ver=6.4.1\"></script>\n<link rel=\"stylesheet\" href=\"/wp-content/plugins/contact-form-7/includes/css/styles.css?ver=5.7.1\" />\n</head><body><h1>lab</h1><a href=\"/wp-login.php\">login</a></body></html>\n",
+    "severity": "info",
+    "tags": [
+     "tech",
+     "wordpress",
+     "cms",
+     "wp",
+     "plugin",
+     "theme",
+     "discovery",
+     "passive",
+     "enum"
+    ],
+    "template_id": "wordpress-passive-detection",
+    "type": "http"
+   },
+   {
+    "description": "Passively enumerates WordPress plugins and themes through REST API discovery and HTML source analysis without brute-forcing, based on wpprobe methodology.\n",
+    "extracted_results": [
+     "contact-form-7"
+    ],
+    "host": "192.0.2.10",
+    "matched_at": "http://192.0.2.10",
+    "matcher_name": "",
+    "name": "WordPress Passive Detection - Plugins & Themes",
+    "references": [
+     "https://developer.wordpress.org/rest-api/using-the-rest-api/discovery/",
+     "https://github.com/Chocapikk/wpprobe",
+     "https://chocapikk.com/posts/2025/wpprobe/"
+    ],
+    "request": "GET / HTTP/1.1\r\nHost: 192.0.2.10\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15\r\nAccept: */*\r\nAccept-Language: en\r\nAccept-Encoding: gzip\r\n\r\n",
+    "response": "HTTP/1.1 200 OK\r\nContent-Length: 437\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: Thu, 12 Nov 2026 16:06:48 GMT\r\nEtag: \"6af5dd90-1b5\"\r\nLast-Modified: Thu, 12 Nov 2026 15:38:56 GMT\r\nServer: nginx/1.31.8\r\n\r\n<!DOCTYPE html><html><head><title>cvtv lab blog</title>\n<meta name=\"generator\" content=\"WordPress 6.4.1\" />\n<link rel=\"stylesheet\" href=\"/wp-content/themes/twentytwentythree/style.css?ver=1.2\" />\n<script src=\"/wp-includes/js/wp-embed.min.js?ver=6.4.1\"></script>\n<link rel=\"stylesheet\" href=\"/wp-content/plugins/contact-form-7/includes/css/styles.css?ver=5.7.1\" />\n</head><body><h1>lab</h1><a href=\"/wp-login.php\">login</a></body></html>\n",
+    "severity": "info",
+    "tags": [
+     "tech",
+     "wordpress",
+     "cms",
+     "wp",
+     "plugin",
+     "theme",
+     "discovery",
+     "passive",
+     "enum"
+    ],
+    "template_id": "wordpress-passive-detection",
+    "type": "http"
+   },
+   {
+    "description": "Passively enumerates WordPress plugins and themes through REST API discovery and HTML source analysis without brute-forcing, based on wpprobe methodology.\n",
+    "extracted_results": [
+     "twentytwentythree"
+    ],
+    "host": "192.0.2.10",
+    "matched_at": "http://192.0.2.10",
+    "matcher_name": "",
+    "name": "WordPress Passive Detection - Plugins & Themes",
+    "references": [
+     "https://developer.wordpress.org/rest-api/using-the-rest-api/discovery/",
+     "https://github.com/Chocapikk/wpprobe",
+     "https://chocapikk.com/posts/2025/wpprobe/"
+    ],
+    "request": "GET / HTTP/1.1\r\nHost: 192.0.2.10\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15\r\nAccept: */*\r\nAccept-Language: en\r\nAccept-Encoding: gzip\r\n\r\n",
+    "response": "HTTP/1.1 200 OK\r\nContent-Length: 437\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: Thu, 12 Nov 2026 16:06:48 GMT\r\nEtag: \"6af5dd90-1b5\"\r\nLast-Modified: Thu, 12 Nov 2026 15:38:56 GMT\r\nServer: nginx/1.31.8\r\n\r\n<!DOCTYPE html><html><head><title>cvtv lab blog</title>\n<meta name=\"generator\" content=\"WordPress 6.4.1\" />\n<link rel=\"stylesheet\" href=\"/wp-content/themes/twentytwentythree/style.css?ver=1.2\" />\n<script src=\"/wp-includes/js/wp-embed.min.js?ver=6.4.1\"></script>\n<link rel=\"stylesheet\" href=\"/wp-content/plugins/contact-form-7/includes/css/styles.css?ver=5.7.1\" />\n</head><body><h1>lab</h1><a href=\"/wp-login.php\">login</a></body></html>\n",
+    "severity": "info",
+    "tags": [
+     "tech",
+     "wordpress",
+     "cms",
+     "wp",
+     "plugin",
+     "theme",
+     "discovery",
+     "passive",
+     "enum"
+    ],
+    "template_id": "wordpress-passive-detection",
+    "type": "http"
+   },
+   {
+    "description": "",
+    "extracted_results": [],
+    "host": "192.0.2.10",
+    "matched_at": "http://192.0.2.10",
+    "matcher_name": "",
+    "name": "WordPress Detect",
+    "request": "GET / HTTP/1.1\r\nHost: 192.0.2.10\r\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11) AppleWebKit/601.1.27 (KHTML, like Gecko) Chrome/47.0.2526.106 Safari/601.1.27\r\nAccept: */*\r\nAccept-Language: en\r\nAccept-Encoding: gzip\r\n\r\n",
+    "response": "HTTP/1.1 200 OK\r\nContent-Length: 437\r\nAccept-Ranges: bytes\r\nConnection: keep-alive\r\nContent-Type: text/html\r\nDate: Thu, 12 Nov 2026 16:06:49 GMT\r\nEtag: \"6af5dd90-1b5\"\r\nLast-Modified: Thu, 12 Nov 2026 15:38:56 GMT\r\nServer: nginx/1.31.8\r\n\r\n<!DOCTYPE html><html><head><title>cvtv lab blog</title>\n<meta name=\"generator\" content=\"WordPress 6.4.1\" />\n<link rel=\"stylesheet\" href=\"/wp-content/themes/twentytwentythree/style.css?ver=1.2\" />\n<script src=\"/wp-includes/js/wp-embed.min.js?ver=6.4.1\"></script>\n<link rel=\"stylesheet\" href=\"/wp-content/plugins/contact-form-7/includes/css/styles.css?ver=5.7.1\" />\n</head><body><h1>lab</h1><a href=\"/wp-login.php\">login</a></body></html>\n",
+    "severity": "info",
+    "tags": [
+     "tech",
+     "wordpress",
+     "cms",
+     "wp",
+     "discovery"
+    ],
+    "template_id": "wordpress-detect",
+    "type": "http"
+   }
+  ],
+  "outcome": "done",
+  "templates_release": "image:v10.5.1",
+  "unreachable": []
+ },
+ "sentinel_seconds": 24.1,
+ "target": {
+  "severities": [
+   "info",
+   "low",
+   "medium",
+   "high",
+   "critical"
+  ],
+  "tags": [
+   "tech",
+   "nginx",
+   "ssh"
+  ],
+  "targets": [
+   "http://192.0.2.10",
+   "https://192.0.2.11",
+   "192.0.2.12:22"
+  ]
+ },
+ "tool_rows": 16
+}

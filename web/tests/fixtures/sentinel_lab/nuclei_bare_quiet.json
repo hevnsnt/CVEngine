@@ -1,0 +1,33 @@
+{
+ "kind": "nuclei_targeted",
+ "name": "nuclei_bare_quiet",
+ "payload": {
+  "findings": [],
+  "outcome": "done",
+  "templates_release": "image:v10.5.1",
+  "unreachable": [
+   "192.0.2.12"
+  ]
+ },
+ "sentinel_seconds": 20.1,
+ "target": {
+  "severities": [
+   "info",
+   "low",
+   "medium",
+   "high",
+   "critical"
+  ],
+  "tags": [
+   "grafana",
+   "jira",
+   "tomcat"
+  ],
+  "targets": [
+   "192.0.2.10",
+   "192.0.2.12",
+   "192.0.2.11"
+  ]
+ },
+ "tool_rows": 0
+}

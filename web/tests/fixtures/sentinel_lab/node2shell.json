@@ -1,0 +1,17 @@
+{
+ "kind": "node2shell",
+ "name": "node2shell",
+ "payload": {
+  "evidence": "HTTP/1.1 405 Not Allowed\r\nserver: nginx/1.31.8\r\ndate: Thu, 12 Nov 2026 16:09:23 GMT\r\ncontent-type: text/html\r\ncontent-length: 559\r\nconnection: keep-alive\r\n\r\n<html>\r\n<head><title>405 Not Allowed</title></head>\r\n<body>\r\n<center><h1>405 Not Allowed</h1></center>\r\n<hr><center>nginx/1.31.8</center>\r\n</body>\r\n</html>\r\n<!-- a padding to disable MSIE and Chrome friendly error page -->\r\n<!-- a padding to disable MSIE and Chrome friendly error page -->\r\n<!-- a padding to disable MSIE and Chrome friendly error page -->\r\n<!-- a padding to disable MSIE and Chrome friendly error page -->\r\n<!-- a padding to disable MSIE and Chrome friendly error page -->\r\n<!-- a padding to disable MSIE and Chrome friendly error page -->\r\n",
+  "outcome": "done",
+  "reason": "the controls did not establish distinct route and malformed-Brotli response classes",
+  "status_code": 405,
+  "verdict": "NO SIGNAL",
+  "vulnerable": false
+ },
+ "sentinel_seconds": 0.0,
+ "target": {
+  "url": "http://192.0.2.10/"
+ },
+ "tool_rows": null
+}

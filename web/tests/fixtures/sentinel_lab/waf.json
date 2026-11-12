@@ -1,0 +1,17 @@
+{
+ "kind": "waf",
+ "name": "waf",
+ "payload": {
+  "generic": false,
+  "outcome": "done",
+  "products": []
+ },
+ "sentinel_seconds": 0.1,
+ "target": {
+  "host": "web.lab.test",
+  "ip": "192.0.2.10",
+  "port": 80,
+  "scheme": "http"
+ },
+ "tool_rows": null
+}
