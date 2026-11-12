@@ -85,6 +85,16 @@ NOT_EXPOSED = {
     ('settings', 'autotune/decisions/(?P<decision_id>\\d+)/revert'): 'revert_tuning_decision.',
     ('settings', 'autotune/release'): 'release_tuning_pin.',
 }
+# Entries an agent may read but not change. The allowlist is the perimeter: its handlers refuse a change that would lock the caller out by looking at the
+# caller's address, and an agent has no address of its own (the bridge's request is built here), so it must not be able to move the perimeter at all.
+# A person does it in the web interface, where the guard sees the real address.
+READ_ONLY_FOR_AGENTS = {
+    'ip_allowlist': 'the allowed addresses are the perimeter of the instance; an agent can read the list, a person changes it in the web interface.',
+    'ip_allowlist_entry_add': 'the allowed addresses are the perimeter of the instance; a person changes them in the web interface.',
+    'ip_allowlist_entry': 'the allowed addresses are the perimeter of the instance; a person changes them in the web interface.',
+}
+# What the handlers see as the caller's address. Not a loopback address: nothing that trusts the caller's address may take the bridge for the local machine.
+BRIDGE_ADDRESS = ''
 WRITE_METHODS = ('PUT', 'PATCH', 'POST')
 NOT_EXPOSED[('admin', 'openvas')] = 'the same add-on settings as the openvas entry (settings table).'
 IDENTITY_ROUTES_NOT_YET = ('users', 'memberships', 'orgs', 'projects')  # people, roles and organizations: a separate slice, owner to say how far an agent may go
@@ -111,8 +121,8 @@ def catalogue():
     for name, (api, pattern, text, ident) in ENTRIES.items():
         methods = _methods(api, pattern)
         out.append({'name': name, 'what': text, 'id': ident, 'read': 'GET' in methods,
-                    'change': next((m for m in methods if m in WRITE_METHODS), None) is not None,
-                    'remove': 'DELETE' in methods})
+                    'change': name not in READ_ONLY_FOR_AGENTS and next((m for m in methods if m in WRITE_METHODS), None) is not None,
+                    'remove': name not in READ_ONLY_FOR_AGENTS and 'DELETE' in methods})
     return out
 
 
@@ -156,9 +166,11 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
         raise ApiError(405, f'{name} does not take {method}')
     if method != 'GET':
         require_write_token(ctx)
+        if name in READ_ONLY_FOR_AGENTS:
+            raise ApiError(403, f'{name} is not available to agents: {READ_ONLY_FOR_AGENTS[name]}')
     groups = _groups(pattern, ident)
     path = '/cve/api/%s/%s/' % (api, _path_for(pattern, groups))
-    factory = RequestFactory()
+    factory = RequestFactory(REMOTE_ADDR=BRIDGE_ADDRESS)
     if method == 'GET':
         request = factory.get(path, {k: str(v) for k, v in (query or {}).items()})
     else:
@@ -181,7 +193,8 @@ def list_settings(ctx):
     return {'settings': catalogue(),
             'how': 'get_setting(name) reads it; change_setting(name, values) changes it with the same limits as the web page; '
                    'entries marked with an id take it as "id" (for example "3/shodan"). Secrets are never returned.',
-            'not_exposed': [{'api': a, 'route': r, 'why': why} for (a, r), why in NOT_EXPOSED.items()]}
+            'not_exposed': [{'api': a, 'route': r, 'why': why} for (a, r), why in NOT_EXPOSED.items()]
+                           + [{'api': ENTRIES[n][0], 'route': ENTRIES[n][1], 'why': 'can be read, not changed by an agent: ' + why} for n, why in READ_ONLY_FOR_AGENTS.items()]}
 
 
 def get_setting(ctx, name, ident=None, query=None):
