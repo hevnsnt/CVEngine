@@ -281,6 +281,7 @@ class WatchdogScriptTests(unittest.TestCase):
         self.assertEqual(len([c for c in self.docker_calls() if '--force-recreate celery' in c]), 1)
         self.assertFalse(self.result()['ok'])
         self.assertIn('refused by the host', self.result()['detail'])
+        self.assertEqual(self.result()['limit'], 'gap')  # the web side reads this as held, not as a failed fix
 
     def test_a_different_action_is_not_held_back_by_the_gap_of_another(self):
         self.request()
@@ -296,6 +297,7 @@ class WatchdogScriptTests(unittest.TestCase):
         self.run_script('act')
         self.assertEqual([c for c in self.docker_calls() if '--force-recreate' in c], [])
         self.assertIn('limit 24', self.result()['detail'])
+        self.assertEqual(self.result()['limit'], 'day')
 
     def test_one_action_at_a_time(self):
         self.hold(self.state / 'watchdog-act.lock')

@@ -1,4 +1,4 @@
-import { api, button, el, shortDate, table, toast } from "/staticfiles/cve/ui.js";
+import { api, button, couldNotRead, el, shortDate, table, toast, waiting } from "/staticfiles/cve/ui.js";
 import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
 
 const mount = document.getElementById("ai-usage");
@@ -12,8 +12,11 @@ if (mount) {
   }
   days.value = "7";
   const output = el("div");
-  const status = el("p", "note", "Loading recorded AI attempts…", { role: "status" });
+  const status = el("p", "note", "", { role: "status" });
+  let waitBox = waiting("Loading recorded AI attempts");
+  let drawn = false;
   tools.append(days, button("Refresh", load, "btn ghost sm"));
+  output.append(waitBox);
   mount.append(tools, status, output);
   days.onchange = load;
   let requestNumber = 0;
@@ -173,9 +176,25 @@ if (mount) {
         el("p", "note", `Explicit connection test: ${data.verified_at ? shortDate(data.verified_at) : "not recorded"}. Successful provider calls above show observed transport activity, not a new connection test.`));
       built.append(about);
       built.append(priceEditor(data));
+      waitBox.remove();
       renderKeepingState(output, () => Array.from(built.childNodes));
+      drawn = true;
     } catch (error) {
-      if (current === requestNumber) status.textContent = `Usage unavailable: ${error.message}`;
+      if (current !== requestNumber) return;
+      status.textContent = `Usage unavailable: ${error.message}`;
+      // nothing drawn yet: say so where the list would be and offer the same read again; later failures leave what is on screen
+      if (!drawn) {
+        waitBox.stop?.();
+        const box = couldNotRead("The AI usage", () => {
+          // the error box goes and the placeholder comes back while the same read runs again
+          while (status.firstChild) status.removeChild(status.firstChild); // the error line goes; the placeholder speaks
+          waitBox = waiting("Loading recorded AI attempts");
+          renderKeepingState(output, () => [waitBox]);
+          load();
+        }, error.message);
+        box.setAttribute("data-keep-key", "usage-error");
+        renderKeepingState(output, () => [box]);
+      }
     }
   }
   load();

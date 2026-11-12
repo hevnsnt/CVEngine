@@ -358,12 +358,12 @@ def main():
                     and row.get('action') in WATCHDOG_ACTIONS):
                 print(row['id'], row['action'], row['rule'])
         elif action == 'watchdog-result':
-            # `watchdog-result ID ACTION ok|failed|standdown DETAIL`: the host's answer to that request (web/.watchdog-result)
+            # `watchdog-result ID ACTION ok|failed|standdown|limit-day|limit-gap DETAIL` (a limit-* answer is a refusal for one of the host's own limits: failed, but not a fault): the host's answer to that request (web/.watchdog-result)
             wid, name, outcome = sys.argv[2], sys.argv[3], sys.argv[4]
             detail = sys.argv[5] if len(sys.argv) > 5 else ''
-            if not re.fullmatch(r'[0-9a-f]{12}', wid) or name not in WATCHDOG_ACTIONS or outcome not in ('ok', 'failed', 'standdown') or len(detail) > 300:
+            if not re.fullmatch(r'[0-9a-f]{12}', wid) or name not in WATCHDOG_ACTIONS or outcome not in ('ok', 'failed', 'standdown', 'limit-day', 'limit-gap') or len(detail) > 300:
                 raise ValueError('invalid watchdog answer')
-            publish(web_fd, '.watchdog-result', [json.dumps({'id': wid, 'action': name, 'ok': outcome == 'ok', 'standdown': outcome == 'standdown',
+            publish(web_fd, '.watchdog-result', [json.dumps({'id': wid, 'action': name, 'ok': outcome == 'ok', 'standdown': outcome == 'standdown', 'limit': outcome[6:] if outcome.startswith('limit-') else '',
                                                               'detail': detail, 'at': time.time()}).encode('utf-8') + b'\n'])
         elif action == 'phase':
             value = sys.argv[2]

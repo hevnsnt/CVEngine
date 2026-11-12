@@ -31,6 +31,17 @@ let current = null;  // the host that is drawn now, for getElementById
 const walk = (n, f) => { f(n); n.children.forEach((c) => walk(c, f)); };
 const find = (root, pred) => { const out = []; walk(root, (n) => pred(n) && out.push(n)); return out; };
 
+// The words are inside a closed <details> (whose summary says "Details") and are not shown anywhere outside it: a person who never opens it never reads them.
+const behindDetails = (host, pattern) => {
+  const boxes = find(host, (n) => n.tag === 'details');
+  const inside = boxes.filter((d) => pattern.test(d.textContent));
+  assert.ok(inside.length >= 1, `${pattern} is inside a details element`);
+  assert.ok(inside[0].textContent.startsWith('Details'), 'whose summary is Details');
+  assert.ok(!inside[0].attrs || !('open' in inside[0].attrs), 'closed by default');
+  const outside = host.textContent.split(inside[0].textContent).join('');
+  assert.doesNotMatch(outside, pattern, `${pattern} is not shown outside the details`);
+};
+
 globalThis.document = {
   createElement: (tag) => new Node(tag),
   createTextNode: (t) => Object.assign(new Node('#text'), {_text: t}),
@@ -89,8 +100,9 @@ test('a card shows only the rows of its own group, with range, default, source, 
   const inputs = find(host, (n) => n.tag === 'input');
   assert.deepEqual(inputs.map((i) => [i.dataset.key, i.value, i.attrs.min, i.attrs.max]), [['triage_max_per_day', '2000', '1', '50000'], ['validate_max_per_day', '300', '1', '20000']]);
   const text = host.textContent;
-  assert.match(text, /Built-in default · allowed 1 to 50000 · Default 2000 · CVENGINE_TRIAGE_MAX_PER_DAY is not set · Applies within a few seconds, with no restart/);
-  assert.match(text, /Saved here · allowed 1 to 20000 · Default 1500 · CVENGINE_VALIDATE_MAX_PER_DAY is not set · Set by alice <i>x<\/i> on /);
+  assert.match(text, /Built-in default · allowed 1 to 50000 · Default 2000 · Applies within a few seconds, with no restart/);
+  behindDetails(host, /CVENGINE_TRIAGE_MAX_PER_DAY is not set/);
+  assert.match(text, /Saved here · allowed 1 to 20000 · Default 1500 · Set by alice <i>x<\/i> on /);
   assert.ok(!find(host, (n) => n.tag === 'i').length);
   assert.match(text, /questions/);
   const resets = find(host, (n) => n.tag === 'button' && n.textContent === 'Reset to default');
@@ -101,9 +113,10 @@ test('the environment source is named, and a setting read at process start says 
   const host = new Node('div');
   await maxxing.cards()[1].build(host);
   const text = host.textContent;
-  assert.match(text, /From the environment \(CVENGINE_STAGE_PARALLEL=6\) · allowed 1 to 16 · Default 4/);
+  assert.match(text, /Set on the server · allowed 1 to 16 · Default 4/);
+  behindDetails(host, /CVENGINE_STAGE_PARALLEL=6/);
   assert.match(text, /Hours before rescan/);
-  assert.match(text, /allowed 0 to 168 · Default 2 · CVENGINE_WORK_MIN_GAP_HOURS is not set · Applies after the next restart/);
+  assert.match(text, /allowed 0 to 168 · Default 2 · Applies after the next restart/);
   assert.doesNotMatch(text, /AI spend/);
 });
 
@@ -273,7 +286,7 @@ test('the warning rules are pure and cover the environment reference and the con
   assert.equal(L.softWarning(cap, '500'), '');
   assert.equal(L.softWarning(cap, '20000'), '');
   assert.match(L.softWarning(cap, '20001'), /ten times the default \(2000\)/);
-  assert.match(L.softWarning({...cap, env_value: 300}, '3001'), /ten times the environment value \(300\)/);
+  assert.match(L.softWarning({...cap, env_value: 300}, '3001'), /ten times the value set on the server \(300\)/);
   assert.equal(L.softWarning({...cap, caution: null}, '1'), '');
   assert.equal(L.softWarning(cap, 'x'), '');
   assert.equal(L.softWarning(cap, '99999'), '');  // out of range is the error line's business

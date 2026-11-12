@@ -159,7 +159,11 @@ class SentinelTask(models.Model):
                    models.Index(fields=['agent', '-finished_at', '-id'], name='sentineltask_agent_done_idx', include=['status', 'accepted_at', 'claimed_at', 'kind'],
                                 condition=models.Q(status__in=['done', 'failed'])),
                    models.Index(fields=['finished_at'], name='sentineltask_finished_idx', condition=models.Q(finished_at__isnull=False)),
-                   models.Index(fields=['claimed_at'], name='sentineltask_claimed_idx', condition=models.Q(claimed_at__isnull=False))]
+                   models.Index(fields=['claimed_at'], name='sentineltask_claimed_idx', condition=models.Q(claimed_at__isnull=False)),
+                   # ``sentinel_broker.scrub_stale_values`` (once a minute): finished secrets and route-probe results whose values are not scrubbed yet. The index holds only
+                   # those rows (a row leaves it when it is scrubbed), so the select reads a handful of entries instead of the result column of every finished task
+                   models.Index(fields=['id'], name='sentineltask_unscrubbed_idx',
+                                condition=models.Q(status='done', kind__in=['secrets_scan', 'route_probe']) & ~models.Q(result__has_key='values_scrubbed'))]
 
     def save(self, *args, **kwargs):
         """A new task is checked against the organization's do-not-scan address list before it is written, whoever creates it: the one place a kind added

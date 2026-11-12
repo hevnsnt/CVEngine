@@ -46,8 +46,11 @@
     <button class="btn" type="button" id="enroll-go" disabled aria-disabled="true" aria-describedby="enroll-missing">Provision</button>
     <p class="note enroll-missing" id="enroll-missing" role="status" aria-live="polite">Choose a scope to continue.</p>
     <div id="enroll-out" class="msg ok" role="status" hidden></div>
-    <h2 class="card-h enroll-needs">What a Sentinel needs</h2>
-    <p class="note">The blob is nothing new: standard base64 of the same JSON <code>projects/{slug}/sentinels/enroll</code>, <code>orgs/{slug}/sentinels/enroll</code> or <code>sentinels/enroll</code> already returns (<code>{enrollment_token, server_url, expires_at, scope}</code>, plus <code>project</code> or <code>org</code> where scope is not instance-wide), so the Sentinel client can decode it in a few lines with no shared library. It calls <code>POST /api/v1/sentinels/bootstrap</code> with the decoded <code>enrollment_token</code>, stores the token it gets back, then loops <code>sentinel/heartbeat</code> and <code>sentinel/tasks/next</code>, <code>accept</code>, <code>result</code>. The OpenAPI spec is at <a href="/api/v1/openapi.json">/api/v1/openapi.json</a>.</p>
+    <details class="tech enroll-needs">
+      <summary>For developers and integrators</summary>
+      <h3 class="card-h">What a Sentinel needs</h3>
+      <p class="note">The blob is nothing new: standard base64 of the same JSON <code>projects/{slug}/sentinels/enroll</code>, <code>orgs/{slug}/sentinels/enroll</code> or <code>sentinels/enroll</code> already returns (<code>{enrollment_token, server_url, expires_at, scope}</code>, plus <code>project</code> or <code>org</code> where scope is not instance-wide), so the Sentinel client can decode it in a few lines with no shared library. It calls <code>POST /api/v1/sentinels/bootstrap</code> with the decoded <code>enrollment_token</code>, stores the token it gets back, then loops <code>sentinel/heartbeat</code> and <code>sentinel/tasks/next</code>, <code>accept</code>, <code>result</code>. The OpenAPI spec is at <a href="/api/v1/openapi.json">/api/v1/openapi.json</a>. An existing Sentinel takes the blob as <code>CVENGINE_SENTINEL_BLOB</code> in its <code>.env</code> file.</p>
+    </details>
   </div>
 </div>
 {% endblock %}
@@ -120,9 +123,9 @@ mountScannerPlan(document.getElementById('plan-card'));
         enrollOut.appendChild(el('span', '', 'Ready for ' + label + ' (' + steps.network + ', ' + steps.profile + '). Single-use, expires ' + x.d.expires_at.slice(0, 16).replace('T', ' ') + ' UTC.'));
         // three ways in, one at a time: a tab each, the last one chosen remembered in this browser
         var ways = [
-          {key: 'command', label: 'Command', sub: 'Paste on the machine that will scan. It clones the client, writes its settings, names it after the machine and starts it.', text: steps.one_liner || ''},
-          {key: 'agent', label: 'AI agent', sub: 'Give this to an agent with a shell on that machine. The blob and your choices are already in it.', text: steps.agent_prompt || '', cls: 'enroll-prompt'},
-          {key: 'blob', label: 'Blob', sub: 'For CVENGINE_SENTINEL_BLOB in an existing Sentinel\'s .env. Server: ' + x.d.server_url, text: x.d.blob}
+          {key: 'command', label: 'Terminal command', sub: 'Paste on the machine that will scan. It clones the client, writes its settings, names it after the machine and starts it.', text: steps.one_liner || ''},
+          {key: 'agent', label: 'AI agent prompt', sub: 'Give this to an agent with a shell on that machine. The blob and your choices are already in it.', text: steps.agent_prompt || '', cls: 'enroll-prompt'},
+          {key: 'blob', label: 'Existing Sentinel', sub: 'For a Sentinel that is already installed: put this value in its settings file in place of the old one. Server: ' + x.d.server_url, more: 'The setting is named CVENGINE_SENTINEL_BLOB, in the .env file in the folder the Sentinel runs from.', text: x.d.blob}
         ];
         var chosen = 'command';
         try { chosen = localStorage.getItem('cve.sentinel.way') || 'command'; } catch (e) { /* storage blocked: default */ }
@@ -135,6 +138,7 @@ mountScannerPlan(document.getElementById('plan-card'));
           var panel = el('div', 'enroll-panel'); panel.id = 'enroll-panel-' + w.key;
           panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', tab.id);
           panel.appendChild(el('div', 'enroll-sub', w.sub));
+          if (w.more) { var more = el('details', 'tech'); more.appendChild(el('summary', '', 'Details')); more.appendChild(el('p', 'note', w.more)); panel.appendChild(more); }
           var pre = el('pre', 'code' + (w.cls ? ' ' + w.cls : ''), w.text); pre.appendChild(copyBtn(function () { return w.text; })); panel.appendChild(pre);
           tab.addEventListener('click', function () { pick(i, true); });
           tab.addEventListener('keydown', function (e) {
