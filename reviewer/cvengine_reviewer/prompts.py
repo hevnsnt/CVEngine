@@ -71,13 +71,15 @@ For every check that is not ok, write a diagnosis for the server's administrator
 do, in at most 600 characters of plain text. Name settings, pages and commands the administrator can use (for example Settings, the \
 Sentinels page, docker compose logs celery). No links, no markup.
 
+Never say no Sentinel is online if live_sentinels > 0, nor to start a built-in one if builtin_scanner is false.
+
 Then choose actions, only from the actions a check offers: feed_sentinels gives idle Sentinels due hosts now, refresh_nuclei_templates \
 fetches the newest nuclei templates. Choose an action only when its check is not ok and the action addresses it. The server runs an \
 action only when its own check still offers it.
 
 Answer with the JSON object the schema describes and nothing else."""
 
-OPS_CODES = ['sentinels_idle', 'nuclei_templates', 'sentinel_errors', 'scan_errors', 'system', 'generated_templates', 'ai_errors']
+OPS_CODES = ['sentinels_idle', 'sentinels_offline', 'nuclei_templates', 'sentinel_errors', 'scan_errors', 'system', 'generated_templates', 'ai_errors']
 
 OPS_SCHEMA = {
     'type': 'object', 'additionalProperties': False,

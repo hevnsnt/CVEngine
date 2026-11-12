@@ -62,6 +62,20 @@ def outcome_words(job_failed, really_failed, capped_only):
     return 'deferred (daily cap reached, retried after the reset)' if capped_only else 'held (nothing was run: blocked by scope or policy; retried later)'
 
 
+def line_outcome(checks, check_state, ai_state, capped_only):
+    """``(status, words)`` of a validation's activity line. The AI step being put off (``deferred``, or ``queued`` for the reviewer container) after
+    the checks ran and none failed or was blocked is not a failure of anything: the line is ``deferred`` and the status check does not count it. A check or an AI review that
+    really failed is ``failed``, as before, whatever the AI step did; a blocked check is the ``held`` line it always was (policy, not a fault), never ``deferred``."""
+    ai_failed = ai_state == 'failed'
+    broken = bool(checks.get('failed') or checks.get('blocked'))  # a check that failed or was blocked is never "deferred", whatever the AI step does
+    put_off = check_state == 'checked' and ai_state in ('deferred', 'queued') and not capped_only and not broken
+    really = ai_failed or (bool(checks.get('failed')) and not put_off)
+    if put_off:
+        return 'deferred', 'is waiting on its AI step'
+    job_failed = really or any(checks.get(key) for key in ('failed', 'blocked')) or capped_only
+    return line_status(job_failed, really), outcome_words(job_failed, really, capped_only)
+
+
 def retry_after(attempts, capped_only=False):
     """When a failed validation of the same evidence may be queued again. Stopped only by the per-day caps: once the caps reset,
     without spending an attempt. Otherwise an exponential backoff (5 min, doubling, at most 6 h), and None once MAX_ATTEMPTS

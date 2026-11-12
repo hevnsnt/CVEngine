@@ -1619,10 +1619,16 @@ def waiting_q():
     return Q(status='expired') & q
 
 
+EXPIRED_AGENT = 'expired_agent'  # the key of a task's result that names the Sentinel that held it when its lease ran out
+
+
 def _end_as_expired(task, reason, now):
     """Mark an active task expired (nothing else: no audit row). True when this call won it, False when another call changed it first."""
+    # the agent is cleared (nothing may treat the task as still held), but who held it stays in the result: the administrator alert judges each Sentinel
+    # on its own tasks, and a Sentinel whose tasks all expire must be named
+    result = {**(task.result if isinstance(task.result, dict) else {}), EXPIRED_AGENT: task.agent_id} if task.agent_id else task.result
     won = SentinelTask._base_manager.filter(pk=task.pk, status__in=SENTINEL_ACTIVE_STATUSES).update(
-        status='expired', agent=None, lease_expires_at=None, error=reason[:300], finished_at=now, **_scrubbed(task))
+        status='expired', agent=None, lease_expires_at=None, error=reason[:300], finished_at=now, result=result, **_scrubbed(task))
     if won:
         _ended(task, task.agent_id)
     return bool(won)

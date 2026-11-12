@@ -98,7 +98,7 @@ def next_targets(limit, now=None):
     gate = Gate()
     blocked_projects = gate.blocked
     cutoff = now - min_gap()
-    from cveFeed.discovery import HOST_PIPELINE_TASK
+    from cveFeed.discovery import HOST_PIPELINE_TASK, refusal_pending
     # A host-only retest does not refresh discovery of the entire domain.
     newest = (ScanHistory.objects.filter(domain_id=OuterRef('pk'))
               .exclude(tasks__contains=[HOST_PIPELINE_TASK])
@@ -110,6 +110,8 @@ def next_targets(limit, now=None):
     for domain_id, project_id, name, last_scan in rows.iterator(chunk_size=500):
         if len(chosen) >= limit:
             break
+        if refusal_pending(domain_id):
+            continue  # the private-address guard refused it lately and it is still internal: not queued again every round
         if domain_id in busy or project_id in projects or project_id in blocked_projects or (last_scan and last_scan >= cutoff):
             continue
         if project_id not in banned:
