@@ -1298,7 +1298,7 @@ def automatic_validate_finding(job_id):
         row = Triage.objects.get(pk=job.triage_id, project_id=job.project_id)
         fresh_row = Triage.objects.select_related(
             'match__cve_entry', 'vulnerability__target_domain', 'route', 'hygiene__domain').get(pk=row.pk)
-        if not (hot_validation.manual_eligible(fresh_row) if job.source == 'manual' else hot_validation.tier_for(fresh_row)):
+        if not (hot_validation.manual_eligible(fresh_row) if job.source in ('manual', 'host_review') else hot_validation.tier_for(fresh_row)):  # the host review may ask for a finding the sweep would not
             return _skip_automatic_validation(job, progress, 'no_longer_eligible')
         stage = f'load_{row.kind}'
         findings = triage.load_findings([row])

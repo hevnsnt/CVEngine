@@ -8,7 +8,7 @@ from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
-from cveFeed import host_review, triage
+from cveFeed import host_actions, host_review, triage
 from cveFeed.models import (CVEEntry, CVEMatch, FindingReview, HostReview, HostScreenshot, HostState, HygieneFinding, ProjectSettings,
                             ReviewerSettings, SecretFinding, SecretOccurrence, Triage)
 from dashboard.models import Org, Project
@@ -196,6 +196,21 @@ class PacketTests(PacketFixture):
         per_finding = (len(large) - len(small)) / 27
         self.assertLessEqual(per_finding, 8, f'{len(small)} queries for 3 findings, {len(large)} for 30')
         self.assertLessEqual(len(large), 300)
+
+
+class OfferedInPacketTests(PacketFixture):
+    def test_without_a_given_list_the_packet_offers_what_host_actions_allows_now_and_names_refs_only(self):
+        self.match()
+        built = host_review.build(self.proj, 'www.example.com')
+        offered = built[2]
+        self.assertTrue({'none', 'ask_person', 'validate_match'} <= set(offered))
+        header = self.header_of(built)
+        shown = {o['action']: o for o in header['offered_next_steps']}
+        self.assertEqual(shown['validate_match']['targets'], ['f1'])
+        self.assertEqual(shown['validate_match']['class'], 'auto')
+        self.assertEqual(shown['rescan_host']['class'], 'recommend')
+        self.assertEqual(set(shown), set(offered))
+        self.assertTrue(set(shown) <= set(host_actions.ACTIONS))
 
 
 class HostileBannerTests(PacketFixture):

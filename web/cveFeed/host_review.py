@@ -237,6 +237,21 @@ def _host_facts(project, state, sub):
             'archived': bool(state.archived_at), 'zombie': bool(state.zombie_since), 'pinned': bool(state.pinned), 'has_inventory_record': sub is not None}
 
 
+def pairs(project, host):
+    """``[(ref, Triage)]`` of the host's open findings in the order ``build`` shows them (at most ``MAX_FINDINGS``): the refs of a packet built
+    now. A stored review resolves its own refs with ``pairs_from_refs`` instead."""
+    return [(f'f{i}', e['row']) for i, e in enumerate(_ordered(_gather(project, host, open_rows(project, host)))[:MAX_FINDINGS], 1)]
+
+
+def pairs_from_refs(project, refs):
+    """``[(ref, Triage)]`` for a stored review's ``refs`` (ref to triage id): the findings of this project that are still there, still open. A
+    ref whose finding was closed or removed since is left out, so an action can never name it."""
+    from cveFeed import reviewer
+    from cveFeed.models import Triage
+    found = Triage.objects.filter(reviewer.open_q(), project=project, pk__in=[int(v) for v in (refs or {}).values()]).in_bulk()
+    return [(ref, found[int(pk)]) for ref, pk in sorted((refs or {}).items(), key=lambda kv: int(kv[0][1:])) if int(pk) in found]
+
+
 # ---------------------------------------------------------------------------------------------------------------------------- the packet
 
 def build(project, host, offered=None, now=None):
