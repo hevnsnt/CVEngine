@@ -323,6 +323,64 @@ class OutcomeTests(Base):
         sentinel_dispatch.Result({}, agent_id=self.agent.pk)  # outside the block nothing is kept anywhere
 
 
+
+class NonHttpPortTests(Base):
+    """A fix on a port that does not speak HTTP, or one that closed the port, is verified by a TCP connect and, for a closed port, by another
+    open port of the host (``fix_retest._reachable``); every port dead stays not verified."""
+    SSH = {'ip': '192.0.2.10', 'port': 22}
+    WEB = {'ip': '192.0.2.10', 'port': 443}
+
+    def run_check(self, kind, own, services, answers):
+        """Run the retest of a ``kind`` check on ``own`` that answered ``version_changed``; ``answers(ask)`` says whether a Sentinel's connect to
+        the ask succeeded. Returns the outcome and every ask sent to the Sentinel."""
+        self.mark()
+        job = FixRetest.objects.get()
+        asked = []
+
+        def try_alive(project, scan, asks):
+            asked.extend(asks)
+            return {a['id']: answers(a) for a in asks}
+        check = {'kind': kind, 'label': kind, 'display': kind, 'target': f"{own['ip']}:{own['port']}", 'asset': 'www.example.com', 'service': 'validate:x',
+                 'params': {'ip': own['ip'], 'port': own['port'], 'project_id': None}}
+        subject = {'kind': 'cve_match', 'host': 'www.example.com', 'ip': own['ip'], 'port': own['port'], 'candidate_services': services}
+        with mock.patch('cveFeed.fix_retest._planned', return_value=(subject, [check], [])), \
+                RunsAs(self, {'status': 'version_changed', 'summary': 'patched'}, self.agent, kind=kind), \
+                mock.patch('agentapi.probe_dispatch.try_alive', side_effect=try_alive):
+            out = fix_retest.run(job.pk)
+        return out['outcome'], asked
+
+    def test_a_patched_ssh_server_is_verified_by_a_tcp_connect_not_an_http_request(self):
+        outcome, asked = self.run_check('nmap_sv', self.SSH, [self.SSH, self.WEB], lambda a: a['scheme'] == 'tcp' and a['port'] == 22)
+        self.assertEqual(outcome, 'verified_fixed')
+        self.assertEqual([a['scheme'] for a in asked if a['port'] == 22], ['tcp'])
+
+    def test_a_database_fix_is_verified_the_same_way(self):
+        db = {'ip': '192.0.2.10', 'port': 5432}
+        outcome, _ = self.run_check('db_probe', db, [db], lambda a: a['scheme'] == 'tcp' and a['port'] == 5432)
+        self.assertEqual(outcome, 'verified_fixed')
+
+    def test_web_ports_keep_their_http_and_https_asks(self):
+        outcome, asked = self.run_check('nmap_sv', self.WEB, [self.WEB], lambda a: True)
+        self.assertEqual((outcome, [a['scheme'] for a in asked]), ('verified_fixed', ['https']))
+
+    def test_a_fix_that_closed_the_port_is_verified_when_the_host_answers_on_another_known_port(self):
+        db = {'ip': '192.0.2.10', 'port': 5432}
+        outcome, asked = self.run_check('db_probe', db, [db, self.WEB], lambda a: a['port'] == 443)
+        self.assertEqual(outcome, 'verified_fixed')
+        self.assertEqual(sorted(a['port'] for a in asked), [443, 5432])
+
+    def test_every_port_dead_is_not_verified(self):
+        db = {'ip': '192.0.2.10', 'port': 5432}
+        outcome, _ = self.run_check('db_probe', db, [db, self.WEB, self.SSH], lambda a: False)
+        self.assertEqual(outcome, 'not_verified')
+        self.refresh()
+        self.assertEqual((self.triage.retest_state, self.triage.retest_reason), ('not_verified', 'the host did not answer'))
+
+    def test_a_web_check_is_not_verified_by_another_port(self):
+        outcome, asked = self.run_check('nuclei_template', self.WEB, [self.WEB, self.SSH], lambda a: a['port'] == 22)
+        self.assertEqual(outcome, 'not_verified')
+        self.assertEqual([a['port'] for a in asked], [443])
+
 class RetryTests(Base):
     def failed_try(self, when):
         self.mark()

@@ -317,15 +317,30 @@ def _endpoints(subject, check):
     return [(c['ip'], int(c['port'])) for c in (subject.get('candidate_services') or []) if c.get('ip') and c.get('port')][:4]
 
 
+TCP_KINDS = ('nmap_sv', 'db_probe')  # checks of a service that may not speak HTTP: the host is asked with a TCP connect (the Sentinel's ``tcp`` scheme, as ``cveFeed.zombie``)
+
+
+def _scheme(kind, port):
+    from cveFeed import zombie
+    if port in zombie.HTTPS_PORTS:
+        return 'https'
+    return 'tcp' if kind in TCP_KINDS and port not in zombie.WEB_PORTS else 'http'
+
+
 def _reachable(project, subject, check, scan=None):
     """True when a Sentinel connected to the host (``probe_dispatch.try_alive``); False when none did; None when there was no address to try. A
-    "does not reproduce" from a check whose answer does not show that the host was there (``ALIVE_KINDS``) is only believed after this."""
+    "does not reproduce" from a check whose answer does not show that the host was there (``ALIVE_KINDS``) is only believed after this. A port
+    that does not speak HTTP (SSH, a database) is asked with a TCP connect. For a service check, a fix that closed the port is shown by the host
+    answering on another port it was seen with (``candidate_services``); if every one is dead the answer is False."""
     from agentapi import probe_dispatch
     endpoints = _endpoints(subject, check)
     if not endpoints:
         return None
-    asks = [{'id': f'{ip}:{port}', 'host': subject.get('host') or ip, 'ip': ip, 'port': port, 'scheme': 'https' if port in (443, 8443) else 'http'}
-            for ip, port in endpoints]
+    if check['kind'] in TCP_KINDS:
+        endpoints += [(c['ip'], int(c['port'])) for c in (subject.get('candidate_services') or [])
+                      if c.get('ip') and c.get('port') and (c['ip'], int(c['port'])) not in endpoints][:4]
+    asks = [{'id': f'{ip}:{port}', 'host': subject.get('host') or ip, 'ip': ip, 'port': port, 'scheme': _scheme(check['kind'], port)}
+            for ip, port in dict.fromkeys(endpoints)]
     return any(probe_dispatch.try_alive(project, scan, asks).values())
 
 
