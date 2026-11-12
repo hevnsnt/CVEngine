@@ -4,7 +4,7 @@ import { hostRow, previewHosts, suggestions, syntaxHelp } from "/staticfiles/cve
 // App shell behaviour: project switcher, mobile "More" sheet, account menu, and the jump palette (Ctrl/Cmd+K or "/").
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
-const SECTIONS = ["targets", "scans", "hosts", "changes", "activity", "vulns", "matches", "hygiene", "secrets", "suppliers"];
+const SECTIONS = ["targets", "scans", "hosts", "changes", "activity", "vulns", "matches", "hygiene", "secrets", "suppliers", "situations"];
 
 // Where the switcher sends you when the project changes. On the dashboard and the asset graph it stays there (?project= names
 // the project or "_all"); on a section page it keeps the section. The server remembers the choice for pages with no project.

@@ -82,7 +82,10 @@ class ShellTests(TestCase):
 		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/alpha/activity/'))], ['Scans', 'Activity'])
 		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/graph/'))][:3], ['Hosts', 'Targets', 'Graph'])
 		self.assertEqual([label for _, _, label in tabs(self.get(self.root, '/cve/sentinels/'))], ['Scanners', 'Sentinels'])
-		self.assertEqual(tabs(self.get(self.root, '/cve/?skip=1')), [])  # Overview has no siblings
+		overview = tabs(self.get(self.root, '/cve/?skip=1'))
+		self.assertEqual([label for _, _, label in overview], ['Overview', 'Situations'])  # Situations is the one page that sits beside the Overview
+		self.assertEqual([label for _, current, label in overview if current], ['Overview'])
+		self.assertEqual(tabs(self.get(self.root, '/cve/settings/')), [])  # a utility page has no siblings
 
 	def test_the_current_page_marks_its_entry_in_the_rail(self):
 		html = self.get(self.root, '/cve/alpha/hygiene/')

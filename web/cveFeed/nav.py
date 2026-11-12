@@ -8,7 +8,7 @@ from django.urls import reverse
 
 # the page a template names (``active`` in the view context) -> the rail entry it sits under
 GROUP_OF = {
-    'dashboard': 'overview',
+    'dashboard': 'overview', 'situations': 'overview',
     'vulns': 'findings', 'matches': 'findings', 'hygiene': 'findings', 'changes': 'findings', 'cves': 'findings',
     'hosts': 'assets', 'targets': 'assets', 'graph': 'assets', 'secrets': 'assets', 'suppliers': 'assets',
     'scans': 'scans', 'activity': 'scans',
@@ -39,7 +39,10 @@ def _section(slug, name):
 def _tabs(group, slug, sentinels_enabled):
     """(key, label, href) of the pages that share a rail entry, in order. The pages that need a project are left out when there is none."""
     out = []
-    if group == 'findings':
+    if group == 'overview':
+        if slug:  # Situations is a page of one project (or all of them), so with no project there is no strip
+            out += [('dashboard', 'Overview', reverse('cve_dashboard')), ('situations', 'Situations', _section(slug, 'situations'))]
+    elif group == 'findings':
         if slug:
             out += [('vulns', 'Findings', _section(slug, 'vulns')), ('matches', 'CVE matches', _section(slug, 'matches')),
                     ('hygiene', 'Hygiene', _section(slug, 'hygiene')), ('changes', 'Changes', _section(slug, 'changes'))]
@@ -90,7 +93,7 @@ def build(active, slug, *, bounty_enabled, sentinels_enabled, all_projects=False
     if len(tabs) < 2:
         tabs = []
     index, seen = [], set()
-    for g in ('findings', 'assets', 'scans', 'scanners'):
+    for g in ('overview', 'findings', 'assets', 'scans', 'scanners'):
         for k, label, href in _tabs(g, slug, sentinels_enabled):
             full = {'project-sentinels': 'Project Sentinels'}.get(k, label)  # every other page is listed under the name its rail entry and tab use
             if href not in seen:
