@@ -31,7 +31,7 @@ def tool(key, name, url, group, version, license, purpose, where='sentinel', opt
 # The Sentinel commit the Sentinel versions below were read from (its Dockerfile and requirements.txt). tests/test_about_page.py holds it equal to
 # the floor commit of scanner.lock.json and to the sha web/requirements.txt pins: raising the floor means reading the Sentinel's pins again, then changing this line.
 # (The built-in scanner image follows the newest published build; the page says what it was read at, not that it runs exactly this.)
-SENTINEL_PINS_COMMIT = 'f7ea5c94c4a28365523cd7c422ed58014d67f02c'
+SENTINEL_PINS_COMMIT = '7be0f7999d33b3059ce3c379e7df939a88b570a3'
 
 GH = 'https://github.com/'
 SENTINEL_DOCKERFILE = 'sentinel:Dockerfile'
@@ -46,7 +46,7 @@ TOOLS = [
     tool('nuclei', 'nuclei', GH + 'projectdiscovery/nuclei', 'scanners', '3.11.1', 'MIT',
          'Vulnerability scanning and CVE tests. The Sentinel runs it; the server keeps the binary only to read and check templates', where='both',
          pins=[('web/Dockerfile', r'ARG NUCLEI_VERSION=([0-9.]+)'), (SENTINEL_DOCKERFILE, r'ARG NUCLEI_VERSION=([0-9.]+)')]),
-    tool('nuclei-templates', 'nuclei-templates', GH + 'projectdiscovery/nuclei-templates', 'scanners', 'v10.5.1', 'MIT',
+    tool('nuclei-templates', 'nuclei-templates', GH + 'projectdiscovery/nuclei-templates', 'scanners', 'v10.5.2', 'MIT',
          'The community template library. The Sentinel image carries this pinned release as a fallback; the server refreshes its own set daily from the '
          'project and hands Sentinels the approved bundle', where='both', pins=[(SENTINEL_DOCKERFILE, r'ARG NUCLEI_TEMPLATES_VERSION=(v[0-9.]+)')]),
     tool('testssl', 'testssl.sh', GH + 'testssl/testssl.sh', 'scanners', '3.2.5', 'GPL-2.0 (a separate program, never linked)',
@@ -56,8 +56,16 @@ TOOLS = [
          pins=[(SENTINEL_DOCKERFILE, r'ARG WPSCAN_VERSION=([0-9.]+)')]),
     tool('wafw00f', 'wafw00f', GH + 'EnableSecurity/wafw00f', 'scanners', '2.4.2', 'BSD-3-Clause', 'Names the firewall in front of a web host',
          pins=[(SENTINEL_DOCKERFILE, r'ARG WAFW00F_VERSION=([0-9.]+)')]),
-    tool('bbot', 'bbot', GH + 'blacklanternsecurity/bbot', 'scanners', '3.0.2', 'AGPL-3.0 (a separate program, never imported)',
+    tool('bbot', 'bbot', GH + 'blacklanternsecurity/bbot', 'scanners', '3.1.0', 'AGPL-3.0 (a separate program, never imported)',
          'Discovery of domains, subdomains and addresses', pins=[(SENTINEL_DOCKERFILE, r'ARG BBOT_VERSION=([0-9.]+)')]),
+    tool('blastdns', 'blastdns', GH + 'blacklanternsecurity/blastdns', 'scanners', '2.0.4', 'AGPL-3.0-or-later (a separate program, never imported)',
+         'bbot\'s own DNS resolver (a Rust library), pinned so a rebuild never picks up a newer one', pins=[(SENTINEL_DOCKERFILE, r'ARG BLASTDNS_VERSION=([0-9.]+)')]),
+    tool('blasthttp', 'blasthttp', GH + 'blacklanternsecurity/blasthttp', 'scanners', '0.10.1', 'See its package page (a bbot dependency, never imported)',
+         'bbot\'s own HTTP engine (a Rust library), pinned so a rebuild never picks up a newer one', pins=[(SENTINEL_DOCKERFILE, r'ARG BLASTHTTP_VERSION=([0-9.]+)')]),
+    tool('baddns', 'baddns', GH + 'blacklanternsecurity/baddns', 'scanners', '2.5.0', 'GPL-3.0 (a separate program, never imported)',
+         'bbot\'s subdomain-takeover and dangling-record module, installed with bbot', pins=[(SENTINEL_DOCKERFILE, r'ARG BADDNS_VERSION=([0-9.]+)')]),
+    tool('badsecrets', 'badsecrets', GH + 'blacklanternsecurity/badsecrets', 'scanners', '1.3.0', 'GPL-3.0 (a separate program, never imported)',
+         'bbot\'s known-weak-secret module (web framework signing keys), installed with bbot', pins=[(SENTINEL_DOCKERFILE, r'ARG BADSECRETS_VERSION=([0-9.]+)')]),
     tool('gowitness', 'gowitness', GH + 'sensepost/gowitness', 'scanners', '', 'GPL-3.0',
          'Older discovery-time screenshots, installed and run by bbot (the host page falls back to them)'),
     tool('kingfisher', 'Kingfisher', GH + 'mongodb/kingfisher', 'scanners', '2.18.1', 'Apache-2.0',
@@ -67,11 +75,11 @@ TOOLS = [
          'check runs: it never submits a credential', pins=[(SENTINEL_DOCKERFILE, r'ARG SSHAMBLE_VERSION=([0-9.]+)')]),
     tool('badkeys-data', 'badkeys blocklist data', 'https://badkeys.info', 'scanners', '', 'Unknown (the badkeys software is MIT; no license for the data is stated)',
          'Known-weak SSH host keys. The Sentinel refreshes it daily with `sshamble badkeys-update`; turn that off with CVENGINE_BADKEYS_REFRESH=0 on an air-gapped Sentinel'),
-    tool('playwright', 'Playwright', GH + 'microsoft/playwright-python', 'scanners', '1.65.0', 'Apache-2.0',
+    tool('playwright', 'Playwright', GH + 'microsoft/playwright-python', 'scanners', '1.65.1', 'Apache-2.0',
          'Drives the headless Chromium that takes the screenshot of every web page of every host, in the Sentinel image',
          pins=[(SENTINEL_REQUIREMENTS, r'(?m)^playwright==([0-9.]+)')]),
     tool('chromium', 'Chromium (Playwright headless shell)', 'https://www.chromium.org/', 'scanners', '158.0.8127.18',
-         'BSD-3-Clause, plus the licenses of what it bundles', 'The browser behind the screenshots, pinned to the build Playwright 1.65.0 drives',
+         'BSD-3-Clause, plus the licenses of what it bundles', 'The browser behind the screenshots, pinned to the build Playwright 1.65.1 drives',
          pins=[(SENTINEL_DOCKERFILE, r'ARG PLAYWRIGHT_CHROMIUM_VERSION=([0-9.]+)')]),
     tool('aardwolf', 'aardwolf', GH + 'skelsec/aardwolf', 'scanners', '0.2.17', 'MIT', 'The headless RDP client behind the login-screen screenshot',
          pins=[(SENTINEL_REQUIREMENTS, r'(?m)^aardwolf==([0-9.]+)')]),
@@ -132,7 +140,7 @@ LIBRARY_NOTE = ('Python libraries are pinned in web/requirements.txt (server) an
 # Python packages only the Sentinel image installs (the server ones come from web/requirements.txt, read below).
 SENTINEL_LIBRARIES = (
     ('aardwolf', '0.2.17', 'MIT'), ('h11', '0.16.0', 'MIT'), ('Pillow', '>=13.0.0,<14', 'MIT-CMU'), ('PyMySQL', '1.2.4', 'MIT'),
-    ('pymongo', '4.19.0', 'Apache-2.0'), ('playwright', '1.65.0', 'Apache-2.0'),
+    ('pymongo', '4.20.0', 'Apache-2.0'), ('playwright', '1.65.1', 'Apache-2.0'),
 )
 
 
