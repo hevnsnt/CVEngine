@@ -53,7 +53,7 @@ BEAT_KEY = 'cve:snap:refresher'  # the refresher's heartbeat: {'at', 'interval',
 METRIC_TTL = 3 * 3600
 # a request: served fresh / served stale / computed / waited for a winner; the refresher: refreshed a snapshot, skipped a run (a stressed worker), overran its budget
 OUTCOMES = ('hit', 'stale', 'miss', 'waited', 'refreshed', 'skipped', 'overran')
-NAMES = ('stats', 'discovery-counts', 'graph-version', 'graph-live', 'search-facets', 'activity-days', 'refresher')
+NAMES = ('stats', 'discovery-counts', 'graph-version', 'graph-live', 'search-facets', 'activity-days', 'retest-counts', 'refresher')
 
 INTERNAL = ('host-reps',)  # snapshots the others are built from: not counted as polls (the per-hour counters are what people asked for)
 ADAPTIVE = ('stats', 'discovery-counts')  # snapshots whose freshness follows the cost of computing them ('host-reps' is not: the live host count stays at most its own 5 s old)
