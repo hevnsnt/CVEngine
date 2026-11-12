@@ -17,7 +17,7 @@ globalThis.document = {getElementById: () => null, querySelector: () => null, qu
 globalThis.window = globalThis;
 globalThis.localStorage = {getItem: () => null, setItem() {}, removeItem() {}};
 
-const {actionsFor, glanceText, plannerRows, routingText, stageRunsText, stateLine} = await import('../static/cve/sentinel-live.js');
+const {actionsFor, glanceText, healthFlags, plannerRows, routingText, stageRunsText, stateLine} = await import('../static/cve/sentinel-live.js');
 const NOTE = 'Sentinel "old-box" (#1) of the same user was revoked on 2026-03-02. Reinstate this one to use it, and reinstate or delete #1 so new agents start normally';
 
 test('a suspended Sentinel reads "Suspended: <reason>", never idle', () => {
@@ -109,4 +109,24 @@ test('a collapsed row names a problem first, then the work in hand, then the las
   assert.equal(glanceText({state: 'offline', stats, current: []}), 'Not taking work until it checks in again.');
   assert.equal(glanceText({state: 'idle', stats, current: []}), 'Ready, nothing to do right now. 14 done, 2 failed in the last hour.');
   assert.equal(glanceText({state: 'suspended', stats: {}, current: []}), '0 done, 0 failed in the last hour.');
+});
+
+// UI-4: what is wrong with a Sentinel shows on its closed row, not only when it is opened
+test('a closed row says why a Sentinel is offline and that its update failed', () => {
+  const edge = {state: 'offline', status: 'active', status_note: 'Update failed: could not pull image', stats: {done_1h: 0, failed_1h: 0}, current: []};
+  assert.equal(glanceText(edge), 'Update failed: could not pull image · Not taking work until it checks in again.');
+  assert.deepEqual(healthFlags(edge).map((f) => f.text), ['Update failed']);
+  // a working one keeps its work first and the note after it
+  assert.equal(glanceText({state: 'working', status_note: 'held for review', stats: {}, current: [{kind: 'nmap', label: 'a.example.com'}]}), 'nmap on a.example.com · held for review');
+  // a suspension's reason is already on the state line: not repeated
+  assert.equal(glanceText({state: 'suspended', status_note: 'because', stats: {}, current: []}), '0 done, 0 failed in the last hour.');
+});
+
+test('the chips on a closed row: a failed update, an update waiting, tasks that failed in the last hour', () => {
+  assert.deepEqual(healthFlags({state: 'idle', stats: {failed_1h: 0}}), []);
+  assert.deepEqual(healthFlags({state: 'idle', stats: {failed_1h: 3}}).map((f) => f.text), ['3 failed in the last hour']);
+  assert.deepEqual(healthFlags({state: 'idle', stats: {}, version_state: {status: 'behind'}}).map((f) => f.text), ['Update available']);
+  const flagged = healthFlags({state: 'idle', stats: {}, auto_update: {flagged: true, text: 'The update was asked for and nothing came back.'}, version_state: {status: 'behind'}});
+  assert.deepEqual(flagged.map((f) => f.text), ['Update failed']); // a failed update is not also "available"
+  assert.equal(flagged[0].title, 'The update was asked for and nothing came back.');
 });

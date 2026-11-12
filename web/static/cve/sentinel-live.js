@@ -116,6 +116,11 @@ function card(s, reload, detail, group) {
   const title = el("span", "sl-title");
   const state = el("span", "sl-state", stateLine(s));
   if (s.capabilities.includes(INTERNAL)) state.append(" ", badge("Internal network", "internal"));
+  healthFlags(s).forEach((f) => {
+    const chip = badge(f.text, f.kind);
+    if (f.title) chip.title = f.title;
+    state.append(" ", chip);
+  });
   if (s.builtin) state.append(" ", el("span", "chip sl-builtin", s.last_resort ? "Built-in, last resort" : "Built-in", { title: s.last_resort ? "This install's own scanner. It takes work only when no external Sentinel can." : "This install's own scanner" }));
   title.append(el("h3", "", s.name), state);
   head.append(title);
@@ -203,8 +208,27 @@ function card(s, reload, detail, group) {
   return c;
 }
 
-// The one line a collapsed row says about what the Sentinel is doing: a problem first, then the work in hand, then how the last hour went.
+// What is wrong with a Sentinel, as chips on its closed row: a failed or stuck update, tasks that failed in the last hour, a newer version waiting. The
+// row says it without being opened; each chip's words are whole (a title carries the server's own sentence).
+export function healthFlags(s) {
+  const out = [];
+  const st = s.stats || {};
+  const au = s.auto_update || {};
+  if (au.flagged || /^update failed/i.test(s.status_note || "")) out.push({ text: "Update failed", kind: "failed", title: au.flagged && au.text ? au.text : s.status_note || "" });
+  else if (s.version_state && s.version_state.status === "behind") out.push({ text: "Update available", kind: "info", title: "A newer Sentinel version is out" });
+  if (st.failed_1h > 0) out.push({ text: `${st.failed_1h} failed in the last hour`, kind: "failed", title: "" });
+  return out;
+}
+
+// The one line a collapsed row says about what the Sentinel is doing: a problem first, then the work in hand, then how the last hour went. The note the server
+// keeps for it (why an update failed, why it is held) goes first on an offline one, because that is the thing to act on.
 export function glanceText(s) {
+  const note = s.status_note && s.state !== "suspended" && !s.problem ? s.status_note : "";
+  const base = glanceBase(s);
+  return note && !base.includes(note) ? (s.state === "offline" ? `${note} · ${base}` : `${base} · ${note}`) : base;
+}
+
+function glanceBase(s) {
   const st = s.stats || {};
   if (s.problem) return s.problem;
   if (s.contract_state === "unsupported" && s.contract_note) return s.contract_note;

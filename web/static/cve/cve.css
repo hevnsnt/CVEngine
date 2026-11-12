@@ -2812,3 +2812,16 @@ a.score-label:hover{text-decoration-color:var(--ink)}
   .sl-sum b{display:inline;font-size:var(--fs-3);margin-right:var(--s-1)}
   .sl-sum span{display:inline;font-size:var(--fs-2)}
 }
+
+/* ---- UI-4: a Sentinel's closed row says how it is, and nothing on the page is cut ---- */
+/* the summary's words wrap (the tooltip is no longer the only place the whole label is); a row's one sentence wraps to a second line instead of ending in "..." */
+.sl-sum span{white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere}
+.sl-sum div{flex:1 1 auto;min-width:min-content}
+.sl-glance{white-space:normal;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden;text-overflow:clip}
+.sl-state .badge{white-space:nowrap}
+@media (min-width:640px){.sl-main-head .note{white-space:normal;overflow:visible;text-overflow:clip}}
+.sl-card .sl-quiet{white-space:normal}
+@media (max-width:639px){
+  /* the last check-in is whole; the buttons keep their own cell */
+  .sl-card .sl-beat{white-space:normal;min-width:0}
+}
