@@ -1951,6 +1951,10 @@ def _claim(agent, kinds, now):
                 continue  # only a Sentinel inside the private network can reach it
             if eff.secret_refusal(task) or (validating(task) and not eff.builtin):
                 continue  # (the query already left it out; this is the same rule where the task is actually taken)
+            if task.kind == 'nmap_udp':
+                from cveFeed import udp_scan
+                if udp_scan.claim_skips(agent.pk, task):
+                    continue  # an IPv6 address this Sentinel said it has no route to: left for another Sentinel
             cap = eff.kind_caps.get(task.kind)
             if cap is not None and held_by_kind.get((agent.pk, task.kind), 0) >= cap:
                 held_back.setdefault(task.kind, f'{sentinel_policy.label(task.kind)} is at its limit of {cap} at once here')

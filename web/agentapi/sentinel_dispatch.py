@@ -1013,7 +1013,13 @@ def try_nmap_udp(project, ip_address, scan=None, timeout=None):
     if result is None:
         raise ScannerUnavailable('nmap_udp', 'no scanner finished the work')
     from cveFeed.udp_scan import host_from_report
-    host = host_from_report(result.get('xml') or '', ip_address)  # the one reader: normalized address on both sides, a down host a clean record
+    from cveFeed.udp_scan import NoIpv6Route
+    try:
+        host = host_from_report(result.get('xml') or '', ip_address)  # the one reader: normalized address on both sides, a down host a clean record
+    except NoIpv6Route as exc:
+        exc.agent_id = result.agent_id  # which Sentinel had no route: held against that one only
+        raise
+    host['sentinel'] = result.agent_id
     return host
 
 
@@ -1348,8 +1354,15 @@ def wrap_wpscan_runner(project, scan=None, timeout=None, internal=False):
         result = dispatch_or_none(project, 'wpscan', {'url': url, 'token': token}, scan=scan, timeout=timeout, redact_target=redact)
         if result is None:  # the task was not finished and the kind may not run here (dispatch_or_none raised already): nothing was read
             raise RuntimeError('no Sentinel finished the WordPress scan')
+        runner.last_sentinel = _sentinel_name(result.agent_id)  # a stage whose every site reads as down names the Sentinel that said so
         return _classify(result.get('report'), result.get('returncode', 1), result.get('stderr_tail', ''), token)
+    runner.last_sentinel = ''
     return runner
+
+
+def _sentinel_name(agent_id):
+    from agentapi.models import Agent
+    return (Agent.objects.filter(pk=agent_id).values_list('name', flat=True).first() or '') if agent_id else ''
 
 
 def wrap_wpscan_thorough_runner(project, scan=None, timeout_seconds=None):

@@ -598,7 +598,7 @@ def plan_wpscan(h, ev):
         return 'no sign of WordPress'
     if state['state'] == 'not_wordpress':
         return 'the WordPress probe found no WordPress'
-    return _one(h, ev, ('wpscan', 'wpscan-partial'))
+    return _one(h, ev, ('wpscan', 'wpscan-partial', 'wpscan-redirected', 'wpscan-not-scannable'))
 
 
 def plan_wpscan_thorough(h, ev):
@@ -811,7 +811,7 @@ def plan_internal_wpscan(h, ev):
         return 'no sign of WordPress'
     if state is not None and state['state'] == 'not_wordpress':
         return 'the WordPress scan found no WordPress'
-    return _one(h, ev, ('wpscan', 'wpscan-partial'))
+    return _one(h, ev, ('wpscan', 'wpscan-partial', 'wpscan-redirected', 'wpscan-not-scannable'))
 
 
 # check id -> the rule for an internal host; every other check does not apply to one (``INTERNAL_REASON``)
@@ -850,7 +850,7 @@ CHECKS = (
     Check('secrets-scan', 'Secrets scan (Kingfisher, in a scanner)', plan_secrets, kinds=('secrets-scan',), stages=('secrets_scan',)),
     Check('version-probes', 'Version and identity probes', plan_probes, kinds=('probe',), stages=('version_probes',)),
     Check('wp-detect', 'WordPress detection probe', plan_wp_probe, kinds=('wp-probe',)),
-    Check('wpscan', 'WordPress scan (quick pass)', plan_wpscan, kinds=('wpscan', 'wpscan-partial'), stages=('wpscan',)),
+    Check('wpscan', 'WordPress scan (quick pass)', plan_wpscan, kinds=('wpscan', 'wpscan-partial', 'wpscan-redirected', 'wpscan-not-scannable'), stages=('wpscan',)),
     Check('wpscan-thorough', 'WordPress scan (thorough pass, on a Sentinel)', plan_wpscan_thorough, kinds=('wpscan-thorough', 'wpscan-thorough-partial')),
     Check('node2shell', 'node2shell check (CVE-2026-111497)', plan_node2shell, kinds=('node2shell',), stages=('node2shell',)),
     Check('vhost', 'Other sites on the host\'s addresses', plan_vhost, kinds=('vhost', 'vhost-ip'), sweeps=('vhost',), ttl_kind='vhost'),

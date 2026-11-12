@@ -272,6 +272,12 @@ TOOLS = [
                           'ai': {'type': 'string', 'enum': ['all', 'disputed', 'real']},
                           'group': {'type': 'string', 'enum': ['none', 'cve']}}), ['project']),
      lambda c, a: svc.list_findings(c, a.get('project'), a), False),
+    ('list_situations', 'What needs you, one host at a time, ranked: the same list and order as the Situations page. Each row is one host with everything open on it that needs a person (proven findings first, then likely real ones, exposures, then hygiene and low-heat items; closed, false positive, accepted and ruled out are not part of it): rank, rank_reason (why it is where it is), headline, narrative (two to four plain sentences built from the data, not by a model), counts {proven, likely, exposure, minor}, first_action, host_link and findings (the top ones, each with a link and its proof when a check reproduced it). state is attention, clear (scanned and nothing needs you) or unscanned (nothing scanned yet: not the same thing). q: part of a host name. tier: all (default), exposure, likely or proven keeps the situations whose worst tier is at least that. Rank rule: worst tier, known exploited, internet-facing before internal, worst severity, how many, oldest, then name; a heat a person set is respected.',
+     _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}, 'tier': {'type': 'string', 'enum': ['all', 'exposure', 'likely', 'proven']}}), ['project']),
+     lambda c, a: svc.list_situations(c, a.get('project'), a), False),
+    ('get_situation', 'One situation in full (what list_situations returns for a host, with up to 200 findings): the narrative, the rank and its reason, the first action and every finding with its kind (match, vulnerability, hygiene or secret), id and link. Fails with 404 when nothing open on the host needs a person.',
+     _schema({'project': SLUG, 'host': {'type': 'string', 'description': 'Host name as list_situations gives it (or another name of the same host)'}}, ['project', 'host']),
+     lambda c, a: svc.get_situation(c, a.get('project'), a['host']), False),
     ('export_report', 'Queue a PDF report of a project, or of one host of it: cover, executive summary (fire, smoke and ice counts, severity, top risks), host table, one section per finding (evidence with the exact command that proved it, remediation, status, assignee, notes), TLS and email hygiene, and a method and validity page. Open findings only unless include_closed is true. Returns the report id, its status and a status_url and (once done) a download_url on the REST API; poll with get_report. Reports expire after 24 hours by default and only the user who asked can download one. Not a write: a read-only token may ask.',
      _schema({'project': SLUG, 'host': {'type': 'string', 'description': 'exact host name, for a report on that host only'},
               'include_closed': {'type': 'boolean', 'description': 'also list fixed, accepted-risk and false-positive findings, each with its closure note (default false)'}}, ['project']),
@@ -739,7 +745,7 @@ def _without_waiting(message):
     return message
 
 
-HEAVY_TOOLS = frozenset(('search_hosts', 'list_hosts'))  # a query over a whole project's hosts: one per batch
+HEAVY_TOOLS = frozenset(('search_hosts', 'list_hosts', 'list_situations'))  # a query over a whole project's hosts: one per batch
 
 
 def _heavy_call(message):
