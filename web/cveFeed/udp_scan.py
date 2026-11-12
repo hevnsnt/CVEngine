@@ -43,6 +43,9 @@ logger = logging.getLogger(__name__)
 
 SERVICE = 'udp-scan'  # ledger: one sweep per IP per week (CVENGINE_TTL_UDP_SCAN, hours)
 FAILED_SERVICE = 'udp-scan-failed'  # an IP whose sweep failed is asked again tomorrow, not at the next firing
+NO_IPV6_SERVICE = 'udp-scan-noipv6'  # an IPv6 address every live Sentinel of its tenant had no route to: not scanned, not failed (asked again after a day)
+NO_IPV6_KEY = 'cvengine:udpscan:noipv6'  # prefix of the per Sentinel flags (``:agent:<id>``, ``:last:<id>``, ``:addr:<id>:<digest>``), each held for a day
+NO_IPV6_TTL = 24 * 3600
 QUEUE = 'udp_queue'
 CLAIM_KEY = 'cvengine:udpscan'
 CLAIM_TTL = 3 * 3600
@@ -102,10 +105,18 @@ SEVERITY_WORDS = {INFO: 'info', LOW: 'low', MEDIUM: 'medium', HIGH: 'high', CRIT
 
 _last_status = {}
 _empty_local = {}
+_ipv6_local = {}
 
 
 class UdpScanError(RuntimeError):
     """The sweep of one address produced no usable result."""
+
+
+class NoIpv6Route(UdpScanError):
+    """The Sentinel had no route to an IPv6 address: nmap finished and scanned no host. Not a failed scan of the address, and not yet proof that the
+    Sentinel has no IPv6 at all: ``scan_ip`` records the address against ``agent_id`` (the Sentinel that said so, set by ``try_nmap_udp``), and only
+    two different global addresses in a row make it a Sentinel that is skipped for IPv6 work. Other Sentinels are unaffected."""
+    agent_id = None
 
 
 # ----------------------------------------------------------------------------- settings
@@ -194,7 +205,7 @@ def due(limit=MAX_ELIGIBLE):
                 .exclude(address='').order_by('id')[:limit])
     assets = {asset_of(ip): ip for ip in rows}
     fresh = ledger.fresh(SERVICE, assets)
-    failed = ledger.fresh(FAILED_SERVICE, assets)
+    failed = ledger.fresh(FAILED_SERVICE, assets) | ledger.fresh(NO_IPV6_SERVICE, assets)  # an IPv6 address a Sentinel had no route to waits out its day too
     last = ledger.last_run(SERVICE, assets)
     epoch = timezone.now() - timedelta(days=36500)
     wanted = [(last.get(asset) or epoch, ip.id, ip) for asset, ip in assets.items() if asset not in fresh and asset not in failed]
@@ -278,9 +289,139 @@ def host_from_report(xml_text, address):
     if hosts:
         named = ', '.join(sorted({str(h.get('ip')) for h in hosts})[:3])
         raise ScannerReportedNothing('nmap_udp', f'a Sentinel\'s report named other addresses only ({named})')
+    if total == 0 and _is_ipv6(want):
+        raise NoIpv6Route(f'nmap scanned no host for {address}: the Sentinel has no route to IPv6 addresses')
     if total == 0:
-        raise UdpScanError(f'nmap scanned no host for {address}: the Sentinel could not reach it (no route, for example no IPv6 connectivity)')
+        raise UdpScanError(f'nmap scanned no host for {address}: the Sentinel could not reach it (no route to the address, or a name it could not resolve)')
     return {'ip': want, 'status': 'down', 'ports': [], 'extraports': [], 'scanned_udp': set()}
+
+
+def _is_ipv6(address):
+    import ipaddress
+    try:
+        return ipaddress.ip_address(normalize_address(address)).version == 6
+    except ValueError:
+        return False
+
+
+def _flag_key(*parts):
+    return ':'.join((NO_IPV6_KEY,) + tuple(str(p) for p in parts))
+
+
+def _flag_set(key, value='1'):
+    """Remember ``key`` for a day: in this process always, and in Redis when it is there (so every worker sees it)."""
+    _ipv6_local[key] = (value, time.time())
+    try:
+        client = _store()
+        if client is not None:
+            client.set(key, value, ex=NO_IPV6_TTL)
+    except Exception:  # noqa: BLE001 - a flag that cannot be written must not stop the sweep
+        logger.warning('could not set the no-IPv6 flag %s', key, exc_info=True)
+
+
+def _flag_get(key, now=None):
+    """The value of ``key`` if it was set within the last day (Redis, else this process), else None."""
+    try:
+        client = _store()
+        if client is not None:
+            value = client.get(key)
+            return None if value is None else (value.decode() if isinstance(value, bytes) else str(value))
+    except Exception:  # noqa: BLE001 - a flag that cannot be read must not stop the sweep
+        logger.warning('could not read the no-IPv6 flag %s', key, exc_info=True)
+    now = time.time() if now is None else now
+    held = _ipv6_local.get(key)
+    return held[0] if held and now - held[1] < NO_IPV6_TTL else None
+
+
+def _flag_del(*keys):
+    for key in keys:
+        _ipv6_local.pop(key, None)
+    try:
+        client = _store()
+        if client is not None and keys:
+            client.delete(*keys)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def forget_ipv6_state():
+    """Drop every per-Sentinel IPv6 flag (tests, and nothing else)."""
+    prefix = NO_IPV6_KEY + ':'
+    keys = [k for k in _ipv6_local if k.startswith(prefix)]
+    _ipv6_local.clear()
+    try:
+        client = _store()
+        if client is not None:
+            keys += [k.decode() if isinstance(k, bytes) else k for k in client.scan_iter(prefix + '*')]
+            if keys:
+                client.delete(*keys)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _addr_digest(address):
+    import hashlib
+    return hashlib.sha1(normalize_address(address).encode()).hexdigest()[:20]
+
+
+def _is_global_unicast(address):
+    """An address in the global unicast block 2000::/3. Link-local, unique-local, loopback, multicast, unspecified and mapped addresses are not: nmap
+    reports 'no route' for those on a Sentinel that has IPv6 perfectly well, so they say nothing about the Sentinel."""
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(normalize_address(address))
+    except ValueError:
+        return False
+    return ip.version == 6 and ip in ipaddress.ip_network('2000::/3')
+
+
+def sentinel_cannot_ipv6(agent_id):
+    """Whether Sentinel ``agent_id`` reported, within the last day, that it has no IPv6 route at all (two different global addresses in a row)."""
+    return agent_id is not None and _flag_get(_flag_key('agent', agent_id)) is not None
+
+
+def sentinel_no_route_to(agent_id, address):
+    """Whether Sentinel ``agent_id`` is skipped for ``address``: it cannot reach IPv6 at all, or it said within the day it has no route to this one."""
+    if agent_id is None:
+        return False
+    return sentinel_cannot_ipv6(agent_id) or _flag_get(_flag_key('addr', agent_id, _addr_digest(address))) is not None
+
+
+def claim_skips(agent_id, task):
+    """Whether Sentinel ``agent_id`` must not be handed this queued ``nmap_udp`` task: an IPv6 address it has no route to. Any other Sentinel may take it."""
+    try:
+        address = (task.target or {}).get('address') if isinstance(task.target, dict) else None
+        return bool(address) and _is_ipv6(address) and sentinel_no_route_to(agent_id, address)
+    except Exception:  # noqa: BLE001 - a flag that cannot be read never withholds work
+        return False
+
+
+def live_sentinel_ids(project):
+    """Ids of the live Sentinels of ``project``'s own tenant that can take UDP work (the same rule dispatch uses): another tenant's Sentinel is never here."""
+    from agentapi import sentinel_broker
+    return {e.agent.pk for e in sentinel_broker.eligible_sentinels(project, 'nmap_udp', live_only=True)}
+
+
+def _no_route_note(agent_id, address):
+    """Record that Sentinel ``agent_id`` had no route to ``address`` and whether that makes it a Sentinel with no IPv6 at all. Returns True when it does."""
+    if agent_id is None:
+        return False
+    now_global = _is_global_unicast(address)
+    _flag_set(_flag_key('addr', agent_id, _addr_digest(address)))
+    if not now_global:  # an unroutable kind of address says nothing about the Sentinel
+        return False
+    last = _flag_get(_flag_key('last', agent_id))
+    _flag_set(_flag_key('last', agent_id), normalize_address(address))
+    if last is not None and last != normalize_address(address):  # two different global addresses in a row
+        _flag_set(_flag_key('agent', agent_id))
+        return True
+    return sentinel_cannot_ipv6(agent_id)
+
+
+def _ipv6_reached(agent_id, address):
+    """A Sentinel scanned an IPv6 address: it has IPv6, and what was held against it no longer holds."""
+    if agent_id is not None:
+        _flag_del(_flag_key('agent', agent_id), _flag_key('last', agent_id), _flag_key('addr', agent_id, _addr_digest(address)))
 
 
 def _empty_count(asset, now=None):
@@ -547,6 +688,16 @@ def scan_ip(ip, pipeline=None):
     from cveFeed.conductor import bounty_blocked_projects
     project = fullscan.active_attached(ip).exclude(target_domain__project_id__in=bounty_blocked_projects()).values_list(
         'target_domain__project_id', flat=True).first()
+    if _is_ipv6(address):  # every live Sentinel of this tenant already said it has no route to it: recorded as not scanned, silently
+        try:
+            from dashboard.models import Project
+            quiet = Project.objects.filter(pk=project).first() if project else None
+            live = live_sentinel_ids(quiet) if quiet is not None else set()
+        except Exception:  # noqa: BLE001 - not knowing the Sentinels must not stop the scan
+            live = set()
+        if live and all(sentinel_no_route_to(agent, address) for agent in live):
+            ledger.record(NO_IPV6_SERVICE, [asset])
+            return {'ip': address, 'ok': False, 'error': 'NoIpv6Route', 'unreachable': 'ipv6', 'quiet': True}
     running = activity.log('run_check', f'Background UDP scan of {address} ({len(ports())} ports: DNS, NTP, SNMP, IKE and the like)',
                            project=project, status='running')
     try:
@@ -575,6 +726,27 @@ def scan_ip(ip, pipeline=None):
         activity.settle(running, 'done', message=f'Background UDP scan of {address} is waiting: no scanner could take this work ({exc.kind}); '
                         'the address stays due until one can')
         return {'ip': address, 'ok': False, 'error': type(exc).__name__, 'waiting': True}
+    except NoIpv6Route as exc:  # one Sentinel had no route to this address: held against that Sentinel only, any other may still take it
+        agent = exc.agent_id
+        again = sentinel_no_route_to(agent, address)  # it already said no to this address: it was handed it despite the skip, so nobody else is asked
+        wide = _no_route_note(agent, address)
+        try:
+            live = live_sentinel_ids(project_obj) if project_obj is not None else set()
+        except Exception:  # noqa: BLE001
+            live = set()
+        others = [a for a in live if a != agent and not sentinel_no_route_to(a, address)] if agent is not None and not again else []  # each retry adds one Sentinel that said no: at most one attempt per live Sentinel
+        logger.info('background UDP scan of %s not run by Sentinel %s: %s', address, agent, exc)
+        if others:  # still due: the next pass hands it to a Sentinel that has not said no (this one is skipped for it)
+            activity.settle(running, 'done', message=(
+                f'Background UDP scan of {address}: one Sentinel has no IPv6 route to it' + ('' if not wide else ' and none to any IPv6 address (it is skipped for IPv6 work for a day)')
+                + '; another Sentinel will try it'))
+            return {'ip': address, 'ok': False, 'error': type(exc).__name__, 'retry_elsewhere': True}
+        ledger.record(NO_IPV6_SERVICE, [asset])  # every live Sentinel of the tenant said no (or there is no other): not scanned, asked again after a day
+        activity.settle(running, 'done', message=(
+            f'Background UDP scan of {address} not run: this Sentinel cannot reach IPv6 addresses (it has no IPv6 route). IPv6 addresses are not scanned '
+            'for UDP by it until tomorrow; a Sentinel with IPv6 would take them' if wide else
+            f'Background UDP scan of {address} not run: no Sentinel has an IPv6 route to this address; asked again tomorrow'))
+        return {'ip': address, 'ok': False, 'error': type(exc).__name__, 'unreachable': 'ipv6'}
     except Exception as exc:  # noqa: BLE001 - failure stays visible, and the address is asked again tomorrow
         logger.warning('background UDP scan of %s failed: %s', address, exc, exc_info=not isinstance(exc, UdpScanError))  # a UdpScanError says all there is
         if not isinstance(exc, (MemoryBusy, ScanAborted)):
@@ -584,6 +756,8 @@ def scan_ip(ip, pipeline=None):
         return {'ip': address, 'ok': False, 'error': type(exc).__name__}
     ledger.record(SERVICE, [asset])
     _empty_reset(asset)
+    if _is_ipv6(address):  # a Sentinel did reach an IPv6 address: what was held against it no longer holds
+        _ipv6_reached(host.get('sentinel'), address)
     if outcome.get('down'):
         activity.settle(running, 'done', message=f'Background UDP scan of {address}: the host did not answer, so no open UDP ports; asked again next week')
         return {'ip': address, 'ok': True, **outcome, 'findings': 0}
