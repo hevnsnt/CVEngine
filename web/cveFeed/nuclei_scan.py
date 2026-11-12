@@ -281,9 +281,11 @@ def _echo_ports(subs):
 
 def record_reached(service, chunk, project, scan, stream):
     """Write the ledger for one chunk the stream returned from: the targets it reached as done, the ones it could not (a name that did not resolve, a host
-    the Sentinel could not connect to: ``stream.unreached``) as failed. A pass that finds nothing on a host it never reached is not a clean host."""
+    the Sentinel could not connect to: ``stream.unreached``, and a port it only partly checked: ``stream.not_checked``) as failed. A pass that finds nothing on a host it never reached is not a clean host."""
     from cveFeed import ledger
-    unreached = {t for t in chunk if t in getattr(stream, 'unreached', ())}
+    # a port the Sentinel only partly checked (``stream.not_checked``: out of time part way, some template runs failed) was not scanned either: it stays due
+    partly = {str(row.get('target') or '').strip().lower() for row in getattr(stream, 'not_checked', ()) if isinstance(row, dict)}
+    unreached = {t for t in chunk if t in getattr(stream, 'unreached', ()) or t.strip().lower() in partly}
     ledger.record(service, [t for t in chunk if t not in unreached], project, scan)
     if unreached:
         ledger.record(service, sorted(unreached), project, scan, 'failed')
@@ -300,7 +302,7 @@ def _report_not_checked(stream, chunk, project, scan):
         return
     shown = '; '.join(f"{row['target']} ({row.get('reason') or 'not fully checked'})" for row in rows[:5])
     more = f' and {len(rows) - 5} more' if len(rows) > 5 else ''
-    activity.log('run_check', f'Nuclei did not fully check {len(rows)} port(s): {shown}{more}. They are scanned again later.', project=project,\
+    activity.log('run_check', f'Nuclei did not fully check {len(rows)} port(s): {shown}{more}. They stay due and are scanned again on the next run.', project=project,\
                  scan_id=getattr(scan, 'id', None), status='done')
     stream.not_checked = [row for row in stream.not_checked if row not in rows]
 

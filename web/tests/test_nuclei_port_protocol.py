@@ -262,3 +262,39 @@ class NotCheckedTests(DispatchBase):
         self.assertIn(f'{HOST}:22 (nothing answered on this port)', text)
         self.assertIn(f'{HOST}:25 (its time ran out after 3 of 13 templates)', text)
         self.assertEqual(stream.not_checked, [])  # said once
+
+    def test_a_port_only_partly_checked_stays_due(self):
+        """Third pass, N1: the Sentinel names a port that ran out of time part way (or some of whose template runs failed) in ``not_checked`` and, from the
+        fixed Sentinel, in ``unreachable``; a Sentinel that sends only ``not_checked`` is read the same way. The ledger never records such a port as done."""
+        from cveFeed import ledger
+        chunk = [HOST, f'{HOST}:22', f'{HOST}:25']
+        stream = mock.Mock(unreached=set(), not_checked=[{'target': f'{HOST}:25', 'reason': 'its time ran out after 3 of 13 templates'}])
+        unreached = nuclei_scan.record_reached('nuclei_deep', chunk, self.project, self.scan, stream)
+        self.assertEqual(unreached, {f'{HOST}:25'})
+        self.assertEqual(ledger.fresh('nuclei_deep', chunk, self.project), {HOST, f'{HOST}:22'})  # :25 is still due
+        from cveFeed.models import ServiceRun
+        self.assertEqual(ServiceRun.objects.get(service='nuclei_deep', asset=f'{HOST}:25').status, 'failed')
+
+    def test_the_target_of_a_not_checked_row_is_matched_however_it_is_spelled(self):
+        from cveFeed import ledger
+        chunk = [HOST, f'{HOST}:25']
+        stream = mock.Mock(unreached=set(), not_checked=[{'target': f'WWW.Example.Test:25 ', 'reason': '1 of 13 template runs failed'}])
+        self.assertEqual(nuclei_scan.record_reached('nuclei_deep', chunk, self.project, self.scan, stream), {f'{HOST}:25'})
+        self.assertEqual(ledger.fresh('nuclei_deep', chunk, self.project), {HOST})
+
+    def test_a_fully_checked_chunk_is_recorded_done_and_nothing_is_said(self):
+        from cveFeed import ledger
+        from cveFeed.models import AgentActivity
+        chunk = [HOST, f'{HOST}:25']
+        stream = mock.Mock(unreached=set(), not_checked=[])
+        self.assertEqual(nuclei_scan.record_reached('nuclei_deep', chunk, self.project, self.scan, stream), set())
+        self.assertEqual(ledger.fresh('nuclei_deep', chunk, self.project), set(chunk))
+        self.assertFalse(AgentActivity.objects.filter(message__contains='did not fully check').exists())
+
+    def test_the_activity_text_says_only_what_is_true(self):
+        from cveFeed.models import AgentActivity
+        stream = mock.Mock(unreached=set(), not_checked=[{'target': f'{HOST}:25', 'reason': 'its time ran out after 3 of 13 templates'}])
+        nuclei_scan.record_reached('nuclei_deep', [HOST, f'{HOST}:25'], self.project, self.scan, stream)
+        text = ' '.join(AgentActivity.objects.values_list('message', flat=True))
+        self.assertIn('stay due', text)
+        self.assertNotIn('scanned again later', text)
