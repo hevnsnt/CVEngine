@@ -118,9 +118,16 @@ def heartbeat_once(now=None):
     return True
 
 
+_stop = threading.Event()  # the loop waits on this, not on ``time.sleep``: tests patch that one globally, and a call from this thread landed in their mock
+
+
+def stop():
+    """End the heartbeat thread (it also ends with the process)."""
+    _stop.set()
+
+
 def _heartbeat_loop():
-    while True:
-        time.sleep(HEARTBEAT_SECONDS)
+    while not _stop.wait(HEARTBEAT_SECONDS):
         try:
             heartbeat_once()
         except Exception:  # noqa: BLE001 - the heartbeat must outlive any one failed write
@@ -133,7 +140,10 @@ def _ensure_heartbeat():
     thread = _state.get('beat_thread')
     if thread is not None and thread.is_alive():
         return
+    if not (_state['lane'] or lane_name()):  # not a worker (a test process running tasks eagerly): nobody reads this process's record, and no thread is wanted
+        return
     try:
+        _stop.clear()
         thread = threading.Thread(target=_heartbeat_loop, name='lane-memory-heartbeat', daemon=True)
         thread.start()
         _state['beat_thread'] = thread
