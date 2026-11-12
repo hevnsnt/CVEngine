@@ -48,7 +48,7 @@ REASON_CODES = (
 NOTE_MAX = 1200
 LEASE_SECONDS = 900
 PACKET_LIMIT = 25
-WINDOW = 400  # candidates read per request to find the ones not yet reviewed in their current state
+WINDOW = 400  # candidates read per page while looking for the ones not yet reviewed in their current state (the pages go on until the limit is found or none are left)
 DEFAULT_OPS_HOURS = (3, 9, 15, 21)
 DEFAULT_MODELS = {'review': 'claude-sonnet-5-5', 'ops': 'claude-haiku-5-5'}
 KIND_ORDER = {'cve_match': 0, 'nuclei': 1, 'db_exposure': 2, 'bbot': 3, 'hygiene': 4}
@@ -191,35 +191,48 @@ def review_key(triage, fingerprint):
     return hashlib.sha1(basis.encode()).hexdigest()
 
 
-def _last_keys(triage_ids):
+def _reviewed(triages, fingerprints):
+    """``{(project id, host, review key): [(outcome, created_at), ...]}`` of the reviews that already hold the current key of each of these
+    findings. Looked up by the key, not by the Triage row: a rescan makes a new row for the same finding (same kind, evidence key and host
+    state, so the same key), and that copy is not asked about again."""
     from cveFeed.models import FindingReview
+    keys = {review_key(t, fingerprints.get((t.project_id, t.host), '')) for t in triages}
     out = {}
-    for row in (FindingReview.objects.filter(triage_id__in=triage_ids).order_by('triage_id', '-created_at', '-id')
-                .values('triage_id', 'review_key', 'outcome', 'created_at')):
-        out.setdefault(row['triage_id'], row)
+    for row in (FindingReview.objects.filter(review_key__in=keys).order_by('-created_at', '-id')
+                .values('review_key', 'outcome', 'created_at', 'triage__project_id', 'triage__host')):
+        out.setdefault((row['triage__project_id'], row['triage__host'], row['review_key']), []).append((row['outcome'], row['created_at']))
     return out
 
 
 def due(limit=PACKET_LIMIT, now=None):
-    """Up to ``limit`` ``(triage, review_key)`` pairs to review now: open findings whose current key has no review, CVE matches first."""
+    """Up to ``limit`` ``(triage, review_key)`` pairs to review now: open findings whose current key has no review, CVE matches first.
+    The open findings are read in pages of WINDOW in that order until ``limit`` are found or none are left, so a finding is reached
+    however many reviewed ones come before it."""
+    from django.db.models import Case, IntegerField, Value, When
     from cveFeed.models import Triage
-    rows = list(Triage.objects.filter(open_q()).exclude(kind='route_auth')
-                .order_by('-last_seen', '-id').only('id', 'kind', 'project_id', 'host', 'evidence_key', 'signature')[:WINDOW * 5])
-    rows.sort(key=lambda t: KIND_ORDER.get(t.kind, 9))  # stable: newest first within a kind
-    fingerprints = _fingerprints({(t.project_id, t.host) for t in rows[:WINDOW]})
-    last = _last_keys([t.pk for t in rows[:WINDOW]])
+    rank = Case(*[When(kind=k, then=Value(v)) for k, v in KIND_ORDER.items()], default=Value(9), output_field=IntegerField())
+    qs = (Triage.objects.filter(open_q()).exclude(kind='route_auth').annotate(kind_rank=rank).order_by('kind_rank', '-last_seen', '-id')
+          .only('id', 'kind', 'project_id', 'host', 'evidence_key', 'signature'))
     now = now or timezone.now()
     picked = []
-    for triage in rows[:WINDOW]:
-        key = review_key(triage, fingerprints.get((triage.project_id, triage.host), ''))
-        seen = last.get(triage.pk)
-        if seen and seen['review_key'] == key and not (seen['outcome'] == REFUSED and now - seen['created_at'] >= REFUSED_WAIT):
-            continue  # reviewed in this state; a refused or empty review is asked again only after a day (or when the host changes)
-        if not cache.add(f'cvengine:reviewer:lease:{triage.pk}', key, LEASE_SECONDS):
-            continue  # handed out within the last 15 minutes
-        picked.append((triage.pk, key))
-        if len(picked) >= limit:
+    offset = 0
+    while len(picked) < limit:
+        rows = list(qs[offset:offset + WINDOW])
+        if not rows:
             break
+        offset += WINDOW
+        fingerprints = _fingerprints({(t.project_id, t.host) for t in rows})
+        seen_all = _reviewed(rows, fingerprints)
+        for triage in rows:
+            key = review_key(triage, fingerprints.get((triage.project_id, triage.host), ''))
+            seen = seen_all.get((triage.project_id, triage.host, key), [])
+            if seen and not (all(outcome == REFUSED for outcome, _ in seen) and now - seen[0][1] >= REFUSED_WAIT):
+                continue  # reviewed in this state; a refused or empty review is asked again only after a day (or when the host changes)
+            if not cache.add(f'cvengine:reviewer:lease:{triage.pk}', key, LEASE_SECONDS):
+                continue  # handed out within the last 15 minutes
+            picked.append((triage.pk, key))
+            if len(picked) >= limit:
+                break
     return picked
 
 

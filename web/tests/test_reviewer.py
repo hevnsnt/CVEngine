@@ -163,6 +163,33 @@ class ReviewTests(Fixture):
         self.assertEqual(len(again), 1)
         self.assertNotEqual(again[0]['review_key'], packet['review_key'])
 
+    def test_the_review_reaches_older_and_other_kinds_of_findings_once_the_newest_window_is_reviewed(self):
+        from datetime import timedelta
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        now = timezone.now()
+        extra = []
+        for i in range(7):
+            cve = CVEEntry.objects.create(cve_id=f'CVE-2099-88{i:02d}', cvss=9.8, published_at=now, affected=[])
+            m = CVEMatch.objects.create(cve_entry=cve, subdomain=self.sub, source='tech', matched_product='lib-b', matched_version='1.0',
+                                        version_in_range=False, confidence=0.8, ai_verdict='uncertain', scan_history=self.scan,
+                                        evidence={'source': 'tech'})
+            triage.track([m])
+            extra.append(m)
+        Triage.objects.filter(match=self.match).update(last_seen=now - timedelta(days=3))  # the oldest one, never reviewed
+        for m in extra:
+            Triage.objects.filter(match=m).update(last_seen=now)
+        hygiene = HygieneFinding.objects.create(domain=self.domain, host='www.example.com', check_name='spf_missing', severity=2, title='No SPF')
+        triage.track([hygiene])
+        for m in extra:  # more reviewed matches than one page holds
+            t = Triage.objects.get(match=m)
+            FindingReview.objects.create(triage=t, project=self.proj, review_key=reviewer.review_key(t, self.state.fingerprint), verdict='true_open',
+                                         confidence='high', outcome='recorded')
+        with mock.patch.object(reviewer, 'WINDOW', 3), CaptureQueriesContext(connection) as queries:
+            picked = {pk for pk, _ in reviewer.due(25)}
+        self.assertEqual(picked, {Triage.objects.get(match=self.match).pk, Triage.objects.get(hygiene=hygiene).pk})
+        self.assertLessEqual(len(queries), 12)  # three pages of three rows, three queries each, and no query per finding
+
     def test_a_verdict_on_a_state_that_changed_is_refused(self):
         packet = self.packet()
         self.state.fingerprint = 'd' * 40
