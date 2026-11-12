@@ -70,6 +70,26 @@ class EmptyDashboardTests(SimpleTestCase):
 		self.assertIn('first-note', js)
 		self.assertRegex(js, r'first-note[\s\S]{0,400}hosts')
 
+	def test_the_first_discovery_answer_is_drawn_not_thrown_away(self):
+		# The first answer names the scan being shown. Asking the same URL again for it came back 304 (the tag of that very answer), so the line stayed
+		# "Nothing has run yet" on a project full of scans. Only a cursor from another scan is asked for again, and under a URL of its own.
+		js = read('static', 'cve', 'dashboard.js')
+		self.assertRegex(js, r'if \(cursor\) \{\s*askAgain = true;\s*return pollDiscovery\(\);')
+		self.assertNotRegex(js, r'lastEvent = 0;\s*\$\("d-ticker"\)\.textContent = "";\s*return pollDiscovery\(\);')
+		self.assertIn('&fresh=1', js)
+
+	def test_the_idle_line_is_not_shown_before_the_first_answer_says_nothing_ran(self):
+		html = read('cveFeed', 'templates', 'cveFeed', 'dashboard.html')
+		self.assertRegex(html, r'id="d-target"[^>]*hidden>Nothing has run yet')
+		js = read('static', 'cve', 'dashboard.js')
+		self.assertRegex(js, r'Nothing has run yet[^\n]*\n\s*\$\("d-target"\)\.hidden = false;')
+		self.assertRegex(js, r'const target = \$\("d-target"\);\s*target\.hidden = false;')
+
+	def test_waiting_for_ai_triage_is_said_only_while_a_model_is_connected(self):
+		js = read('static', 'cve', 'app.js')
+		self.assertIn('const waitingForNobody = (ai) => ai.connected === false', js)
+		self.assertIn('noAssessment[waitingForNobody(d.ai) ? "not_triaged" : d.ai.status]', js)
+
 	def test_the_idle_discovery_line_names_the_next_step(self):
 		js = read('static', 'cve', 'dashboard.js')
 		self.assertIn('Nothing has run yet. Add a target to start a first look.', js)  # the same words as the page, so the poll does not change the line

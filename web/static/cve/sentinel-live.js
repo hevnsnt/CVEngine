@@ -42,7 +42,7 @@ function orbFor(s, group) {
   const key = `${group}:${s.id}`;
   let o = orbs.get(key);
   if (!o) {
-    o = thinkingOrb({ state: busy, size: 64 });
+    o = thinkingOrb({ state: busy, size: 32 });
     orbs.set(key, o);
   }
   o.setState(busy, `${s.name}: ${WORDS[s.state] || s.state}`);
@@ -109,11 +109,12 @@ export function actionsFor(s) {
 }
 
 function card(s, reload, detail, group) {
-  const c = el("article", `sl-card sl-${s.state}`, null, { "data-id": s.id, "data-keep-key": `card:${group}:${s.id}` });
-  const head = el("header", "sl-head", null, { "data-orb-key": `${group}:${s.id}` });
+  // One row: the state, what it is doing, when it last checked in and what the viewer may do. Everything else opens from the row.
+  const c = el("details", `sl-card sl-${s.state}`, null, { "data-id": s.id, "data-keep-key": `card:${group}:${s.id}` });
+  const head = el("summary", "sl-head", null, { "data-orb-key": `${group}:${s.id}` });
   head.append(orbFor(s, group));
-  const title = el("div", "sl-title");
-  const state = el("p", "sl-state", stateLine(s));
+  const title = el("span", "sl-title");
+  const state = el("span", "sl-state", stateLine(s));
   if (s.capabilities.includes(INTERNAL)) state.append(" ", badge("Internal network", "internal"));
   if (s.builtin) state.append(" ", el("span", "chip sl-builtin", s.last_resort ? "Built-in, last resort" : "Built-in", { title: s.last_resort ? "This install's own scanner. It takes work only when no external Sentinel can." : "This install's own scanner" }));
   title.append(el("h3", "", s.name), state);
@@ -152,22 +153,24 @@ function card(s, reload, detail, group) {
       ),
   };
   actionsFor(s).forEach((a) => actions.append(ACT[a]()));
-  head.append(actions);
+  const glance = glanceText(s);
+  head.append(el("span", "sl-glance", glance, { title: glance }));
+  const beat = el("span", "sl-beat");
+  beat.append(el("i", `sl-pulse ${s.live ? "on" : ""}`), el("span", "", "", { "data-seen": s.last_seen || "" }));
+  head.append(beat, actions);
   c.append(head);
 
-  const beat = el("p", "sl-beat");
-  beat.append(el("i", `sl-pulse ${s.live ? "on" : ""}`), el("span", "", "", { "data-seen": s.last_seen || "" }));
-  c.append(beat);
+  const body = el("div", "sl-body");
   const version = versionBlock(detail, { onChange: reload, builtin: s.builtin });
-  if (version) c.append(version);
-  if (s.contract_note) c.append(el("p", s.contract_state === "unsupported" ? "sl-note msg err" : "sl-note", s.contract_note));
-  if (s.problem) c.append(el("p", "sl-note", s.problem));
-  else if (s.status_note && s.state !== "suspended") c.append(el("p", "sl-note", s.status_note)); // a suspension's reason is on the state line
+  if (version) body.append(version);
+  if (s.contract_note) body.append(el("p", s.contract_state === "unsupported" ? "sl-note msg err" : "sl-note", s.contract_note));
+  if (s.problem) body.append(el("p", "sl-note", s.problem));
+  else if (s.status_note && s.state !== "suspended") body.append(el("p", "sl-note", s.status_note)); // a suspension's reason is on the state line
 
   const now = el("div", "sl-now");
   if (s.current.length) s.current.forEach((t) => now.append(task(t)));
   else now.append(el("p", "sl-quiet", s.state === "offline" ? "Not taking work until it checks in again." : s.state === "idle" ? "Checking in and ready. Nothing to do right now." : ""));
-  c.append(now);
+  body.append(now);
 
   const st = s.stats;
   const stats = el("dl", "sl-stats");
@@ -177,26 +180,42 @@ function card(s, reload, detail, group) {
     return d;
   };
   stats.append(stat("Done, last hour", st.done_1h), stat("Failed, last hour", st.failed_1h), stat("Done, 24 hours", st.done_24h), stat("Average task", st.average_seconds == null ? "none yet" : span(st.average_seconds)));
-  c.append(stats);
+  body.append(stats);
   const util = utilisationBar(s.load);
-  if (util) c.append(util);
+  if (util) body.append(util);
 
   if (s.recent.length) {
     const list = el("ul", "sl-recent", null, { "aria-label": `Recent tasks of ${s.name}` });
     s.recent.forEach((t) => list.append(recent(t)));
-    c.append(list);
+    body.append(list);
   }
   // the capability chips (allowed, denied, withheld) come from the Sentinel's detail; the plain list is the fallback while it has not loaded or on an older server
   const chips = detail && detail.kinds ? kindChips(detail.kinds) : null;
   const kinds = s.capabilities.filter((k) => k !== INTERNAL);
   const tools = kinds.length ? kinds.map(kindName).join(", ") : "no capabilities";
-  if (chips) c.append(chips);
-  c.append(el("p", "sl-foot", [...(chips ? [] : [tools]), s.os, `up to ${s.max_concurrent} at once`].filter(Boolean).join(" · ")));
+  if (chips) body.append(chips);
+  body.append(el("p", "sl-foot", [...(chips ? [] : [tools]), s.os, `up to ${s.max_concurrent} at once`].filter(Boolean).join(" · ")));
   Object.entries(s.withheld_kinds || {}).forEach(([k, w]) => {
     const retry = new Date(w.retry_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    c.append(el("p", "sl-foot", `${kindName(k)} failed ${w.failures} times in a row: cvENGINE runs it itself until ${retry}, then tries this Sentinel again.`));
+    body.append(el("p", "sl-foot", `${kindName(k)} failed ${w.failures} times in a row: cvENGINE runs it itself until ${retry}, then tries this Sentinel again.`));
   });
+  c.append(body);
   return c;
+}
+
+// The one line a collapsed row says about what the Sentinel is doing: a problem first, then the work in hand, then how the last hour went.
+export function glanceText(s) {
+  const st = s.stats || {};
+  if (s.problem) return s.problem;
+  if (s.contract_state === "unsupported" && s.contract_note) return s.contract_note;
+  if (s.current && s.current.length) {
+    const t = s.current[0];
+    const more = s.current.length > 1 ? ` and ${s.current.length - 1} more` : "";
+    return `${kindName(t.kind)} on ${t.label || t.host || "a target"}${more}`;
+  }
+  if (s.state === "offline") return "Not taking work until it checks in again.";
+  const hour = `${st.done_1h || 0} done, ${st.failed_1h || 0} failed in the last hour`;
+  return s.state === "idle" ? `Ready, nothing to do right now. ${hour}.` : `${hour}.`;
 }
 
 function summary(data) {
@@ -327,6 +346,21 @@ function openvasQueue(queue) {
   return box;
 }
 
+// What the planner and the router are doing, from GET sentinels/live: the planner's line is the one line shown, the routing sentence, the stage waits and the
+// table of what is due open from it.
+function engineNotes(data) {
+  const planner = plannerBlock(data.planner);
+  const route = routingText(data.routing);
+  const waits = stageRunsText(data.stage_runs);
+  if (!planner && !route && !waits) return null;
+  const box = el("details", "sl-notes", null, { "data-keep-key": "notes" });
+  box.append(el("summary", "", (data.planner && data.planner.line) || "How work is shared"));
+  if (route) box.append(el("p", "note sl-routing", route, { "data-keep-key": "routing" }));
+  if (planner) box.append(planner);
+  if (waits) box.append(el("p", "note sl-stage-runs", waits, { "data-keep-key": "stage-runs" }));
+  return box;
+}
+
 // The groups to draw: instance-wide Sentinels first, then each organization that has a Sentinel or an internal network, then any
 // Sentinel whose scope names nothing this user can see. A server too old to report `orgs` gets one group with no heading.
 function groups(data) {
@@ -419,9 +453,9 @@ function section(g, reload, details) {
   sum.append(chips);
   box.append(sum);
   if (g.note) box.append(el("p", "note", g.note));
-  if (g.networks.length) box.append(networks(g.networks));
   if (g.sentinels.length) box.append(grid);
   else box.append(el("p", "sl-quiet", "No Sentinel covers this organization. Its internal networks are not being scanned."));
+  if (g.networks.length) box.append(networks(g.networks)); // under the Sentinels, so the rows come first
   return box;
 }
 
@@ -470,15 +504,11 @@ export function sentinelLive(mount) {
       if (!(data.orgs || []).some((o) => o.networks.length) && !data.openvas) return Array.from(built.childNodes);
     } else {
       built.append(summary(data));
-      const route = routingText(data.routing);
-      if (route) built.append(el("p", "note sl-routing", route, { "data-keep-key": "routing" }));
-      const planner = plannerBlock(data.planner);
-      if (planner) built.append(planner);
-      const waits = stageRunsText(data.stage_runs);
-      if (waits) built.append(el("p", "note sl-stage-runs", waits, { "data-keep-key": "stage-runs" }));
+      const notes = engineNotes(data);
+      if (notes) built.append(notes);
     }
-    if (data.openvas) built.append(openvasQueue(data.openvas));
     groups(data).forEach((g) => built.append(section(g, reload, details)));
+    if (data.openvas) built.append(openvasQueue(data.openvas)); // under the Sentinels: they are what the page is for
     return Array.from(built.childNodes);
   };
   // after a draw: forget the orbs of Sentinels that are gone, give each card its orb back (the card that was built and then not used took it), age the text

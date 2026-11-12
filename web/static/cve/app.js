@@ -1757,6 +1757,8 @@ function renderFinding(d, cfg, row) {
     }
   }
 
+  // "Waiting for AI triage." is true only while a model is connected to do it: with none, a finding that has no verdict yet never gets one
+  const waitingForNobody = (ai) => ai.connected === false && (ai.status === "pending" || ai.status === "untracked");
   const noAssessment = {
     not_triaged: "No AI provider is configured, so there is no written assessment. The evidence stands on its own.",
     pending: "Waiting for AI triage.",
@@ -1929,7 +1931,7 @@ function renderFinding(d, cfg, row) {
     : "This check did not reproduce the finding. It does not prove the host is unaffected."));
   if (v.status === "observed") check.append(el("p", "note", "These checks observed host metadata only. They did not validate or rule out this CVE on this host."));
   out.push(
-    ...glance(d, { row, aiBadge: aiBadge(d.ai, { project, kind: d.kind, id: d.id }), note: noAssessment[d.ai.status] }),
+    ...glance(d, { row, aiBadge: aiBadge(d.ai, { project, kind: d.kind, id: d.id }), note: noAssessment[waitingForNobody(d.ai) ? "not_triaged" : d.ai.status] }),
     fix,
     ...[checkFold, advisoryFold, seenFold, aiHasDetail ? aiFold : null, requestFold, jobFold].filter(Boolean).map((x) => x.root),
   );
@@ -4489,7 +4491,6 @@ const pages = {
 };
 
 pages.hygiene = function hygiene(mount) {
-  const head = el("div", "tools");
   const run = el("button", "btn sm", "Run checks now", { type: "button" });
   run.onclick = async () => {
     run.disabled = true;
@@ -4511,11 +4512,20 @@ pages.hygiene = function hygiene(mount) {
       run.disabled = false;
     }
   };
-  if (!ALL) head.append(run); // running the checks is per project
-  mount.append(head);
+
+  // The issues come first, under one line of numbers: the same head as Scans and Hosts, so the first screen shows the user's data. The
+  // certificates are a one-line disclosure under the list (the two certificate numbers open it).
+  const certs = el("details", "card hy-card hy-certs", null, { id: "certs", "data-keep-key": "hygiene-certs" });
+  const certsLine = el("span", "note", "");
+  const certsSum = el("summary", "hy-certs-sum");
+  certsSum.append(el("h2", "", "Certificates"), certsLine);
+  const openCerts = () => {
+    certs.open = true;
+    certs.scrollIntoView({ block: "start" });
+  };
 
   // headline numbers, each a count request with page_size 0 (the count alone)
-  const tiles = el("div", "tiles");
+  const tiles = el("div", "tiles slim");
   mount.append(tiles);
   const countOf = (path, qs) =>
     api("GET", `${base}/${path}?${query({ ...qs, page_size: 0 })}`).then((r) => r.count).catch(() => null);
@@ -4529,11 +4539,14 @@ pages.hygiene = function hygiene(mount) {
     ]);
     tiles.textContent = "";
     tiles.append(
-      tile("Certificates tracked", tracked),
-      tile("Expiring in 30 days", expiring, { hot: "smoke" }),
+      tile("Certificates tracked", tracked, { onClick: openCerts }),
+      tile("Expiring in 30 days", expiring, { hot: "smoke", onClick: openCerts }),
       tile("Critical or high issues", crit == null ? null : crit + (high || 0), { hot: "fire" }),
       tile("Open issues", open, { hot: "ice" }),
     );
+    certsLine.textContent = tracked == null ? "" : tracked === 0
+      ? "None checked yet. They are checked after discovery, daily, or when you run the checks."
+      : `${tracked} tracked, ${expiring || 0} expiring in 30 days. Soonest expiry first.`;
   };
   paintTiles();
   liveCustom.add({ alive: () => tiles.isConnected, run: paintTiles });
@@ -4544,42 +4557,10 @@ pages.hygiene = function hygiene(mount) {
       d < 0 ? "critical" : d <= 7 ? "high" : d <= 30 ? "medium" : "success";
     return badge(d < 0 ? `expired ${-d}d ago` : `${d} days`, cls);
   };
-  const certs = el("section", "card hy-card hy-certs");
-  certs.append(
-    el("h2", "", "Certificates"),
-    el(
-      "p",
-      "note",
-      "Soonest expiry first. Anything under 30 days needs renewing now.",
-    ),
-  );
-  mount.append(certs);
-  createList({
-    mount: certs,
-    path: `${base}/certificates`,
-    empty:
-      "No certificates checked yet. They are checked after discovery, daily, or when you run the checks.",
-    render: table(withProject([
-      { label: "Host", render: (c) => { const n = el("span"); n.append(hostLink(c.host, projectOf(c)), document.createTextNode(`:${c.port}`)); return n; } },
-      {
-        label: "Expires",
-        cls: "cert-expiry",
-        render: (c) => (c.not_after ? c.not_after.slice(0, 10) : "-"),
-      },
-      { label: "Left", render: (c) => dayBadge(c.days_left) },
-      { label: "Issuer", render: (c) => c.issuer || "-" },
-      { label: "Key", render: (c) => c.key || "-" },
-      {
-        label: "TLS",
-        render: (c) =>
-          c.legacy_tls ? badge("1.0/1.1 on", "medium") : c.protocol || "-",
-      },
-    ]), (c) => (c.days_left == null ? "" : c.days_left < 0 ? "critical" : c.days_left <= 7 ? "high" : c.days_left <= 30 ? "medium" : "")),
-  }).start();
 
-  const issues = el("section", "card hy-card");
-  issues.append(el("h2", "", "TLS, email authentication and cleartext services"));
-  const tools = el("div", "tools");
+  const root = el("div", "table-page");
+  mount.append(root);
+  root.append(el("h2", "visually-hidden", "TLS, email authentication and cleartext services"));
   const sev = picker(
     "Severity",
     [
@@ -4616,11 +4597,15 @@ pages.hygiene = function hygiene(mount) {
     () => list.reload(),
   );
   const q = searchBox("Filter by host", () => list.reload());
-  tools.append(kind, q);
-  issues.append(sev.node, tools);
-  mount.append(issues);
+  const countLine = el("span", "list-count note", "", { role: "status" });
+  const tools = el("span", "meta-tools");
+  if (!ALL) tools.append(run); // running the checks is per project
+  const metaRow = el("div", "list-meta");
+  metaRow.append(countLine, tools);
+  const lh = listHead({ page: "hygiene", lead: [q], panelNodes: [sev.node, kind], meta: metaRow });
+  root.append(lh.head);
   const list = createList({
-    mount: issues,
+    mount: root,
     path: `${base}/hygiene`,
     params: () => ({ severity: sev.value, check: kind.value, q: q.value }),
     empty: () =>
@@ -4632,7 +4617,11 @@ pages.hygiene = function hygiene(mount) {
             title: "No open hygiene issues",
             body: "Certificates, TLS settings, SPF, DKIM and DMARC look healthy, and no Telnet, FTP or other cleartext service was found.",
           },
-    onLoaded: (_, reset, quiet) => reset && !quiet && sev.refresh(),
+    onLoaded: (data, reset, quiet) => {
+      countLine.textContent = `${data.count} ${data.count === 1 ? "issue" : "issues"}`;
+      lh.refresh();
+      if (reset && !quiet) sev.refresh();
+    },
     render: table(withProject([
       { label: "Severity", render: (f) => badge(f.severity, f.severity) },
       {
@@ -4649,6 +4638,40 @@ pages.hygiene = function hygiene(mount) {
     ], 3), (f) => f.severity),
   });
   list.start();
+
+  // the certificates: one line until opened, the list is asked for when it is
+  const certsBody = el("div", "hy-certs-body");
+  certs.append(certsSum, certsBody);
+  mount.append(certs);
+  let certsStarted = false;
+  const startCerts = () => {
+    if (certsStarted || !certs.open) return;
+    certsStarted = true;
+    createList({
+      mount: certsBody,
+      path: `${base}/certificates`,
+      empty:
+        "No certificates checked yet. They are checked after discovery, daily, or when you run the checks.",
+      render: table(withProject([
+        { label: "Host", render: (c) => { const n = el("span"); n.append(hostLink(c.host, projectOf(c)), document.createTextNode(`:${c.port}`)); return n; } },
+        {
+          label: "Expires",
+          cls: "cert-expiry",
+          render: (c) => (c.not_after ? c.not_after.slice(0, 10) : "-"),
+        },
+        { label: "Left", render: (c) => dayBadge(c.days_left) },
+        { label: "Issuer", render: (c) => c.issuer || "-" },
+        { label: "Key", render: (c) => c.key || "-" },
+        {
+          label: "TLS",
+          render: (c) =>
+            c.legacy_tls ? badge("1.0/1.1 on", "medium") : c.protocol || "-",
+        },
+      ]), (c) => (c.days_left == null ? "" : c.days_left < 0 ? "critical" : c.days_left <= 7 ? "high" : c.days_left <= 30 ? "medium" : "")),
+    }).start();
+  };
+  certs.addEventListener("toggle", startCerts);
+  if (location.hash === "#certs") openCerts();
 };
 
 // --- scan detail: overview + tabs over the scan's sub-resources ------------------

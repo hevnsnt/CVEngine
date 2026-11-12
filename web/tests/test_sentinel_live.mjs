@@ -17,7 +17,7 @@ globalThis.document = {getElementById: () => null, querySelector: () => null, qu
 globalThis.window = globalThis;
 globalThis.localStorage = {getItem: () => null, setItem() {}, removeItem() {}};
 
-const {actionsFor, plannerRows, routingText, stageRunsText, stateLine} = await import('../static/cve/sentinel-live.js');
+const {actionsFor, glanceText, plannerRows, routingText, stageRunsText, stateLine} = await import('../static/cve/sentinel-live.js');
 const NOTE = 'Sentinel "old-box" (#1) of the same user was revoked on 2026-03-02. Reinstate this one to use it, and reinstate or delete #1 so new agents start normally';
 
 test('a suspended Sentinel reads "Suspended: <reason>", never idle', () => {
@@ -98,4 +98,15 @@ test('a planner that is off shows its line and no table, and an older server sho
   assert.deepEqual(off.rows, []);
   assert.equal(plannerRows(null), null);
   assert.equal(plannerRows({enabled: true, line: ''}), null);
+});
+
+// the one line a collapsed Sentinel row says about what it is doing
+test('a collapsed row names a problem first, then the work in hand, then the last hour', () => {
+  const stats = {done_1h: 14, failed_1h: 2};
+  assert.equal(glanceText({state: 'offline', problem: 'Wrong contract version', stats, current: []}), 'Wrong contract version');
+  assert.equal(glanceText({state: 'working', stats, current: [{kind: 'nmap', label: 'host001.example.com'}]}), 'nmap on host001.example.com');
+  assert.equal(glanceText({state: 'working', stats, current: [{kind: 'nmap', host: 'a.example.com'}, {kind: 'naabu'}, {kind: 'testssl'}]}), 'nmap on a.example.com and 2 more');
+  assert.equal(glanceText({state: 'offline', stats, current: []}), 'Not taking work until it checks in again.');
+  assert.equal(glanceText({state: 'idle', stats, current: []}), 'Ready, nothing to do right now. 14 done, 2 failed in the last hour.');
+  assert.equal(glanceText({state: 'suspended', stats: {}, current: []}), '0 done, 0 failed in the last hour.');
 });
