@@ -2346,7 +2346,6 @@ class FindingReview(models.Model):
     input_tokens = models.PositiveIntegerField(default=0)
     output_tokens = models.PositiveIntegerField(default=0)
     host_review = models.ForeignKey("cveFeed.HostReview", on_delete=models.SET_NULL, null=True, blank=True, related_name="finding_reviews")  # set when the host review gave this verdict
-    demotes = models.BooleanField(default=False, db_default=False)  # a verdict that moves the finding down in Situations (the rule is cveFeed.reviewer's, docs/SITUATIONS.md)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

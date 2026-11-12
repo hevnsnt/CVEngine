@@ -193,7 +193,7 @@ class NoBypassTests(SimpleTestCase):
             named |= set(re.findall(r"usage_stage\('([a-z_]+)'\)", text))
             named |= {m[1] for m in re.findall(r"enqueue\(\s*'([a-z_]+)',\s*'([a-z_]+)'", text)}
             named |= set(re.findall(r"_ask\(\s*'(nuclei_[a-z_]+)'", text))
-        named |= {autotune.ADVISOR_STAGE, 'finding_triage_repair', 'host_review', 'host_review_repair'}  # the host review's job names them once it is queued (cveFeed.host_review)
+        named |= {autotune.ADVISOR_STAGE, 'finding_triage_repair', 'host_review_repair'}  # the repair stage is named by the Retry the host review returns, not by an enqueue (cveFeed.host_review)
         self.assertTrue(named, 'no stage found: the scan is broken')
         for stage in named:
             self.assertIn(stage, ai_prompts.STAGES, stage)

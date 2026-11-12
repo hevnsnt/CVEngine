@@ -1,7 +1,7 @@
 """1.4.0 host review: the AI reads every open result of a host together and chooses one next step (``cveFeed.host_review``).
 
-A new table (HostReview) and a few columns on existing ones: FindingReview points back to the host review that gave a verdict (and says whether
-it demotes the finding), ProjectSettings has the review mode and ReviewerSettings the daily limits. Every NOT NULL column added to a table that
+A new table (HostReview) and a few columns on existing ones: FindingReview points back to the host review that gave a verdict,
+ProjectSettings has the review mode and ReviewerSettings the daily limits. Every NOT NULL column added to a table that
 exists has a database default, so the previous release's code, which keeps running until the workers restart and inserts rows without them, can
 still insert. Catalog-only on PostgreSQL 11 and later: no rewrite, nothing backfilled (a project reads as mode auto, the default).
 """
@@ -20,11 +20,6 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name="findingreview",
-            name="demotes",
-            field=models.BooleanField(db_default=False, default=False),
-        ),
         migrations.AddField(
             model_name="projectsettings",
             name="host_review_mode",

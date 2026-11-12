@@ -35,8 +35,7 @@ class ModelTests(TestCase):
     def test_every_new_column_of_an_existing_table_has_a_database_default(self):
         # the previous release's code keeps inserting rows without these columns until the workers restart
         for model, names in ((ProjectSettings, ['host_review_mode']),
-                             (ReviewerSettings, ['host_review_enabled', 'host_review_daily_max', 'host_review_auto_per_project_day']),
-                             (FindingReview, ['demotes'])):
+                             (ReviewerSettings, ['host_review_enabled', 'host_review_daily_max', 'host_review_auto_per_project_day'])):
             for name in names:
                 self.assertIsNot(model._meta.get_field(name).db_default, NOT_PROVIDED, f'{model.__name__}.{name}')
 

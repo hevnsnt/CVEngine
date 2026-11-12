@@ -447,10 +447,6 @@ def apply_verdict(ref, body, now=None):
     """Take one verdict for the finding ``ref`` (``t<triage id>``). Returns ``{outcome, reason, review_id}``. Raises VerdictError for a
     malformed verdict, an unknown finding (404), or a verdict on a state that is no longer current (409: the finding changed, was closed, or
     was already reviewed in this state)."""
-    from django.db import transaction
-    from cveFeed import activity, closure, injection_guard
-    from cveFeed import triage as triage_lib
-    from cveFeed.models import FindingAuditEvent, FindingReview, Triage
     parsed = _parse_verdict(body)
     match = re.fullmatch(r't(\d{1,12})', str(ref or ''))
     if not match:
@@ -462,6 +458,21 @@ def apply_verdict(ref, body, now=None):
     key = review_key(triage, fingerprint)
     if parsed['review_key'] != key:
         raise VerdictError('the finding or its host changed since the packet was built', 409)
+    return apply_finding_verdict(triage, parsed, key, now=now)
+
+
+def apply_finding_verdict(triage, parsed, key, host_review=None, extra_injection=(), extra_markers=(), now=None):
+    """The shared core of ``apply_verdict``: apply the parsed verdict ``parsed`` (``_parse_verdict``'s shape) for ``triage``, whose current
+    ``review_key`` is ``key``, under the row lock and through ``close_gate``. The finding review calls it with a verdict of the container; the
+    host review (``cveFeed.host_review``) calls it once per finding with ``host_review`` set (the row is linked to the ``HostReview``). Then a
+    person's work, hard evidence and planted instructions hold a closure exactly as they do for a single finding. ``extra_injection`` is the
+    families of AI-directed text found elsewhere in the host's evidence (the host's banners and pages): they hold the closure too, and
+    ``extra_markers`` are identifiers planted there, which a note must not repeat. A host review is not "the same state reviewed once": a newer
+    review of a state that has one is allowed (the newest row is the current one). Raises VerdictError like ``apply_verdict``."""
+    from django.db import transaction
+    from cveFeed import activity, closure, injection_guard
+    from cveFeed import triage as triage_lib
+    from cveFeed.models import FindingAuditEvent, FindingReview, Triage
     model = parsed['model']
     now = now or timezone.now()
     with transaction.atomic():
@@ -473,14 +484,14 @@ def apply_verdict(ref, body, now=None):
             raise VerdictError('not found', 404)
         if not Triage.objects.filter(open_q(), pk=triage.pk).exists():
             raise VerdictError('the finding is no longer open', 409)
-        if FindingReview.objects.filter(triage=triage, review_key=key).exclude(outcome=REFUSED).exists():
+        if host_review is None and FindingReview.objects.filter(triage=triage, review_key=key).exclude(outcome=REFUSED).exists():
             raise VerdictError('this state of the finding was already reviewed', 409)
         finding = triage.finding
         d = triage_lib.describe(finding)
         raw = _raw_evidence(triage, finding)
-        injection = injection_guard.families(raw, d.get('payload'), d.get('host_context'))
+        injection = sorted(set(injection_guard.families(raw, d.get('payload'), d.get('host_context'))) | set(extra_injection))
         note = usable_note(parsed['note'], min_words=2)  # filler ("Placeholder") is no reason: the verdict stands, with no note
-        if injection_guard.repeats_marker(note, injection_guard.planted_markers(raw, d.get('payload'), d.get('host_context'))):
+        if injection_guard.repeats_marker(note, injection_guard.planted_markers(raw, d.get('payload'), d.get('host_context')) | set(extra_markers)):
             injection = sorted(set(injection) | {'echo_marker'})
             note = 'The reviewer\'s note repeated an identifier planted in the evidence and was discarded.'
             parsed['verdict'], parsed['confidence'] = 'uncertain', 'low'
@@ -498,7 +509,7 @@ def apply_verdict(ref, body, now=None):
         review = FindingReview.objects.create(
             triage=triage, project_id=triage.project_id, review_key=key, verdict=parsed['verdict'], confidence=parsed['confidence'],
             reason_code=parsed['reason_code'], note=note, model=model, outcome=outcome, held_reason=held[:200], injection=injection,
-            input_tokens=parsed['input_tokens'], output_tokens=parsed['output_tokens'])
+            input_tokens=parsed['input_tokens'], output_tokens=parsed['output_tokens'], host_review=host_review)
         if outcome == 'closed':
             text = f"{CLOSE_PREFIX} ({model or 'model not reported'}) found this is a false positive. {note}".strip()
             text = closure.clip_note(text)
@@ -508,7 +519,8 @@ def apply_verdict(ref, body, now=None):
             finding.save(update_fields=['remediation_status', 'remediation_updated_at', 'remediation_by', 'remediation_note'])
             FindingAuditEvent.objects.create(project_id=triage.project_id, finding_kind=AUDIT_KIND[triage.kind], finding_id=finding.pk,
                                              event='status', actor=None, before={'status': before},
-                                             after={'status': 'false_positive', 'note': text, 'by': 'ai_reviewer', 'review_id': review.pk})
+                                             after={'status': 'false_positive', 'note': text, 'by': 'ai_reviewer', 'review_id': review.pk,
+                                                    **({'host_review_id': host_review.pk} if host_review is not None else {})})
     cache.delete(f'cvengine:reviewer:lease:{triage.pk}')
     if outcome == 'closed':
         from agentapi import services
