@@ -372,6 +372,9 @@ function groups(data) {
     const mine = data.results.filter((s) => (s.orgs || []).includes(o.slug));
     if (mine.length || o.networks.length) out.push({ key: `org:${o.slug}`, title: o.name, slug: o.slug, sentinels: mine, networks: o.networks });
   });
+  // one organization and nothing instance-wide: its name heads nothing (every row is under it), so the Sentinels start right under the summary. Its
+  // networks and its "no Sentinel covers it" line stay, under the rows.
+  if (out.length === 1 && out[0].slug) out[0].bare = true;
   const loose = data.results.filter((s) => s.scope_level !== "instance" && !(s.orgs || []).length);
   if (loose.length) out.push({ key: "none", title: "No organization you can see", note: "Their scope names projects outside your organizations.", sentinels: loose, networks: [] });
   return out;
@@ -435,6 +438,14 @@ function section(g, reload, details) {
   const grid = el("div", "sl-grid", null, { "data-keep-key": `grid:${g.key}` });
   g.sentinels.forEach((s) => grid.append(card(s, reload, details.get(s.id), g.key)));
   if (!g.title) return grid;
+  if (g.bare) {
+    const plain = el("div", "sl-org-bare", null, { "data-keep-key": `org:${g.key}` });
+    if (g.note) plain.append(el("p", "note", g.note));
+    if (g.sentinels.length) plain.append(grid);
+    else plain.append(el("p", "sl-quiet", `No Sentinel covers ${g.title}. Its internal networks are not being scanned.`));
+    if (g.networks.length) plain.append(networks(g.networks));
+    return plain;
+  }
   const box = el("details", "sl-org", null, { "data-keep-key": `org:${g.key}` });
   box.open = !folded.has(g.key);
   box.addEventListener("toggle", () => {

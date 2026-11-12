@@ -2788,3 +2788,15 @@ a.score-label:hover{text-decoration-color:var(--ink)}
   .split>.split-list>.host-rows .host-row:has(>.row-head) .host-meta>.host-why{flex:0 1 auto}
   .split>.split-list>.host-rows .host-row:has(>.row-head) .host-meta>.heat-why{min-width:0}
 }
+
+/* ---- UI-3: Sentinels starts with its rows ---- */
+/* the one organization's name heads nothing, so the rows start right under the summary; on a phone the summary is a sentence, not a strip that scrolls sideways */
+.sl-org-bare{margin-top:var(--s-1)}
+.sl-nets{margin-top:var(--s-3)}
+@media (max-width:639px){
+  .sl-sum,.sl-sum:not(:empty){display:block;overflow:visible;padding:var(--s-1) var(--s-3);line-height:1.5}
+  .sl-sum div,.sl-sum div+div{display:inline;padding:0;border:0;background:none;flex:none;min-width:0}
+  .sl-sum div+div::before{content:" · ";color:var(--muted)}
+  .sl-sum b{display:inline;font-size:var(--fs-3);margin-right:var(--s-1)}
+  .sl-sum span{display:inline;font-size:var(--fs-2)}
+}
