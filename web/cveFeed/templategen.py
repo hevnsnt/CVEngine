@@ -22,6 +22,7 @@ import re
 import yaml
 from django.utils import timezone
 
+from cveFeed import check_allowlist
 from cveFeed.safeyaml import load_template
 from reNgine import ai_prompts
 from reNgine.ai_providers import UNTRUSTED_NOTICE, clean_text
@@ -42,6 +43,24 @@ ALLOWED_TOP_KEYS = ALLOWED_PROTOCOLS | {"id", "info", "variables", "self-contain
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,100}$")
 SEVERITIES = {"info", "low", "medium", "high", "critical", "unknown"}
 
+def sentinel_rules():
+    """The rules of the strict gate every check passes before a Sentinel runs it (``cveFeed.check_allowlist``), as one paragraph for the writer, built
+    from that module's own tables so the text a model is told cannot drift from the rules that judge its answer."""
+    rules = check_allowlist
+    return (
+        "The check is also judged by a strict gate that refuses anything outside these rules and says why. One plain YAML document: no --- or ..., "
+        "anchors, aliases, tags or duplicate keys, at most %d levels of nesting, no control characters; write true, false, whole numbers or a "
+        "decimal such as 9.8 plain, and quote every other value that could be read as another type (on, yes, no, 1e3, 0x1F, 1:30) and every "
+        "value that starts with {{. Metadata keys are plain words; info.author is text or a list of text. Expressions, in {{ }} and in dsl, may call "
+        "only these helpers: %s; a bare name must be one of %s, or a variable you define; a string inside an expression must not contain a quote character "
+        "of either kind (put such text in a word or regex matcher); no member access or indexing. Requests: GET, HEAD or OPTIONS only; a raw entry "
+        "is one request line and header lines, no blank line, body or @ annotation; at most %d headers; Host only inside raw, as {{Hostname}}, "
+        "{{Host}} or {{Host}}:{{Port}}; never Authorization, Cookie, Proxy-, X-Forwarded- or any header that carries a credential. Only the keys "
+        "nuclei documents for http, network, dns and ssl; matcher types %s; extractor types %s. " % (
+            rules.MAX_DEPTH, ", ".join(sorted(rules.FUNCTIONS)), ", ".join(sorted(rules.PLACEHOLDERS | {"body", "header", "status_code", "content_length"})),
+            rules.MAX_HEADERS, ", ".join(sorted(rules.MATCHER_TYPES)), ", ".join(sorted(rules.EXTRACTOR_TYPES))))
+
+
 SYSTEM_PROMPT = ai_prompts.compose('template_generation',
     "Write it as nuclei v3 YAML. Output ONLY one YAML document, "
     "no prose. Rules: id must be the lowercase CVE id (e.g. cve-2024-1234); include "
@@ -52,7 +71,7 @@ SYSTEM_PROMPT = ai_prompts.compose('template_generation',
     "delete data, no code/javascript/headless/file protocols, no interactsh). Requests may "
     "target only the scanned host: http paths must be {{BaseURL}} or {{BaseURL}}/path; network checks may only read banners without sending inputs. Network hosts "
     "must be {{Hostname}} or {{Host}}; never include any other URL or hostname, and no "
-    "redirects. " + UNTRUSTED_NOTICE)
+    "redirects. " + sentinel_rules() + UNTRUSTED_NOTICE)
 
 
 def _clean_value(value, limit, depth=0):
@@ -276,6 +295,8 @@ def static_check(yaml_text, expected_cve_id=None):
         doc = load_template(yaml_text)
     except yaml.YAMLError as e:
         return False, f"invalid YAML: {e}"
+    except RecursionError:  # a document nested thousands deep is no template
+        return False, "invalid YAML: nested too deeply"
     if not isinstance(doc, dict):
         return False, "template must be a YAML mapping"
     bad = set(doc) & FORBIDDEN_PROTOCOLS
@@ -845,7 +866,7 @@ def generate_template(cve, project=None, candidate_only=True):
     from cveFeed import activity, ai_jobs
     key = _generation_lease(cve)
     try:
-        sentinel_dispatch.nuclei_validate_ready(project)  # raises ScannerUnavailable before the AI is asked for a template nothing could check
+        sentinel_dispatch.nuclei_validate_ready(project, cve=cve)  # raises ScannerUnavailable before the AI is asked for a template nothing could check
         # the reply is a template, whose literal values (a JWT in a header, a Basic credential, a PEM header matcher) must survive: only the
         # prompt is masked
         job = ai_jobs.enqueue('template_generation', 'template_generation', system=SYSTEM_PROMPT, parts=prompt_parts(cve_info_for(cve)),
@@ -881,6 +902,11 @@ def job_answer(job, text):
         tmpl.save()
         activity.log('write_check', f'The AI-written check for {cve.cve_id} failed the static check', project=project, cve_id=cve.cve_id)
         return None
+    # the draft row exists before its first check: a Sentinel that is not the built-in scanner checks only the exact text of a draft row
+    # (agentapi.ai_checks.binding_problem). It waits under the 'syntax' stage, which the automatic validator does not pick up before the hour is out
+    # (and then simply runs the same check again, cveFeed.templatevalidate.step).
+    tmpl.status, tmpl.validation_stage, tmpl.validation_next_at = GeneratedTemplate.STATUS_DRAFT, 'syntax', timezone.now() + datetime.timedelta(hours=1)
+    tmpl.save()
     with activity.step('validate', f'Validating the check for {cve.cve_id} (safety gate and nuclei -validate)',
                        project=project, cve_id=cve.cve_id) as handle:
         try:
@@ -889,6 +915,7 @@ def job_answer(job, text):
             valid, output = False, f'not validated: no scanner could take this work ({exc.kind}); the CVE is tried again later'
         handle.done_message = f'Check for {cve.cve_id} {"passed" if valid else "failed"} validation'
     tmpl.status = GeneratedTemplate.STATUS_DRAFT if valid else GeneratedTemplate.STATUS_INVALID
+    tmpl.validation_stage, tmpl.validation_next_at = '', None
     tmpl.validation_output = (output + '\nPending automatic validation: a positive fixture test and a second-pass review run before it may run on a host.'
                               if valid else output)
     if not valid:

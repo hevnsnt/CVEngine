@@ -1,0 +1,45 @@
+{
+  "outcome": "done",
+  "routes": [
+    {
+      "id": "https://www.example.com/",
+      "status": 200,
+      "title": "Dashboard",
+      "content_type": "text/html",
+      "state": "open",
+      "evidence": {
+        "markers": [],
+        "bytes": 2048,
+        "provider": "",
+        "redirect_to": ""
+      },
+      "sensitive": {},
+      "sensitive_score": 0,
+      "bytes": 2048,
+      "credentials": []
+    },
+    {
+      "id": "https://www.example.com/account",
+      "status": 302,
+      "title": "",
+      "content_type": "",
+      "state": "session_required",
+      "evidence": {
+        "markers": [
+          "redirect"
+        ],
+        "bytes": 0,
+        "provider": "",
+        "redirect_to": "/login"
+      },
+      "sensitive": {},
+      "sensitive_score": 0,
+      "bytes": 0,
+      "credentials": []
+    }
+  ],
+  "touched": [
+    "www.example.com"
+  ],
+  "refused": []
+}

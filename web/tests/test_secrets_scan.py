@@ -68,7 +68,7 @@ class ContractTests(SimpleTestCase):
         self.assertEqual(set(result['findings']['items']['properties']['validation_meta']['properties']), set(secrets_inventory.META_KEYS))
         self.assertEqual(result['references']['items']['properties']['kind']['enum'], list(secrets_scan.REFERENCE_KINDS))
         self.assertEqual(contract.kind_since('secrets_scan'), 3)
-        self.assertEqual(contract.version(), 3)
+        self.assertGreaterEqual(contract.version(), 3)  # contract 4 changed nothing of secrets_scan
 
     def test_the_server_keeps_only_the_contract_and_never_a_validation_response(self):
         body = json.loads(FIXTURE.read_text())

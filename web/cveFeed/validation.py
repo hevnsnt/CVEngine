@@ -109,8 +109,8 @@ def readonly_problem(yaml_text):
         return 'template not validated: empty or too large'
     try:
         doc = load_template(yaml_text)
-    except yaml.YAMLError:
-        return 'template not validated: not valid YAML'
+    except (yaml.YAMLError, RecursionError):  # a document nested thousands deep is no template
+        return 'template not validated: not valid YAML, or nested too deeply'
     if not isinstance(doc, dict):
         return 'template not validated: not a template'
     from cveFeed import templategen
@@ -166,6 +166,35 @@ def readonly_problem(yaml_text):
                 return 'template not validated: malformed network section'
             if any(not isinstance(i, dict) or i.get('data') for i in block.get('inputs') or []):
                 return 'template not validated: it sends data over a raw connection'
+    return ''
+
+
+_OWN_HOST = re.compile(r'^\{\{(?:Hostname|Host)\}\}(?::\{\{Port\}\})?$')
+
+
+def own_target_problem(yaml_text):
+    """Why a read-only template would reach something other than the target and port it is run against, or "" (the rule for a check that may run on
+    a Sentinel other than the built-in scanner, ``agentapi.ai_checks``; the scanner library's ``cvengine_scanner.checks.scope_problem`` is the same
+    rule on the Sentinel). ``readonly_problem`` already holds every destination to the target's placeholders; this also refuses a literal port on a
+    network host (``{{Hostname}}:22``) and a ``port`` key, which would reach another port of the host, or another loopback port of the Sentinel
+    during the benign fixture run. Pure."""
+    try:
+        doc = load_template(yaml_text) if yaml_text else None
+    except yaml.YAMLError:
+        return 'template not validated: not valid YAML'
+    if not isinstance(doc, dict):
+        return 'template not validated: not a template'
+    for proto in ('network', 'tcp'):
+        for block in doc.get(proto) or []:
+            if not isinstance(block, dict):
+                return f'template not validated: malformed {proto} section'
+            if 'port' in {str(k).lower() for k in block}:
+                return f'template not validated: a {proto} check names its own port; it may reach only the port of the task'
+            for key in ('host', 'address'):
+                values = block.get(key) or []
+                for h in values if isinstance(values, list) else [values]:
+                    if not _OWN_HOST.match(str(h)):
+                        return f'template not validated: a {proto} {key} names a port of its own ({str(h)[:60]!r}); it may reach only the port of the task'
     return ''
 
 
