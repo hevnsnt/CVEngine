@@ -48,7 +48,7 @@ REASON_CODES = (
 NOTE_MAX = 1200
 LEASE_SECONDS = 900
 PACKET_LIMIT = 25
-WINDOW = 400  # candidates read per request to find the ones not yet reviewed in their current state
+WINDOW = 400  # candidates read per page while looking for the ones not yet reviewed in their current state (the pages go on until the limit is found or none are left)
 DEFAULT_OPS_HOURS = (3, 9, 15, 21)
 DEFAULT_MODELS = {'review': 'claude-sonnet-5-5', 'ops': 'claude-haiku-5-5'}
 KIND_ORDER = {'cve_match': 0, 'nuclei': 1, 'db_exposure': 2, 'bbot': 3, 'hygiene': 4}
@@ -67,8 +67,14 @@ def settings_row():
 
 
 def provider_row():
+    """The AI provider the reviewer may use: the pipeline's own (``ai_jobs.provider_row``), so a row with no key or no server address is none."""
+    from cveFeed import ai_jobs
+    return ai_jobs.provider_row()
+
+
+def _any_provider():
     from dashboard.models import AIProviderSettings
-    return AIProviderSettings.objects.filter(enabled=True).first()
+    return AIProviderSettings.objects.filter(enabled=True).exists()
 
 
 def paused():
@@ -155,7 +161,7 @@ def config(now=None):
         out['jobs_why'] = jobs_why
     if not on:
         out['why'] = ('turned off in .env (CVENGINE_REVIEWER=0)' if not env_enabled() else
-                      'turned off in Settings' if not row.enabled else 'no AI provider is configured' if not provider else
+                      'turned off in Settings' if not row.enabled else ('no AI provider is configured' if not _any_provider() else 'the AI provider has no key or server address') if not provider else
                       'scanning is paused')
         return out
     base = {'provider': provider.provider, 'base_url': reachable_url(provider.base_url) if provider.base_url else '',
@@ -191,35 +197,68 @@ def review_key(triage, fingerprint):
     return hashlib.sha1(basis.encode()).hexdigest()
 
 
-def _last_keys(triage_ids):
+def _reviewed(triages, fingerprints):
+    """``{(project id, host, review key): [(outcome, created_at), ...]}`` of the reviews that already hold the current key of each of these
+    findings. Looked up by the key, not by the Triage row: a rescan makes a new row for the same finding (same kind, evidence key and host
+    state, so the same key), and that copy is not asked about again."""
     from cveFeed.models import FindingReview
+    keys = {review_key(t, fingerprints.get((t.project_id, t.host), '')) for t in triages}
     out = {}
-    for row in (FindingReview.objects.filter(triage_id__in=triage_ids).order_by('triage_id', '-created_at', '-id')
-                .values('triage_id', 'review_key', 'outcome', 'created_at')):
-        out.setdefault(row['triage_id'], row)
+    for row in (FindingReview.objects.filter(review_key__in=keys).order_by('-created_at', '-id')
+                .values('review_key', 'outcome', 'created_at', 'triage__project_id', 'triage__host')):
+        out.setdefault((row['triage__project_id'], row['triage__host'], row['review_key']), []).append((row['outcome'], row['created_at']))
     return out
 
 
 def due(limit=PACKET_LIMIT, now=None):
-    """Up to ``limit`` ``(triage, review_key)`` pairs to review now: open findings whose current key has no review, CVE matches first."""
+    """Up to ``limit`` ``(triage, review_key)`` pairs to review now: open findings whose current key has no review, CVE matches first.
+    Each project with open findings gets an equal share of the batch (what one has too little of goes to the others), so a large project
+    cannot take the whole of the daily cap while another has work."""
     from cveFeed.models import Triage
-    rows = list(Triage.objects.filter(open_q()).exclude(kind='route_auth')
-                .order_by('-last_seen', '-id').only('id', 'kind', 'project_id', 'host', 'evidence_key', 'signature')[:WINDOW * 5])
-    rows.sort(key=lambda t: KIND_ORDER.get(t.kind, 9))  # stable: newest first within a kind
-    fingerprints = _fingerprints({(t.project_id, t.host) for t in rows[:WINDOW]})
-    last = _last_keys([t.pk for t in rows[:WINDOW]])
+    projects = sorted(Triage.objects.filter(open_q()).exclude(kind='route_auth').order_by().values_list('project_id', flat=True).distinct())
     now = now or timezone.now()
+    picked, active = [], list(projects)
+    while active and len(picked) < limit:
+        share = max(1, -(-(limit - len(picked)) // len(active)))
+        full = []
+        for project_id in active:
+            got = _due_in(project_id, min(share, limit - len(picked)), now)
+            picked += got
+            if len(got) >= share:
+                full.append(project_id)  # it may have more
+            if len(picked) >= limit:
+                break
+        active = full
+    return picked
+
+
+def _due_in(project_id, limit, now):
+    """``due`` for one project. The open findings are read in pages of WINDOW in that order until ``limit`` are found or none are left, so a
+    finding is reached however many reviewed ones come before it."""
+    from django.db.models import Case, IntegerField, Value, When
+    from cveFeed.models import Triage
+    rank = Case(*[When(kind=k, then=Value(v)) for k, v in KIND_ORDER.items()], default=Value(9), output_field=IntegerField())
+    qs = (Triage.objects.filter(open_q(), project_id=project_id).exclude(kind='route_auth').annotate(kind_rank=rank).order_by('kind_rank', '-last_seen', '-id')
+          .only('id', 'kind', 'project_id', 'host', 'evidence_key', 'signature'))
     picked = []
-    for triage in rows[:WINDOW]:
-        key = review_key(triage, fingerprints.get((triage.project_id, triage.host), ''))
-        seen = last.get(triage.pk)
-        if seen and seen['review_key'] == key and not (seen['outcome'] == REFUSED and now - seen['created_at'] >= REFUSED_WAIT):
-            continue  # reviewed in this state; a refused or empty review is asked again only after a day (or when the host changes)
-        if not cache.add(f'cvengine:reviewer:lease:{triage.pk}', key, LEASE_SECONDS):
-            continue  # handed out within the last 15 minutes
-        picked.append((triage.pk, key))
-        if len(picked) >= limit:
+    offset = 0
+    while len(picked) < limit:
+        rows = list(qs[offset:offset + WINDOW])
+        if not rows:
             break
+        offset += WINDOW
+        fingerprints = _fingerprints({(t.project_id, t.host) for t in rows})
+        seen_all = _reviewed(rows, fingerprints)
+        for triage in rows:
+            key = review_key(triage, fingerprints.get((triage.project_id, triage.host), ''))
+            seen = seen_all.get((triage.project_id, triage.host, key), [])
+            if seen and not (all(outcome == REFUSED for outcome, _ in seen) and now - seen[0][1] >= REFUSED_WAIT):
+                continue  # reviewed in this state; a refused or empty review is asked again only after a day (or when the host changes)
+            if not cache.add(f'cvengine:reviewer:lease:{triage.pk}', key, LEASE_SECONDS):
+                continue  # handed out within the last 15 minutes
+            picked.append((triage.pk, key))
+            if len(picked) >= limit:
+                break
     return picked
 
 
@@ -236,21 +275,47 @@ def _raw_evidence(triage, finding):
     return out
 
 
+def _copies(kind, finding):
+    """The ids of the earlier copies of this finding (a rescan makes a new row for the same finding and carries its status over, but not the
+    comments and audit events kept by the old row's id): the rows of the same project, host, kind and evidence key, and, for a CVE match, the
+    ones its triage was carried from (``Triage.carried_from``). Empty when it has no triage row."""
+    from cveFeed.models import Triage
+    triage = getattr(finding, 'triage', None)
+    if triage is None:
+        return []
+    column = {'cve_match': 'match_id', 'hygiene': 'hygiene_id'}.get(kind, 'vulnerability_id')
+    ids = set()
+    if triage.evidence_key:
+        ids |= set(Triage.objects.filter(project_id=triage.project_id, host=triage.host, kind=kind, evidence_key=triage.evidence_key)
+                   .exclude(**{column: None}).values_list(column, flat=True)[:50])
+    seen, match_id = set(), triage.carried_from if kind == 'cve_match' else None
+    for _ in range(6):
+        if not match_id or match_id in seen:
+            break
+        seen.add(match_id)
+        ids.add(match_id)
+        match_id = Triage.objects.filter(match_id=match_id).values_list('carried_from', flat=True).first()
+    ids.discard(finding.pk)
+    return sorted(ids)
+
+
 def worked_by_person(kind, finding):
-    """Whether a person has worked this finding: a status other than open, an assignee, a comment, a status change or heat set by hand,
-    or (for a CVE match) a manual validation request. Such a finding is never closed automatically: a person's work wins."""
+    """Whether a person has worked this finding: a status other than open, an assignee, a remediation date or owner, a comment, a status
+    change or heat set by hand, or (for a CVE match) a manual validation request, on this copy of it or on an earlier copy a rescan replaced
+    (``_copies``). Such a finding is never closed automatically: a person's work wins."""
     from cveFeed.models import FindingAuditEvent, FindingComment, OnDemandValidation
     audit_kind = AUDIT_KIND.get(kind, kind)
-    if finding.remediation_status != 'open' or getattr(finding, 'assignee_id', None):
+    if finding.remediation_status != 'open' or getattr(finding, 'assignee_id', None) or getattr(finding, 'remediation_by_id', None):
         return True
-    if FindingComment.objects.filter(finding_kind=audit_kind, finding_id=finding.pk).exists():
+    ids = [finding.pk] + _copies(kind, finding)
+    if FindingComment.objects.filter(finding_kind=audit_kind, finding_id__in=ids).exists():
         return True
-    if FindingAuditEvent.objects.filter(finding_kind=audit_kind, finding_id=finding.pk, actor__isnull=False).exists():
+    if FindingAuditEvent.objects.filter(finding_kind=audit_kind, finding_id__in=ids, actor__isnull=False).exists():
         return True
     triage = getattr(finding, 'triage', None)
     if triage is not None and triage.heat_override:
         return True
-    return kind == 'cve_match' and OnDemandValidation.objects.filter(match=finding, source='manual').exists()
+    return kind == 'cve_match' and OnDemandValidation.objects.filter(match_id__in=ids, source='manual').exists()
 
 
 def proof(kind, triage, finding):
@@ -632,13 +697,15 @@ def review_summary(triage_id):
 
 
 def newest_review_q(prefix=''):
-    """The newest review's verdict and outcome of a finding as two subquery annotations, ``review_verdict`` and ``review_outcome``
-    (``prefix`` reaches the Triage row's id from the finding: ``triage__``)."""
+    """The newest review's verdict, outcome, confidence and held reason of a finding as subquery annotations, ``review_verdict``,
+    ``review_outcome``, ``review_confidence`` and ``review_held`` (``prefix`` reaches the Triage row's id from the finding: ``triage__``)."""
     from django.db.models import CharField, OuterRef, Subquery
     from cveFeed.models import FindingReview
     newest = FindingReview.objects.filter(triage_id=OuterRef(prefix + 'id')).exclude(outcome=REFUSED).order_by('-created_at', '-id')
     return {'review_verdict': Subquery(newest.values('verdict')[:1], output_field=CharField()),
-            'review_outcome': Subquery(newest.values('outcome')[:1], output_field=CharField())}
+            'review_outcome': Subquery(newest.values('outcome')[:1], output_field=CharField()),
+            'review_confidence': Subquery(newest.values('confidence')[:1], output_field=CharField()),
+            'review_held': Subquery(newest.values('held_reason')[:1], output_field=CharField())}
 
 
 def newest_review_row_q(prefix=''):

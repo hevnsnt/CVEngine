@@ -211,6 +211,27 @@ class ResultBindingTests(SimpleTestCase):
         self.assertEqual([f['template_id'] for f in clean['findings']], ['t1', 't2', 't3', 't4'])
         self.assertEqual(clean['dropped'], 3)
 
+    def test_a_nuclei_finding_on_another_port_than_the_task_asked_is_dropped(self):
+        """SN-9: a target with a port is answered by that port; a bare host target still takes any port, as before."""
+        task = self._task('nuclei_light', {'targets': ['192.0.2.50:8443', 'www.a.example']}, [])
+        findings = [{'template_id': 'ok1', 'host': '192.0.2.50', 'matched_at': 'https://192.0.2.50:8443/'},
+                    {'template_id': 'ok2', 'host': '192.0.2.50:8443', 'matched_at': ''},
+                    {'template_id': 'ok3', 'host': 'www.a.example', 'matched_at': 'https://www.a.example:8080/x'},
+                    {'template_id': 'bad1', 'host': '192.0.2.50', 'matched_at': 'https://192.0.2.50:9443/'},
+                    {'template_id': 'bad2', 'host': '192.0.2.50', 'matched_at': 'https://192.0.2.50/'},
+                    {'template_id': 'bad3', 'host': '192.0.2.50:22', 'matched_at': ''}]
+        clean = sentinels.clean_result('nuclei_light', {'outcome': 'done', 'findings': findings}, task)
+        self.assertEqual([f['template_id'] for f in clean['findings']], ['ok1', 'ok2', 'ok3'])
+        self.assertEqual(clean['dropped'], 3)
+
+    def test_a_template_test_hit_on_another_port_is_not_a_hit_for_the_host_and_port_asked(self):
+        task = self._task('nuclei_validate', {'targets': ['www.a.example:443', 'www.a.example:8443']}, [])
+        hit = {'matcher-name': 'm', 'host': 'www.a.example:8443', 'matched-at': 'https://www.a.example:8443/'}
+        outcomes = [{'host': h, 'vulnerable': True, 'output': 'x', 'hit': hit} for h in ('www.a.example:443', 'www.a.example:8443')]
+        got = [sentinels._held_to_its_host(o) for o in outcomes]
+        self.assertEqual([o['vulnerable'] for o in got], [False, True])
+        self.assertEqual(got[0]['error'], sentinels.OTHER_HOST_HIT)
+
     def test_without_a_task_nothing_is_filtered_and_nothing_is_added(self):
         clean = sentinels.clean_result('nuclei_light', {'outcome': 'done', 'findings': [{'template_id': 't', 'host': 'x.example'}]})
         self.assertEqual(len(clean['findings']), 1)

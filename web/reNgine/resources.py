@@ -1040,6 +1040,9 @@ def report_state(store=None, state_fn=memory_state, now_fn=time.time):
     store.publish_state({'host': socket.gethostname(), 'memory': state, 'budget_mb': budget_mb(state), 'headroom_mb': headroom_mb(state),
                          'critical_mb': critical_mb(state), 'waiting_by_kind': waiting, 'running_by_kind': running,
                          'memory_kills_3h': sum(1 for event in store.events() if now - event.get('t', 0) <= 3 * 3600), 't': now})
+    if isinstance(store, RedisStore):  # this container's memory against its limit and its kernel oom kills, for the maintainer's signals (reNgine/container_signals.py)
+        from reNgine import container_signals
+        container_signals.publish('worker', client=store.r, now=now)
 
 
 def adaptive_history(since):
