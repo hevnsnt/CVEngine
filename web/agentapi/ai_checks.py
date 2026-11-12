@@ -35,15 +35,28 @@ own Sentinels whose contract version is at least ``external_since`` (``sentinel_
 - **Bounded**: unchanged from the built-in scanner's run (at most 20,000 bytes for a draft, 200,000 for an installed template, 64 targets, nuclei at
   10 requests a second, no retries, no interactsh, no template update; the Sentinel's own time limits).
 """
+import functools
 import hashlib
 import hmac
 import re
 
 KIND = 'nuclei_validate'
 MODES = ('validate', 'test')
-SHA256 = re.compile(r'^[0-9a-f]{64}$')
+SHA256 = re.compile(r'[0-9a-f]{64}')
 NOT_READ_ONLY = ('not tested: this check is not read-only, and only the built-in scanner may run such a check; this install scans with its own '
                  'Sentinels')
+
+
+def _never_raises(gate):
+    """A content gate refuses, it never raises: an error while judging the text of a check (a document too deep to read, a value of an unexpected
+    type) is itself the reason to refuse it, with the name of the error, so the AI pipeline and the dispatcher are not taken down by one draft."""
+    @functools.wraps(gate)
+    def judged(*args, **kwargs):
+        try:
+            return gate(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            return f'template not validated: it could not be checked ({type(exc).__name__}), so it is refused'
+    return judged
 
 
 def digest(text):
@@ -105,6 +118,7 @@ def approval_problem(mode, text, builtin=True, project=None, targets=None):
     return problem
 
 
+@_never_raises
 def content_problem(mode, text):
     """Why the text of a check may not go to a Sentinel that is not the built-in scanner, whatever approved it: for a draft the static gate, then
     read-only (``NOT_READ_ONLY`` for a test template that is not), own target and port, and the allowlist (``external_problem``)."""
@@ -203,6 +217,7 @@ def validation_readonly(text):
     return validation.readonly_problem(text) == ''
 
 
+@_never_raises
 def external_problem(text):
     """Why ``text`` may not run on a Sentinel that is not the built-in scanner, or "": read-only, and only the task's own target and port."""
     from cveFeed import check_allowlist, validation
@@ -216,7 +231,7 @@ def task_problem(task, builtin):
     names no stored sign-in. A task built by ``sentinel_dispatch`` passes; one changed after it was made, or whose approval was withdrawn, does not."""
     body = task.target if isinstance(task.target, dict) else {}
     mode, text, sha = body.get('mode'), body.get('template'), body.get('template_sha256')
-    if not isinstance(text, str) or not isinstance(sha, str) or not SHA256.match(sha) or not same_hash(digest(text), sha):
+    if not isinstance(text, str) or not isinstance(sha, str) or not SHA256.fullmatch(sha) or not same_hash(digest(text), sha):
         return 'the check does not match its template hash'
     problem = approval_problem(mode, text, builtin=builtin, project=task.project_id, targets=body.get('targets'))
     if not problem and not builtin:

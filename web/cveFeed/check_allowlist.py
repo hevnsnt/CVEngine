@@ -9,7 +9,10 @@ Every rule here is an allowlist, so a nuclei feature this module does not know i
   PyYAML is YAML 1.1. They disagree on duplicate keys (PyYAML keeps the last, yaml.v3 refuses or keeps another), a second document (yaml.v3 reads
   the first), anchors, aliases and merge keys, explicit tags, YAML 1.1 words such as ``on``/``yes``/``no`` (PyYAML: booleans, yaml.v3: strings),
   non-decimal or sexagesimal numbers, and the line breaks U+0085, U+2028 and U+2029 (YAML 1.1 only). Any of these is refused, so the text this
-  module judges is the text nuclei runs.
+  module judges is the text nuclei runs. Read the same by both, so accepted: a plain decimal such as ``9.8`` (a float in both), a CRLF line end
+  (one line break in both YAML versions, read as a line feed; a lone carriage return is refused), and a list of text where nuclei takes text or a
+  list of text (``author``). A document nested more than ``MAX_DEPTH`` levels is refused. Whatever goes wrong while judging a template is a refusal,
+  with a reason, never an exception.
 - **Known keys only** (``TOP_KEYS``, ``INFO_KEYS``, per-protocol ``BLOCK_KEYS``, ``MATCHER_KEYS``, ``EXTRACTOR_KEYS``): matched exactly, so a
   look-alike (``b\u043edy`` with a Cyrillic o, ``Method``) or a future nuclei key is refused.
 - **Every expression uses only listed names** (``expression_problem``): each ``{{...}}`` anywhere in the document, every ``dsl`` string of a matcher or
@@ -17,7 +20,10 @@ Every rule here is an allowlist, so a nuclei feature this module does not know i
   network, file, environment, clock or sleep effect; ``resolve``, ``jarm``, ``public_ip``, ``wappalyzer``, ``llm_prompt``, ``wait_for``,
   ``print_debug``, ``unix_time``, ``date_time``, ``rand_*`` and every other helper are refused. A bare name must be a target placeholder
   (``PLACEHOLDERS``), a response part (``RESPONSE_NAMES``, optionally numbered ``body_2``) or a variable or extractor the template itself defines.
-  nuclei's other expression marker (U+00A7) is refused anywhere.
+  A string literal in an expression may not contain a quote character of either kind: nuclei's lexer before v3.9.0 ended a string at either kind,
+  so what is one string here was code there. nuclei's other expression marker (U+00A7), and the control and bidi characters, are refused anywhere,
+  in the text and in the strings decoded from it. A helper's output is not bounded by its input, so memory is bounded by the limits on the nuclei
+  process, not by this list.
 - **Plain requests to the task's own host and port** (``http_problem``): methods GET, HEAD or OPTIONS; a raw request is exactly one request line and
   header lines, no body, no ``@`` annotation (``@Host`` re-aims a request), no ``Content-Length``, ``Transfer-Encoding`` or ``Connection``; a ``Host``
   header only in raw text and only ``{{Hostname}}``, ``{{Host}}`` or ``{{Host}}:{{Port}}``; no ``Authorization``, ``Cookie``, ``Proxy-*``,
@@ -59,8 +65,10 @@ RESPONSE_NAMES = frozenset({'body', 'header', 'all_headers', 'status_code', 'con
                             'subject_cn', 'subject_org', 'subject_an', 'issuer_cn', 'issuer_org', 'serial'})
 _NUMBERED = frozenset({'body', 'header', 'all_headers', 'status_code', 'content_length', 'content_type', 'response', 'raw', 'request', 'duration'})
 PARTS = frozenset({'body', 'header', 'all_headers', 'all', 'response', 'raw', 'request', 'content_type', 'data', 'answer', 'ns', 'extra', 'question'})
-# nuclei DSL helpers (``nuclei -ldf`` of the pinned image) that only compute on their arguments: no network, file, environment, clock or sleep, and
-# output bounded by their input (no ``repeat``, ``rand_base`` or decompression, which a template could use to exhaust memory).
+# nuclei DSL helpers (``nuclei -ldf`` of the pinned image) that only compute on their arguments: no network, file, environment, clock or sleep.
+# Their output is NOT bounded by their input (``replace(body,'a',body)`` is quadratic, and variables that each double the one before grow without
+# limit), so this list does not bound memory: the memory and time limits on the nuclei process do (``client.tools``). ``repeat``, ``rand_base`` and
+# decompression stay off the list because they make output out of nothing.
 FUNCTIONS = frozenset({
     'contains', 'contains_all', 'contains_any', 'starts_with', 'ends_with', 'line_starts_with', 'line_ends_with', 'equals_any',
     'regex', 'regex_any', 'regex_all', 'compare_versions', 'len',
@@ -71,6 +79,7 @@ FUNCTIONS = frozenset({
 })
 LITERALS = frozenset({'true', 'false'})
 MAX_EXPRESSION = 1000
+MAX_DEPTH = 20  # nesting of mappings and lists: a real template has about six levels
 MAX_HEADERS = 12
 
 # Headers a check never sets: the destination (``Host`` outside raw text), forwarding and rewrite headers that steer a proxy or a back end,
@@ -86,19 +95,24 @@ _CREDENTIAL_VALUE = re.compile(
     r'|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b'  # an AWS key id
     r'|(?:passw\w*|secret|token|api[-_]?key|session\w*|sid|auth\w*)\s*[=:]'  # name=value or name: value
     r'|[A-Za-z0-9+/_-]{32,}={0,2}')  # a long opaque string
-_HEADER_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9-]{0,63}$')
-_RAW_HOST = re.compile(r'^\{\{(?:Hostname|Host)\}\}$|^\{\{Host\}\}:\{\{Port\}\}$')
-_REQUEST_LINE = re.compile(r'^(GET|HEAD|OPTIONS) (\S+) HTTP/1\.[01]$')
-_IDENT = re.compile(r'^[A-Za-z_][A-Za-z0-9_]{0,40}$')
-_META_KEY = re.compile(r'^[a-z][a-z0-9_-]{0,40}$')
-_TEMPLATE_ID = re.compile(r'^[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*$')
-_NUMBERED_NAME = re.compile(r'^([a-z_]+?)_([1-9][0-9]?)$')
-_RANDSTR = re.compile(r'^randstr(?:_[1-9][0-9]?)?$')
-# YAML 1.1 line breaks (YAML 1.2 reads them as ordinary characters), bidi controls and every C0/C1 control but tab and newline.
-_BAD_CHARS = re.compile('[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]')
+_HEADER_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9-]{0,63}')
+_RAW_HOST = re.compile(r'\{\{(?:Hostname|Host)\}\}|\{\{Host\}\}:\{\{Port\}\}')
+_REQUEST_LINE = re.compile(r'(GET|HEAD|OPTIONS) (\S+) HTTP/1\.[01]')
+_IDENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]{0,40}')
+_META_KEY = re.compile(r'[A-Za-z][A-Za-z0-9_-]{0,40}')
+_TEMPLATE_ID = re.compile(r'[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*')
+_NUMBERED_NAME = re.compile(r'([a-z_]+?)_([1-9][0-9]?)')
+_RANDSTR = re.compile(r'randstr(?:_[1-9][0-9]?)?')
+# YAML 1.1 line breaks (YAML 1.2 reads them as ordinary characters), bidi controls and every C0/C1 control but tab and newline. A carriage return
+# is allowed only as the first half of CRLF (``_LONE_CR``): both YAML versions and both readers make CRLF one line break read as a line feed.
+_BAD_CHARS = re.compile('[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]')
+_LONE_CR = re.compile('\r(?!\n)')
 _TOKEN = re.compile(r'''\s+|(?P<str>'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*")|(?P<num>\d+(?:\.\d+)?)|(?P<id>[A-Za-z_][A-Za-z0-9_]*)'''
                     r'''|(?P<op>==|!=|>=|<=|=~|!~|&&|\|\||[-+*/%<>!(),?:])''')
-_PLAIN_INT = re.compile(r'^[-+]?(?:0|[1-9][0-9]*)$')
+_PLAIN_INT = re.compile(r'[-+]?(?:0|[1-9][0-9]*)')
+_PLAIN_FLOAT = re.compile(r'[-+]?(?:0|[1-9][0-9]{0,8})\.[0-9]{1,10}')
+# what yaml.v3 reads as a number or a special float but PyYAML (YAML 1.1) leaves as text (``1e3``, ``9.8e0``, ``.5``, ``0o7``, ``.inf``)
+_V3_NUMBER = re.compile(r'[-+]?(?:\.[0-9]+|[0-9]+(?:\.[0-9]*)?)(?:[eE][-+]?[0-9]+)?|0o[0-7]+|0x[0-9a-fA-F]+|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)')
 _PLAIN_BOOL = frozenset({'true', 'True', 'TRUE', 'false', 'False', 'FALSE'})
 _PLAIN_NULL = frozenset({'', '~', 'null', 'Null', 'NULL'})
 
@@ -114,13 +128,16 @@ def yaml_problem(text):
     import yaml
     if not isinstance(text, str) or not text or '\0' in text:
         return _fail('empty or not text')
-    bad = _BAD_CHARS.search(text)
-    if bad:
-        return _fail(f'it contains the control or line-break character U+{ord(bad.group()):04X}')
-    if '\u00a7' in text:
-        return _fail("it contains nuclei's second expression marker (U+00A7)")
+    problem = _chars_problem(text)
+    if problem:
+        return problem
+    events, depth = [], 0
     try:
-        events = list(yaml.parse(text, Loader=yaml.SafeLoader))
+        for event in yaml.parse(text, Loader=yaml.SafeLoader):
+            events.append(event)
+            depth += isinstance(event, (yaml.SequenceStartEvent, yaml.MappingStartEvent)) - isinstance(event, (yaml.SequenceEndEvent, yaml.MappingEndEvent))
+            if depth > MAX_DEPTH:
+                return _fail(f'it is nested more than {MAX_DEPTH} levels deep')
         root = yaml.compose(text, Loader=yaml.SafeLoader)
     except yaml.YAMLError:
         return _fail('not valid YAML, or more than one YAML document')
@@ -143,14 +160,27 @@ def yaml_problem(text):
     return _duplicate_problem(root)
 
 
+def _chars_problem(text):
+    """Why a text (the document, or one string decoded from it) holds a character no template needs, or ``''``: a control or line-break character
+    other than tab and newline (a carriage return only before a line feed), a bidi control, or nuclei's second expression marker (U+00A7)."""
+    bad = _BAD_CHARS.search(text) or _LONE_CR.search(text)
+    if bad:
+        return _fail(f'it contains the control or line-break character U+{ord(bad.group()):04X}')
+    if '\u00a7' in text:
+        return _fail("it contains nuclei's second expression marker (U+00A7)")
+    return ''
+
+
 def _plain_scalar_problem(tag, value):
     kind = tag.rsplit(':', 1)[-1]
     if kind == 'merge':
         return 'YAML merge keys are not allowed'
-    if kind == 'str' or (kind == 'bool' and value in _PLAIN_BOOL) or (kind == 'int' and _PLAIN_INT.match(value)) or \
-            (kind == 'null' and value in _PLAIN_NULL):
+    # A plain decimal such as 9.8 is a float in both (the same text, the same double); ``9.8e0``, ``1e3``, ``.5`` and the like are text to PyYAML
+    # and a number to yaml.v3, so a plain text that yaml.v3 would read as a number is refused too.
+    if (kind == 'str' and not _V3_NUMBER.fullmatch(value)) or (kind == 'bool' and value in _PLAIN_BOOL) or (kind == 'int' and _PLAIN_INT.fullmatch(value)) \
+            or (kind == 'float' and _PLAIN_FLOAT.fullmatch(value)) or (kind == 'null' and value in _PLAIN_NULL):
         return ''
-    return f'the plain value {value[:40]!r} reads differently in YAML 1.1 and 1.2 (quote it, or write true, false or a decimal number)'
+    return f'the plain value {value[:40]!r} reads differently in YAML 1.1 and 1.2 (quote it, or write true, false, a whole number or a decimal such as 9.8)'
 
 
 def _duplicate_problem(node):
@@ -189,6 +219,9 @@ def expression_problem(expr, names=frozenset()):
         if match is None:
             return f'an expression contains {expr[pos]!r}, which no allowed expression uses: {expr[:60]!r}'
         pos = match.end()
+        if match.lastgroup == 'str' and ('\'' in match.group('str')[1:-1] or '"' in match.group('str')[1:-1]):
+            # nuclei's expression lexer before v3.9.0 ended a string at either kind of quote, so what this lexer reads as one string it read as code
+            return f'a string in an expression contains a quote character; write text with quotes in a word or regex matcher: {expr[:60]!r}'
         if match.lastgroup:
             tokens.append((match.lastgroup, match.group(match.lastgroup)))
     for i, (kind, value) in enumerate(tokens):
@@ -204,9 +237,9 @@ def expression_problem(expr, names=frozenset()):
 
 
 def _known_name(name, names):
-    if name in PLACEHOLDERS or name in RESPONSE_NAMES or name in LITERALS or name in names or _RANDSTR.match(name):
+    if name in PLACEHOLDERS or name in RESPONSE_NAMES or name in LITERALS or name in names or _RANDSTR.fullmatch(name):
         return True
-    numbered = _NUMBERED_NAME.match(name)
+    numbered = _NUMBERED_NAME.fullmatch(name)
     return bool(numbered and numbered.group(1) in _NUMBERED)
 
 
@@ -257,10 +290,10 @@ def _info_problem(info):
         return problem
     if not isinstance(info.get('name'), str) or str(info.get('severity', '')).lower() not in SEVERITIES:
         return 'info needs a name and a known severity'
-    for key in ('name', 'author', 'severity', 'description', 'remediation', 'impact'):
+    for key in ('name', 'severity', 'description', 'remediation', 'impact'):
         if key in info and not isinstance(info[key], str):
             return f'info {key} must be text'
-    for key in ('reference', 'tags'):
+    for key in ('author', 'reference', 'tags'):  # nuclei reads each of these as text or a list of text, and so do both YAML readers
         value = info.get(key)
         if value is not None and not isinstance(value, str) and not (isinstance(value, list) and all(isinstance(v, str) for v in value)):
             return f'info {key} must be text or a list of text'
@@ -270,7 +303,7 @@ def _info_problem(info):
             return problem or 'info classification holds only plain values'
     if 'metadata' in info:
         meta = info['metadata']
-        if not isinstance(meta, dict) or not all(isinstance(k, str) and _META_KEY.match(k) for k in meta) or \
+        if not isinstance(meta, dict) or not all(isinstance(k, str) and _META_KEY.fullmatch(k) for k in meta) or \
                 not all(_scalar(v) or (isinstance(v, list) and all(_scalar(i) for i in v)) for v in meta.values()):
             return 'info metadata holds only plain names and values'
     return ''
@@ -278,7 +311,7 @@ def _info_problem(info):
 
 def header_problem(name, value):
     """Why a request header may not be sent by a check, or ``''``: a plain name not on ``FORBIDDEN_HEADERS``, no credential in its name or value."""
-    if not isinstance(name, str) or not _HEADER_NAME.match(name):
+    if not isinstance(name, str) or not _HEADER_NAME.fullmatch(name):
         return f'the header name {str(name)[:40]!r} is not a plain header name'
     lowered = name.lower()
     if lowered in FORBIDDEN_HEADERS or lowered.startswith(_FORBIDDEN_HEADER_PREFIXES):
@@ -301,7 +334,7 @@ def raw_problem(text):
         lines.pop()
     if not lines or '\r' in text:
         return 'a raw request is one request line and header lines'
-    line = _REQUEST_LINE.match(lines[0])
+    line = _REQUEST_LINE.fullmatch(lines[0])
     if not line:
         return f'a raw request line must be GET, HEAD or OPTIONS, a path and HTTP/1.1: {lines[0][:60]!r}'
     target = line.group(2)
@@ -319,7 +352,7 @@ def raw_problem(text):
         value = value.strip()
         if name.lower() == 'host':
             hosts += 1
-            if not _RAW_HOST.match(value) or hosts > 1:
+            if not _RAW_HOST.fullmatch(value) or hosts > 1:
                 return 'a raw Host header must be {{Hostname}}, {{Host}} or {{Host}}:{{Port}}, once'
             continue
         problem = header_problem(name, value)
@@ -343,7 +376,7 @@ def http_problem(block):
             if problem:
                 return problem
     else:
-        if block.get('method', 'GET') not in METHODS:
+        if not isinstance(block.get('method', 'GET'), str) or block.get('method', 'GET') not in METHODS:
             return f'the http method {str(block.get("method"))[:20]!r} is not GET, HEAD or OPTIONS'
         if not isinstance(block.get('path'), list) or not block['path'] or not all(isinstance(p, str) for p in block['path']):
             return 'an http block needs a list of paths'
@@ -368,7 +401,7 @@ def http_problem(block):
 def _part_ok(part):
     if not isinstance(part, str):
         return False
-    numbered = _NUMBERED_NAME.match(part)
+    numbered = _NUMBERED_NAME.fullmatch(part)
     return part in PARTS or bool(numbered and numbered.group(1) in _NUMBERED)
 
 
@@ -382,13 +415,13 @@ def _operators_problem(block, names):
             problem = _keys_problem(item, allowed, where)
             if problem:
                 return problem
-            if item.get('type') not in types:
+            if not isinstance(item.get('type'), str) or item['type'] not in types:
                 return f'{where} of type {str(item.get("type"))[:20]!r} is not allowed'
             part = item.get('part')
             if part is not None and not _part_ok(part):
                 return f'{where} reads the part {str(part)[:30]!r}, which is not a response part'
             for field in ('condition',):
-                if field in item and item[field] not in ('and', 'or'):
+                if field in item and not (isinstance(item[field], str) and item[field] in ('and', 'or')):
                     return f'{where} condition must be and or or'
             dsl = item.get('dsl')
             if dsl is not None:
@@ -398,7 +431,7 @@ def _operators_problem(block, names):
                     problem = expression_problem(expr, names)
                     if problem:
                         return f'{where} dsl: {problem}'
-    if block.get('matchers-condition', 'and') not in ('and', 'or'):
+    if not isinstance(block.get('matchers-condition', 'and'), str) or block.get('matchers-condition', 'and') not in ('and', 'or'):
         return 'matchers-condition must be and or or'
     return ''
 
@@ -421,7 +454,7 @@ def _variables_problem(variables, names):
     if not isinstance(variables, dict):
         return 'variables must be a mapping'
     for key, value in variables.items():
-        if not isinstance(key, str) or not _IDENT.match(key) or key in PLACEHOLDERS or key in RESPONSE_NAMES or key in FUNCTIONS or key in LITERALS:
+        if not isinstance(key, str) or not _IDENT.fullmatch(key) or key in PLACEHOLDERS or key in RESPONSE_NAMES or key in FUNCTIONS or key in LITERALS:
             return f'the variable name {str(key)[:40]!r} is not a plain name of its own'
         if not isinstance(value, (str, int)) or isinstance(value, bool):
             return f'the variable {key!r} must be text or a number'
@@ -433,7 +466,15 @@ def _variables_problem(variables, names):
 
 
 def allowlist_problem(text):
-    """Why ``text`` is not on the allowlist a Sentinel other than the built-in scanner runs, or ``''`` (the module text)."""
+    """Why ``text`` is not on the allowlist a Sentinel other than the built-in scanner runs, or ``''`` (the module text). It refuses, it never
+    raises: any error while judging a template is itself the reason to refuse it."""
+    try:
+        return _allowlist_problem(text)
+    except Exception as exc:  # noqa: BLE001 - a gate that crashes must refuse, never let the template through or take the caller down
+        return _fail(f'it could not be checked ({type(exc).__name__}), so it is refused')
+
+
+def _allowlist_problem(text):
     problem = yaml_problem(text)
     if problem:
         return problem
@@ -444,7 +485,7 @@ def allowlist_problem(text):
     problem = _keys_problem(doc, TOP_KEYS, 'the template')
     if problem:
         return _fail(problem)
-    if not isinstance(doc.get('id'), str) or not _TEMPLATE_ID.match(doc['id']):
+    if not isinstance(doc.get('id'), str) or not _TEMPLATE_ID.fullmatch(doc['id']):
         return _fail('missing or malformed id')
     problem = _info_problem(doc.get('info'))
     if problem:
@@ -468,6 +509,9 @@ def allowlist_problem(text):
             if problem:
                 return _fail(problem)
     for value in _strings(doc):
+        problem = _chars_problem(value)  # the escapes of a quoted string (\\u00a7, \\x0b, \\u202e) decode to what the text scan refuses
+        if problem:
+            return problem
         problem = braces_problem(value, names)
         if problem:
             return _fail(problem)
@@ -495,6 +539,6 @@ def _block_problem(proto, block):
         return ''
     if block.get('address', '{{Host}}:{{Port}}') != '{{Host}}:{{Port}}':
         return 'ssl address must be {{Host}}:{{Port}}'
-    if any(k in block and block[k] not in TLS_VERSIONS for k in ('min_version', 'max_version')):
+    if any(k in block and not (isinstance(block[k], str) and block[k] in TLS_VERSIONS) for k in ('min_version', 'max_version')):
         return 'ssl versions must be one of ' + ', '.join(sorted(TLS_VERSIONS))
     return ''

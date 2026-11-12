@@ -593,6 +593,83 @@ class ServerCorpusTests(SimpleTestCase):
             self.assertIn(name, refused)
 
 
+class ThirdPassServerTests(SimpleTestCase):
+    """N1 to N7 of the third security review, on the server's side of the same rules."""
+
+    def corpus(self):
+        return {c["name"]: c["template"] for c in json.loads(CORPUS_COPY.read_text(encoding="utf-8"))["cases"]}
+
+    def test_a_helper_hidden_in_a_string_that_holds_the_other_quote_is_refused_before_it_is_sent(self):
+        for name in ("q_mixed_quote_dsl", "q_mixed_quote_header", "q_mixed_quote_variable", "q_dq_with_sq_inside"):
+            with self.subTest(case=name):
+                text = self.corpus()[name]
+                self.assertEqual(validation.readonly_problem(text), "")  # only the lexer rule refuses it
+                self.assertIn("quote character", ai_checks.external_problem(text))
+                self.assertIn("quote character", ai_checks.content_problem("test", text) if validation.readonly_problem(text) == "" else "")
+
+    def test_the_gates_refuse_and_never_raise(self):
+        corpus = self.corpus()
+        for name in ("nested_6000_deep", "type_is_a_list", "ssl_version_is_a_list", "method_is_a_list"):
+            for label, gate in (("external", ai_checks.external_problem), ("test", lambda t: ai_checks.content_problem("test", t)),
+                                ("validate", lambda t: ai_checks.content_problem("validate", t)), ("readonly", validation.readonly_problem),
+                                ("allowlist", check_allowlist.allowlist_problem)):
+                with self.subTest(case=name, gate=label):
+                    problem = gate(corpus[name])  # returns, never raises
+                    self.assertIsInstance(problem, str)
+                    if label != "readonly":  # the read-only rule alone does not look at a matcher type or an ssl version
+                        self.assertTrue(problem.startswith(("template not validated: ", "not tested: ")), problem)
+        self.assertEqual(templategen.static_check(corpus["nested_6000_deep"])[0], False)
+
+    def test_an_error_inside_a_content_gate_is_a_refusal_with_a_reason(self):
+        with mock.patch.object(check_allowlist, "allowlist_problem", side_effect=ValueError("boom")):
+            self.assertEqual(ai_checks.external_problem(TEMPLATE), "template not validated: it could not be checked (ValueError), so it is refused")
+        with mock.patch.object(validation, "readonly_problem", side_effect=RecursionError()):
+            self.assertIn("RecursionError", ai_checks.content_problem("test", TEMPLATE))
+        with mock.patch.object(templategen, "static_check", side_effect=TypeError("boom")):
+            self.assertIn("TypeError", ai_checks.content_problem("validate", TEMPLATE))
+
+    def test_the_hash_must_match_whole_a_trailing_newline_is_no_hash(self):
+        self.assertTrue(ai_checks.SHA256.fullmatch(SHA))
+        self.assertFalse(ai_checks.SHA256.fullmatch(SHA + "\n"))
+
+    def test_names_decoded_text_and_float_rules_are_the_sentinels(self):
+        corpus = self.corpus()
+        for name, expect in (("trailing_newline_in_header_name", "header name"), ("trailing_newline_in_template_id", "id"),
+                             ("section_sign_by_escape_in_value", "U+00A7"), ("control_character_by_escape_in_value", "U+000B"),
+                             ("raw_get_blank_line_then_header_like_body", "body"), ("lone_carriage_return", "U+000D"),
+                             ("float_with_exponent", "reads differently")):
+            with self.subTest(case=name):
+                self.assertIn(expect, ai_checks.external_problem(corpus[name]))
+        for name in ("plain_float_cvss_score", "crlf_line_endings", "upper_case_metadata_key", "list_of_authors"):
+            with self.subTest(case=name):
+                self.assertEqual(ai_checks.external_problem(corpus[name]), "")
+
+    def test_the_writer_is_told_the_exact_rules_and_a_check_written_by_them_passes(self):
+        prompt = templategen.SYSTEM_PROMPT
+        for helper in check_allowlist.FUNCTIONS:
+            self.assertIn(helper, prompt)
+        for fragment in (f"{check_allowlist.MAX_DEPTH} levels", f"{check_allowlist.MAX_HEADERS} headers", "quote character", "9.8", "list of text", "no blank line"):
+            self.assertIn(fragment, prompt)
+        for name in check_allowlist.PLACEHOLDERS:
+            self.assertIn(name, prompt)
+        written = (
+            "id: cve-2099-0002\ninfo:\n  name: Example 1.2 version\n  author: [cvengine-ai, second]\n  severity: high\n  description: |\n    Reads a version.\n"
+            "  reference:\n    - https://example.com/advisory\n  classification:\n    cvss-metrics: CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H\n"
+            "    cvss-score: 9.8\n    cve-id: CVE-2099-0002\n  metadata:\n    Verified: true\n    max-request: 1\n  tags: cve,cve2099,example\n"
+            "http:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/version\"\n    matchers-condition: and\n    matchers:\n"
+            "      - type: status\n        status:\n          - 200\n      - type: dsl\n        dsl:\n"
+            "          - 'compare_versions(version, \"< 1.2.4\")'\n    extractors:\n      - type: regex\n        name: version\n        part: body\n"
+            "        group: 1\n        regex:\n          - 'Example/([0-9.]+)'\n")
+        for text in (written, written.replace("\n", "\r\n")):
+            self.assertEqual(ai_checks.external_problem(text), "")
+            self.assertEqual(templategen.static_check(text, expected_cve_id="CVE-2099-0002"), (True, ""))
+
+    def test_a_refused_draft_gives_the_author_a_plain_reason(self):
+        for name in ("q_mixed_quote_dsl", "float_with_exponent", "trailing_newline_in_header_name"):
+            problem = ai_checks.content_problem("test", self.corpus()[name])
+            self.assertTrue(problem.startswith("template not validated: ") and len(problem) > 40 and "Traceback" not in problem, problem)
+
+
 class SameVerdictTests(SimpleTestCase):
     def test_the_server_and_the_sentinel_judge_every_corpus_template_alike(self):
         from cvengine_scanner import checks
@@ -611,7 +688,7 @@ class SameVerdictTests(SimpleTestCase):
         from cvengine_scanner import check_allowlist as library
         for name in ('TOP_KEYS', 'INFO_KEYS', 'CLASSIFICATION_KEYS', 'BLOCK_KEYS', 'INPUT_KEYS', 'MATCHER_KEYS', 'MATCHER_TYPES', 'EXTRACTOR_KEYS',
                      'EXTRACTOR_TYPES', 'METHODS', 'DNS_TYPES', 'TLS_VERSIONS', 'PLACEHOLDERS', 'RESPONSE_NAMES', 'PARTS', 'FUNCTIONS', 'LITERALS',
-                     'FORBIDDEN_HEADERS', 'MAX_HEADERS', 'MAX_EXPRESSION'):
+                     'FORBIDDEN_HEADERS', 'MAX_HEADERS', 'MAX_EXPRESSION', 'MAX_DEPTH'):
             with self.subTest(table=name):
                 self.assertEqual(getattr(check_allowlist, name), getattr(library, name))
 

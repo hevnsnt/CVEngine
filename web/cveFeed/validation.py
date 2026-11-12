@@ -109,8 +109,8 @@ def readonly_problem(yaml_text):
         return 'template not validated: empty or too large'
     try:
         doc = load_template(yaml_text)
-    except yaml.YAMLError:
-        return 'template not validated: not valid YAML'
+    except (yaml.YAMLError, RecursionError):  # a document nested thousands deep is no template
+        return 'template not validated: not valid YAML, or nested too deeply'
     if not isinstance(doc, dict):
         return 'template not validated: not a template'
     from cveFeed import templategen
