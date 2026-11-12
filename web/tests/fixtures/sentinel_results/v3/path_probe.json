@@ -1,0 +1,29 @@
+{
+  "outcome": "done",
+  "results": [
+    {
+      "ip": "192.0.2.10",
+      "port": 81,
+      "plain": true,
+      "odd": true
+    },
+    {
+      "ip": "198.51.100.20",
+      "port": 8081,
+      "plain": true,
+      "odd": true
+    },
+    {
+      "ip": "203.0.113.30",
+      "port": 9,
+      "plain": true,
+      "odd": false
+    },
+    {
+      "ip": "203.0.113.31",
+      "port": 9,
+      "plain": false,
+      "odd": null
+    }
+  ]
+}

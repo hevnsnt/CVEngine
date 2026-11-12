@@ -109,6 +109,7 @@ ALLOWED = {
     ],
     'nuclei': [
         'Dockerfile',
+        'agentapi/ai_checks.py',  # 1.4.0 AI-written checks on Sentinels: the rules a nuclei_validate task must keep, runs nothing (the Sentinel runs the tool)
         'agentapi/egress.py',  # 1.3.4 outbound connection log (develop): names the tools whose probe plans it records, runs nothing
         'agentapi/mcp.py',
         'agentapi/models.py',

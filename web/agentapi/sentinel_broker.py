@@ -2134,7 +2134,7 @@ def approved_check(ctx, task_id):
     read-only and aimed only at the task's own target and port). Anything else, a task of another Sentinel or kind included, is a 404 and audited."""
     from agentapi import ai_checks
     agent = _sentinel_agent(ctx, write=False)
-    broker._limit(agent.token, 'check')
+    _limit(agent.token, 'check')
     task = SentinelTask.objects.select_related('project').filter(pk=_int(task_id), agent=agent, kind=AI_CHECK, status__in=('claimed', 'running')).first()
     why = 'not a check this Sentinel holds' if task is None else ai_checks.task_problem(task, builtin=is_builtin(agent))
     if why:

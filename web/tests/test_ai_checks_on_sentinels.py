@@ -112,6 +112,7 @@ class RoutingTests(Base):
                 task = SentinelTask.objects.create(project=self.project, kind=kind, target={})
                 self.assertEqual(sentinel_broker.effective(outside.agent).refusal(task), ('capability', sentinel_broker.BUILTIN))
                 self.assertIsNone(sentinel_broker.effective(own.agent).refusal(task))
+                task.delete()  # only asked about, never meant to run
         valid, _ = templategen.validate_anywhere(TEMPLATE, self.project)
         self.assertTrue(valid)
         self.assertEqual((len(own.served), len(outside.served)), (1, 0))
@@ -141,14 +142,19 @@ class NeverSentTests(Base):
     def assertNothingSent(self):
         self.assertFalse(SentinelTask.objects.filter(kind='nuclei_validate').exists())
 
-    def test_a_draft_that_fails_the_static_gate_is_never_sent(self):
-        for fake in (self.builtin(), self.external(name='own-2')):
-            with self.subTest(builtin=not fake.external):
-                valid, output = templategen.validate_anywhere(NOT_READ_ONLY, self.project)
-                self.assertFalse(valid)
-                self.assertIn('not validated', output)
-                self.assertNothingSent()
-            fake.stop()
+    def test_a_draft_that_fails_the_static_gate_is_never_sent_to_the_builtin_scanner(self):
+        self.builtin()
+        self.assertDraftRefused()
+
+    def test_a_draft_that_fails_the_static_gate_is_never_sent_to_a_sentinel(self):
+        self.external()
+        self.assertDraftRefused()
+
+    def assertDraftRefused(self):
+        valid, output = templategen.validate_anywhere(NOT_READ_ONLY, self.project)
+        self.assertFalse(valid)
+        self.assertIn('not validated', output)
+        self.assertNothingSent()
 
     def test_a_test_template_the_server_did_not_approve_is_never_sent_to_any_scanner(self):
         self.builtin()
@@ -242,6 +248,21 @@ class HandOutTests(Base):
             sentinel_broker.approved_check(self.ctx(fake), held.pk)
         self.assertEqual(caught.exception.status, 404)
 
+    def test_a_sentinel_token_reaches_the_route_over_http(self):
+        from django.test import Client
+        from agentapi.auth import SCOPE_SENTINEL, create_token
+        fake = self.external()
+        token, raw = create_token(fake.agent.token.user, 'aival-http', scope=SCOPE_SENTINEL)
+        fake.agent.token = token
+        fake.agent.save(update_fields=['token'])
+        task = self.queued(self.target())
+        self.assertEqual(self.claim(fake)['id'], task.pk)
+        response = Client().get(f'/api/v1/sentinel/tasks/{task.pk}/check', HTTP_AUTHORIZATION=f'Bearer {raw}')
+        self.assertEqual(response.status_code, 200, response.content[:300])
+        self.assertEqual(response.json()['template_sha256'], SHA)
+        other = self.queued(self.target())
+        self.assertEqual(Client().get(f'/api/v1/sentinel/tasks/{other.pk}/check', HTTP_AUTHORIZATION=f'Bearer {raw}').status_code, 404)
+
     def test_the_route_is_published(self):
         from agentapi import rest
         self.assertTrue(any(method == 'GET' and pattern == r'sentinel/tasks/(?P<task_id>\d+)/check' for method, pattern, *_ in rest.ROUTES))
@@ -251,22 +272,20 @@ class HandOutTests(Base):
 
 class ResultTests(Base):
     def test_an_external_result_that_does_not_name_the_check_it_was_sent_is_rejected(self):
-        for change in ({'template_sha256': 'b' * 64}, {'template_sha256': None}):
-            with self.subTest(change=change):
-                def answer(task, change=change):
-                    out = echo()(task)
-                    out.update({k: v for k, v in change.items() if v is not None})
-                    if change.get('template_sha256') is None:
-                        out.pop('template_sha256')
-                    return out
-                fake = self.external(responders={'nuclei_validate': answer}, name=f'own-{len(change)}-{change["template_sha256"] or "none"}'[:40])
-                with self.assertRaises(resources.ScannerUnavailable):
-                    templategen.validate_anywhere(TEMPLATE, self.project)
-                task = fake.tasks()[-1]
+        fake = self.external()
+        good = {'outcome': 'done', 'valid': True, 'output': 'ok', 'fixture_ok': True, 'fixture_note': 'no match'}
+        for name, body in (('another hash', {**good, 'template_sha256': 'b' * 64}), ('no hash', good)):
+            with self.subTest(case=name):
+                task = self.queued({'mode': 'validate', 'template': TEMPLATE, 'template_sha256': SHA})
+                self.assertEqual(self.claim(fake)['id'], task.pk)
+                sentinel_broker.accept_task(self.ctx(fake), task.pk)
+                with self.assertRaises(ApiError) as caught:
+                    sentinel_broker.report_result(self.ctx(fake), task.pk, body)
+                self.assertEqual(caught.exception.status, 400)
+                task.refresh_from_db()
                 self.assertEqual(task.status, 'failed')
                 self.assertIn('rejected', task.error)
-                fake.stop()
-                SentinelTask.objects.all().delete()
+                self.assertFalse(task.result)  # nothing of it kept
 
     def test_a_hit_that_names_another_host_or_an_unasked_host_is_not_counted(self):
         def outcomes(targets):
@@ -308,6 +327,9 @@ class PathSurveyTests(Base):
         self.assertEqual(out['vantage'], 'sentinels')
         self.assertEqual(os_detection.sentinel_path_state(fake.agent.pk)['state'], 'interfering')
         self.assertEqual(os_detection.path_state(), before)  # the install-wide verdict is the built-in scanner's alone
+        os_detection.record_path(out)  # what the daily task does with it
+        self.assertEqual(os_detection.path_state()['state'], before['state'])
+        self.assertEqual(os_detection.status()['path']['sentinels'], {str(fake.agent.pk): 'interfering'})  # shown, per Sentinel
 
     def test_an_os_guess_from_a_sentinel_whose_path_interferes_is_not_believed(self):
         fake, _out = self.survey([{'ip': ip, 'port': port, 'plain': True, 'odd': False} for ip, port in self.TARGETS])

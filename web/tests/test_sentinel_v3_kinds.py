@@ -14,7 +14,7 @@ from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from agentapi import scanner_state, sentinel_broker
+from agentapi import ai_checks, scanner_state, sentinel_broker, sentinel_contract
 from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import Agent
 from agentapi.services import ApiError
@@ -113,19 +113,27 @@ class CleanResultTests(SimpleTestCase):
 # ============================================================================== who may take the built-in-only kinds
 
 class BuiltinOnlyKindTests(RouteFixture, TestCase):
-    def external(self, capabilities):
+    def external(self, capabilities, contract_version=3):
         user = User.objects.create_user('ext-owner', password='x')
         token, _raw = create_token(user, 'ext-token')
         return Agent.objects.create(token=token, name='remote', kind='scanner', status='active', scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []},
-                                    capabilities=capabilities, last_seen=timezone.now(), info={'contract_version': 3})
+                                    capabilities=capabilities, last_seen=timezone.now(), info={'contract_version': contract_version})
 
     def test_an_external_sentinel_is_never_offered_path_probe_or_nuclei_validate(self):
-        self.external(['path_probe', 'nuclei_validate', 'route_probe_signed', 'db_probe'])
-        self.assertTrue(dispatch.any_scanner_for(self.project, 'db_probe'))
-        for kind in sentinel_broker.BUILTIN_KINDS:
-            with self.subTest(kind=kind):
-                self.assertFalse(dispatch.any_scanner_for(self.project, kind))
-                self.assertEqual(sentinel_broker.capacity_state(self.project, kind)['state'], 'none')
+        # while the install has a built-in scanner (here: one that does not declare the kinds), whatever the external's contract version
+        self.external(['path_probe', 'nuclei_validate', 'route_probe_signed', 'db_probe'], contract_version=sentinel_contract.version())
+        with FakeScanner(kinds=['nmap']):
+            self.assertTrue(dispatch.any_scanner_for(self.project, 'db_probe'))
+            for kind in sentinel_broker.BUILTIN_KINDS:
+                with self.subTest(kind=kind):
+                    self.assertFalse(dispatch.any_scanner_for(self.project, kind))
+                    self.assertEqual(sentinel_broker.capacity_state(self.project, kind)['state'], 'none')
+
+    def test_with_no_built_in_scanner_an_external_is_offered_only_what_its_contract_allows(self):
+        self.external(['path_probe', 'nuclei_validate', 'route_probe_signed'], contract_version=3)
+        self.assertTrue(dispatch.any_scanner_for(self.project, 'path_probe'))  # external_since 3
+        self.assertFalse(dispatch.any_scanner_for(self.project, 'nuclei_validate'))  # external_since 4: the hash and the server's approval
+        self.assertFalse(dispatch.any_scanner_for(self.project, 'route_probe_signed'))  # never outside the built-in scanner
 
     def test_the_built_in_scanner_is(self):
         with FakeScanner(kinds=list(sentinel_broker.BUILTIN_KINDS)):
@@ -341,7 +349,7 @@ class NucleiValidateTests(StageBase):
         self.arm('nuclei_validate')
         with FakeScanner(kinds=['nuclei_validate']) as fake:
             valid, output = templategen.validate_anywhere(self.TEMPLATE, self.project)
-        self.assertEqual(fake.served[0]['target'], {'mode': 'validate', 'template': self.TEMPLATE})
+        self.assertEqual(fake.served[0]['target'], {'mode': 'validate', 'template': self.TEMPLATE, 'template_sha256': ai_checks.digest(self.TEMPLATE)})
         self.assertTrue(valid)
         self.assertIn('no match on benign local fixture', output)
 
@@ -390,7 +398,8 @@ class NucleiValidateTests(StageBase):
                 {'host': 'https://elsewhere.example.test', 'vulnerable': True, 'output': '', 'hit': {'matcher-name': 'word'}}]}
         with FakeScanner(kinds=['nuclei_validate'], responders={'nuclei_validate': answer}) as fake:
             outcomes = dispatch.try_template_test(self.TEMPLATE, hosts, self.project.id)
-        self.assertEqual(fake.served[0]['target'], {'mode': 'test', 'template': self.TEMPLATE, 'targets': hosts})
+        self.assertEqual(fake.served[0]['target'], {'mode': 'test', 'template': self.TEMPLATE, 'template_sha256': ai_checks.digest(self.TEMPLATE),
+                                                    'targets': hosts})
         self.assertEqual(fake.tasks()[0].project_id, self.project.id)  # filed under the hosts' own project
         self.assertTrue(outcomes[0]['vulnerable'])
         self.assertEqual(outcomes[0]['hit']['matched-at'], 'https://www.rt.test/x')
