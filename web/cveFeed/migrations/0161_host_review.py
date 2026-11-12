@@ -10,12 +10,29 @@ from django.conf import settings
 from django.db import migrations, models
 
 
+TASK_NAME = 'cvengine-host-review-sweep'
+
+
+def schedule_sweep(apps, schema_editor):
+    """The host review sweep runs every ten minutes from here on (cveFeed.host_review.sweep). It queues AI jobs and nothing else, and does nothing
+    with no AI provider, while scanning is paused or past the day's cap."""
+    Interval = apps.get_model('django_celery_beat', 'IntervalSchedule')
+    PeriodicTask = apps.get_model('django_celery_beat', 'PeriodicTask')
+    every_ten, _ = Interval.objects.get_or_create(every=10, period='minutes')
+    PeriodicTask.objects.get_or_create(name=TASK_NAME, defaults={'task': 'host_review_sweep', 'interval': every_ten, 'enabled': True, 'queue': 'cve_feed_queue'})
+
+
+def unschedule_sweep(apps, schema_editor):
+    apps.get_model('django_celery_beat', 'PeriodicTask').objects.filter(name=TASK_NAME).delete()
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
         ("cveFeed", "0160_fix_retest"),
         ("dashboard", "0035_apitoken_suffix_db_default"),
         ("targetApp", "0008_domain_expect_private_ca"),
+        ("django_celery_beat", "0001_initial"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
@@ -182,4 +199,5 @@ class Migration(migrations.Migration):
                 name="one_open_hostreview_per_host",
             ),
         ),
+        migrations.RunPython(schedule_sweep, unschedule_sweep),
     ]

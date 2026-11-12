@@ -19,6 +19,7 @@ import json
 import logging
 import re
 from collections import Counter
+from datetime import timedelta
 
 from django.db.models import Count
 from django.utils import timezone
@@ -368,6 +369,15 @@ SEED = 7
 REPLY_KEYS = {'findings', 'next_step', 'host_note'}
 FINDING_KEYS = {'ref', 'verdict', 'confidence', 'reason_code', 'same_as', 'note'}
 STEP_KEYS = {'action', 'target', 'reason_code', 'note'}
+RETRY_AFTER = timedelta(hours=24)          # a host whose review failed, or went stale, waits this long before it is asked again with the same state
+RETRY_AFTER_OUTAGE = timedelta(hours=1)    # a failure that is the provider's (a rate limit, a timeout): sooner
+OUTAGE = ('provider_rate_limit', 'provider_timeout', 'provider_connect_timeout', 'provider_network', 'provider_http', 'provider_error', 'lease_expired')
+OPEN_STALE_AFTER = timedelta(days=8)       # an open review whose job is long gone is closed by the sweep (a job lives at most ai_jobs.TTL)
+PROPOSAL_LIFE = timedelta(days=7)          # a proposed step nobody started or dismissed expires
+AUTO_HOST_HOURS = 24
+SWEEP_BATCH = 20                           # reviews one sweep run may queue
+SWEEP_WINDOW = 500                         # hosts one sweep run looks at
+SWEEP_LOCK = 'cvengine:host-review-sweep'
 
 HOST_REVIEW_BODY = (
     'The message is one host: a TRUSTED block that cvENGINE computed (the open findings f1, f2, ..., each with its kind, heat, severity, checks and '
@@ -743,11 +753,76 @@ def apply_reply(review, parsed, job, offered):
     return 'applied'
 
 
+# ============================================================================================================================ the next step (WP5)
+# D6. A step runs on its own only when ALL of these hold; otherwise it is stored as recommend/proposed for a person, who starts it with the same
+# ``host_actions.run`` (``start_step``) or dismisses it (``dismiss_step``).
+
+def person_acted(project, host, since):
+    """Whether a person started or dismissed a step of this host since ``since``: a step of mode ``recommend`` that is started or done was started by a
+    person (the review's own steps are mode ``auto``); a dismissal is a person's by definition."""
+    from django.db.models import Q
+    from cveFeed.models import HostReview
+    return HostReview.objects.filter(project=project, host=host).filter(
+        Q(dismissed_at__gte=since) | Q(step_mode='recommend', step_state__in=('started', 'done'), decided_at__gte=since)).exists()
+
+
+def auto_steps_since(since, project=None, host=None):
+    """How many steps the reviews started on their own since ``since`` (a step that ran: started or done; ``none`` starts nothing and is not counted)."""
+    from cveFeed.models import HostReview
+    rows = HostReview.objects.filter(step_mode='auto', step_state__in=('started', 'done'), decided_at__gte=since).exclude(step_action__in=('', 'none'))
+    if project is not None:
+        rows = rows.filter(project=project)
+    if host is not None:
+        rows = rows.filter(host=host)
+    return rows.count()
+
+
+def auto_blockers(review, action, injection, now=None):
+    """Why this step may not start on its own (every condition of D6, a list of plain reasons), or ``[]`` when it may: its class is auto, the project's
+    mode is auto, the host's evidence carries no planted instructions, no person started or dismissed a step of this host in the last 24 hours, at
+    most one step a host in 24 hours and ``host_review_auto_per_project_day`` a project a day, and scanning is not paused. (The action's own gates,
+    scope, exclusions and caps, are applied by ``host_actions.run``.)"""
+    from cveFeed import host_actions, reviewer
+    now = now or timezone.now()
+    out = []
+    if host_actions.ACTIONS[action][0] != host_actions.AUTO:
+        out.append('this step touches the host: a person starts it')
+    if mode_of(review.project) != 'auto':
+        out.append('the project is set to recommend only')
+    if injection:
+        out.append('the evidence of the host carries text aimed at AI agents')
+    if person_acted(review.project, review.host, now - timedelta(hours=AUTO_HOST_HOURS)):
+        out.append('a person started or dismissed a step of this host in the last 24 hours')
+    if auto_steps_since(now - timedelta(hours=AUTO_HOST_HOURS), project=review.project, host=review.host):
+        out.append('a step of this host already started on its own in the last 24 hours')
+    if auto_steps_since(_day_start(now), project=review.project) >= reviewer.settings_row().host_review_auto_per_project_day:
+        out.append("the project's limit of automatic steps for today is reached")
+    if reviewer.paused():
+        out.append('scanning is paused')
+    return out
+
+
+def dismissed_before(review, action, target):
+    """Whether a person dismissed this same step for this same state of the host: it is not proposed again."""
+    from cveFeed.models import HostReview
+    return HostReview.objects.filter(project=review.project, host=review.host, state_key=review.state_key, step_action=action, step_target=target,
+                                     step_state='dismissed').exclude(pk=review.pk).exists()
+
+
+def _announce(review, action, text):
+    from cveFeed import activity, host_actions
+    activity.log('confirm', f'AI host review of {review.host}: {text} ({host_actions.ACTIONS[action][3]})', project=review.project, status='done',
+                 host_review_id=review.pk, step_action=action)
+
+
 def store_step(review, step, offered, injection, state, now=None):
-    """Store the one next step the reply chose. An action that was not offered (or a target it did not offer) is ``refused``; ``none`` is done;
-    every other step is stored ``recommend``/``proposed`` for a person: what starts on its own is decided in the next work package."""
+    """Decide and store the one next step. In order: an action that was not offered (or a target it did not offer) is ``refused``; the same step a
+    person dismissed for this state is ``dismissed`` and not proposed again; ``none`` is done; a step that passes every condition of
+    ``auto_blockers`` runs now (``host_actions.run``, which applies its own gates and may still refuse); any other is ``recommend``/``proposed``
+    with the reason it was not started. ``ask_person`` that runs sends the notification and is the needs-person state (``needs_person``)."""
     from cveFeed import host_actions
     from cveFeed.models import HostReview
+    now = now or timezone.now()
     action, target = step['action'], step['target']
     fields = {'step_action': action, 'step_target': target, 'step_reason_code': step['reason_code'], 'step_mode': '', 'step_state': '', 'step_detail': ''}
     offer = (offered or {}).get(action)
@@ -755,10 +830,186 @@ def store_step(review, step, offered, injection, state, now=None):
         fields.update(step_state='refused', step_detail='refused: the action was not offered for this host')
     elif (action in host_actions.TARGETED and target not in (offer.get('targets') or [])) or (action not in host_actions.TARGETED and target):
         fields.update(step_state='refused', step_detail='refused: the finding it names was not offered for this action')
+    elif dismissed_before(review, action, target):
+        fields.update(step_mode='recommend', step_state='dismissed', step_detail='a person dismissed this step for this state of the host')
     elif action == 'none':
         fields.update(step_mode='auto', step_state='done', step_detail='nothing more is needed')
     else:
-        fields.update(step_mode='recommend', step_state='proposed', step_detail='not started on its own')
+        blockers = auto_blockers(review, action, injection, now)
+        if blockers:
+            fields.update(step_mode='recommend', step_state='proposed', step_detail=('not started on its own: ' + '; '.join(blockers))[:300])
+        else:
+            result = host_actions.run(action, target, review.project, state_sub(state), by=None, rows=pairs_from_refs(review.project, review.refs))
+            fields.update(step_mode='auto', step_state=result['state'], step_detail=result['detail'][:300])
+            if result['state'] in ('started', 'done'):
+                _announce(review, action, 'started a step')
     HostReview.objects.filter(pk=review.pk).update(**fields)
     review.refresh_from_db()
     return review
+
+
+def state_sub(state):
+    return _load_sub(state)
+
+
+def start_step(review, by):
+    """A person's Start: run the proposed step through the same ``host_actions.run`` with ``by`` (the normal write permission is the caller's check).
+    Raises ``HostReviewRefused`` 409 when the step is not proposed any more. Returns the result of ``run``; a step that is no longer offered is stored
+    as refused with the reason."""
+    from cveFeed.models import HostReview, HostState
+    now = timezone.now()
+    if review.status != 'applied' or not HostReview.objects.filter(pk=review.pk, step_state='proposed').update(step_state='started', decided_at=now):
+        raise HostReviewRefused('there is no proposed step to start', 409)  # claimed first: two clicks start one step
+    state = HostState.objects.filter(project=review.project, host=review.host).first()
+    why = unavailable(review.project, review.host)
+    if why or state is None:
+        result = {'action': review.step_action, 'target': review.step_target, 'state': 'refused', 'detail': why or 'not a host of this project'}
+    else:
+        from cveFeed import host_actions
+        result = host_actions.run(review.step_action, review.step_target, review.project, state_sub(state), by=by,
+                                  rows=pairs_from_refs(review.project, review.refs))
+    HostReview.objects.filter(pk=review.pk).update(step_state=result['state'], step_detail=result['detail'][:300], step_mode='recommend')
+    if result['state'] in ('started', 'done'):
+        review.refresh_from_db()
+        _announce(review, review.step_action, 'a person started the step')
+    return result
+
+
+def dismiss_step(review, by, reason=''):
+    """A person's Dismiss: the proposed step (or the needs-person flag of ``ask_person``) is dismissed, with who and when, and the same step is not
+    proposed again for this state of the host. Raises ``HostReviewRefused`` 409 when there is nothing to dismiss."""
+    from django.db.models import Q
+    from cveFeed import reviewer
+    from cveFeed.models import HostReview
+    now = timezone.now()
+    detail = ('dismissed' + (f': {reviewer.clean_note(reason)[:200]}' if reason else ''))[:300]
+    flag = Q(step_state='proposed') | Q(step_action='ask_person', step_state='done')
+    if not HostReview.objects.filter(flag, pk=review.pk, status='applied').update(step_state='dismissed', step_detail=detail, dismissed_by=by, dismissed_at=now):
+        raise HostReviewRefused('there is no proposed step to dismiss', 409)
+    review.refresh_from_db()
+    return review
+
+
+def needs_person(project, host=None):
+    """The newest applied reviews that ask a person to look (``ask_person``, proposed or sent, not dismissed), one per host, optionally of one host: for
+    the Situations badge and the host card."""
+    from cveFeed.models import HostReview
+    newest = {}
+    rows = HostReview.objects.filter(project=project, status='applied').order_by('host', '-created_at', '-id')
+    if host is not None:
+        rows = rows.filter(host=host)
+    for row in rows:
+        newest.setdefault(row.host, row)
+    return [r for r in newest.values() if r.step_action == 'ask_person' and r.step_state in ('proposed', 'done')]
+
+
+# ---------------------------------------------------------------------------------------------------------------------------- the sweep
+
+def _older_than(now, age=OPEN_STALE_AFTER):
+    from django.db.models import Q
+    return Q(created_at__lt=now - age)
+
+
+def housekeeping(now=None):
+    """Close what nobody will: an open review whose job has finished without telling it (a continuation that broke) or that is older than the job's
+    lifetime becomes failed or stale, so it never blocks the host's next review; a proposed step expires when a newer review of the host exists or
+    after ``PROPOSAL_LIFE``."""
+    from django.db.models import Exists, OuterRef
+    from cveFeed.models import AIJob, HostReview
+    now = now or timezone.now()
+    out = {'closed': 0, 'expired': 0}
+    over = HostReview.objects.filter(status__in=HostReview.OPEN).filter(
+        Exists(AIJob.objects.filter(pk=OuterRef('ai_job_id'), status__in=('applied', 'failed', 'expired'))) | _older_than(now))
+    for review in over[:200]:
+        _finish(review, 'failed', 'failed: its AI job ended without an answer', now)
+        out['closed'] += 1
+    newer = HostReview.objects.filter(project=OuterRef('project'), host=OuterRef('host'), created_at__gt=OuterRef('created_at'))
+    out['expired'] = HostReview.objects.filter(step_state='proposed').filter(Exists(newer) | _older_than(now, PROPOSAL_LIFE)).update(step_state='expired')
+    return out
+
+
+def _recent_blocks(candidates, now):
+    """``{(project_id, host)}`` of the hosts the sweep leaves alone: a host whose newest review has the host's current state (an open or applied one
+    always; a failed or stale one until ``RETRY_AFTER``, an hour for a provider outage)."""
+    from cveFeed.models import HostReview, HostState
+    if not candidates:
+        return set()
+    from django.db.models import Q
+    newest = {}
+    q = None
+    for project_id, host in candidates:
+        q = Q(project_id=project_id, host=host) if q is None else q | Q(project_id=project_id, host=host)
+    for row in HostReview.objects.filter(q).order_by('project_id', 'host', '-created_at', '-id').distinct('project_id', 'host'):
+        newest[(row.project_id, row.host)] = row
+    blocked = set()
+    fingerprints = {(s['project_id'], s['host']): s['fingerprint'] for s in HostState.objects.filter(q).values('project_id', 'host', 'fingerprint')}
+    for (project_id, host), row in newest.items():
+        rows = open_rows(row.project, host)
+        if not rows or state_key(fingerprints.get((project_id, host), ''), rows) != row.state_key:
+            continue  # the host changed since: due
+        if row.status in HostReview.OPEN or row.status == 'applied':
+            blocked.add((project_id, host))
+        else:
+            wait = RETRY_AFTER_OUTAGE if any(name in row.step_detail for name in OUTAGE) else RETRY_AFTER
+            if now - (row.decided_at or row.created_at) < wait:
+                blocked.add((project_id, host))
+    return blocked
+
+
+def due_hosts(limit, now=None):
+    """Up to ``limit`` ``(project, host)`` pairs to review: hosts of projects whose mode is not off, not archived or retired, with an open finding and
+    no review of their current state, the hottest hosts first (the host score), taken round-robin by project so one project cannot use the day."""
+    from django.db.models import Exists, OuterRef
+    from cveFeed import reviewer
+    from cveFeed.models import HostState, ProjectSettings, Triage
+    now = now or timezone.now()
+    open_here = Triage.objects.filter(reviewer.open_q(), project=OuterRef('project'), host=OuterRef('host')).exclude(kind='route_auth')
+    states = list(HostState.objects.filter(archived_at__isnull=True, retired_at__isnull=True).filter(Exists(open_here))
+                  .exclude(project__in=ProjectSettings.objects.filter(host_review_mode='off').values('project'))
+                  .select_related('project').order_by('-score', 'id')[:SWEEP_WINDOW])
+    blocked = _recent_blocks([(s.project_id, s.host) for s in states], now)
+    by_project = {}
+    for s in states:
+        if (s.project_id, s.host) not in blocked:
+            by_project.setdefault(s.project_id, []).append(s)
+    picked = []
+    while by_project and len(picked) < limit:
+        for project_id in list(by_project):
+            picked.append(by_project[project_id].pop(0))
+            if not by_project[project_id]:
+                del by_project[project_id]
+            if len(picked) >= limit:
+                break
+    return [(s.project, s.host) for s in picked]
+
+
+def sweep(limit=SWEEP_BATCH, now=None):
+    """Every ten minutes: queue the review of the hosts whose state changed, at most ``limit`` a run and never past today's cap, nothing while scanning
+    is paused or no AI provider is configured. Returns the counts. Never raises for one host's trouble."""
+    from django.core.cache import cache
+    now = now or timezone.now()
+    out = {'queued': 0, 'skipped': '', 'closed': 0, 'expired': 0}
+    if not cache.add(SWEEP_LOCK, 1, 540):
+        out['skipped'] = 'another sweep is running'
+        return out
+    try:
+        out.update({k: v for k, v in housekeeping(now).items()})
+        ok, why = available(now)
+        if not ok:
+            out['skipped'] = why
+            return out
+        from cveFeed import reviewer
+        room = reviewer.settings_row().host_review_daily_max - reviews_today(now)
+        for project, host in due_hosts(max(0, min(limit, room)), now):
+            try:
+                request(project, host, priority=6, now=now)
+                out['queued'] += 1
+            except HostReviewRefused as exc:
+                if exc.status in (429, 503):
+                    out['skipped'] = str(exc)
+                    break
+            except Exception:  # noqa: BLE001
+                logger.warning('host review sweep: could not queue a review', exc_info=True)
+    finally:
+        cache.delete(SWEEP_LOCK)
+    return out

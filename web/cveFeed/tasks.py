@@ -2052,6 +2052,14 @@ def ai_jobs_housekeeping():
     return ai_jobs.housekeeping()
 
 
+@app.task(name="host_review_sweep", bind=False, queue="cve_feed_queue", time_limit=900, soft_time_limit=840)
+def host_review_sweep():
+    """Every ten minutes: queue the AI review of the hosts whose state changed (``cveFeed.host_review.sweep``): a few hosts a run, within the daily caps,
+    nothing while scanning is paused. The reviewer container asks the model; a Celery task applies the answer."""
+    from cveFeed import host_review
+    return host_review.sweep()
+
+
 @app.task(name="validate_template_drafts", bind=False, queue="cve_feed_queue", time_limit=900, soft_time_limit=840)
 def validate_template_drafts():
     """Every five minutes: AI-written template drafts go through the automatic gates (``cveFeed.templatevalidate``): they are validated,
