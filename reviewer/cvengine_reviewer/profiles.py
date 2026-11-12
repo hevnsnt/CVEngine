@@ -230,7 +230,7 @@ def reasoning_plan(provider_id, model, level, max_tokens=None):
 STAGE_ANSWER_CAPS = {
     'finding_triage': 400, 'finding_triage_repair': 400,  # a short JSON object
     'local_check_suggestion': 1024, 'rdp_screenshot': 1024, 'validation_plan': 1024, 'operations_check': 4000,
-    'finding_review': 4000, 'autotune_advisor': 2000, 'cve_detection': 8192,
+    'finding_review': 4000, 'host_review': 6000, 'host_review_repair': 6000, 'autotune_advisor': 2000, 'cve_detection': 8192,
     'template_generation': 6144,  # a whole detection template (YAML with requests, matchers and extractors)
     'template_validation': 4096,  # the fixture (two short responses) or the critique of an AI-written template: a small JSON object
 }
