@@ -666,3 +666,37 @@ class SmallTextsTests(Base):
             found = self.check('generated_templates')
         self.assertIn('1 live Sentinel is remote', found['detail'])
         self.assertNotIn('1 live Sentinel are', found['detail'])
+
+
+class DismissedAlertStaysDismissedTests(Base):
+    """AM-10: a dismissed alert comes back when the problem changes, not when a count inside it moves."""
+
+    def waiting_alert(self):
+        return [a for a in reviewer.open_alerts() if a['code'] == 'sentinel_waiting']
+
+    def test_one_more_waited_task_does_not_bring_a_dismissed_alert_back(self):
+        from django.contrib.auth.models import User
+        self.live(count=2, slots=4)
+        self.tasks(500, 'done', ago=timedelta(hours=2))
+        self.tasks(40, 'expired', WAIT, kind='nmap', ago=timedelta(hours=4))
+        self.tasks(40, 'expired', WAIT, kind='nmap', ago=timedelta(hours=1))
+        reviewer.run_ops_checks()
+        root = User.objects.create_superuser('dis_root', 'd@x.io', 'x')
+        reviewer.dismiss_alert(self.waiting_alert()[0]['id'], root)
+        before = [a['code'] for a in reviewer.open_alerts()]
+        self.assertNotIn('sentinel_waiting', before)
+        self.tasks(1, 'expired', WAIT, kind='nmap', ago=timedelta(minutes=5))
+        reviewer.run_ops_checks()
+        self.assertEqual([a['code'] for a in reviewer.open_alerts()], before)
+
+    def test_a_new_kind_waiting_or_falling_behind_brings_it_back(self):
+        facts = {'waited': 80, 'by_kind': {'nmap': 80}, 'slots': 8, 'falling_behind': False, 'saturated': True, 'waited_recent': 40, 'growing': False}
+        check = lambda f: {'code': 'sentinel_waiting', 'state': 'warning', 'severity': 'info', 'title': 't', 'detail': 'd', 'facts': f, 'actions': []}
+        base = reviewer._digest(check(facts))
+        self.assertEqual(reviewer._digest(check({**facts, 'waited': 95, 'by_kind': {'nmap': 95}, 'waited_recent': 3})), base)
+        self.assertNotEqual(reviewer._digest(check({**facts, 'falling_behind': True})), base)
+        self.assertNotEqual(reviewer._digest(check({**facts, 'by_kind': {'nmap': 80, 'nuclei': 2}})), base)
+        failing = lambda groups: check({'groups': groups, 'failed': 12})
+        one = [{'sentinel': 's1', 'kind': 'nmap', 'failed': 12, 'completed': 0}]
+        self.assertEqual(reviewer._digest(failing([{**one[0], 'failed': 15}])), reviewer._digest(failing(one)))
+        self.assertNotEqual(reviewer._digest(failing(one + [{'sentinel': 's2', 'kind': 'nmap', 'failed': 12, 'completed': 0}])), reviewer._digest(failing(one)))

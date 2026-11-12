@@ -940,9 +940,23 @@ def ops_checks(now=None, templates_release=None):
     return checks
 
 
+def _meaning(value):
+    """What a fact says apart from how big it is: names, switches and states stay, a count is only "there is one". A dismissed alert comes back
+    when the problem changes (another Sentinel or kind, a state turning true), not because one more task waited or failed."""
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        return '#'
+    if isinstance(value, dict):
+        return {str(k): _meaning(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return sorted((_meaning(v) for v in value), key=lambda v: json.dumps(v, sort_keys=True, default=str))
+    return str(value)
+
+
 def _digest(check):
-    keep = {k: v for k, v in (check.get('facts') or {}).items() if k not in ('last_errors', 'last_messages', 'hours_since_refresh', 'done_2h', 'completed', 'queued_now', 'live_sentinels', 'slots',
-                                                                       'restart_cut', 'waited_earlier', 'waited_recent', 'growing')}
+    keep = {k: _meaning(v) for k, v in (check.get('facts') or {}).items() if k not in ('last_errors', 'last_messages', 'hours_since_refresh', 'done_2h', 'completed', 'queued_now', 'live_sentinels', 'slots',
+                                                                                    'restart_cut', 'waited_earlier', 'waited_recent', 'growing')}
     return hashlib.sha1(json.dumps([check['code'], check['state'], keep], sort_keys=True, default=str).encode()).hexdigest()
 
 
