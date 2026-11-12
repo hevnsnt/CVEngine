@@ -1127,6 +1127,8 @@ def _inherited_fields(twin, d, now):
               'validated_at': twin.validated_at or (twin.created_at if twin.validation_status == 'no_check' else None),
               'attempts': twin.attempts, 'next_attempt_at': twin.next_attempt_at, 'confidence_adjust': twin.confidence_adjust,
               'carried_from': twin.match_id,
+              # what a retest found stays with the finding across a rescan of the same evidence (cveFeed.fix_retest)
+              'retest_state': twin.retest_state, 'retest_at': twin.retest_at, 'retest_reason': twin.retest_reason, 'retest_sentinel': twin.retest_sentinel,
               # a heat a person set stays with the finding across rescans of the same evidence (threat.manual_heat)
               'heat_override': twin.heat_override, 'heat_override_reason': twin.heat_override_reason,
               'heat_override_by_id': twin.heat_override_by_id, 'heat_override_at': twin.heat_override_at}

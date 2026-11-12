@@ -256,6 +256,8 @@ def worked_by_person(kind, finding):
 def proof(kind, triage, finding):
     """Why this finding cannot be a false positive in cvENGINE's own eyes, or '': hard evidence about this host."""
     from cveFeed import match_policy
+    if triage.retest_state == 'still_reproduces':
+        return 'a retest after it was marked fixed reproduced it again'  # reopened by a check that ran: no verdict of the model undoes that
     if triage.validation_status == 'hit':
         return "one of cvENGINE's own read-only checks reproduced it"
     if kind == 'cve_match':

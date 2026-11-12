@@ -72,3 +72,29 @@ test('hostile text in the exchange is drawn as text, never as markup', () => {
   assert.ok(card.textContent.includes('<script>alert(1)</script>'));
   assert.equal(find([card], (n) => n.tag === 'script' || n.tag === 'img').length, 0);
 });
+
+const retestCards = (nodes) => find(nodes, (n) => /\bgl-retest\b/.test(n.className));
+const withRetest = (retest) => glance({...detail({status: 'none', steps: [], evidence: {}}), retest}, {row: null, aiBadge: new Node('span'), note: ''});
+
+test('the retest card is first, says the state plainly and names the Sentinel', () => {
+  const nodes = withRetest({state: 'not_verified', label: 'Fixed, not verified', text: 'Fixed, not verified: the host did not answer', at: '2026-11-12T10:00:00Z',
+    sentinel: 'east-1', reason: 'the host did not answer', can_retest: true});
+  const [card] = retestCards(nodes);
+  assert.ok(card, 'the retest card is drawn');
+  assert.equal(nodes[0], card);
+  const text = card.textContent;
+  for (const part of ['Retest after the fix', 'Fixed, not verified', 'east-1', 'the host did not answer', 'at most once a day']) assert.ok(text.includes(part), part);
+  assert.ok(!/Verified fixed/.test(text), 'never calls it verified');
+});
+
+test('verified fixed and still reproduces each draw their own card, and no card for a finding never marked fixed', () => {
+  assert.ok(retestCards(withRetest({state: 'verified_fixed', label: 'Verified fixed', text: 'Verified fixed on 2026-11-12', at: '2026-11-12T10:00:00Z', sentinel: 'e', reason: ''}))[0].className.includes('gl-retest-verified-fixed'));
+  assert.ok(retestCards(withRetest({state: 'still_reproduces', label: 'Still reproduces, reopened', text: 'x', at: null, sentinel: '', reason: ''}))[0].textContent.includes('reopened'));
+  for (const retest of [undefined, null, {state: ''}]) assert.equal(retestCards(withRetest(retest)).length, 0);
+});
+
+test('hostile text in a reason is text', () => {
+  const [card] = retestCards(withRetest({state: 'not_verified', label: 'Fixed, not verified', text: 't', at: null, sentinel: '<b>x</b>', reason: '<script>alert(1)</script>'}));
+  assert.ok(card.textContent.includes('<script>alert(1)</script>'));
+  assert.equal(find([card], (n) => n.tag === 'script' || n.tag === 'b').length, 0);
+});

@@ -2865,7 +2865,8 @@ def _vuln(v):
             'seen_while_authenticated': any(t.name == 'seen-while-authenticated' for t in v.tags.all()),  # an authenticated request saw it (cveFeed.auth_checks)
             'first_seen': _iso(_seen(v, 'first_seen', v.discovered_date)), 'last_seen': _iso(_seen(v, 'last_seen', v.discovered_date)),
             'internal': _internal_row(v.target_domain.project_id if v.target_domain_id else None, v.subdomain.name if v.subdomain else ''),
-            'heat_override': _heat_override(_triage_of(v)), 'triage': _triage_brief(_triage_of(v))}
+            'heat_override': _heat_override(_triage_of(v)), 'triage': _triage_brief(_triage_of(v)),
+            'retest': _retest_of(v)}
 
 
 def _internal_row(project_id, host):
@@ -2927,7 +2928,8 @@ def _hygiene(f):
             'status_changed_at': _iso(f.remediation_updated_at), 'status_changed_by': _user_brief(f.remediation_by),
             'assignee': _user_brief(f.assignee), 'comment_count': _comment_count(f, 'hygiene'), **_closure_fields('hygiene', f),
             'first_seen': _iso(f.first_seen), 'last_seen': _iso(f.last_seen), 'domain': f.domain.name,
-            'triage': _triage_brief(_triage_of(f))}
+            'triage': _triage_brief(_triage_of(f)),
+            'retest': _retest_of(f)}
 
 
 def list_hygiene(ctx, slug, params):
@@ -3499,7 +3501,8 @@ def _match(m):
             'assignee': _user_brief(m.assignee), 'comment_count': _comment_count(m, 'match'), 'agent_task': _agent_task_of(m),
             **_closure_fields('match', m),
             'first_seen': _iso(_seen(m, 'first_seen', m.created_at)), 'last_seen': _iso(_seen(m, 'last_seen', m.updated_at)),
-            'triage': _triage_brief(_triage_of(m))}
+            'triage': _triage_brief(_triage_of(m)),
+            'retest': _retest_of(m)}
 
 
 def _agent_task_of(m):
@@ -3525,7 +3528,8 @@ def _matches_qs(project):
     qs = _scoped(CVEMatch.objects.all(), project, 'subdomain__target_domain__project').filter(latest_scan_q('subdomain__')) \
         .select_related('cve_entry', 'subdomain', 'triage__verdict', 'triage__heat_override_by', 'remediation_by', 'assignee') \
         .annotate(comment_count=_comment_count_annotation('match'), **_agent_task_annotations()).order_by('-confidence', '-id')
-    return qs.select_related('subdomain__target_domain__project') if _is_all(project) else qs
+    # the host's target joined in either case: a list row reads its project (``_finding_row``) and must not ask for it row by row
+    return qs.select_related('subdomain__target_domain__project') if _is_all(project) else qs.select_related('subdomain__target_domain')
 
 
 def list_matches(ctx, slug, params):
@@ -3556,7 +3560,10 @@ def list_matches(ctx, slug, params):
 
 FINDING_TYPES = {'cve': 'match', 'scanner': 'vulnerability', 'hygiene': 'hygiene'}  # facet -> the finding-detail kind
 # the Findings list's status facet: actionable (the default), closed (any closing status), one closing status on its own, or all
-FINDING_STATUS_FACETS = ('actionable', 'closed', 'fixed', 'accepted_risk', 'false_positive', 'all')
+# verified_fixed, unverified_fixed (fixed and not verified by a retest) and reopened (a retest found it still reproduces) read the retest state
+# (cveFeed.counts.retest_q)
+FINDING_STATUS_FACETS = ('actionable', 'closed', 'fixed', 'accepted_risk', 'false_positive', 'verified_fixed', 'unverified_fixed', 'reopened', 'all')
+RETEST_FACETS = ('verified_fixed', 'unverified_fixed', 'reopened')
 HEAT_FACETS = {'fire': 3, 'smoke': 2, 'ice': 1}
 MAX_FINDINGS = 2000  # rows the merged list can page through; the counts stay exact beyond it
 # the Findings list's AI facet: what the AI reviewer's newest verdict on a finding says. disputed: it called the finding a false positive and
@@ -3604,6 +3611,7 @@ def _finding_sources(project, params):
     kev = _kev_only(params)
     if kev:
         wanted = 'cve' if wanted in ('all', 'cve') else None  # a scanner or hygiene finding has no KEV listing: none of them is KEV
+    from cveFeed import counts as counts_lib
     from cveFeed.closure import CLOSED
     status = params.get('status') or 'actionable'
     if status not in FINDING_STATUS_FACETS:
@@ -3628,6 +3636,8 @@ def _finding_sources(project, params):
             qs = qs.exclude(ai_verdict='not_affected').exclude(remediation_status__in=CLOSED)
         elif by_status is not None:
             qs = qs.filter(by_status)
+        elif status in RETEST_FACETS:
+            qs = qs.filter(counts_lib.retest_q(status, 'triage__'))
         if params.get('host'):
             qs = qs.filter(subdomain__name__icontains=params['host'])
         sources['cve'] = qs
@@ -3641,6 +3651,8 @@ def _finding_sources(project, params):
             qs = qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED)
         elif by_status is not None:
             qs = qs.filter(by_status)
+        elif status in RETEST_FACETS:
+            qs = qs.filter(counts_lib.retest_q(status, 'triage__'))
         if params.get('host'):
             qs = qs.filter(subdomain__name__icontains=params['host'])
         sources['scanner'] = qs
@@ -3653,6 +3665,8 @@ def _finding_sources(project, params):
             qs = qs.filter(status='open', severity__gte=1).exclude(remediation_status__in=CLOSED)
         elif by_status is not None:
             qs = qs.filter(by_status)
+        elif status in RETEST_FACETS:
+            qs = qs.filter(counts_lib.retest_q(status, 'triage__'))
         if params.get('host'):
             qs = qs.filter(host__icontains=params['host'])
         sources['hygiene'] = qs
@@ -3714,6 +3728,7 @@ def _finding_row(kind, obj):
             'assignee': _user_brief(getattr(obj, 'assignee', None)), 'comment_count': getattr(obj, 'comment_count', 0),
             'agent_task': _agent_task_of(obj) if kind == 'cve' else None, 'detected': _iso(obj.when), 'first_seen': _iso(obj.when),
             'heat_override': _heat_override(_triage_of(obj)) if kind != 'hygiene' else None, 'triage': _triage_brief(_triage_of(obj)),
+            'retest': _retest_of(obj),
             'ai_review': None, '_triage_id': getattr(_triage_of(obj), 'pk', None), '_review_read': hasattr(obj, 'review_row'),
             '_review': _review_from_row(obj), **extra}
 
@@ -3793,7 +3808,14 @@ def list_findings(ctx, slug, params):
         results.append(row)
     _attach_reviews(results)
     return {'count': min(total, MAX_FINDINGS), 'total': total, 'truncated': total > MAX_FINDINGS, 'page': page,
-            'page_size': size, 'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'results': results}
+            'page_size': size, 'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'retest': _retest_counts(project), 'results': results}
+
+
+def _retest_counts(project):
+    """The retest states of the project's findings, from ``cveFeed.counts.retest_counts``: {verified_fixed, unverified_fixed, reopened}. A few counting
+    queries, the same however many rows the page has."""
+    from cveFeed import counts as counts_lib
+    return counts_lib.retest_counts(list(project.ids) if _is_all(project) else [project.pk])
 
 
 def _grouped_findings(project, sources, counts, page, size):
@@ -3909,11 +3931,14 @@ def _apply_remediation(obj, status, note, user, rescore=True):
     _check_status(status)
     note = closure.clip_note(note)
     fields = ['remediation_status', 'remediation_updated_at', 'remediation_by']
+    before = obj.remediation_status
     obj.remediation_status, obj.remediation_updated_at, obj.remediation_by = status, timezone.now(), user
     if note is not None:
         obj.remediation_note = note
         fields.append('remediation_note')
     obj.save(update_fields=fields)
+    from cveFeed import fix_retest
+    fix_retest.status_changed(obj, before, status)  # marked fixed (by a person, the API or an agent): the check that proved it is run again on a Sentinel
     from django.db import transaction
 
     from cveFeed.views import bump_stats_revision
@@ -4024,6 +4049,41 @@ def update_finding_status(ctx, slug, kind, finding_id, status=None, note=None, a
     if assignee is not UNSET:
         _apply_assignee(project, kind, obj, new_user, ctx.user)
     return _vuln(obj) if kind == 'vulnerability' else _hygiene(obj)
+
+
+def get_finding_retest(ctx, slug, kind, finding_id):
+    """The retest state of one finding (a CVE match, scanner finding or hygiene finding): ``{kind, id, status, retest, history}`` where ``retest`` is
+    {state, label, text, at, sentinel, reason, can_retest} (state is '' for a finding that was not marked fixed, else verifying, verified_fixed,
+    still_reproduces, not_verified or no_check) and ``history`` the tries, newest first, with their Sentinel, time, reason and evidence."""
+    project, _ = get_one_project(ctx, slug)
+    if kind not in STATUS_KINDS:
+        raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
+    obj = _finding_obj(project, kind, finding_id)
+    return {'kind': kind, 'id': obj.pk, 'status': obj.remediation_status, 'retest': _retest_of(obj), 'history': _retest_history(_triage_of(obj))}
+
+
+def start_finding_retest(ctx, slug, kind, finding_id):
+    """Retest now: re-run on a Sentinel the check that proved a finding marked fixed. Same permissions as changing its status. Only a finding marked
+    fixed can be retested (400 otherwise); one already being retested answers the same (no second one is queued); one with no check to repeat
+    answers state ``no_check``. Answers what ``get_finding_retest`` does, with ``queued`` true when a retest was queued by this call."""
+    from cveFeed import fix_retest
+    project, _ = get_one_project(ctx, slug, write=True)
+    if kind not in STATUS_KINDS:
+        raise ApiError(400, f'kind must be one of {", ".join(STATUS_KINDS)}')
+    obj = _finding_obj(project, kind, finding_id)
+    if obj.remediation_status != 'fixed':
+        raise ApiError(400, 'only a finding marked fixed can be retested')
+    t = _triage_of(obj)
+    if t is None:
+        return {**get_finding_retest(ctx, slug, kind, finding_id), 'queued': False}
+    from cveFeed.models import FixRetest
+    already = FixRetest.objects.filter(triage=t, status__in=('queued', 'running')).exists()
+    job, _state = fix_retest.request(t, ctx.user, 'manual')
+    if job is not None and not already:
+        from cveFeed import activity
+        activity.log('remediation', f'{kind} finding #{finding_id}: retest requested', project=project, finding_kind=kind, finding_id=finding_id)
+    t.refresh_from_db()
+    return {**get_finding_retest(ctx, slug, kind, finding_id), 'queued': job is not None and not already}
 
 
 def bulk_update_finding_status(ctx, slug, items, status, note=None):
@@ -4444,6 +4504,26 @@ def _review_of(t):
     return reviewer.review_summary(t.pk) if t is not None else None
 
 
+def _retest_of(obj):
+    """What the finding shows about its retest after it was marked fixed (``cveFeed.fix_retest.summary``): {state, label, text, at, sentinel, reason,
+    can_retest}. Read from the Triage row every list already joins: no query of its own."""
+    from cveFeed import fix_retest
+    return fix_retest.summary(obj.remediation_status, _triage_of(obj))
+
+
+def _retest_history(t, limit=10):
+    """The tries of a finding's retest, newest first (one query, the detail pane and ``get_finding_retest`` only): when, which Sentinel, the outcome,
+    why, and the evidence of the new exchange."""
+    if t is None:
+        return []
+    from cveFeed.models import FixRetest
+    return [{'id': r.pk, 'status': r.status, 'outcome': r.outcome, 'reason': r.reason, 'source': r.source, 'sentinel': r.sentinel,
+             'checks': (r.check_run or {}).get('checks') or [], 'evidence': r.evidence or {}, 'attempt': r.attempts,
+             'requested': _iso(r.created_at), 'finished': _iso(r.finished_at), 'next_attempt': _iso(r.next_attempt_at),
+             'requested_by': _user_brief(r.requested_by)}
+            for r in FixRetest.objects.filter(triage=t).select_related('requested_by').order_by('-id')[:limit]]
+
+
 def _triage_brief(t):
     """What a list card needs to show the classification and validation badges without a second request."""
     from cveFeed import triage as triage_lib
@@ -4685,6 +4765,7 @@ def finding_detail(ctx, slug, kind, finding_id):
         'closure_note': closed.get('closure_note'), 'closed_by': closed.get('closed_by'), 'closed_at': closed.get('closed_at'),
         'closed_automatically': closed.get('closed_automatically', False),
         'agent_task': _agent_task_of(obj) if kind == 'match' else None,
+        'retest': {**_retest_of(obj), 'history': _retest_history(t)} if kind in STATUS_KINDS else None,
         'secrets': _tracked_secrets(obj) if kind == 'vulnerability' else [],  # "Tracked in Secrets": the inventory rows a token finding fed
         'cve': {**_cve_context(obj.cve_entry), 'detection': _detection(obj.cve_entry)} if kind == 'match' else None,
         'confirm': _confirm_guide(obj) if kind == 'match' else None,

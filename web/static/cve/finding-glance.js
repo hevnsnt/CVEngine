@@ -5,6 +5,7 @@
 import { el, badge } from "/staticfiles/cve/ui.js";
 import { fmtLong, zoneLabel } from "/staticfiles/cve/prefs.js";
 import { proofOf, templateSegments, textSegments } from "/staticfiles/cve/finding-glance-logic.js";
+import * as RT from "/staticfiles/cve/retest-logic.js";
 
 const CLASS_WORDS = {
   confirmed: "Confirmed",
@@ -359,8 +360,28 @@ function proofCard(d) {
   return card;
 }
 
+// What a re-check found after the finding was marked fixed, before the proof: a state in plain words, the Sentinel and the time, and why when it
+// could not be told. Drawn only for a finding that was marked fixed (or reopened by a retest); never says verified unless a check ran.
+function retestCard(d) {
+  const r = RT.retestOf(d);
+  if (!r) return null;
+  const card = el("section", `gl-card gl-retest gl-retest-${r.state.replace(/_/g, "-")}`);
+  card.append(el("h3", "gl-h", "Retest after the fix"));
+  card.append(badge(r.label, RT.toneOf(r)));
+  card.append(el("p", "gl-proof-line", RT.cardNote(r)));
+  const list = el("dl", "gl-facts");
+  RT.cardFacts(r).forEach(([label, value]) => {
+    const dd = el("dd", "gl-val");
+    if (label === "Checked") dd.append(el("time", "gl-when", fmtLong(value) || value, { datetime: value, title: `${value} (shown in ${zoneLabel()})` }));
+    else dd.textContent = value;
+    list.append(el("dt", "", label), dd);
+  });
+  if (list.children.length) card.append(list);
+  return card;
+}
+
 export function glance(d, { row, aiBadge, note }) {
   const grid = el("div", "gl-grid");
   grid.append(foundCard(d), confidenceCard(d, row), aiCard(d, aiBadge, note));
-  return [proofCard(d), grid, threatLine(d)].filter(Boolean);
+  return [retestCard(d), proofCard(d), grid, threatLine(d)].filter(Boolean);
 }

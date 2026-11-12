@@ -322,3 +322,40 @@ def oldest_open(now=None):
 
 def expiring_certificates(qs, days=CERT_WARNING_DAYS):
     return qs.filter(not_after__lte=timezone.now() + timedelta(days=days))
+
+
+# --- retest on fix (cveFeed.fix_retest) ----------------------------------------------------------------------------------------------------
+# The states of a finding marked fixed: verified fixed (a retest ran the check that proved it and it no longer reproduces), fixed and not verified
+# (queued, could not be told, no check to repeat, or not re-checked yet: never read as verified), and reopened (a retest found it still reproduces).
+
+def retest_q(state, prefix='triage__'):
+    """A filter on a finding's remediation status and its Triage row (``prefix`` is the path to the Triage row, ``triage__`` from a finding)
+    for ``verified_fixed``, ``unverified_fixed`` or ``reopened``."""
+    fixed = Q(remediation_status='fixed')
+    verified = Q(**{f'{prefix}retest_state': 'verified_fixed'})
+    if state == 'verified_fixed':
+        return fixed & verified
+    if state == 'unverified_fixed':
+        return fixed & ~verified  # a row with no Triage row (the join is null) is not verified either
+    if state == 'reopened':
+        return Q(remediation_status__in=('open', 'in_progress')) & Q(**{f'{prefix}retest_state': 'still_reproduces'})
+    raise ValueError('unknown retest state')
+
+
+def retest_counts(project_ids):
+    """``{verified_fixed, unverified_fixed, reopened}``: findings (CVE matches of the current inventory, scanner and hygiene findings) of these
+    projects in each retest state. One grouped query per kind of finding."""
+    from django.db.models import Count
+
+    from cveFeed.correlation import latest_scan_q
+    from cveFeed.models import CVEMatch, HygieneFinding
+    from startScan.models import Vulnerability
+    out = {'verified_fixed': 0, 'unverified_fixed': 0, 'reopened': 0}
+    sources = (CVEMatch.objects.filter(latest_scan_q('subdomain__'), subdomain__target_domain__project_id__in=project_ids),
+               Vulnerability.objects.filter(target_domain__project_id__in=project_ids),
+               HygieneFinding.objects.filter(domain__project_id__in=project_ids))
+    for qs in sources:
+        agg = qs.aggregate(**{state: Count('pk', filter=retest_q(state)) for state in out})
+        for state in out:
+            out[state] += agg[state]
+    return out
