@@ -2763,3 +2763,11 @@ a.score-label:hover{text-decoration-color:var(--ink)}
   .discovery>.ticker{grid-area:ticker;height:auto;min-height:0;max-height:96px;padding-bottom:var(--s-4)}
   .hero #d-graph{flex:1;height:auto;min-height:clamp(144px,calc(100dvh - 620px),440px)}
 }
+/* ---- UI-1: a page head that carries buttons keeps them off the title ---- */
+/* A head that carries buttons (the Overview: Connect your AI model, Download PDF report, Include closed findings) gives them their own line under the title
+   and the sentence, whatever the width, so no button covers the title and the sentence is never squeezed to a character */
+.page-head.one-line.with-actions{flex-wrap:wrap;align-items:center;justify-content:flex-start;column-gap:var(--s-3);row-gap:var(--s-2)}
+.page-head.one-line.with-actions>div{flex:1 0 100%}
+@media (min-width:900px){
+  .wrap:has(>.pagetabs+.page-head.one-line.with-actions)>.page-head{flex:1 0 100%}
+}
