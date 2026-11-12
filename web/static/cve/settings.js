@@ -1,6 +1,6 @@
 // Admin settings: AI, API keys, Tailscale, OpenVAS, notifications, email, scan policy, proxy. Superuser only (the API enforces it).
 // DOM is built with textContent / value only; secrets are write-only (blank keeps the stored value).
-import { ask } from "/staticfiles/cve/ui.js";
+import { ask, details } from "/staticfiles/cve/ui.js";
 import { askScannerPlan } from "/staticfiles/cve/scanner-plan.js";
 import { seedCard } from "/staticfiles/cve/seed-card.js";
 import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
@@ -126,7 +126,7 @@ function reviewerPanel(r, markDirty) {
   const draw = (now) => {
     const container = now.container || {};
     const inForce = now.models_in_force || {};
-    status.textContent = !now.env_enabled ? "Turned off on the server (CVENGINE_REVIEWER=0)."
+    status.textContent = !now.env_enabled ? "Turned off for this whole server by its administrator."
       : !container.token ? "Waiting for the server to hand the reviewer container its token."
       : `${now.working ? "Working" : "Not working (see the connection above, or a pause)"}. ${inForceText(inForce)} Reviewed today: ${now.reviews_today}. `
         + `Last call from the container: ${container.last_seen || "never"}. Last operations check: ${now.last_ops_at || "never"}.`;
@@ -138,6 +138,7 @@ function reviewerPanel(r, markDirty) {
     "AI reviewer",
     el("p", "note", "A separate, locked-down container reviews every open finding once (again only when its host or evidence changes) and checks the server's operations a few times a day, raising admin alerts. It closes a false positive only when the server finds no hard evidence, nobody worked the finding, and no text aimed at AI agents in its evidence. It also answers the questions the AI triage queues for it; while it is off they wait. Its models are chosen above, in the table."),
     status,
+    details("For the server's administrator: CVENGINE_REVIEWER=0 in the server's environment turns the reviewer off. It shows here as turned off by the administrator."),
     waiting,
     on.wrap,
     close.wrap,
@@ -921,9 +922,12 @@ const sections = {
       host.append(
         card(
           "Tuning",
-          el("p", "note", "Container ceilings come from CELERY_MEM_LIMIT, WEB_MEM_LIMIT and BEAT_MEM_LIMIT (docker-compose, default 4g, 1g, 512m). Memory reserved per job (an estimate at first, raised to what real runs needed): " +
-            Object.entries(snap.costs_mb || {}).map(([k, v]) => `${k} ${mb(v)}`).join(", ") +
-            ". Override with HEAVY_COST_SCALE, HEAVY_MEMORY_BUDGET_MB or HEAVY_COST_<KIND>_MB in the celery environment."),
+          el("p", "note", "Memory reserved per job (an estimate at first, raised to what real runs needed): " +
+            Object.entries(snap.costs_mb || {}).map(([k, v]) => `${k} ${mb(v)}`).join(", ") + "."),
+          details(
+            "For the server's administrator: container ceilings come from CELERY_MEM_LIMIT, WEB_MEM_LIMIT and BEAT_MEM_LIMIT (docker-compose, default 4g, 1g, 512m).",
+            "Override the per-job estimate with HEAVY_COST_SCALE, HEAVY_MEMORY_BUDGET_MB or HEAVY_COST_<KIND>_MB in the celery environment.",
+          ),
         ),
       );
     };

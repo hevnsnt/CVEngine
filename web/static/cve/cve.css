@@ -398,6 +398,10 @@ a.cve-link{font-family:var(--mono)}
 /* ---- toast ---- */
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(var(--tab) + 14px + env(safe-area-inset-bottom,0px));max-width:min(92vw,440px);z-index:90;background:var(--ink);color:var(--on-ink);padding:var(--s-3) var(--s-4);border-radius:var(--r);font-size:var(--fs-3);font-weight:var(--fw-semi);box-shadow:var(--pop);animation:rise .2s var(--ease)}
 .toast.err{background:var(--fire)}
+.toast-stack{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(var(--tab) + 14px + env(safe-area-inset-bottom,0px));width:min(92vw,440px);z-index:90;display:flex;flex-direction:column;gap:var(--s-2)}
+.toast-stack .toast{position:static;transform:none;max-width:none;display:flex;align-items:center;justify-content:space-between;gap:var(--s-3)}
+.toast-close{flex:none;min-height:36px;background:transparent;color:inherit;border:1px solid currentColor;border-radius:var(--r-s);padding:var(--s-1) var(--s-3);font:inherit;font-size:var(--fs-2);cursor:pointer}
+.toast-close:focus-visible{outline:2px solid var(--on-ink);outline-offset:2px}
 
 /* ---- dialog: bottom sheet on phones, centred modal from 640px ---- */
 .dlg{border:0;padding:0;margin:auto 0 0;width:100%;max-width:100%;max-height:92dvh;border-radius:var(--r-l) var(--r-l) 0 0;background:var(--surface);color:var(--ink);box-shadow:var(--sh-3)}
@@ -1091,7 +1095,7 @@ pre.mono{margin:0 0 var(--s-2);padding:var(--s-2) var(--s-3);background:var(--in
   :root{--gutter:24px}
   h1{font-size:var(--fs-8)}
   .cards{grid-template-columns:repeat(2,1fr)}
-  .toast{bottom:24px}
+  .toast,.toast-stack{bottom:24px}
   .sheet-grid{grid-template-columns:repeat(4,1fr)}
   .add-btn span{display:inline}
   .jump-key{display:inline-block}
@@ -1131,7 +1135,7 @@ pre.mono{margin:0 0 var(--s-2);padding:var(--s-2) var(--s-3);background:var(--in
   .wrap{padding-top:var(--s-8);padding-bottom:var(--s-12)}
   .cards{grid-template-columns:repeat(3,1fr)}
   #graph{height:calc(100dvh - 360px)}
-  .toast{left:calc(50% + var(--rail)/2)}
+  .toast,.toast-stack{left:calc(50% + var(--rail)/2)}
   .big b{font-size:76px}
 }@media (min-width:1024px) and (max-width:1100px){:root{--rail:232px}}
 
@@ -1452,7 +1456,10 @@ a.bb-tile{text-decoration:none;color:inherit;display:block}a.bb-tile:focus-visib
 .sk-line:last-of-type{border-bottom:0}
 .load-error{display:flex;flex-direction:column;align-items:flex-start;gap:var(--s-2);padding:var(--s-4) var(--s-4);border:1px solid var(--line-2);border-left:4px solid var(--fire);border-radius:var(--r);background:var(--surface)}
 .load-error b{font-size:var(--fs-3)}
-.load-error.inline{margin-top:var(--s-3)}@media (prefers-reduced-motion:reduce){.sk-bar,.skeleton{animation:none}}
+.load-error.inline{margin-top:var(--s-3)}
+.wait{display:flex;flex-direction:column;gap:var(--s-2);min-width:0}.wait-line{margin:0}.wait-bar{width:60%}.wait-bar+.wait-bar{width:38%}.wait.slow .wait-line{color:var(--ink)}
+.tech{margin-top:var(--s-1)}.tech>summary{cursor:pointer;color:var(--muted);font-size:var(--fs-2);width:max-content}.tech>.note{margin:var(--s-1) 0 0;overflow-wrap:anywhere}
+@media (prefers-reduced-motion:reduce){.sk-bar,.skeleton{animation:none}}
 
 /* copy buttons: small, quiet until hovered or focused, a tick when done */
 .copy-btn{all:unset;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:var(--r-s);color:var(--muted);cursor:pointer;flex:none}

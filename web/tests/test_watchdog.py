@@ -3,6 +3,7 @@ action and the flap guard (R10), the switches, the host request files, and a tic
 fakes: nothing here talks to a broker or a container."""
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -51,8 +52,9 @@ class FakeRedis:
     def ping(self):
         return True
 
-    def zrangebyscore(self, key, lo, hi):
-        return [t for t, (score, raw) in self.unacked.items() if score <= float(hi)]
+    def zrangebyscore(self, key, lo, hi, withscores=False):
+        found = [(t, score) for t, (score, raw) in self.unacked.items() if score <= float(hi)]
+        return found if withscores else [t for t, _ in found]
 
     def hget(self, key, tag):
         return self.unacked[tag][1] if tag in self.unacked else None
@@ -119,10 +121,10 @@ class WatchdogCase(TestCase):
         path = self.home / wd.ACTION_FILE
         return json.loads(path.read_text()) if path.exists() else None
 
-    def host_answers(self, ok=True, at=None):
+    def host_answers(self, ok=True, at=None, detail='done', **extra):
         req = self.request()
         (self.home / wd.ACTION_FILE).unlink()
-        (self.home / wd.RESULT_FILE).write_text(json.dumps({'id': req['id'], 'action': req['action'], 'ok': ok, 'at': (at or self.t).timestamp(), 'detail': 'done'}))
+        (self.home / wd.RESULT_FILE).write_text(json.dumps({'id': req['id'], 'action': req['action'], 'ok': ok, 'at': (at or self.t).timestamp(), 'detail': detail, **extra}))
         return req
 
 
@@ -232,13 +234,48 @@ class R1LanesTests(WatchdogCase):
         self.assertIn('stopped answering at {{time:2026-11-08T18:00:00Z}}', alert.title)
         self.assertIn('they answer again', alert.title)
 
+    def test_a_restart_whose_lanes_answer_after_five_minutes_is_fixed_not_escalated(self):
+        """The lanes of a restarted container can take minutes to answer (the CVE feed lane took ten on 11/9): the check waits as long as an update's warm-up."""
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.host_answers()
+        self.tick(30)
+        self.tick(125)  # two minutes after the host finished: the lanes are still starting
+        self.assertEqual(self.state('R1').status, 'acting')
+        self.assertFalse(AdminAlert.objects.filter(code='watchdog_r1', severity='critical').exists())
+        self.assertIn('starting', self.state('R1').status_text)
+        self.tick(120)  # five minutes after the host finished: still starting, still no verdict
+        self.assertFalse(AdminAlert.objects.filter(code='watchdog_r1', severity='critical').exists())
+        self.probes.data['lanes'] = dict(LANES)
+        self.tick(30)
+        self.assertEqual(self.state('R1').status, 'ok')
+        self.assertTrue(WatchdogEvent.objects.filter(rule='R1', level='fixed').exists())
+        self.assertFalse(WatchdogEvent.objects.filter(rule='R1', level='problem').exists())
+        self.assertFalse(AdminAlert.objects.filter(code='watchdog_r1', severity='critical').exists())
+        self.assertIsNone(self.state('R1').hold_until)
+
+    def test_a_restart_whose_lanes_never_answer_is_escalated_once_the_warm_up_is_over(self):
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.host_answers()
+        self.tick(30)
+        for _ in range(11):  # 11 minutes after the host finished
+            self.tick(60)
+        self.assertEqual(self.state('R1').status, 'problem')
+        self.assertEqual(AdminAlert.objects.get(code='watchdog_r1', resolved_at__isnull=True).severity, 'critical')
+        self.assertEqual(WatchdogEvent.objects.filter(rule='R1', level='problem').count(), 1)
+
     def test_not_fixed_escalates_once_and_stops_for_an_hour(self):
         self.break_lanes()
         self.tick()
         self.tick(181)
         self.host_answers()
         self.tick(30)
-        self.tick(125)  # check due, symptom still there
+        self.tick(125)  # check due, symptom still there: the lanes are given the warm-up first
+        self.assertEqual(self.state('R1').status, 'acting')
+        self.tick(500)  # the warm-up (ten minutes after the host finished) is over, the symptom is still there
         self.assertEqual(self.state('R1').status, 'problem')
         alert = AdminAlert.objects.get(code='watchdog_r1', resolved_at__isnull=True)
         self.assertEqual(alert.severity, 'critical')
@@ -250,6 +287,24 @@ class R1LanesTests(WatchdogCase):
         self.assertEqual(self.state('R1').status, 'problem')
         self.assertEqual(AdminAlert.objects.filter(code='watchdog_r1').count(), 1)
 
+    def test_the_warm_up_text_does_not_claim_the_workers_are_starting_and_the_escalation_does_not_assume_it(self):
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.host_answers()
+        self.tick(30)
+        self.tick(125)
+        text = self.state('R1').status_text
+        self.assertIn('have not answered yet', text)
+        self.assertIn('ten minutes', text)
+        self.tick(500)
+        alert = AdminAlert.objects.get(code='watchdog_r1', resolved_at__isnull=True)
+        self.assertIn('ten minutes after the restart, and the workers still did not answer', alert.detail)
+        self.assertNotIn('long after', alert.detail)
+        self.assertIn('waiting', alert.detail)  # what waits and what happens next
+        self.assertIn('run when', alert.detail)
+        self.assertIn('tries again', alert.detail)
+
     def test_after_the_hold_ends_it_may_try_again_within_the_daily_cap(self):
         self.break_lanes()
         self.tick()
@@ -257,6 +312,7 @@ class R1LanesTests(WatchdogCase):
         self.host_answers()
         self.tick(30)
         self.tick(125)
+        self.tick(500)  # the warm-up is over: escalated and held for an hour
         self.assertIsNone(self.request())
         self.tick(3600)
         self.tick(5)
@@ -279,6 +335,72 @@ class R1LanesTests(WatchdogCase):
         self.tick(1000)
         self.assertIsNone(self.request())
         self.assertIn('limit', self.state('R1').status_text)
+
+    def test_r1_and_r2_share_the_restart_budget(self):
+        """Both rules recreate the same container and the host allows 24 restarts a day in all: the web side counts them together, not 16 and 16."""
+        self.tick()
+        now = self.t.timestamp()
+        for code in ('R1', 'R2'):
+            row = self.state(code)
+            row.actions = [now - (i + 2) * 3600 for i in range(12)]
+            row.save()
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.assertIsNone(self.request())
+        self.assertEqual(self.state('R1').status, 'held')
+        self.assertIn('24', self.state('R1').status_text)
+        self.assertFalse(AdminAlert.objects.filter(code='watchdog_r1', severity='critical').exists())
+
+    def test_a_host_budget_refusal_is_held_not_escalated(self):
+        """The host's own limit said no: nothing was tried and nothing failed. No 'could not fix it', no hour of silence, and the attempt does not count."""
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.host_answers(ok=False, detail='refused by the host: 24 restarts in the last 24 hours (limit 24).', limit='day')
+        self.tick(30)
+        row = self.state('R1')
+        self.assertEqual(row.status, 'held')
+        self.assertIsNone(row.hold_until)
+        self.assertIsNone(row.escalated_at)
+        self.assertEqual(row.actions, [])
+        self.assertFalse(WatchdogEvent.objects.filter(rule='R1', level='problem').exists())
+        alert = AdminAlert.objects.get(code='watchdog_r1', resolved_at__isnull=True)
+        self.assertEqual(alert.severity, 'warning')
+        self.assertNotIn('could not fix', alert.title)
+        self.assertIn('daily limit', alert.detail)
+        for _ in range(5):  # still held: the host is not asked again every minute
+            self.tick(60)
+            self.assertIsNone(self.request())
+        self.assertEqual(self.state('R1').status, 'held')
+
+    def test_a_host_budget_refusal_is_recognised_from_an_older_host_script_by_its_words(self):
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.host_answers(ok=False, detail='refused by the host: restart-celery was done 4 minutes ago (limit: one per 10 minutes).')
+        self.tick(30)
+        self.assertEqual(self.state('R1').status, 'held')
+        self.assertFalse(AdminAlert.objects.filter(code='watchdog_r1', severity='critical').exists())
+
+    def test_a_held_rule_asks_again_when_the_hold_ends_and_resolves_its_notice_when_the_lanes_answer(self):
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.host_answers(ok=False, detail='refused by the host: 24 restarts in the last 24 hours (limit 24).', limit='day')
+        self.tick(30)
+        self.probes.data['lanes'] = dict(LANES)
+        self.tick(60)
+        self.assertEqual(self.state('R1').status, 'ok')
+        self.assertFalse(AdminAlert.objects.filter(code='watchdog_r1', resolved_at__isnull=True).exists())
+
+    def test_a_host_that_failed_for_another_reason_is_still_a_failed_fix(self):
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.host_answers(ok=False, detail='restart-celery failed (exit 1); see watchdog.log on the host')
+        self.tick(30)
+        self.assertEqual(self.state('R1').status, 'problem')
 
     def test_minimum_gap_of_fifteen_minutes(self):
         self.break_lanes()
@@ -386,6 +508,25 @@ class StandDownTests(WatchdogCase):
             self.tick(400)
         self.assertIsNone(self.request())
         self.assertIn('busy, not gone', self.state('R1').status_text)
+
+    def test_a_silent_lane_running_one_task_for_eight_minutes_is_not_restarted(self):
+        """A lane in one long task (a big port load) finishes nothing for minutes and misses its ping: busy, not dead."""
+        self.break_lanes()
+        quiet = {}  # no task finished in the last 90 seconds
+        started_eight_minutes_ago = {p: 480 for p in ('discovery', 'cve_feed', 'validation_priority', 'classic')}
+        with mock.patch('reNgine.lane_memory.recent_progress', return_value=quiet), mock.patch('reNgine.lane_memory.in_flight', return_value=started_eight_minutes_ago):
+            self.tick()
+            self.tick(400)
+        self.assertIsNone(self.request())
+        self.assertIn('busy', self.state('R1').status_text)
+        self.assertNotIn('stopped', self.state('R1').status_text)
+
+    def test_a_silent_lane_whose_task_started_over_thirty_minutes_ago_is_still_restarted(self):
+        self.break_lanes()
+        with mock.patch('reNgine.lane_memory.recent_progress', return_value={}), mock.patch('reNgine.lane_memory.in_flight', return_value={}):
+            self.tick()
+            self.tick(400)
+        self.assertIsNotNone(self.request())
 
     def test_an_unreadable_update_state_stands_it_down(self):
         self.break_lanes()
@@ -501,6 +642,54 @@ class R2HungTests(WatchdogCase):
             self.tick(60)
         self.assertIsNone(self.request())
         self.assertEqual(self.state('R2').status, 'ok')
+
+    def test_one_long_task_with_free_slots_is_busy_not_hung(self):
+        """One task running for twelve minutes, 1 of 8 slots taken, completions frozen, a queue that does not shrink: the lane is busy."""
+        self.grow(10)
+        with mock.patch('reNgine.lane_memory.in_flight', return_value={'cve_feed': 720}):
+            self.tick()
+            for step in range(1, 14):
+                self.grow(10 + step * 5)
+                self.tick(60)
+        self.assertIsNone(self.request())
+        self.assertEqual(self.state('R2').status, 'ok')
+        self.assertIn('busy', self.state('R2').status_text)
+
+    def test_a_task_started_over_thirty_minutes_ago_does_not_make_a_lane_busy(self):
+        self.grow(10)
+        with mock.patch('reNgine.lane_memory.in_flight', return_value={}):
+            self.tick()
+            for step in range(1, 12):
+                self.grow(10 + step * 5)
+                self.tick(60)
+        self.assertEqual(self.request()['rule'], 'R2')
+
+    def _long_task_record(self, pid):
+        """A real in-flight record of the CVE feed lane (written now, beating) by a worker with this pid."""
+        from django.core.cache import cache
+        from reNgine import lane_memory
+        now = time.time()
+        cache.set(lane_memory.RUNNING_PREFIX + 'cve_feed', json.dumps({'pid': pid, 'beat': now, 'running': [{'name': 'cveFeed.tasks.port_load', 'since': now - 2700}]}), 600)
+        self.addCleanup(cache.delete, lane_memory.RUNNING_PREFIX + 'cve_feed')
+
+    def _frozen_lane(self, pid):
+        self.probes.data['lane_work'] = {'cve_feed_worker@c': {'completed': 50, 'active': 1, 'capacity': 8, 'pid': pid}}
+        self.grow(10)
+        self.tick()
+        for step in range(1, 12):
+            self.grow(10 + step * 5)
+            self.tick(60)
+
+    def test_a_forty_five_minute_task_whose_worker_is_the_answering_one_is_busy_not_hung(self):
+        self._long_task_record(pid=4242)
+        self._frozen_lane(pid=4242)
+        self.assertIsNone(self.request())
+        self.assertEqual(self.state('R2').status, 'ok')
+
+    def test_a_record_left_by_a_worker_that_is_not_the_answering_one_does_not_make_the_lane_busy(self):
+        self._long_task_record(pid=4242)
+        self._frozen_lane(pid=9999)  # the lane was restarted: the answering worker is another process
+        self.assertEqual(self.request()['rule'], 'R2')
 
     def test_a_queue_that_shrinks_is_not_hung(self):
         self.grow(100)
@@ -710,6 +899,173 @@ class R4R5R6Tests(WatchdogCase):
             restored.assert_not_called()
         self.assertEqual(self.state('R5').status, 'ok')
 
+    def _unacked_45_minutes(self):
+        self.probes.data['unacked'] = {'count': 1, 'oldest_age_seconds': 2700}
+        self.probes.client.unacked = {'a': (self.t.timestamp() - 2700, '[{"headers": {"id": "busy-1"}}]')}
+
+    def _inspect_answering(self, workers):
+        """A fake Celery inspect: only ``workers`` answer, and none of them lists the task."""
+        fake = mock.MagicMock()
+        for call in ('active', 'reserved', 'scheduled'):
+            getattr(fake, call).return_value = {w: [] for w in workers} or None
+        app = mock.MagicMock()
+        app.control.inspect.return_value = fake
+        return mock.patch('reNgine.celery.app', app)
+
+    def test_no_worker_answering_never_returns_an_unacked_message(self):
+        """A worker that does not answer may still hold the message: returning it would run the task twice."""
+        self._unacked_45_minutes()
+        self.probes.data['lanes'] = {}
+        with mock.patch('cveFeed.broker_recovery.requeue_tags') as restored:
+            self.tick()
+            self.tick(700)
+        restored.assert_not_called()
+        self.assertEqual(self.state('R5').status, 'unknown')
+
+    def test_a_partial_answer_never_returns_an_unacked_message(self):
+        """Three lanes answer the inspect, the fourth is busy and silent: its message must stay where it is."""
+        self._unacked_45_minutes()
+        with self._inspect_answering(['discovery_worker@c', 'cve_feed_worker@c', 'validation_priority_worker@c']), \
+                mock.patch('cveFeed.broker_recovery.requeue_tags') as restored:
+            self.tick()
+        restored.assert_not_called()
+        self.assertEqual(self.state('R5').status, 'unknown')
+
+    def test_a_silent_lane_in_the_snapshot_blocks_the_requeue_even_when_the_inspect_answers(self):
+        self._unacked_45_minutes()
+        self.probes.data['lanes'] = {n: q for n, q in LANES.items() if not n.startswith('cve_feed')}
+        with self._inspect_answering(list(self.probes.data['lanes'])), mock.patch('cveFeed.broker_recovery.requeue_tags') as restored:
+            self.tick()
+        restored.assert_not_called()
+
+    def test_a_complete_answer_still_returns_what_no_worker_holds(self):
+        self._unacked_45_minutes()
+        with self._inspect_answering(list(LANES)), mock.patch('cveFeed.broker_recovery.requeue_tags', return_value=1) as restored:
+            self.tick()
+        restored.assert_called_once_with(['a'])
+
+    def test_a_requeue_that_cannot_tell_is_written_to_the_event_log(self):
+        self._unacked_45_minutes()
+        self.probes.data['lanes'] = {}
+        ctx = wd.Ctx(self.t, snap_mod.collect(self.probes, now=self.t.timestamp()), {}, probes=self.probes)
+        self.assertEqual(wd.requeue_orphans(ctx, 60), 0)
+        self.assertTrue(WatchdogEvent.objects.filter(result__contains='left where they are').exists())
+
+    def test_a_skipped_return_is_written_to_the_event_log_on_the_tick_path_once_in_ten_minutes(self):
+        self._unacked_45_minutes()
+        self.probes.data['lanes'] = {}
+        self.tick()
+        self.assertEqual(WatchdogEvent.objects.filter(rule='R5', result__contains='left where they are').count(), 1)
+        self.tick(30)
+        self.assertEqual(WatchdogEvent.objects.filter(rule='R5', result__contains='left where they are').count(), 1)  # not every 30 seconds
+        self.tick(700)
+        self.assertEqual(WatchdogEvent.objects.filter(rule='R5', result__contains='left where they are').count(), 2)
+
+    def _one_lane_silent_but_working(self):
+        """The CVE feed lane misses its ping but beats (a long task); one message taken before has been unacknowledged for 45 minutes."""
+        self._unacked_45_minutes()
+        self.probes.data['lanes'] = {n: q for n, q in LANES.items() if not n.startswith('cve_feed')}
+
+    def test_messages_stuck_behind_a_silent_lane_raise_a_notice_after_half_an_hour_that_says_what_happens_next(self):
+        self._one_lane_silent_but_working()
+        with mock.patch('reNgine.lane_memory.in_flight', return_value={'cve_feed': 600}), mock.patch('cveFeed.broker_recovery.requeue_tags') as restored:
+            self.tick()
+            self.tick(25 * 60)
+            self.assertFalse(AdminAlert.objects.filter(code='watchdog_r5', resolved_at__isnull=True).exists())  # not yet: a quiet lane is often only busy
+            self.tick(6 * 60)
+        restored.assert_not_called()  # the lane may still hold the message
+        alert = AdminAlert.objects.get(code='watchdog_r5', resolved_at__isnull=True)
+        self.assertEqual(alert.severity, 'warning')
+        for words in ('1 message', 'CVE feed', 'not been put back', 'docker compose logs --tail 100 celery', 'restart'):
+            self.assertIn(words, alert.title + ' ' + alert.detail)
+        self.assertNotIn('dead', alert.detail)
+
+    def test_the_stuck_messages_notice_closes_when_every_lane_answers_again(self):
+        self._one_lane_silent_but_working()
+        with mock.patch('reNgine.lane_memory.in_flight', return_value={'cve_feed': 600}):
+            self.tick()
+            self.tick(31 * 60)
+        self.assertTrue(AdminAlert.objects.filter(code='watchdog_r5', resolved_at__isnull=True).exists())
+        self.probes.data['lanes'] = dict(LANES)
+        with self._inspect_answering(list(LANES)), mock.patch('cveFeed.broker_recovery.requeue_tags', return_value=1):
+            self.tick(30)
+        self.assertFalse(AdminAlert.objects.filter(code='watchdog_r5', resolved_at__isnull=True, title__startswith='Work is waiting').exists())
+
+    def _restarted_at(self, offset):
+        """The host recreated the workers ``offset`` seconds after T0: every process that held a message before it is gone."""
+        state = WatchdogState.objects.get_or_create(rule='R5')[0]
+        state.data = {**(state.data or {}), 'workers_recreated_before': (T0 + timedelta(seconds=offset)).timestamp()}
+        state.save()
+
+    def test_after_a_restart_the_messages_taken_before_it_are_returned_even_with_a_lane_gone_and_nothing_taken_after_it(self):
+        self.probes.data['unacked'] = {'count': 2, 'oldest_age_seconds': 4000}
+        self.probes.client.unacked = {
+            'before': (T0.timestamp() - 4000, '[{"headers": {"id": "dead-1"}}]'),   # taken by a process the restart killed
+            'after': (T0.timestamp() + 100, '[{"headers": {"id": "live-2"}}]'),     # taken after the restart: a live worker may hold it
+        }
+        self.probes.data['lanes'] = {n: q for n, q in LANES.items() if not n.startswith('cve_feed')}
+        self._restarted_at(0)
+        with mock.patch('reNgine.lane_memory.in_flight', return_value={'cve_feed': 60}), mock.patch('cveFeed.broker_recovery.requeue_tags', return_value=1) as restored:
+            self.tick(3000)  # the later message is now over 30 minutes old too
+        restored.assert_called_once_with(['before'])
+
+    def test_a_message_a_live_worker_holds_is_never_returned_whatever_the_restart_time(self):
+        """Delivered after the restart, lane gone: it stays, even though every other lane answers and does not list it."""
+        self.probes.data['unacked'] = {'count': 1, 'oldest_age_seconds': 2000}
+        self.probes.client.unacked = {'after': (T0.timestamp() + 100, '[{"headers": {"id": "live-2"}}]')}
+        self.probes.data['lanes'] = {n: q for n, q in LANES.items() if not n.startswith('cve_feed')}
+        self._restarted_at(0)
+        with self._inspect_answering(list(self.probes.data['lanes'])), mock.patch('cveFeed.broker_recovery.requeue_tags') as restored:
+            self.tick(3000)
+        restored.assert_not_called()
+
+    def test_a_restart_the_host_carried_out_is_remembered_as_the_time_before_which_no_worker_survives(self):
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        requested = self.request()
+        self.host_answers()
+        self.tick(30)
+        data = self.state('R5').data
+        self.assertAlmostEqual(data['workers_recreated_before'], (T0 + timedelta(seconds=181)).timestamp(), delta=1)
+        self.assertEqual(requested['action'], 'restart-celery')
+
+    def test_a_restart_the_host_refused_is_not_remembered(self):
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.host_answers(ok=False, detail='refused by the host: 24 restarts in the last 24 hours (limit 24).', limit='day')
+        self.tick(30)
+        self.assertNotIn('workers_recreated_before', self.state('R5').data or {})
+
+    def test_the_hold_notice_does_not_repeat_the_host_prefix(self):
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.host_answers(ok=False, detail='refused by the host: 24 restarts in the last 24 hours (limit 24).', limit='day')
+        self.tick(30)
+        detail = AdminAlert.objects.get(code='watchdog_r1', resolved_at__isnull=True).detail
+        self.assertNotIn('refused by the host', detail)
+        self.assertIn('24 restarts in the last 24 hours', detail)
+
+    def test_a_gap_refusal_for_the_disk_cleanup_says_what_was_refused_and_does_not_say_restarted(self):
+        text = wd._gap_text('prune-docker', 'refused by the host: prune-docker was done 20 minutes ago (limit: one per 30 minutes).')
+        self.assertIn('disk cleanup', text)
+        self.assertNotIn('restarted', text)
+        self.assertNotIn('refused by the host', text)
+        self.assertIn('tries again later', text)
+
+    def test_a_gap_refusal_for_a_restart_says_a_restart_was_refused(self):
+        self.break_lanes()
+        self.tick()
+        self.tick(181)
+        self.host_answers(ok=False, detail='refused by the host: restart-celery was done 4 minutes ago (limit: one per 10 minutes).', limit='gap')
+        self.tick(30)
+        detail = AdminAlert.objects.get(code='watchdog_r1', resolved_at__isnull=True).detail
+        self.assertIn('restart', detail)
+        self.assertIn('4 minutes ago', detail)
+        self.assertNotIn('a moment ago', detail)
+
     def test_recent_unacked_messages_are_left_alone(self):
         self.probes.data['unacked'] = {'count': 30, 'oldest_age_seconds': 120}
         with mock.patch('cveFeed.broker_recovery.requeue_tags') as restored:
@@ -856,6 +1212,17 @@ class TickSafetyTests(WatchdogCase):
             self.tick(121)
         self.assertEqual(self.state('R1').status, 'unknown')
         self.assertEqual(self.request()['action'], 'restart-celery-beat')
+
+    def test_the_docs_name_the_tick_limits_the_code_uses(self):
+        """docs/WATCHDOG.md said 25 s and 33 s after the code moved to 40 s and 48 s; the host script's bounds are named too."""
+        from cveFeed.management.commands import watchdog_tick
+        doc = (Path(__file__).resolve().parents[2] / 'docs' / 'WATCHDOG.md').read_text()
+        self.assertIn(f'stops itself after {wd.TICK_SECONDS} seconds', doc)
+        self.assertIn(f'at {watchdog_tick.HARD_SECONDS} seconds', doc)
+        script = (Path(__file__).resolve().parents[2] / 'scripts' / 'watchdog.sh').read_text()
+        for bound in re.findall(r'timeout -k \d+ (\d+) "\$\{COMPOSE\[@\]\}" exec -T web timeout -k \d+ (\d+) python3 manage.py watchdog_tick', script):
+            for seconds in bound:
+                self.assertIn(f'{seconds} seconds', doc)
 
     def test_a_probe_that_hangs_is_cut_off_by_the_time_limit(self):
         probes = FakeProbes(lanes=lambda: time.sleep(30))

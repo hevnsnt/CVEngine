@@ -90,9 +90,25 @@
       tasks.appendChild(li);
     });
   }
+  // A list that could not be read says so and offers the same read again; it never falls back to "none yet".
+  function unreadable(box, emptyNote, what, again, why) {
+    box.textContent = ''; emptyNote.style.display = 'none';
+    var li = el('li'), err = el('div', 'load-error'); err.setAttribute('role', 'alert');
+    err.appendChild(el('b', '', what + ' could not be read'));
+    if (why) err.appendChild(el('span', 'note', why));
+    err.appendChild(button('Retry', 'btn ghost sm', again));
+    li.appendChild(err); box.appendChild(li);
+  }
+  function read(url, draw, box, emptyNote, what) {
+    function go() {
+      api('GET', url).then(function (x) { if (x.ok) draw(x.d.results || []); else unreadable(box, emptyNote, what, go, x.d && x.d.error); })
+        .catch(function () { unreadable(box, emptyNote, what, go, 'The server did not answer.'); });
+    }
+    go();
+  }
   function load() {
-    api('GET', '/api/v1/projects/' + encodeURIComponent(slug) + '/sentinels').then(function (x) { if (x.ok) renderList(x.d.results || []); });
-    api('GET', '/api/v1/projects/' + encodeURIComponent(slug) + '/sentinel-tasks?page_size=20').then(function (x) { if (x.ok) renderTasks(x.d.results || []); });
+    read('/api/v1/projects/' + encodeURIComponent(slug) + '/sentinels', renderList, list, none, 'The Sentinel list');
+    read('/api/v1/projects/' + encodeURIComponent(slug) + '/sentinel-tasks?page_size=20', renderTasks, tasks, noTasks, 'The task list');
   }
   var rangesCard = document.getElementById('ranges-card'), ranges = document.getElementById('ranges'), noRanges = document.getElementById('no-ranges'),
     rangeMsg = document.getElementById('range-msg'), rangesUrl = '/api/v1/projects/' + encodeURIComponent(slug) + '/internal-ranges';

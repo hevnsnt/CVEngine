@@ -15,9 +15,15 @@ const SHOWN = 3;
 const POLL_MS = 120000;
 
 // Each open alert is one notice in the status strip (statusstrip.js), drawn there as its own row with the Dismiss button; the strip's first line
-// is the most severe notice and its count includes these.
+// is the most severe notice and its count includes these. No other page lists the alerts, so when there are more than SHOWN the last row is a
+// button that opens the whole list right here (and "Show fewer" folds it back); nothing sends the person to another page.
+let current = [];
+let showAll = false;
+
 function render(alerts) {
-  const items = alerts.slice(0, SHOWN).map((a) => {
+  current = alerts;
+  const shown = showAll ? alerts : alerts.slice(0, SHOWN);
+  const items = shown.map((a) => {
     const row = el("div", `ab-row ab-${["info", "warning", "critical"].includes(a.severity) ? a.severity : "warning"}`);
     const text = el("div", "ab-text");
     text.append(el("strong", "", localTimes(a.title)));
@@ -36,19 +42,25 @@ function render(alerts) {
           method: "POST", credentials: "same-origin", headers: csrf ? { "X-CSRFToken": csrf.value } : {},
         });
       } finally {
-        row.remove();
-        const rest = items.filter((i) => i.node !== row);
-        items.length = 0;
-        items.push(...rest);
-        setNotices("alerts", items.slice());
+        render(current.filter((x) => x.id !== a.id));
       }
     });
     row.append(text, dismiss);
     return { kind: "alert", text: localTimes(a.title), node: row, rank: a.severity === "critical" ? 0 : 2 };
   });
   if (alerts.length > SHOWN) {
-    const more = `${alerts.length - SHOWN} more alert(s): see Settings, AI model.`;
-    items.push({ kind: "more", text: more, node: el("p", "ab-more", more), rank: 3 });
+    const n = alerts.length - SHOWN;
+    const label = showAll ? "Show fewer alerts" : `${n} more ${n === 1 ? "alert" : "alerts"}. Show all.`;
+    const row = el("p", "ab-more");
+    const toggle = el("button", "btn sm ghost", label);
+    toggle.type = "button";
+    toggle.setAttribute("aria-expanded", String(showAll));
+    toggle.addEventListener("click", () => {
+      showAll = !showAll;
+      render(current);
+    });
+    row.append(toggle);
+    items.push({ kind: "more", text: label, node: row, rank: 3 });
   }
   setNotices("alerts", items);
 }

@@ -21,6 +21,7 @@ import {
   field,
   text as uiText,
   watchWide,
+  waiting,
   whatIs,
 } from "/staticfiles/cve/ui.js";
 import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation, pageAnchor, pageUrl } from "/staticfiles/cve/links.js";
@@ -3740,7 +3741,8 @@ const pages = {
       assessButton.title = h.excluded ? "This host is excluded from scanning" : h.archived ? "Restore this host before scanning" : "Refresh DNS and run the permitted host checks now";
       assessButton.classList.add("host-rescan");
       head.append(assessButton);
-      const assessBody = el("div", "note", "Checking for an existing assessment…");
+      const assessBody = el("div", "note");
+      assessBody.append(waiting("Checking for an existing assessment"));
       assessBox.append(assessHead, assessBody);
       S.manage.append(assessBox);
       // a PDF of this host: findings with evidence and remediation status, built in the background and downloaded when ready
@@ -4744,7 +4746,8 @@ pages.activity = function activity(mount) {
   const tools = el("div", "tools");
   if (ALL && root.dataset.appAdmin === "1") {
     const control = el("section", "card");
-    const state = el("p", "note", "Loading global scanning state…", { role: "status" });
+    const state = el("div", "note", null, { role: "status" });
+    state.append(waiting("Loading the global scanning state", { live: false })); // state is already a status region
     const actions = el("div", "tools");
     const pause = el("button", "btn", "Pause all scanning", { type: "button" });
     const resume = el("button", "btn ghost", "Resume scanning", { type: "button" });
