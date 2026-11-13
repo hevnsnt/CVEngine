@@ -305,9 +305,6 @@ def _agent_applies():
         from dashboard.models import ApiToken
         if ApiToken.objects.filter(revoked=False, scope='full').exists():
             return True, ''
-        from cveFeed import reviewer
-        if reviewer.settings_row().enabled:  # the AI reviewer's health check is an agent too
-            return True, ''
     except Exception:  # noqa: BLE001 - a question that cannot be worked out is not asked
         pass
     return False, 'No API key for an AI agent exists, so there is nothing to decide. If one is made later, agents may only recommend changes until you choose otherwise in Settings > configMaxxing > Auto-tuning.'
