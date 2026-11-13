@@ -1039,6 +1039,8 @@ def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOW
         out['updater'] = sentinel_settings.updater_state(agent)
         from agentapi import sentinel_version
         out['version_state'] = sentinel_version.state(agent, out['self_update'])  # current, behind or unknown, from the cached check of the latest client
+        from agentapi import sentinel_tools
+        out['tools_state'] = sentinel_tools.state(agent)  # current, behind or unknown: the tool versions it reports against the ones this release ships
         from agentapi import sentinel_contract
         reported = (agent.info or {}).get('contract_version')
         out['contract'] = {'version': reported, 'state': sentinel_contract.state(reported), 'note': sentinel_contract.note(reported)}

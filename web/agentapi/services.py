@@ -17,7 +17,7 @@ from django.contrib.postgres.expressions import ArraySubquery
 from django.db.models import AutoField, Lookup
 from django.utils import timezone
 
-from cveFeed import match_policy
+from cveFeed import match_policy, result_cuts
 from cveFeed.counts import running_window
 from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
 from tenancy import roles
@@ -1628,9 +1628,11 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
                      'full_scan_ports': e['ip'].full_scan_ports,
                      # UDP ports nothing answered on (open or filtered): shown as a note, never as a service
                      'udp_unanswered': sorted(p.number for p in e['ip'].ports.all() if p.state == 'open|filtered' and p.protocol == 'udp'),
+                     # what the last fingerprint pass cut for this address (a port list past its cap, a clipped banner, nmap's time limit), in words (cveFeed.result_cuts)
+                     'cut_notes': [result_cuts.words(c) for c in result_cuts.clean(((e['ip'].fingerprint or {}).get('result_cuts') or {}).get('nmap'))],
                      'ports': [
                 {'number': p.number, 'service': p.service_name, 'protocol': p.protocol, 'product': p.product,
-                 'version': p.version, 'cpe': p.cpe, 'os': p.os_guess, 'banner': (p.banner or '')[:500],
+                 'version': p.version, 'cpe': p.cpe, 'os': p.os_guess, 'banner': (p.banner or '')[:500], 'tunnel': (p.extra or {}).get('tunnel') or '',
                  'info': p.service_extra or '', 'scripts': {k: str(v)[:800] for k, v in list(((p.extra or {}).get('scripts') or {}).items())[:12]},
                  'db': (p.extra or {}).get('db') or None,
                  'http': p.http or None, 'tls': p.tls or None,

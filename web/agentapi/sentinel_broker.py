@@ -42,8 +42,10 @@ from agentapi import sentinel_settings
 from agentapi import sentinel_contract
 from agentapi import sentinel_stream
 from agentapi import sentinel_autoupdate
+from agentapi import sentinel_tools
 from agentapi import sentinel_version
 from agentapi import web_screenshot_results
+from cveFeed import result_cuts
 from agentapi import services as svc
 from agentapi.auth import SCOPE_SENTINEL, create_token
 from agentapi.models import SENTINEL_ACTIVE_STATUSES, Agent, SentinelEnrollment, SentinelTask
@@ -2395,7 +2397,60 @@ def _clip(value, key):
     return _text(value, _STR[key])
 
 
-def _clean_ports(ports):
+_SCRIPT_ID = re.compile(r'[a-z0-9][a-z0-9._-]{0,63}')
+MAX_SCRIPTS, MAX_SCRIPT_TEXT, MAX_SCRIPT_TOTAL = 24, 4000, 16000
+MAX_BANNER, MAX_CPES = 1024, 8
+_PORT_TEXT = {'service_extra': 200, 'ostype': 40, 'hostname': 255, 'devicetype': 64}  # a service's own words, one line, clipped (contract 5)
+_TLS_TEXT = {'subject': 300, 'issuer': 300, 'not_before': 40, 'not_after': 40, 'key_type': 20, 'key_bits': 10, 'signature': 60}
+_TLS_DIGESTS = {'fingerprint_sha1': 40, 'fingerprint_sha256': 64, 'fingerprint_md5': 32}
+_CPE = re.compile(r'cpe:/\S{1,250}')
+MAX_SCANNED_RANGES = 4096
+
+
+def _int_in(value, low, high):
+    return value if isinstance(value, int) and not isinstance(value, bool) and low <= value <= high else None
+
+
+def _block_text(value, limit):
+    """A multi-line text from a scanned host (a banner, an NSE script's output): at most ``limit`` characters, control characters other than newline and tab
+    removed. Data to store and escape when shown, never interpreted."""
+    from cveFeed.nuclei_fp import bounded
+    return bounded(value, limit) if isinstance(value, str) else ''
+
+
+def _clean_scripts(value):
+    """``{script id: output}`` of NSE output: at most ``MAX_SCRIPTS`` ids of the plain shape, ``MAX_SCRIPT_TEXT`` characters each and ``MAX_SCRIPT_TOTAL`` in all.
+    (``cveFeed.port_inventory.persist_inventory`` then keeps only the reviewed ids.)"""
+    out, total = {}, 0
+    for sid, text in (value.items() if isinstance(value, dict) else ()):
+        if len(out) >= MAX_SCRIPTS or total >= MAX_SCRIPT_TOTAL:
+            break
+        if isinstance(sid, str) and _SCRIPT_ID.fullmatch(sid) and isinstance(text, str):
+            text = _block_text(text, MAX_SCRIPT_TEXT)[:MAX_SCRIPT_TOTAL - total]
+            out[sid] = text
+            total += len(text)
+    return out
+
+
+def _clean_tls(value):
+    """The certificate summary of a port (``cvengine_scanner.nmap.parse_ssl_cert``'s fields): known keys only, each clipped, a digest only when it is hex of
+    the right length; {} without a subject (the library's own rule: no subject is no certificate)."""
+    if not isinstance(value, dict):
+        return {}
+    out = {key: _text(value[key], limit) for key, limit in _TLS_TEXT.items() if isinstance(value.get(key), str) and _text(value[key], limit)}
+    if isinstance(value.get('sans'), list):
+        out['sans'] = [_text(v, 200) for v in value['sans'][:40] if isinstance(v, str) and _text(v, 200)]
+    for key, size in _TLS_DIGESTS.items():
+        digest = value.get(key)
+        if isinstance(digest, str) and len(digest) == size and re.fullmatch(r'[0-9a-f]+', digest):
+            out[key] = digest
+    return out if out.get('subject') else {}
+
+
+def _clean_ports(ports, cuts=None, target=None):
+    """The ports of one nmap host. The six fields of contract 1 are always rebuilt; the detail contract 5 added (the service's extra info, how the name was
+    found, the TLS tunnel, CPEs, banner, reviewed script output, the certificate summary) only when the Sentinel sent it, so a contract 4 result comes back
+    exactly as before. More than ``MAX_PORTS_PER_HOST`` ports are cut and said so in ``cuts`` (a list, changed in place) for ``target``."""
     if not isinstance(ports, list):
         raise ApiError(400, 'ports must be a list')
     out = []
@@ -2405,29 +2460,78 @@ def _clean_ports(ports):
         number = item.get('number')
         if not isinstance(number, int) or isinstance(number, bool) or not 0 < number < 65536:
             continue
-        out.append({'number': number, 'protocol': item.get('protocol') if item.get('protocol') in _PROTOCOLS else 'tcp',
-                    'state': item.get('state') if item.get('state') in _PORT_STATES else 'open',
-                    'service_name': _clip(item.get('service_name'), 'service_name'), 'product': _clip(item.get('product'), 'product'),
-                    'version': _clip(item.get('version'), 'version')})
+        row = {'number': number, 'protocol': item.get('protocol') if item.get('protocol') in _PROTOCOLS else 'tcp',
+               'state': item.get('state') if item.get('state') in _PORT_STATES else 'open',
+               'service_name': _clip(item.get('service_name'), 'service_name'), 'product': _clip(item.get('product'), 'product'),
+               'version': _clip(item.get('version'), 'version')}
+        for key, limit in _PORT_TEXT.items():
+            if _text(item.get(key), limit):
+                row[key] = _text(item[key], limit)
+        if item.get('method') in ('probed', 'table'):
+            row['method'] = item['method']
+        if item.get('tunnel') == 'ssl':  # the one tunnel there is: the service speaks TLS (name http and tunnel ssl is HTTPS)
+            row['tunnel'] = 'ssl'
+        if isinstance(item.get('confidence'), str) and re.fullmatch(r'[0-9]|10', item['confidence']):
+            row['confidence'] = item['confidence']
+        cpes = [c.strip() for c in (item.get('cpes') if isinstance(item.get('cpes'), list) else [])[:MAX_CPES] if isinstance(c, str) and _CPE.fullmatch(c.strip())]
+        if cpes:
+            row['cpes'] = cpes
+        if isinstance(item.get('cpe'), str) and _CPE.fullmatch(item['cpe'].strip()):
+            row['cpe'] = item['cpe'].strip()
+        if _block_text(item.get('banner'), MAX_BANNER):
+            row['banner'] = _block_text(item['banner'], MAX_BANNER)
+        scripts = _clean_scripts(item.get('scripts'))
+        if scripts:
+            row['scripts'] = scripts
+        tls = _clean_tls(item.get('tls'))
+        if tls:
+            row['tls'] = tls
+        out.append(row)
+    if cuts is not None and len(ports) > MAX_PORTS_PER_HOST:
+        result_cuts.add(cuts, 'ports', MAX_PORTS_PER_HOST, len(ports) - MAX_PORTS_PER_HOST, target=target)
     return out
+
+
+def _clean_nmap_host(item, cuts):
+    ip = _address(item.get('ip')) if isinstance(item, dict) and isinstance(item.get('ip'), str) else None
+    if ip is None:  # an address row is only ever made from an IP literal, never from free text
+        return None
+    row = {'ip': ip, 'os_guess': _clip(item.get('os_guess'), 'os_guess'), 'ports': _clean_ports(item.get('ports') or [], cuts, ip)}
+    if item.get('timed_out') is True:  # nmap gave up on this host: only the explicit True is kept, so a result without the field reads as before
+        row['timed_out'] = True
+    if 'os_accuracy' in item and (item['os_accuracy'] is None or _int_in(item['os_accuracy'], 0, 100) is not None):
+        row['os_accuracy'] = item['os_accuracy']
+    matches = [{'name': _text(m['name'], 100), **({'accuracy': m['accuracy']} if 'accuracy' in m and (m['accuracy'] is None or _int_in(m['accuracy'], 0, 100) is not None) else {}),
+                **({'cpe': _text(m['cpe'], 120)} if _text(m.get('cpe'), 120) else {})}
+               for m in (item.get('os_matches') if isinstance(item.get('os_matches'), list) else [])[:3] if isinstance(m, dict) and _text(m.get('name'), 100)]
+    if matches:
+        row['os_matches'] = matches
+    if _int_in(item.get('closed_tcp'), 1, 65535):
+        row['closed_tcp'] = item['closed_tcp']  # a port the host answered with a reset: the path check's candidate
+    ranges = [[r[0], r[1]] for r in (item.get('scanned_ranges') if isinstance(item.get('scanned_ranges'), list) else [])[:MAX_SCANNED_RANGES]
+              if isinstance(r, list) and len(r) == 2 and _int_in(r[0], 1, 65535) and _int_in(r[1], 1, 65535) and r[0] <= r[1]]
+    if ranges:
+        row['scanned_ranges'] = ranges
+    hostscripts = _clean_scripts(item.get('hostscripts'))
+    if hostscripts:
+        row['hostscripts'] = hostscripts
+    if item.get('status') in ('up', 'down'):
+        row['status'] = item['status']
+    extra = [_text(v, 20) for v in (item.get('extraports') if isinstance(item.get('extraports'), list) else [])[:8] if isinstance(v, str) and _text(v, 20)]
+    if extra:
+        row['extraports'] = extra
+    return row
 
 
 def _clean_nmap_result(body):
     hosts = body.get('hosts')
     if not isinstance(hosts, list) or len(hosts) > MAX_ADDRESSES:
         raise ApiError(400, f'hosts must be a list of at most {MAX_ADDRESSES} entries')
-    out = []
-    for item in hosts:
-        ip = _address(item.get('ip')) if isinstance(item, dict) and isinstance(item.get('ip'), str) else None
-        if ip is None:  # an address row is only ever made from an IP literal, never from free text
-            continue
-        row = {'ip': ip, 'os_guess': _clip(item.get('os_guess'), 'os_guess'), 'ports': _clean_ports(item.get('ports') or [])}
-        if item.get('timed_out') is True:  # nmap gave up on this host: only the explicit True is kept, so a result without the field reads as before
-            row['timed_out'] = True
-        out.append(row)
+    cuts = result_cuts.clean(body.get('cuts'))
+    out = [row for row in (_clean_nmap_host(item, cuts) for item in hosts) if row]
     # Docker Desktop can make an OS guess describe its gateway instead of the target.
     # Preserve only the explicit boolean opt-out through result sanitization.
-    return {'hosts': out, 'os_reliable': body.get('os_reliable') is not False}
+    return {'hosts': out, 'os_reliable': body.get('os_reliable') is not False, **({'cuts': cuts} if cuts else {})}
 
 
 def _clean_naabu_result(body):
@@ -2531,6 +2635,10 @@ def _clean_findings(findings):
 def _clean_nuclei_result(body):
     findings, dropped = _clean_findings(body.get('findings') or [])
     out = {'findings': findings, **({'dropped_findings': dropped} if dropped else {})}
+    cuts = result_cuts.clean(body.get('cuts'))  # the Sentinel's own cuts (the findings it kept, clipped descriptions and evidence, its time limit) and this server's
+    result_cuts.add(cuts, 'findings', MAX_FINDINGS, dropped)
+    if cuts:
+        out['cuts'] = cuts
     unreachable = body.get('unreachable')
     if isinstance(unreachable, list):  # the hosts the Sentinel could not resolve or connect to: not scanned, whatever the findings say
         out['unreachable'] = sorted({_text(h, 260).strip().lower() for h in unreachable[:MAX_ADDRESSES * 4] if isinstance(h, str) and h.strip()})
@@ -2623,7 +2731,7 @@ def _clean_discover_result(body):
     raw = body.get('hosts')
     if not isinstance(raw, list) or len(raw) > MAX_DISCOVER_HOSTS:
         raise ApiError(400, f'hosts must be a list of at most {MAX_DISCOVER_HOSTS} entries')
-    hosts, seen = [], set()
+    hosts, seen, cuts = [], set(), []
     for item in raw:
         if not isinstance(item, dict) or not isinstance(item.get('ip'), str):
             continue
@@ -2633,7 +2741,8 @@ def _clean_discover_result(body):
         seen.add(ip)
         names = item.get('hostnames') if isinstance(item.get('hostnames'), list) else []
         hosts.append({'ip': ip, 'hostnames': [_clip(n, 'host') for n in names[:5] if isinstance(n, str) and n.strip()]})
-    return {'hosts': hosts}
+        result_cuts.add(cuts, 'names', 5, len([n for n in names[5:] if isinstance(n, str) and n.strip()]), target=ip)
+    return {'hosts': hosts, **({'cuts': cuts} if cuts else {})}
 
 
 def _clean_openvas_result(body):
@@ -3072,6 +3181,7 @@ def report_result(ctx, task_id, body):
                                                             error=explain_error(result.get('error', '')) if status == 'failed' else '', **_scrubbed(task))
             audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
                          agent_id=agent.pk, agent=agent.name, outcome=result['outcome'])
+            _note_cuts(task, agent, result)
             if status == 'done' and sentinel_adopt.orphaned(task, now):  # nothing waits for it (the update that ran while it was held ended its stage): filed here
                 task.refresh_from_db()
                 adopted = _adopted(ctx, agent, task, result)
@@ -3092,6 +3202,21 @@ def report_result(ctx, task_id, body):
         sentinel_adopt.note_adopted(task)
         return {'task': task_brief(task), 'duplicate': False, 'adopted': True}
     return {'task': task_brief(task), 'duplicate': False}
+
+
+def _note_cuts(task, agent, result):
+    """Say in the scan's activity feed (and so on the scan page) that a result was cut: what, and how many were dropped (``cveFeed.result_cuts``). One line per task,
+    written when the result is filed, so a capped list or a stopped tool is never silent. The words come from the cleaned cuts only."""
+    if result.get('outcome') != 'done':
+        return
+    notes = result_cuts.summary(result)
+    if not notes:
+        return
+    from agentapi import sentinel_dispatch
+    from cveFeed import activity
+    more = f' and {len(notes) - 4} more' if len(notes) > 4 else ''
+    activity.log('run_check', f'{agent.name} cut its {task.kind} result for {sentinel_dispatch._label(task.host, task.ips)}: {"; ".join(notes[:4])}{more}',
+                 project=task.project, status='done', scan_id=task.scan_id, sentinel_task_id=task.pk, cuts=True)
 
 
 def _adopted(ctx, agent, task, result):
@@ -3127,6 +3252,7 @@ def _adopt_late(ctx, agent, task, body, now):
     task.refresh_from_db()
     audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
                  agent_id=agent.pk, agent=agent.name, outcome=result['outcome'], late=True)
+    _note_cuts(task, agent, result)
     if status == 'done':
         outcome = _adopted(ctx, agent, task, result)
         sentinel_adopt.note_adopted(task)
@@ -3151,13 +3277,23 @@ def release_task(ctx, task_id, reason=''):
 
 # --- reading / admin -------------------------------------------------------------------------------------
 
+def result_notes(result):
+    """What a stored result says about itself, for the task row (REST, MCP and the Sentinels page): ``cuts`` in plain words (empty when nothing was left out,
+    and for a Sentinel of contract 4, which sends none), whether the targets were only partly checked because of them, and the nuclei template release the
+    run used (``templates_release``, so a stale one is visible)."""
+    result = result if isinstance(result, dict) else {}
+    release = result.get('templates_release')
+    return {'cut_notes': result_cuts.summary(result), 'partly_checked': result_cuts.partial(result),
+            'templates_release': release if isinstance(release, str) and release else None}
+
+
 def task_brief(task):
     agent = task.agent
     return {'id': task.pk, 'project': task.project.slug, 'scan_id': task.scan_id, 'kind': task.kind, 'status': task.status,
             'host': task.host, 'priority': task.priority, 'agent': {'id': agent.pk, 'name': agent.name} if agent else None,
             'attempts': task.attempts, 'max_attempts': task.max_attempts, 'lease_expires_at': svc._iso(task.lease_expires_at),
             'created': svc._iso(task.created_at), 'finished': svc._iso(task.finished_at), 'error': task.error,
-            'result': task.result or None}
+            'result': task.result or None, **result_notes(task.result)}
 
 
 def task_payload(task):
@@ -3272,8 +3408,9 @@ def _live_task(task, allowed, **fields):
     row = {'id': task.pk, 'kind': task.kind, 'status': task.status, **fields}
     if allowed is not None and task.project_id not in allowed:
         return {**row, 'hidden': True, 'host': '', 'label': '', 'project': '', 'project_name': '', 'scan_id': None, 'error': ''}
+    notes = result_notes(task.result) if task.status == 'done' else {}
     return {**row, 'host': task.host, 'label': task_label(task), 'project': task.project.slug, 'project_name': task.project.name,
-            'scan_id': task.scan_id, 'error': task.error}
+            'scan_id': task.scan_id, 'error': task.error, 'cut_notes': notes.get('cut_notes') or [], 'templates_release': notes.get('templates_release')}
 
 
 def live_overview(ctx):
@@ -3344,9 +3481,10 @@ def _live_overview(ctx):
             'contract_note': sentinel_contract.note((agent.info or {}).get('contract_version')), 'version_since': (agent.info or {}).get('version_since'),
             'version': (agent.info or {}).get('version'), 'version_label': (agent.info or {}).get('version') or 'unknown (built without the updater)',
             'version_state': sentinel_version.state(agent, sentinel_settings.explicit(agent).get('self_update') or instance_update),
+            'tools_state': sentinel_tools.state(agent),  # "tools behind" next to "version behind": the tool versions it reports against the ones this release ships
             'auto_update': sentinel_autoupdate.view(agent, now, keep=keep_newest, instance_update=instance_update),  # "running abc1234, newest def5678, update requested 10:42"
             # moves when what the Sentinel's detail card shows (settings, version, update request) can have: the page refreshes the detail only then
-            'revision': '|'.join(str(x) for x in (svc._iso(agent.updated_at), svc._iso(agent.update_requested_at), (agent.info or {}).get('version'), (agent.info or {}).get('auto_update', {}).get('status'))),
+            'revision': '|'.join(str(x) for x in (svc._iso(agent.updated_at), svc._iso(agent.update_requested_at), (agent.info or {}).get('version'), (agent.info or {}).get('auto_update', {}).get('status'), json.dumps((agent.info or {}).get('tool_versions') or {}, sort_keys=True))),
             'current': [_live_task(t, allowed, since=svc._iso(t.accepted_at or t.claimed_at), lease_expires_at=svc._iso(t.lease_expires_at))
                         for t in mine],
             'recent': [_live_task(t, allowed, finished=svc._iso(t.finished_at), outcome=task_outcome(t),

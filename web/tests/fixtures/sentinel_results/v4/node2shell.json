@@ -1,0 +1,8 @@
+{
+  "outcome": "done",
+  "vulnerable": false,
+  "verdict": "NOT VULNERABLE",
+  "reason": "the probe landed in the malformed response class",
+  "status_code": 400,
+  "evidence": ""
+}
