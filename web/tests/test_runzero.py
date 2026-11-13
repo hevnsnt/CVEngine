@@ -793,7 +793,7 @@ class RetiredBinaryEdgeTests(TestCase):
         self.assertTrue(SERVICES['binaryedge'])  # the row definition stays so stored keys remain readable
 
     def test_no_new_binaryedge_key_is_accepted_anywhere(self):
-        self.assertEqual(call(self.token, 'PUT', '/api/v1/projects/rz-ret-p/api-keys/binaryedge', {'api_key': 'abc'})[0], 410)
+        self.assertEqual(call(self.admin, 'PUT', '/api/v1/projects/rz-ret-p/api-keys/binaryedge', {'api_key': 'abc'})[0], 410)  # a person: a token may not store a key (it is refused first)
         self.assertFalse(ApiCredential.objects.filter(service='binaryedge').exists())
         from tests.test_admin import api as admin_api_call
         from tests.test_tenancy import client_for

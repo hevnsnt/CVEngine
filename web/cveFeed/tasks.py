@@ -1714,16 +1714,26 @@ def host_pipeline(self, domain_id, names, by_person=False):
 @app.task(name='assess_host', bind=True, queue='discovery_queue')
 def assess_host(self, assessment_id):
     """Execute one stored, scope-checked host assessment; the broker carries no target text."""
-    from cveFeed.host_assessment import execute
-    return execute(assessment_id, celery_id=self.request.id)
+    from cveFeed import host_assessment
+    if not host_assessment.still_queued([assessment_id]):
+        return {'status': 'dropped', 'reason': 'the assessment already ended'}  # FC-4: its row is stopped, done, failed or gone: nothing to put off
+    if host_assessment.over_share() and host_assessment.deferral_count(self.request.id) <= host_assessment.SHARE_DEFER_LIMIT:  # a scan waits and assessments already hold their share of the pool: look again shortly (the row stays queued)
+        assess_host.apply_async(args=[assessment_id], task_id=self.request.id, countdown=host_assessment.SHARE_DEFER_SECONDS, queue='discovery_queue', priority=host_assessment.ASSESS_PRIORITY)
+        return {'status': 'deferred', 'reason': 'scans are waiting and host assessments hold their share of the discovery pool'}
+    return host_assessment.execute(assessment_id, celery_id=self.request.id)
 
 
 @app.task(name='assess_hosts', bind=True, queue='discovery_queue')
 def assess_hosts(self, assessment_ids):
     """Execute a batch of stored, scope-checked host assessments of one target as one pipeline run (each host keeps its own row and outcome);
     the broker carries no target text, only row ids. The time limit is the discovery queue's, as for ``assess_host``."""
-    from cveFeed.host_assessment import execute_batch
-    return execute_batch(assessment_ids, celery_id=self.request.id)
+    from cveFeed import host_assessment
+    if not host_assessment.still_queued(assessment_ids):
+        return {'status': 'dropped', 'reason': 'the assessments already ended'}
+    if host_assessment.over_share() and host_assessment.deferral_count(self.request.id) <= host_assessment.SHARE_DEFER_LIMIT:
+        assess_hosts.apply_async(args=[assessment_ids], task_id=self.request.id, countdown=host_assessment.SHARE_DEFER_SECONDS, queue='discovery_queue', priority=host_assessment.ASSESS_PRIORITY)
+        return {'status': 'deferred', 'reason': 'scans are waiting and host assessments hold their share of the discovery pool'}
+    return host_assessment.execute_batch(assessment_ids, celery_id=self.request.id)
 
 
 @app.task(name="retest_hosts", bind=True, queue="discovery_queue")
@@ -2221,7 +2231,12 @@ def apply_scan_concurrency():
     """After a save on Settings, configMaxxing: resize the running discovery worker to the saved value with celery's ``autoscale`` remote
     control (the other numbers are read live by the workers). report_resources does the same every 30 seconds."""
     from cveFeed import scan_concurrency
-    return scan_concurrency.apply_discovery()
+    result = scan_concurrency.apply_discovery()
+    try:
+        scan_concurrency.apply_lanes()
+    except Exception:  # noqa: BLE001 - the 30 second tick tries the lanes again
+        pass
+    return result
 
 
 PRUNE_ROUNDS, PRUNE_BATCH = 20, 5000

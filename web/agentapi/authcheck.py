@@ -54,6 +54,8 @@ def set_credential(ctx, slug, target_id, body):
     from cveFeed.admin_api import audit
     from cveFeed.models import AuthCredential
     project = _admin(ctx, slug, write=True)
+    if ctx.token is not None:  # an API token or MCP call: a stored sign-in makes the scanners send credentials to the target, so only a person stores one (deleting one stays open)
+        raise ApiError(403, 'a stored sign-in makes the scanners send credentials to the target, so only a person stores one, in the web interface (the target\'s sign-in); a token may delete one')
     domain = _target(project, target_id)
     body = body if isinstance(body, dict) else {}
     try:

@@ -318,3 +318,9 @@ test('the advisor note says in words when today\'s count is not known', async ()
   assert.doesNotMatch(host.textContent, /\?/);
   reply = {status: status(), concurrency: concurrency()};
 });
+
+test('a worker lane left alone says why, in words', () => {
+  const line = logic.autoTuneLine({value: 3, autotune: {managed: false, why_not_managed: 'this lane is set to 3, which is at or below its floor of 3'}}, 'auto');
+  assert.match(line.text, /^Not auto-tuned: this lane is set to 3/);
+  assert.equal(logic.autoTuneLine({value: 3, autotune: {managed: false, why_not_managed: 'x'}}, 'off').text, '');
+});

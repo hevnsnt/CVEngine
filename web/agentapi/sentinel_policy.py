@@ -19,9 +19,12 @@ carries ``disabled_kinds``, now derived from this policy, so a client that preda
 """
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timedelta
+
+from django.utils import timezone
 
 from agentapi import agent_broker as broker
-from agentapi.models import SentinelDefaults, SentinelTask
+from agentapi.models import Agent, SentinelDefaults, SentinelTask
 from agentapi.services import ApiError
 
 MODES = ('allow', 'deny', 'prefer')
@@ -35,7 +38,7 @@ LABELS = {'openvas': 'OpenVAS', 'discover': 'internal discovery', 'waf': 'WAF de
           'vhost_probe': 'virtual host checks', 'subdir_probe': 'subdirectory application checks', 'supplier_check': 'supplier posture checks', 'hygiene_check': 'TLS and email checks', 'dangling_dns_check': 'dangling DNS checks', 'route_probe': 'web route checks', 'route_probe_signed': 'signed-in web route checks', 'page_read': 'validation page reads',
           'identity_check': 'name and certificate reads', 'web_screenshot': 'web screenshots', 'ssh_probe': 'SSH inspection',
           'wpscan_thorough': 'thorough WordPress scan'}
-SOURCES = ('agent', 'instance default', 'machine', 'contract', 'cool-off', 'default')
+SOURCES = ('agent', 'instance default', 'machine', 'contract', 'cool-off', 'pause', 'default')
 
 
 def label(kind):
@@ -115,6 +118,107 @@ def managed_kinds(agent):
     return managed_envelope(agent)[0]
 
 
+# --- a pause with an expiry ----------------------------------------------------------------------------------------------------------------
+# ``Agent.managed_settings['pauses']['value']`` is ``{kind: {'until': ISO time, 'reason', 'at', 'by'}}``: a kind withheld from ONE Sentinel until a time. It is
+# read as a ``deny`` for as long as ``until`` is in the future and is simply ignored afterwards, so a pause always ends by itself, with nothing to clean up and
+# nothing that can be forgotten. Auto-tuning sets it (``cveFeed.autotune.pause_failing_kinds``) for a kind that fails every time on every Sentinel that has it.
+PAUSE_MIN_HOURS, PAUSE_MAX_HOURS = 1, 6
+MAX_PAUSED_KINDS = 2  # kinds paused at once across the instance
+
+
+class PauseRefused(Exception):
+    pass
+
+
+def _until(entry):
+    try:
+        return datetime.fromisoformat(entry['until'])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def active_pauses(agent, now=None):
+    """``{kind: {'until': aware datetime, 'reason', 'at', 'by'}}`` for the pauses of this Sentinel that have not ended."""
+    now = now or timezone.now()
+    stored = ((agent.managed_settings or {}).get('pauses') or {}).get('value')
+    out = {}
+    if isinstance(stored, dict):
+        for kind, entry in stored.items():
+            until = _until(entry) if isinstance(entry, dict) else None
+            if kind in SentinelTask.KINDS and until is not None and until > now:
+                out[kind] = {**entry, 'until': until}
+    return out
+
+
+def paused_kinds_everywhere(now=None):
+    """The kinds with an unexpired pause on any Sentinel."""
+    from agentapi.models import Agent
+    now = now or timezone.now()
+    kinds = set()
+    for agent in Agent.objects.filter(kind='scanner').only('id', 'managed_settings'):
+        kinds.update(active_pauses(agent, now))
+    return kinds
+
+
+def _scope_covers(other, agent):
+    """Whether ``other``'s declared scope reaches everything ``agent``'s does: instance-wide, or every project and organization ``agent`` names."""
+    theirs, mine = other.scope or {}, agent.scope or {}
+    if theirs.get('instance'):
+        return True
+    if mine.get('instance') or not (mine.get('projects') or mine.get('orgs')):
+        return False
+    return set(mine.get('projects') or []) <= set(theirs.get('projects') or []) and set(mine.get('orgs') or []) <= set(theirs.get('orgs') or [])
+
+
+def _another_live_sentinel(agent, kind, now):
+    """FC-3: whether ANOTHER Sentinel can take ``kind`` work the paused one would have taken: approved and not revoked, heard from within the live window (an approved Sentinel
+    that is offline does not count), not suspended (its status is not ``active``), allowed the kind by its capability policy and not paused for it, and whose scope reaches the
+    same projects."""
+    from agentapi import sentinel_broker as broker
+    from agentapi.agent_broker import LIVE_WINDOW
+    for other in Agent.objects.filter(kind='scanner', status='active', token__revoked=False, last_seen__gte=now - LIVE_WINDOW).exclude(pk=agent.pk):
+        if kind in broker.effective_capabilities(other) and not active_pauses(other, now).get(kind) and _scope_covers(other, agent):
+            return True
+    return False
+
+
+def pause(agent, kind, hours, reason, by='auto-tuning', now=None):
+    """Withhold ``kind`` from ``agent`` for ``hours`` (held to ``PAUSE_MIN_HOURS``..``PAUSE_MAX_HOURS``). Refused (``PauseRefused``) for an unknown kind, when
+    ``MAX_PAUSED_KINDS`` other kinds are paused already, or when this is the last live Sentinel that can run the kind (a pause must never leave the work nowhere to
+    go). Returns the time the pause ends."""
+    from agentapi.models import Agent
+    now = now or timezone.now()
+    if kind not in SentinelTask.KINDS:
+        raise PauseRefused(f'{kind} is not a task kind')
+    others = paused_kinds_everywhere(now) - {kind}
+    if len(others) >= MAX_PAUSED_KINDS and kind not in paused_kinds_everywhere(now):
+        raise PauseRefused(f'{len(others)} kinds are paused already (at most {MAX_PAUSED_KINDS} at once)')
+    if not _another_live_sentinel(agent, kind, now):
+        raise PauseRefused(f'no other live Sentinel can run {label(kind)} for the same projects: it is not paused on the last one')
+    until = now + timedelta(hours=max(PAUSE_MIN_HOURS, min(PAUSE_MAX_HOURS, hours)))
+    managed = dict(agent.managed_settings or {})
+    value = {k: v for k, v in (((managed.get('pauses') or {}).get('value')) or {}).items() if k in active_pauses(agent, now)}
+    value[kind] = {'until': until.isoformat(), 'reason': str(reason)[:200], 'at': now.isoformat(), 'by': by}
+    managed['pauses'] = {'value': value, 'at': now.isoformat(), 'by': by}
+    agent.managed_settings = managed
+    agent.save(update_fields=['managed_settings'])
+    return until
+
+
+def lift(agent, kind, now=None):
+    """End a pause early (a person's choice). Returns whether there was one."""
+    now = now or timezone.now()
+    if kind not in active_pauses(agent, now):
+        return False
+    managed = dict(agent.managed_settings or {})
+    value = dict((managed.get('pauses') or {}).get('value') or {})
+    value.pop(kind, None)
+    managed['pauses'] = {'value': value, 'at': now.isoformat(), 'by': 'a person'}
+    agent.managed_settings = managed
+    agent.save(update_fields=['managed_settings'])
+    return True
+
+
 # --- the instance defaults ----------------------------------------------------------------------------------------------------------------
 
 _local = threading.local()
@@ -189,6 +293,7 @@ def resolve(agent, builtin=None):
     the install's own scanner (looked up when not given)."""
     builtin = is_builtin(agent) if builtin is None else builtin
     veto = machine_denied(agent)
+    pauses = active_pauses(agent)
     own, own_at, own_by = managed_envelope(agent)
     shared = defaults()
     default = shared['builtin' if builtin else 'external']
@@ -197,6 +302,9 @@ def resolve(agent, builtin=None):
         if kind in veto:
             out[kind] = {'mode': 'deny', 'cap': None, 'source': 'machine', 'by': None, 'at': ((agent.reported_settings or {}).get('disabled_kinds') or {}).get('at'),
                          'machine': True}
+        elif kind in pauses:
+            out[kind] = {'mode': 'deny', 'cap': None, 'source': 'pause', 'by': pauses[kind].get('by'), 'at': pauses[kind].get('at'), 'machine': False,
+                         'until': pauses[kind]['until'].isoformat(), 'reason': pauses[kind].get('reason')}
         elif kind in own:
             out[kind] = {'mode': own[kind]['mode'], 'cap': own[kind]['max_concurrent'], 'source': 'agent', 'by': own_by, 'at': own_at, 'machine': False}
         elif kind in default:
