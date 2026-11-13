@@ -130,6 +130,11 @@ def register(ctx, body):
 
 
 def heartbeat(ctx, body=None):
+    with sentinel_policy.shared_lookups():  # the defaults, the user's reach and sign-in facts are read once for the whole call, not once by each step of it
+        return _heartbeat(ctx, body)
+
+
+def _heartbeat(ctx, body=None):
     """Say the Sentinel is alive. The same call as any agent's: it already extends SentinelTask leases too (see
     ``agent_broker.heartbeat``). An optional ``running`` list (the ids of the tasks the Sentinel is working on) ends, as expired, any of its own
     claimed or running tasks it does not list once they were accepted more than ``RUNNING_GRACE`` ago, so a task a restart or a crash lost
@@ -154,6 +159,13 @@ def heartbeat(ctx, body=None):
     return out
 
 
+def _in_update_grace(now=None):
+    """``scan_control.in_update_grace``, read once inside ``sentinel_policy.shared_lookups`` (the reaper, the lease extension and the unreported-task check of one heartbeat ask it
+    each, and a read of the control row is a query)."""
+    from cveFeed import scan_control
+    return sentinel_policy.shared(('update-grace',), lambda: scan_control.in_update_grace(now))
+
+
 def _clean_running(body):
     """The set of task ids in a heartbeat's ``running``, or ``None`` when the field is absent (or null)."""
     value = body.get('running') if isinstance(body, dict) else None
@@ -169,8 +181,7 @@ def _end_unreported(agent_id, running):
     """End this Sentinel's own claimed or running tasks that are not in ``running`` and were accepted (or, never accepted, claimed) more than
     ``RUNNING_GRACE`` ago, through ``expire`` (so the dispatcher falls back and the slot frees). Returns the set of ended task ids. Another
     Sentinel's tasks are never in the query."""
-    from cveFeed import scan_control
-    if scan_control.in_update_grace():  # the Sentinel may have been talking to a server that was down: what it does not list now is not lost yet
+    if _in_update_grace():  # the Sentinel may have been talking to a server that was down: what it does not list now is not lost yet
         return set()
     cutoff = timezone.now() - RUNNING_GRACE
     ended = set()
@@ -395,8 +406,7 @@ def failing_kinds(agent, now=None):
     after the round trip. Work of that kind goes straight to this server (``capacity_state`` finds no Sentinel) until the cool-off ends; then the
     next task of the kind is the one more try, and a success clears the streak while a failure withholds it for another cool-off. Needs no state of
     its own: it reads the last tasks the Sentinel finished. ``CVENGINE_SENTINEL_KIND_COOLDOWN_MINUTES=0`` turns it off."""
-    streak = max(2, _env_int('CVENGINE_SENTINEL_KIND_FAIL_STREAK', FAIL_STREAK_DEFAULT))
-    cooldown = _env_int('CVENGINE_SENTINEL_KIND_COOLDOWN_MINUTES', FAIL_COOLDOWN_DEFAULT_MINUTES)
+    streak, cooldown = _fail_settings()
     if cooldown <= 0 or not agent.pk:
         return {}
     now = now or timezone.now()
@@ -408,12 +418,43 @@ def failing_kinds(agent, now=None):
         if status == 'failed' and any(marker in (error or '') for marker in TARGET_CAUSED_ERRORS):
             continue
         by_kind.setdefault(kind, []).append((status, finished))
+    return _streaks(by_kind, streak, window, now)
+
+
+def _fail_settings():
+    return max(2, _env_int('CVENGINE_SENTINEL_KIND_FAIL_STREAK', FAIL_STREAK_DEFAULT)), _env_int('CVENGINE_SENTINEL_KIND_COOLDOWN_MINUTES', FAIL_COOLDOWN_DEFAULT_MINUTES)
+
+
+def _streaks(by_kind, streak, window, now):
     out = {}
     for kind, rows in by_kind.items():
         last = rows[:streak]
         if len(last) == streak and all(status == 'failed' for status, _ in last) and now - last[0][1] < window:
             out[kind] = {'failures': streak, 'since': last[-1][1], 'retry_at': last[0][1] + window}
     return out
+
+
+def failing_kinds_many(agents, now=None):
+    """``{agent id: failing_kinds(agent)}`` for a page of Sentinels in one query (the last ``FAIL_STREAK`` finished tasks of each kind of each Sentinel, a
+    failure the scanned host caused left out), where ``failing_kinds`` is one query per Sentinel."""
+    from django.db.models import Window
+    from django.db.models.functions import RowNumber
+    streak, cooldown = _fail_settings()
+    ids = [a.pk for a in agents if a.pk and a.kind == 'scanner']
+    if cooldown <= 0 or not ids:
+        return {a.pk: {} for a in agents}
+    now = now or timezone.now()
+    window = timedelta(minutes=cooldown)
+    caused = Q()
+    for marker in TARGET_CAUSED_ERRORS:
+        caused |= Q(error__contains=marker)
+    rows = (SentinelTask.objects.filter(agent_id__in=ids, status__in=('done', 'failed'), finished_at__gte=now - 4 * window).exclude(Q(status='failed') & caused)
+            .annotate(rank=Window(RowNumber(), partition_by=[F('agent_id'), F('kind')], order_by=F('finished_at').desc()))
+            .values_list('agent_id', 'kind', 'status', 'finished_at', 'rank'))
+    by_agent = {}
+    for agent_id, kind, status, finished, rank in sorted((r for r in rows if r[4] <= streak), key=lambda r: (r[0], r[1], r[4])):
+        by_agent.setdefault(agent_id, {}).setdefault(kind, []).append((status, finished))
+    return {a.pk: _streaks(by_agent.get(a.pk, {}), streak, window, now) for a in agents}
 
 
 def prefer_defer_seconds():
@@ -848,14 +889,15 @@ def secret_refusal(eff, task):
 
 
 class SentinelEff:
-    def __init__(self, agent, now):
+    def __init__(self, agent, now, withheld=None):
+        """``withheld`` is ``failing_kinds(agent, now)`` when the caller has read it for many Sentinels at once (``failing_kinds_many``)."""
         self.agent, self.now = agent, now
         token = agent.token
         self.problem = broker.Eff._problem(agent, token, token.user, now)
         if agent.kind != 'scanner':
             self.problem = self.problem or "this agent is not a Sentinel (kind='scanner')"
         limits = agent.limits or {}
-        self.withheld = failing_kinds(agent, now) if agent.kind == 'scanner' else {}
+        self.withheld = (failing_kinds(agent, now) if withheld is None else withheld) if agent.kind == 'scanner' else {}
         self._builtin = sentinel_policy.is_builtin(agent) if agent.kind == 'scanner' else None
         self.policy = sentinel_policy.resolve(agent, self._builtin) if agent.kind == 'scanner' else {}
         caps = effective_capabilities(agent, self.withheld, self.policy)
@@ -1687,8 +1729,7 @@ def reap_expired(now=None):
     dispatcher that normally expires it is gone when its worker died, so without this an orphan would stay claimable, and counted as waiting
     work, for ever. Called by every broker entry point, like ``agent_broker.reap_expired``."""
     now = now or timezone.now()
-    from cveFeed import scan_control
-    if scan_control.in_update_grace(now):  # an update is running (or has just ended): Sentinels were talking to a server that was down, nothing is judged lost yet
+    if _in_update_grace(now):  # an update is running (or has just ended): Sentinels were talking to a server that was down, nothing is judged lost yet
         return 0
     stale = (Q(status='queued', kind='openvas', created_at__lt=now - queued_ttl('openvas'))
              | (Q(status='queued', created_at__lt=now - queued_ttl('nmap')) & ~Q(kind='openvas')))
@@ -1774,8 +1815,7 @@ def max_runtime(task):
 def extend_leases(agent, now):
     """Extend the lease of every SentinelTask this agent is running, the same way ``agent_broker.heartbeat`` extends
     AgentTask leases (and capped like them, at ``max_runtime`` after it was accepted); called from there so one heartbeat call covers both."""
-    from cveFeed import scan_control
-    grace = scan_control.in_update_grace(now)  # a lease that lapsed while the server was down is taken up again, not left for the reaper
+    grace = _in_update_grace(now)  # a lease that lapsed while the server was down is taken up again, not left for the reaper
     leases = []
     for task in SentinelTask.objects.filter(agent=agent, status__in=('claimed', 'running')).order_by('id'):
         if task.status == 'running' and agent.status == 'active':
@@ -3158,8 +3198,9 @@ def list_project_sentinels(ctx, slug):
                                        token__revoked=False).exclude(status='revoked').select_related('token__user', 'held_by').order_by('name', 'id')[:CANDIDATES])
     rows = []
     with sentinel_policy.shared_lookups():
+        withheld = failing_kinds_many(agents, now)  # one query for the page, not one per Sentinel
         for agent in agents:
-            eff = SentinelEff(agent, now)
+            eff = SentinelEff(agent, now, withheld.get(agent.pk))
             if agent.status == 'active' and not eff.problem and project.slug not in eff.projects:
                 continue  # the owner's reach or an administrator's project limit keeps it out of this project
             rows.append((agent, eff))
@@ -3268,10 +3309,17 @@ def _live_overview(ctx):
                  failed_24h=Count('id', filter=Q(status='failed')),
                  average_duration=Avg(duration, filter=Q(status='done') &
                                       (Q(accepted_at__isnull=False) | Q(claimed_at__isnull=False))))}
-    for agent_id in ids:
-        finished[agent_id] = list(tasks.filter(agent_id=agent_id, status__in=('done', 'failed')).order_by('-finished_at', '-id')[:5])
+    # each Sentinel's five latest finished tasks: their ids through the per-Sentinel index in one query (the table is large, so no window over all of it), then the rows
+    from django.contrib.postgres.expressions import ArraySubquery
+    from django.db.models import OuterRef
+    newest = (SentinelTask._base_manager.filter(agent_id=OuterRef('pk'), status__in=('done', 'failed')).order_by('-finished_at', '-id').values('id')[:5])
+    latest = {pk: got for pk, got in Agent.objects.filter(pk__in=ids).annotate(latest=ArraySubquery(newest)).values_list('pk', 'latest')}
+    by_id = {t.pk: t for t in tasks.filter(pk__in=[i for got in latest.values() for i in got])}
+    for agent_id, got in latest.items():
+        finished[agent_id] = [by_id[i] for i in got if i in by_id]
     queued = _for_viewer(SentinelTask.objects.filter(status='queued'), ctx.user, allowed).count()
-    effs = {a.pk: SentinelEff(a, now) for a in agents}
+    withheld = failing_kinds_many(agents, now)  # one query for the page, not one per Sentinel
+    effs = {a.pk: SentinelEff(a, now, withheld.get(a.pk)) for a in agents}
     activity = activity_metrics(ids, now, viewer=ctx.user, max_concurrent={pk: e.max_concurrent for pk, e in effs.items()}, allowed=allowed)
     orgs, org_of = _visible_orgs(ctx.user, allowed)
     instance_update = sentinel_settings.instance_self_update()  # one lookup for the page, not one per Sentinel

@@ -27,6 +27,11 @@ KNOWN_DROPS = {  # payload fields the server does not keep, and why that is no l
     ('hygiene_check', '.certs[].cert.port'): 'the same host and port are on the certificate row itself',
     ('nuclei_empty_tags', '.no_templates'): 'findings [] and unreachable [] already say nothing was checked',
 }
+NO_FIXTURE = {  # kinds with no lab fixture yet (TL-12 of the 1.4.0 tool review), and why none is recorded; a kind not here must have one
+    'openvas': 'needs a Greenbone (gvmd) instance with its feed, which the container lab does not run',
+    'nuclei_deep': 'a deep template pass takes up to an hour over the full template set; no short lab run exists',
+    'route_probe_signed': 'needs a site with a sign-in the probe can use; the lab has none',
+}
 KNOWN_DROP_PREFIXES = {('nuclei_test', '.outcomes[].hit.'): 'the raw nuclei line of a hit: the outcome keeps the verdict and the trimmed matched row'}
 
 
@@ -77,12 +82,14 @@ class LabResults(TestCase):
         fixture = load(name)
         return fixture, sb.clean_result(fixture['kind'], fixture['payload'], self.task_for(fixture))
 
-    def test_there_is_a_fixture_for_every_kind_that_can_run_in_a_lab(self):
+    def test_there_is_a_fixture_for_every_kind_unless_it_is_listed_with_its_reason(self):
         kinds = {load(n)['kind'] for n in all_fixtures()}
-        for kind in ('naabu', 'nmap', 'nmap_full', 'nmap_verify', 'nmap_udp', 'testssl', 'waf', 'wpscan', 'wpscan_thorough', 'nuclei_light', 'nuclei_validate',
-                     'path_probe', 'db_probe', 'rdp_shot', 'node2shell', 'ssh_probe', 'secrets_scan', 'web_screenshot', 'http_probe', 'dns_resolve',
-                     'identity_check' if False else 'hygiene_check', 'subdir_probe', 'route_probe', 'vhost_probe', 'alive_check', 'page_read', 'discover'):
-            self.assertIn(kind, kinds)
+        for kind in sorted(set(sd.COMPLETION_CEILING) - set(NO_FIXTURE)):
+            self.assertIn(kind, kinds, f'{kind} has no lab fixture: record one, or name it in NO_FIXTURE with the reason it cannot be run in the lab')
+        for kind, reason in NO_FIXTURE.items():
+            self.assertIn(kind, sd.COMPLETION_CEILING, f'{kind} is no longer a kind: remove it from NO_FIXTURE')
+            self.assertNotIn(kind, kinds, f'{kind} has a fixture now: remove it from NO_FIXTURE')
+            self.assertTrue(reason.strip())
 
     def test_every_payload_is_accepted_and_nothing_is_dropped_but_what_is_listed(self):
         for name in all_fixtures():

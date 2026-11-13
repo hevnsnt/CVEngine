@@ -22,6 +22,13 @@ the same way as the saved values, so a change takes effect within seconds with n
 hours when an AI provider is set up and the advisor is on, the AI advisor; apply (Auto) or record as a recommendation (Suggest). Nothing changes
 while scanning is paused or an update is being applied. Every change is a ``TuningDecision`` (kept ``RETENTION_DAYS``), an audit entry and an
 activity line, and the last change of a setting can be reverted with one click.
+
+**Verify** (``verify_pending``, the start of every run in Auto): an applied change stores what it expected to improve (``expected``) and the
+measurements before it (``baseline``); ``VERIFY_SETTLE_SECONDS`` later, once three measurements came after it, the same measurements are judged
+(``autotune_policy.verdict``: helped, no effect, regressed, or unknown) and the outcome stored on the decision. A calm change that regressed is
+reverted by the tuner itself (a decision with ``action='revert'``, ``phase='verify'``) and the setting is held for a day. Only one calm change is
+unverified at a time; a forced back-off, a cap and an emergency back-off never wait. When the watchdog pauses the starting of work for memory
+(AM-8) the tuner takes the memory trouble from the measurements before the pause and backs off once, instead of holding with the evidence unread.
 """
 import json
 import logging
@@ -304,10 +311,14 @@ def _record(**fields):
     return TuningDecision.objects.create(**fields)
 
 
-def apply_tuned(m, old, new, *, mode, source, reason, signals, pressure=False, actor=None, action=None, phase='', only_lower=False):
+def apply_tuned(m, old, new, *, mode, source, reason, signals, pressure=False, actor=None, action=None, phase='', only_lower=False,
+                verify=None, only_if=None, hold_until=None):
     """Set a tuned number (mode Auto) and record it. Returns the decision, or None when, checked again under the row's lock, the mode is no
     longer Auto (a person chose Off or Suggest while this run was working, or the kill switch is set) or the setting was pinned meanwhile:
-    nothing is written then. ``only_lower``: write only when ``new`` is below the tuned number the row holds now."""
+    nothing is written then. ``only_lower``: write only when ``new`` is below the tuned number the row holds now. ``only_if``: write only when
+    the tuned number the row holds now is exactly this (a verification revert undoes its own change, never a later one). ``verify``: ``{'expected':
+    metric, 'baseline': measurements before, 'at': now}``: the decision is judged ``VERIFY_SETTLE_SECONDS`` after ``at``. ``hold_until``: a datetime
+    before which the tuner does not raise this setting (written in the same transaction)."""
     from django.db import transaction
 
     from cveFeed.models import AutoTuneSettings
@@ -319,13 +330,22 @@ def apply_tuned(m, old, new, *, mode, source, reason, signals, pressure=False, a
         before = values.get(m.key)
         if only_lower and not (isinstance(before, int) and new < before):
             return None
+        if only_if is not None and before != only_if:
+            return None
         values[m.key] = new
         row.values = values
+        if hold_until is not None:
+            row.meta = {**(row.meta or {}), m.key: {**((row.meta or {}).get(m.key) or {}), 'hold_until': hold_until.isoformat()}}
         row.save()
+        extra = {}
+        if verify:
+            from cveFeed import autotune_policy as policy
+            extra = {'expected': verify['expected'], 'baseline': verify['baseline'],
+                     'verify_at': verify['at'] + timedelta(seconds=policy.VERIFY_SETTLE_SECONDS)}
         decision = _record(setting=m.key, old_value=old, new_value=new, mode=mode, source=source,
                            action=action or ('raise' if new > old else 'lower'),
                            layer='auto', old_layer_value=before, applied=True, pressure=pressure, phase=phase, reason=reason[:300], signals=signals,
-                           actor=actor)
+                           actor=actor, **extra)
     publish(row)
     who = {'controller': 'Auto-tuning', 'ai': 'Auto-tuning (AI advisor)'}.get(source, f'{getattr(actor, "username", "A person")}')
     _activity(f'{who}: {m.label} {old} -> {new}. {reason}', setting=m.key, decision_id=decision.pk)
@@ -757,6 +777,134 @@ def take_advice(now):
         return None
 
 
+def _verification(m, value, new, samples, now_dt):
+    """What ``apply_tuned`` stores for a change of ``m`` from ``value`` to ``new``: the measurement it expects to improve and the measurements before
+    it (the last ``VERIFY_BEFORE_SAMPLES``, the newest taken at the change: ``t`` says when)."""
+    from cveFeed import autotune_policy as policy
+    if not samples:
+        return None
+    direction = policy.direction_of(m.setting, value, new)
+    before = policy.measure(m.setting, samples[-policy.VERIFY_BEFORE_SAMPLES:], direction)
+    before['t'] = float(samples[-1].get('t', now_dt.timestamp()))
+    before['direction'] = direction
+    return {'expected': before['metric'], 'baseline': before, 'at': now_dt}
+
+
+def calm_change_unverified():
+    """Whether a calm change (anything that is not a forced back-off, a cap, an emergency or a verification revert) is waiting to be judged: while one
+    is, no other calm change is made (``autotune_policy.is_calm``)."""
+    from cveFeed import autotune_policy as policy
+    from cveFeed.models import TuningDecision
+    return TuningDecision.objects.filter(applied=True, layer='auto', outcome='', verify_at__isnull=False, pressure=False).exclude(
+        phase__in=policy.NO_ACTION_PHASES).exclude(action='revert').exists()
+
+
+def verify_pending(now_dt, samples):
+    """Judge every applied change whose settling time has passed (``autotune_policy.verify_due``, ``verdict``), store the outcome on the decision and
+    take back a calm change that regressed. ``samples``: the measurements since the restart without the paused ones, oldest first. Returns one dict per
+    judged change, ``{'id', 'setting', 'outcome', 'detail', 'reverted'}``. A change that cannot be judged (its setting is no longer tuned, or too few
+    measurements came ``VERIFY_GIVE_UP_SECONDS`` after the settling time) gets the outcome ``unknown`` and no longer holds another change back."""
+    from cveFeed import autotune_policy as policy
+    from cveFeed.models import TuningDecision
+    now, keys, judged = now_dt.timestamp(), by_key(), []
+    pending = (TuningDecision.objects.filter(applied=True, layer='auto', outcome='', verify_at__isnull=False).exclude(action='revert')
+               .order_by('created_at', 'pk')[:50])
+    for d in pending:
+        base = dict(d.baseline or {})
+        since = float(base.get('t') or d.created_at.timestamp())
+        after = [s for s in samples if float(s.get('t', 0)) > since][:2 * policy.VERIFY_SAMPLES]
+        due = policy.verify_due(now, d.verify_at.timestamp(), len(after))
+        if due == 'wait':
+            continue
+        m = keys.get(d.setting)
+        direction = base.get('direction') or ('more' if (d.new_value or 0) > (d.old_value or 0) else 'less')
+        if m is None:
+            outcome, detail = 'unknown', 'the setting is no longer auto-tuned, so the change was not judged'
+        elif due == 'give_up':
+            outcome, detail = 'unknown', f'only {len(after)} measurement(s) came after the change, so it was not judged'
+        else:
+            after_m = policy.measure(m.setting, after, direction)
+            outcome, detail = policy.verdict(base, after_m)
+            base['after'] = after_m
+        TuningDecision.objects.filter(pk=d.pk).update(outcome=outcome, outcome_detail=detail[:300], verified_at=now_dt, baseline=base)
+        reverted = False
+        if m is not None and policy.revert_wanted(outcome, d.phase, d.pressure):
+            reverted = _auto_revert(m, d, detail, now_dt)
+        judged.append({'id': d.pk, 'setting': d.setting, 'outcome': outcome, 'detail': detail, 'reverted': reverted})
+    return judged
+
+
+def _auto_revert(m, d, detail, now_dt):
+    """Undo one change that made things worse: the number goes back to what it was, as a decision of its own (``action='revert'``, ``phase='verify'``,
+    ``pressure``: the level it left is remembered as trouble, ``autotune_policy.decide``), the setting is held for ``VERIFY_COOLDOWN_SECONDS`` and
+    the judged decision is marked reverted. Only when ``d`` is still the newest applied change of the setting and the tuned number is still the one
+    it wrote (a person, or a later change, is never overwritten). Returns whether it was reverted."""
+    from cveFeed import autotune_policy as policy
+    from cveFeed.models import TuningDecision
+    latest = _latest_applied(d.setting)
+    if latest is None or latest.pk != d.pk:
+        return False
+    done = apply_tuned(m, d.new_value, d.old_value, mode='auto', source='controller', pressure=True, action='revert', phase='verify',
+                       reason=f'verification of the change of {d.created_at.isoformat(timespec="minutes")}: {detail}; put {d.new_value} back to {d.old_value}',
+                       signals={'verified_decision': d.pk}, only_if=d.new_value,
+                       hold_until=now_dt + timedelta(seconds=policy.VERIFY_COOLDOWN_SECONDS))
+    if done is None:
+        return False
+    TuningDecision.objects.filter(pk=d.pk).update(resolution='reverted', resolved_at=now_dt, resolved_by='auto-tune')
+    TuningDecision.objects.filter(pk=done.pk).update(outcome='reverted', outcome_detail=f'undid decision {d.pk}: {detail}'[:300], verified_at=now_dt)
+    return True
+
+
+def _watchdog_memory_pause(now):
+    """When the watchdog's pause for memory pressure began (seconds since the epoch), or None when scanning is not paused by it for memory (a
+    person's pause, an update's and a disk pause are not memory evidence)."""
+    from cveFeed.models import ScanControl
+    from cveFeed.watchdog import PAUSE_REASON
+    row = ScanControl.objects.filter(pk=1, paused=True, paused_by_update=True).first()
+    if row is None or not str(row.reason).startswith(PAUSE_REASON + 'memory'):
+        return None
+    return row.changed_at.timestamp() if row.changed_at else now
+
+
+def back_off_for_pause(mode, row, samples, now_dt, boot_at, since, summary):
+    """AM-8. The watchdog paused the starting of work because host memory is over 90 percent. Holding until it lets go (and ignoring every sample
+    taken meanwhile) would start the same work again afterwards. Instead, once per pause, each setting that holds memory takes ONE back-off from the
+    measurements before the pause (``autotune_policy.trouble`` with ``pause``): the level is remembered as trouble for a day like any back-off, so the
+    probes do not bring it straight back. Returns the changes made."""
+    from cveFeed import autotune_policy as policy
+    now, rows, made = now_dt.timestamp(), _saved_rows(), []
+    tuned = _clean_values(row.values) if mode == 'auto' else {}
+    cooldown, probe_cooldown, _window = _cooldowns()
+    for m in managed():
+        if pin_of(m, rows) is not None:
+            continue
+        value = _effective(m, {}, tuned)
+        if value == 0 and m.setting.kind in ('depth', 'refresh_gap'):
+            continue
+        past = _history(m.key, now_dt)
+        if any(h['phase'] == 'back_off' and h['at'] >= since for h in past):
+            continue  # already backed off in this pause
+        plan = policy.decide(m.setting, value, _baseline(m), samples, past, now=now, boot_at=boot_at, target=m.setting.high, cooldown=cooldown,
+                             probe_cooldown=probe_cooldown, pause='the watchdog paused the starting of work: host memory is over 90 percent')
+        if plan['phase'] != 'back_off':
+            continue
+        used = {'summary': signals_summary(samples[-6:]), 'controller': plan['reason'], 'watchdog_memory_pause': True}
+        if mode == 'auto':
+            decision = apply_tuned(m, value, plan['new'], mode=mode, source='controller', reason=plan['reason'], signals=used, pressure=True,
+                                   phase='back_off', verify=_verification(m, value, plan['new'], samples, now_dt))
+        else:
+            decision = recommend(m, value, plan['new'], mode=mode, source='controller', reason=plan['reason'], signals=used, pressure=True,
+                                 phase='back_off')
+        if decision is not None:
+            made.append({'setting': m.key, 'from': value, 'to': plan['new'], 'source': 'controller', 'applied': mode == 'auto', 'id': decision.pk})
+    return made
+
+
+def signals_summary(samples):
+    from cveFeed import autotune_signals as signals
+    return signals.summarise(samples)
+
+
 def run(now_dt=None):
     """One auto-tuning round (the ``autotune`` beat task, every ten minutes). Returns the round's summary, which ``status`` shows."""
     from cveFeed import autotune_policy as policy
@@ -788,12 +936,20 @@ def run(now_dt=None):
     sample = signals.collect(now, boot['id'])
     cooldown, probe_cooldown, window = _cooldowns()
     kept = [s for s in store_sample(sample) if float(s.get('t', 0)) >= float(boot['at']) - 1]
+    samples = [s for s in kept if not (s.get('paused') or s.get('updating'))]
     if sample.get('paused') or sample.get('updating'):
         summary['held'] = 'scanning is paused or an update is being applied: nothing changes'
+        since = _watchdog_memory_pause(now) if samples and sample.get('paused') and not sample.get('updating') else None
+        if since is not None:  # AM-8: the watchdog's memory pause is evidence, not a reason to look away
+            summary['changes'] = back_off_for_pause(mode, row, samples, now_dt, float(boot['at']), since, summary)
+            if summary['changes']:
+                summary['held'] = 'the watchdog paused the starting of work for memory: backed off once, from the measurements before the pause'
         remember(summary)
         return summary
-    samples = [s for s in kept if not (s.get('paused') or s.get('updating'))]
     in_window = [s for s in samples if s['t'] >= now - window]
+    if mode == 'auto':
+        summary['verified'] = verify_pending(now_dt, samples)
+        row = settings_row()  # a revert just wrote the tuned numbers
     rows = _saved_rows()
     tuned = _clean_values(row.values) if mode == 'auto' else {}
     facts = policy.steady_facts(samples) if samples else {}  # a Sentinel that missed one heartbeat still counts for sizing
@@ -843,6 +999,7 @@ def run(now_dt=None):
         error = ask_advisor(offered, signals.summarise(in_window), now)
         summary['advisor'] = {'asked': True, 'queued': not error, 'error': error or None}
     compact = signals.summarise(in_window[-6:])
+    gate_closed = mode == 'auto' and calm_change_unverified()
     for key, (m, value, baseline, plan) in plans.items():
         source, new, reason, pressured, phase = 'controller', plan['new'], plan['reason'], plan['pressure'], plan['phase']
         if not pressured and key in advice:
@@ -856,13 +1013,18 @@ def run(now_dt=None):
                 _retire_suggestions(key, now_dt)
             continue
         signals_used = {'summary': compact, 'controller': plan['reason']}
+        if mode == 'auto' and gate_closed and policy.is_calm(phase, pressured):
+            summary['settings'][key]['why_not_raised'] = 'waiting: an earlier change is still being verified (one calm change at a time)'
+            continue
         if mode == 'auto':
-            decision = apply_tuned(m, value, new, mode=mode, source=source, reason=reason, signals=signals_used, pressure=pressured, phase=phase)
+            decision = apply_tuned(m, value, new, mode=mode, source=source, reason=reason, signals=signals_used, pressure=pressured, phase=phase,
+                                   verify=_verification(m, value, new, samples, now_dt))
         else:
             decision = recommend(m, value, new, mode=mode, source=source, reason=reason, signals=signals_used, pressure=pressured, phase=phase)
         if decision is None and mode == 'auto':
             summary['settings'][key]['why_not_raised'] = 'not applied: the mode changed or the setting was pinned during this run'
         if decision is not None:
+            gate_closed = gate_closed or (mode == 'auto' and policy.blocks_calm(phase, pressured))
             summary['changes'].append({'setting': key, 'from': value, 'to': new, 'source': source, 'applied': mode == 'auto', 'id': decision.pk})
             summary['settings'][key]['value'] = new if mode == 'auto' else value
     remember(summary)
@@ -1018,7 +1180,9 @@ def serialize(d):
     return {'id': d.pk, 'at': _iso(d.created_at), 'setting': d.setting, 'label': getattr(by_key().get(d.setting), 'label', d.setting),
             'old_value': d.old_value, 'new_value': d.new_value, 'mode': d.mode, 'source': d.source, 'action': d.action, 'layer': d.layer,
             'applied': d.applied, 'pressure': d.pressure, 'phase': d.phase or None, 'reason': d.reason, 'actor': d.actor.username if d.actor_id else None,
-            'resolution': d.resolution or None, 'resolved_at': _iso(d.resolved_at), 'resolved_by': d.resolved_by or None}
+            'resolution': d.resolution or None, 'resolved_at': _iso(d.resolved_at), 'resolved_by': d.resolved_by or None,
+            'expected': d.expected or None, 'baseline': d.baseline or None, 'verify_at': _iso(d.verify_at), 'verified_at': _iso(d.verified_at),
+            'outcome': d.outcome or None, 'outcome_detail': d.outcome_detail or None}
 
 
 def list_decisions(setting=None, limit=50, offset=0):
