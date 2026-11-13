@@ -256,6 +256,33 @@ server runs an action only when the check offered it at that moment, and no more
 nuclei-templates release exists, the reviewer container reads the newest release tag from GitHub's API itself, at a fixed URL. The model is not
 involved in that request.
 
+## Host review
+
+The finding review reads one finding at a time. The **host review** reads a whole host: every open result of the host together (CVE matches, scanner findings, hygiene findings, the host's context, secrets counts, screenshot outcomes), so the AI can see that a banner, a version and a missing header tell one story. It answers three things: a verdict for each open finding (a real finding, a false positive, or not sure, with its reason), a sentence about the host, and **one next step** chosen from a fixed list. People see it on the host page ("AI review of this host", [Front end](FRONTEND.md)), agents over REST and MCP ([the AI review of a host](AGENT-API.md#the-ai-review-of-a-host)).
+
+**It is off until a person turns it on.** Every review is an AI call that your provider bills you for, so neither an update nor a fresh install switches it on. An administrator turns it on in **Settings > AI model > AI reviewer > AI review of whole hosts** and sets the most hosts reviewed per day (default 100). While it is off the sweep, the job and **Review now** do nothing and spend nothing, and the host page says so. An agent (an API key or the MCP `change_setting`) cannot turn it on or raise its limits; it may turn it off or lower them.
+
+**What it sees.** At most 60 open findings of the host (the Fire and Smoke ones first, then by severity; the rest are only counted), in at most 80,000 characters, each finding at most 1,200. Text that came from the scanned host (banners, page titles, response excerpts, finding evidence) is put in fenced blocks marked untrusted, with host names and addresses removed and instruction-like sentences cut out; cvENGINE's own facts (heat, hard evidence, what the server will not close) are in a separate trusted block. The model never sees a host name, an address or a secret.
+
+**What it decides.** Per finding: a verdict and how sure it is. Each verdict goes through the same gates as the finding review (`close_gate`), unchanged: a false positive is closed only with high confidence, no hard evidence (a template hit, proof, a floor), nobody having worked the finding, no text aimed at AI in the evidence, and closing switched on in Settings. Otherwise the verdict is recorded and the finding stays open ("held", or "disputed" when cvENGINE has proof). Then one next step from nine: `none`, `validate_match`, `revalidate_finding`, `screenshot`, `draft_check`, `ask_person` (read-only or notification-only, class **auto**), and `rescan_host`, `assess_host`, `run_hygiene` (they touch the host, class **recommend**). The model names an action and a short reference; nothing else it writes reaches a function.
+
+**What may start by itself.** A step starts on its own only when all of these hold: its class is auto; the project's mode is **automatic** (a person sets that on the host page; the default is **recommend only**, and an API key cannot set it); the host's own evidence carries no text aimed at AI; no person started or dismissed a step of this host in the last 24 hours; no step of this host already started on its own in the last 24 hours and the project is under `host_review_auto_per_project_day` (50); scanning is not paused; and the action's own gates (scope, exclusions, the project's caps, a bug bounty project that has not confirmed automated testing, a manual-only target) pass. Anything else is stored as a **proposal** with the reason it was not started, and a person presses **Start** (the same gates, with the person's own permission) or **Dismiss** (the same step is not proposed again for this state of the host). A proposal nobody acts on expires after 7 days. `ask_person` only sends a notification and marks the host as needing a person until dismissed.
+
+**How a hostile host is handled** (the safety rules as built).
+1. The reply must match a schema of enums and references the server made, and is validated on the server; a reply that does not is sent back once, then the review fails and nothing is applied.
+2. The action must be in the list offered for this host at this moment, and is checked again when it runs.
+3. Planted text is looked for in what the host said **as stored, before it is cleaned** (banner, service strings, page title, headers, certificate fields, screenshot titles, hygiene rows, routes) as well as in each finding's evidence. When any is found, no closure of the host is made and no step starts by itself.
+4. A note, a host note or a step note that repeats an identifier planted in the host is discarded, the verdict is lowered to unsure, and the step is only proposed.
+5. A false positive the server refused to act on (held, disputed, hard evidence, planted text, an earlier real verdict on the same evidence) is a recorded opinion only and does not move the finding down in [Situations](SITUATIONS.md).
+6. A host review cannot close a finding that an earlier review called real for the same evidence (`contradicts the earlier verdict on this state`): asking again, or a failed review that is retried, is never another roll at closing a finding. A review that fails applies nothing.
+7. The verdicts of one reply are applied in one transaction: all or none.
+8. An answer for a host state that changed while the AI read it is stale and applies nothing. One review is open per host.
+9. Notes are cleaned (no markup, no links) and every screen shows them as text.
+
+**What queues a review.** A sweep every ten minutes picks hosts whose state changed (a new port, version or finding, or a changed fingerprint), hottest first, one project's hosts never taking all the places, at most `host_review_daily_max` a day for the whole install, and nothing while scanning is paused or no provider is set. It skips excluded, archived and retired hosts and hosts of projects set to off. A host whose packet cannot be built is recorded as a failed review and waits a day. A failed review waits 24 hours (an hour when the provider was at fault) before the same state is asked again. **Review now** on the host page or over the API queues one at a person's priority. A state is every open finding, not only the 60 shown.
+
+**What was deliberately left out:** secret validation (it contacts third parties with the secret), marking findings fixed or accepted, heat changes, and a deep port scan have no step; screenshots are not sent to the model as pictures; the host review's verdicts do not feed the cross-host consistency prior.
+
 ## Settings
 
 **Settings > AI model** (the reviewer's models are chosen in the table **Which model does which job**; the rest is in the **AI reviewer** card; the API is `GET`/`PUT /cve/api/settings/reviewer`, unchanged):
@@ -278,6 +305,8 @@ The page has one **Connection** block (provider, API key, address, and a status 
 | Close false positives | on | Off: the reviewer records its verdicts and closes nothing. |
 | Reviews per day | 300 | The most findings reviewed in one UTC day. |
 | Operations hours (UTC) | 3, 9, 15, 21 | When the operations check runs. |
+| AI review of whole hosts | **off** | Turns the [host review](#host-review) on. Every review is a billed AI call. |
+| Hosts reviewed per day | 100 | The most host reviews queued in one UTC day, for the whole install. |
 
 `CVENGINE_REVIEWER=0` in `.env` turns the reviewer off entirely: no token is written and the container idles.
 
