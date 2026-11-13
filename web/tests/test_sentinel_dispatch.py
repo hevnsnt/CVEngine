@@ -58,7 +58,7 @@ class DispatchBase(TestCase):
         token, _raw = create_token(user, 'sentinel-token')
         agent = Agent.objects.create(token=token, name='live-sentinel', kind='scanner', status='active',
                                      scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []},
-                                     capabilities=capabilities, last_seen=timezone.now())
+                                     capabilities=capabilities, last_seen=timezone.now(), info={'features': ['credential_filter']})  # a current client: it leaves out checks that send credentials
         return agent
 
 

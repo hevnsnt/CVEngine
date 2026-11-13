@@ -177,6 +177,77 @@ class AskingTests(Base):
         self.assertEqual(self.question('scan_from')['state'], 'decided')  # the wizard of a new install asked it as its own step
 
 
+class CredentialChecksQuestionTests(Base):
+    """FA-10: an administrator who relied on default-login findings is told in the product: "Run checks that send credentials?", No (the safe default, what this
+    update set) or Yes, carried out through the Scan policy handler by a person only."""
+
+    def setUp(self):
+        super().setUp()
+        from cveFeed.models import ServiceRun
+        ServiceRun.objects.create(service='nuclei', asset='www.example.test', status='done', finished_at=timezone.now())  # checks have run here: an install the update changed
+
+    def test_a_brand_new_install_is_not_asked(self):
+        from cveFeed.models import ServiceRun
+        ServiceRun.objects.all().delete()
+        question = self.question('credential_checks')
+        self.assertEqual((question['state'], question['applies']), ('not_applicable', False))
+        self.assertIn('Settings > Scan policy', question['why_not'])
+
+    def policy(self):
+        from dashboard.models import ScanPolicy
+        return ScanPolicy.current().allow_credential_checks
+
+    def test_the_question_is_asked_with_no_as_the_safe_default_and_says_what_it_does(self):
+        question = self.question('credential_checks')
+        self.assertEqual((question['state'], question['safe_default'], question['current']), ('pending', 'off', 'off'))
+        self.assertEqual(question['title'], 'Run checks that send credentials?')
+        self.assertIn('vendor default logins', question['text'])
+        self.assertIn('fixed credentials', question['text'])
+        no, yes = question['choices']
+        self.assertEqual((no['label'], no['tag'], no['safe']), ('No', 'Keeps what this update set', True))
+        self.assertIn('no longer re-confirmed', no['effect'])
+        self.assertEqual((yes['label'], yes['safe']), ('Yes', False))
+        self.assertEqual(question['link'], '/cve/settings/#scan_policy')
+
+    def test_the_page_says_every_host_is_checked_once_more_as_information(self):
+        data = self.c.get(API).json()
+        self.assertEqual(len(data['notes']), 1)
+        self.assertIn('every host is checked once more with nuclei', data['notes'][0].lower())
+        self.assertIn('check set changed', data['notes'][0])
+
+    def test_yes_goes_through_the_scan_policy_handler_with_its_audit_entry_and_no_changes_nothing(self):
+        self.assertEqual(post(self.c, {'key': 'credential_checks', 'answer': 'off'}).status_code, 200)
+        self.assertFalse(self.policy())
+        self.assertEqual(post(self.c, {'key': 'credential_checks', 'answer': 'on'}).status_code, 200)
+        self.assertTrue(self.policy())
+        self.assertTrue(AuditLog.objects.filter(action='scan_policy.allow_credential_checks', target='on').exists())  # the Settings page's own entry
+        self.assertTrue(AuditLog.objects.filter(action='setup.question', target='credential_checks').exists())
+        self.assertEqual(SetupAnswer.objects.get(key='credential_checks').answer, 'on')
+        self.assertEqual(post(self.c, {'key': 'credential_checks', 'answer': 'off'}).status_code, 200)
+        self.assertFalse(self.policy())
+
+    def test_a_switch_a_person_already_turned_on_is_decided_and_never_undone(self):
+        from dashboard.models import ScanPolicy
+        ScanPolicy.objects.create(allow_credential_checks=True)
+        question = self.question('credential_checks')
+        self.assertEqual((question['state'], question['current']), ('decided', 'on'))
+        self.assertEqual(post(self.c, {'later': True}).status_code, 200)
+        self.assertTrue(self.policy())
+
+    def test_only_a_person_answers_never_an_agent_or_a_plain_user(self):
+        self.assertEqual(post(client_for(self.plain), {'key': 'credential_checks', 'answer': 'on'}).status_code, 403)
+        ctx = Ctx(user=self.admin, token=SimpleNamespace(read_only=False))
+        with self.assertRaises(ApiError) as caught:
+            bridge.change_setting(ctx, 'setup_questions', {'key': 'credential_checks', 'answer': 'on'})
+        self.assertEqual(caught.exception.status, 403)
+        self.assertFalse(self.policy())
+
+    def test_deciding_later_leaves_it_off(self):
+        post(self.c, {'later': True})
+        self.assertEqual(self.question('credential_checks')['state'], 'later')
+        self.assertFalse(self.policy())
+
+
 class AnswerTests(Base):
     def test_only_an_app_admin_answers_and_an_agent_never_does(self):
         self.connect_ai()
@@ -342,8 +413,8 @@ class AnswerTests(Base):
 
     def test_the_questions_list_every_question_with_its_state(self):
         data = self.c.get(API).json()
-        self.assertEqual([q['key'] for q in data['questions']], ['scan_from', 'ai_validation', 'agent_policy'])
-        self.assertEqual((data['pending'], data['later'], data['open']), (1, 0, 1))  # the AI one does not apply: no model
+        self.assertEqual([q['key'] for q in data['questions']], ['scan_from', 'ai_validation', 'credential_checks', 'agent_policy'])
+        self.assertEqual((data['pending'], data['later'], data['open']), (1, 0, 1))  # the AI one does not apply: no model, nor the credential one: nothing has run
         for q in data['questions']:
             self.assertEqual(q['since'], '1.4.0')
 

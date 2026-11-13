@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 NUCLEI_CHUNK = 100  # targets handed to a stream per call: the ledger is written after each call, so a failure part way marks only the later ones
 # A run's flags and the ports a bare host is probed on are the scanner library's (cvengine_scanner.flags), shared with every Sentinel.
-TEMPLATE_POLICY_REV = 'readonly-3'  # readonly-3 also refuses a template that sends a credential of its own (a fixed Authorization or Cookie header, a user name in a URL)
-ALL_TEMPLATES_REV = 'all-3'  # all-1 ran default-login and bruteforce templates; all-2 leaves them out unless a person allowed them (``all-2-cred``); all-3 also leaves out a template with a fixed credential header or a user name in a URL (``all-3-cred`` lifts both)
+TEMPLATE_POLICY_REV = 'readonly-4'  # readonly-3 also refused a template that sends a credential of its own (a fixed Authorization or Cookie header, a user name in a URL)
+ALL_TEMPLATES_REV = 'all-4'  # all-1 ran default-login and bruteforce templates; all-2 left them out unless a person allowed them; all-3 also left out a fixed credential header or user name in a URL; all-4 also a fixed password in a body, a placeholder over a fixed value, and the default-login and bruteforce tags themselves (``all-4-cred`` lifts all of it)
 _APPROVED = {'root': None, 'at': 0, 'value': None}
 _APPROVED_LOCK = threading.Lock()
 

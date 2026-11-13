@@ -111,19 +111,62 @@ def all_templates_allowed():
 
 
 # A literal credential a template sends (TL-2, item 3). The same rule as ``cvengine_scanner.checks.credential_problem`` on the Sentinel (both are tested against
-# ``tests/fixtures/checks/corpus.json``): a header whose name authenticates with a value the template fixes, or a URL with a user name in it. A value made only
+# ``tests/fixtures/checks/corpus.json``): a header whose name authenticates with a value the template fixes, a URL with a user name in it, or a password field of a body with a fixed value. A value made only
 # of placeholders (what a signed-in run's secrets file or an extractor supplies) is not fixed.
-_CRED_HEADER = re.compile(r'(?i)^(?:proxy-)?authorization$|^cookie2?$|auth|token|secret|passw|api[-_]?key|session|credential|jwt|csrf|xsrf|signature|bearer')
+# The tables credential_problem acts on (the Sentinel's checks has the same ones, and builds a byte prefilter from them).
+CREDENTIAL_HEADER_PATTERNS = ('^(?:proxy-)?authorization$', '^cookie2?$', 'auth', 'token', 'secret', 'passw', 'api[-_]?key', 'session', 'credential', 'jwt', 'csrf',
+                              'xsrf', 'signature', 'bearer')  # what makes a header name one that authenticates
+CREDENTIAL_HEADERS_KEY = 'headers'  # the block key whose mapping is a request's headers
+CREDENTIAL_RAW_KEY = 'raw'  # the block key whose strings are raw requests (header lines after the request line)
+CREDENTIAL_URL_KEYS = ('path', 'raw', 'host', 'address', 'url')  # the keys whose strings are looked at for a user name in a URL
+CREDENTIAL_BODY_KEYS = ('body', 'path', 'raw')  # the keys whose strings are looked at for a password field (a form or JSON body, a query string, a raw request's body)
+CREDENTIAL_PAYLOADS_KEY = 'payloads'  # the block key whose names are lists of fixed values a request is repeated with
+# What makes a request field one that carries a password: a name with ``passw`` (password, passwd, hashedpasswd), ``passphrase`` or ``pwd`` in it, or ending in
+# ``pass`` (userpass, login_pass; not ``bypass``, ``compass``, ``trespass``, ``overpass``) or having ``pass`` as a segment of its own (pass1, pass_confirm).
+CREDENTIAL_FIELD_PATTERNS = ('passw', 'passphrase', 'pwd', '(?<!by)(?<!com)(?<!tres)(?<!over)pass\\d*$', '(?<![a-z])pass(?![a-z])')
+_CRED_HEADER = re.compile('(?i)' + '|'.join(CREDENTIAL_HEADER_PATTERNS))
 _AUTH_SCHEME = re.compile(r'(?i)\b(?:bearer|basic|digest|negotiate|ntlm|token|apikey)\b')
 _USERINFO = re.compile(r'(?i)[a-z0-9+.-]://[^/\s?#]*@')  # one scheme character before ://, so a long run of letters is not rescanned from every position
 _PLACEHOLDER = re.compile(r'\{\{\s*([^}]*?)\s*\}\}')
 
 
+_IDENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+_PASSWORD_FIELD = re.compile('(?i)' + '|'.join(CREDENTIAL_FIELD_PATTERNS))
+_FIELD = re.compile(r'(?i)(?:^|[&?\s"{,;\'(])([\w.\[\]-]{1,40})["\']?\s*[=:]\s*["\']?((?:\{\{[^}]*\}\}|\{(?!\{[^}]*\}\})|[^&"\'\s,}<\\{])*)')  # name=value, "name": "value"
+_XML_FIELD = re.compile(r'(?i)<([\w:.-]{1,40})>((?:\{\{[^}]*\}\}|\{(?!\{[^}]*\}\})|[^<{])*)<')  # <password>value</password>
+
+
 def _fixed_text(value, literal_names):
+    """What is left of ``value`` once every placeholder that is not a fixed value is taken out. A placeholder that holds a quoted literal
+    (``{{base64('admin:admin')}}``) or in which any name (a variable, a payload) is one the template gives a fixed value counts as text."""
     def one(match):
-        name = match.group(1)
-        return 'x' if ("'" in name or '"' in name or name in literal_names) else ''
+        inner = match.group(1)
+        return 'x' if ("'" in inner or '"' in inner or inner in literal_names or any(word in literal_names for word in _IDENT.findall(inner))) else ''
     return _PLACEHOLDER.sub(one, str(value))
+
+
+def _literal_names(variables, payloads=()):
+    """The names of the variables that hold a fixed value (also through another such variable) and of the payload lists: a placeholder that names one is fixed."""
+    names = {str(k) for k in payloads}
+    for _round in range(5):
+        more = {str(k) for k, v in variables.items() if re.search(r'[A-Za-z0-9]', _fixed_text(v, names)) and str(k) not in names}
+        if not more:
+            break
+        names |= more
+    return names
+
+
+def _password_field_problem(text, literal_names):
+    """The name of a password field of a form, JSON or XML body (or query string) in ``text`` that is given a fixed value, else ``''``."""
+    if not isinstance(text, str) or len(text) > 200_000:
+        return ''
+    for match in _FIELD.finditer(text):
+        if _PASSWORD_FIELD.search(match.group(1)) and re.search(r'[A-Za-z0-9]', _fixed_text(match.group(2), literal_names)):
+            return match.group(1)[:40]
+    for match in _XML_FIELD.finditer(text):
+        if _PASSWORD_FIELD.search(match.group(1)) and re.search(r'[A-Za-z0-9]', _fixed_text(match.group(2), literal_names)):
+            return match.group(1)[:40]
+    return ''
 
 
 def _literal_credential_header(name, value, literal_names):
@@ -136,9 +179,9 @@ def _literal_credential_header(name, value, literal_names):
 
 
 def credential_problem(yaml_text):
-    """Why a template sends a credential of its own, or "": a header that authenticates (Authorization, Cookie, an API key, a token...) with a fixed value in
-    the ``headers`` of a block or in a raw request, or a URL with a user name in it (``http://admin:admin@{{Hostname}}``). Pure. ``readonly_problem`` includes it
-    unless told a person allowed credential checks (installed templates only: an AI-written template is never given that)."""
+    """Why a template sends a credential of its own, or ``''``: a header that authenticates (Authorization, Cookie, an API key, a token...) with a fixed value
+    in the ``headers`` of a block or in a raw request, or a URL with a user name in it (``http://admin:admin@{{Hostname}}``). A value made only of placeholders is
+    not fixed. Pure; ``readonly_problem`` includes it, and the server lets an App Admin lift it for installed templates only (never for an AI-written one)."""
     try:
         doc = load_template(yaml_text) if yaml_text else None
     except (yaml.YAMLError, RecursionError):
@@ -146,34 +189,42 @@ def credential_problem(yaml_text):
     if not isinstance(doc, dict):
         return 'template not validated: not a template'
     variables = doc.get('variables') if isinstance(doc.get('variables'), dict) else {}
-    literal_names = {str(k) for k, v in variables.items() if re.search(r'[A-Za-z0-9]', _PLACEHOLDER.sub('', str(v)))}
     refuse = 'template not validated: it sends a credential of its own'
 
-    def walk(node, key=''):
+    def walk(node, key='', names=None):
+        names = names if names is not None else _literal_names(variables)
         if isinstance(node, dict):
-            if str(key).lower() == 'headers':
+            if isinstance(node.get(CREDENTIAL_PAYLOADS_KEY), dict):  # a request repeated with the values of these lists: their names are fixed values
+                names = names | _literal_names(variables, node[CREDENTIAL_PAYLOADS_KEY])
+            if str(key).lower() == CREDENTIAL_HEADERS_KEY:
                 for name, value in node.items():
-                    if _literal_credential_header(name, value, literal_names):
+                    if _literal_credential_header(name, value, names):
                         return f'{refuse} (the {str(name)[:40]} header has a fixed value)'
             for k, value in node.items():
-                found = walk(value, k)
+                found = walk(value, k, names)
                 if found:
                     return found
         elif isinstance(node, list):
             for value in node:
-                found = walk(value, key)
+                found = walk(value, key, names)
                 if found:
                     return found
         elif isinstance(node, str):
-            if str(key).lower() in ('path', 'raw', 'host', 'address', 'url') and _USERINFO.search(node):
+            lowered = str(key).lower()
+            if lowered in CREDENTIAL_URL_KEYS and _USERINFO.search(node):
                 return f'{refuse} (a URL with a user name in it)'
-            if str(key).lower() == 'raw':
-                for line in node.strip().splitlines()[1:]:
+            if lowered == CREDENTIAL_RAW_KEY:
+                lines = node.strip().splitlines()
+                for line in lines[1:]:
                     if not line.strip():
                         break
                     name, sep, value = line.partition(':')
-                    if sep and _literal_credential_header(name, value, literal_names):
+                    if sep and _literal_credential_header(name, value, names):
                         return f'{refuse} (the {name.strip()[:40]} header has a fixed value)'
+            if lowered in CREDENTIAL_BODY_KEYS:
+                field = _password_field_problem(node, names)
+                if field:
+                    return f'{refuse} (the {field} field has a fixed value)'
         return ''
     return walk({k: v for k, v in doc.items() if k not in ('info', 'variables')})
 
@@ -247,11 +298,35 @@ def readonly_problem(yaml_text, allow_credentials=False):
     return '' if allow_credentials else credential_problem(yaml_text)
 
 
+CREDENTIAL_TAGS = ('default-login', 'bruteforce')  # the tags of the checks that guess or send credentials (``cvengine_scanner.flags.NUCLEI_CREDENTIAL_TAGS``)
+
+
+def credential_tag_problem(yaml_text):
+    """Why a template is one of the checks that send credentials by its own tag (``info.tags`` has ``default-login`` or ``bruteforce``), or "". A cheap text test
+    first, then ``info.tags`` read properly, so a word in a description is not a tag. A document PyYAML cannot read has no tags to read."""
+    lowered = yaml_text.lower() if isinstance(yaml_text, str) else ''
+    if not any(tag in lowered for tag in CREDENTIAL_TAGS):
+        return ''
+    try:
+        doc = load_template(yaml_text)
+    except (yaml.YAMLError, RecursionError):
+        return ''
+    info = doc.get('info') if isinstance(doc, dict) else None
+    tags = info.get('tags') if isinstance(info, dict) else None
+    names = {str(t).strip().lower() for t in (tags if isinstance(tags, list) else str(tags or '').split(','))}
+    found = sorted(names & set(CREDENTIAL_TAGS))
+    return f'template not validated: it is tagged {found[0]}, a check that sends credentials' if found else ''
+
+
 def installed_template_problem(yaml_text):
     """Why an INSTALLED template (never an AI-written one) may not run under the policy in force, or "": with every template allowed, only a credential of its
     own refuses it (and only while "Allow checks that send credentials" is off); under the read-only policy it is ``readonly_problem``, which also refuses
     a credential of its own unless that switch is on. A document PyYAML cannot read is left to nuclei when every template is allowed, as it always was."""
     allow = credential_checks_allowed()
+    if not allow:  # a template tagged default-login or bruteforce is a check that sends credentials, whatever its text says (an older Sentinel has no tag filter of its own)
+        tagged = credential_tag_problem(yaml_text)
+        if tagged:
+            return tagged
     if not all_templates_allowed():
         return readonly_problem(yaml_text, allow_credentials=allow)
     if allow:
