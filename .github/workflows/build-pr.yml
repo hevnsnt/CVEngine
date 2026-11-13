@@ -78,6 +78,8 @@ jobs:
           cache-dependency-path: web/requirements.txt
       - name: Native rendering libraries
         run: sudo apt-get update && sudo apt-get install -y libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0
+      - name: The proxy's own nginx image (web/tests/test_tunnel_client_address.py runs config/nginx/rengine.conf in it and fails when it cannot)
+        run: docker pull nginx:alpine
       - name: Install application dependencies
         run: |
           sed '/^psycopg2==/d' web/requirements.txt > "$RUNNER_TEMP/cvengine-ci-requirements.txt"
