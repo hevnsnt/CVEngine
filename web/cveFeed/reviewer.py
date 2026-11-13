@@ -526,6 +526,9 @@ def apply_verdict(ref, body, now=None):
     return apply_finding_verdict(triage, parsed, key, now=now)
 
 
+CONTRADICTS = 'contradicts the earlier verdict on this state'  # held reason: a host review would close what an earlier review called real
+
+
 def apply_finding_verdict(triage, parsed, key, host_review=None, extra_injection=(), extra_markers=(), now=None):
     """The shared core of ``apply_verdict``: apply the parsed verdict ``parsed`` (``_parse_verdict``'s shape) for ``triage``, whose current
     ``review_key`` is ``key``, under the row lock and through ``close_gate``. The finding review calls it with a verdict of the container; the
@@ -571,6 +574,13 @@ def apply_finding_verdict(triage, parsed, key, host_review=None, extra_injection
                 outcome, held = 'held', 'closing false positives is turned off in Settings'
             else:
                 outcome = 'closed'
+        if outcome == 'closed' and host_review is not None:
+            # a host review is a newer look at a state that may already have a verdict (the finding reviewer's, an earlier host review's, a person's
+            # "Review now"): it may not undo a real verdict on the same evidence, so asking again is never another roll at closing the finding
+            earlier = FindingReview.objects.filter(triage=triage, review_key=key).exclude(outcome=REFUSED).exclude(verdict='').exclude(host_review=host_review) \
+                .order_by('-created_at', '-id').first()
+            if earlier is not None and earlier.verdict.startswith('true_'):
+                outcome, held = 'held', CONTRADICTS
         review = FindingReview.objects.create(
             triage=triage, project_id=triage.project_id, review_key=key, verdict=parsed['verdict'], confidence=parsed['confidence'],
             reason_code=parsed['reason_code'], note=note, model=model, outcome=outcome, held_reason=held[:200], injection=injection,

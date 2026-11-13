@@ -105,7 +105,8 @@ def _disputed():
     not about the evidence (a person worked it, a critical scanner finding, closing switched off), and no retest reproduced it: as a flag,
     never NULL. A verdict the server refused because of hard evidence, a floor, or text aimed at an AI in the evidence, one the model was not
     sure of, and a finding a retest reopened never demote it: the ranking does not follow a model the server itself did not believe."""
-    refused_for_evidence = (Q(review_outcome='disputed') | Q(review_held__startswith='hard evidence') | Q(review_held__startswith='its evidence carries text'))
+    refused_for_evidence = (Q(review_outcome='disputed') | Q(review_held__startswith='hard evidence') | Q(review_held__startswith='its evidence carries text')
+                            | Q(review_held__startswith='contradicts the earlier verdict'))  # a host review's closure an earlier real verdict holds
     return Case(When(Q(review_verdict='false_positive', review_confidence='high') & ~Q(review_outcome='closed') & ~refused_for_evidence
                      & ~Q(triage__retest_state='still_reproduces'), then=Value(True)), default=Value(False), output_field=BooleanField())
 

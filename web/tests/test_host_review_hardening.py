@@ -91,3 +91,43 @@ class PlantedTextTests(Base):
 
     def test_in_a_certificate_only(self):
         self.check(lambda: TlsCertificate.objects.create(domain=self.domain, host=HOST, port=443, issuer=HOSTILE[:400], subject=HOSTILE[:400]))
+
+
+class EarlierVerdictTests(Base):
+    """HR-2: an earlier real verdict on the same state of a finding holds a later host review's closure."""
+
+    def earlier(self, match, verdict='true_open', confidence='high', key=None):
+        from cveFeed import reviewer
+        row = Triage.objects.get(match=match)
+        key = key or reviewer.review_key(row, HostState.objects.get(project=self.proj, host=HOST).fingerprint)
+        return FindingReview.objects.create(triage=row, project=self.proj, review_key=key, verdict=verdict, confidence=confidence, outcome='recorded')
+
+    def test_a_host_review_cannot_close_a_finding_the_reviewer_already_called_real_for_this_state(self):
+        match = self.match()
+        self.earlier(match)
+        review, _ = self.reply(self.queue(), self.fp())
+        row = FindingReview.objects.get(host_review=review)
+        self.assertEqual((row.verdict, row.outcome), ('false_positive', 'held'))
+        self.assertIn('contradicts the earlier verdict', row.held_reason)
+        self.assertEqual(CVEMatch.objects.get(pk=match.pk).remediation_status, NOT_CLOSED)
+        self.assertFalse(self.tier_of(match)[1])  # and the held verdict does not mark the finding disputed in Situations
+
+    def test_the_same_holds_when_the_earlier_real_verdict_was_a_host_reviews_own_and_a_person_asks_again(self):
+        match = self.match()
+        first, _ = self.reply(self.queue(), {'f1': ('true_open', 'high')})
+        HostReview.objects.filter(pk=first.pk).update(status='stale')  # a person asks again ("Review now") on the same state
+        second, _ = self.reply(self.queue(), self.fp())
+        self.assertEqual(FindingReview.objects.get(host_review=second).outcome, 'held')
+        self.assertEqual(CVEMatch.objects.get(pk=match.pk).remediation_status, NOT_CLOSED)
+
+    def test_an_earlier_verdict_on_another_state_does_not_hold_it(self):
+        match = self.match()
+        self.earlier(match, key='0' * 40)  # the evidence changed since: a new state, a new review
+        review, _ = self.reply(self.queue(), self.fp())
+        self.assertEqual(FindingReview.objects.get(host_review=review).outcome, 'closed')
+
+    def test_an_earlier_uncertain_verdict_does_not_hold_it(self):
+        match = self.match()
+        self.earlier(match, verdict='uncertain', confidence='low')
+        review, _ = self.reply(self.queue(), self.fp())
+        self.assertEqual(FindingReview.objects.get(host_review=review).outcome, 'closed')
