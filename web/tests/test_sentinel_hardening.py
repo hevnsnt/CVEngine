@@ -574,7 +574,8 @@ class NetworkAuthorityTests(SentinelBase):
         sentinels.sentinel_settings.set_managed(agent, {'network': 'external'}, self.dana)
         self.assertNotIn(sentinels.INTERNAL_CAPABILITY, sentinels.effective_capabilities(agent))
 
-        status, out = call(self.t['root'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'settings': {'network': None}})
+        self.assertEqual(call(self.t['root'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'settings': {'network': None}})[0], 403)  # a token may not widen to the internal grant (FB-5)
+        status, out = call(self.root, 'PATCH', f'/api/v1/agents/{agent.pk}', {'settings': {'network': None}})  # a person may
         self.assertEqual(status, 200, out)
         agent.refresh_from_db()
         self.assertEqual(agent.network, 'internal')

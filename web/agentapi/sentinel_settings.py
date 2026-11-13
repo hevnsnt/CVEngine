@@ -239,6 +239,70 @@ def record_reported(agent, raw, now=None):
     return changed
 
 
+_MODE_RANK = {'deny': 0, 'allow': 1, 'prefer': 2}
+
+
+def _kind_wider(new, old):
+    """Whether the policy entry ``new`` lets a kind run more than ``old`` does (no entry is allow with no cap)."""
+    new, old = new or {'mode': 'allow', 'max_concurrent': None}, old or {'mode': 'allow', 'max_concurrent': None}
+    if _MODE_RANK[new['mode']] > _MODE_RANK[old['mode']]:
+        return True
+    if new['mode'] == 'deny' or old.get('max_concurrent') is None:
+        return False
+    return new.get('max_concurrent') is None or new['max_concurrent'] > old['max_concurrent']
+
+
+def policy_widening(before, after):
+    """The first kind whose entry in ``after`` (a ``{kind: entry}`` policy map) lets it run more than in ``before``, or None. An agent may only narrow a policy."""
+    for kind in sorted(set(before) | set(after)):
+        if _kind_wider(after.get(kind), before.get(kind)):
+            return kind
+    return None
+
+
+def refuse_wider_policy(before, after, what):
+    kind = policy_widening(before, after)
+    if kind:
+        raise ApiError(403, f'{what}: {policy_lib.label(kind)} would be allowed more than it is now; an agent may only narrow what a Sentinel runs (deny a kind, lower its cap), a person widens it in the web interface')
+
+
+def refuse_wider_settings(agent, values, kinds_before, kinds_after):
+    """FB-5: what an agent may not do to one Sentinel's managed settings: allow a kind more, reach private networks, run the full profile, send discovery keys, raise its
+    concurrency or switch its self-update to automatic. ``values`` are the cleaned settings, ``kinds_after`` the policy they leave."""
+    refuse_wider_policy(kinds_before, kinds_after, 'kinds')
+    if 'network' in values:
+        if values['network'] is None:  # back to the enrollment grant, which is what ``set_managed`` restores
+            from agentapi import sentinel_broker as sb
+            enrolled = SentinelEnrollment.objects.filter(used_by_agent=agent, token_id=agent.token_id).values_list('network', flat=True).first()
+            target = enrolled if enrolled in sb.NETWORKS else 'external'
+        else:
+            target = values['network']
+        if target != 'external' and target != agent.network:
+            raise ApiError(403, 'network: reaching private networks widens what this Sentinel scans; an agent may only choose external (or hand the setting back where the enrollment grant is external)')
+    if values.get('profile', 'light') != 'light' and values.get('profile') != (explicit(agent).get('profile') or 'full'):
+        raise ApiError(403, 'profile: only a person chooses the full profile; an agent may choose light')
+    if 'discovery_keys' in values and values['discovery_keys'] is not False:
+        raise ApiError(403, 'discovery_keys: sending the discovery API keys to a Sentinel is a person\'s choice; an agent may only turn it off (false)')
+    if 'self_update' in values and values['self_update'] not in ('off', 'manual'):
+        raise ApiError(403, 'self_update: only a person switches a Sentinel to update by itself; an agent may choose off or manual')
+    if 'max_concurrent' in values:
+        now = explicit(agent).get('max_concurrent') or agent.max_concurrent
+        if values['max_concurrent'] is None or values['max_concurrent'] > now:
+            raise ApiError(403, f'max_concurrent: an agent may only lower it (now {now}); a person raises it in the web interface')
+
+
+def refuse_wider_raw(agent, raw):
+    """FB-5, for an API token or MCP call that changes one Sentinel's settings (``set_managed`` follows): ``ApiError`` 403 when they would widen what it does."""
+    values = clean_settings(raw)
+    kinds_before = policy_lib.managed_kinds(agent)
+    kinds_after = kinds_before
+    if 'kinds' in values:
+        kinds_after = policy_lib.apply_change(kinds_before, values.pop('kinds'))
+    elif 'disabled_kinds' in values:
+        kinds_after = policy_lib.apply_disabled_kinds(kinds_before, values.pop('disabled_kinds'))
+    refuse_wider_settings(agent, values, kinds_before, kinds_after)
+
+
 def set_managed(agent, raw, actor, now=None):
     """An administrator's change from cvENGINE. Clearing network restores its enrollment grant, never the Sentinel's claim."""
     from agentapi import sentinel_broker as sb
@@ -257,12 +321,12 @@ def set_managed(agent, raw, actor, now=None):
             kinds_after = policy_lib.apply_change(kinds_before, change)
         else:
             kinds_after = policy_lib.apply_disabled_kinds(kinds_before, values.pop('disabled_kinds'))
-        if kinds_after != kinds_before:  # the older disabled_kinds is folded into the policy, which is its one home from now on
-            managed.pop('disabled_kinds', None)
-            if kinds_after:
-                managed['kinds'] = {'value': kinds_after, 'at': now.isoformat(), 'by': actor.username}
-            else:
-                managed.pop('kinds', None)
+    if kinds_after != kinds_before:  # the older disabled_kinds is folded into the policy, which is its one home from now on
+        managed.pop('disabled_kinds', None)
+        if kinds_after:
+            managed['kinds'] = {'value': kinds_after, 'at': now.isoformat(), 'by': actor.username}
+        else:
+            managed.pop('kinds', None)
     network_before = agent.network
     if 'network' in values:  # the Sentinel cannot grant itself access to private networks
         if values['network'] is None:
@@ -688,7 +752,7 @@ def get_defaults():
             'changed_by': row.changed_by or None, 'changed_at': row.changed_at.isoformat() if row.changed_at else None}
 
 
-def set_defaults(actor, body):
+def set_defaults(actor, body, via_agent=False):
     """App Admin only: any of ``{self_update: off|manual|automatic|null, builtin_kinds: {kind: {mode, max_concurrent}}|null, external_kinds: {...}|null}``.
     ``self_update`` ``null`` goes back to following ``keep_newest`` (a boolean, on by default: Sentinels are Automatic and cvENGINE asks them to update to the newest build). ``builtin_kinds`` / ``external_kinds`` replace the whole map
     (``{}``: no defaults); ``null`` for ``builtin_kinds`` restores the shipped default (OpenVAS denied on the built-in scanner), for ``external_kinds`` it is
@@ -713,6 +777,15 @@ def set_defaults(actor, body):
             else:
                 cleaned[key] = policy_lib.clean_kinds(body[key], what=key, allow_null_entries=False)
     before = get_defaults()
+    if via_agent:  # an API token or MCP call (FB-5): it may narrow what Sentinels run, never widen it or switch their updates to automatic
+        shipped = {'builtin_kinds': policy_lib.SHIPPED_BUILTIN, 'external_kinds': {}}
+        for key in ('builtin_kinds', 'external_kinds'):
+            if key in cleaned:
+                refuse_wider_policy(before[key], shipped[key] if cleaned[key] is None else cleaned[key], key)
+        if 'self_update' in body and value not in ('off', 'manual') and not (value is None and not before['self_update']):
+            raise ApiError(403, 'self_update: only a person switches the Sentinels to update by themselves (or back to following the instance); an agent may choose off or manual')
+        if body.get('keep_newest') and not before['keep_newest']:
+            raise ApiError(403, 'keep_newest: only a person asks every Sentinel to update to the newest build')
     row = SentinelDefaults.current()
     if 'self_update' in body:
         row.self_update = value or ''

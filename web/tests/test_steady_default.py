@@ -33,3 +33,25 @@ class DefaultPinTests(TestCase):
 class OptedOutTests(TestCase):
     def test_a_test_about_the_expiry_still_sees_it(self):
         self.assertGreater(reads_after_a_long_time(), 0)
+
+
+class PinnedCacheSecondsTests(TestCase):
+    """FB-14: the test runner pins each memo's expiry to infinity whatever the module says, so a module whose cache time became 0 (no caching: every read queries) would
+    pass every query-count test. The real value is read from the source, because the module's own name is pinned while a test runs."""
+
+    def test_every_pinned_memo_really_caches_for_at_least_a_second(self):
+        import re
+        from pathlib import Path
+
+        from cveFeed import egress_proxy, scan_concurrency, tailscale_scope
+        from reNgine import resources
+        for module, name in ((internal_view, 'CACHE_SECONDS'), (tunables, 'CACHE_SECONDS'), (scan_concurrency, 'CACHE_SECONDS'), (tailscale_scope, 'CACHE_SECONDS'),
+                             (egress_proxy, 'CACHE_SECONDS'), (resources, 'SAVED_CACHE_SECONDS')):
+            source = Path(module.__file__).read_text(encoding='utf-8')
+            match = re.search(rf'^{name}\s*=\s*(.+?)\s*(#.*)?$', source, re.MULTILINE)
+            self.assertIsNotNone(match, f'{module.__name__}.{name} is not defined in its source')
+            expression = match.group(1)
+            if re.fullmatch(r'[\d.]+', expression):
+                self.assertGreaterEqual(float(expression), 1, f'{module.__name__}.{name} must cache for at least a second')
+            else:  # an alias of another pinned name, which is checked on its own line
+                self.assertRegex(expression, r'^(resources\.)?SAVED_CACHE_SECONDS$', f'{module.__name__}.{name} = {expression}')
