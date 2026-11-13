@@ -43,7 +43,14 @@ def list_decisions(ctx, params):
     from cveFeed import autotune
     _admin(ctx)
     params = params or {}
-    return autotune.list_decisions(params.get('setting') or None, _int(params.get('limit'), 'limit', 50), _int(params.get('offset'), 'offset', 0))
+    return _call(autotune.list_decisions, params.get('setting') or None, _int(params.get('limit'), 'limit', 50), _int(params.get('offset'), 'offset', 0),
+                 params.get('outcome') or None, params.get('source') or None)
+
+
+def get_maintainer_report(ctx):
+    from cveFeed import maintainer_report
+    _admin(ctx)
+    return maintainer_report.report()
 
 
 def set_mode(ctx, body):

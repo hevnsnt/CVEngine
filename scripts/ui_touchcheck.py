@@ -6,7 +6,7 @@ from playwright.sync_api import sync_playwright
 BASE = os.environ.get('BASE', 'http://127.0.0.1:28021'); S = os.environ.get('PROJECT', 'acme-web')
 EXE = os.environ.get('CHROMIUM') or (glob.glob(os.path.expanduser('~/.cache/ms-playwright/chromium-*/*/chrome')) or [None])[-1]
 PAGES = {'dashboard': '/cve/?project=%s&skip=1' % S, 'settings-ai': '/cve/settings/#ai', 'settings-alerts': '/cve/settings/#alerts',
-         'settings-updates': '/cve/settings/#updates', 'settings-scan_policy': '/cve/settings/#scan_policy', 'targets': '/cve/%s/targets/' % S,
+         'settings-updates': '/cve/settings/#updates', 'settings-scan_policy': '/cve/settings/#scan_policy', 'settings-autotune': '/cve/settings/#configmaxxing/autotune', 'targets': '/cve/%s/targets/' % S,
          'hosts': '/cve/%s/hosts/' % S, 'findings': '/cve/%s/vulns/' % S, 'scans': '/cve/%s/scans/' % S, 'sentinels': '/cve/sentinels/',
          'cve-explorer': '/cve/cves/', 'secrets': '/cve/%s/secrets/' % S, 'matches': '/cve/%s/matches/' % S, 'bounty': '/cve/bounty/?project=%s' % S}
 JS = r"""() => {
