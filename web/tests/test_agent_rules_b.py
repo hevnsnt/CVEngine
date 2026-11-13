@@ -392,6 +392,7 @@ class AnswerWordsTests(TestCase):
         self.q = QuestionBase('setUp')
         self.q._testMethodName = 'setUp'
         self.q.setUp()
+        self.addCleanup(self.q.doCleanups)  # its setUp registered cleanups on ITSELF (the BASE_DIR override, the environment patch): nobody runs them unless this does, and they leaked into every later test of the process
         self.addCleanup(self.q.tearDown)
         self.q.connect_ai()
 
