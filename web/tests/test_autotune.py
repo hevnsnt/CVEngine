@@ -922,16 +922,17 @@ class FollowUpPolicyTests(SimpleTestCase):
                                 continue
                             probed += 1
                             where = (setting.key, value, target, len(past), hard_cap)
-                            self.assertEqual(plan['new'], policy.towards(setting, value, 'more'), where)  # one step, never more
+                            step = policy.towards(setting, value, 'more')  # one step, or the ceiling itself when one step would pass it (AM-11)
+                            self.assertEqual(plan['new'], plan['ceiling'] if policy._beyond(setting, step, plan['ceiling']) else step, where)
                             for limit in (plan['ceiling'], target, hard_cap):
                                 if limit is not None:
                                     self.assertFalse(policy._beyond(setting, plan['new'], limit), where)
                                     self.assertFalse(any(policy._beyond(setting, n, limit) for n in plan['ai_range']), where)
         self.assertGreater(probed, 100)
-        # A step that would land past the target is not taken (the setting holds one short of it, it does not overshoot)
-        held = decide(DISCOVERY32, 21, 8, busy, past=SETTLED, target=22)
-        self.assertIsNone(held['new'])
-        self.assertIn('target for this machine', held['why_not_raised'])
+        # A step that would land past the target lands on the target (AM-11: it used to hold one short of it for good)
+        with mock.patch.object(policy, 'room', return_value=None), mock.patch.object(policy, 'demand', return_value=None):
+            landed = decide(DISCOVERY32, 21, 8, busy, past=SETTLED, target=22)
+        self.assertEqual((landed['phase'], landed['new']), ('probe', 22))
 
 
 TWO_SENTINELS = {'sentinel': {'live': 2, 'slots': 9}}

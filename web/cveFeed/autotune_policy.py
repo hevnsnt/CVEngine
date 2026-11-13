@@ -27,6 +27,12 @@ and acts on what these return; ``cveFeed.autotune_signals`` takes the measuremen
    budget holds at its real peak) is brought down to it at once, with no cooldown (phase ``cap``). The Sentinels a target is sized from are
    the most any measurement of the last ``SENTINEL_GRACE_SECONDS`` saw (``steady_facts``), so one missed heartbeat lowers nothing.
 
+6. **Verify, and take back what hurt** (``expectation``, ``measure``, ``verdict``): every change records what it expected to improve and the measurements
+   before it; after ``VERIFY_SETTLE_SECONDS`` the same measurements are taken again and judged (helped, no effect, regressed, or unknown when a
+   number is missing: an unknown number is never an improvement). A calm change that regressed is reverted (``revert_wanted``) and not tried
+   again for ``VERIFY_COOLDOWN_SECONDS``; only one calm change is unverified at a time (``blocks_calm``). All of it is a pure function of the
+   measurements, with the thresholds below as named constants.
+
 The AI advisor's answer is untrusted: ``validate_advice`` keeps only a number for a setting it was offered, inside the range the controller
 gives for that setting right now (from one step down up to the controller's own target).
 """
@@ -59,6 +65,31 @@ BACKLOG_SECONDS = 1800         # assessment work older than this is a backlog
 SMALL_INSTANCE = 100           # hosts plus targets under this: a small instance, sized modestly
 LOW_DISK_PERCENT = 10          # under this share of free disk, no target is above the optimistic value
 SENTINEL_GRACE_SECONDS = 25 * 60  # a Sentinel still counts for sizing until it is missing from the measurements of this long (three runs)
+
+# --- verifying a change: the thresholds (named, so a test and a reader see every number) ---------------------------------------------
+VERIFY_SETTLE_SECONDS = 30 * 60    # a change is judged this long after it was made
+VERIFY_SAMPLES = 3                 # ... from at least this many measurements taken after it (three runs, ten minutes apart)
+VERIFY_BEFORE_SAMPLES = 3          # the baseline: the last this many measurements up to the change
+VERIFY_SLACK_SECONDS = 120         # a run a little earlier than the settling time still counts (the beat is not to the second)
+VERIFY_GIVE_UP_SECONDS = 3 * 3600  # not enough measurements this long after the settling time (paused, off): the outcome stays unknown
+VERIFY_COOLDOWN_SECONDS = 24 * 3600  # a reverted change is not tried again for this long (``cveFeed.autotune`` holds the setting)
+IMPROVE_RELATIVE = 0.20            # the measurement improved by at least this share of its value before (and the metric's floor) = helped
+REGRESS_RELATIVE = 0.50            # it got worse by at least this share (and twice the floor) = regressed
+REGRESS_FLOOR_FACTOR = 2
+REAIM_WINDOW = 24 * 3600           # after a cap, the aim is repeated once the facts are back, within this long
+MAX_AIMS_PER_DAY = 2               # ... and never more often than this (the first aim after a restart counts)
+# name: (better, floor, label). better: 'lower' or 'higher'. floor: the smallest change in that measurement that counts at all (the numbers move
+# by themselves: a queue of 4 becoming 5 is noise).
+METRICS = {
+    'wait_share': ('lower', 0.20, 'share of measurements with a run waiting for its turn'),
+    'discovery_queue': ('lower', 3.0, 'scans waiting in the discovery queue'),
+    'assess_oldest_s': ('lower', 600.0, 'age of the oldest waiting assessment (seconds)'),
+    'conductor_saturated_share': ('lower', 0.30, 'share of measurements held back by the conductor depth'),
+    'conductor_idle_share': ('lower', 0.30, 'share of measurements with nothing due'),
+    'sentinel_idle_share': ('lower', 0.15, 'share of Sentinel slots idle'),
+    'trouble': ('lower', 1.0, 'trouble for this setting (1 yes, 0 no)'),
+}
+NO_ACTION_PHASES = ('cap', 'verify', 'emergency')  # never reverted, never hold the one-at-a-time gate
 
 # key: the setting's key. kind: what it is (``heavy:<scanner kind>``, ``discovery``, ``batch``, ``depth``, ``stage``, ``work_gap``,
 # ``refresh_gap``). low/high: the auto-tuning range. step: one step. sense: ``more`` (a higher number does more at once) or ``gap`` (a higher
@@ -355,12 +386,28 @@ def _sentinel_trouble(samples):
     return None
 
 
-def trouble(setting, samples):
+def _pause_trouble(setting, last, pause):
+    """The watchdog paused the starting of work for memory (``pause`` says so): evidence of memory pressure for the settings that hold memory, even
+    when the scanning container's own numbers did not show it (the watchdog reads the whole host). A scanner kind only counts when runs of it were
+    going."""
+    kind = setting.kind
+    if kind.startswith('heavy:'):
+        return pause if _get(last, 'memory', 'running', kind.split(':', 1)[1], default=0) else None
+    return pause if kind in ('discovery', 'depth', 'work_gap') else None
+
+
+def trouble(setting, samples, pause=''):
     """Why this setting should back off now (a few words with the number), or None. ``samples`` oldest first; the newest decides, the CPU, a
-    silent worker and occasional Sentinel time-outs need two in a row."""
+    silent worker and occasional Sentinel time-outs need two in a row. ``pause``: the reason text when the watchdog paused the starting of work
+    for memory pressure (AM-8): that is trouble too, for the settings that hold memory."""
     if not samples:
         return None
     last, kind = samples[-1], setting.kind
+    found = _trouble(setting, samples, last, kind)
+    return found or (_pause_trouble(setting, last, pause) if pause else None)
+
+
+def _trouble(setting, samples, last, kind):
     if kind.startswith('heavy:'):
         scanner = kind.split(':', 1)[1]
         kills = _get(last, 'memory', 'kills_by_kind', scanner, default=0)
@@ -494,7 +541,7 @@ def _beyond(setting, number, ceiling):
 
 
 def decide(setting, value, baseline, samples, history, *, now, boot_at, target, target_reason='', cooldown, probe_cooldown,
-           hold_until=None, hard_cap=None, target_known=True, ready=True):
+           hold_until=None, hard_cap=None, target_known=True, ready=True, pause=''):
     """What the controller does with one setting now.
 
     ``value``: the number in effect; ``baseline``: the number without the tuner (environment or default); ``samples``: the measurements since
@@ -502,7 +549,7 @@ def decide(setting, value, baseline, samples, history, *, now, boot_at, target, 
     'phase', 'old', 'new'}]``; ``target``: what ``size_for`` says this machine carries; ``hard_cap``: for a scanner kind, what the memory budget
     holds at its real peak (None when not reported); ``target_known``: False when the target is only the optimistic stand-in for facts that did
     not report (it then never lowers anything); ``ready``: memory and Sentinels have reported (``facts_ready``); ``hold_until``: a revert asked
-    for no raise before this time. All times in seconds.
+    for no raise before this time; ``pause``: the reason when the watchdog paused the starting of work for memory (``trouble``). All times in seconds.
 
     A value above the ceiling (the known target, a remembered bad level, the memory cap) is brought down to it at once, with no cooldown (phase
     ``cap``): the Sentinels left, the database filled up, a kind's real peak grew. The aim-high jump waits ``AIM_WARMUP_SECONDS`` after the
@@ -530,7 +577,7 @@ def decide(setting, value, baseline, samples, history, *, now, boot_at, target, 
             ceiling, remembered = _clamp(setting, below), f'{level} caused trouble {int((now - bad[-1]["at"]) // 3600)} h ago'
     out['ceiling'] = ceiling
 
-    why = trouble(setting, samples)
+    why = trouble(setting, samples, pause)
     if why:
         backs = [h['at'] for h in history if h.get('phase') == 'back_off']
         if backs and now - max(backs) < BACKOFF_HOLD:
@@ -558,9 +605,10 @@ def decide(setting, value, baseline, samples, history, *, now, boot_at, target, 
 
     held = bool(hold_until and now < hold_until)
     since_boot = [h for h in history if h['at'] >= boot_at]
-    if not since_boot and not held:
+    reaim = _reaim(setting, value, history, now=now, ceiling=ceiling, held=held)
+    if (not since_boot or reaim) and not held:
         age = now - boot_at
-        if age < AIM_WARMUP_SECONDS or (not ready and age < AIM_FALLBACK_SECONDS):
+        if not reaim and (age < AIM_WARMUP_SECONDS or (not ready and age < AIM_FALLBACK_SECONDS)):
             out['reason'] = out['why_not_raised'] = (f'warming up after a restart or an update ({int(age // 60)} min); aims high once memory and '
                                                      'Sentinels have reported')
             return out
@@ -569,7 +617,8 @@ def decide(setting, value, baseline, samples, history, *, now, boot_at, target, 
             out['why_not_raised'] = remembered or out['reason']
             return out
         out.update(direction='more', new=ceiling, phase='aim_high', ai_range=tuple(sorted((value, ceiling))),
-                   reason=f'aim high for this machine ({target_reason or "sized"}): {value} to {ceiling}' + (f'; {remembered}' if remembered else ''))
+                   reason=(f'the facts that lowered it are back: aimed again at the target for this machine ({target_reason or "sized"}): {value} to {ceiling}'
+                           if reaim else f'aim high for this machine ({target_reason or "sized"}): {value} to {ceiling}') + (f'; {remembered}' if remembered else ''))
         return out
 
     recovery = _recovery(setting, value, samples, history, now=now, ceiling=ceiling, held=held)
@@ -584,7 +633,7 @@ def decide(setting, value, baseline, samples, history, *, now, boot_at, target, 
     blocker = _probe_blocker(setting, value, samples, history, now=now, ceiling=ceiling, remembered=remembered, held=held,
                              last_change=last_change, probe_cooldown=probe_cooldown, target_reason=target_reason)
     if blocker is None:
-        up = towards(setting, value, 'more')
+        up = _step_to(setting, value, ceiling)
         out.update(direction='more', new=up, phase='probe', ai_range=tuple(sorted((lower if less_ok else value, up))),
                    reason=f'{_evidence(setting, samples[-1])}: probed {value} to {up}')
         return out
@@ -628,14 +677,35 @@ def _recovery(setting, value, samples, history, *, now, ceiling, held):
     return _clamp(setting, goal)
 
 
-def _probe_blocker(setting, value, samples, history, *, now, ceiling, remembered, held, last_change, probe_cooldown, target_reason):
+def _step_to(setting, value, ceiling):
+    """The number a probe goes to: one step, except that a step which would pass the ceiling lands on the ceiling itself when it is more than
+    nothing away (AM-11: ``assess_batch`` stopped at 16 against a target of 18 because its step is 4)."""
     up = towards(setting, value, 'more')
+    if _beyond(setting, up, ceiling) and _beyond(setting, ceiling, value):
+        return ceiling
+    return up
+
+
+def _reaim(setting, value, history, *, now, ceiling, held):
+    """Whether the aim-high jump is repeated now (AM-11): the newest change of this setting is a ``cap`` of the last day (the Sentinels left, the
+    memory budget shrank), the target is above the number again (the facts are back, and no remembered trouble holds the ceiling down) and the
+    aim was not repeated more than ``MAX_AIMS_PER_DAY`` times in the day. Without it only slow probes bring the numbers back, over days."""
+    if held or not history:
+        return False
+    latest = max(history, key=lambda h: h['at'])
+    if latest.get('phase') != 'cap' or now - latest['at'] > REAIM_WINDOW or not _beyond(setting, ceiling, value):
+        return False
+    return sum(1 for h in history if h.get('phase') == 'aim_high' and now - h['at'] < 86400) < MAX_AIMS_PER_DAY
+
+
+def _probe_blocker(setting, value, samples, history, *, now, ceiling, remembered, held, last_change, probe_cooldown, target_reason):
+    up = _step_to(setting, value, ceiling)
     if up == value:
         return f'at the auto-tuning {"maximum" if setting.sense == "more" else "minimum"} ({value})'
     if _beyond(setting, up, ceiling):
         return f'below the level that last caused trouble ({remembered})' if remembered else f'at the target for this machine ({target_reason or ceiling})'
     if held:
-        return 'a person reverted the last change; no raise for a day'
+        return 'the last change was reverted (by a person or by its verification); no raise for a day'
     if last_change is not None and now - last_change < probe_cooldown:
         return f'changed {int((now - last_change) // 60)} min ago (a probe waits {int(probe_cooldown // 60)} min)'
     if float(samples[0].get('t', now)) > now - PROBE_HEALTHY_SECONDS:
@@ -664,6 +734,139 @@ def _evidence(setting, sample):
     if db is not None:
         parts.append(f'database {round(db * 100)}% used')
     return ', '.join(parts)
+
+
+# --- verifying a change: what it expected, the measurements before and after, the verdict --------------------------------
+
+Verdict = namedtuple('Verdict', 'outcome detail')  # outcome: helped | no_effect | regressed | unknown
+
+
+def expectation(setting, direction):
+    """The measurement a change of ``setting`` in ``direction`` ('more' or 'less' work, ``direction_of``) expects to improve: a name of ``METRICS``.
+    More work: the backlog it serves gets shorter (a scanner kind: fewer runs waiting for their turn; the discovery pool: a shorter discovery queue;
+    a batch: a younger oldest assessment; the conductor depth and gap: fewer measurements held back or idle; Sentinel stage and refresh: fewer idle
+    Sentinel slots). Less work: the trouble that caused it is gone (or none appears)."""
+    if direction != 'more':
+        return 'trouble'
+    return {'discovery': 'discovery_queue', 'batch': 'assess_oldest_s', 'depth': 'conductor_saturated_share', 'work_gap': 'conductor_idle_share',
+            'stage': 'sentinel_idle_share', 'refresh_gap': 'sentinel_idle_share'}.get(setting.kind) or ('wait_share' if setting.kind.startswith('heavy:') else 'trouble')
+
+
+def _mean(values):
+    values = [v for v in values if v is not None]
+    return sum(values) / len(values) if values else None
+
+
+def _metric_value(metric, setting, samples):
+    """One metric over ``samples`` (oldest first), or None when it was not measured. None is never 0: a probe that failed leaves a gap, and a gap
+    is not an improvement."""
+    if not samples:
+        return None
+    if metric == 'trouble':
+        return 1.0 if trouble(setting, samples) else 0.0
+    if metric == 'wait_share':
+        scanner = setting.kind.split(':', 1)[1] if setting.kind.startswith('heavy:') else ''
+        return _mean([_get(s, 'memory', 'waiting', scanner, default=0) if (s.get('memory') or {}).get('reported') else None for s in samples])
+    if metric == 'discovery_queue':
+        return _mean([_get(s, 'discovery', 'queued') for s in samples])
+    if metric == 'assess_oldest_s':
+        return _mean([(_get(s, 'assess', 'oldest_s') or 0) if _get(s, 'assess', 'queued') is not None else None for s in samples])
+    if metric in ('conductor_saturated_share', 'conductor_idle_share'):
+        states = [_get(s, 'conductor', 'state') for s in samples]
+        states = [x for x in states if x not in (None, 'unknown')]
+        want = 'saturated' if metric == 'conductor_saturated_share' else 'idle'
+        return sum(1 for x in states if x == want) / len(states) if states else None
+    if metric == 'sentinel_idle_share':
+        shares = [1 - (_get(s, 'sentinel', 'in_use', default=0) or 0) / _get(s, 'sentinel', 'slots') if _get(s, 'sentinel', 'live') and _get(s, 'sentinel', 'slots') else None
+                  for s in samples]
+        return _mean(shares)
+    return None
+
+
+def _kills(samples):
+    """Memory kills the measurements saw (the scanning containers' own), and the kernel's oom kills plus Celery lane restarts of the last day at their
+    highest (``sample['maint']``, ``cveFeed.autotune_signals.maintainer``); each None when nothing measured it."""
+    counts = [_get(s, 'memory', 'kills') for s in samples if (s.get('memory') or {}).get('reported')]
+    rolling = [(_get(s, 'maint', 'oom_kills_24h'), _get(s, 'maint', 'lane_restarts_24h')) for s in samples]
+    known = [(a or 0) + (b or 0) for a, b in rolling if a is not None or b is not None]
+    return (sum(c or 0 for c in counts) if counts else None), (max(known) if known else None)
+
+
+def measure(setting, samples, direction='more'):
+    """What a change of ``setting`` is judged by, from ``samples`` (oldest first): ``{'metric', 'better', 'value', 'trouble', 'kills', 'oom', 'n'}``.
+    ``value`` is the expected measurement (``expectation``); ``trouble`` whether this setting's trouble rule fires on them (1 or 0); ``kills`` the
+    memory kills in them and ``oom`` the kernel kills and lane restarts of the last day (``_kills``). None: not measured. Pure: the same
+    function takes the baseline when the change is made and the result after the settling time."""
+    metric = expectation(setting, direction)
+    kills, oom = _kills(samples)
+    value = _metric_value(metric, setting, samples)
+    return {'metric': metric, 'better': METRICS[metric][0], 'value': None if value is None else round(value, 3),
+            'trouble': (1 if trouble(setting, samples) else 0) if samples else None, 'kills': kills, 'oom': oom, 'n': len(samples)}
+
+
+def _num(value):
+    return f'{value:.2f}'.rstrip('0').rstrip('.') if isinstance(value, float) and value != int(value) else str(int(value))
+
+
+def verdict(before, after):
+    """Judge a change from the measurements before it (``before``, as stored on the decision) and after it (``after``, from ``measure`` on the same
+    setting and direction): a ``Verdict(outcome, detail)``, the detail one sentence with the numbers. Pure; every threshold is a named constant.
+
+    1. ``regressed`` whatever the expected measurement did: a memory kill, an oom kill or a lane restart that was not there before, or trouble for
+       this setting that was not there before.
+    2. ``unknown`` when the expected measurement is missing before or after (the probe failed, nothing was reported): never ``helped``.
+    3. Otherwise the expected measurement: ``helped`` when it got better by at least ``IMPROVE_RELATIVE`` of its value before and its floor,
+       ``regressed`` when it got worse by at least ``REGRESS_RELATIVE`` of its value before and ``REGRESS_FLOOR_FACTOR`` times its floor,
+       else ``no_effect``."""
+    metric = before.get('metric')
+    if metric not in METRICS or after.get('metric') != metric:
+        return Verdict('unknown', 'the change did not record what it expected to improve')
+    better, floor, label = METRICS[metric]
+    for name, text in (('kills', 'memory kill(s)'), ('oom', 'kernel oom kill(s) and Celery lane restart(s) in the last day')):
+        was, now = before.get(name), after.get(name)
+        if was is not None and now is not None and now > was:
+            return Verdict('regressed', f'{now} {text} after the change, {was} before')
+    if after.get('trouble') and not before.get('trouble'):
+        return Verdict('regressed', 'trouble for this setting appeared after the change')
+    was, now = before.get('value'), after.get('value')
+    if was is None or now is None:
+        return Verdict('unknown', f'{label}: not measured {"before" if was is None else "after"} the change, so it is not judged')
+    gain = (was - now) if better == 'lower' else (now - was)  # positive: it got better
+    text = f'{label}: {_num(was)} before, {_num(now)} after'
+    if gain >= max(IMPROVE_RELATIVE * abs(was), floor):
+        return Verdict('helped', text)
+    if -gain >= max(REGRESS_RELATIVE * abs(was), REGRESS_FLOOR_FACTOR * floor):
+        return Verdict('regressed', text)
+    return Verdict('no_effect', text)
+
+
+def verify_due(now, verify_at, measurements):
+    """What to do with an unjudged change: ``'judge'`` once ``VERIFY_SAMPLES`` measurements came after it and the settling time has passed (a run
+    ``VERIFY_SLACK_SECONDS`` early counts), ``'give_up'`` when ``VERIFY_GIVE_UP_SECONDS`` after that there are still too few (scanning paused, the
+    tuner off: the outcome is unknown and the change no longer holds back another), else ``'wait'``."""
+    if measurements >= VERIFY_SAMPLES and now >= verify_at - VERIFY_SLACK_SECONDS:
+        return 'judge'
+    if now >= verify_at + VERIFY_GIVE_UP_SECONDS:
+        return 'give_up'
+    return 'wait'
+
+
+def blocks_calm(phase, pressure):
+    """Whether an unjudged change keeps another calm change from being made: any change that is not a forced back-off, a cap, an emergency or a
+    verification revert (those act at once and never wait for, or hold, anything)."""
+    return not pressure and phase not in NO_ACTION_PHASES
+
+
+def is_calm(phase, pressure):
+    """Whether a change waits for the one-at-a-time gate: a probe, a restore after an emergency, a number the AI advisor picked. Not the aim-high
+    jump (the one-off target for this machine, which every setting takes at once after a restart), a cap, or anything forced by trouble."""
+    return blocks_calm(phase, pressure) and phase != 'aim_high'
+
+
+def revert_wanted(outcome, phase, pressure):
+    """Whether a judged change is taken back: only a calm change that regressed. A back-off forced by trouble is judged for the record and never
+    reverted upwards; a cap and an emergency back-off are the safety net itself."""
+    return outcome == 'regressed' and blocks_calm(phase, pressure)
 
 
 # --- the AI advisor's answer ---------------------------------------------------------------------------------------------
