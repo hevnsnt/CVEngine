@@ -98,6 +98,8 @@ class PlanTests(World):
         Subdomain.objects.bulk_create([Subdomain(name=f'h.{s.domain.name}', target_domain=s.domain, scan_history=s) for s in ScanHistory.objects.select_related('domain')])
         with connection.cursor() as cursor:
             cursor.execute('ANALYZE "startScan_scanhistory"')
+            cursor.execute('ANALYZE "startScan_subdomain"')  # the plan depends on the statistics of every table in it, and autovacuum has not seen these rows yet: without this it flipped at random
+            cursor.execute('ANALYZE "targetApp_domain"')
         qs = Subdomain.objects.filter(latest_scan_q())
         sql, params = qs.query.sql_with_params()
         with connection.cursor() as cursor:
