@@ -861,6 +861,55 @@
       "read_only": false,
       "own_target": false,
       "sentinel": false
+    },
+    {
+      "name": "network_read_at_the_bound",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nnetwork:\n  - host:\n      - \"{{Hostname}}\"\n    inputs:\n      - read: 65536\n    matchers:\n      - type: word\n        words: [\"SSH-2.0\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": true
+    },
+    {
+      "name": "network_read_over_the_bound",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nnetwork:\n  - host:\n      - \"{{Hostname}}\"\n    inputs:\n      - read: 65537\n    matchers:\n      - type: word\n        words: [\"SSH-2.0\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "network_read_unbounded",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nnetwork:\n  - host:\n      - \"{{Hostname}}\"\n    inputs:\n      - read: 1000000000\n    matchers:\n      - type: word\n        words: [\"SSH-2.0\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "network_read_zero",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nnetwork:\n  - host:\n      - \"{{Hostname}}\"\n    inputs:\n      - read: 0\n    matchers:\n      - type: word\n        words: [\"SSH-2.0\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "ssl_blocks_over_the_request_limit",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nssl:\n  - address: \"{{Host}}:{{Port}}\"\n  - address: \"{{Host}}:{{Port}}\"\n  - address: \"{{Host}}:{{Port}}\"\n  - address: \"{{Host}}:{{Port}}\"\n  - address: \"{{Host}}:{{Port}}\"\n  - address: \"{{Host}}:{{Port}}\"\n  - address: \"{{Host}}:{{Port}}\"\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "dns_blocks_over_the_request_limit",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\ndns:\n  - name: \"{{FQDN}}\"\n    type: A\n  - name: \"{{FQDN}}\"\n    type: A\n  - name: \"{{FQDN}}\"\n    type: A\n  - name: \"{{FQDN}}\"\n    type: A\n  - name: \"{{FQDN}}\"\n    type: A\n  - name: \"{{FQDN}}\"\n    type: A\n  - name: \"{{FQDN}}\"\n    type: A\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "http_and_ssl_blocks_over_the_request_limit",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/1\", \"{{BaseURL}}/2\", \"{{BaseURL}}/3\", \"{{BaseURL}}/4\", \"{{BaseURL}}/5\", \"{{BaseURL}}/6\"]\nssl:\n  - address: \"{{Host}}:{{Port}}\"\ndns:\n  - name: \"{{FQDN}}\"\n    type: A\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
     }
   ]
 }

@@ -27,7 +27,7 @@ ENTRIES = {
     'ai_test': ('settings', 'ai/test', 'Test the AI connection with one small call. Action.', None),
     'ai_models': ('settings', 'ai/models', 'List the models the provider offers for the key saved. Action.', None),
     'reviewer': ('settings', 'reviewer', 'The AI reviewer of AI-written checks: its model and whether it is on.', None),
-    'scan_policy': ('settings', 'scan_policy', 'What the scanners may run (every template check, or only read-only ones).', None),
+    'scan_policy': ('settings', 'scan_policy', 'What the scanners may run (every template check, or only read-only ones) and whether checks that send credentials (default logins) may run (off by default).', None),
     'scan_concurrency': ('settings', 'scan_concurrency', 'How many scans and assessments run at once.', None),
     'tunables': ('settings', 'tunables', 'The throughput settings (the ones auto-tuning manages), with the pinned value of each.', None),
     'autotune': ('settings', 'autotune', 'Auto-tuning: mode and advisor. (Also set_tuning_mode.)', None),
@@ -95,6 +95,9 @@ READ_ONLY_FOR_AGENTS = {
 }
 # What the handlers see as the caller's address. Not a loopback address: nothing that trusts the caller's address may take the bridge for the local machine.
 BRIDGE_ADDRESS = ''
+# Owner rule: no check that sends credentials runs unless a person turned it on. An agent may switch such a setting off and read it, never switch it on: a
+# person does that in the web interface. {setting name: the fields of its body an agent may not set to true}
+AGENT_CANNOT_ENABLE = {'scan_policy': ('allow_credential_checks',)}
 WRITE_METHODS = ('PUT', 'PATCH', 'POST')
 NOT_EXPOSED[('admin', 'openvas')] = 'the same add-on settings as the openvas entry (settings table).'
 IDENTITY_ROUTES_NOT_YET = ('users', 'memberships', 'orgs', 'projects')  # people, roles and organizations: a separate slice, owner to say how far an agent may go
@@ -168,6 +171,10 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
         require_write_token(ctx)
         if name in READ_ONLY_FOR_AGENTS:
             raise ApiError(403, f'{name} is not available to agents: {READ_ONLY_FOR_AGENTS[name]}')
+    if method != 'GET' and isinstance(values, dict):
+        for field in AGENT_CANNOT_ENABLE.get(name, ()):
+            if values.get(field) not in (None, False):  # anything but off: a string or a number is refused by the handler, and must not slip past here
+                raise ApiError(403, f'{field} can only be switched on by a person in the web interface; an agent may switch it off')
     groups = _groups(pattern, ident)
     path = '/cve/api/%s/%s/' % (api, _path_for(pattern, groups))
     factory = RequestFactory(REMOTE_ADDR=BRIDGE_ADDRESS)

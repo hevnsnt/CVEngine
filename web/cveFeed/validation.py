@@ -92,6 +92,15 @@ def cap(name):
 
 # ----------------------------------------------------------------------------- templates (read-only by their own text)
 
+def credential_checks_allowed():
+    """True only when an App Admin turned on Settings > Scan policy > "Allow checks that send credentials". Fails closed: any doubt is off."""
+    try:
+        from dashboard.models import ScanPolicy
+        return bool(ScanPolicy.current().allow_credential_checks)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def all_templates_allowed():
     """True when Settings > Scan engines lets every installed Nuclei template run. Fails closed: any doubt is the read-only policy."""
     try:

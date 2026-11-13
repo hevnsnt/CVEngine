@@ -102,6 +102,9 @@ class WatchdogCase(TestCase):
         os.environ.pop('DISCOVERY_CONCURRENCY', None)
         self.probes = FakeProbes()
         self.t = T0
+        ops = mock.patch.object(wd, '_run_ops_checks', return_value='')  # the operations checks have their own tests (test_maintainer_checks); a tick here is about the rules
+        ops.start()
+        self.addCleanup(ops.stop)
 
     def tick(self, seconds=0, probes=None, **over):
         self.t = self.t + timedelta(seconds=seconds)

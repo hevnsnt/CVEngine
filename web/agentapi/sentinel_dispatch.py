@@ -22,6 +22,8 @@ import os
 import re
 import time
 
+from cveFeed import result_cuts
+
 MAX_ADDRESSES = 64  # kept equal to sentinel_broker.MAX_ADDRESSES: the most addresses one dispatched task names (a longer list goes in several)
 DISPATCH_POLL_INTERVAL = 0.5  # seconds between checks while waiting for a dispatched task to finish
 RESOLVE_WORKERS = 16  # matches targetApp.target_types.blocked_names: one bounded parallel pass, never one lookup per target serially
@@ -953,6 +955,37 @@ def _dispatch_serially(project, kind, chunks, prepare, scan, timeout, created_by
 
 # --- nmap: dispatch a chunk of addresses, persist a hit through the exact same function local nmap uses ---------------
 
+def scanned_ports(ranges):
+    """The TCP ports a Sentinel says its nmap run probed (``scanned_ranges``: ``[low, high]`` pairs of a contract 5 result), as a set, or None when it sent none (a
+    contract 4 Sentinel, or a run that does not say). Clamped to 1..65535 and never more than 65535 numbers, whatever the pairs claim."""
+    ports = set()
+    for low, high in ranges or ():
+        ports.update(range(max(int(low), 1), min(int(high), 65535) + 1))
+    return ports or None
+
+
+def nmap_inventory(result, chunk):
+    """The hosts of a Sentinel's ``nmap`` result that belong to ``chunk``, as the records ``cveFeed.port_inventory.persist_inventory`` reads (the same ones the
+    library's ``extract_nmap_inventory`` makes from nmap's XML): the ports with all the detail the Sentinel sent, the OS guess with its accuracy and runner-ups,
+    the closed port nmap used, the host scripts, and what the run probed (``scanned``) with the host's state, so a port probed and not open now is closed. A host nmap gave up on
+    (``timed_out``) is left out: it was not fingerprinted and stays due. A result of a contract 4 Sentinel has none of the new fields and reads as it always did."""
+    cuts = result_cuts.clean(result.get('cuts'))
+    inventory = []
+    for host in result.get('hosts', []):
+        if host.get('ip') not in chunk or host.get('timed_out'):
+            continue
+        row = {'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': host.get('os_accuracy'), 'ports': host.get('ports', [])}
+        for key in ('os_matches', 'closed_tcp', 'hostscripts', 'status', 'extraports'):
+            if key in host:
+                row[key] = host[key]
+        if scanned_ports(host.get('scanned_ranges')):
+            row['scanned'] = scanned_ports(host['scanned_ranges'])
+        if 'scanned_ranges' in host or 'cuts' in result:  # a contract 5 result says what it cut for this host (``persist_inventory`` shows it on the host)
+            row['cuts'] = [c for c in cuts if c.get('target') == host['ip']]
+        inventory.append(row)
+    return inventory
+
+
 def try_nmap(project, scan, targets, org_id=None, timeout=None):
     """Fingerprint ``targets`` on Sentinels and persist what they report; return the persist totals.
 
@@ -973,8 +1006,7 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None):
                 if result is None:
                     continue
                 chunk = chunks[index]
-                inventory = [{'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': None, 'ports': host.get('ports', [])}
-                             for host in result.get('hosts', []) if host.get('ip') in chunk and not host.get('timed_out')]
+                inventory = nmap_inventory(result, chunk)
                 # a host nmap gave up on (``timed_out``) was not fingerprinted: it is stored as nothing and stays due (it is "missing" below)
                 # the Sentinel's own network, unless it says it sits behind Docker Desktop's; the built-in scanner's is this server's own (os_reliable None:
                 # judged and marked as a local scan, cveFeed.os_detection)
@@ -1157,17 +1189,21 @@ def _nuclei_target(kind, targets, kwargs, scan=None, labels=None):
     from cvengine_scanner import flags as scan_flags
 
     from agentapi import template_bundle
-    from cveFeed import nuclei_scan, nuclei_services
+    from cveFeed import nuclei_scan, nuclei_services, validation
     # no severities given: the default (``cvengine_scanner.flags.NUCLEI_SEVERITIES``, info to critical), sent as a list, since a client given none
     # would run every severity, ``unknown`` included
     tags, severities = sorted(kwargs.get('tags') or []), list(kwargs.get('severities') or scan_flags.NUCLEI_SEVERITIES.split(','))
     if kind == 'nuclei_light':
         tags, severities = ['tech'], ['info']
     etags = list(scan_flags.NUCLEI_EXCLUDED_TAGS)
+    if not validation.credential_checks_allowed():  # the Sentinel leaves these out of its own runs too (``flags.NUCLEI_CREDENTIAL_TAGS``): the task says so
+        etags += list(scan_flags.NUCLEI_CREDENTIAL_TAGS)
     rev = nuclei_scan.policy_rev()
     target = {'targets': targets, 'tags': tags, 'severities': severities, 'etags': etags,
               'template_policy': {'rev': rev, 'read_only': rev == nuclei_scan.TEMPLATE_POLICY_REV, 'bundle_sha256': template_bundle.sha256_if_ready()},
               'budget': dict(scan_flags.NUCLEI_SERVICE_BUDGET)}
+    if validation.credential_checks_allowed():  # only when an App Admin turned it on: absent means off, and a Sentinel that does not know the field never runs them
+        target['allow_credential_checks'] = True
     if labels is None:
         labels = nuclei_services.labels_for(scan, targets) if scan is not None else {}
     services = {t: labels[t] for t in targets if t in labels}
@@ -1197,6 +1233,17 @@ def _not_checked_of(result):
     """``[{'target', 'reason'}]`` a Sentinel says it did not fully check (``result['not_checked']``), as cleaned by the broker; none from a Sentinel that
     sends no such field."""
     return [row for row in (result.get('not_checked') or []) if isinstance(row, dict) and row.get('target')]
+
+
+def _cut_check_of(result, chunk, named=()):
+    """``[{'target', 'reason'}]`` for the targets of ``chunk`` when its result was cut so that it is only part of the answer (``cveFeed.result_cuts.partial``: the
+    tool stopped at its time limit, or findings were dropped above the cap): they were not fully checked, so they are not recorded as scanned clean and are asked again
+    (the stage's back-off of a day applies, as for any port a Sentinel names). A target the Sentinel itself named in ``not_checked`` is not named twice."""
+    if not result_cuts.partial(result):
+        return []
+    taken = {str(row.get('target') or '').strip().lower() for row in named}
+    why = '; '.join(n for n in result_cuts.summary(result) if n.startswith(('findings', 'stopped')) or 'time limit' in n)[:150] or 'the result was cut'
+    return [{'target': t, 'reason': f'result cut: {why}'} for t in chunk if t.strip().lower() not in taken]
 
 
 NO_CHECK_REASON = 'no check exists for this service'  # the Sentinel's own words for a class it has no allowlisted template for (``client.tools.NO_CHECK_REASON``)
@@ -1239,7 +1286,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                         raise RuntimeError('no Sentinel inside the network answered (one must declare network:internal and cover this project)')
                     internal_stream.unreached.update(_unreachable_of(result, chunks[_index]))
                     named = _not_checked_of(result)
-                    internal_stream.not_checked += named + _no_check_of(result, chunks[_index], labels, kind, kwargs, named)
+                    internal_stream.not_checked += named + _no_check_of(result, chunks[_index], labels, kind, kwargs, named) + _cut_check_of(result, chunks[_index], named)
                     for finding in result.get('findings', []):
                         yield _finding_to_nuclei_line(finding)
         internal_stream.unreached = set()
@@ -1284,7 +1331,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                     raise ScannerUnavailable(kind, 'no scanner returned a result for a chunk')
                 stream.unreached.update(_unreachable_of(result, chunks[index]))
                 named = _not_checked_of(result)
-                stream.not_checked += named + _no_check_of(result, chunks[index], labels, kind, kwargs, named)
+                stream.not_checked += named + _no_check_of(result, chunks[index], labels, kind, kwargs, named) + _cut_check_of(result, chunks[index], named)
                 for finding in result.get('findings', []):
                     yield _finding_to_nuclei_line(finding)
     stream.unreached = set()

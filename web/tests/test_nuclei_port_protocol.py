@@ -302,8 +302,8 @@ class NotCheckedTests(DispatchBase):
 
 class NoCheckExistsTests(DispatchBase):
     """Fifth pass: a Sentinel that answers ``no_templates: True`` for a task without a tag filter has no check for the service ports of the chunk (the allowlist is
-    missing or empty, or has no template of the class: postgres, ldap). Such a port is not checked, never scanned clean: it is named in ``not_checked`` with the
-    plain reason, stays due, is asked again at most once a day and is said in the activity feed."""
+    missing or empty, or has no template of the class: postgres). Such a port is named in ``not_checked`` with the plain reason; the server records it as
+    no check (TL-4), not as failed, and says so in the activity feed."""
     REASON = 'no check exists for this service'
 
     def streamed(self, result, targets, labels, kind='nuclei_deep', **kwargs):
@@ -341,17 +341,35 @@ class NoCheckExistsTests(DispatchBase):
         self.assertEqual(self.streamed(result, [f'{HOST}:5432'], self.LABELS, kind='nuclei_light').not_checked, [])
         self.assertEqual(self.streamed({'findings': []}, [f'{HOST}:5432'], self.LABELS).not_checked, [])  # the Sentinel did not say so
 
-    def test_such_a_port_is_recorded_failed_not_done_backed_off_for_a_day_and_said(self):
+    def test_such_a_port_is_recorded_as_no_check_not_failed_and_not_asked_again_for_a_while(self):
+        """TL-4: nothing to check is an answer. The port is not failed (it was, and was sent again every day for ever), not counted as covered by nuclei, and held
+        for a week under its own ledger key; the activity line says so once."""
         from cveFeed import ledger
         from cveFeed.models import AgentActivity, ServiceRun
         chunk = [HOST, f'{HOST}:5432']
         stream = self.streamed({'findings': [], 'no_templates': True}, chunk, self.LABELS)
         unreached = nuclei_scan.record_reached('nuclei_deep', chunk, self.project, self.scan, stream)
-        self.assertEqual(unreached, {f'{HOST}:5432'})
-        self.assertEqual(ServiceRun.objects.get(service='nuclei_deep', asset=f'{HOST}:5432').status, 'failed')  # never scanned clean
-        self.assertEqual(ledger.fresh('nuclei_deep', chunk, self.project), {HOST})
-        self.assertTrue(ServiceRun.objects.filter(service=ledger.failed_service('nuclei_deep'), asset=f'{HOST}:5432', status='done').exists())  # asked again after a day, not sooner
-        self.assertIn(f'{HOST}:5432 ({self.REASON})', ' '.join(AgentActivity.objects.values_list('message', flat=True)))
+        self.assertEqual(unreached, set())
+        self.assertFalse(ServiceRun.objects.filter(service__in=['nuclei_deep', ledger.failed_service('nuclei_deep')], asset=f'{HOST}:5432').exists())
+        self.assertEqual(ledger.fresh('nuclei_deep', chunk, self.project), {HOST})  # not counted as checked
+        self.assertEqual(ledger.fresh(ledger.nocheck_service('nuclei_deep'), chunk, self.project), {f'{HOST}:5432'})
+        self.assertEqual(nuclei_scan.backed_off('nuclei_deep', chunk, self.project), set())
+        self.assertEqual(nuclei_scan.no_check_held('nuclei_deep', chunk, self.project), {f'{HOST}:5432'})
+        self.assertEqual(ledger.ttl(ledger.nocheck_service('nuclei:wordpress')), 7 * 24 * 3600)
+        text = ' '.join(AgentActivity.objects.values_list('message', flat=True))
+        self.assertIn(f'{HOST}:5432', text)
+        self.assertIn('no nuclei check', text.lower())
+        self.assertNotIn('did not fully check', text)
+        self.assertEqual(stream.not_checked, [])
+
+    def test_the_older_library_names_the_port_unreachable_too_and_it_is_still_no_check(self):
+        """A pinned Sentinel library that lists the port in ``unreachable`` as well as ``not_checked`` is read the same way."""
+        from cveFeed import ledger
+        chunk = [HOST, f'{HOST}:5432', f'{HOST}:25']
+        stream = mock.Mock(unreached={f'{HOST}:5432', f'{HOST}:25'}, refused=set(),
+                           not_checked=[{'target': f'{HOST}:5432', 'reason': self.REASON}, {'target': f'{HOST}:25', 'reason': 'its time ran out'}])
+        self.assertEqual(nuclei_scan.record_reached('nuclei_deep', chunk, self.project, self.scan, stream), {f'{HOST}:25'})  # a real failure stays failed
+        self.assertEqual(ledger.fresh(ledger.nocheck_service('nuclei_deep'), chunk, self.project), {f'{HOST}:5432'})
 
 
 class PartlyCheckedBackOffTests(DispatchBase):

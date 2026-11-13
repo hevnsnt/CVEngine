@@ -3966,12 +3966,13 @@ const pages = {
         S.services.append(el("div", "note", `full port scan: ${fullScanAgo(ip.full_scanned_at)}${ip.full_scanned_at ? ` (${ip.full_scan_ports} open)` : ""}`));
         if ((ip.udp_unanswered || []).length)
           S.services.append(el("div", "note", `UDP ${ip.udp_unanswered.join(", ")}: no answer (open or filtered, not counted as open)`));
+        (ip.cut_notes || []).forEach((note) => S.services.append(el("div", "note", `The scanner cut its report for this address: ${note}`)));
         ip.ports.forEach((p) => {
           const card = el("div", "svc");
           const top = el("div", "svc-top");
           top.append(
             el("span", "svc-port", `${p.number}/${p.protocol || "tcp"}`),
-            el("span", "svc-name", [p.product || p.service, p.version].filter(Boolean).join(" ")),
+            el("span", "svc-name", [p.product || p.service, p.version].filter(Boolean).join(" ") + (p.tunnel === "ssl" ? " (TLS)" : "")),
           );
           card.append(top);
           if (p.info) card.append(el("div", "note", p.info));

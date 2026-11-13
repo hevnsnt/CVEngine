@@ -25,6 +25,15 @@ class AiTagsTests(TestCase):
 		tags = nt.ai_tags_for(['Some Unmapped Build System'], provider)
 		self.assertEqual(tags, {'jenkins', 'cms'})  # only values from CANDIDATE_TAGS survive
 
+	def test_a_credential_tag_is_never_picked_while_credential_checks_are_off(self):
+		from dashboard.models import ScanPolicy
+		provider = mock.Mock()
+		provider.complete.return_value = '["jenkins", "default-login", "bruteforce"]'
+		self.assertEqual(nt.ai_tags_for(['Some Unmapped Build System'], provider), {'jenkins'})
+		self.assertEqual(nt.pertinent_tags([('jenkins',)], {'jenkins', 'default-login', 'bruteforce'}), ['jenkins'])
+		ScanPolicy.objects.create(allow_credential_checks=True)  # a person turned it on
+		self.assertEqual(nt.ai_tags_for(['Some Unmapped Build System'], provider), {'jenkins', 'default-login'})
+
 	def test_ai_is_not_asked_about_names_the_static_table_already_covers(self):
 		provider = mock.Mock()
 		provider.complete.return_value = '["jenkins"]'

@@ -67,7 +67,10 @@ function recent(t) {
   const li = el("li", `sl-r ${t.status}`);
   li.append(el("i", "sl-dot"), el("b", "mono", kindName(t.kind)), el("span", "sl-host", t.label || t.host || (t.hidden ? "a target" : "")));
   const tail = t.status === "failed" ? t.error || "failed" : t.seconds != null ? span(t.seconds) : "";
-  li.append(el("span", "sl-tail", tail));
+  // what the result left out (a cap, a clipped text, a time limit) and the nuclei template release the run used: never silent (``cut_notes``, ``templates_release``)
+  const notes = Array.isArray(t.cut_notes) ? t.cut_notes : [];
+  const extra = [notes.length ? `cut: ${notes.slice(0, 2).join("; ")}${notes.length > 2 ? ` and ${notes.length - 2} more` : ""}` : "", t.templates_release ? `templates ${t.templates_release}` : ""].filter(Boolean);
+  li.append(el("span", "sl-tail", [tail, ...extra].filter(Boolean).join(" · "), extra.length ? { title: [...notes, t.templates_release ? `nuclei templates ${t.templates_release}` : ""].filter(Boolean).join("\n") } : {}));
   if (t.finished) li.append(el("span", "sl-when", "", { "data-ago": t.finished }));
   return li;
 }

@@ -85,8 +85,7 @@ def _nmap(task, result, agent):
     from cveFeed.port_inventory import persist_inventory
     from startScan.ip_rows import org_id_of_project
     chunk = {str(i) for i in (task.ips or (task.target or {}).get('addresses') or [])}
-    inventory = [{'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': None, 'ports': host.get('ports', [])}
-                 for host in result.get('hosts', []) if host.get('ip') in chunk and not host.get('timed_out')]  # a host nmap gave up on was not fingerprinted: it stays due, as on the stage path
+    inventory = sentinel_dispatch.nmap_inventory(result, chunk)
     reliable = sentinel_dispatch.os_reliable(sentinel_dispatch.Result(result, agent_id=getattr(agent, 'pk', None)))
     done = persist_inventory(inventory, org_id=org_id_of_project(task.project_id), os_reliable=reliable) if inventory else {}
     if inventory:

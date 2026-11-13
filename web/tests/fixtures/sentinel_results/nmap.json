@@ -3,18 +3,318 @@
   "os_reliable": true,
   "hosts": [
     {
-      "ip": "192.0.2.10",
-      "os_guess": "Linux 5.x",
+      "ip": "192.0.2.11",
+      "os_guess": "Linux 5.15 - 6.1",
       "ports": [
+        {
+          "number": 21,
+          "protocol": "tcp",
+          "state": "open",
+          "service_name": "ftp",
+          "product": "vsftpd",
+          "version": "3.0.5",
+          "method": "probed",
+          "ostype": "Unix",
+          "confidence": "10",
+          "cpes": [
+            "cpe:/a:vsftpd:vsftpd:3.0.5"
+          ],
+          "cpe": "cpe:/a:vsftpd:vsftpd:3.0.5",
+          "scripts": {
+            "banner": "220 (vsFTPd 3.0.5)",
+            "ssl-cert": "Subject: commonName=ftp.example.test/organizationName=Example\nSubject Alternative Name: DNS:ftp.example.test\nIssuer: commonName=Example Test CA\nPublic Key type: rsa\nPublic Key bits: 2048\nSignature Algorithm: sha256WithRSAEncryption\nNot valid before: 2026-01-01T00:00:00\nNot valid after:  2027-01-01T00:00:00\nMD5:   0123 4567 89ab cdef 0123 4567 89ab cdef\nSHA-1: 0123 4567 89ab cdef 0123 4567 89ab cdef 0123 4567"
+          },
+          "banner": "220 (vsFTPd 3.0.5)",
+          "tls": {
+            "subject": "commonName=ftp.example.test/organizationName=Example",
+            "sans": [
+              "DNS:ftp.example.test"
+            ],
+            "issuer": "commonName=Example Test CA",
+            "key_type": "rsa",
+            "key_bits": "2048",
+            "signature": "sha256WithRSAEncryption",
+            "not_before": "2026-01-01T00:00:00",
+            "not_after": "2027-01-01T00:00:00",
+            "fingerprint_md5": "0123456789abcdef0123456789abcdef",
+            "fingerprint_sha1": "0123456789abcdef0123456789abcdef01234567"
+          }
+        },
         {
           "number": 22,
           "protocol": "tcp",
           "state": "open",
           "service_name": "ssh",
           "product": "OpenSSH",
-          "version": "9.6"
+          "version": "9.6p1 Ubuntu 3ubuntu13.5",
+          "service_extra": "Ubuntu Linux; protocol 2.0",
+          "method": "probed",
+          "ostype": "Linux",
+          "confidence": "10",
+          "cpes": [
+            "cpe:/a:openbsd:openssh:9.6p1",
+            "cpe:/o:linux:linux_kernel"
+          ],
+          "cpe": "cpe:/a:openbsd:openssh:9.6p1",
+          "scripts": {
+            "banner": "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.5",
+            "ssh-hostkey": "  256 aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99 (ECDSA)"
+          },
+          "banner": "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.5"
+        },
+        {
+          "number": 80,
+          "protocol": "tcp",
+          "state": "open",
+          "service_name": "http",
+          "product": "nginx",
+          "version": "1.25.3",
+          "method": "probed",
+          "confidence": "10",
+          "cpes": [
+            "cpe:/a:igor_sysoev:nginx:1.25.3"
+          ],
+          "cpe": "cpe:/a:igor_sysoev:nginx:1.25.3",
+          "scripts": {
+            "http-title": "Welcome to the lab",
+            "http-server-header": "nginx/1.25.3"
+          }
+        },
+        {
+          "number": 443,
+          "protocol": "tcp",
+          "state": "open",
+          "service_name": "http",
+          "product": "nginx",
+          "version": "1.25.3",
+          "method": "probed",
+          "tunnel": "ssl",
+          "confidence": "10",
+          "cpes": [
+            "cpe:/a:igor_sysoev:nginx:1.25.3"
+          ],
+          "cpe": "cpe:/a:igor_sysoev:nginx:1.25.3",
+          "scripts": {
+            "ssl-cert": "Subject: commonName=web.example.test/organizationName=Example\nSubject Alternative Name: DNS:web.example.test, DNS:www.example.test\nIssuer: commonName=Example Test CA\nPublic Key type: rsa\nPublic Key bits: 2048\nSignature Algorithm: sha256WithRSAEncryption\nNot valid before: 2026-01-01T00:00:00\nNot valid after:  2027-01-01T00:00:00\nMD5:   fedc ba98 7654 3210 fedc ba98 7654 3210\nSHA-1: fedc ba98 7654 3210 fedc ba98 7654 3210 fedc ba98",
+            "http-title": "Welcome to the lab"
+          },
+          "tls": {
+            "subject": "commonName=web.example.test/organizationName=Example",
+            "sans": [
+              "DNS:web.example.test",
+              "DNS:www.example.test"
+            ],
+            "issuer": "commonName=Example Test CA",
+            "key_type": "rsa",
+            "key_bits": "2048",
+            "signature": "sha256WithRSAEncryption",
+            "not_before": "2026-01-01T00:00:00",
+            "not_after": "2027-01-01T00:00:00",
+            "fingerprint_md5": "fedcba9876543210fedcba9876543210",
+            "fingerprint_sha1": "fedcba9876543210fedcba9876543210fedcba98"
+          }
+        },
+        {
+          "number": 2121,
+          "protocol": "tcp",
+          "state": "open",
+          "service_name": "ftp",
+          "product": "vsftpd",
+          "version": "3.0.5",
+          "method": "probed",
+          "confidence": "10",
+          "scripts": {
+            "banner": "220 plain ftp, no TLS offered"
+          },
+          "banner": "220 plain ftp, no TLS offered"
         }
-      ]
+      ],
+      "os_accuracy": 97,
+      "os_matches": [
+        {
+          "name": "Linux 5.15 - 6.1",
+          "accuracy": 97,
+          "cpe": "cpe:/o:linux:linux_kernel:5"
+        },
+        {
+          "name": "Linux 4.15",
+          "accuracy": 94
+        }
+      ],
+      "closed_tcp": 1,
+      "status": "up",
+      "extraports": [
+        "closed"
+      ],
+      "scanned_ranges": [
+        [
+          21,
+          23
+        ],
+        [
+          25,
+          25
+        ],
+        [
+          53,
+          53
+        ],
+        [
+          80,
+          80
+        ],
+        [
+          110,
+          111
+        ],
+        [
+          135,
+          135
+        ],
+        [
+          139,
+          139
+        ],
+        [
+          143,
+          143
+        ],
+        [
+          443,
+          443
+        ],
+        [
+          445,
+          445
+        ],
+        [
+          993,
+          993
+        ],
+        [
+          995,
+          995
+        ],
+        [
+          1723,
+          1723
+        ],
+        [
+          3306,
+          3306
+        ],
+        [
+          3389,
+          3389
+        ],
+        [
+          5900,
+          5900
+        ],
+        [
+          8080,
+          8080
+        ]
+      ],
+      "hostscripts": {
+        "smb-os-discovery": "  OS: Windows Server 2019 (Windows Server 2019 6.3)\n  Computer name: LAB-SRV"
+      }
+    },
+    {
+      "ip": "192.0.2.12",
+      "os_guess": "",
+      "ports": [
+        {
+          "number": 80,
+          "protocol": "tcp",
+          "state": "open",
+          "service_name": "http",
+          "product": "",
+          "version": "",
+          "method": "table",
+          "confidence": "3"
+        }
+      ],
+      "status": "up",
+      "scanned_ranges": [
+        [
+          21,
+          23
+        ],
+        [
+          25,
+          25
+        ],
+        [
+          53,
+          53
+        ],
+        [
+          80,
+          80
+        ],
+        [
+          110,
+          111
+        ],
+        [
+          135,
+          135
+        ],
+        [
+          139,
+          139
+        ],
+        [
+          143,
+          143
+        ],
+        [
+          443,
+          443
+        ],
+        [
+          445,
+          445
+        ],
+        [
+          993,
+          993
+        ],
+        [
+          995,
+          995
+        ],
+        [
+          1723,
+          1723
+        ],
+        [
+          3306,
+          3306
+        ],
+        [
+          3389,
+          3389
+        ],
+        [
+          5900,
+          5900
+        ],
+        [
+          8080,
+          8080
+        ]
+      ],
+      "timed_out": true
+    }
+  ],
+  "cuts": [
+    {
+      "what": "host_timeout",
+      "kind": "time",
+      "limit": 480,
+      "target": "192.0.2.12"
     }
   ]
 }

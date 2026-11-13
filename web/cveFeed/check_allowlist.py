@@ -1,7 +1,6 @@
-"""The allowlist an AI-written or approved nuclei template must meet, as a whole document, before the server sends it to a Sentinel that is not the
-built-in scanner (``agentapi.ai_checks.external_problem``). The Sentinel applies the same rules itself (``cvengine_scanner.check_allowlist`` of the
-scanner library, this file rule for rule); both are tested against one corpus (the library's ``fixtures/checks/corpus.json``, field ``sentinel``,
-``tests.test_ai_checks_on_sentinels``), and the tables of both are compared there too.
+"""The allowlist an AI-written or approved nuclei template must meet, as a whole document, before a Sentinel that is not the built-in scanner runs
+it (``nuclei_validate``, contract version 4). The cvENGINE server applies the same rules (``cveFeed.check_allowlist``) before it ever sends one; both
+test against one corpus (``fixtures/checks/corpus.json``, field ``sentinel``).
 
 Every rule here is an allowlist, so a nuclei feature this module does not know is refused by default:
 
@@ -525,6 +524,8 @@ def _block_problem(proto, block):
         inputs = block.get('inputs') or []
         if not isinstance(inputs, list) or any(_keys_problem(i, INPUT_KEYS, 'a network input') or type(i.get('read')) is not int for i in inputs):
             return 'network checks may only read banners (inputs: read)'
+        if any(not 0 < i['read'] <= 65536 for i in inputs):
+            return 'a network input read must be 1 to 65536'
         if 'read-size' in block and not (type(block['read-size']) is int and 0 < block['read-size'] <= 65536):
             return 'read-size must be 1 to 65536'
         hosts = block.get('host')
