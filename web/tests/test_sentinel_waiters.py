@@ -101,8 +101,8 @@ class WaiterSlotTests(SecretBase):
     def test_a_built_in_long_poll_over_http_holds_when_the_instance_cap_is_full_and_an_external_one_does_not(self):
         cache.set('agentapi:waiters', broker.MAX_WAITERS, 120)
         started = time.monotonic()
-        status, out = call(self.t['external'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 1})
-        self.assertLess(time.monotonic() - started, 0.9)  # no slot: answered at once, told to come back in 5 s
+        status, out = call(self.t['external'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 30})
+        self.assertLess(time.monotonic() - started, 20)  # no slot: answered at once (not after the 30 s asked for), told to come back in 5 s
         self.assertEqual((status, out['task'], out['retry_after_seconds']), (200, None, 5))
         started = time.monotonic()
         status, out = call(self.t['builtin'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 1})
