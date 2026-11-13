@@ -2881,6 +2881,7 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 .at-history{list-style:none;margin:0;padding:0}
 .at-line{display:flex;gap:var(--s-3);align-items:flex-start;justify-content:space-between;padding:var(--s-2) var(--s-3);border-top:1px solid var(--line);border-left:3px solid var(--line-2)}
 .at-line.at-good{border-left-color:var(--ok)}.at-line.at-bad{border-left-color:var(--fire-ink)}.at-line.at-wait{border-left-color:var(--smoke)}
+.at-line{scroll-margin-top:96px}
 .at-line.at-focus{background:var(--sunk)}
 .at-line p{margin:0;font-size:var(--fs-2);line-height:1.4;overflow-wrap:anywhere}
 .at-line .at-what{font-weight:var(--fw-semi);color:var(--ink)}

@@ -88,6 +88,7 @@ test('the design lines: what, why, what happened', () => {
   assert.equal(helped.who, 'auto-tune');
   assert.equal(helped.when, '12 min ago');
   assert.equal(helped.tone, 'good');
+  assert.equal(h.historyLine(SHAPES.back_off, NOW).happened, 'the trouble is gone, no memory pressure; kept');
   assert.match(h.historyLine(SHAPES.helped_queue, NOW).happened, /^scans waiting in the queue 12 → 3, no memory pressure; kept$/);
   assert.match(h.historyLine(SHAPES.no_effect, NOW).happened, /^runs waiting for their turn 40% → 40%, no memory pressure; no effect, kept$/);
   assert.equal(h.historyLine(SHAPES.regressed_undone, NOW).happened, 'made it worse: scans waiting in the queue 3 → 9, trouble for this setting; undone');
@@ -125,7 +126,7 @@ test('a recommendation, a revert row and a release say what they are', () => {
   assert.equal(person.happened, 'undone by bill');
   const auto = h.historyLine(SHAPES.auto_revert, NOW);
   assert.equal(auto.why, 'Undone because the change before it made things worse');
-  assert.match(auto.happened, /^put back: /);
+  assert.equal(auto.happened, 'put back: trouble for this setting appeared after the change');  // not "undid decision 6: ..."
   assert.equal(h.historyLine(SHAPES.release, NOW).what, 'Hosts assessed at once handed back to auto-tune at 12');
 });
 

@@ -92,6 +92,9 @@ export function measurementText(d) {
   const base = d && d.baseline && typeof d.baseline === "object" ? d.baseline : null;
   const after = base && base.after && typeof base.after === "object" ? base.after : null;
   const m = base && METRIC[base.metric];
+  if (base && base.metric === "trouble" && after && after.metric === "trouble" && isNum(base.value) && isNum(after.value)) {  // a back-off: judged by whether the trouble stopped
+    return after.value ? "the trouble is still there" : base.value ? "the trouble is gone" : "no trouble";
+  }
   if (!m || !after || after.metric !== base.metric || !isNum(base.value) || !isNum(after.value)) return "";
   const [a, b] = [amount(m, base.value), amount(m, after.value)];
   if (m.seconds) {
@@ -111,7 +114,7 @@ function pressureText(d) {
 }
 
 // The server's own sentence without its "so it was not judged" tail, which the line says up front.
-const plainDetail = (text) => clean(text).replace(/,?\s+so (?:it|the change) (?:was|is) not judged\.?$/i, "").replace(/\.$/, "");
+const plainDetail = (text) => clean(text).replace(/^undid decision \d+:\s*/i, "").replace(/,?\s+so (?:it|the change) (?:was|is) not judged\.?$/i, "").replace(/\.$/, "");
 
 // What happened after the change: {text, tone}. tone: good | bad | neutral | wait.
 export function happenedText(d, now = Date.now()) {

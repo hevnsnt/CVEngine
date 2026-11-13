@@ -68,7 +68,7 @@ export async function buildSection(host, { card = "", item = "" } = {}) {
   );
   host.append(head);
   for (const entry of registry) {
-    const wrap = el("div", "", null, { id: cardAnchor(entry.id), style: "margin-bottom:16px" });
+    const wrap = el("div", "", null, { id: cardAnchor(entry.id), style: "margin-bottom:16px;scroll-margin-top:72px" });
     host.append(wrap);
     try {
       await entry.build(wrap, { reload: () => buildSection(host), focus: entry.id === card && item ? item : null });
