@@ -142,7 +142,7 @@ test('the agent policy is its own control: Suggest by default, and changing it s
   const policy = selects[1];
   assert.equal(policy.attrs.id, 'autotune-agent-policy');
   assert.equal(policy.value, 'suggest');
-  assert.match(host.textContent, /May AI agents change performance settings by themselves\?/);
+  assert.match(host.textContent, /Whether AI agents may change performance settings by themselves/);
   assert.match(host.textContent, /never raise a spend cap/);
   policy.value = 'auto';
   calls.length = 0;

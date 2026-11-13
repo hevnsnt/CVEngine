@@ -73,6 +73,14 @@ reviewer is built on the assumption that every scanned byte is hostile.
      and its equivalent for scanner and hygiene findings);
    - the evidence the model was shown carries no instructions aimed at an AI (`cveFeed.injection_guard`);
    - the packet the verdict answers is still the current one: same evidence, same host state, and the finding is still open.
+   - no earlier review of the same evidence on another host of the same project said it is real. "The same evidence" is the finding's kind and
+     its evidence key (`triage.evidence_key`: the CVE or check, the product and version, the matcher; never the host) in the same project, never
+     across projects or organizations. Only reviews that count are counted: not refused, no planted text in their evidence, a `true_*` verdict, one host once.
+     Then the closure is held with the reason "N earlier reviews of the same evidence on other hosts said it is real" (shown where every held
+     reason is shown, and it never demotes the finding in Situations). The other direction changes nothing: a real verdict after earlier false
+     positives stands. The model is told the same as one line of cvENGINE's own computed facts in the packet (`same_evidence_on_other_hosts`:
+     "the same evidence was judged real on 2 other hosts, false positive on 0": counts only, at most 50, no host names). It reads one indexed query
+     (`triage_proj_kind_evkey_idx`) and adds no model call. The host review's packet does not carry the line, but its closures go through the same hold.
 
    Anything else is recorded as the reviewer's opinion, shown on the finding, and changes nothing. A `false_positive` the server holds back on a
    finding with hard evidence is recorded as **disputed**, for a person to look at. Only one held verdict changes any ranking: in Situations a
@@ -311,6 +319,7 @@ The page has one **Connection** block (provider, API key, address, and a status 
 | Reviews per day | 300 | The most findings reviewed in one UTC day. |
 | Operations hours (UTC) | 3, 9, 15, 21 | When the operations check runs. |
 | Let the host review close false positives by itself | **off** | When off, a host review's false positive is recorded and a person closes it. Only a person sets it. |
+| Validate AI-written checks automatically | **off** | The automatic validation of the checks the AI wrote ([below](#ai-written-templates-validated-by-the-system-never-by-a-person)): two AI calls per draft, and a check that passes runs on hosts. Off, drafts wait unused (as in 1.3.6), nothing is asked of the AI and no draft expires; checks already validated keep working. Only a person switches it on (an agent cannot), here or in the AI question after an update. |
 | AI review of whole hosts | **off** | Turns the [host review](#host-review) on. Every review is a billed AI call. |
 | Hosts reviewed per day | 100 | The most host reviews queued in one UTC day, for the whole install. |
 
@@ -348,7 +357,7 @@ Some models (measured: `claude-sonnet-5-5` and `claude-opus-5-5`) answer the Nuc
 
 ## AI-written templates: validated by the system, never by a person
 
-There is no review page, so nothing waits for one. A draft (`GeneratedTemplate`, status `draft`, shown as "being checked") is taken through every gate by `cveFeed/templatevalidate.py`, a task that runs every five minutes (`validate_template_drafts`, scheduled by migration 0154, which also pushes every draft that was stuck waiting into the validator once):
+Since 1.4 this runs only after an administrator switched it on (it ships off: see the setting above). There is no review page, so nothing waits for one. A draft (`GeneratedTemplate`, status `draft`, shown as "being checked") is taken through every gate by `cveFeed/templatevalidate.py`, a task that runs every five minutes (`validate_template_drafts`, scheduled by migration 0154, which also pushes every draft that was stuck waiting into the validator once):
 
 1. **Static gate** again (protocols, destinations bound to the scanned host, at most six read-only requests, real matchers, nothing generic).
 2. **`nuclei -validate` and the benign loopback control on a Sentinel**, the existing `nuclei_validate` kind: on the built-in scanner while the install has one, else on a Sentinel of the project's own (contract version 4 or newer; see **AI-written checks on your own Sentinels** below). With no Sentinel that can run it the draft waits and no try is used.

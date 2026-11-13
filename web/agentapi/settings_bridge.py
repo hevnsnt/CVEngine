@@ -101,8 +101,27 @@ BRIDGE_ADDRESS = ''
 # Owner rule: no check that sends credentials runs unless a person turned it on. An agent may switch such a setting off and read it, never switch it on: a
 # person does that in the web interface. {setting name: the fields of its body an agent may not set to true}
 # The same rule for everything that costs money or widens what is scanned (owner rule, WP4: an agent can lower such a thing, never switch it on).
-AGENT_CANNOT_ENABLE = {'scan_policy': ('allow_credential_checks', 'nuclei_all_templates'), 'ai': ('enabled', 'auto_fire'), 'reviewer': ('enabled',),
+AGENT_CANNOT_ENABLE = {'scan_policy': ('allow_credential_checks', 'nuclei_all_templates'), 'ai': ('enabled', 'auto_fire'), 'reviewer': ('enabled', 'auto_close', 'host_review_enabled', 'host_review_auto_close'),
                        'openvas': ('enabled',), 'openvas_project': ('enabled',), 'tailscale_project': ('enabled', 'auto_scan', 'use_local')}
+# DEFAULT DENY (final review FA-1, FA-4). Beyond the explicit tables above, an agent's write is refused when it switches ANY boolean on, unless (entry, field) is in
+# this list, and when it raises ANY number the entry shows today, unless the entry or field is in the lists below it. So a setting added later (a new switch, a new
+# cap) is refused to an agent until someone decides here, with a reason, that it is safe: nothing has to be remembered to be closed.
+AGENT_MAY_SWITCH_ON = {
+    ('updates', 'wait_for_scans'): 'an update then waits for running scans: the cautious choice',
+    ('scan_control', 'paused'): 'pausing scanning is the safe direction (an agent may also resume: that sends False)',
+    ('watchdog', 'enabled'): 'a watchdog switch on is the safety net coming back (the watchdog changes nothing that spends money or widens a scan)',
+}
+# Entries whose numbers an agent may change in either direction, with why none of them spends money or widens what is scanned.
+AGENT_NUMBERS_FREE = {
+    'timings': 'check intervals, the daily hygiene hour and the discovery and template-scan run limits: pacing, no spend',
+    'email': 'the mail server port',
+    'org_excluded_address': 'an exclusion only narrows what is scanned',
+    'org_excluded_addresses': 'an exclusion only narrows what is scanned',
+    'alert_dismiss': 'a notice id',
+    'ai_usage_rate': 'the price of a model, used to show what a call cost: it changes no spend',
+}
+# Entries the generic rule does not read because they have their own, stricter rules above (``_throughput_write``, ``AGENT_*``, the autotune rules).
+GENERIC_RULE_SKIPS = ('scan_concurrency', 'tunables', 'autotune')
 # A value an agent may not send for an entry: {entry: {field: the values refused}}. Automatic updates install without a person pressing the button; the
 # two scanner plans that keep the built-in scanner running spend the host's memory.
 AGENT_CANNOT_SET = {'updates': {'mode': ('automatic',)}, 'scanner_plan': {'plan': ('internal', 'both')}}
@@ -189,9 +208,9 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
     if method != 'GET' and isinstance(values, dict):
         for field in AGENT_CANNOT_ENABLE.get(name, ()):
             if values.get(field) not in (None, False):  # anything but off: a string or a number is refused by the handler, and must not slip past here
-                raise ApiError(403, f'{field} can only be switched on by a person in the web interface; an agent may switch it off')
+                raise ApiError(403, f'{field} is for a person to switch on (only a person does, in the web interface); an agent may switch it off')
     if method != 'GET' and isinstance(values, dict):
-        _agent_body_rules(ctx, name, values)
+        _agent_body_rules(ctx, name, values, ident)
     groups = _groups(pattern, ident)
     path = '/cve/api/%s/%s/' % (api, _path_for(pattern, groups))
     factory = RequestFactory(REMOTE_ADDR=BRIDGE_ADDRESS)
@@ -204,7 +223,21 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
     request.via_agent = True  # a handler that spends the owner's money or widens what runs by itself refuses an agent (settings_api.reviewer_put)
     if method == 'PUT' and name in ('scan_concurrency', 'tunables') and isinstance(values, dict) and isinstance(values.get('values'), dict) and values['values']:
         return _throughput_write(ctx, name, method, fn, request, values, groups)
+    if name == 'reviewer' and method != 'GET':
+        return _keep_the_persons_mark(ctx, name, api, fn, request, groups)
     return _run(ctx, name, api, fn, request, groups)
+
+
+def _keep_the_persons_mark(ctx, name, api, fn, request, groups):
+    """FA-1: the reviewer's handler records who saved the row (``updated_by``), and the update question reads that as "a person chose". An agent's save must not look
+    like a person's choice, so the mark is put back as it was; the audit row (``via_token``) says who made the change."""
+    from cveFeed import reviewer
+    from cveFeed.models import ReviewerSettings
+    before = reviewer.settings_row().updated_by_id
+    try:
+        return _run(ctx, name, api, fn, request, groups)
+    finally:
+        ReviewerSettings.objects.filter(pk=reviewer.settings_row().pk).update(updated_by=before)
 
 
 def _run(ctx, name, api, fn, request, groups):
@@ -230,7 +263,7 @@ def _current_body_number(name, field):
     return getattr(reviewer.settings_row(), field, None)
 
 
-def _agent_body_rules(ctx, name, values):
+def _agent_body_rules(ctx, name, values, ident=None):
     """What an agent may not send, checked before anything is written (a person's own writes, in the web interface, never come here)."""
     for field, refused in AGENT_CANNOT_SET.get(name, {}).items():
         if values.get(field) in refused:
@@ -242,12 +275,70 @@ def _agent_body_rules(ctx, name, values):
         why = autotune.raises_autonomy(values.get('mode') if isinstance(values.get('mode'), str) else None, values.get('advisor'))
         if why:
             raise ApiError(403, why)
+    if name == 'reviewer' and 'ops_hours' in values:
+        _ops_hours_rule(values['ops_hours'])
+    if name not in GENERIC_RULE_SKIPS:
+        _default_deny(ctx, name, values, ident)
     for field in AGENT_LOWER_ONLY.get(name, ()):
         if field not in values:
             continue
         new, now = values[field], _current_body_number(name, field)
         if isinstance(new, bool) or not isinstance(new, int) or (isinstance(now, int) and new > now):
-            raise ApiError(403, f'{field} is a limit on what this instance spends: an agent may only lower it (now {now}); a person raises it in the web interface')
+            raise ApiError(403, f'{field} is a limit on what this instance spends: an agent may only lower it (now {now}); only a person raises it, in the web interface')
+
+
+def _ops_hours_rule(hours):
+    """The AI operations check runs at each of these UTC hours, one provider call each: an agent may remove hours, never add one."""
+    from cveFeed import reviewer
+    now = set(reviewer.ops_hours(reviewer.settings_row()))
+    if not isinstance(hours, list) or not set(hours) <= now:
+        raise ApiError(403, f'ops_hours: every hour is a paid call to the AI provider, so an agent may only take hours away (now {sorted(now)}); a person adds them in the web interface')
+
+
+def _flatten(value, prefix=''):
+    """{dotted path: leaf} of a nested answer, lists kept whole."""
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            out.update(_flatten(v, f'{prefix}{k}.'))
+        return out
+    return {prefix[:-1]: value}
+
+
+def _current(ctx, name, ident):
+    """What the entry's own page shows now, flattened (empty when it cannot be read): the numbers an agent's write is compared with."""
+    api, pattern, _text, _ident = ENTRIES[name]
+    getter = _find(api, pattern, 'GET')
+    if getter is None:
+        return {}
+    try:
+        groups = _groups(pattern, ident)
+        path = '/cve/api/%s/%s/' % (api, _path_for(pattern, groups))
+        request = RequestFactory(REMOTE_ADDR=BRIDGE_ADDRESS).get(path)
+        request.user = ctx.user
+        return _flatten(_run(ctx, name, api, getter, request, groups))
+    except Exception:  # noqa: BLE001 - what cannot be read is not compared: the booleans are still refused
+        return {}
+
+
+def _default_deny(ctx, name, values, ident):
+    """An agent's write may not switch a boolean on or raise a number unless it is on the lists above (``AGENT_MAY_SWITCH_ON``, ``AGENT_NUMBERS_FREE``). Works on
+    any field of the body, nested ones included, so a field added to a handler tomorrow is refused until it is decided here."""
+    sent = _flatten(values)
+    current = None
+    for path, value in sent.items():
+        field = path.rsplit('.', 1)[-1]
+        if value is True:
+            if (name, field) not in AGENT_MAY_SWITCH_ON:
+                raise ApiError(403, f'{name}.{field}: switching this on can cost money, widen what is scanned or change who may reach the instance, so only a person does it, in the web interface; an agent may switch it off')
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            if name in AGENT_NUMBERS_FREE or field in AGENT_LOWER_ONLY.get(name, ()):  # a free entry, or a number with its own lower-only rule below
+                continue
+            current = _current(ctx, name, ident) if current is None else current
+            matches = [v for k, v in current.items() if k == path or k.rsplit('.', 1)[-1] == field]
+            now = matches[0] if len(matches) == 1 else None
+            if not (isinstance(now, (int, float)) and not isinstance(now, bool) and value <= now):  # a number the page does not show under that name is as good as unknown: refused
+                raise ApiError(403, f'{name}.{field}: an agent may only lower a number (now {now if now is not None else "not known here"}); only a person raises or sets it, in the web interface')
 
 
 def _tunable_rules(values):
@@ -270,7 +361,7 @@ def _tunable_rules(values):
         def reach(n):  # a cap of 0 on these keys means no cap
             return float('inf') if key in TUNABLE_ZERO_IS_UNLIMITED and n == 0 else n
         if reach(number) > reach(now):
-            raise ApiError(403, f'{t.label} is a limit on cost or scope: an agent may only lower it (now {now}); a person raises it in the web interface')
+            raise ApiError(403, f'{t.label} is a limit on cost or scope: an agent may only lower it (now {now}); only a person raises it, in the web interface')
 
 
 def _throughput_write(ctx, name, method, fn, request, values, groups):
