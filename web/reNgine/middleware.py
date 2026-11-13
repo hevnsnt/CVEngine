@@ -11,3 +11,18 @@ class ContentSecurityPolicyMiddleware:
         if 'Content-Security-Policy' not in response:
             response['Content-Security-Policy'] = self.POLICY
         return response
+
+
+class HtmlRevalidateMiddleware:
+    """A page (HTML) that sets no Cache-Control of its own gets ``private, no-cache``: the browser keeps it but asks the server before showing it
+    again, so no heuristic copy of a page from before an update is shown after it. Files (static, media, downloads) and JSON keep their own
+    headers; a response that already sets one (``no-store`` on the sign-in pages, a download) is left alone."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        if 'Cache-Control' not in response and not response.streaming and response.get('Content-Type', '').startswith('text/html'):
+            response['Cache-Control'] = 'private, no-cache'
+        return response

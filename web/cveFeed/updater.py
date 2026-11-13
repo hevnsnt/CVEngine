@@ -76,6 +76,24 @@ def installed_sha():
     return env if SHA_RE.match(env) else ''
 
 
+_build_seen = (False, False, '')  # (mtime of .commit, CVENGINE_COMMIT, answer): re-read only when either changes
+
+
+def build_id():
+    """The build this process serves, as the short commit ('' when unknown): stamped into every page (``<meta name="cvengine-build">``) and
+    answered by /cve/api/alive, so a page rendered by an older build can tell, from the poll it makes anyway, that the server has been
+    updated (static/cve/sitewatch.js). One stat per call; the file is read again only when it changed (a new build writes it)."""
+    global _build_seen
+    try:
+        stamp = os.stat(_file('.commit')).st_mtime_ns
+    except OSError:
+        stamp = None
+    env = os.environ.get('CVENGINE_COMMIT')
+    if _build_seen[:2] != (stamp, env):
+        _build_seen = (stamp, env, installed_sha()[:12])
+    return _build_seen[2]
+
+
 UPSTREAM_STALE_SECONDS = 3 * 86400  # the host refreshes it every half hour while its updater runs; this is days of silence
 
 
@@ -532,7 +550,7 @@ def state(row):
     return {
         'status': status, 'enabled': row.enabled, 'repo': row.repo, 'branch': row.branch, 'branch_warning': branch_warning(row.branch),
         'has_token': bool(row.token),
-        'installed': installed[:7], 'installed_known': bool(installed),
+        'installed': installed[:7], 'installed_known': bool(installed), 'build': build_id(),
         'local_commits': host['ahead'] if host else None, 'common': host['base'][:7] if host else '', 'host_comparison': note,
         'latest': row.latest_sha[:7], 'latest_message': row.latest_message, 'latest_url': row.latest_url,
         'latest_date': row.latest_date.isoformat() if row.latest_date else None, 'behind_by': row.behind_by,

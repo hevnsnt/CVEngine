@@ -8,6 +8,7 @@ import os
 from django import template
 from django.conf import settings
 from django.templatetags.static import static
+from django.utils.html import format_html
 from django.utils.safestring import mark_safe
 
 register = template.Library()
@@ -34,6 +35,13 @@ def version(name):
 def asset(name):
     v = version(name)
     return f'{static(name)}?v={v}' if v else static(name)
+
+
+@register.simple_tag
+def build_stamp():
+    """The build that renders this page, for static/cve/sitewatch.js to compare with the one /cve/api/alive reports (empty when unknown)."""
+    from cveFeed import updater
+    return format_html('<meta name="cvengine-build" content="{}">', updater.build_id())
 
 
 @register.simple_tag

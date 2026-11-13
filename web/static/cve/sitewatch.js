@@ -2,6 +2,7 @@
 // rebuilding" scene and comes back by itself once the site answers again. The scene is fetched while the site is still up and shown from
 // memory (srcdoc), because during the outage nothing can serve it: on some hosts not even the proxy that normally hands it out.
 // An administrator's page watching an update (static/cve/updatebar.js) drives the same veil itself and tells this module to stand back.
+import { buildAction } from "/staticfiles/cve/build-logic.js";
 const SCENE_URL = new URL("maintenance.html", import.meta.url).pathname;
 const ALIVE = "/cve/api/alive";
 const EVERY_MS = 15000; // while the site is up
@@ -15,6 +16,18 @@ let scene = null;
 let veil = null;
 let veilText = "";
 let managed = false;
+let serverBuild = "";
+let dirty = false; // the person typed in a field of this page: a build change then offers a reload instead of doing it
+const GUARD = "cvengine-build-reloaded"; // sessionStorage: the build this tab last reloaded for, so a build mismatch never loops
+const pageBuild = () => {
+  const m = document.querySelector('meta[name="cvengine-build"]');
+  return m ? m.getAttribute("content") || "" : "";
+};
+const typed = (e) => {
+  if (e.isTrusted) dirty = true;
+};
+document.addEventListener("input", typed, true);
+document.addEventListener("change", typed, true);
 
 export async function loadScene() {
   if (scene) return scene;
@@ -92,9 +105,56 @@ export function manageVeil() {
   managed = true;
 }
 
+// A page rendered by another build than the one the server runs now (an update went in while it was open, in a background tab, or behind
+// back/forward) hard-reloads itself, or offers to when that would lose what was typed. Fed by the poll below and by the Settings Updates
+// section, which both read the server's build anyway: no request of its own.
+export function noteBuild(server) {
+  if (managed || !server) return;
+  serverBuild = server;
+  let seen = server; // a tab that cannot remember is treated as having reloaded already: it gets the bar, never a loop
+  try {
+    seen = sessionStorage.getItem(GUARD);
+  } catch (_) {}
+  const action = buildAction({ page: pageBuild(), server, hidden: document.hidden, dirty, dialog: !!document.querySelector("dialog[open], [aria-modal='true']"), reloadedFor: seen });
+  if (action === "reload") {
+    try {
+      sessionStorage.setItem(GUARD, server);
+      return hardReload();
+    } catch (_) {}
+  }
+  if (action === "reload" || action === "bar") showReloadBar();
+}
+
+let reloadBar = null;
+function showReloadBar() {
+  if (reloadBar) return;
+  reloadBar = document.createElement("div");
+  reloadBar.className = "toast notice";
+  reloadBar.setAttribute("role", "status");
+  const text = document.createElement("span");
+  text.textContent = "A new version is installed.";
+  const go = document.createElement("button");
+  go.type = "button";
+  go.className = "notice-link";
+  go.textContent = "Reload";
+  go.onclick = () => hardReload();
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "notice-close";
+  close.textContent = "\u00d7";
+  close.setAttribute("aria-label", "Dismiss");
+  close.onclick = () => (reloadBar.hidden = true);
+  reloadBar.append(text, go, close);
+  document.body.append(reloadBar);
+}
+
 async function answers() {
   try {
     const r = await fetch(`${ALIVE}?t=${Date.now()}`, { cache: "no-store", credentials: "same-origin", redirect: "manual" });
+    if (r.ok) {
+      const body = await r.json().catch(() => null);
+      serverBuild = (body && body.build) || "";
+    }
     return r.type === "opaqueredirect" || r.status < 500; // a 502, 503 (the maintenance page) or 504 is the site being down
   } catch (_) {
     return false;
@@ -103,34 +163,61 @@ async function answers() {
 
 let misses = 0;
 let hits = 0;
+let timer = 0;
+let busy = false;
+let last = 0;
+const later = (fn, ms) => {
+  clearTimeout(timer);
+  timer = setTimeout(fn, ms);
+};
 async function check() {
-  if (managed) return;
-  if (document.hidden && !veil) return setTimeout(check, EVERY_MS);
-  const up = await answers();
+  if (managed || busy) return;
+  if (document.hidden && !veil) return later(check, EVERY_MS);
+  busy = true;
+  last = Date.now();
+  let up;
+  try {
+    serverBuild = "";
+    up = await answers();
+  } finally {
+    busy = false;
+  }
   if (managed) return;
   if (up) {
     misses = 0;
+    if (!veil) noteBuild(serverBuild); // while veiled, the reload below brings the new build
     if (veil) {
       hits += 1;
       if (hits >= UP_AFTER) {
         showVeil("Back. Reloading.");
         return hardReload();
       }
-      return setTimeout(check, BACK_MS);
+      return later(check, BACK_MS);
     }
     if (!scene) loadScene();
-    return setTimeout(check, EVERY_MS);
+    return later(check, EVERY_MS);
   }
   hits = 0;
   misses += 1;
   if (misses >= DOWN_AFTER) {
     showVeil("The site is not answering. This page comes back by itself.");
-    return setTimeout(check, BACK_MS);
+    return later(check, BACK_MS);
   }
-  setTimeout(check, DOWN_MS);
+  later(check, DOWN_MS);
 }
 
 const idle = window.requestIdleCallback || ((fn) => setTimeout(fn, 1500));
 idle(() => loadScene());
-setTimeout(check, EVERY_MS);
-window.addEventListener("online", () => setTimeout(check, 500));
+later(check, EVERY_MS);
+window.addEventListener("online", () => later(check, 500));
+// A page that was in the background (or asleep, or behind back/forward) skipped its polls: when it is shown again it asks at once, so a page
+// from before an update does not stay on screen. At most one extra request, only when the person comes back.
+const WAKE_GAP_MS = 3000;
+const wake = () => {
+  if (!document.hidden && Date.now() - last > WAKE_GAP_MS) later(check, 0);
+};
+document.addEventListener("visibilitychange", wake);
+window.addEventListener("pageshow", (e) => {
+  const nav = performance.getEntriesByType("navigation")[0];
+  if (e.persisted || (nav && nav.type === "back_forward")) later(check, 0);
+});

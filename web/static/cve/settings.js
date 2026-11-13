@@ -1,6 +1,7 @@
 // Admin settings: AI, API keys, Tailscale, OpenVAS, notifications, email, scan policy, proxy. Superuser only (the API enforces it).
 // DOM is built with textContent / value only; secrets are write-only (blank keeps the stored value).
 import { ask, details } from "/staticfiles/cve/ui.js";
+import { noteBuild } from "/staticfiles/cve/sitewatch.js";
 import { askScannerPlan } from "/staticfiles/cve/scanner-plan.js";
 import { seedCard } from "/staticfiles/cve/seed-card.js";
 import { openvasPanel } from "/staticfiles/cve/openvas-panel.js";
@@ -659,6 +660,7 @@ const sections = {
     let timer = 0;
     const draw = (s) => {
       clearTimeout(timer);
+      noteBuild(s.build); // the server runs another build than the one that drew this page: it reloads (sitewatch.js)
       host.textContent = "";
       const head = {
         up_to_date: "CVEngine is up to date.",
@@ -1707,9 +1709,18 @@ const hash = location.hash.slice(1);
 if (hash === "openvas") window.location.replace("/cve/admin/#openvas"); // its one place now
 const hashTab = isSectionHash(location.hash) ? SECTION_ID : legacyTabs[hash] || hash;
 open(sections[hashTab] ? hashTab : "ai", isSectionHash(location.hash) ? parseHash(location.hash).card : "", isSectionHash(location.hash) ? hashItem(location.hash) : "");
-window.addEventListener("hashchange", () => {
+const openHash = () => {
   if (location.hash === "#openvas") window.location.replace("/cve/admin/#openvas");
   if (isSectionHash(location.hash)) open(SECTION_ID, parseHash(location.hash).card, hashItem(location.hash));
   else if (legacyTabs[location.hash.slice(1)]) open(legacyTabs[location.hash.slice(1)]);
   else if (sections[location.hash.slice(1)]) open(location.hash.slice(1));
+};
+window.addEventListener("hashchange", openHash);
+// A link to the section that is already open ("Review" in the update bar while Settings is on Updates) changes no hash, so no hashchange
+// comes: open it again, which reads the section's state afresh.
+document.addEventListener("click", (e) => {
+  const a = e.target.closest ? e.target.closest("a[href]") : null;
+  if (!a || e.defaultPrevented || e.button || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const to = new URL(a.href, location.href);
+  if (to.origin === location.origin && to.pathname === location.pathname && to.hash && to.hash === location.hash) openHash();
 });
