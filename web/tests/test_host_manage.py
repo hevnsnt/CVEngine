@@ -480,8 +480,9 @@ class RouteTests(Base):
 		status, data = call(self.token, 'POST', f'/api/v1/projects/a1/hosts/{HOST}/exclude', {'reason': 'noise'})
 		self.assertEqual((status, data['excluded'], data['hosts_removed']), (200, True, 1))
 		self.assertEqual(call(self.token, 'GET', '/api/v1/projects/a2/exclusions')[1]['results'][0]['reason'], 'noise')
-		self.assertEqual(call(self.token, 'DELETE', f'/api/v1/projects/a1/exclusions/{HOST}')[0], 200)
-		self.assertEqual(call(self.token, 'DELETE', f'/api/v1/projects/a1/exclusions/{HOST}')[0], 404)
+		self.assertEqual(call(self.token, 'DELETE', f'/api/v1/projects/a1/exclusions/{HOST}')[0], 403)  # a token may not lift an exclusion
+		self.assertEqual(call(self.admin, 'DELETE', f'/api/v1/projects/a1/exclusions/{HOST}')[0], 200)
+		self.assertEqual(call(self.admin, 'DELETE', f'/api/v1/projects/a1/exclusions/{HOST}')[0], 404)
 
 	def test_mcp_tools(self):
 		self.populate(self.a1)
@@ -497,7 +498,8 @@ class RouteTests(Base):
 		self.assertFalse(tool('exclude_host', project='a1', host=HOST, reason='r')[0])
 		self.assertEqual(HostExclusion.objects.get().host, HOST)
 		self.assertFalse(tool('list_exclusions', project='a1')[0])
-		self.assertFalse(tool('remove_exclusion', project='a1', host=HOST)[0])
+		self.assertTrue(tool('remove_exclusion', project='a1', host=HOST)[0])  # a person lifts it, not a token
+		HostExclusion.objects.all().delete()
 
 
 class MoveHostTests(Base):

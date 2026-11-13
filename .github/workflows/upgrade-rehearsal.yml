@@ -204,3 +204,28 @@ jobs:
       - name: Logs
         if: failure()
         run: "$GITHUB_WORKSPACE/.github/rehearsal/logs.sh"
+
+  older-scanner-image:
+    name: 🔁 An older scanner image under the reduced capability set (what scripts/scanner.sh must handle)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: The kernel refuses nmap and naabu with a file capability the container does not hold, and a current image has none
+        run: |
+          # OLD: the Sentinel build before the reduction (the floor of scanner.lock.json at 9dc8d913): nmap and naabu carry cap_net_raw,cap_net_admin+eip.
+          # NEW: the moving tag, from the Sentinel's reduction on: cap_net_raw+eip. REDUCED is the scanner service's set in docker-compose.yml.
+          OLD=ghcr.io/hevnsnt/cvengine-sentinel@sha256:685ddb251bf69ba552f68f6ef38203e7bc7afd75cdd668de600b45e6c7620a34
+          NEW=ghcr.io/hevnsnt/cvengine-sentinel:main
+          REDUCED=(--cap-drop ALL --cap-add NET_RAW --cap-add SYS_CHROOT)
+          docker pull -q "$OLD" >/dev/null; docker pull -q "$NEW" >/dev/null
+          echo "old image file capabilities:"; docker run --rm --entrypoint getcap "$OLD" /usr/local/bin/nmap /usr/local/bin/naabu | tee old-caps.txt
+          echo "new image file capabilities:"; docker run --rm --entrypoint getcap "$NEW" /usr/local/bin/nmap /usr/local/bin/naabu | tee new-caps.txt
+          grep -q cap_net_admin old-caps.txt || { echo "::error::the old image no longer has the file capability this test is about"; exit 1; }
+          grep -q cap_net_admin new-caps.txt && { echo "::error::the current scanner image still has cap_net_admin as a file capability"; exit 1; }
+          status=0; docker run --rm "${REDUCED[@]}" --entrypoint nmap "$OLD" --version >old-reduced.txt 2>&1 || status=$?
+          cat old-reduced.txt; echo "old image, reduced set: nmap exit status $status"
+          [ "$status" != 0 ] || { echo "::error::an old image's nmap started without NET_ADMIN: the extra capability is not needed, and scripts/scanner.sh can stop adding it"; exit 1; }
+          docker run --rm "${REDUCED[@]}" --cap-add NET_ADMIN --entrypoint nmap "$OLD" -sS -Pn -n -p 1 127.0.0.1 | tail -n 4
+          docker run --rm "${REDUCED[@]}" --entrypoint nmap "$NEW" -sS -Pn -n -p 1 127.0.0.1 | tail -n 4
+          docker run --rm "${REDUCED[@]}" --entrypoint nmap "$NEW" -sS -O -Pn -n -p 1,22 127.0.0.1 | grep -E "OS detection|Running|OS details|No exact OS|Aggressive" | head -n 3
+          docker run --rm "${REDUCED[@]}" --entrypoint nmap "$NEW" -sU -Pn -n -p 53 --max-retries 1 127.0.0.1 | tail -n 3

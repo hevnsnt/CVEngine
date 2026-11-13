@@ -91,9 +91,25 @@ class BuiltinScannerComposeTests(unittest.TestCase):
         self.assertNotIn('networks', self.scanner)
         self.assertIn('celery', self.scanner['depends_on'])
 
-    def test_it_has_its_raw_socket_capabilities_and_nothing_that_would_block_them(self):
-        self.assertEqual(sorted(self.scanner['cap_add']), ['NET_ADMIN', 'NET_RAW'])
+    def test_it_has_the_sentinels_reduced_capability_set_and_nothing_that_would_block_it(self):
+        # SN-8, as proven by the Sentinel's own CI (scripts/ci_scan_smoke.sh there): every capability dropped, NET_RAW for nmap's SYN scan, OS detection and UDP
+        # sweep and naabu, SYS_CHROOT for Chromium's sandbox. The third entry repeats SYS_CHROOT unless scripts/scanner.sh gives an older image NET_ADMIN.
+        self.assertEqual(self.scanner['cap_drop'], ['ALL'])
+        # the file as written (nothing is interpolated here): the third entry is the one variable scripts/scanner.sh may set to NET_ADMIN for an older image
+        self.assertEqual(self.scanner['cap_add'], ['NET_RAW', 'SYS_CHROOT', '${CVENGINE_SCANNER_EXTRA_CAP:-SYS_CHROOT}'])
+        self.assertFalse(self.scanner.get('privileged'))
+        # not set, for the reasons in docker-compose.yml: read_only (bbot's ~/.bbot/tools) and no-new-privileges (file capabilities)
         self.assertFalse([o for o in self.scanner.get('security_opt', []) if 'no-new-privileges' in o])
+        self.assertFalse(self.scanner.get('read_only'))
+
+    def test_no_overlay_changes_the_scanners_capabilities(self):
+        for name in ('docker-compose.hostnet.yml', 'docker-compose.macvlan.yml', 'docker-compose.apparmor.yml', 'docker-compose.dev.yml', 'docker-compose.setup.yml'):
+            path = ROOT / name
+            if not path.is_file():
+                continue
+            text = path.read_text()  # not parsed: an overlay may use compose tags (!reset) that a plain YAML reader refuses
+            self.assertNotIn('cap_add', text, name)
+            self.assertNotIn('cap_drop', text, name)
 
     def test_the_built_in_scanner_can_give_chromium_its_sandbox(self):
         # Playwright's seccomp profile (Docker's default plus user namespaces), vendored unchanged from microsoft/playwright v1.64.1: the web_screenshot

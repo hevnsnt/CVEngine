@@ -198,7 +198,7 @@ class ApiTests(Fixture):
 	url = '/api/v1/projects/acp'
 
 	def put(self, who, body, target=None, **kw):
-		return call(self.tokens[who], 'PUT', f'{self.url}/targets/{(target or self.domain).pk}/auth-credential', body)
+		return call(self.users.get(who) or self.tokens[who], 'PUT', f'{self.url}/targets/{(target or self.domain).pk}/auth-credential', body)
 
 	def body(self, **extra):
 		body = {'label': 'staging test account', 'scope': 'host', 'host': 'app.example.test', 'headers': [{'name': 'Authorization', 'secret': SECRET}],

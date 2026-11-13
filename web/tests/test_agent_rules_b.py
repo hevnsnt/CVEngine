@@ -481,3 +481,158 @@ class PersonsMarkTests(Base):
         c.force_login(self.root)
         self.assertEqual(c.put('/cve/api/settings/reviewer', json.dumps({'review_daily_max': 9}), content_type='application/json').status_code, 200)
         self.assertEqual(reviewer.settings_row().updated_by_id, self.root.pk)
+
+
+class EveryChangingCapabilityIsReviewedTests(TestCase):
+    """PR "c": every MCP tool that writes and every REST route that is not a GET has a verdict in ``agentapi.capability_review``; a new one has none and fails here."""
+
+    def test_every_writing_tool_and_route_has_exactly_one_verdict_and_nothing_else_is_listed(self):
+        from agentapi import capability_review as review, mcp, rest
+        needed = {t[0] for t in mcp.TOOLS if t[-1]} | {review.route_key(r[0], r[1]) for r in rest.ROUTES if r[0] != 'GET'}
+        seen = {}
+        for verdict, reason, keys in review.REVIEW:
+            self.assertIn(verdict, ('refuse', 'narrow', 'allow'))
+            self.assertGreater(len(reason), 30)
+            for key in keys:
+                self.assertNotIn(key, seen, f'{key} has two verdicts')
+                seen[key] = verdict
+        self.assertEqual(sorted(needed - set(seen)), [], 'a tool or route that changes something has no verdict: decide it in agentapi/capability_review.py')
+        self.assertEqual(sorted(set(seen) - needed), [], 'a verdict names a tool or route that does not exist')
+
+
+class PersonOnlyCapabilitiesTests(TestCase):
+    """PR "c": secret validation, internal ranges, lifting an exclusion, approving an agent, an internal enrollment, creating hosts from reports and the AI probes."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from tests.test_sentinels import build_world
+        build_world(cls)
+
+    def setUp(self):
+        from tests.test_sentinels import reset_rates
+        reset_rates(self.tokens)
+        self.root_token = self.tokens['root']
+
+    def test_secret_validation_cannot_be_switched_on_by_a_token_but_can_be_switched_off(self):
+        from cveFeed import secrets_validation
+        from cveFeed.models import ProjectSettings
+        from tests.test_agentapi import call
+        url = '/api/v1/projects/sen-a/secrets/settings'
+        on = {'validation': {'enabled': True, 'attestation': secrets_validation.ATTESTATION}}
+        status, out = call(self.root_token, 'PUT', url, on)
+        self.assertEqual(status, 403, out)
+        self.assertIn('person', json.dumps(out))
+        self.assertFalse(ProjectSettings.objects.filter(project=self.pa, secrets_validation=True).exists())
+        self.assertEqual(call(self.root, 'PUT', url, on)[0], 200)  # a person
+        self.assertEqual(call(self.root_token, 'PUT', url, {'validation': {'enabled': False}})[0], 200)
+        self.assertFalse(ProjectSettings.objects.get(project=self.pa).secrets_validation)
+
+    def test_an_internal_range_cannot_be_declared_by_a_token_but_can_be_removed(self):
+        from cveFeed.models import InternalRange
+        from tests.test_agentapi import call, tool_call
+        url = '/api/v1/projects/sen-a/internal-ranges'
+        self.assertEqual(call(self.root_token, 'POST', url, {'cidr': '10.20.0.0/24'})[0], 403)
+        self.assertFalse(InternalRange.objects.exists())
+        status, out = call(self.root, 'POST', url, {'cidr': '10.20.0.0/24'})  # a person
+        self.assertEqual(status, 201, out)
+        self.assertEqual(call(self.root_token, 'DELETE', f'{url}/{out["id"]}')[0], 200)
+        self.assertFalse(InternalRange.objects.exists())
+
+    def test_an_exclusion_cannot_be_lifted_by_a_token_over_rest_or_mcp_but_can_be_added(self):
+        from cveFeed.models import HostExclusion
+        from tests.test_agentapi import call, tool_call
+        status, out = call(self.root_token, 'POST', '/api/v1/projects/sen-a/hosts/a.example/exclude', {'reason': 'keep out'})
+        self.assertIn(status, (200, 201), out)
+        self.assertTrue(HostExclusion.objects.filter(org=self.org1).exists())
+        self.assertEqual(call(self.root_token, 'DELETE', '/api/v1/projects/sen-a/exclusions/a.example')[0], 403)
+        error, text = tool_call(self.root_token, 'remove_exclusion', {'project': 'sen-a', 'host': 'a.example'})
+        self.assertTrue(error)
+        self.assertIn('person', text)
+        self.assertTrue(HostExclusion.objects.filter(org=self.org1).exists())
+        self.assertEqual(call(self.root, 'DELETE', '/api/v1/projects/sen-a/exclusions/a.example')[0], 200)  # a person
+
+    def test_a_token_cannot_approve_or_reinstate_an_agent_but_can_suspend_and_revoke(self):
+        from agentapi.models import Agent
+        from tests.test_agentapi import call, tool_call
+        from tests.test_sentinels import register_sentinel
+        status, out = register_sentinel(self.tokens['alice'], approve=False)
+        agent = Agent.objects.get(pk=out['id'])
+        self.assertEqual(agent.status, 'pending')
+        self.assertEqual(call(self.root_token, 'PATCH', f'/api/v1/agents/{agent.pk}', {'status': 'active'})[0], 403)
+        agent.refresh_from_db()
+        self.assertEqual(agent.status, 'pending')
+        self.assertEqual(call(self.root, 'PATCH', f'/api/v1/agents/{agent.pk}', {'status': 'active'})[0], 200)  # a person
+        self.assertEqual(call(self.root_token, 'PATCH', f'/api/v1/agents/{agent.pk}', {'status': 'suspended'})[0], 200)
+        error, _ = tool_call(self.root_token, 'update_agent', {'agent_id': agent.pk, 'status': 'active'})
+        self.assertTrue(error)  # reinstating a suspended one
+        self.assertEqual(call(self.root_token, 'PATCH', f'/api/v1/agents/{agent.pk}', {'status': 'revoked'})[0], 200)
+        self.assertEqual(call(self.root_token, 'PATCH', f'/api/v1/agents/{agent.pk}', {'status': 'active'})[0], 403)  # and an un-revoke
+
+    def test_a_token_cannot_make_an_internal_enrollment_but_can_make_an_external_one(self):
+        from tests.test_agentapi import call, tool_call
+        self.assertEqual(call(self.root_token, 'POST', '/api/v1/projects/sen-a/sentinels/enroll?format=blob&network=internal&profile=light', {})[0], 403)
+        error, _ = tool_call(self.root_token, 'generate_sentinel_enrollment', {'project': 'sen-a', 'network': 'internal'})
+        self.assertTrue(error)
+        error, out = tool_call(self.root_token, 'generate_sentinel_enrollment', {'project': 'sen-a', 'network': 'external'})
+        self.assertFalse(error, out)
+        self.assertIn(call(self.root, 'POST', '/api/v1/projects/sen-a/sentinels/enroll?format=blob&network=internal&profile=light', {})[0], (200, 201))  # a person
+
+    def test_a_token_cannot_switch_on_creating_hosts_from_reports_but_can_switch_it_off(self):
+        from cveFeed.models import ProjectSettings
+        from tests.test_agentapi import call
+        url = '/api/v1/projects/sen-a/settings'
+        self.assertEqual(call(self.root_token, 'PUT', url, {'inventory': {'create_hosts': True}})[0], 403)
+        self.assertFalse(ProjectSettings.objects.filter(project=self.pa, inventory_create_hosts=True).exists())
+        self.assertEqual(call(self.root, 'PUT', url, {'inventory': {'create_hosts': True}})[0], 200)  # a person
+        self.assertEqual(call(self.root_token, 'PUT', url, {'inventory': {'create_hosts': False}})[0], 200)
+
+    def test_a_token_cannot_store_a_service_key_anywhere_but_can_remove_one(self):
+        from dashboard.models import ApiCredential, Org
+        from tests.test_agentapi import call, tool_call
+        url = '/api/v1/projects/sen-a/api-keys/shodan'
+        status, out = call(self.root_token, 'PUT', url, {'api_key': 'sk-secret'})
+        self.assertEqual(status, 403, out)
+        self.assertIn('person', json.dumps(out))
+        self.assertFalse(ApiCredential.objects.filter(project=self.pa).exists())
+        self.assertEqual(call(self.root, 'PUT', url, {'api_key': 'sk-secret'})[0], 200)  # a person
+        self.assertEqual(call(self.root_token, 'DELETE', url)[0], 200)
+        self.assertFalse(ApiCredential.objects.filter(project=self.pa).exists())
+        # the instance keys and an organization key, through the settings tool
+        error, text = tool_call(self.root_token, 'change_setting', {'name': 'keys', 'values': {'openai': {'key': 'sk-x'}}})
+        self.assertTrue(error)
+        self.assertIn('person', text)
+        error, text = tool_call(self.root_token, 'change_setting', {'name': 'org_api_key', 'id': f'{self.org1.pk}/shodan', 'values': {'api_key': 'sk-x'}})
+        self.assertTrue(error)
+        self.assertFalse(tool_call(self.root_token, 'change_setting', {'name': 'keys', 'values': {'openai': {'clear': True}}})[0])  # removing is open
+        self.assertIsInstance(Org.objects.get(pk=self.org1.pk), Org)
+
+    def test_a_token_cannot_store_a_target_sign_in_but_can_delete_one(self):
+        from agentapi import authcheck
+        from cveFeed.models import AuthCredential
+        from tests.test_agentapi import call
+        url = f'/api/v1/projects/sen-a/targets/{self.da.pk}/auth-credential'
+        body = {'label': 'test account', 'scope': 'target', 'headers': [{'name': 'Authorization', 'secret': 'Bearer abc'}], 'expires': 30}
+        status, out = call(self.root_token, 'PUT', url, body)
+        self.assertEqual(status, 403, out)
+        self.assertIn('person', json.dumps(out))
+        self.assertFalse(AuthCredential.objects.exists())
+        status, out = call(self.root, 'PUT', url, body)  # a person
+        self.assertEqual(status, 200, out)
+        row = AuthCredential.objects.get()
+        self.assertEqual(call(self.root_token, 'DELETE', f'/api/v1/projects/sen-a/auth-credentials/{row.pk}')[0], 200)
+        self.assertIsNotNone(authcheck)
+
+    def test_the_ai_probes_are_limited_per_token_an_hour(self):
+        from django.core.cache import cache
+        from tests.test_agentapi import tool_call
+        from dashboard.models import ApiToken
+        for token in ApiToken.objects.all():
+            cache.delete(f'agentapi:ai-probe:{token.pk}')
+        limit = getattr(bridge, 'AI_PROBE_PER_HOUR', 6)  # a build without the limit fails the assertions below instead of erroring here
+        codes = []
+        for _ in range(limit + 2):
+            error, text = tool_call(self.root_token, 'change_setting', {'name': 'ai_models', 'values': {}})
+            codes.append('429' if error and 'an hour' in str(text) else 'other')
+        self.assertEqual(codes[:limit], ['other'] * limit)
+        self.assertEqual(codes[limit:], ['429', '429'])
+        self.assertEqual(sum(1 for c in codes if c == '429'), 2)
