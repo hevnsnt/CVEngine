@@ -1310,6 +1310,10 @@ const sections = {
       "Let scans run every Nuclei template that is installed (turn off to run only the read-only ones)",
       policy.nuclei_all_templates,
     );
+    const credentials = check(
+      "Allow checks that send credentials (default logins and brute force)",
+      policy.allow_credential_checks,
+    );
     const policyCard = card(
       "Nuclei templates",
       el(
@@ -1318,9 +1322,16 @@ const sections = {
         "By default scans run the whole template library Nuclei ships, including checks that send requests other than plain reads. Turn this off to run only templates that read (plain GET, HEAD or OPTIONS requests to the scanned host). Templates the AI writes always stay read-only, and Nuclei's denial-of-service templates stay excluded.",
       ),
       everything.wrap,
+      el(
+        "p",
+        "note",
+        "Off by default. Some templates try a product's default username and password against a login form. Scans never run them unless you turn this on, and the targeted pass never picks them. Turn it on only for hosts you are allowed to try logins against.",
+      ),
+      credentials.wrap,
       button("Save", async () => {
         await api("PUT", "scan_policy", {
           nuclei_all_templates: everything.box.checked,
+          allow_credential_checks: credentials.box.checked,
         });
         toast("Saved");
       }),
