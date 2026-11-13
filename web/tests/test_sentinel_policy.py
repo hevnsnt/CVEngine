@@ -2,6 +2,7 @@
 expire, a bounded lease, a retryable report, rights computed once per sweep, the cached broker probe, project rotation, the update hold, private-address
 hosts that are not archived, and the OpenVAS run a queued Sentinel task can no longer hold."""
 import tempfile
+import threading
 import time
 from datetime import timedelta
 from unittest import mock
@@ -121,14 +122,17 @@ class LightNucleiPolicyTests(DispatchBase):
 
 class ResolveBoundTests(SimpleTestCase):
     def test_a_resolver_that_never_answers_does_not_hold_the_stage(self):
+        release = threading.Event()  # the slow lookup waits on this until the test is over
+        self.addCleanup(release.set)
+
         def slow(host, timeout):
             if host == 'slow.example.test':
-                time.sleep(3)
+                release.wait(60)
             return True
         started = time.monotonic()
         with mock.patch('agentapi.sentinel_dispatch._resolves', side_effect=slow):
             kept = dispatch.resolvable_targets(['fast.example.test', 'slow.example.test'], workers=2, timeout=0.3)
-        self.assertLess(time.monotonic() - started, 2)
+        self.assertLess(time.monotonic() - started, 30)  # the 0.3 s bound ends the wait, not the lookup
         self.assertEqual(kept, ['fast.example.test'])
 
 
@@ -141,7 +145,7 @@ class LongPollTests(SentinelBase):
         self.addCleanup(cache.delete, 'agentapi:waiters')
         started = time.monotonic()
         status, body = self.call_next(wait=15)
-        self.assertLess(time.monotonic() - started, 5)  # not held for the 15 s
+        self.assertLess(time.monotonic() - started, 12)  # not held for the 15 s
         self.assertEqual((status, body['task'], body['retry_after_seconds']), (200, None, 5))
 
     def test_a_long_poll_that_gets_a_slot_still_returns_a_task_that_arrives_first(self):

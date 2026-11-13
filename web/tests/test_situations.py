@@ -4,6 +4,7 @@ A situation is one host of a project with everything open on it that needs a per
 order, the narrative (deterministic, plain text), the three empty states, tenancy, REST and MCP parity, and that the work stays set-based.
 """
 import json
+import time
 from datetime import timedelta
 from unittest import mock
 
@@ -381,9 +382,14 @@ class QueryCountTests(Seeded):
 
 	def test_the_ranking_is_computed_once_and_a_closed_finding_drops_it(self):
 		# DB-2: every list, detail, REST and MCP call used to rank every host of the project; now one snapshot per scope
-		with mock.patch('cveFeed.internal_view.table', return_value={}), mock.patch('agentapi.auth.LAST_USED_RESOLUTION', timedelta(days=3650)):
+		# the snapshot is fresh for 10 seconds by the entries' clock: it is frozen here, so a slow runner that takes ten seconds between two requests cannot make
+		# the second one rank again (nor the copy served after the close below go stale before the assertion that it is still served)
+		from cveFeed import snapshot_cache
+		with mock.patch('cveFeed.internal_view.table', return_value={}), mock.patch('agentapi.auth.LAST_USED_RESOLUTION', timedelta(days=3650)), \
+				mock.patch.object(snapshot_cache, '_now', return_value=time.time()):
 			self.api('projects/sa/situations')  # warms the token
 			cache.clear()
+			snapshot_cache.reset_hot()
 
 			def run(path, **params):
 				with CaptureQueriesContext(connection) as ctx:
@@ -394,7 +400,6 @@ class QueryCountTests(Seeded):
 			detail = run('projects/sa/situations/proven.sa.test')
 			self.assertLess(detail, warm + 3, 'the detail of a host reads the same ranking and then only that host')
 			before = self.names()
-			from cveFeed import snapshot_cache
 			CVEMatch.objects.filter(pk=self.m_proven.pk).update(remediation_status='fixed')  # a person closes the proven finding ...
 			self.assertEqual(self.names(), before)  # ... within the 10 seconds the old copy is served,
 			snapshot_cache.bump_revision()  # ... but the close drops it at once (services.update_finding_status does this on commit)

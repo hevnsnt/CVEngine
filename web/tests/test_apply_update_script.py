@@ -1057,16 +1057,20 @@ class ApplyUpdateScriptTests(unittest.TestCase):
 
     def test_two_watchers_do_not_run_at_once(self):
         self.install_watcher()
-        first = subprocess.Popen(['bash', 'scripts/update-watch.sh', '6'], cwd=self.work, env=self.env,
+        first = subprocess.Popen(['bash', 'scripts/update-watch.sh', '120'], cwd=self.work, env=self.env,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(first.kill)
         import time
-        time.sleep(1)
+        heartbeat = self.work / 'web' / '.updater-heartbeat'  # written after the watcher took its lock: the first one is on (a fixed pause only hoped so)
+        end = time.monotonic() + 60
+        while not heartbeat.exists() and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertTrue(heartbeat.exists(), 'the first watcher did not start')
         started = time.monotonic()
         second = self.run_watch(6)
         self.assertEqual(second.returncode, 0)
-        self.assertLess(time.monotonic() - started, 3)  # it found the lock taken and left at once
-        first.wait(timeout=30)
+        self.assertLess(time.monotonic() - started, 60)  # it found the lock taken and left at once: the first one runs for 120 s
+        self.assertIsNone(first.poll())  # and the first is still the one holding it
 
     def test_waiting_for_scans_exits_with_3_reports_once_and_keeps_the_approval(self):
         self.wait_for_scans()  # the old drain is the opt-in now
