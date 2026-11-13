@@ -108,6 +108,27 @@ if grep -qx scanner < <(dc config --services 2>/dev/null); then
     dc exec -T web python3 manage.py shell -c "from agentapi import builtin_scanner as b; print(b.status())" || true
     dc logs --tail 80 scanner || true
   fi
+
+  # SN-8: the scanner runs with every capability dropped but NET_RAW and SYS_CHROOT, and still does what the raw-socket tools do. NET_ADMIN is allowed only
+  # when the image running is one from before the reduction (nmap and naabu with cap_net_admin as a file capability, which cannot start without it:
+  # scripts/scanner.sh adds it for such an image alone), so a scanner that keeps it for a current image fails here.
+  cid=$(dc ps -q scanner | head -n 1)
+  caps=$(docker inspect -f '{{json .HostConfig.CapDrop}} {{json .HostConfig.CapAdd}}' "$cid")
+  echo "scanner capabilities (drop, add): $caps"
+  grep -q '"ALL"' <<<"${caps%% *}" || bad "the built-in scanner does not drop every capability"
+  for cap in NET_RAW SYS_CHROOT; do grep -Eq "\"(CAP_)?$cap\"" <<<"${caps#* }" || bad "the built-in scanner lacks $cap"; done
+  if grep -Eq '"(CAP_)?NET_ADMIN"' <<<"${caps#* }"; then
+    dc exec -T scanner getcap /usr/local/bin/nmap | grep -q cap_net_admin || bad "the built-in scanner keeps NET_ADMIN although its image no longer needs it"
+    echo "(this scanner image is from before the reduction, so it keeps NET_ADMIN)"
+  fi
+  # a SYN scan, OS detection, a UDP probe and naabu's SYN scan through the service itself, at its own loopback only (never another host)
+  dc exec -T scanner nmap -sS -Pn -n -p 1 --reason 127.0.0.1 | tee "$HOME/scanner-syn.txt"
+  grep -q '1/tcp *closed' "$HOME/scanner-syn.txt" || bad "nmap -sS through the built-in scanner did not run"
+  dc exec -T scanner nmap -sS -O -Pn -n -p 1,22 127.0.0.1 > "$HOME/scanner-os.txt" 2>&1 || bad "nmap -O through the built-in scanner failed"
+  grep -qi 'requires root privileges' "$HOME/scanner-os.txt" && bad "nmap -O wanted root privileges in the built-in scanner"
+  dc exec -T scanner nmap -sU -Pn -n -p 53 --max-retries 1 127.0.0.1 > "$HOME/scanner-udp.txt" 2>&1 || bad "nmap -sU through the built-in scanner failed"
+  grep -qi 'requires root privileges' "$HOME/scanner-udp.txt" && bad "nmap -sU wanted root privileges in the built-in scanner"
+  dc exec -T scanner naabu -host 127.0.0.1 -p 8000,5432,6379 -scan-type s -silent -nc -warm-up-time 1 || bad "naabu's SYN scan through the built-in scanner failed"
 fi
 
 [ "$fail" = 0 ] && echo "The updated install is healthy." || exit 1
