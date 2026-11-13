@@ -542,6 +542,8 @@ def remove_exclusion(ctx, slug, host):
     was deleted does not come back; the host returns when a scan next finds it."""
     from cveFeed.models import HostExclusion
     project, _ = get_project(ctx, slug, write=True)
+    if ctx.token is not None:  # an API token or MCP call: a person excluded it, so only a person re-includes it
+        raise ApiError(403, 'lifting an exclusion lets the organization scan the host again; a person excluded it, so only a person lifts it, in the web interface')
     if project.org is None or not roles.can_manage_org(ctx.user, project.org_id):
         raise ApiError(403, 'only an organization admin can lift an exclusion')
     name = clean_host(host)
