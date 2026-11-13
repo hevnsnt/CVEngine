@@ -93,38 +93,47 @@ For a server that cannot or should not open a port, such as a machine at home. `
 
 **Point `cloudflared` at the bundled proxy, not at the web service.** The proxy is the part that serves `/staticfiles/` with its cache headers, hands out scan screenshots and results (the application answers with an `X-Accel-Redirect` header that only this proxy understands, and Cloudflare removes that header from a direct reply), and shows the maintenance page while an update runs. Aimed straight at `127.0.0.1:8000`, a tunnel would lose all three and the pages would load without their styles. The proxy also speaks HTTPS with the certificate `make certs` made, which `cloudflared` can verify, so no unverified hop is needed.
 
-**1. Move the proxy off the public ports and let it believe the tunnel.** Make two files in the cvENGINE folder. `docker-compose.tunnel.yml` replaces the proxy's published ports (the default is 443 and 8082 on every address) with one on the server's loopback and mounts your list of trusted upstreams:
+**1. Give the tunnel its own door on the proxy.** The proxy has a second HTTPS listener inside its container, port 8443, with the same certificate and the same pages. It is the only listener that can believe an `X-Forwarded-For` it is sent, and only from a peer you list (below). Port 443 never believes one, whatever any file says. Make `docker-compose.tunnel.yml` in the cvENGINE folder: it publishes **only** that port, **only** on the server's loopback (443 and 8082 are no longer published at all), and mounts your list of trusted peers:
 
 ```yaml
 services:
   proxy:
     ports: !override
-      - "127.0.0.1:8443:443"
+      - "127.0.0.1:8443:8443"
     volumes:
       - ./config/nginx/trusted-upstreams.local.conf:/etc/nginx/trusted-upstreams.conf:ro
 ```
 
-`config/nginx/trusted-upstreams.local.conf` names the addresses the proxy sees `cloudflared` connect from. On the server itself (`cloudflared` installed as a service) a connection to `127.0.0.1:8443` reaches the proxy through the Docker bridge, so it arrives from the bridge's gateway; as a container on the same Compose network it arrives from that container's address. Both are inside Docker's usual `172.16.0.0/12`:
+Why two conditions: Docker can show an outside visitor to the proxy as the bridge's gateway address (its userland proxy does this for IPv6 and for some hairpin cases), so "the peer is the gateway" alone does not prove the request came from `cloudflared`. If the overlay is ever left out (a `make up`, a forgotten `-f`), port 443 is published on every address again, and it still believes nobody.
 
-```
-172.16.0.0/12 1;
-```
-
-If `docker network inspect <project>_rengine_network` shows a subnet outside that range (a custom Docker address pool), list that subnet instead. **Only list a peer that no outsider can reach.** That is why the proxy is bound to `127.0.0.1` above: a published port open to the Internet can show outsiders to the proxy as the same Docker address, and anything it believes can then be forged. Keep the file to the Docker range and keep the port on loopback. Then tell the updater about the overlay in `.env` (an update recreates the proxy and must keep it):
+Then tell the updater about the overlay in `.env`, so it is used by every update, the watchdog and the certificate renewal:
 
 ```
 DOMAIN_NAME=scanner.example.com
 CVENGINE_COMPOSE_FILES=docker-compose.yml,docker-compose.tunnel.yml
 ```
 
-`CVENGINE_TRUSTED_PROXIES` needs no change: its default, `172.16.0.0/12`, already covers the proxy's own address, which is what the web container sees. Add your own subnet to it (never replace the default) only if you listed a subnet outside that range above. Do not put Cloudflare's address ranges into either list. Then:
+Start with an empty list (nobody trusted), then fill it in once you know the address:
 
 ```bash
-cp config/nginx/trusted-upstreams.conf config/nginx/trusted-upstreams.local.conf   # the stock file only holds comments; add the line above to the copy
+cp config/nginx/trusted-upstreams.conf config/nginx/trusted-upstreams.local.conf   # the stock file only holds comments
 docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d
 ```
 
-From now on name both files whenever you run `docker compose` by hand, and do not use `make up`: it reads only `docker-compose.yml` and would publish 443 on every address again. The updater and the in-app update use the setting in `.env`. Do not edit `config/nginx/trusted-upstreams.conf` itself: an update would stop on the change. The copy is ignored by git.
+`config/nginx/trusted-upstreams.local.conf` names the one address the proxy sees `cloudflared` connect from, and nothing wider:
+
+- **`cloudflared` on the server itself (recommended).** A connection to `127.0.0.1:8443` reaches the proxy through the Docker bridge, so the proxy sees the bridge's gateway. Print it:
+
+  ```bash
+  docker network inspect $(docker network ls -q --filter name=rengine_network) --format '{{.Name}} {{(index .IPAM.Config 0).Gateway}}'
+  ```
+
+  It looks like `172.18.0.1`. Put that address in the file as `172.18.0.1 1;` (your own number), then `docker compose -f docker-compose.yml -f docker-compose.tunnel.yml exec proxy nginx -s reload`. Anything else on this machine that can reach `127.0.0.1:8443` is believed too, so keep the machine's other users to those you trust.
+- **`cloudflared` as a container on the Compose network.** Use that container's address, printed by `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' <container>`. It can change when the container is recreated, which is why the server-side install is easier to keep right.
+
+Do not list a range such as `172.16.0.0/12`, and do not list Cloudflare's addresses. `CVENGINE_TRUSTED_PROXIES` needs no change: its default, `172.16.0.0/12`, already covers the proxy's own address, which is what the web container sees (add your own subnet to it, never replace it, only if you run Docker with an address pool outside that range).
+
+From now on name both files whenever you run `docker compose` by hand, and do not use `make up` or re-run `install.sh`: both read only `docker-compose.yml`, so they would publish 443 on every address again (harmless to the addresses the server believes, but the tunnel overlay is gone and the open port is back). The updater, the in-app update, the watchdog and the certificate renewal use the setting in `.env`; the updater also refuses to run when a Compose file like `docker-compose.tunnel.yml` sits in the folder and `.env` does not name it.
 
 **2. Create the tunnel.** With `cloudflared tunnel login`, `cloudflared tunnel create cvengine` and `cloudflared tunnel route dns cvengine scanner.example.com`, then copy `secrets/certs/ca.crt` to `/etc/cloudflared/cvengine-ca.crt` and write `/etc/cloudflared/config.yml`:
 
@@ -142,9 +151,18 @@ ingress:
 
 `originServerName` is the name on the certificate (it is `DOMAIN_NAME`), and `caPool` is the installer's private authority, so `cloudflared` verifies the proxy. Do not use `noTLSVerify`. Leave `httpHostHeader` unset: the application must see the public name in `Host`. With a Let's Encrypt certificate on the proxy (A above) `caPool` is not needed. Then `sudo cloudflared service install` (or run `cloudflared tunnel run cvengine`). If `cloudflared` runs as a container on the Compose network instead, add it as a service in `docker-compose.tunnel.yml` with the same `config.yml` and credentials mounted and point the ingress at `https://proxy:443`; the rest is the same. (The container form was not run here.)
 
-**3. Check that the server sees each visitor's own address.** Sign in at `https://scanner.example.com`, open **Settings > IP allowlist**: the line "your current IP" is the address the server took for you. It must be your own public address (the one a "what is my IP" page shows), not a `172.` address. Check it again from a second network, such as a phone off Wi-Fi: it must show a different address. `docker compose logs proxy` shows the address the proxy itself saw connect, which is the `cloudflared` side (a `172.` address or `127.0.0.1`); use it to confirm the line you listed in `trusted-upstreams.local.conf`. If the page shows a `172.` address, the proxy did not believe the peer (the line is wrong, the file is not mounted, or the proxy was not recreated: `docker compose -f docker-compose.yml -f docker-compose.tunnel.yml up -d --force-recreate proxy`) or Cloudflare is not sending `X-Forwarded-For` (a Cloudflare setting that removes visitor IP headers is on). Fix it before you turn the allowlist on or rely on the sign-in lockout: with every visitor the same address, one visitor's lockout (and the lockout counter for an address) is everyone's.
+**3. Check that the server sees each visitor's own address, before any Sentinel uses the tunnel.** Do this first: every address the server believes (the allowlist, the abuse guard's bans, the sign-in lockout) depends on it. Sign in at `https://scanner.example.com`, open **Settings > IP allowlist**: the line "your current IP" is the address the server took for you. It must be your own public address (the one a "what is my IP" page shows), not a `172.` address. Check it again from a second network, such as a phone off Wi-Fi: it must show a different address. To see what the proxy itself saw connect, make one request and run `docker compose -f docker-compose.yml -f docker-compose.tunnel.yml logs --tail 5 proxy`: the first field of each line is the peer, and it must be the address in `trusted-upstreams.local.conf`.
 
-**How the address is chosen, and what a visitor can fake.** Cloudflare adds the address that connected to it at the end of `X-Forwarded-For`; if the visitor sent one of its own, it stays in front of that. The bundled proxy keeps the chain from a listed peer and adds the peer at the end, and the application takes the last address that is not a trusted proxy, so what a visitor writes at the front is never picked. A request that reaches the proxy from a peer that is not listed has its `X-Forwarded-For` thrown away, as always. Cookies, CSRF and `ALLOWED_HOSTS` need nothing extra: the proxy tells Django the request was HTTPS, the public name is `DOMAIN_NAME`, and secure cookies are on. HSTS is sent by the application as before.
+If it shows a `172.` address (or `127.0.0.1`), the server is treating every visitor as one address. Do not turn the allowlist on and do not point Sentinels at the name yet. Work through these in order:
+
+- The first field in the proxy log is not the address in the file: put the address from the log in the file and reload the proxy (`... exec proxy nginx -s reload`).
+- The log line is missing: the request did not come through port 8443. Check that `cloudflared` points at `https://127.0.0.1:8443`, not at 443, and that the overlay is the one running (`docker compose -f docker-compose.yml -f docker-compose.tunnel.yml ps` shows `127.0.0.1:8443->8443/tcp`).
+- The address is right but the page still shows `172.`: Cloudflare is not sending `X-Forwarded-For`, usually because its "Remove visitor IP headers" transform is on. Turn it off.
+- Still wrong: stop here and leave the tunnel unused; a wrong address is worse than a slow one. Empty `trusted-upstreams.local.conf` (reload the proxy) so nothing is believed, and leave the allowlist off.
+
+Until it is right, one visitor's lockout is everyone's.
+
+**How the address is chosen, and what a visitor can fake.** Cloudflare adds the address that connected to it at the end of `X-Forwarded-For`; if the visitor sent one of its own, it stays in front of that. The bundled proxy keeps the chain from a listed peer and adds the peer at the end, and the application takes the last address that is not a trusted proxy, so what a visitor writes at the front is never picked. A request on port 443, or from a peer that is not listed, has its `X-Forwarded-For` thrown away, as always. Cookies, CSRF and `ALLOWED_HOSTS` need nothing extra: the proxy tells Django the request was HTTPS, the public name is `DOMAIN_NAME`, and secure cookies are on. HSTS is sent by the application as before.
 
 **What does not work, or works differently.**
 
@@ -154,9 +172,9 @@ ingress:
 - **Other limits.** Cloudflare's own bot and firewall rules in front can block a Sentinel or an MCP client; they see the same requests as a browser would. Add a skip rule for `/api/v1/` and `/mcp/` if they do.
 - **Cloudflare Access.** An Access policy in front of the name would block Sentinels and MCP clients, which send a bearer token and no cookies or Cloudflare headers. Give these paths a **Bypass** policy (they carry their own token): `/api/v1/` (the Sentinel calls `/api/v1/sentinels/bootstrap` and `/api/v1/sentinel/...`; the REST API and the AI reviewer use the rest of `/api/v1/`) and `/mcp/`. Keep Access on everything else, and keep the IP allowlist and two-step sign-in on. A service token (a `Service Auth` policy) needs the client to send Cloudflare's headers, which neither a Sentinel nor a plain MCP client does.
 
-**Updates.** The updater works as before: it checks that the site answers on the proxy's own loopback port, not through Cloudflare. While it migrates, the proxy shows the maintenance page (Cloudflare passes it on; it is sent with `no-store`, and a Sentinel just retries). For the few seconds the proxy itself restarts, `cloudflared` has nothing to connect to and Cloudflare shows its own 502 page instead. Nothing needs purging in Cloudflare after an update ([static files](#b-behind-cloudflare-or-another-cdn) are versioned). The first update after you add `CVENGINE_COMPOSE_FILES` is the check that the overlay is kept; look at `docker compose ps` afterwards.
+**Updates.** The updater works as before: it checks that the site answers on the proxy's published loopback port (8443 here; it looks for 443 first and then 8443), not through Cloudflare. While it migrates, the proxy shows the maintenance page (Cloudflare passes it on; it is sent with `no-store`, and a Sentinel just retries). For the few seconds the proxy itself restarts, `cloudflared` has nothing to connect to and Cloudflare shows its own 502 page instead. Nothing needs purging in Cloudflare after an update ([static files](#b-behind-cloudflare-or-another-cdn) are versioned). The first update after you add `CVENGINE_COMPOSE_FILES` is the check that the overlay is kept; look at `docker compose ps` afterwards.
 
-**Moving an existing install.** Keep the same `DOMAIN_NAME` so Sentinels, MCP clients and bookmarks keep working. Do the steps above, then switch DNS last: delete the old `A`/`AAAA` record for the name and run `cloudflared tunnel route dns cvengine scanner.example.com` (use `--overwrite-dns` if you leave the record in place), close TCP 443 on the firewall once the tunnel answers, and watch **Scanners > Sentinels** until every Sentinel checks in again (about a minute). Nothing is re-enrolled: the address in a Sentinel's enrollment is the public name. A Let's Encrypt certificate already on the proxy can stay (drop `caPool`); the installer's certificate and its `caPool` line also work.
+**Moving an existing install.** Keep the same `DOMAIN_NAME` so Sentinels, MCP clients and bookmarks keep working, and switch DNS last. Do step 1 and 2 first, but create the tunnel's route under a temporary name (`cloudflared tunnel route dns cvengine test.example.com`, and `test.example.com` as a second `hostname:` in the ingress). Add `CVENGINE_ALLOWED_HOSTS=test.example.com` and `CVENGINE_CSRF_TRUSTED_ORIGINS=https://test.example.com` to `.env` for the test (`docker compose ... up -d web`) and do step 3 there. Only when the address is right: remove those two lines, delete the old `A`/`AAAA` record for the real name and run `cloudflared tunnel route dns cvengine scanner.example.com` (`--overwrite-dns` if you leave the record in place), close TCP 443 on the firewall once the tunnel answers, and watch **Scanners > Sentinels** until every Sentinel checks in again (about a minute). Nothing is re-enrolled: the address in a Sentinel's enrollment is the public name. A Let's Encrypt certificate already on the proxy can stay (drop `caPool`); the installer's certificate and its `caPool` line also work.
 
 **What Cloudflare can see.** The tunnel ends at Cloudflare: your visitors' HTTPS connection is decrypted there and sent on to you over the tunnel. Everything that passes, including findings, scan results, the contents of the pages, session cookies and the API tokens of Sentinels and MCP clients, is readable by Cloudflare while it passes, and its logs and settings can change what happens to it. That is the same exposure as the proxied DNS in B, and the price of having no open port. If it is not acceptable, keep the server on a private network and reach it over a VPN instead.
 
