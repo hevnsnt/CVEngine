@@ -131,10 +131,29 @@ def _fit(value, limit):
     return value if len(json.dumps(value)) <= limit else {}
 
 
-def _raw_text(project, host):
-    """What the host said in the places the packet quotes besides its findings, as stored (for the injection scan only, never sent)."""
-    from cveFeed.models import HostScreenshot, HygieneFinding
-    return [list(HostScreenshot.objects.filter(project=project, host=host).values_list('title', 'reason', 'final_url')[:MAX_LISTED]),
+def _raw_host(sub):
+    """Everything the host itself said that reaches the packet, as stored: the page title and server names, the technologies, each open port's banner,
+    service strings, HTTP, TLS and script output, the host's reverse names. ``host_context`` cleans these (the instruction sentences are removed), so the
+    planted text must be looked for here, before that."""
+    if sub is None:
+        return []
+    out = [[sub.page_title, sub.webserver, sub.cname, sub.cdn_name, sub.http_url], [t.name for t in sub.technologies.all()[:200]]]
+    for ip in sub.ip_addresses.all():
+        out.append(ip.reverse_pointer)
+        for port in ip.ports.all()[:200]:
+            out.append([port.service_name, port.description, port.product, port.version, port.service_extra, port.cpe, port.os_guess, port.banner,
+                        port.http, port.tls, port.extra])
+    return out
+
+
+def _raw_text(project, host, sub=None):
+    """What the host said in the places the packet quotes besides its findings, as stored (for the injection scan only, never sent): its page, banners
+    and certificates (``_raw_host``), its stored web routes, certificates, screenshots and hygiene rows."""
+    from cveFeed.models import HostScreenshot, HygieneFinding, RouteAuth, TlsCertificate
+    return [_raw_host(sub),
+            list(RouteAuth.objects.filter(project=project, host=host).values_list('url', 'title', 'evidence')[:MAX_LISTED]),
+            list(TlsCertificate.objects.filter(domain__project=project, host=host).values_list('subject', 'issuer', 'sans', 'chain_error')[:MAX_LISTED]),
+            list(HostScreenshot.objects.filter(project=project, host=host).values_list('title', 'reason', 'final_url')[:MAX_LISTED]),
             list(HygieneFinding.objects.filter(domain__project=project, host=host).values_list('title', 'detail', 'evidence')[:MAX_LISTED])]
 
 
@@ -282,7 +301,7 @@ def build(project, host, offered=None, now=None):
         from cveFeed import host_actions
         offered = host_actions.offered(project, sub, pairs)
     context = host_context.host_context(sub, project.pk) if sub is not None else {}
-    injection = injection_guard.families(context, _raw_text(project, host))
+    injection = injection_guard.families(context, _raw_text(project, host, sub))
     injection = sorted(set(injection) | {name for e in shown for name in e['injection']})
     ids = [e['row'].pk for e in shown]
     latest, retests = _latest_reviews(ids), _retests(ids)
@@ -644,7 +663,7 @@ def _evidence(project, state):
     from cveFeed import host_context, injection_guard
     sub = _load_sub(state)
     context = host_context.host_context(sub, project.pk) if sub is not None else {}
-    raw = _raw_text(project, state.host)
+    raw = _raw_text(project, state.host, sub)
     return injection_guard.families(context, raw), injection_guard.planted_markers(context, raw)
 
 

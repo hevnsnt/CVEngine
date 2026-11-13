@@ -52,8 +52,15 @@ class HostileHostTests(Fixture):
         self.assertEqual((review.step_mode, review.step_state), ('recommend', 'proposed'))
 
     def test_a_held_hostile_false_positive_does_not_demote_and_stays_a_recorded_opinion(self):
+        from cveFeed import situations
+        from cveFeed.models import CVEEntry
+        CVEEntry.objects.update(kev=True)  # on the KEV and in range: Situations ranks them Likely until something demotes them
+        CVEMatch.objects.update(version_in_range=True)
+        tiers = lambda: sorted(situations._matches([self.proj.pk])[0].values_list('tier', 'disputed'))  # noqa: E731
+        self.assertEqual(tiers(), [(situations.LIKELY, False)] * 2)
         review, _ = self.obey()
         self.assertFalse(FindingAuditEvent.objects.filter(finding_kind='match', event='status').exists())
+        self.assertEqual(tiers(), [(situations.LIKELY, False)] * 2)  # the server refused both closures, so the ranking does not follow the model
 
     def test_a_note_that_repeats_an_identifier_planted_in_the_host_is_discarded(self):
         review = self.queue()
