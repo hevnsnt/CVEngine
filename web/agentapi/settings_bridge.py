@@ -201,6 +201,7 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
         body = json.dumps(values if values is not None else {})
         request = factory.generic(method, path, body, content_type='application/json')
     request.user = ctx.user
+    request.via_agent = True  # a handler that spends the owner's money or widens what runs by itself refuses an agent (settings_api.reviewer_put)
     if method == 'PUT' and name in ('scan_concurrency', 'tunables') and isinstance(values, dict) and isinstance(values.get('values'), dict) and values['values']:
         return _throughput_write(ctx, name, method, fn, request, values, groups)
     return _run(ctx, name, api, fn, request, groups)

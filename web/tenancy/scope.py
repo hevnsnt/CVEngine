@@ -51,6 +51,7 @@ SCOPES = {
     'cveFeed.HostInventory': 'project_id',
     'cveFeed.HostInventoryReport': 'inventory__project_id',
     'cveFeed.Triage': 'project_id',
+    'cveFeed.HostReview': 'project_id',  # the AI's review of one host (cveFeed.host_review), kept with the project it belongs to
     'cveFeed.FindingReview': 'project_id',  # the AI reviewer's verdicts (cveFeed.reviewer), one project's finding each
     'cveFeed.FixRetest': 'project_id',  # one try to re-check a finding marked fixed (cveFeed.fix_retest), kept with the project it belongs to
     'cveFeed.ReportExport': 'project_id',

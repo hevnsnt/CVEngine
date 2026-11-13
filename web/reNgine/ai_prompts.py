@@ -36,6 +36,11 @@ REVIEW_TASK_REVIEWER = (
     'with a strong justification: answer false_positive and, in the note, name the specific evidence you read and why it does not '
     'support the finding. If the evidence is not enough to decide, say so and answer uncertain, which leaves the finding open.')
 
+REVIEW_TASK_HOST = (
+    'Your task: as a vulnerability analyst, review all the open results of this one host together and decide, for each finding, whether it is a '
+    'false positive or a real finding, naming the specific evidence you read. Then choose the one next step for this host from the offered '
+    'list, or none. If the evidence is not enough to decide, say so and answer uncertain, which leaves the finding open.')
+
 TASKS = {
     'validation_plan': (
         'Your task: validate whether one CVE really applies to one product on one host, and choose which of the product\'s read-only '
@@ -43,6 +48,8 @@ TASKS = {
     'finding_triage': REVIEW_TASK_TRIAGE,
     'finding_triage_repair': REVIEW_TASK_TRIAGE,
     'finding_review': REVIEW_TASK_REVIEWER,
+    'host_review': REVIEW_TASK_HOST,
+    'host_review_repair': REVIEW_TASK_HOST,
     'local_check_suggestion': (
         'Your task: the operator has shell access to their own host and wants to check locally whether the product named in this '
         'advisory is installed, because it could not be confirmed from outside.'),
@@ -73,6 +80,8 @@ STAGES = {
     'finding_triage': 'Triage of one finding (AI job)',
     'finding_triage_repair': 'The same triage asked once more after a rejected reply (AI job)',
     'finding_review': 'The AI reviewer container\'s review of one finding',
+    'host_review': 'The AI review of every open result of one host, with the next step for it (AI job)',
+    'host_review_repair': 'The same host review asked once more after a rejected reply (AI job)',
     'local_check_suggestion': 'Local read-only checks for a CVE match (AI job)',
     'cve_detection': 'Detection record and guidance for one CVE (AI job)',
     'template_generation': 'Template draft for a CVE with no installed template (AI job)',

@@ -105,8 +105,15 @@ def _disputed():
     not about the evidence (a person worked it, a critical scanner finding, closing switched off), and no retest reproduced it: as a flag,
     never NULL. A verdict the server refused because of hard evidence, a floor, or text aimed at an AI in the evidence, one the model was not
     sure of, and a finding a retest reopened never demote it: the ranking does not follow a model the server itself did not believe."""
-    refused_for_evidence = (Q(review_outcome='disputed') | Q(review_held__startswith='hard evidence') | Q(review_held__startswith='its evidence carries text'))
-    return Case(When(Q(review_verdict='false_positive', review_confidence='high') & ~Q(review_outcome='closed') & ~refused_for_evidence
+    refused_for_evidence = (Q(review_outcome='disputed') | Q(review_held__startswith='hard evidence') | Q(review_held__startswith='its evidence carries text')
+                            | Q(review_held__startswith='contradicts the earlier verdict') | Q(review_held__startswith='the host review does not close'))  # a host review's closure an earlier real verdict holds
+    from django.db.models import Exists
+    from cveFeed.models import ReviewerSettings
+    # a verdict of the AI's review of a whole host moves nothing in the ranking while the host review may not close findings by itself (whatever the finding review's own
+    # closing switch says and whoever worked the finding): it is an opinion waiting for a person
+    # (read inside the same query: the switch costs no round trip)
+    flagged = (Q(review_injection__isnull=False) & ~Q(review_injection=[])) | (Q(review_host__isnull=False) & ~Exists(ReviewerSettings.objects.filter(host_review_auto_close=True)))  # a review that found planted text in the evidence moves nothing, whatever else held it
+    return Case(When(Q(review_verdict='false_positive', review_confidence='high') & ~Q(review_outcome='closed') & ~refused_for_evidence & ~flagged
                      & ~Q(triage__retest_state='still_reproduces'), then=Value(True)), default=Value(False), output_field=BooleanField())
 
 

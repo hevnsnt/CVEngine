@@ -271,8 +271,9 @@ def _inside_min_gap(row, now):
     return bool(keys) and triage.revalidation_key(triage.describe(match)) in keys
 
 
-def enqueue(row, lane):
-    """Idempotent dispatch of this persisted finding. No target argument reaches the broker."""
+def enqueue(row, lane, source='automatic'):
+    """Idempotent dispatch of this persisted finding. No target argument reaches the broker. ``source`` is who asked: ``automatic`` (the sweep) or
+    ``host_review`` (the AI host review's chosen step, ``cveFeed.host_actions``): neither is a person's work, and both run under the unattended gates."""
     from cveFeed.tasks import automatic_validate_finding, validate_match_on_demand
 
     priority = PRIORITY[lane]
@@ -313,7 +314,7 @@ def enqueue(row, lane):
                     attempts = next_attempt_number(carried, row.signature, lambda j: row.signature)
                 else:
                     attempts = next_attempt_number(previous, row.signature, lambda j: j.evidence_signature)
-                job = OnDemandValidation.objects.create(match_id=row.match_id, project_id=row.project_id,
+                job = OnDemandValidation.objects.create(match_id=row.match_id, project_id=row.project_id, source=source,
                     evidence_signature=row.signature, priority=priority, attempts=attempts)
                 task, promoted = validate_match_on_demand, False
         else:
@@ -330,7 +331,7 @@ def enqueue(row, lane):
             else:
                 if _active_count(row.project_id) >= cap:
                     return 'project_cap'
-                job = AutomaticValidation.objects.create(triage=row, project_id=row.project_id,
+                job = AutomaticValidation.objects.create(triage=row, project_id=row.project_id, source=source,
                     signature=row.signature, priority=priority,
                     attempts=next_attempt_number(previous, row.signature, lambda j: j.signature))
                 task, promoted = automatic_validate_finding, False
