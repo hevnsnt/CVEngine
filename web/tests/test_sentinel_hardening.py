@@ -260,6 +260,7 @@ class InternalOnlyClaimTests(SentinelBase):
         self.inside_token = create_token(self.dana, 'inside')[1]
         self.inside = register_sentinel(self.inside_token, name='inside', capabilities=['nmap', 'nuclei_light', 'wpscan', 'network:internal'])[1]
         Agent.objects.filter(pk=self.inside['id']).update(network='internal')  # granted by the server, not by what the Sentinel declares
+        Agent.objects.filter(pk__in=[self.external['id'], self.inside['id']]).update(info={'features': ['credential_filter']})  # a current client: only one that leaves out credential checks is offered nuclei work while they are off
 
     def _nuclei(self, targets):
         return SentinelTask.objects.create(project=self.pa, kind='nuclei_light', target={'targets': targets, 'tags': [], 'severities': []}, ips=[])
@@ -290,6 +291,7 @@ class HostScopeNarrowingTests(SentinelBase):
     def _sentinel(self, hosts):
         status, out = register_sentinel(self.t['dana'], name='narrow', capabilities=['nuclei_light', 'wpscan'], scope={'projects': ['sen-a'], 'hosts': hosts})
         self.assertEqual(status, 201, out)
+        Agent.objects.filter(pk=out['id']).update(info={'features': ['credential_filter']})  # a current client (see InternalOnlyClaimTests)
 
     def test_a_nuclei_task_outside_the_declared_hosts_is_not_claimable(self):
         self._sentinel(['192.0.2.0/24'])
@@ -524,12 +526,12 @@ class NetworkAuthorityTests(SentinelBase):
     def test_an_external_sentinel_gets_no_internal_work_and_is_not_eligible(self):
         InternalRange.objects.create(project=self.pa, cidr='10.0.0.0/24')
         boot = self.boot('external')
-        Agent.objects.filter(pk=boot['id']).update(status='active', last_seen=timezone.now())
+        Agent.objects.filter(pk=boot['id']).update(status='active', last_seen=timezone.now(), info={'features': ['credential_filter']})
         task = SentinelTask.objects.create(project=self.pa, kind='nuclei_light', target={'targets': ['10.0.0.5'], 'tags': [], 'severities': []}, ips=[])
         self.assertIsNone(call(boot['token'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})[1]['task'])
         self.assertEqual(sentinels.eligible_sentinels(self.pa, 'nuclei_light', internal=True), [])
         inside = self.boot('internal')
-        Agent.objects.filter(pk=inside['id']).update(status='active', last_seen=timezone.now())
+        Agent.objects.filter(pk=inside['id']).update(status='active', last_seen=timezone.now(), info={'features': ['credential_filter']})
         self.assertEqual(call(inside['token'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})[1]['task']['id'], task.pk)
 
     def test_only_an_administrator_moves_a_sentinel_across_the_boundary(self):
@@ -574,7 +576,8 @@ class NetworkAuthorityTests(SentinelBase):
         sentinels.sentinel_settings.set_managed(agent, {'network': 'external'}, self.dana)
         self.assertNotIn(sentinels.INTERNAL_CAPABILITY, sentinels.effective_capabilities(agent))
 
-        status, out = call(self.t['root'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'settings': {'network': None}})
+        self.assertEqual(call(self.t['root'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'settings': {'network': None}})[0], 403)  # a token may not widen to the internal grant (FB-5)
+        status, out = call(self.root, 'PATCH', f'/api/v1/agents/{agent.pk}', {'settings': {'network': None}})  # a person may
         self.assertEqual(status, 200, out)
         agent.refresh_from_db()
         self.assertEqual(agent.network, 'internal')

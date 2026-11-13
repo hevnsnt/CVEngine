@@ -924,7 +924,16 @@ def _reasons(rows):
     return ' '.join(parts)
 
 
-def status_counts(project_ids):
+def web_hosts_by_project():
+    """``{project_id: hosts with a web page}`` for every project in one statement (what ``status_counts`` counts for one)."""
+    from startScan.models import Subdomain
+    found = {}
+    for project_id, _name in Subdomain.objects.filter(_web_evidence_q()).values_list('target_domain__project_id', 'name').distinct():
+        found[project_id] = found.get(project_id, 0) + 1
+    return found
+
+
+def status_counts(project_ids, web_hosts=None):
     """For ``get_system_status``: how many of the projects' hosts have a screenshot, what is queued, what failed and the last capture error."""
     from django.db.models import Count
     from cveFeed.models import HostScreenshot
@@ -932,8 +941,9 @@ def status_counts(project_ids):
     rows = HostScreenshot.objects.filter(project_id__in=list(project_ids)).exclude(scheme='rdp')
     by_outcome = {row['outcome']: row['n'] for row in rows.values('outcome').annotate(n=Count('id'))}
     shot_hosts = rows.exclude(image_path='').values('project_id', 'host').distinct().count()
-    web_hosts = (Subdomain.objects.filter(target_domain__project_id__in=list(project_ids)).filter(_web_evidence_q())
-                 .values('target_domain__project_id', 'name').distinct().count())
+    if web_hosts is None:  # ``web_hosts_by_project`` gives a caller that asks for many projects the number of each in one statement
+        web_hosts = (Subdomain.objects.filter(target_domain__project_id__in=list(project_ids)).filter(_web_evidence_q())
+                     .values('target_domain__project_id', 'name').distinct().count())
     last = rows.filter(outcome__in=FAILURES).exclude(attempted_at=None).order_by('-attempted_at').values('host', 'scheme', 'port', 'outcome', 'reason', 'attempted_at').first()
     return {'enabled': enabled(), 'available': available(), 'unavailable_reason': unavailable_reason() or None, 'sandbox': sandbox_status(),
             'hosts_with_web': web_hosts, 'hosts_with_screenshot': shot_hosts, 'pages': by_outcome,
