@@ -47,7 +47,7 @@ def memory(now, interval=INTERVAL_SECONDS):
     since = now - interval
     free, budgets, totals, counted = [], [], [], 0
     waits, running = {}, {}
-    for key in store.r.scan_iter(match='cvengine:heavy:*:state'):
+    for key in store.r.scan_iter(match='cvengine:heavy:*:state', count=1000):
         try:
             state = json.loads(store.r.get(key) or '{}')
         except ValueError:

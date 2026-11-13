@@ -10,13 +10,13 @@ How it is bounded, and why nothing is left stuck:
   (``CVENGINE_STATUS_PROBE_SECONDS``, 5) or the budget of the whole answer (``CVENGINE_STATUS_BUDGET_SECONDS``, 8), whichever is first. Python cannot
   kill a thread, so what keeps an abandoned one from living on is that every wait inside a probe is bounded by itself: the thread sets a statement
   timeout and a lock timeout on its own database connection (the probe's deadline), the Redis client has socket timeouts, Celery's inspect has a
-  timeout, the one subprocess has a timeout. A thread that was left behind therefore ends by itself, drops what it found (the answer was sent without
+  timeout, the one version lookup of an installed tool has a timeout. A thread that was left behind therefore ends by itself, drops what it found (the answer was sent without
   it) and closes its database connection in ``finally``.
 * A probe is never started twice at once: while the thread of an earlier call is still alive the probe is reported as still running instead of
   starting another (so a poller cannot pile up threads or connections behind a slow probe).
 * The threads have connections of their own and so cannot see the uncommitted rows of a caller that is inside a transaction (a Django ``TestCase``,
-  ``ATOMIC_REQUESTS``). Inside a transaction the probes run one after another in the calling thread instead: the budget still stops the ones that
-  have not started, but a probe that is already running cannot be interrupted there.
+  ``ATOMIC_REQUESTS``). Inside a transaction the probes run one after another in the calling thread instead, with their timings but without
+  deadlines (nothing can interrupt them there). The server never calls it that way: it is for the tests.
 """
 import logging
 import os
@@ -151,9 +151,6 @@ def run(probes, budget=None, concurrency=CONCURRENCY, clock=time.monotonic):
     if not threaded:
         for probe in probes:
             result = results[probe.name]
-            if clock() >= deadline:
-                result.state = 'skipped'
-                continue
             result.started = clock()
             try:
                 result.value, result.state = probe.fn(result.problems, result.notes, dict(done)), 'ok'
