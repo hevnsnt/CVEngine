@@ -72,7 +72,7 @@ class RestTests(World):
     url = '/api/v1/projects/ir-a/internal-ranges'
 
     def test_admin_declares_lists_and_removes_a_range(self):
-        status, row = call(self.t['admin'], 'POST', self.url, {'cidr': '10.20.0.0/24', 'description': 'office'})
+        status, row = call(self.admin, 'POST', self.url, {'cidr': '10.20.0.0/24', 'description': 'office'})
         self.assertEqual(status, 201)
         self.assertEqual((row['cidr'], row['description'], row['created_by']), ('10.20.0.0/24', 'office', 'ir_admin'))
         self.assertEqual([r['cidr'] for r in call(self.t['admin'], 'GET', self.url)[1]['results']], ['10.20.0.0/24'])
@@ -90,11 +90,11 @@ class RestTests(World):
         self.assertEqual(call(self.t['root'], 'GET', self.url)[0], 200)
 
     def test_bad_and_duplicate_input(self):
-        self.assertEqual(call(self.t['admin'], 'POST', self.url, {'cidr': '8.8.8.0/24'})[0], 400)
-        self.assertEqual(call(self.t['admin'], 'POST', self.url, {'cidr': '10.20.0.0/24', 'extra': 1})[0], 400)
-        self.assertEqual(call(self.t['admin'], 'POST', self.url, {'cidr': '10.20.0.0/24', 'description': 'x' * 201})[0], 400)
-        self.assertEqual(call(self.t['admin'], 'POST', self.url, {'cidr': '10.20.0.0/24'})[0], 201)
-        self.assertEqual(call(self.t['admin'], 'POST', self.url, {'cidr': '10.20.0.0/24'})[0], 409)
+        self.assertEqual(call(self.admin, 'POST', self.url, {'cidr': '8.8.8.0/24'})[0], 400)
+        self.assertEqual(call(self.admin, 'POST', self.url, {'cidr': '10.20.0.0/24', 'extra': 1})[0], 400)
+        self.assertEqual(call(self.admin, 'POST', self.url, {'cidr': '10.20.0.0/24', 'description': 'x' * 201})[0], 400)
+        self.assertEqual(call(self.admin, 'POST', self.url, {'cidr': '10.20.0.0/24'})[0], 201)
+        self.assertEqual(call(self.admin, 'POST', self.url, {'cidr': '10.20.0.0/24'})[0], 409)
 
     def test_a_range_of_another_project_cannot_be_deleted_through_this_one(self):
         row = self.declare('10.50.0.0/24', project=self.pb)
