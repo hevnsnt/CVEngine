@@ -2929,3 +2929,11 @@ a.hr-name{text-underline-offset:2px}
 .hr-old{margin-top:var(--s-2)}
 .hr-old summary{cursor:pointer;min-height:36px;display:flex;align-items:center;color:var(--muted);font-size:var(--fs-2)}
 .hr-card a:focus-visible,.hr-card button:focus-visible,.hr-card summary:focus-visible,.hr-card select:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+@media (pointer:coarse){
+  .hr-card .btn.sm{min-height:44px}
+  .hr-settings summary,.hr-old summary{min-height:44px}
+  .hr-settings select{min-height:44px}
+  .hr-row{position:relative}
+  a.hr-name::after{content:"";position:absolute;inset:0}
+  a.hr-step-title{display:inline-block;padding:var(--s-3) 0}
+}
