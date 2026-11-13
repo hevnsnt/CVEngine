@@ -68,7 +68,7 @@ TASKS = {
         'Your task: read this screenshot of a Windows Remote Desktop login screen, which the product captured during a host check, '
         'and say whether it shows an account already signed in.'),
     'operations_check': (
-        'Your task: diagnose the product\'s own health checks that are not ok, for the operator who administers this server.'),
+        'Your task: diagnose the product\'s own health checks that are not ok, for the operator who administers this server, using the measurements and the auto-tuner\'s recent decisions sent with them.'),
 }
 
 # Every usage stage a model call may be recorded under (AIUsage.stage), with the job it names. The usage page, the refusal counts and

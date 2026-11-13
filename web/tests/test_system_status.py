@@ -78,6 +78,11 @@ class SystemStatusTests(TestCase):
 		# earlier tests of this run must not make this instance look unhealthy (tests.test_local_egress covers that problem line)
 		from tests.test_local_egress import _clear
 		_clear()
+		# refusals of the rate limiter live in Redis too (agentapi.claim_refusals): another test's refusals, an action named 'secret' among them, are real numbers in the status
+		from agentapi import claim_refusals
+		client = claim_refusals._client(claim_refusals.KEY)
+		for key in client.scan_iter(match=claim_refusals.KEY + '*'):
+			client.delete(key)
 		# the per-project cache is exercised by CountsCacheTests; here every call counts afresh
 		patch = mock.patch.dict(os.environ, {'CVENGINE_STATUS_CACHE_SECONDS': '0'})
 		patch.start()

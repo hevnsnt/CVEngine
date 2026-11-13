@@ -32,6 +32,7 @@ class WaitingIsNotFailingTests(Fixture):
     def test_they_are_counted_apart_in_plain_words(self):
         from tests.fake_scanner import FakeScanner
         FakeScanner(external=True, name='sentinel-1', kinds=['web_screenshot']).start_for(self)  # a live Sentinel: with none the note is a warning (see test_alerts_tell_the_truth)
+        SentinelTask.objects.bulk_create([SentinelTask(project=self.proj, kind='nmap', target={}, status='running', claimed_at=timezone.now()) for _ in range(8)])  # its slots are in use: the waits are back-pressure
         self.add(13, 'expired', WAIT)
         note = self.check('sentinel_waiting')
         self.assertEqual((note['state'], note['severity']), ('warning', 'info'))

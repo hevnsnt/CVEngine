@@ -27,6 +27,8 @@ from django.core.cache import cache
 from django.db.models import Q
 from django.utils import timezone
 
+from cveFeed import maintainer_checks
+
 logger = logging.getLogger(__name__)
 
 VERDICTS = ('false_positive', 'true_open', 'true_in_progress', 'true_fixed', 'true_accepted_risk', 'uncertain')
@@ -767,10 +769,11 @@ def installed_templates_version():
 # Every code ops_checks can return, in the order it computes them. The snapshot sends it to the reviewer container, which builds the model's answer
 # format from it; tests/test_ai_prompts.py holds it equal to the codes written in ops_checks and to the container's fallback copy.
 OPS_CODES = ('sentinels_idle', 'workers_down', 'nuclei_templates', 'sentinel_errors', 'sentinel_waiting', 'sentinels_offline', 'scan_errors', 'system',
-             'generated_templates', 'ai_errors')
+             'generated_templates', 'ai_errors', 'memory', 'queue_starvation', 'sentinel_claims_refused')
 
 
 def _check(code, state, title, detail, facts=None, actions=(), severity=None):
+    """One check. ``state`` is ok, warning or problem, or ``unknown``: the numbers it needs could not be read, so there is no verdict."""
     return {'code': code, 'state': state, 'severity': severity or ('critical' if state == 'problem' else 'warning' if state == 'warning' else 'info'),
             'title': title, 'detail': detail, 'facts': facts or {}, 'actions': list(actions)}
 
@@ -810,7 +813,37 @@ def _restart_q(since):
     return None if q is None else Q(status='expired') & q
 
 
-def ops_checks(now=None, templates_release=None):
+def _starvation_inputs(now, paused, live):
+    """What ``maintainer_checks.queue_starvation`` needs besides the signals, counted here: the host assessments running and queued, the scans queued, and per
+    Sentinel task kind the oldest queued task, what that kind normally waits (the median over its last 200 claimed tasks of the day) and the other kinds the
+    Sentinels claimed lately. A count that cannot be made is ``None``: no verdict, never a zero."""
+    from agentapi.models import SentinelTask
+    from cveFeed.models import HostAssessment
+    from django.db.models import Count, Min
+    from startScan.models import ScanHistory
+    out = {'paused': paused, 'scans_queued': None, 'assessments_running': None, 'assessments_queued': None, 'sentinel_kinds': None}
+    try:
+        by = {r['status']: r['n'] for r in HostAssessment.objects.filter(status__in=('queued', 'running')).values('status').annotate(n=Count('id'))}
+        out.update(assessments_running=by.get('running', 0), assessments_queued=by.get('queued', 0), scans_queued=ScanHistory.objects.filter(scan_status=-1).count())
+    except Exception:  # noqa: BLE001 - one unreadable source gives no verdict, it does not stop the other checks
+        logger.debug('queue starvation: could not count scans and assessments', exc_info=True)
+    try:
+        kinds = []
+        if live:
+            recent = SentinelTask.objects.filter(claimed_at__gte=now - timedelta(minutes=maintainer_checks.SENTINEL_BUSY_MINUTES)).values_list('kind', flat=True).distinct()
+            claimed_lately = set(recent)
+            for row in SentinelTask.objects.filter(status='queued').values('kind').annotate(n=Count('id'), oldest=Min('created_at'))[:30]:
+                waits = sorted((c - k).total_seconds() for k, c in SentinelTask.objects.filter(kind=row['kind'], claimed_at__isnull=False, created_at__gte=now - timedelta(days=1))
+                               .order_by('-id').values_list('created_at', 'claimed_at')[:200])
+                kinds.append({'kind': row['kind'], 'queued': row['n'], 'oldest_age_seconds': int(max(0, (now - row['oldest']).total_seconds())),
+                              'typical_wait_seconds': int(waits[len(waits) // 2]) if waits else None, 'busy_with': sorted(claimed_lately - {row['kind']})})
+        out['sentinel_kinds'] = kinds
+    except Exception:  # noqa: BLE001
+        logger.debug('queue starvation: could not read the Sentinel queue', exc_info=True)
+    return out
+
+
+def ops_checks(now=None, templates_release=None, _out=None):
     """The operations checks (docs/AI-REVIEWER.md), from ``system_status`` and the database. ``templates_release`` is the newest
     nuclei-templates release the reviewer container read from GitHub, ``{tag, published_at}``, when it has one."""
     from agentapi.models import SentinelTask
@@ -822,7 +855,11 @@ def ops_checks(now=None, templates_release=None):
     admin = _admin()
     status = system_status(Ctx(user=admin)) if admin else {'problems': [], 'system': None}
     system = status.get('system') or {}
+    if _out is not None:
+        _out['status'] = status
     sentinels = system.get('sentinels') or {}
+    signals = ((system.get('signals') or {}).get('signals')) if isinstance(system.get('signals'), dict) else None
+    signals = signals if isinstance(signals, dict) else {}
     checks = []
 
     # Sentinels idle while there is work
@@ -947,8 +984,21 @@ def ops_checks(now=None, templates_release=None):
                  f'{completed} completed in the same six hours and {queued_now} are queued now.')
         share_waited = waited / (waited + completed)
         saturated = bool(slots) and (share_waited >= WAIT_SATURATED_SHARE or queued_now >= 3 * slots)  # whatever the trend: a good part of the work finds no free slot
+        # tasks that expired unclaimed while the slots are free are not a shortage of capacity: the Sentinels are not claiming (a limiter that refused every claim
+        # for an hour read as "add a Sentinel" here). Say that, and why when the numbers say, and give no capacity advice.
+        queue_counts = sentinels.get('queue') or {}
+        slots_in_use = (queue_counts.get('claimed') or 0) + (queue_counts.get('running') or 0) if fleet['live_sentinels'] else None
+        claimed_2h = SentinelTask.objects.filter(claimed_at__gte=now - timedelta(hours=2)).count() if fleet['live_sentinels'] else None
+        refusals = signals.get('claim_refusals')
+        refused_2h = sum((r.get('this_hour') or 0) + (r.get('previous_hour') or 0) for r in (refusals.get('by') or []) if isinstance(r, dict) and r.get('action') == 'claim') \
+            if isinstance(refusals, dict) and refusals.get('state') == 'known' else 0
+        not_claiming, why = (maintainer_checks.not_claiming(slots, slots_in_use, claimed_2h, refused_2h) if fleet['live_sentinels'] and (refused_2h or waited / (waited + completed) >= WAIT_SATURATED_SHARE)
+                             else (False, ''))  # a few tasks that expired unclaimed beside plenty that completed are noise, not an outage
         if not fleet['live_sentinels']:
             advice = 'No Sentinel is live, so none of this work is being done: bring a Sentinel online on the Sentinels page.'
+        elif not_claiming:
+            advice = (f'The Sentinels are not claiming work: {slots_in_use} of {slots} slots are in use while tasks expire unclaimed, so this is not a shortage of capacity '
+                      f'and adding Sentinels or slots will not help. {why}').strip()
         elif behind:
             advice = (f'Work is falling behind: waits grew from {earlier} in the earlier three hours to {recent} in the latest three, and the queue holds '
                       f'{queued_now} against {slots} slots. Add a Sentinel, or give the ones you have more slots.')
@@ -962,12 +1012,20 @@ def ops_checks(now=None, templates_release=None):
             advice = f'The backlog is not growing ({earlier} waits in the earlier three hours, {recent} in the latest three): the Sentinels are keeping up and no action is needed.'
         facts = {'waited': waited, 'by_kind': {r['kind']: r['n'] for r in held}, 'slots': slots, 'completed': completed, 'queued_now': queued_now,
                  'waited_earlier': earlier, 'waited_recent': recent, 'growing': growing, 'falling_behind': behind, 'saturated': saturated,
-                 'live_sentinels': fleet['live_sentinels']}
+                 'live_sentinels': fleet['live_sentinels'], 'not_claiming': not_claiming, 'slots_in_use': slots_in_use, 'claimed_2h': claimed_2h, 'refused_2h': refused_2h}
         # with no Sentinel live nothing is being done at all: that is a problem (a warning, not a note); with Sentinels live it is back-pressure, a note
-        checks.append(_check('sentinel_waiting', 'warning' if fleet['live_sentinels'] else 'problem', 'Sentinel tasks are waiting for a free slot',
+        checks.append(_check('sentinel_waiting', 'warning' if fleet['live_sentinels'] else 'problem',
+                             'Sentinels are not claiming work' if not_claiming else 'Sentinel tasks are waiting for a free slot',
                              f"{waited} task(s) waited for a Sentinel slot in the last six hours ({', '.join(str(r['n']) + ' ' + r['kind'] for r in held[:5])}); "
                              f'their targets stay due and are asked again. {where} {advice}', facts,
-                             severity='info' if fleet['live_sentinels'] else 'warning'))
+                             severity='info' if fleet['live_sentinels'] and not not_claiming else 'warning'))
+
+    # the maintainer's checks (cveFeed/maintainer_checks.py): what the signals say about memory, starved queues and refused claims. A part that could not be read is
+    # no verdict ('unknown'): it neither raises an alert nor resolves one.
+    work = _starvation_inputs(now, bool((system.get('work') or {}).get('paused')), fleet['live_sentinels'])
+    checks.append(_check('memory', **maintainer_checks.memory(signals)))
+    checks.append(_check('queue_starvation', **maintainer_checks.queue_starvation(signals, work)))
+    checks.append(_check('sentinel_claims_refused', **maintainer_checks.claim_refusals(signals)))
 
     # a Sentinel that was registered and approved, was heard from this week, and now none is live: nothing runs, whether or not tasks wait
     if not fleet['live_sentinels']:
@@ -1062,6 +1120,8 @@ def sync_alerts(checks, now=None):
     now = now or timezone.now()
     opened = resolved = 0
     for check in checks:
+        if check['state'] == 'unknown':
+            continue  # no verdict: an open alert is neither refreshed nor resolved (it ages, and is shown as not re-checked: ``open_alerts``)
         alert = AdminAlert.objects.filter(code=check['code'], resolved_at__isnull=True).first()
         if check['state'] == 'ok':
             if alert:
@@ -1098,10 +1158,18 @@ def _watchdog_events(limit=10):
 
 
 def snapshot(now=None, templates_release=None):
-    checks = ops_checks(now, templates_release)
+    """What the reviewer container's operations job is given: the checks that have a verdict, the measurements behind them and auto-tuning's last decisions."""
+    out = {}
+    checks = ops_checks(now, templates_release, _out=out)
     from cveFeed import fleet
-    return {'at': (now or timezone.now()).isoformat(), 'checks': checks, 'codes': list(OPS_CODES), 'watchdog': _watchdog_events(), 'fleet': fleet.fleet_facts(now),
-            'actions': {name: f'at most once every {int(gap.total_seconds() // 60)} minutes' for name, gap in ACTIONS.items()}}
+    system = (out.get('status') or {}).get('system') or {}
+    signals = (system.get('signals') or {}).get('signals') if isinstance(system.get('signals'), dict) else None
+    tuning = system.get('autotune') if isinstance(system.get('autotune'), dict) and 'error' not in system['autotune'] else None
+    snap = {'at': (now or timezone.now()).isoformat(), 'checks': [c for c in checks if c['state'] != 'unknown'], 'codes': list(OPS_CODES), 'watchdog': _watchdog_events(),
+            'fleet': fleet.fleet_facts(now), 'actions': {name: f'at most once every {int(gap.total_seconds() // 60)} minutes' for name, gap in ACTIONS.items()}}
+    if isinstance(signals, dict) or tuning:
+        snap.update(maintainer_checks.brief(signals, tuning))
+    return snap
 
 
 def _run_action(name):
@@ -1174,7 +1242,7 @@ def apply_ops_report(body, now=None):
         if not isinstance(item, dict):
             continue
         check = by_code.get(item.get('code'))
-        if not check or check['state'] == 'ok':
+        if not check or check['state'] in ('ok', 'unknown'):
             continue
         alert = AdminAlert.objects.filter(code=check['code'], resolved_at__isnull=True).first()
         if alert is None:
@@ -1190,7 +1258,7 @@ def apply_ops_report(body, now=None):
         alert.save(update_fields=['ai_detail', 'ai_model', 'severity'])
         updated += 1
     ran, refused = [], []
-    offered = {a for c in checks if c['state'] != 'ok' for a in c['actions']}
+    offered = {a for c in checks if c['state'] not in ('ok', 'unknown') for a in c['actions']}
     for name in (body.get('actions') or [])[:5] if isinstance(body.get('actions'), list) else []:
         if name not in ACTIONS or name not in offered:
             refused.append(str(name)[:40])
@@ -1207,6 +1275,9 @@ def apply_ops_report(body, now=None):
     return {'alerts_updated': updated, 'actions_run': ran, 'actions_refused': refused}
 
 
+ALERT_STALE_AFTER = timedelta(hours=1)  # the checks run every 30 minutes (the watchdog tick, or the beat task): an alert not refreshed for this long was not re-checked
+
+
 def open_alerts(user=None):
     """The open alerts an App Admin sees: not resolved, and not dismissed unless the problem changed since."""
     from cveFeed.models import AdminAlert
@@ -1214,14 +1285,19 @@ def open_alerts(user=None):
     from cveFeed import fleet
     facts = fleet.fleet_facts() if any(a.ai_detail for a in rows) else {}
     out = []
+    now = timezone.now()
     for a in rows:
         if a.dismissed_at and a.dismissed_digest == a.digest:
             continue
         ai_detail = usable_note(a.ai_detail, min_words=DIAGNOSIS_MIN_WORDS)  # a row stored before filler was refused is not shown either
         if ai_detail and fleet.contradicts_fleet(ai_detail, facts):  # advice stored before this guard keeps only the sentences the facts do not contradict
             ai_detail = usable_note(fleet.without_contradictions(ai_detail, facts), min_words=DIAGNOSIS_MIN_WORDS)
-        out.append({'id': a.pk, 'code': a.code, 'severity': a.severity, 'title': a.title, 'detail': a.detail, 'ai_detail': ai_detail,
-                    'ai_model': a.ai_model if ai_detail else '', 'first_seen': a.first_seen.isoformat(), 'last_seen': a.last_seen.isoformat()})
+        detail, age = a.detail, now - a.last_seen
+        stale = a.code in OPS_CODES and age > ALERT_STALE_AFTER  # the check that keeps it current has not run lately: its numbers are old, say so
+        if stale:
+            detail = f'Not re-checked for {maintainer_checks.span(age.total_seconds())}, so this may no longer be true. {detail}'
+        out.append({'id': a.pk, 'code': a.code, 'severity': a.severity, 'title': a.title, 'detail': detail, 'ai_detail': ai_detail, 'stale': stale,
+                    'age_minutes': int(age.total_seconds() // 60), 'ai_model': a.ai_model if ai_detail else '', 'first_seen': a.first_seen.isoformat(), 'last_seen': a.last_seen.isoformat()})
     return out
 
 
