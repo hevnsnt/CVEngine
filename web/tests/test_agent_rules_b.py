@@ -436,3 +436,32 @@ class AnswerWordsTests(TestCase):
         from cveFeed.models import SetupAnswer
         SetupAnswer.objects.create(key='ai_validation', answer='recommend', answered_by=self.q.admin, version=1)
         self.assertEqual(self.q.question('ai_validation')['new_lines'], ['AI host review', 'AI-written checks'])
+
+
+class PersonsMarkTests(Base):
+    """FB-12: the bridge put the old ``updated_by`` back after an agent's save, which also wiped a person's mark made in between. The handler now leaves it alone for an agent."""
+
+    def test_a_person_who_saves_while_an_agent_saves_keeps_their_mark(self):
+        from cveFeed import reviewer
+        from cveFeed.models import ReviewerSettings
+        person = User.objects.create_user('rules_person', password='x')
+        pk = reviewer.settings_row().pk
+        real_audit = __import__('cveFeed.admin_api', fromlist=['audit']).audit
+
+        def a_person_saves_now(*args, **kwargs):  # between the agent's save and the end of its call
+            ReviewerSettings.objects.filter(pk=pk).update(updated_by=person)
+            return real_audit(*args, **kwargs)
+
+        with mock.patch('cveFeed.admin_api.audit', side_effect=a_person_saves_now):
+            bridge.change_setting(self.ctx, 'reviewer', {'review_daily_max': 10})
+        row = ReviewerSettings.objects.get(pk=pk)
+        self.assertEqual((row.review_daily_max, row.updated_by_id), (10, person.pk))
+
+    def test_an_agents_save_still_leaves_nobody_marked_and_a_persons_save_marks_them(self):
+        from cveFeed import reviewer
+        bridge.change_setting(self.ctx, 'reviewer', {'review_daily_max': 10})
+        self.assertIsNone(reviewer.settings_row().updated_by_id)
+        c = Client()
+        c.force_login(self.root)
+        self.assertEqual(c.put('/cve/api/settings/reviewer', json.dumps({'review_daily_max': 9}), content_type='application/json').status_code, 200)
+        self.assertEqual(reviewer.settings_row().updated_by_id, self.root.pk)

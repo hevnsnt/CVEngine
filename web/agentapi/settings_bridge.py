@@ -258,21 +258,7 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
     request.via_agent = True  # a handler that spends the owner's money or widens what runs by itself refuses an agent (settings_api.reviewer_put)
     if method == 'PUT' and name in ('scan_concurrency', 'tunables') and isinstance(values, dict) and isinstance(values.get('values'), dict) and values['values']:
         return _throughput_write(ctx, name, method, fn, request, values, groups)
-    if name == 'reviewer' and method != 'GET':
-        return _keep_the_persons_mark(ctx, name, api, fn, request, groups)
     return _run(ctx, name, api, fn, request, groups)
-
-
-def _keep_the_persons_mark(ctx, name, api, fn, request, groups):
-    """FA-1: the reviewer's handler records who saved the row (``updated_by``), and the update question reads that as "a person chose". An agent's save must not look
-    like a person's choice, so the mark is put back as it was; the audit row (``via_token``) says who made the change."""
-    from cveFeed import reviewer
-    from cveFeed.models import ReviewerSettings
-    before = reviewer.settings_row().updated_by_id
-    try:
-        return _run(ctx, name, api, fn, request, groups)
-    finally:
-        ReviewerSettings.objects.filter(pk=reviewer.settings_row().pk).update(updated_by=before)
 
 
 def _run(ctx, name, api, fn, request, groups):
