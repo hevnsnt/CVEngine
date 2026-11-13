@@ -95,6 +95,31 @@ READ_ONLY_FOR_AGENTS = {
     'ip_allowlist_entry': 'the allowed addresses are the perimeter of the instance; a person changes them in the web interface.',
     'updates_approve': 'approving an update restarts the whole instance; an agent may check for one and read its state, a person presses the button.',
     'setup_questions': 'an answer can switch on a feature the AI provider or the host bills for, or change what is scanned; only a person decides that, in the web interface. An agent can read the questions.',
+    'config_maxxing_reset': 'it puts auto-tuning back on Auto with the AI advisor on, puts every spend cap back to its default (raising any a person lowered) and removes every pin; an agent lowers one number at a time with change_setting, a person resets in the web interface.',
+    'cve_guidance_run': 'it asks the AI model for guidance on up to 5000 CVEs whatever is left of the day\'s budget, which spends past the cap a person set; a person starts it in the web interface.',
+    'scanner_plan': 'the choice of scanner decides whether the built-in scanner runs and counts as the scanner question being answered; only a person chooses, in the web interface. An agent can read the plan.',
+}
+# Entries whose DELETE (``change_setting(..., remove=True)``) an agent may not send although it may change them otherwise: taking the entry away widens something.
+AGENT_CANNOT_REMOVE = {
+    'org_excluded_address': 'removing an exclusion lets the organization scan that address again; an agent may add exclusions, a person lifts them in the web interface.',
+}
+# FB-1 audit: every entry whose change is a POST (an Action, or a save that is sent as a POST) is either refused to agents above or listed here with why it is safe for
+# an agent: none of these raises autonomy, raises a spend cap, removes a person's pin or spends money beyond a cap a person set. A new POST entry is in neither
+# list until someone decides, and ``tests.test_agent_rules_b`` fails until then.
+AGENT_ACTIONS_ALLOWED = {
+    'ai_test': 'one small call to the AI provider already switched on, with a short time-out: it changes nothing',
+    'ai_models': 'lists the models of the provider already set up: it changes nothing',
+    'updates_check': 'asks GitHub for a newer version and records it: nothing is installed',
+    'updates_cancel': 'cancels an update that has not started: the cautious direction',
+    'updates_dismiss': 'hides the update notice: nothing is installed or changed',
+    'email_test': 'one test mail through the mail server a person set up; the mail server and sender are not changed by it',
+    'tailscale_test': 'tries the saved connection: it imports and scans nothing',
+    'tailscale_sync': 'runs the sync as a person configured it (the scope and the scan switch are the person\'s), at most once in 30 seconds',
+    'alert_dismiss': 'hides one notice: nothing is installed or changed',
+    'cve_seed_build': 'builds a file from CVE data already stored: CPU only, no AI call, nothing scanned',
+    'scan_control': 'pausing is the cautious direction; resuming only returns to what a person set',
+    'watchdog': 'a watchdog switch on is the safety net coming back (see AGENT_MAY_SWITCH_ON)',
+    'org_excluded_addresses': 'an exclusion only narrows what is scanned',
 }
 # What the handlers see as the caller's address. Not a loopback address: nothing that trusts the caller's address may take the bridge for the local machine.
 BRIDGE_ADDRESS = ''
@@ -124,7 +149,12 @@ AGENT_NUMBERS_FREE = {
 GENERIC_RULE_SKIPS = ('scan_concurrency', 'tunables', 'autotune')
 # A value an agent may not send for an entry: {entry: {field: the values refused}}. Automatic updates install without a person pressing the button; the
 # two scanner plans that keep the built-in scanner running spend the host's memory.
-AGENT_CANNOT_SET = {'updates': {'mode': ('automatic',)}, 'scanner_plan': {'plan': ('internal', 'both')}}
+AGENT_CANNOT_SET = {'tailscale_project': {'routing': ('host',)}}  # "host" is taken at the operator's word that the Docker host is on the tailnet: scanning of the tailnet begins
+# The only value an agent may send for a field: {entry: {field: the values allowed}}. FB-2: an update is never switched to automatic by an agent (the handler's word is
+# 'auto', which the old rule, spelt 'automatic', let through), whatever word is sent.
+AGENT_ONLY_VALUES = {'updates': {'mode': ('manual',)}}
+# Fields an agent may send only with the value they have now (read-only for an agent): where an install updates from decides what the Update button installs.
+AGENT_READ_ONLY_FIELDS = {'updates': ('repo', 'branch')}
 # Numbers of an entry's body that cost money or work: an agent may only lower them. {entry: {field: how the current number is read}}
 AGENT_LOWER_ONLY = {'ai': ('plan_daily_total', 'plan_daily_per_project', 'cve_guidance_daily', 'auto_fire_max_scans'), 'reviewer': ('review_daily_max',)}
 # Tunables an agent may only lower: every cap (``caution='cap'``, which includes each AI spend cap) and the two switches that widen what is scanned or sent.
@@ -132,6 +162,9 @@ AGENT_LOWER_ONLY = {'ai': ('plan_daily_total', 'plan_daily_per_project', 'cve_gu
 TUNABLE_ONLY_RAISE = ('validate_min_gap_hours',)
 TUNABLE_SWITCHES = ('planner_enabled', 'sentinel_bbot_keys')
 TUNABLE_ZERO_IS_UNLIMITED = ('egress_port25_per_hour',)
+# Lists that decide what is scanned, with which way narrows them (FB-5): an ``only`` list lets less through the fewer entries it has (and an empty one lets everything
+# through), a ``skip`` list the more entries it has. {entry: {field: 'only' | 'skip'}}
+AGENT_SCOPE_LISTS = {'tailscale_project': {'only_tags': 'only', 'only_os': 'only', 'skip_tags': 'skip'}}
 WRITE_METHODS = ('PUT', 'PATCH', 'POST')
 NOT_EXPOSED[('admin', 'openvas')] = 'the same add-on settings as the openvas entry (settings table).'
 IDENTITY_ROUTES_NOT_YET = ('users', 'memberships', 'orgs', 'projects')  # people, roles and organizations: a separate slice, owner to say how far an agent may go
@@ -159,7 +192,7 @@ def catalogue():
         methods = _methods(api, pattern)
         out.append({'name': name, 'what': text, 'id': ident, 'read': 'GET' in methods,
                     'change': name not in READ_ONLY_FOR_AGENTS and next((m for m in methods if m in WRITE_METHODS), None) is not None,
-                    'remove': name not in READ_ONLY_FOR_AGENTS and 'DELETE' in methods})
+                    'remove': name not in READ_ONLY_FOR_AGENTS and name not in AGENT_CANNOT_REMOVE and 'DELETE' in methods})
     return out
 
 
@@ -204,7 +237,9 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
     if method != 'GET':
         require_write_token(ctx)
         if name in READ_ONLY_FOR_AGENTS:
-            raise ApiError(403, f'{name} is not available to agents: {READ_ONLY_FOR_AGENTS[name]}')
+            raise ApiError(403, f'{name} is not available to agents: {READ_ONLY_FOR_AGENTS[name]}; use change_setting on the setting itself where there is one')
+        if method == 'DELETE' and name in AGENT_CANNOT_REMOVE:
+            raise ApiError(403, f'{name} cannot be removed by an agent: {AGENT_CANNOT_REMOVE[name]}')
     if method != 'GET' and isinstance(values, dict):
         for field in AGENT_CANNOT_ENABLE.get(name, ()):
             if values.get(field) not in (None, False):  # anything but off: a string or a number is refused by the handler, and must not slip past here
@@ -223,21 +258,7 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
     request.via_agent = True  # a handler that spends the owner's money or widens what runs by itself refuses an agent (settings_api.reviewer_put)
     if method == 'PUT' and name in ('scan_concurrency', 'tunables') and isinstance(values, dict) and isinstance(values.get('values'), dict) and values['values']:
         return _throughput_write(ctx, name, method, fn, request, values, groups)
-    if name == 'reviewer' and method != 'GET':
-        return _keep_the_persons_mark(ctx, name, api, fn, request, groups)
     return _run(ctx, name, api, fn, request, groups)
-
-
-def _keep_the_persons_mark(ctx, name, api, fn, request, groups):
-    """FA-1: the reviewer's handler records who saved the row (``updated_by``), and the update question reads that as "a person chose". An agent's save must not look
-    like a person's choice, so the mark is put back as it was; the audit row (``via_token``) says who made the change."""
-    from cveFeed import reviewer
-    from cveFeed.models import ReviewerSettings
-    before = reviewer.settings_row().updated_by_id
-    try:
-        return _run(ctx, name, api, fn, request, groups)
-    finally:
-        ReviewerSettings.objects.filter(pk=reviewer.settings_row().pk).update(updated_by=before)
 
 
 def _run(ctx, name, api, fn, request, groups):
@@ -268,6 +289,12 @@ def _agent_body_rules(ctx, name, values, ident=None):
     for field, refused in AGENT_CANNOT_SET.get(name, {}).items():
         if values.get(field) in refused:
             raise ApiError(403, f'{field} {values.get(field)!r} can only be chosen by a person in the web interface; an agent may choose the other way')
+    for field, allowed in AGENT_ONLY_VALUES.get(name, {}).items():
+        if field in values and values[field] not in allowed:
+            raise ApiError(403, f'{field} {values[field]!r} can only be chosen by a person in the web interface; an agent may only choose {" or ".join(map(repr, allowed))}')
+    for field in AGENT_READ_ONLY_FIELDS.get(name, ()):
+        if field in values and values[field] != _current(ctx, name, ident).get(field):
+            raise ApiError(403, f'{field} is read-only for an agent: where the install updates from is a person\'s choice, in the web interface')
     if name == 'autotune' and 'agent_policy' in values:
         raise ApiError(403, 'what agents may do to the throughput settings is a person\'s decision: change it in Settings, Auto-tuning')
     if name == 'autotune':
@@ -277,6 +304,9 @@ def _agent_body_rules(ctx, name, values, ident=None):
             raise ApiError(403, why)
     if name == 'reviewer' and 'ops_hours' in values:
         _ops_hours_rule(values['ops_hours'])
+    for field, kind in AGENT_SCOPE_LISTS.get(name, {}).items():
+        if field in values:
+            _scope_list_rule(ctx, name, field, kind, values[field], ident)
     if name not in GENERIC_RULE_SKIPS:
         _default_deny(ctx, name, values, ident)
     for field in AGENT_LOWER_ONLY.get(name, ()):
@@ -295,6 +325,28 @@ def _ops_hours_rule(hours):
         raise ApiError(403, f'ops_hours: every hour is a paid call to the AI provider, so an agent may only take hours away (now {sorted(now)}); a person adds them in the web interface')
 
 
+def _entries(value):
+    """The entries of a list as the handlers read it (a string is split on spaces and commas; entries are trimmed and unique), or None when it is not a list."""
+    if isinstance(value, str):
+        value = re.split(r'[\s,]+', value)
+    if not isinstance(value, list):
+        return None
+    return {str(item).strip() for item in value if str(item).strip()}
+
+
+def _scope_list_rule(ctx, name, field, kind, new, ident):
+    """FB-5: an agent may narrow a filter list (fewer entries let through, more entries skipped), never widen it: an emptied ``only`` list lets every device in."""
+    entries, now = _entries(new), _entries(_current(ctx, name, ident).get(field))
+    if entries is None or now is None:
+        raise ApiError(403, f'{name}.{field}: an agent may only narrow what is scanned, and this list cannot be compared with the one now; a person sets it in the web interface')
+    if kind == 'only':
+        narrower = bool(entries) and (not now or entries <= now)
+    else:
+        narrower = entries >= now
+    if not narrower:
+        raise ApiError(403, f'{name}.{field}: this would let more devices be scanned (now {sorted(now)}); an agent may only narrow the scope, a person widens it in the web interface')
+
+
 def _flatten(value, prefix=''):
     """{dotted path: leaf} of a nested answer, lists kept whole."""
     if isinstance(value, dict):
@@ -309,6 +361,11 @@ def _current(ctx, name, ident):
     """What the entry's own page shows now, flattened (empty when it cannot be read): the numbers an agent's write is compared with."""
     api, pattern, _text, _ident = ENTRIES[name]
     getter = _find(api, pattern, 'GET')
+    if getter is None and name == 'tailscale_project':  # this entry has no GET of its own: the link is shown by the list
+        from cveFeed import tailscale_admin
+        from cveFeed.models import TailscaleLink
+        link = TailscaleLink.objects.filter(project_id=ident).select_related('project').first() if str(ident).isdigit() else None
+        return _flatten(tailscale_admin.link_dict(link)) if link is not None else {}
     if getter is None:
         return {}
     try:
@@ -328,6 +385,17 @@ def _default_deny(ctx, name, values, ident):
     current = None
     for path, value in sent.items():
         field = path.rsplit('.', 1)[-1]
+        if isinstance(value, str) and value.strip() and not (name in AGENT_NUMBERS_FREE or field in AGENT_LOWER_ONLY.get(name, ())):
+            # a text where the page shows a switch or a number: the handlers coerce it (bool('false') is True, int('5000') is 5000), so it is read as what the field is
+            current = _current(ctx, name, ident) if current is None else current
+            now = next((v for k, v in current.items() if k == path or k.rsplit('.', 1)[-1] == field), None)
+            if isinstance(now, bool):
+                value = True
+            elif isinstance(now, (int, float)):
+                try:
+                    value = float(value.strip())
+                except ValueError:
+                    raise ApiError(403, f'{name}.{field}: a number is expected and an agent may only lower one; a person sets it in the web interface')
         if value is True:
             if (name, field) not in AGENT_MAY_SWITCH_ON:
                 raise ApiError(403, f'{name}.{field}: switching this on can cost money, widen what is scanned or change who may reach the instance, so only a person does it, in the web interface; an agent may switch it off')
@@ -364,6 +432,22 @@ def _tunable_rules(values):
             raise ApiError(403, f'{t.label} is a limit on cost or scope: an agent may only lower it (now {now}); only a person raises it, in the web interface')
 
 
+def _scan_concurrency_rules(values):
+    """FB-5: a scan concurrency number that auto-tuning does not manage (the heavy scanner limits) goes straight to the page's handler, which takes any number in
+    range: an agent may only lower it (a reset to the default counts as the default)."""
+    from cveFeed import scan_concurrency as sc
+    for key, new in values.items():
+        field = sc.BY_KEY.get(key)
+        if field is None:
+            continue  # the handler refuses a key it does not know
+        now = sc.resolve(key)['value']
+        number = sc.resolve(key, {}, {})['value'] if new is None else new
+        if isinstance(number, bool) or not isinstance(number, (int, float)):
+            continue  # the handler refuses a value that is not a number
+        if number > now:
+            raise ApiError(403, f'{field.label} is a limit on how much is scanned at once: an agent may only lower it (now {now}); only a person raises it, in the web interface')
+
+
 def _throughput_write(ctx, name, method, fn, request, values, groups):
     """AM-3: the keys auto-tune manages go to the engine (``autotune.agent_change``); everything else of the same write goes to the page's handler.
     The reply is the page's own answer plus ``agent_changes`` (one result per managed key) and ``agent_summary`` in plain words."""
@@ -374,6 +458,8 @@ def _throughput_write(ctx, name, method, fn, request, values, groups):
     rest = {k: v for k, v in inner.items() if k not in mine}
     if name == 'tunables':
         _tunable_rules(rest)
+    else:
+        _scan_concurrency_rules(rest)
     if not mine:
         return _run(ctx, name, ENTRIES[name][0], fn, request, groups)
     who = _who(ctx)

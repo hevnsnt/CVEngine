@@ -1202,6 +1202,15 @@ def _clean_limits(value):
     return out
 
 
+def _refuse_wider_limits(now, new):
+    """The limits an agent has are replaced as a whole (a key left out is no limit): a token may keep or tighten each one, never drop or loosen one."""
+    for key in ('capabilities', 'projects'):
+        if key in now and not (key in new and set(map(str, new[key])) <= set(map(str, now[key]))):
+            raise ApiError(403, f'limits.{key}: an agent may only tighten what an agent is limited to; a person loosens it in the web interface')
+    if 'max_concurrent' in now and not new.get('max_concurrent', MAX_CONCURRENT_CAP + 1) <= now['max_concurrent']:
+        raise ApiError(403, 'limits.max_concurrent: an agent may only lower it; a person raises it in the web interface')
+
+
 def update_agent(ctx, agent_id, body):
     """An administrator approves, limits, suspends or revokes an agent: ``status`` (active, suspended, revoked), ``note`` and ``limits``.
     A suspended or revoked agent loses its leases at once; a tighter limit releases what it no longer allows."""
@@ -1220,6 +1229,12 @@ def update_agent(ctx, agent_id, body):
     if 'update' in body and body['update'] != 'now':
         raise ApiError(400, 'update must be "now"')
     before = {'status': agent.status, 'limits': agent.limits}
+    if ctx.token is not None:  # an API token or MCP call (FB-5): it may narrow what an agent does, never widen it
+        if 'limits' in body:
+            _refuse_wider_limits(agent.limits or {}, _clean_limits(body['limits']))
+        if 'settings' in body:
+            from agentapi import sentinel_settings
+            sentinel_settings.refuse_wider_raw(agent, body['settings'])
     if 'status' in body:
         if body['status'] not in ADMIN_STATUSES:
             raise ApiError(400, f'status must be one of {", ".join(ADMIN_STATUSES)}')

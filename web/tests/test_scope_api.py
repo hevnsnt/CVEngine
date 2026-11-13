@@ -26,10 +26,11 @@ class ScopeApiTests(TestCase):
 
 	def test_the_scope_can_be_switched_and_is_validated(self):
 		url = f'/api/v1/projects/scp6/targets/{self.tenant.id}/scope'
-		status, data = call(self.token, 'POST', url, {'scope_mode': 'parent'})
-		self.assertEqual((status, data['scope_mode'], data['host_scoped']), (200, 'parent', False))
+		self.assertEqual(call(self.token, 'POST', url, {'scope_mode': 'parent'})[0], 403)  # a token may only narrow the scope (FB-5)
+		status, data = call(self.token, 'POST', url, {'scope_mode': 'host'})
+		self.assertEqual((status, data['scope_mode'], data['host_scoped']), (200, 'host', True))
 		self.tenant.refresh_from_db()
-		self.assertEqual(self.tenant.scope_mode, 'parent')
+		self.assertEqual(self.tenant.scope_mode, 'host')
 		self.assertEqual(call(self.token, 'POST', url, {'scope_mode': 'everything'})[0], 400)
 		self.assertEqual(call(self.token, 'POST', url, {})[0], 400)
 		self.assertEqual(call(self.read_token, 'POST', url, {'scope_mode': 'host'})[0], 403)
