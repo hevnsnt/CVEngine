@@ -31,7 +31,7 @@ An answer is carried out through the same Settings handler the Settings page use
 
 To see what it would do without changing anything, run `python3 scripts/host-review.py` in the install directory; add `--apply` to let it. It never asks a question and never blocks an update.
 
-What an operator needs to know in one place is in [1.4-OPERATOR-NOTES.md](1.4-OPERATOR-NOTES.md). Update from 1.3.x the way you always do: the in-app updater, `scripts/update.sh`, or automatic deployment ([UPDATES.md](UPDATES.md)). The update takes a database dump just before it migrates (`scripts/db-backup.sh`, the last 3 are kept) and a migration is never rolled back. 1.4 is still on the `1.4-develop` line; the version string it reports is `v1.4.0` (`web/.version`, shown on the About page). This is a version string only: no 1.4 release has been made, and nothing here tells you to wait for one. A fresh install needs none of this.
+What an operator needs to know in one place is in [1.4-OPERATOR-NOTES.md](1.4-OPERATOR-NOTES.md). Update from 1.3.x the way you always do: the in-app updater, `scripts/update.sh`, or automatic deployment ([UPDATES.md](UPDATES.md)). The update takes a database dump just before it migrates (`scripts/db-backup.sh`, the last 3 are kept) and a migration is never rolled back. The version it reports is `v1.4.0` (`web/.version`, shown on the About page). A fresh install needs none of this.
 
 **The one change that matters: the server no longer scans.** Every scan runs on a Sentinel ([SENTINELS.md](SENTINELS.md), [SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECTURE.md)).
 

@@ -46,7 +46,7 @@ Attack surface tools find assets. Vulnerability scanners find flaws. Threat feed
 | **Hunt** | A [bug bounty workbench](docs/BUG-BOUNTY.md): program scope from HackerOne, Bugcrowd, Intigriti, and YesWeHack, and report drafts |
 | **Bring your own AI** | Anthropic, OpenAI, OpenRouter, Ollama, LM Studio, or vLLM. Without a model it still discovers, scans, matches, and validates |
 
-## New in 1.4 (in development)
+## New in 1.4
 
 ### Every scan runs on a Sentinel
 
@@ -63,7 +63,7 @@ The server runs no scan tool. Every install starts a **built-in scanner** next t
 - **AI reviewer.** A [boxed-in container](docs/AI-REVIEWER.md) reviews every open finding once and checks operations.
 - **OpenVAS** is a Greenbone stack on a Sentinel, off until you turn it on ([OpenVAS](docs/OPENVAS.md)).
 - **Screenshots** are taken by a Sentinel's headless Chromium.
-- **The left rail has 6 links** (Overview, Findings, Hosts, Scans, Scanners, Bug bounty); Settings, Administration and About are in the footer.
+- **The left rail has eight entries** (Overview, Findings, Hygiene, Hosts, Suppliers, Scans, Scanners, Bug bounty; seven for people not authorised for Bug bounty, and three or four when no project is selected); Settings, Administration, API keys and About are in the account menu.
 
 Upgrading from 1.3: [upgrading to 1.4](docs/UPGRADE.md#upgrading-to-14). Everything the product is built from, with versions and licenses, is on the About page and in [THIRD-PARTY.md](THIRD-PARTY.md).
 
