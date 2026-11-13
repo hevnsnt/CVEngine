@@ -90,6 +90,7 @@ class ReadTests(ApiFixture):
         self.assertEqual(by_id[self.m1.pk]['summary'], 'real')
         self.assertEqual(by_id[second.pk]['summary'], 'false_positive')
         self.assertEqual(by_id[second.pk]['finding']['type'], 'match')
+        self.assertEqual(by_id[second.pk]['link'], f'/cve/{self.proj.slug}/vulns/#match-{second.pk}')
         self.assertEqual((by_id[second.pk]['title'], by_id[second.pk]['reason_code']), (second.cve_entry.cve_id, 'version_not_affected'))
         self.assertEqual(by_id[second.pk]['outcome'], 'closed')
         self.assertEqual((shown['counts']['real'], shown['counts']['false_positive'], shown['counts']['closed']), (1, 1, 1))
@@ -103,7 +104,7 @@ class ReadTests(ApiFixture):
     def test_a_step_that_names_a_finding_says_which(self):
         review = self.applied(action='validate_match', target='f1', mode='recommend')
         step = self.get()[1]['review']['step']
-        self.assertEqual(step['target'], {'type': 'match', 'id': self.m1.pk, 'title': self.m1.cve_entry.cve_id})
+        self.assertEqual(step['target'], {'type': 'match', 'id': self.m1.pk, 'title': self.m1.cve_entry.cve_id, 'link': f'/cve/{self.proj.slug}/vulns/#match-{self.m1.pk}'})
         self.assertTrue(step['can_start'])
 
     def test_a_step_started_on_its_own_is_shown_as_started_and_cannot_be_started_or_dismissed(self):

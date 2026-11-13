@@ -57,6 +57,13 @@ def readiness(project, host):
     return {'can_request': True, 'reason_code': '', 'reason': ''}
 
 
+def _link(project, kind, finding_id):
+    """The page that opens one finding (the same links Situations uses)."""
+    if kind == 'hygiene':
+        return f'/cve/{project.slug}/hygiene/#hygiene-{finding_id}'
+    return f'/cve/{project.slug}/vulns/#{kind}-{finding_id}'
+
+
 def _titles(project, triage_ids):
     """``{triage id: (kind, finding id, title)}`` for findings of this project a review named, whether or not they are still open."""
     from cveFeed.models import Triage
@@ -87,7 +94,7 @@ def _findings(review, project):
         if row is None or int(pk) not in found:
             continue
         kind, finding_id, title = found[int(pk)]
-        out.append({'finding': {'type': kind, 'id': finding_id}, 'title': title, 'verdict': row.verdict,
+        out.append({'finding': {'type': kind, 'id': finding_id}, 'link': _link(project, kind, finding_id), 'title': title, 'verdict': row.verdict,
                     'summary': 'real' if row.verdict in REAL else 'false_positive' if row.verdict == 'false_positive' else 'uncertain',
                     'confidence': row.confidence, 'reason_code': row.reason_code, 'note': row.note, 'outcome': row.outcome, 'held_reason': row.held_reason})
     return out
@@ -105,7 +112,7 @@ def _step(review, project):
     if ref:
         found = _titles(project, [int(ref)]).get(int(ref))
         if found:
-            target = {'type': found[0], 'id': found[1], 'title': found[2]}
+            target = {'type': found[0], 'id': found[1], 'title': found[2], 'link': _link(project, found[0], found[1])}
     proposed = review.status == 'applied' and review.step_state == 'proposed'
     sent = review.status == 'applied' and review.step_action == 'ask_person' and review.step_state == 'done'
     return {'action': review.step_action, 'description': spec[3] if spec else '', 'what_it_touches': spec[1] if spec else '', 'target': target,

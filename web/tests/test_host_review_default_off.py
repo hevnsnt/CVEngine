@@ -113,3 +113,23 @@ class TurningItOnTests(DefaultOffFixture):
         response = self.client.put(url, data=json.dumps({'host_review_mode': 'auto'}), content_type='application/json')  # a person in the web interface
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(host_review.mode_of(self.proj), 'auto')
+
+
+class PerProjectModeTests(DefaultOffFixture):
+    def test_settings_lists_every_project_with_its_mode_and_a_person_changes_them(self):
+        data = self.client.get('/cve/api/settings/reviewer').json()
+        modes = {p['slug']: p['mode'] for p in data['host_review_projects']}
+        self.assertEqual(modes[self.proj.slug], 'recommend')
+        response = self.put(host_review_modes={self.proj.slug: 'auto', self.other.slug: 'off'})
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual((host_review.mode_of(self.proj), host_review.mode_of(self.other)), ('auto', 'off'))
+        self.assertEqual(self.put(host_review_modes={'nope': 'off'}).status_code, 404)
+        self.assertEqual(self.put(host_review_modes={self.proj.slug: 'sometimes'}).status_code, 400)
+
+    def test_an_agent_may_list_and_lower_but_not_set_automatic(self):
+        err, text = tool_call(self.token, 'change_setting', {'name': 'reviewer', 'values': {'host_review_modes': {self.proj.slug: 'auto'}}})
+        self.assertTrue(err)
+        self.assertEqual(host_review.mode_of(self.proj), 'recommend')
+        err, data = tool_call(self.token, 'change_setting', {'name': 'reviewer', 'values': {'host_review_modes': {self.proj.slug: 'off'}}})
+        self.assertFalse(err, data)
+        self.assertEqual(host_review.mode_of(self.proj), 'off')

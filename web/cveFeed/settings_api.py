@@ -1180,11 +1180,13 @@ MODEL_NAME = re.compile(r'^[A-Za-z0-9._:/@+-]{0,100}$')
 def reviewer_get(request):
     from agentapi import builtin_reviewer
     from cveFeed import ai_jobs, host_review, reviewer
+    from dashboard.models import Project
     row, provider = reviewer.settings_row(), reviewer.provider_row()
     out = {'enabled': row.enabled, 'env_enabled': reviewer.env_enabled(), 'review_model': row.review_model, 'ops_model': row.ops_model,
            'auto_close': row.auto_close, 'review_daily_max': row.review_daily_max, 'ops_hours': reviewer.ops_hours(row),
            'host_review_enabled': row.host_review_enabled, 'host_review_daily_max': row.host_review_daily_max,
            'host_review_auto_per_project_day': row.host_review_auto_per_project_day, 'host_reviews_today': host_review.reviews_today(),
+           'host_review_projects': [{'slug': p.slug, 'name': p.name, 'mode': host_review.mode_of(p)} for p in Project.objects.order_by('name')[:500]],
            'default_ops_hours': list(reviewer.DEFAULT_OPS_HOURS), 'default_models': reviewer.DEFAULT_MODELS,
            'reviews_today': reviewer.reviews_today(), 'last_ops_at': row.last_ops_at.isoformat() if row.last_ops_at else None,
            'container': builtin_reviewer.status(), 'working': reviewer.enabled(row, provider)}
@@ -1241,6 +1243,21 @@ def reviewer_put(request):
                 raise SettingsError(403, 'an agent may lower this limit; only a person raises it, in Settings in the web interface')
             setattr(row, name, value)
             fields.append(name)
+    modes = data.get('host_review_modes')  # {project slug: auto | recommend | off}: the same setting as the host page's, listed here so there is one obvious place
+    if modes is not None:
+        from cveFeed.models import ProjectSettings
+        from dashboard.models import Project
+        if not isinstance(modes, dict) or len(modes) > 500 or not all(isinstance(k, str) and v in ProjectSettings.HOST_REVIEW_MODES for k, v in modes.items()):
+            raise SettingsError(400, 'host_review_modes is {project slug: auto, recommend or off}')
+        if via_agent and 'auto' in modes.values():
+            raise SettingsError(403, 'only a person sets a project to automatic, in Settings in the web interface')
+        projects = {p.slug: p for p in Project.objects.filter(slug__in=list(modes))}
+        if set(modes) - set(projects):
+            raise SettingsError(404, 'no such project: ' + ', '.join(sorted(set(modes) - set(projects))[:5]))
+        for slug, mode in modes.items():
+            ProjectSettings.objects.update_or_create(project=projects[slug], defaults={'host_review_mode': mode, 'updated_by': request.user})
+        from cveFeed.admin_api import audit
+        audit(request.user, 'settings.reviewer', 'AI host review mode per project', projects=sorted(modes))
     if 'ops_hours' in data:
         hours = data['ops_hours']
         if not isinstance(hours, list) or len(hours) > 24 or not all(isinstance(h, int) and not isinstance(h, bool) and 0 <= h <= 23 for h in hours):
