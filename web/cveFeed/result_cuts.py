@@ -80,8 +80,26 @@ _NAMES = {
 }
 
 
+# Cuts that are a setting at work, not a loss: the nuclei run left these installed checks out on purpose. They are said once as a plain sentence, never as a warning.
+INFORMATIONAL = ('templates_with_credentials', 'templates_unreadable')
+
+
+def informational(cut):
+    """The plain sentence of an ``INFORMATIONAL`` cut ("377 checks that send a fixed credential were left out; turn on ... to run them"), else ``None``."""
+    count = cut.get('dropped')
+    if cut.get('what') == 'templates_with_credentials' and count:
+        return (f"{count} check{'s' if count != 1 else ''} that send{'' if count != 1 else 's'} a fixed credential {'were' if count != 1 else 'was'} left out; "
+                "turn on 'Allow checks that send credentials' to run them")
+    if cut.get('what') == 'templates_unreadable' and count:
+        return f"{count} installed check{'s' if count != 1 else ''} that could not be read or parsed {'were' if count != 1 else 'was'} left out"
+    return None
+
+
 def words(cut):
     """One cut in plain words: "findings: 120 dropped (kept 500)", "stopped at its time limit (480 s)", "banner text: 14 characters clipped (limit 1024)"."""
+    sentence = informational(cut)
+    if sentence:
+        return sentence
     what = _NAMES.get(cut.get('what'), str(cut.get('what') or 'something').replace('_', ' '))
     where = f" on {cut['target']}" if cut.get('target') else ''
     limit = cut.get('limit')
@@ -95,12 +113,14 @@ def words(cut):
     return f'{what}{where}: {dropped} {unit}{tail}'
 
 
-def summary(result):
+def summary(result, losses_only=False):
     """Every cut of a stored result as plain sentences: its ``cuts``, the findings it kept only the strongest of (``dropped_findings``) and the ones on hosts the
     task did not name (``dropped``). [] for a result nothing was cut from (and for a result of a contract 4 Sentinel that sent no ``cuts``)."""
     if not isinstance(result, dict):
         return []
     rows = merged(clean(result.get('cuts')))
+    if losses_only:  # leave out what a setting did on purpose (``INFORMATIONAL``): it is said on its own
+        rows = [r for r in rows if r['what'] not in INFORMATIONAL]
     seen_findings = any(r['what'] == 'findings' for r in rows)
     out = [words(r) for r in rows]
     dropped_findings = _count(result.get('dropped_findings'))

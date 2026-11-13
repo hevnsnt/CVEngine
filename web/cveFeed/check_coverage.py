@@ -16,7 +16,8 @@ States, per check and host:
   ``CVENGINE_TTL_<KIND>`` override; a check that has no ledger kind is judged by its scan stage, ``STAGE_TTL_HOURS``).
 * ``due``: it applies and never ran, ran longer ago than its window, or its last attempt failed.
 
-``coverage`` returns ``{done, applicable, paused, internal, checks: [{id, label, state, last_run, ttl_hours, detail}]}`` (``internal`` is the declared
+``coverage`` returns ``{done, applicable, paused, internal, checks: [{id, label, state, last_run, ttl_hours, detail}], no_check: [{port, target, state, last_run, detail}]}``
+(``no_check`` names each open port a nuclei service run found no check for, "Port 9200: no check exists for this service": neither a pass nor a gap, never counted in ``done`` or ``applicable``) (``internal`` is the declared
 network of a host inside one, else null: such a host is judged by what the internal scan runs, see "hosts inside a declared internal network"); the single-host view also
 carries ``units`` (the addresses, ports or CVEs a check is judged on). ``done`` of ``applicable`` is the "NN of NNN applicable checks done"
 the host page shows.
@@ -257,6 +258,37 @@ def _tls_numbers(h, starttls=False):
     return sorted(numbers)[:MAX_UNITS]
 
 
+def _tcp_ports(h):
+    """``[(number, Addr)]``: each open TCP port of the host once (the first address that has it), at most ``MAX_UNITS * 4``."""
+    seen = {}
+    for entry in h.addresses.values():
+        for p in entry.ports:
+            if p.protocol in TCP and getattr(p, 'state', 'open') == 'open' and p.number not in seen:
+                seen[p.number] = entry
+    return sorted(seen.items())[:MAX_UNITS * 4]
+
+
+NO_CHECK_REASON = 'no check exists for this service'
+
+
+def no_check_ports(h, ev):
+    """``[{'port', 'target', 'state': 'no_check', 'last_run', 'detail'}]``: the ports of the host a nuclei service run answered "no check exists for this service"
+    for (``ledger.nocheck_service``), inside that kind's window and under the allowlist now in use. Not a pass and not a gap: never counted in ``done`` or
+    ``applicable``."""
+    from cveFeed import ledger
+    release, out = ledger.allowlist_release(), []
+    for number, entry in _tcp_ports(h):
+        best = None
+        for asset in (f'{h.name}:{number}', f'{_norm(entry.address)}:{number}'):
+            for service, status, when in ev.ledger.get(('nuclei-nocheck', h.project_id, _norm(asset)), ()):
+                if (status == 'done' and when and service.split(':')[1:2] == [release] and (ev.now - when).total_seconds() <= ledger.ttl(service)
+                        and (best is None or when > best[1])):
+                    best = (asset, when)
+        if best:
+            out.append({'port': number, 'target': best[0], 'state': 'no_check', 'last_run': best[1].isoformat(), 'detail': f'Port {number}: {NO_CHECK_REASON}'})
+    return out
+
+
 def _rdp_ports(h):
     from cveFeed import service_intel
     return sorted({(a.address, p.number) for a in h.scannable() for p in a.ports
@@ -313,6 +345,8 @@ def load(entries, now=None):
             assets.update((_norm(entry.address), _norm(_udp_asset(entry))))
         for number in _tls_numbers(h, starttls=True):
             assets.add(f'{h.name}:{number}')
+        for number, _entry in _tcp_ports(h):  # the ports a nuclei service run may have answered "no check exists for this service" for
+            assets.update((f'{h.name}:{number}', f"{_norm(_entry.address)}:{number}"))
         for address, number in _rdp_ports(h):
             assets.add(f'{address}:{number}')
         for address, number in _ssh_ports(h):  # the ledger rows of the SSH inspection are per endpoint: without them an inspected endpoint read as never run
@@ -996,7 +1030,8 @@ def coverage(h, ev, rich=False, paused=''):
                 entry['units'] = [{'unit': u.label, 'state': 'done' if u.fresh(ev.now) else 'due',
                                    'last_run': u.last().isoformat() if u.last() else None} for u in plan]
         rows.append(entry)
-    return {'done': done, 'applicable': applicable, 'paused': paused, 'internal': h.internal or None, 'checks': rows}
+    return {'done': done, 'applicable': applicable, 'paused': paused, 'internal': h.internal or None, 'checks': rows,
+            'no_check': [] if paused else no_check_ports(h, ev)}
 
 
 def for_host(ev, sub, others, project_id, *, excluded=False, shared_platform=False, hot_cves=(), unversioned=0, probe_rows=(), root=None, rich=False):

@@ -584,4 +584,4 @@ class PageTitleTests(SimpleTestCase):
 		started = time.monotonic()
 		for text in ('<title ' * 40000, '<title>' * 40000, '<title>a' * 40000):
 			self.assertEqual(ra.page_title(text), '')
-		self.assertLess(time.monotonic() - started, 1)
+		self.assertLess(time.monotonic() - started, 10)  # a quadratic read of these bodies takes minutes

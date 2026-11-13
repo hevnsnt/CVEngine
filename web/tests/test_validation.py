@@ -47,6 +47,94 @@ http:
 """
 
 
+def _with_headers(headers='', path='{{BaseURL}}/x', extra=''):
+    return ("id: c\ninfo: {name: c, severity: info}\n" + extra + "http:\n  - method: GET\n    path: [\"" + path + "\"]\n"
+            + ("    headers:\n" + ''.join(f"      {k}: \"{v}\"\n" for k, v in headers.items()) if headers else '')
+            + "    matchers:\n      - type: word\n        words: [ok]\n")
+
+
+class CredentialInATemplateTests(TestCase):
+	"""TL-2 item 3: a template that sends a credential of its own is refused unless an App Admin allowed credential checks (never for an AI-written one)."""
+	HOSTILE = {
+		'basic': _with_headers({'Authorization': 'Basic YWRtaW46YWRtaW4='}),
+		'bearer': _with_headers({'Authorization': 'Bearer abc123def456'}),
+		'cookie': _with_headers({'Cookie': 'PHPSESSID=0123456789abcdef'}),
+		'api_key': _with_headers({'X-Api-Key': 'letmein'}),
+		'function': _with_headers({'Authorization': "Basic {{base64('admin:admin')}}"}),
+		'userinfo': _with_headers(path='http://admin:admin@{{Hostname}}/'),
+		'raw': "id: c\ninfo: {name: c, severity: info}\nhttp:\n  - raw:\n      - |\n        GET /s HTTP/1.1\n        Host: {{Hostname}}\n        Authorization: Basic YWRtaW46YWRtaW4=\n",
+		'variable': _with_headers({'Authorization': 'Bearer {{tok}}'}, extra='variables:\n  tok: "s3cret-value"\n'),
+	}
+	FINE = {
+		'placeholder': _with_headers({'Authorization': 'Bearer {{token}}'}),  # what a signed-in run's secrets file or an extractor supplies
+		'echoed_cookie': _with_headers({'Cookie': 'PHPSESSID={{sid}}'}),
+		'user_agent': _with_headers({'User-Agent': 'cvengine-check/1.0'}),
+		'plain': GET_TEMPLATE,
+	}
+
+	def test_the_read_only_rule_refuses_each_fixed_credential_and_passes_the_placeholders(self):
+		for name, text in self.HOSTILE.items():
+			with self.subTest(hostile=name):
+				self.assertTrue(validation.credential_problem(text).startswith('template not validated: it sends a credential'), name)
+				self.assertTrue(validation.readonly_problem(text), name)  # a user name in a URL is also a destination the rule never allowed
+				if name != 'userinfo':
+					self.assertTrue(validation.readonly_problem(text).startswith('template not validated: it sends a credential'), name)
+					self.assertEqual(validation.readonly_problem(text, allow_credentials=True), '')  # only an installed template is ever given this
+		for name, text in self.FINE.items():
+			with self.subTest(fine=name):
+				self.assertEqual(validation.readonly_problem(text), '')
+
+	def test_an_installed_template_needs_the_switch_under_either_policy(self):
+		from dashboard.models import ScanPolicy
+		hostile = self.HOSTILE['basic']
+		for everything in (False, True):
+			ScanPolicy.objects.all().delete()
+			ScanPolicy.objects.create(nuclei_all_templates=everything)
+			self.assertTrue(validation.installed_template_problem(hostile), everything)
+			self.assertEqual(validation.installed_template_problem(self.FINE['placeholder']), '')
+			ScanPolicy.objects.update(allow_credential_checks=True)
+			self.assertEqual(validation.installed_template_problem(hostile), '', everything)
+
+	def test_the_approved_snapshot_leaves_such_a_template_out_until_the_switch_is_on(self):
+		from dashboard.models import ScanPolicy
+		ScanPolicy.objects.create(nuclei_all_templates=True)
+		with tempfile.TemporaryDirectory() as root:
+			os.makedirs(os.path.join(root, 'http'))
+			for name, text in (('plain', GET_TEMPLATE), ('basic', self.HOSTILE['basic'])):
+				with open(os.path.join(root, 'http', f'{name}.yaml'), 'w') as output:
+					output.write(text)
+			with mock.patch.object(templategen, 'TEMPLATES_ROOT', root):
+				nuclei_scan._APPROVED.update(value=None, root=None, rev=None, at=0)
+				directory, _revision, count = nuclei_scan.approved_templates()
+				self.assertEqual((count, sorted(os.listdir(os.path.join(directory, 'http')))), (1, ['plain.yaml']))
+				ScanPolicy.objects.update(allow_credential_checks=True)
+				nuclei_scan._APPROVED.update(value=None, root=None, rev=None, at=0)
+				directory, _revision, count = nuclei_scan.approved_templates()
+				self.assertEqual(count, 2)
+
+	def test_an_ai_written_check_never_gets_the_switch(self):
+		from agentapi import ai_checks
+		from dashboard.models import ScanPolicy
+		ScanPolicy.objects.create(nuclei_all_templates=True, allow_credential_checks=True)
+		for text in self.HOSTILE.values():
+			self.assertTrue(ai_checks.external_problem(text))  # an external Sentinel's check
+			self.assertTrue(validation.readonly_problem(text))  # the default: nobody passes allow_credentials for generated text
+
+	def test_a_builtin_check_with_every_template_allowed_still_needs_the_switch(self):
+		from agentapi import ai_checks
+		from dashboard.models import ScanPolicy
+		ScanPolicy.objects.create(nuclei_all_templates=True)
+		hostile = self.HOSTILE['basic']
+		self.assertTrue(ai_checks.approval_problem('test', hostile, builtin=True))
+		self.assertEqual(ai_checks.approval_problem('test', self.FINE['placeholder'], builtin=True), '')
+		ScanPolicy.objects.update(allow_credential_checks=True)
+		self.assertEqual(ai_checks.approval_problem('test', hostile, builtin=True), '')
+
+	def test_the_template_policy_revisions_moved_so_hosts_are_judged_again(self):
+		self.assertNotIn(nuclei_scan.TEMPLATE_POLICY_REV, ('readonly-1', 'readonly-2'))
+		self.assertNotIn(nuclei_scan.ALL_TEMPLATES_REV, ('all-1', 'all-2'))
+
+
 class AllTemplatesSettingTests(TestCase):
 	"""Settings > Scan engines can let every installed Nuclei template run (the default); off, only read-only ones do."""
 	def setUp(self):
