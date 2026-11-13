@@ -1014,6 +1014,54 @@ def agent_change(user, values, who='an agent'):
     return out
 
 
+# --- a kind that fails every time on a Sentinel is paused there for a while -------------------------------------------------------------
+
+PAUSE_WINDOW_HOURS = 2     # the failures counted are those of this long
+PAUSE_FAILURES = 3         # a Sentinel that failed a kind this many times and finished none in the window has the kind paused
+PAUSE_HOURS = (2, 4, 6)    # the first pause, the second within a day, the third and later (``sentinel_policy.PAUSE_MAX_HOURS`` holds the last)
+
+
+def pause_failing_kinds(mode, now_dt):
+    """The knob for ``Sentinel kind pause``: a task kind that failed ``PAUSE_FAILURES`` times on one Sentinel and finished none there in the last
+    ``PAUSE_WINDOW_HOURS`` (counted from the end of that Sentinel's last pause of the kind, so a pause is never repeated on the failures that caused it) is paused
+    on that Sentinel for 2 hours, 4 on the second pause within a day, then 6: ``sentinel_policy.pause`` records an expiry, so the pause always ends by itself, and
+    refuses when two other kinds are paused already or when this is the last Sentinel that can run the kind. Only in mode Auto (in Suggest nothing is paused: a
+    pause is not a number a person can apply with a click). Each pause is a ``TuningDecision`` (setting ``sentinel_pause:<kind>``, ``phase='pause'``, the new
+    value is the hours) and an audit entry. It is not verified afterwards: it expires on its own, which is the bound. Returns the pauses made."""
+    from agentapi import sentinel_policy
+    from agentapi.models import Agent, SentinelTask
+    if mode != 'auto':
+        return []
+    made = []
+    for agent in Agent.objects.filter(kind='scanner', status='active'):
+        stored = ((agent.managed_settings or {}).get('pauses') or {}).get('value') or {}
+        active = sentinel_policy.active_pauses(agent, now_dt)
+        for kind in SentinelTask.KINDS:
+            if kind in active:
+                continue
+            ended = sentinel_policy._until(stored.get(kind) or {}) if isinstance(stored.get(kind), dict) else None
+            since = max(now_dt - timedelta(hours=PAUSE_WINDOW_HOURS), ended) if ended else now_dt - timedelta(hours=PAUSE_WINDOW_HOURS)
+            rows = SentinelTask.objects.filter(agent=agent, kind=kind, finished_at__gte=since, status__in=('done', 'failed'))
+            if rows.filter(status='done').exists() or rows.filter(status='failed').count() < PAUSE_FAILURES:
+                continue
+            from cveFeed.models import TuningDecision
+            earlier = TuningDecision.objects.filter(setting=f'sentinel_pause:{kind}', signals__agent_id=agent.pk, created_at__gte=now_dt - timedelta(days=1)).count()
+            hours = PAUSE_HOURS[min(earlier, len(PAUSE_HOURS) - 1)]
+            reason = f'{kind} failed {rows.filter(status="failed").count()} times in a row on {agent.name} and finished none'
+            try:
+                until = sentinel_policy.pause(agent, kind, hours, reason, by='auto-tuning', now=now_dt)
+            except sentinel_policy.PauseRefused as exc:
+                logger.info('auto-tune: %s not paused on %s: %s', kind, agent.name, exc)
+                continue
+            decision = _record(setting=f'sentinel_pause:{kind}', old_value=None, new_value=hours, mode=mode, source='controller', action='pause', layer='',
+                               applied=True, pressure=True, phase='pause', reason=f'{reason}; paused until {until.isoformat(timespec="minutes")}',
+                               signals={'sentinel': agent.name, 'agent_id': agent.pk, 'kind': kind, 'until': until.isoformat()})
+            _audit(None, 'autotune.pause', f'{agent.name}:{kind}', hours=hours, until=until.isoformat(), reason=reason, decision_id=decision.pk)
+            _activity(f'Auto-tuning paused {sentinel_policy.label(kind)} on {agent.name} for {hours} hours: {reason}', setting=decision.setting, decision_id=decision.pk)
+            made.append({'sentinel': agent.name, 'kind': kind, 'hours': hours, 'until': until.isoformat(), 'id': decision.pk})
+    return made
+
+
 def _watchdog_memory_pause(now):
     """When the watchdog's pause for memory pressure began (seconds since the epoch), or None when scanning is not paused by it for memory (a
     person's pause, an update's and a disk pause are not memory evidence)."""
@@ -1109,6 +1157,10 @@ def run(now_dt=None):
     if mode == 'auto':
         summary['verified'] = verify_pending(now_dt, samples)
         row = settings_row()  # a revert just wrote the tuned numbers
+        try:
+            summary['paused_kinds'] = pause_failing_kinds(mode, now_dt)
+        except Exception:  # noqa: BLE001 - a pause that could not be made never stops the round
+            logger.warning('auto-tune: the failing-kind check could not run', exc_info=True)
     rows = _saved_rows()
     tuned = _clean_values(row.values) if mode == 'auto' else {}
     facts = policy.steady_facts(samples) if samples else {}  # a Sentinel that missed one heartbeat still counts for sizing
@@ -1356,7 +1408,7 @@ def list_decisions(setting=None, limit=50, offset=0):
     out = []
     for d in rows[:limit]:
         item = serialize(d)
-        if d.applied and d.resolution != 'reverted' and d.action not in ('revert', 'release'):
+        if d.applied and d.resolution != 'reverted' and d.action not in ('revert', 'release', 'pause'):
             if d.setting not in latest:
                 newest = _latest_applied(d.setting)
                 latest[d.setting] = newest.pk if newest else None

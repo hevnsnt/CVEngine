@@ -320,9 +320,15 @@ def maintainer(now):
     for entry in (maintainer_signals.lanes(now).get('lanes') or []):
         if isinstance(entry.get('restarts_24h'), int):
             restarts.append(entry['restarts_24h'])
-    lanes = {entry['lane']: {'percent': entry.get('percent_of_limit') if entry.get('state') == 'known' else None, 'restarts_24h': entry.get('restarts_24h')}
-             for entry in (maintainer_signals.lanes(now).get('lanes') or []) if entry.get('lane')}
-    return {'oom_kills_24h': sum(oom) if oom else None, 'lane_restarts_24h': sum(restarts) if restarts else None, 'lanes': lanes}
+    return {'oom_kills_24h': sum(oom) if oom else None, 'lane_restarts_24h': sum(restarts) if restarts else None}
+
+
+def lane_memory(now):
+    """``{lane: {'percent', 'restarts_24h'}}``: each Celery lane's memory as a share of its container's limit (None when not known) and the restarts seen on it in
+    the last 24 hours, the numbers the lane rule of ``autotune_policy._lane_trouble`` reads."""
+    from agentapi import maintainer_signals
+    return {entry['lane']: {'percent': entry.get('percent_of_limit') if entry.get('state') == 'known' else None, 'restarts_24h': entry.get('restarts_24h')}
+            for entry in (maintainer_signals.lanes(now).get('lanes') or []) if entry.get('lane')}
 
 
 def starve(now):
@@ -361,6 +367,7 @@ def collect(now=None, boot=''):
         'failures': _probe('failures', lambda: capacity_failures(now), {}),
         'maint': _probe('maintainer signals', lambda: maintainer(now), {}),
         'starve': _probe('queued scans', lambda: starve(now), {}),
+        'lanes': _probe('lane memory', lambda: lane_memory(now), {}),
     }
     measured = _probe('load', lambda: load(now))
     if measured:

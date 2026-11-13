@@ -394,7 +394,7 @@ def _sentinel_trouble(samples):
 
 
 def _lane(sample, lane):
-    return _get(sample, 'maint', 'lanes', lane) or {}
+    return _get(sample, 'lanes', lane) or {}
 
 
 def _lane_trouble(lane, samples):
