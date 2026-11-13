@@ -45,7 +45,8 @@ export function autoTuneRow(field, mode, reload) {
 }
 export const cardAnchor = (id) => `${SECTION_ID}-${id}`;
 
-export async function buildSection(host, { card = "" } = {}) {
+// ``item``: a line inside the card the link points at (#configmaxxing/autotune/12: the History line of decision 12); the card draws it marked and it is scrolled to.
+export async function buildSection(host, { card = "", item = "" } = {}) {
   host.textContent = "";
   const head = el("div", "card", null, { style: "max-width:720px;margin-bottom:16px" });
   head.append(el("h2", "", SECTION_LABEL, { style: "margin-bottom:8px" }), el("p", "note", WARNING_TEXT, { style: "margin:0 0 12px" }));
@@ -67,14 +68,14 @@ export async function buildSection(host, { card = "" } = {}) {
   );
   host.append(head);
   for (const entry of registry) {
-    const wrap = el("div", "", null, { id: cardAnchor(entry.id), style: "margin-bottom:16px" });
+    const wrap = el("div", "", null, { id: cardAnchor(entry.id), style: "margin-bottom:16px;scroll-margin-top:72px" });
     host.append(wrap);
     try {
-      await entry.build(wrap, { reload: () => buildSection(host) });
+      await entry.build(wrap, { reload: () => buildSection(host), focus: entry.id === card && item ? item : null });
     } catch (err) {
       wrap.append(el("p", "msg err", err.message));
     }
   }
-  const target = card && document.getElementById(cardAnchor(card));
+  const target = card && (item && document.getElementById(`${cardAnchor(card)}-line-${item}`)) || (card && document.getElementById(cardAnchor(card)));
   if (target) target.scrollIntoView({ block: "start" });
 }
