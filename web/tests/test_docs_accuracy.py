@@ -142,8 +142,8 @@ class OperatorNotesTests(SimpleTestCase):
         self.assertIn('**Addresses we must never scan.** Administration, Organizations', text)
         self.assertIn('CVENGINE_DB_CONN_MAX_AGE', text)
 
-    def test_the_changelog_unreleased_names_the_1_4_changes(self):
-        text = doc_text('CHANGELOG.md').split('## Unreleased (1.4)', 1)[1].split('\n## v1.3', 1)[0]
+    def test_the_changelog_1_4_section_names_the_1_4_changes(self):
+        text = doc_text('CHANGELOG.md').split('## v1.4.0 (', 1)[1].split('\n## v1.3', 1)[0]
         for needle in ('Addresses we must never scan', 'CVENGINE_SENTINEL_DENY_RANGES', 'CVENGINE_DB_CONN_MAX_AGE', 'agentapi` 0020', 'report PDF',
                        'waiting for a free slot', 'drop-down', 'refusal'):
             self.assertIn(needle, text)

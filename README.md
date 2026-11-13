@@ -46,7 +46,7 @@ Attack surface tools find assets. Vulnerability scanners find flaws. Threat feed
 | **Hunt** | A [bug bounty workbench](docs/BUG-BOUNTY.md): program scope from HackerOne, Bugcrowd, Intigriti, and YesWeHack, and report drafts |
 | **Bring your own AI** | Anthropic, OpenAI, OpenRouter, Ollama, LM Studio, or vLLM. Without a model it still discovers, scans, matches, and validates |
 
-## New in 1.4 (in development)
+## New in 1.4
 
 ### Every scan runs on a Sentinel
 
