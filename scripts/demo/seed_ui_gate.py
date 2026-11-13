@@ -109,6 +109,43 @@ for i, sub in enumerate(random.sample(subs, 40)):
     AssetChange.objects.create(project=project, domain=domain, scan=scan, host=sub.name, kind=kind, ip=ip, port=port, before=before, after=after, detected_at=NOW-timedelta(hours=random.randint(1, 150)))
 # alert strip + empty project + a stale sentinel
 AdminAlert.objects.create(code='disk_low', severity='warning', title='Disk space is running low', detail='The data volume has 7% free. Scans may stop when it is full.')
+# the auto-tune card's History (static/cve/autotune-history.js): a change that is being checked, a recommendation, one an agent asked for, one that helped, one that
+# made things worse and was undone (with the revert row), one that changed nothing, a back-off, a person's change, and an alert that one of them answered
+admin_user = User.objects.filter(username='admin').first()
+
+
+def tuning(minutes, **f):
+    fields = dict(mode='auto', source='controller', action='raise', layer='auto', applied=True, signals={'summary': {}})
+    fields.update(f)
+    d = TuningDecision.objects.create(**fields)
+    TuningDecision.objects.filter(pk=d.pk).update(created_at=NOW - timedelta(minutes=minutes))
+    return d
+
+
+def after(metric, value, **x):
+    return {'metric': metric, 'value': value, 'trouble': 0, 'kills': 0, 'oom': 0, 'n': 3, **x}
+
+
+TuningDecision.objects.all().delete()
+tuning(9, setting='discovery_concurrency', old_value=12, new_value=14, phase='probe', reason='two healthy hours, work waiting in 3 measurements in a row, 40% memory free: probed 12 to 14',
+       verify_at=NOW + timedelta(minutes=21), expected='discovery_queue', baseline={'metric': 'discovery_queue', 'value': 11.0})
+tuning(22, setting='assess_batch', old_value=16, new_value=20, applied=False, mode='suggest', layer='', phase='probe', reason='the oldest waiting assessment is 52 minutes old')
+tuning(48, setting='stage_parallel', old_value=6, new_value=8, source='agent', actor=admin_user, reason='asked by an agent: Sentinel slots are idle while chunks wait',
+       verify_at=NOW - timedelta(minutes=18), verified_at=NOW - timedelta(minutes=16), outcome='helped', outcome_detail='share of Sentinel slots idle: 0.5 before, 0.1 after',
+       baseline={'metric': 'sentinel_idle_share', 'value': 0.5, 'after': after('sentinel_idle_share', 0.1)})
+bad = tuning(130, setting='heavy.nmap', old_value=4, new_value=6, phase='probe', reason='two healthy hours, work waiting in 3 measurements in a row: probed 4 to 6', resolution='reverted',
+             resolved_by='auto-tune', resolved_at=NOW - timedelta(minutes=95), verify_at=NOW - timedelta(minutes=100), verified_at=NOW - timedelta(minutes=96), outcome='regressed',
+             outcome_detail='2 memory kill(s) after the change, 0 before', baseline={'metric': 'wait_share', 'value': 0.4, 'after': after('wait_share', 0.4, kills=2)})
+tuning(96, setting='heavy.nmap', old_value=6, new_value=4, action='revert', phase='verify', pressure=True, outcome='reverted', verified_at=NOW - timedelta(minutes=96),
+       outcome_detail=f'undid decision {bad.pk}: 2 memory kill(s) after the change', reason='verification of the change: put 6 back to 4', signals={'verified_decision': bad.pk})
+tuning(260, setting='work_depth', old_value=6, new_value=7, phase='probe', reason='two healthy hours: probed 6 to 7', verify_at=NOW - timedelta(hours=3), verified_at=NOW - timedelta(hours=3),
+       outcome='no_effect', outcome_detail='x', baseline={'metric': 'conductor_saturated_share', 'value': 0.1, 'after': after('conductor_saturated_share', 0.1)})
+tuning(600, setting='discovery_concurrency', old_value=20, new_value=12, action='lower', pressure=True, phase='back_off', reason='the scanning container has 6% memory free: backed off 20 to 12',
+       verify_at=NOW - timedelta(hours=9), verified_at=NOW - timedelta(hours=9), outcome='helped', outcome_detail='x', baseline={'metric': 'trouble', 'value': 1.0, 'after': after('trouble', 0.0)},
+       signals={'alerts': ['memory']})
+tuning(1500, setting='heavy.nuclei', old_value=2, new_value=3, source='person', action='apply', actor=admin_user, reason='admin applied the recommendation')
+AdminAlert.objects.create(code='memory', severity='warning', title='A worker lane is close to its memory limit', detail='The cve_feed lane uses 91% of its limit.',
+                          first_seen=NOW - timedelta(hours=11), last_seen=NOW - timedelta(minutes=3))
 Agent.objects.filter(name='edge-sentinel').update(last_seen=NOW-timedelta(hours=3), status_note='Update failed: could not pull image')
 op = Org.objects.get(slug='harbor-foods')
 Project.objects.get_or_create(slug='harbor-foods', defaults={'name':'Harbor Foods','org':op,'insert_date':NOW})

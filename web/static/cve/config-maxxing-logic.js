@@ -33,6 +33,8 @@ export function parseHash(hash) {
   const [section, card = ""] = String(hash || "").replace(/^#/, "").split("/");
   return { section, card };
 }
+// "#configmaxxing/autotune/12": the line inside the card (the History entry of decision 12), "" when the hash names none.
+export const hashItem = (hash) => String(hash || "").replace(/^#/, "").split("/")[2] || "";
 export const isSectionHash = (hash) => parseHash(hash).section === SECTION_ID;
 
 // --- numbers -------------------------------------------------------------------------------------------------
