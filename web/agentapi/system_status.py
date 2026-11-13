@@ -13,7 +13,6 @@ import logging
 import os
 import re
 import shutil
-import threading
 import time
 from datetime import datetime, timedelta, timezone as dt_timezone
 
@@ -191,7 +190,7 @@ INVENTORY_SECONDS = 6  # the inventory's own deadline inside the status budget; 
 INVENTORY_MARGIN = 1.0  # the inventory stops starting rows this long before its deadline, so it answers with what it has
 LAST_ROW_SECONDS = 24 * 3600  # the last row worked out per project is kept this long, to be shown (marked stale) while a new one is being counted
 WARM_LOCK = 'sysstatus:warming'
-WARM_MAX_SECONDS = 600
+WARM_MAX_SECONDS = 600  # the task's own time limit, and how long the lock holds if it dies
 
 
 def _row_keys(project):
@@ -204,7 +203,7 @@ def _projects_partial(ctx, deadline=None):
     old. The row is the project's, the same for everyone who may see it (which projects are listed is still decided per caller), so every caller shares
     one. Cold, after a restart or a cache that is off, a row is counted here only while ``deadline`` (a ``time.monotonic`` time) has not passed and each
     of its statements may take only the time that is left; a project that does not fit gets its last known row (``stale: True``) or none, and is
-    counted by ONE background thread (``_warm_rows``, a statement timeout of its own) so the next call finds it cached, instead of fifteen rows in
+    counted by the ``status_warm_rows`` Celery task (``_warm_rows``) so the next call finds it cached, instead of fifteen rows in
     a row inside one request."""
     from django.core.cache import cache
     from django.db import connection
@@ -264,10 +263,33 @@ def _projects(ctx):
     return _projects_partial(ctx)[0]
 
 
+def warm_project_rows(project_ids):
+    """Count the rows of these projects (the shared counts once, then each row) and keep them, so the next status call finds them cached. Runs as the
+    ``status_warm_rows`` Celery task (``cveFeed.tasks``), never in the web process or in the status call: a cold start that does not fit the status's
+    time is finished there, with the worker's own time limit and no statement timeout of the web server's kind."""
+    from django.core.cache import cache
+
+    from dashboard.models import Project
+    seconds = _cache_seconds()
+    try:
+        shared = _shared_inputs(list(project_ids))
+        for project in Project.objects.filter(id__in=project_ids).order_by('name'):
+            key, last_key = _row_keys(project)
+            row = _project_row(project, shared)
+            cache.set(last_key, row, LAST_ROW_SECONDS)
+            if seconds:
+                cache.set(key, row, seconds)
+    finally:
+        try:
+            cache.delete(WARM_LOCK)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _warm_rows(project_ids):
-    """Count the rows of these projects in ONE background thread (a cache lock keeps it to one) and keep them, so a call right after a restart does not
-    count fifteen projects in a row inside the request. Bounded: a statement timeout of 30 s on the thread's own connection, ``WARM_MAX_SECONDS``
-    for the whole walk, and the connection is closed when the thread ends. Not started inside a transaction (the thread would not see its rows)."""
+    """Hand the projects that did not fit the status's time to the ``status_warm_rows`` task (one at a time: a cache lock; not inside a transaction, where
+    a task could not see the rows either). It was a background thread of the calling process, which in a Celery lane is a greenlet that held the lane
+    for minutes and in a web worker took the interpreter's lock from requests."""
     from django.core.cache import cache
     from django.db import connection
     if connection.in_atomic_block:
@@ -275,36 +297,14 @@ def _warm_rows(project_ids):
     try:
         if not cache.add(WARM_LOCK, 1, WARM_MAX_SECONDS + 60):
             return
-    except Exception:  # noqa: BLE001
-        return
-
-    def run():
-        from django.db import connections
-
-        from agentapi import status_probes
-        from dashboard.models import Project
-        started, seconds = time.monotonic(), _cache_seconds()
+        from cveFeed.tasks import status_warm_rows
+        status_warm_rows.apply_async(args=[list(project_ids)], queue='cve_feed_queue', expires=WARM_MAX_SECONDS)
+    except Exception:  # noqa: BLE001 - the next call asks again
+        logger.info('status: could not queue the counting of the projects', exc_info=True)
         try:
-            status_probes._bound_database(30)
-            shared = _shared_inputs(list(project_ids))
-            for project in Project.objects.filter(id__in=project_ids).order_by('name'):
-                if time.monotonic() - started > WARM_MAX_SECONDS:
-                    break
-                key, last_key = _row_keys(project)
-                row = _project_row(project, shared)
-                cache.set(last_key, row, LAST_ROW_SECONDS)
-                if seconds:
-                    cache.set(key, row, seconds)
-        except Exception:  # noqa: BLE001 - the next call asks again
-            logger.info('status: counting the projects in the background failed', exc_info=True)
-        finally:
-            try:
-                connections.close_all()
-                cache.delete(WARM_LOCK)
-            except Exception:  # noqa: BLE001
-                pass
-
-    threading.Thread(target=run, name='status-warm-rows', daemon=True).start()
+            cache.delete(WARM_LOCK)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _inventory(ctx, problems):

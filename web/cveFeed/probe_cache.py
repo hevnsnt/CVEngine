@@ -13,6 +13,12 @@ import time
 logger = logging.getLogger(__name__)
 
 
+def _thread_name(name):
+    from reNgine.gevent_db import thread_name  # None in a gevent worker, where naming a greenlet renames the process
+    return thread_name(name)
+
+
+
 def cached_probe(key, compute, fresh=30, keep=1800, first=None):
     """``(value, taken_at)``: ``compute()``'s last answer. ``fresh``: seconds an answer is served without asking again; ``keep``: how long an older one may still
     be served (and refreshed in the background). A ``compute`` that raises is never cached; in the background the old answer stays. ``first``: a quicker
@@ -54,4 +60,4 @@ def _refresh_behind(key, compute, keep):
                 cache.delete(f'{key}:refreshing')
             except Exception:  # noqa: BLE001
                 pass
-    threading.Thread(target=run, name=f'probe-{key}', daemon=True).start()
+    threading.Thread(target=run, name=_thread_name(f'probe-{key}'), daemon=True).start()

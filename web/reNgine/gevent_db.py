@@ -46,3 +46,10 @@ def install():
     extensions.set_wait_callback(wait_callback)
     logger.info('gevent worker: database waits yield to other greenlets')
     return True
+
+
+def thread_name(name):
+    """``name`` for a ``threading.Thread``, or None in a gevent worker. Python 3.14 gives a thread's name to the operating system, and in a gevent worker a
+    "thread" is a greenlet on the main thread, so naming one renames the whole process in ``ps`` and ``top`` (a Celery lane showed as ``status-warm-row``
+    and ``redis-claim``, which read as processes that were not there). Outside gevent the name is kept: it shows in ``py-spy`` and ``ps -L``."""
+    return None if gevent_patched() else name

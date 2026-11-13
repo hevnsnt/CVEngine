@@ -33,6 +33,12 @@ from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
+
+def _thread_name(name):
+    from reNgine.gevent_db import thread_name  # None in a gevent worker, where naming a greenlet renames the process
+    return thread_name(name)
+
+
 # Estimated peak resident memory per job kind, in MB. Deliberately a little pessimistic.
 BASE_COSTS_MB = {
     'bbot-deep': 2400,      # kitchen-sink preset: dozens of modules and a spider (raised to what real runs reach, see effective_cost)
@@ -773,7 +779,7 @@ def redis_claim(key, owner, ttl, adopt=False, hold=False, keep=None):
                     return
             except Exception:  # noqa: BLE001
                 pass
-    threading.Thread(target=keep_alive, name='redis-claim', daemon=True).start()
+    threading.Thread(target=keep_alive, name=_thread_name('redis-claim'), daemon=True).start()
     from agentapi import stage_runs
     run = stage_runs.current()
     suspending = False
@@ -834,7 +840,7 @@ class LegacyProcessMonitor:
         self.proc, self.scan_id = proc, scan_id
         self.aborted = False
         self.stop_event = threading.Event()
-        self.thread = threading.Thread(target=self._watch, name='legacy-scan-stop', daemon=True)
+        self.thread = threading.Thread(target=self._watch, name=_thread_name('legacy-scan-stop'), daemon=True)
         self.thread.start()
 
     def _watch(self):
@@ -930,7 +936,7 @@ class Job:
             connections.close_all()
 
     def start_watchdog(self):
-        self._thread = threading.Thread(target=self._run, name=f'mem-watch-{self.kind}', daemon=True)
+        self._thread = threading.Thread(target=self._run, name=_thread_name(f'mem-watch-{self.kind}'), daemon=True)
         self._thread.start()
 
     def stop_watchdog(self):

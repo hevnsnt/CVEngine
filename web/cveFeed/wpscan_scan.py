@@ -604,7 +604,7 @@ def _wordpress_rows(project_ids=None):
     if project_ids is not None:
         qs = qs.filter(project_id__in=project_ids)
     by_host = {}
-    for row in qs.order_by('project_id', 'host'):
+    for row in qs.order_by('project_id', 'host', 'id'):  # the id as the last key: two rows of one probe on a host are read in the same order whatever the filter
         by_host.setdefault((row.project_id, row.host), []).append(row)
     return by_host
 

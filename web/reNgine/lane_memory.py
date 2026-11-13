@@ -13,6 +13,12 @@ import sys
 import threading
 import time
 
+
+def _thread_name(name):
+    from reNgine.gevent_db import thread_name  # None in a gevent worker, where naming a greenlet renames the process
+    return thread_name(name)
+
+
 CACHE_PREFIX = 'lane_memory:'
 RUNNING_PREFIX = 'lane_running:'  # its own key: the tasks in flight change with every task start and end, the memory report is written at most every WRITE_EVERY seconds
 LANES = ('discovery', 'cve_feed', 'validation_priority', 'classic')
@@ -201,7 +207,7 @@ def _ensure_heartbeat():
         return
     try:
         _stop.clear()
-        thread = threading.Thread(target=_heartbeat_loop, name='lane-memory-heartbeat', daemon=True)
+        thread = threading.Thread(target=_heartbeat_loop, name=_thread_name('lane-memory-heartbeat'), daemon=True)
         thread.start()
         _state['beat_thread'] = thread
     except Exception:  # noqa: BLE001
