@@ -698,6 +698,13 @@ def update_reply(agent):
         held = sentinel_autoupdate.stored(agent)
         if held.get('status') == 'requested' and held.get('target'):
             out['target'], out['reason'] = held['target'], 'admin' if held.get('reason') == 'admin' else 'newest'
+    if 'target' not in out and (out['requested'] or setting == 'automatic'):
+        # A Sentinel on Automatic (or one an administrator asked) is always told where to go. With nothing newer to name (the instance keeps Sentinels on the newest
+        # version off, or GitHub cannot be read) that is the commit this server pins: no GitHub access needed, and never anything newer than what it was tested with.
+        from agentapi import sentinel_autoupdate
+        pinned = sentinel_autoupdate.pinned_target(agent)
+        if pinned:
+            out['target'], out['reason'] = pinned, 'pinned'
     return out
 
 

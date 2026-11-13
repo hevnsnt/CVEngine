@@ -65,7 +65,7 @@ class World(TestCase):
         _, raw = create_token(self.admin, f'tok-{Agent.objects.count()}')
         status, out = call(raw, 'PUT', '/api/v1/sentinel', {'name': f'live-{Agent.objects.count()}', 'scope': {'projects': [self.project.slug]}, 'capabilities': list(kinds)})
         self.assertIn(status, (200, 201), out)
-        Agent.objects.filter(pk=out['id']).update(status='active')
+        Agent.objects.filter(pk=out['id']).update(status='active', info={'features': ['credential_filter']})  # a current client: an old one is offered no nuclei work while credential checks are off
         return Agent.objects.get(pk=out['id']), raw
 
 class TheRule(World):
