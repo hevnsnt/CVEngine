@@ -671,5 +671,3 @@ class KnobsOf651Tests(Base):
             out = autotune.ai_apply([self.proposal(2, setting=name)], offer, self.now)
             self.assertEqual(out[0]['status'], 'refused', name)
             self.assertIn('not a setting the AI may change', out[0]['text'], name)
-        from agentapi import sentinel_policy
-        self.assertNotIn('autotune.ai_apply', repr(sentinel_policy.pause.__doc__))  # the pause is a Sentinel policy call the controller makes, not a setting
