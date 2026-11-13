@@ -369,6 +369,42 @@ def close_gate(kind, triage, finding, injection, facts=None):
     return '', ''
 
 
+PRIOR_CAP = 50  # the most hosts a prior counts (it is shown as a number to the model and to a person)
+OTHER_HOSTS_SAID_REAL = 'of the same evidence on other hosts said it is real'  # the end of the held reason of ``other_hosts_hold`` (the ranking and the page match on it)
+
+
+def same_evidence_prior(triage):
+    """``(hosts that said real, hosts that said false positive)``: how the AI reviewer judged the same question on OTHER hosts of the same project.
+    The same question is the finding's kind and its ``evidence_key`` (the asset evidence of ``triage.evidence_key_for``: the CVE or check, the
+    product and version, the matcher; never the host, and not the review key either, which also carries the host's state). Counted over the
+    project only (never across projects or organizations: what one tenant's hosts said is not another tenant's business), from reviews that
+    count: not refused, no planted text in the evidence, a real verdict or a false positive. One host counts once. Zero for both when the
+    finding has no evidence key. One indexed query (``triage_proj_kind_evkey_idx``)."""
+    from django.db.models import Count
+    from cveFeed.models import FindingReview
+    if not triage.evidence_key:
+        return 0, 0
+    rows = (FindingReview.objects.filter(project_id=triage.project_id, triage__project_id=triage.project_id, triage__kind=triage.kind,
+                                         triage__evidence_key=triage.evidence_key, injection=[])
+            .exclude(triage__host=triage.host).exclude(outcome=REFUSED)
+            .aggregate(real=Count('triage__host', distinct=True, filter=Q(verdict__startswith='true_')),
+                       fp=Count('triage__host', distinct=True, filter=Q(verdict='false_positive'))))
+    return min(rows['real'] or 0, PRIOR_CAP), min(rows['fp'] or 0, PRIOR_CAP)
+
+
+def prior_line(real, false_positive):
+    """The prior as one line of cvENGINE's own words (numbers only, no host names), or '' when no other host was judged."""
+    if not real and not false_positive:
+        return ''
+    return (f'the same evidence was judged real on {real} other host{"" if real == 1 else "s"}, '
+            f'false positive on {false_positive} (earlier reviews, for consistency; judge this finding on its own evidence)')
+
+
+def other_hosts_hold(real):
+    """The held reason when earlier reviews of the same evidence on other hosts said it is real, or ''."""
+    return f'{real} earlier review{"" if real == 1 else "s"} {OTHER_HOSTS_SAID_REAL}' if real else ''
+
+
 def _heat(kind, finding):
     from cveFeed import threat
     try:
@@ -401,6 +437,7 @@ def build_packet(triage, key):
     injection = injection_guard.families(_raw_evidence(triage, finding), d.get('payload'), d.get('host_context'))
     blocked, why = close_gate(kind, triage, finding, injection, d.get('facts'))
     heat, heat_reason = _heat(kind, finding)
+    prior = prior_line(*same_evidence_prior(triage))  # cvENGINE's own count of earlier verdicts: numbers, no host names, nothing the host wrote
     steps = [{'check': str(s.get('label') or s.get('kind') or '')[:80], 'result': str(s.get('result') or '')[:40]}
              for s in (triage.validation_steps or [])[:10] if isinstance(s, dict)]
     return {
@@ -416,6 +453,7 @@ def build_packet(triage, key):
             'status': finding.remediation_status,
             'server_may_close': not blocked, 'server_will_not_close_because': why,
             'instructions_aimed_at_ai_found_in_evidence': injection,
+            **({'same_evidence_on_other_hosts': prior} if prior else {}),
         },
         'untrusted': {
             'facts': d.get('payload'), 'host_context': d.get('host_context'),
@@ -583,6 +621,12 @@ def apply_finding_verdict(triage, parsed, key, host_review=None, extra_injection
             # ANY earlier real verdict on this evidence holds it, not only the newest: an opinion recorded in between must not hide it
             if FindingReview.objects.filter(triage=triage, review_key=key, verdict__startswith='true_').exclude(outcome=REFUSED).exclude(host_review=host_review).exists():
                 outcome, held = 'held', CONTRADICTS
+        if outcome == 'closed':
+            # the same question asked of another host of this project came out real: a closure that would make two hosts with the same evidence
+            # disagree waits for a person (real always stands: the other direction changes nothing)
+            real, _ = same_evidence_prior(triage)
+            if real:
+                outcome, held = 'held', other_hosts_hold(real)
         if outcome == 'closed' and host_review is not None and not settings_row().host_review_auto_close:
             # persuasion cannot be fully detected: in 1.4.0 a host review's false positive is a recorded opinion, and a person closes it (one click on the host card),
             # unless an administrator switched this on
