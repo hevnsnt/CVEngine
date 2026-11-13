@@ -1303,6 +1303,7 @@ class Triage(models.Model):
             models.Index(fields=["project", "validation_status", "next_attempt_at"], name="triage_proj_valid_idx"),
             models.Index(fields=["kind", "signature"], name="triage_kind_sig_idx"),
             models.Index(fields=["project", "host"], name="triage_proj_host_idx"),
+            models.Index(fields=["project", "kind", "evidence_key"], name="triage_proj_kind_evkey_idx"),  # the reviewer's prior: the same evidence on other hosts (reviewer.same_evidence_prior)
         ]
         constraints = [
             models.CheckConstraint(

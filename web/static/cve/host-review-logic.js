@@ -64,6 +64,7 @@ export function heldBecause(finding) {
   if (/turned off in Settings/.test(held)) return "closing false positives is switched off in Settings";
   if (/critical scanner/.test(held)) return "a person closes critical scanner findings";
   if (/contradicts the earlier verdict/.test(held)) return "an earlier review called it real";
+  if (/of the same evidence on other hosts said it is real/.test(held)) return "earlier reviews of the same evidence on other hosts said it is real";
   return "cvENGINE keeps it open";
 }
 

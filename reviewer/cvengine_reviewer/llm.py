@@ -51,6 +51,16 @@ class ModelError(RuntimeError):
         self.hint = hint
 
 
+PINNED = {'temperature': 0, 'seed': 20260101}  # the reviewer's own jobs on a self-hosted server: the same packet gives the same answer (the pipeline's jobs pin the same, ``complete``)
+
+
+def pinned(name):
+    """The temperature and seed the reviewer's own jobs send to the provider ``name``: only where its profile takes them (a self-hosted server;
+    never Anthropic, OpenAI or OpenRouter, which behave as before)."""
+    profile = profiles.PROFILES.get(name)
+    return {key: PINNED[key] for key, ok in (('temperature', profile.temperature_ok if profile else False), ('seed', profile.seed_ok if profile else False)) if ok}
+
+
 def call(provider, system, user, schema, max_tokens, effort='medium'):
     """``(reply text, usage {input_tokens, output_tokens}, model)`` for one call to ``provider`` (the job's block of the server's
     configuration: provider, base_url, api_key, model, timeout)."""
@@ -130,6 +140,7 @@ def _openai_compatible(provider, system, user, schema, max_tokens):
     body = {'model': provider.get('model') or '', 'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}],
             'response_format': {'type': 'json_schema', 'json_schema': {'name': 'answer', 'strict': True, 'schema': guard.for_provider(schema)}}}
     body['max_completion_tokens' if name == 'openai' else 'max_tokens'] = max_tokens
+    body.update(pinned(name))
     timeout = float(provider.get('timeout') or 120)
     try:
         data = _post(f'{base}/chat/completions', headers, body, timeout)
@@ -154,7 +165,7 @@ def _ollama(provider, system, user, schema, max_tokens):
     base = (provider.get('base_url') or DEFAULT_BASES['ollama']).rstrip('/')
     body = {'model': provider.get('model') or '', 'stream': False, 'format': guard.for_provider(schema),
             'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}],
-            'options': {'num_predict': max_tokens}}
+            'options': {'num_predict': max_tokens, **pinned('ollama')}}
     data = _post(f'{base}/api/chat', {}, body, float(provider.get('timeout') or 120))
     try:
         text = data['message']['content']

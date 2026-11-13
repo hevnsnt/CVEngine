@@ -125,6 +125,35 @@ class RequestShapeTests(unittest.TestCase):
         self.assertEqual((body['thinking'], body['output_config']), ({'type': 'adaptive'}, {'effort': 'low'}))
 
 
+class OwnJobsPinTests(unittest.TestCase):
+    """The reviewer's own jobs (``llm.call``): the same packet gives the same answer on a self-hosted model (AR-5)."""
+
+    def sent(self, name, **provider):
+        replies = {'ollama': {'message': {'content': '{}'}}, 'openai': {'choices': [{'message': {'content': '{}'}, 'finish_reason': 'stop'}]}}
+        seen = []
+
+        def post(url, headers, body, timeout):
+            seen.append(body)
+            return replies.get(name, replies['openai'])
+        with mock.patch.object(llm, '_post', post):
+            llm.call({'provider': name, 'model': 'm', 'base_url': BASES.get(name, ''), **provider}, 's', 'u', SCHEMA, 300)
+        return seen[0]
+
+    def test_a_self_hosted_server_gets_temperature_zero_and_the_fixed_seed(self):
+        for name in ('vllm', 'lmstudio'):
+            body = self.sent(name)
+            self.assertEqual((body['temperature'], body['seed']), (0, 20260101), name)
+        self.assertEqual(self.sent('ollama')['options'], {'num_predict': 300, 'temperature': 0, 'seed': 20260101})
+
+    def test_a_hosted_provider_is_sent_neither(self):
+        for name in ('openai', 'openrouter'):
+            body = self.sent(name, api_key='k')
+            self.assertNotIn('temperature', body, name)
+            self.assertNotIn('seed', body, name)
+        self.assertEqual(llm.pinned('anthropic'), {})
+        self.assertEqual(llm.pinned('nothing-known'), {})
+
+
 class StructuredLadderTests(unittest.TestCase):
     def setUp(self):
         llm._STRUCTURED.clear()

@@ -73,6 +73,14 @@ reviewer is built on the assumption that every scanned byte is hostile.
      and its equivalent for scanner and hygiene findings);
    - the evidence the model was shown carries no instructions aimed at an AI (`cveFeed.injection_guard`);
    - the packet the verdict answers is still the current one: same evidence, same host state, and the finding is still open.
+   - no earlier review of the same evidence on another host of the same project said it is real. "The same evidence" is the finding's kind and
+     its evidence key (`triage.evidence_key`: the CVE or check, the product and version, the matcher; never the host) in the same project, never
+     across projects or organizations. Only reviews that count are counted: not refused, no planted text in their evidence, a `true_*` verdict, one host once.
+     Then the closure is held with the reason "N earlier reviews of the same evidence on other hosts said it is real" (shown where every held
+     reason is shown, and it never demotes the finding in Situations). The other direction changes nothing: a real verdict after earlier false
+     positives stands. The model is told the same as one line of cvENGINE's own computed facts in the packet (`same_evidence_on_other_hosts`:
+     "the same evidence was judged real on 2 other hosts, false positive on 0": counts only, at most 50, no host names). It reads one indexed query
+     (`triage_proj_kind_evkey_idx`) and adds no model call. The host review's packet does not carry the line, but its closures go through the same hold.
 
    Anything else is recorded as the reviewer's opinion, shown on the finding, and changes nothing. A `false_positive` the server holds back on a
    finding with hard evidence is recorded as **disputed**, for a person to look at. Only one held verdict changes any ranking: in Situations a
