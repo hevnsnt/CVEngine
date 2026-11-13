@@ -77,7 +77,7 @@ class LightNucleiPolicyTests(DispatchBase):
         with mock.patch('cveFeed.validation.all_templates_allowed', return_value=False):
             for kind in ('nuclei_light', 'nuclei_targeted'):
                 target = self.dispatched(kind)
-                self.assertEqual(target['etags'], ['dos'], kind)  # scan_flags.NUCLEI_EXCLUDED_TAGS: the tags no run ever runs
+                self.assertEqual(target['etags'], ['dos', 'default-login', 'bruteforce'], kind)  # the tags no run runs: dos always, the credential tags unless a person allowed them
                 self.assertEqual(target['template_policy'], {'rev': nuclei_scan.TEMPLATE_POLICY_REV, 'read_only': True, 'bundle_sha256': None}, kind)  # no snapshot is cached here, so no bundle yet
 
     def test_a_task_carries_allow_credential_checks_only_when_a_person_turned_it_on(self):

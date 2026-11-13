@@ -1196,6 +1196,8 @@ def _nuclei_target(kind, targets, kwargs, scan=None, labels=None):
     if kind == 'nuclei_light':
         tags, severities = ['tech'], ['info']
     etags = list(scan_flags.NUCLEI_EXCLUDED_TAGS)
+    if not validation.credential_checks_allowed():  # the Sentinel leaves these out of its own runs too (``flags.NUCLEI_CREDENTIAL_TAGS``): the task says so
+        etags += list(scan_flags.NUCLEI_CREDENTIAL_TAGS)
     rev = nuclei_scan.policy_rev()
     target = {'targets': targets, 'tags': tags, 'severities': severities, 'etags': etags,
               'template_policy': {'rev': rev, 'read_only': rev == nuclei_scan.TEMPLATE_POLICY_REV, 'bundle_sha256': template_bundle.sha256_if_ready()},
