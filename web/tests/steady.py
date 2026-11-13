@@ -1,4 +1,7 @@
-"""``steady_caches()``: pin the per-process caches that expire on the clock, for a test that compares the query counts of two requests.
+"""Since the test runner pins these caches for every test by default (``reNgine.test_runner.pin_process_caches``; opt out with ``expiring_caches``), ``steady_caches()`` is
+only needed by a test that wants none of them to read at all (the allowlist and ban list never queried, the internal table built up front).
+
+``steady_caches()``: pin the per-process caches that expire on the clock, for a test that compares the query counts of two requests.
 
 A request that lands after one of them expired pays for reloading it, whatever the page holds:
 - the IP allowlist and ban caches (``reNgine.ip_allowlist``, ``reNgine.input_guard``: 10 seconds) cost two queries;
@@ -27,3 +30,10 @@ def steady_caches():
         internal_view.table()  # built once, here, outside any measure
         yield
     internal_view.invalidate()  # the next test builds its own from its own rows
+
+
+def expiring_caches(target):
+    """Opt a test (or a whole test class) out of the default pin of the per-process caches (``reNgine.test_runner.pin_process_caches``): for a test that is ABOUT
+    one of them, its expiry, its reload or its refresh. ``@expiring_caches`` on the method or the class."""
+    target.expiring_caches = True
+    return target
