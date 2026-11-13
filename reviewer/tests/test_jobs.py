@@ -338,3 +338,54 @@ class OpsFleetFactsTests(unittest.TestCase):
     def test_the_new_check_may_be_diagnosed(self):
         from cvengine_reviewer import prompts
         self.assertIn('sentinels_offline', prompts.OPS_CODES)
+
+
+class OpsCodesTests(unittest.TestCase):
+    """AM-4: the model may name every check the server has, and an unknown name costs that one alert, not the whole reply."""
+    PROVIDER = {'provider': 'vllm', 'model': 'm', 'base_url': 'http://192.0.2.10:8000/v1'}
+
+    def run_with(self, snapshot, reply):
+        class Server:
+            sent = None
+
+            def ops_snapshot(self, release):
+                return snapshot
+
+            def ops_report(self, body):
+                self.sent = body
+                return {}
+        server = Server()
+        with mock.patch.object(llm, 'call', return_value=(reply, {}, 'm')) as call:
+            jobs.run_ops(server, self.PROVIDER)
+        return server.sent, call
+
+    CHECKS = [{'code': 'workers_down', 'state': 'problem', 'title': 't', 'detail': 'd', 'facts': {}}]
+    TEXT = 'Restart the celery container with docker compose restart celery, then check the Sentinels page.'
+
+    def test_the_fallback_list_names_the_two_checks_it_lacked(self):
+        from cvengine_reviewer import prompts
+        for code in ('workers_down', 'sentinel_waiting'):
+            self.assertIn(code, prompts.OPS_CODES)
+            self.assertIn(code, prompts.OPS_SCHEMA['properties']['alerts']['items']['properties']['code']['enum'])
+
+    def test_a_reply_naming_workers_down_keeps_its_diagnosis(self):
+        reply = '{"alerts": [{"code": "workers_down", "severity": "critical", "diagnosis": "%s"}], "actions": []}' % self.TEXT
+        sent, _ = self.run_with({'checks': self.CHECKS}, reply)
+        self.assertEqual([a['code'] for a in sent['alerts']], ['workers_down'])
+
+    def test_the_schema_is_built_from_the_codes_the_server_sent(self):
+        reply = '{"alerts": [], "actions": []}'
+        _, call = self.run_with({'checks': self.CHECKS, 'codes': ['workers_down', 'memory_pressure']}, reply)
+        schema = call.call_args[0][3]
+        self.assertEqual(schema['properties']['alerts']['items']['properties']['code']['enum'], ['workers_down', 'memory_pressure'])
+
+    def test_an_unknown_code_drops_that_alert_and_keeps_the_rest_and_the_actions(self):
+        reply = ('{"alerts": [{"code": "made_up_check", "severity": "info", "diagnosis": "%s"},'
+                 ' {"code": "workers_down", "severity": "warning", "diagnosis": "%s"}], "actions": ["feed_sentinels"]}') % (self.TEXT, self.TEXT)
+        sent, _ = self.run_with({'checks': self.CHECKS, 'codes': ['workers_down']}, reply)
+        self.assertEqual([a['code'] for a in sent['alerts']], ['workers_down'])
+        self.assertEqual(sent['actions'], ['feed_sentinels'])
+
+    def test_a_reply_with_the_wrong_shape_is_still_refused_whole(self):
+        sent, _ = self.run_with({'checks': self.CHECKS}, '{"alerts": [{"code": "workers_down"}], "actions": []}')
+        self.assertEqual((sent['alerts'], sent['actions']), ([], []))

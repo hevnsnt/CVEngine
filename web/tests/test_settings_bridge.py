@@ -108,3 +108,62 @@ class BridgeTests(TestCase):
         self.assertTrue(any(n['route'] == 'factory_reset' for n in out['not_exposed']))
         timings = next(s for s in out['settings'] if s['name'] == 'timings')
         self.assertTrue(timings['read'] and timings['change'])
+
+
+class AllowlistThroughTheBridgeTests(TestCase):
+    """AM-2: the bridge's own request has an address of its own, so an agent must not be able to put it on the list and switch the list on."""
+
+    def setUp(self):
+        self.root = User.objects.create_superuser('lock_root', 'l@x.io', 'x')
+
+    def tearDown(self):
+        from reNgine import ip_allowlist
+        ip_allowlist.invalidate_cache()
+
+    def test_an_agent_cannot_add_an_entry_switch_the_list_on_or_delete_an_entry(self):
+        from dashboard.models import IpAccessControl, IpAllowlistEntry
+        entry = IpAllowlistEntry.objects.create(cidr='203.0.113.0/24', label='office')
+        for name, values, ident, remove in (('ip_allowlist_entry_add', {'cidr': '127.0.0.1/32', 'label': 'agent'}, None, False),
+                                            ('ip_allowlist', {'enabled': True}, None, False),
+                                            ('ip_allowlist_entry', None, str(entry.id), True)):
+            with self.assertRaises(ApiError) as caught:
+                bridge.change_setting(ctx(self.root), name, values, ident=ident, remove=remove)
+            self.assertEqual(caught.exception.status, 403, name)
+        self.assertEqual(list(IpAllowlistEntry.objects.values_list('cidr', flat=True)), ['203.0.113.0/24'])
+        self.assertFalse(IpAccessControl.current().enabled)
+
+    def test_the_lockout_the_reviewer_found_does_not_happen_and_a_person_from_outside_still_gets_in(self):
+        from django.test import Client
+        for name, values in (('ip_allowlist_entry_add', {'cidr': '127.0.0.1/32'}), ('ip_allowlist', {'enabled': True})):
+            with self.assertRaises(ApiError):
+                bridge.change_setting(ctx(self.root), name, values)
+        client = Client(REMOTE_ADDR='203.0.113.7')
+        client.force_login(self.root)
+        self.assertEqual(client.get('/cve/api/settings/ip_allowlist/').status_code, 200)
+
+    def test_the_list_can_still_be_read_and_says_these_are_not_for_agents(self):
+        out = bridge.get_setting(ctx(self.root), 'ip_allowlist')
+        self.assertFalse(out['enabled'])
+        self.assertTrue(any(n['route'] == 'ip_allowlist' for n in bridge.list_settings(ctx(self.root))['not_exposed']))
+
+    def test_no_bridge_request_carries_the_loopback_address_into_a_guard(self):
+        seen = []
+        original = bridge.RequestFactory
+
+        class Spy(original):
+            def generic(self, *a, **k):
+                request = super().generic(*a, **k)
+                seen.append(request.META.get('REMOTE_ADDR'))
+                return request
+
+            def get(self, *a, **k):
+                request = super().get(*a, **k)
+                seen.append(request.META.get('REMOTE_ADDR'))
+                return request
+
+        with mock.patch.object(bridge, 'RequestFactory', Spy):
+            bridge.get_setting(ctx(self.root), 'ip_allowlist')
+            bridge.change_setting(ctx(self.root), 'timings', {'ct_watch_minutes': 30})
+        self.assertGreaterEqual(len(seen), 2)
+        for addr in seen:
+            self.assertNotIn(addr, ('127.0.0.1', '::1', 'localhost', None))

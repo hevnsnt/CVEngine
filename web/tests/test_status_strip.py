@@ -82,7 +82,7 @@ class WaitingForASlotNoteTests(SimpleTestCase):
 
     def test_the_server_raises_it_as_info_with_the_count_by_kind(self):
         src = (STATIC.parent.parent / 'cveFeed' / 'reviewer.py').read_text()
-        i = src.index("'sentinel_waiting'")
+        i = src.index("_check('sentinel_waiting'")
         block = src[i:i + 900]
         self.assertIn('Sentinel tasks are waiting for a free slot', block)
         self.assertIn("severity='info'", block)
