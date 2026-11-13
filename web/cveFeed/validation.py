@@ -132,8 +132,8 @@ _PLACEHOLDER = re.compile(r'\{\{\s*([^}]*?)\s*\}\}')
 
 _IDENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 _PASSWORD_FIELD = re.compile('(?i)' + '|'.join(CREDENTIAL_FIELD_PATTERNS))
-_FIELD = re.compile(r'(?i)(?:^|[&?\s"{,;\'(])([\w.\[\]-]{1,40})["\']?\s*[=:]\s*["\']?((?:\{\{[^}]*\}\}|[^&"\'\s,}<\\])*)')  # name=value, "name": "value"
-_XML_FIELD = re.compile(r'(?i)<([\w:.-]{1,40})>((?:\{\{[^}]*\}\}|[^<])*)<')  # <password>value</password>
+_FIELD = re.compile(r'(?i)(?:^|[&?\s"{,;\'(])([\w.\[\]-]{1,40})["\']?\s*[=:]\s*["\']?((?:\{\{[^}]*\}\}|\{(?!\{[^}]*\}\})|[^&"\'\s,}<\\{])*)')  # name=value, "name": "value"
+_XML_FIELD = re.compile(r'(?i)<([\w:.-]{1,40})>((?:\{\{[^}]*\}\}|\{(?!\{[^}]*\}\})|[^<{])*)<')  # <password>value</password>
 
 
 def _fixed_text(value, literal_names):
