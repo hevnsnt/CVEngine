@@ -116,15 +116,29 @@ def ops_message(snapshot):
     return f'{head}\n\n{fenced}\n\nDiagnose every check that is not ok and choose actions, then answer with the JSON object.'
 
 
+def parse_ops_reply(text, schema):
+    """The operations reply checked against ``schema``, except that an alert naming a check code that is not in it is dropped on its own: a
+    model (or a provider that does not enforce the enum) that names one unknown check must not cost the diagnosis of every other."""
+    allowed = schema['properties']['alerts']['items']['properties']['code']['enum']
+    lenient = json.loads(json.dumps(schema))
+    del lenient['properties']['alerts']['items']['properties']['code']['enum']
+    answer = guard.parse_reply(text, lenient)
+    kept = [a for a in answer['alerts'] if a['code'] in allowed]
+    if len(kept) < len(answer['alerts']):
+        logger.warning('operations: dropped %d alert(s) naming a check the server does not have', len(answer['alerts']) - len(kept))
+    return {**answer, 'alerts': kept}
+
+
 def run_ops(server, provider, release=None):
     """One operations pass: read the checks, ask the model, send the report. Returns the server's answer."""
     snapshot = server.ops_snapshot(release)
     if all((c.get('state') == 'ok') for c in snapshot.get('checks') or []):
         return server.ops_report({'alerts': [], 'actions': [], 'model': '', 'templates_release': release})
-    text, _usage, model = measured_call(server, 'operations_check', provider, prompts.OPS_SYSTEM, ops_message(snapshot), prompts.OPS_SCHEMA,
+    schema = prompts.ops_schema(snapshot.get('codes'))  # the server's own list of its checks: the model is offered every one, and the list cannot drift from the server
+    text, _usage, model = measured_call(server, 'operations_check', provider, prompts.OPS_SYSTEM, ops_message(snapshot), schema,
                                         OPS_MAX_TOKENS, effort='low')
     try:
-        answer = guard.parse_reply(text, prompts.OPS_SCHEMA)
+        answer = parse_ops_reply(text, schema)
     except guard.ReplyError as exc:
         logger.warning('operations: unusable answer (%s)', exc)
         answer = {'alerts': [], 'actions': []}
