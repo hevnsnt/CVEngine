@@ -210,12 +210,12 @@ class ApplyLaneTests(Isolated, TestCase):
         row = AutoTuneSettings.current()
         row.values = {'lane.cve_feed': 2}
         row.save()
-        app = self.fake_app({'celery@cve_feed_worker': 4, 'celery@classic_worker': 10, 'celery@discovery_worker': 8})
+        app = self.fake_app({'cve_feed_worker@host1': 4, 'classic_worker@host1': 10, 'discovery_worker@host1': 8})
         out = sc.apply_lanes(app=app, saved={})
-        self.assertEqual(out['lane.cve_feed'], {'want': 2, 'workers': {'celery@cve_feed_worker': 2}, 'changed': ['celery@cve_feed_worker']})
+        self.assertEqual(out['lane.cve_feed'], {'want': 2, 'workers': {'cve_feed_worker@host1': 2}, 'changed': ['cve_feed_worker@host1']})
         self.assertEqual(out['lane.classic']['changed'], [])
         sent = [c.kwargs['destination'] for c in app.control.broadcast.call_args_list]
-        self.assertEqual(sent, [['celery@cve_feed_worker']])
+        self.assertEqual(sent, [['cve_feed_worker@host1']])
 
     def test_a_lane_that_does_not_answer_keeps_what_it_has_and_a_save_asks_for_the_resize(self):
         app = mock.MagicMock()

@@ -400,7 +400,7 @@ def lane_ceilings(key, app=None, timeout=1.5):
     stats = app.control.inspect(timeout=timeout).stats() or {}
     out = {}
     for name, info in stats.items():
-        if str(name).split('@')[-1] == LANE_WORKERS[key]:
+        if LANE_WORKERS[key] in str(name).split('@'):  # celery names `-n cve_feed_worker` cve_feed_worker@<host>; `celery@cve_feed_worker` also reads right
             ceiling = ((info or {}).get('autoscaler') or {}).get('max')
             out[name] = ceiling if isinstance(ceiling, int) else None
     return out
