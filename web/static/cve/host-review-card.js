@@ -108,7 +108,7 @@ export function hostReviewCard({ base, hostId, isCurrent = () => true, ago = FAL
     if (!step) return null;
     const box = el("div", `hr-step ${step.tone}`);
     const top = el("div", "hr-step-top");
-    top.append(el("span", "hr-step-label note", "Suggested next step"), badge(step.chip, step.tone));
+    top.append(el("span", "hr-step-label note", review.step.state === "proposed" ? "Suggested next step" : "Next step"), badge(step.chip, step.tone));
     box.append(top);
     box.append(step.href ? el("a", "hr-step-title", step.title, { href: step.href }) : el("p", "hr-step-title", step.title));
     if (step.why) box.append(el("p", "hr-step-why", step.why));
@@ -167,7 +167,6 @@ export function hostReviewCard({ base, hostId, isCurrent = () => true, ago = FAL
       const t = emptyText(data);
       body.append(el("p", "hr-headline", t.headline));
       if (t.detail) body.append(el("p", "note hr-sub", t.detail));
-      if (state === "running") body.append(badge("Running", "running"));
       if (state === "off") {
         const link = settingsLink();
         if (link && data.readiness.reason_code === "disabled") body.append(el("a", "hr-link", "Turn it on in Settings", { href: link.getAttribute("href") }));
