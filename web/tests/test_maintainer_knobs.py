@@ -131,7 +131,7 @@ class SharePolicyTests(SimpleTestCase):
         plan = decide(SHARE, 65, 75, calm, old)
         self.assertEqual(plan['new'], 75)  # the memory of the trouble is a day old: back to what is configured
         waiting = history(15, starve={'scans_queued': 3, 'scan_age_s': 100}, assess={'queued': 40, 'running': 4, 'oldest_s': 3600})
-        self.assertIn('a scan is waiting', decide(SHARE, 65, 75, waiting, old)['why_not_raised'])
+        self.assertIn('a scan is waiting', decide(SHARE, 55, 75, waiting, [change(5 * 3600, 65, 55, 'back_off')])['why_not_raised'])
 
     def test_what_a_share_change_expects(self):
         self.assertEqual(policy.expectation(SHARE, 'less'), 'scan_oldest_s')
