@@ -303,6 +303,37 @@ class AnswerTests(Base):
         self.assertEqual(bad.status_code, 400)
         self.assertFalse(SetupAnswer.objects.exists())
 
+    def test_a_later_answer_the_settings_refuse_applies_and_records_nothing_and_names_the_question(self):
+        self.connect_ai()
+        from cveFeed import settings_api
+        with mock.patch.object(settings_api, 'scanner_plan_post', side_effect=settings_api.SettingsError(400, 'the host helper is not reachable')):
+            out = post(self.c, {'answers': {'ai_validation': 'act', 'scan_from': 'both'}})  # the scanner plan is refused after the AI answer was carried out
+        self.assertEqual(out.status_code, 400)
+        self.assertIn('Which scanners will you use?', out.json()['error'])
+        self.assertIn('the host helper is not reachable', out.json()['error'])
+        self.assertFalse(SetupAnswer.objects.exists())
+        row = ReviewerSettings.current()
+        self.assertEqual((row.enabled, row.auto_close, row.host_review_enabled, row.template_validation_enabled), (False, False, False, False))
+        self.assertFalse(AuditLog.objects.filter(action__in=('setup.question', 'settings.reviewer')).exists())
+        self.assertFalse(os.path.exists(os.path.join(self.dir, '.scanner-plan-wanted')))
+
+    def test_the_scanner_plan_runs_last_so_a_refusal_after_it_cannot_leave_the_host_changed(self):
+        self.connect_ai()
+        from cveFeed import settings_api
+        with mock.patch.object(settings_api, 'reviewer_put', side_effect=settings_api.SettingsError(400, 'refused')):
+            out = post(self.c, {'answers': {'scan_from': 'both', 'ai_validation': 'act'}})  # the scanner answer is listed first
+        self.assertEqual(out.status_code, 400)
+        self.assertIn('Do you want AI validation?', out.json()['error'])
+        self.assertFalse(SetupAnswer.objects.exists())
+        self.assertFalse(os.path.exists(os.path.join(self.dir, '.scanner-plan-wanted')))  # the file the host helper reads was never written
+
+    def test_every_answer_is_saved_together_when_none_is_refused(self):
+        self.connect_ai()
+        out = post(self.c, {'answers': {'scan_from': 'both', 'ai_validation': 'act'}})
+        self.assertEqual(out.status_code, 200, out.content)
+        self.assertEqual(SetupAnswer.objects.count(), 2)
+        self.assertTrue(os.path.exists(os.path.join(self.dir, '.scanner-plan-wanted')))
+
     def test_the_reminder_names_the_action(self):
         post(self.c, {'later': True})
         reminder = self.c.get('/cve/api/settings/alerts').json()['questions']

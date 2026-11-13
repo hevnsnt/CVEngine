@@ -399,9 +399,16 @@ def answer_many(user, answers):
             raise QuestionError(409, q.applies()[1])
         if not isinstance(value, str) or (value != LATER and value not in [c['value'] for c in q.choices()]):
             raise QuestionError(400, 'that is not one of the choices')
+    # All or nothing: every answer is carried out inside ONE transaction, so a Settings handler that refuses a later answer undoes the earlier ones (the database
+    # side: the settings, the answer rows, the audit entries) and the message names the question. The one effect outside the database is the file the host helper
+    # reads for the scanner plan: that question runs LAST, so a refusal can only come before it writes anything (a refusal of the plan itself writes nothing).
     out = None
-    for key, value in answers.items():
-        out = answer(user, key, value)
+    with transaction.atomic():
+        for key, value in sorted(answers.items(), key=lambda item: item[0] == 'scan_from'):
+            try:
+                out = answer(user, key, value)
+            except QuestionError as exc:
+                raise QuestionError(exc.status, f'"{BY_KEY[key].title}": {str(exc.message).rstrip(".")}. Nothing was saved.')
     return out
 
 
