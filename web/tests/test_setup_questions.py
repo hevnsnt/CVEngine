@@ -118,18 +118,19 @@ class AskingTests(Base):
         self.connect_ai()
         out = post(self.c, {'later': True})
         self.assertEqual(out.status_code, 200)
-        self.assertEqual((out.json()['pending'], out.json()['later']), (0, 2))
+        self.assertEqual((out.json()['pending'], out.json()['later']), (0, 3))
         self.assertEqual(client_for(self.admin).get('/cve/').status_code, 200)
         self.assertFalse(ReviewerSettings.current().enabled)
         self.assertFalse(os.path.exists(os.path.join(self.dir, '.scanner-plan-wanted')))
         reminder = client_for(self.admin).get('/cve/api/settings/alerts').json()['questions']
-        self.assertEqual(reminder['open'], 2)
+        self.assertEqual(reminder['open'], 3)
         self.assertEqual(set(answer.answer for answer in SetupAnswer.objects.all()), {'later'})
 
     def test_no_reminder_and_no_redirect_once_everything_is_answered(self):
         self.connect_ai()
         self.assertEqual(post(self.c, {'key': 'ai_validation', 'answer': 'off'}).status_code, 200)
         self.assertEqual(post(self.c, {'key': 'scan_from', 'answer': 'internal'}).status_code, 200)
+        self.assertEqual(post(self.c, {'key': 'credential_checks', 'answer': 'off'}).status_code, 200)
         self.assertEqual(client_for(self.admin).get('/cve/').status_code, 200)
         self.assertIsNone(self.c.get('/cve/api/settings/alerts').json()['questions'])
 
@@ -152,6 +153,65 @@ class AskingTests(Base):
         self.assertEqual(self.question('scan_from')['state'], 'decided')  # the wizard of a new install asked it as its own step
 
 
+class CredentialChecksQuestionTests(Base):
+    """FA-10: an administrator who relied on default-login findings is told in the product: "Run checks that send credentials?", No (the safe default, what this
+    update set) or Yes, carried out through the Scan policy handler by a person only."""
+
+    def policy(self):
+        from dashboard.models import ScanPolicy
+        return ScanPolicy.current().allow_credential_checks
+
+    def test_the_question_is_asked_with_no_as_the_safe_default_and_says_what_it_does(self):
+        question = self.question('credential_checks')
+        self.assertEqual((question['state'], question['safe_default'], question['current']), ('pending', 'off', 'off'))
+        self.assertEqual(question['title'], 'Run checks that send credentials?')
+        self.assertIn('vendor default logins', question['text'])
+        self.assertIn('fixed credentials', question['text'])
+        no, yes = question['choices']
+        self.assertEqual((no['label'], no['tag'], no['safe']), ('No', 'Keeps what this update set', True))
+        self.assertIn('no longer re-confirmed', no['effect'])
+        self.assertEqual((yes['label'], yes['safe']), ('Yes', False))
+        self.assertEqual(question['link'], '/cve/settings/#scan_policy')
+
+    def test_the_page_says_every_host_is_checked_once_more_as_information(self):
+        data = self.c.get(API).json()
+        self.assertEqual(len(data['notes']), 1)
+        self.assertIn('every host is checked once more with nuclei', data['notes'][0].lower())
+        self.assertIn('check set changed', data['notes'][0])
+
+    def test_yes_goes_through_the_scan_policy_handler_with_its_audit_entry_and_no_changes_nothing(self):
+        self.assertEqual(post(self.c, {'key': 'credential_checks', 'answer': 'off'}).status_code, 200)
+        self.assertFalse(self.policy())
+        self.assertEqual(post(self.c, {'key': 'credential_checks', 'answer': 'on'}).status_code, 200)
+        self.assertTrue(self.policy())
+        self.assertTrue(AuditLog.objects.filter(action='scan_policy.allow_credential_checks', target='on').exists())  # the Settings page's own entry
+        self.assertTrue(AuditLog.objects.filter(action='setup.question', target='credential_checks').exists())
+        self.assertEqual(SetupAnswer.objects.get(key='credential_checks').answer, 'on')
+        self.assertEqual(post(self.c, {'key': 'credential_checks', 'answer': 'off'}).status_code, 200)
+        self.assertFalse(self.policy())
+
+    def test_a_switch_a_person_already_turned_on_is_decided_and_never_undone(self):
+        from dashboard.models import ScanPolicy
+        ScanPolicy.objects.create(allow_credential_checks=True)
+        question = self.question('credential_checks')
+        self.assertEqual((question['state'], question['current']), ('decided', 'on'))
+        self.assertEqual(post(self.c, {'later': True}).status_code, 200)
+        self.assertTrue(self.policy())
+
+    def test_only_a_person_answers_never_an_agent_or_a_plain_user(self):
+        self.assertEqual(post(client_for(self.plain), {'key': 'credential_checks', 'answer': 'on'}).status_code, 403)
+        ctx = Ctx(user=self.admin, token=SimpleNamespace(read_only=False))
+        with self.assertRaises(ApiError) as caught:
+            bridge.change_setting(ctx, 'setup_questions', {'key': 'credential_checks', 'answer': 'on'})
+        self.assertEqual(caught.exception.status, 403)
+        self.assertFalse(self.policy())
+
+    def test_deciding_later_leaves_it_off(self):
+        post(self.c, {'later': True})
+        self.assertEqual(self.question('credential_checks')['state'], 'later')
+        self.assertFalse(self.policy())
+
+
 class AnswerTests(Base):
     def test_only_an_app_admin_answers_and_an_agent_never_does(self):
         self.connect_ai()
@@ -161,7 +221,7 @@ class AnswerTests(Base):
         with self.assertRaises(ApiError) as caught:
             bridge.change_setting(ctx, 'setup_questions', {'key': 'ai_validation', 'answer': 'act'})
         self.assertEqual(caught.exception.status, 403)
-        self.assertEqual(bridge.get_setting(ctx, 'setup_questions')['pending'], 2)  # it can read them
+        self.assertEqual(bridge.get_setting(ctx, 'setup_questions')['pending'], 3)  # it can read them
         plain = Ctx(user=self.plain, token=SimpleNamespace(read_only=False))
         with self.assertRaises(ApiError) as caught:
             bridge.get_setting(plain, 'setup_questions')
@@ -267,9 +327,9 @@ class AnswerTests(Base):
 
     def test_one_request_saves_every_answer_or_none(self):
         self.connect_ai()
-        out = post(self.c, {'answers': {'scan_from': 'internal', 'ai_validation': 'recommend'}})
+        out = post(self.c, {'answers': {'scan_from': 'internal', 'ai_validation': 'recommend', 'credential_checks': 'off'}})
         self.assertEqual(out.status_code, 200, out.content)
-        self.assertEqual(dict(SetupAnswer.objects.values_list('key', 'answer')), {'scan_from': 'internal', 'ai_validation': 'recommend'})
+        self.assertEqual(dict(SetupAnswer.objects.values_list('key', 'answer')), {'scan_from': 'internal', 'ai_validation': 'recommend', 'credential_checks': 'off'})
         self.assertEqual((out.json()['pending'], out.json()['open']), (0, 0))  # choosing Off or anything counts as answered: the reminder is gone
         self.assertIsNone(self.c.get('/cve/api/settings/alerts').json()['questions'])
         SetupAnswer.objects.all().delete()
@@ -280,13 +340,13 @@ class AnswerTests(Base):
     def test_the_reminder_names_the_action(self):
         post(self.c, {'later': True})
         reminder = self.c.get('/cve/api/settings/alerts').json()['questions']
-        self.assertEqual(reminder['text'], '1 question about this update is waiting.')
+        self.assertEqual(reminder['text'], '2 questions about this update are waiting.')
         self.assertEqual(reminder['url'], '/cve/update-questions/')
 
     def test_the_questions_list_every_question_with_its_state(self):
         data = self.c.get(API).json()
-        self.assertEqual([q['key'] for q in data['questions']], ['scan_from', 'ai_validation'])
-        self.assertEqual((data['pending'], data['later'], data['open']), (1, 0, 1))  # the AI one does not apply: no model
+        self.assertEqual([q['key'] for q in data['questions']], ['scan_from', 'ai_validation', 'credential_checks'])
+        self.assertEqual((data['pending'], data['later'], data['open']), (2, 0, 2))  # the AI one does not apply: no model
         for q in data['questions']:
             self.assertEqual(q['since'], '1.4.0')
 

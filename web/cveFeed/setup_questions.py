@@ -232,6 +232,36 @@ def settle(user=None):
         return False
 
 
+# --- the credential checks question ---------------------------------------------------------------------------------------------------------------------
+
+def _cred_current():
+    from cveFeed import validation
+    return 'on' if validation.credential_checks_allowed() else 'off'
+
+
+def _cred_decided():
+    """A person already turned them on in Settings > Scan policy: that is a choice. "Off" is what the update set, so it is not one until a person answers."""
+    return _cred_current() == 'on'
+
+
+def _cred_choices():
+    return [
+        {'value': 'off', 'label': 'No', 'tag': 'Keeps what this update set',
+         'effect': 'Checks that send credentials stay off. Findings that came from those checks (default logins) are no longer re-confirmed.'},
+        {'value': 'on', 'label': 'Yes',
+         'effect': 'Turns on the checks that try vendor default logins and send fixed credentials to your hosts. Use it only on hosts you are allowed to log in to.'},
+    ]
+
+
+def _cred_apply(user, value):
+    from cveFeed import settings_api
+    _call(settings_api.scan_policy_put, user, {'allow_credential_checks': value == 'on'})
+
+
+# What the page says about the update itself, as information only (nothing to answer).
+NOTES = ('Every host is checked once more with nuclei after this update, because the check set changed. Nothing needs to be done.',)
+
+
 class Question:
     def __init__(self, key, since, title, text, choices, safe_default, applies, decided, apply, current, link, link_text, facts=None, version=1):
         self.key, self.since, self.title, self.text, self.choices, self.facts, self.version = key, since, title, text, choices, facts, version
@@ -248,6 +278,10 @@ QUESTIONS = (
              'An AI model can double-check your findings and watch the health of the server. It stays off until you say otherwise. Features you already turned '
              'on in an earlier release are not touched.',
              _ai_choices, lambda: 'off', _ai_applies, _ai_decided, _ai_apply, _ai_current, '/cve/settings/#ai', 'Settings > AI model', facts=_ai_facts, version=2),
+    Question('credential_checks', '1.4.0', 'Run checks that send credentials?',
+             'Some checks try vendor default logins and send fixed credentials (a default password, an API key) to your hosts to see whether they are accepted. '
+             'This update turned them off, and they stay off until you say yes.',
+             _cred_choices, lambda: 'off', lambda: (True, ''), _cred_decided, _cred_apply, _cred_current, '/cve/settings/#scan_policy', 'Settings > Scan policy'),
 )
 BY_KEY = {q.key: q for q in QUESTIONS}
 
@@ -302,7 +336,7 @@ def snapshot():
     questions = [_describe(q, answers) for q in QUESTIONS]
     pending = sum(1 for q in questions if q['state'] == 'pending')
     later = sum(1 for q in questions if q['state'] == 'later')
-    return {'questions': questions, 'pending': pending, 'later': later, 'open': pending + later, 'url': PAGE,
+    return {'questions': questions, 'pending': pending, 'later': later, 'open': pending + later, 'url': PAGE, 'notes': list(NOTES),
             'safe_default': 'A feature that costs money or changes what is scanned stays off until you answer.'}
 
 
