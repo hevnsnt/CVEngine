@@ -643,6 +643,21 @@ def decide(setting, value, baseline, samples, history, *, now, boot_at, target, 
     return out
 
 
+def remembered_ceiling(setting, ceiling, history, *, now):
+    """The same remembered-trouble ceiling ``decide`` applies, for a caller that is not the controller (an agent's request): the level one step
+    short of the newest level that caused trouble in the last ``BAD_MEMORY_SECONDS``, when that is below ``ceiling``. Returns ``(ceiling, text)``;
+    ``text`` is empty when nothing is remembered."""
+    bad = sorted((h for h in history if _troubled(h, history) and h.get('old') is not None and now - h['at'] < BAD_MEMORY_SECONDS),
+                 key=lambda h: h['at'])
+    if not bad:
+        return ceiling, ''
+    level = bad[-1]['old']
+    below = level - setting.step if setting.sense == 'more' else level + setting.step
+    if _beyond(setting, ceiling, below):
+        return _clamp(setting, below), f'{level} caused trouble {int((now - bad[-1]["at"]) // 3600)} h ago'
+    return ceiling, ''
+
+
 def _troubled(change, history):
     """Whether a change of the history marks the level it left as one that caused trouble: a back-off forced by evidence (``pressure``), or an
     emergency back-off (the database did not answer) within ``BAD_MEMORY_SECONDS`` after a quick restore (``recover``) of the same setting.

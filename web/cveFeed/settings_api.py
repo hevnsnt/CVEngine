@@ -986,12 +986,12 @@ def autotune_get(request):
 
 
 def autotune_put(request):
-    """{"mode": "off" | "suggest" | "auto", "advisor": true | false}: either or both."""
+    """{"mode": "off" | "suggest" | "auto", "advisor": true | false, "agent_policy": "off" | "suggest" | "auto"}: any of them."""
     from cveFeed import autotune
     data = _body(request)
-    if not data or set(data) - {'mode', 'advisor'}:
-        raise SettingsError(400, 'send mode and/or advisor')
-    _autotune(autotune.set_mode, request.user, data.get('mode'), data.get('advisor'))
+    if not data or set(data) - {'mode', 'advisor', 'agent_policy'}:
+        raise SettingsError(400, 'send mode, advisor and/or agent_policy')
+    _autotune(autotune.set_mode, request.user, data.get('mode'), data.get('advisor'), data.get('agent_policy'))
     return autotune_get(request)
 
 

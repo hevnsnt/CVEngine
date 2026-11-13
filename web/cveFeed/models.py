@@ -2037,6 +2037,9 @@ class AutoTuneSettings(models.Model):
     MODES = ("off", "suggest", "auto")
     mode = models.CharField(max_length=10, default="auto")
     advisor = models.BooleanField(default=True)  # ask the AI advisor when a provider is configured
+    # What an agent (an API token over MCP or REST) may do to a throughput setting: ``off`` (nothing), ``suggest`` (its write becomes a recommendation a
+    # person applies, the default) or ``auto`` (its write is applied through the tuner, bounded and verified). Only a person changes it.
+    agent_policy = models.CharField(max_length=10, default="suggest", db_default="suggest")
     values = models.JSONField(default=dict, blank=True)
     meta = models.JSONField(default=dict, blank=True)  # {key: {"hold_until": iso time}}
     changed_at = models.DateTimeField(null=True, blank=True)  # the last change of the mode or the advisor switch, by a person
@@ -2062,7 +2065,7 @@ class TuningDecision(models.Model):
     old_value = models.IntegerField(null=True, blank=True)
     new_value = models.IntegerField(null=True, blank=True)
     mode = models.CharField(max_length=10)
-    source = models.CharField(max_length=12)  # controller | ai | person
+    source = models.CharField(max_length=12)  # controller | ai | person | agent
     action = models.CharField(max_length=12)  # raise | lower | apply | revert | release
     layer = models.CharField(max_length=8, blank=True, default="")  # auto | saved | "" for a recommendation
     old_layer_value = models.IntegerField(null=True, blank=True)  # what that layer held before (None: nothing), so a revert restores it exactly

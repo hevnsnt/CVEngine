@@ -28,6 +28,7 @@ from agentapi import egress
 from agentapi import tuning
 from agentapi import authcheck
 from agentapi import tailscale
+from tenancy import audit
 from agentapi.models import SentinelTask
 from agentapi.services import ApiError, Ctx
 
@@ -655,7 +656,8 @@ def call_tool(ctx, name, arguments):
         svc.require_write_token(ctx)
     arguments = storage_safe.clean(arguments or {})  # NUL bytes and lone surrogates would be a 500 at the database or the encoder (review 2 F3)
     check_arguments(schema, arguments)
-    return handler(ctx, arguments)  # a bug in a handler is not the caller's mistake: it surfaces as an internal error, traceback logged
+    with audit.acting_as(ctx):  # an audit row written meanwhile names the token (and the agent) next to its owner
+        return handler(ctx, arguments)  # a bug in a handler is not the caller's mistake: it surfaces as an internal error, traceback logged
 
 
 def handle_message(ctx, msg):

@@ -92,12 +92,25 @@ READ_ONLY_FOR_AGENTS = {
     'ip_allowlist': 'the allowed addresses are the perimeter of the instance; an agent can read the list, a person changes it in the web interface.',
     'ip_allowlist_entry_add': 'the allowed addresses are the perimeter of the instance; a person changes them in the web interface.',
     'ip_allowlist_entry': 'the allowed addresses are the perimeter of the instance; a person changes them in the web interface.',
+    'updates_approve': 'approving an update restarts the whole instance; an agent may check for one and read its state, a person presses the button.',
 }
 # What the handlers see as the caller's address. Not a loopback address: nothing that trusts the caller's address may take the bridge for the local machine.
 BRIDGE_ADDRESS = ''
 # Owner rule: no check that sends credentials runs unless a person turned it on. An agent may switch such a setting off and read it, never switch it on: a
 # person does that in the web interface. {setting name: the fields of its body an agent may not set to true}
-AGENT_CANNOT_ENABLE = {'scan_policy': ('allow_credential_checks',)}
+# The same rule for everything that costs money or widens what is scanned (owner rule, WP4: an agent can lower such a thing, never switch it on).
+AGENT_CANNOT_ENABLE = {'scan_policy': ('allow_credential_checks', 'nuclei_all_templates'), 'ai': ('enabled', 'auto_fire'), 'reviewer': ('enabled',),
+                       'openvas': ('enabled',), 'openvas_project': ('enabled',), 'tailscale_project': ('enabled', 'auto_scan', 'use_local')}
+# A value an agent may not send for an entry: {entry: {field: the values refused}}. Automatic updates install without a person pressing the button; the
+# two scanner plans that keep the built-in scanner running spend the host's memory.
+AGENT_CANNOT_SET = {'updates': {'mode': ('automatic',)}, 'scanner_plan': {'plan': ('internal', 'both')}}
+# Numbers of an entry's body that cost money or work: an agent may only lower them. {entry: {field: how the current number is read}}
+AGENT_LOWER_ONLY = {'ai': ('plan_daily_total', 'plan_daily_per_project', 'cve_guidance_daily', 'auto_fire_max_scans'), 'reviewer': ('review_daily_max',)}
+# Tunables an agent may only lower: every cap (``caution='cap'``, which includes each AI spend cap) and the two switches that widen what is scanned or sent.
+# ``validate_min_gap_hours`` is the other way round (a shorter gap spends more), so an agent may only raise it. A cap of 0 turns the pacing off: more, not less.
+TUNABLE_ONLY_RAISE = ('validate_min_gap_hours',)
+TUNABLE_SWITCHES = ('planner_enabled', 'sentinel_bbot_keys')
+TUNABLE_ZERO_IS_UNLIMITED = ('egress_port25_per_hour',)
 WRITE_METHODS = ('PUT', 'PATCH', 'POST')
 NOT_EXPOSED[('admin', 'openvas')] = 'the same add-on settings as the openvas entry (settings table).'
 IDENTITY_ROUTES_NOT_YET = ('users', 'memberships', 'orgs', 'projects')  # people, roles and organizations: a separate slice, owner to say how far an agent may go
@@ -175,6 +188,8 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
         for field in AGENT_CANNOT_ENABLE.get(name, ()):
             if values.get(field) not in (None, False):  # anything but off: a string or a number is refused by the handler, and must not slip past here
                 raise ApiError(403, f'{field} can only be switched on by a person in the web interface; an agent may switch it off')
+    if method != 'GET' and isinstance(values, dict):
+        _agent_body_rules(ctx, name, values)
     groups = _groups(pattern, ident)
     path = '/cve/api/%s/%s/' % (api, _path_for(pattern, groups))
     factory = RequestFactory(REMOTE_ADDR=BRIDGE_ADDRESS)
@@ -184,6 +199,12 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
         body = json.dumps(values if values is not None else {})
         request = factory.generic(method, path, body, content_type='application/json')
     request.user = ctx.user
+    if method == 'PUT' and name in ('scan_concurrency', 'tunables') and isinstance(values, dict) and isinstance(values.get('values'), dict) and values['values']:
+        return _throughput_write(ctx, name, method, fn, request, values, groups)
+    return _run(ctx, name, api, fn, request, groups)
+
+
+def _run(ctx, name, api, fn, request, groups):
     from cveFeed import admin_api, settings_api
     error_types = (settings_api.SettingsError, admin_api.AdminError)
     try:
@@ -196,12 +217,106 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
     return data if status < 400 else {'error': data, 'status': status}
 
 
+def _current_body_number(name, field):
+    """The number an entry's body field holds now (for the lower-only rule)."""
+    if name == 'ai':
+        from dashboard.models import AIProviderSettings
+        row = AIProviderSettings.objects.first()
+        return getattr(row, field, None) if row is not None else None
+    from cveFeed import reviewer
+    return getattr(reviewer.settings_row(), field, None)
+
+
+def _agent_body_rules(ctx, name, values):
+    """What an agent may not send, checked before anything is written (a person's own writes, in the web interface, never come here)."""
+    for field, refused in AGENT_CANNOT_SET.get(name, {}).items():
+        if values.get(field) in refused:
+            raise ApiError(403, f'{field} {values.get(field)!r} can only be chosen by a person in the web interface; an agent may choose the other way')
+    if name == 'autotune' and 'agent_policy' in values:
+        raise ApiError(403, 'what agents may do to the throughput settings is a person\'s decision: change it in Settings, Auto-tuning')
+    for field in AGENT_LOWER_ONLY.get(name, ()):
+        if field not in values:
+            continue
+        new, now = values[field], _current_body_number(name, field)
+        if isinstance(new, bool) or not isinstance(new, int) or (isinstance(now, int) and new > now):
+            raise ApiError(403, f'{field} is a limit on what this instance spends: an agent may only lower it (now {now}); a person raises it in the web interface')
+
+
+def _tunable_rules(values):
+    """The lower-only rules for the tunables of one write (see ``TUNABLE_*``); raises 403 for the first number that would raise one."""
+    from cveFeed import tunables
+    for key, new in values.items():
+        t = tunables.BY_KEY.get(key)
+        if t is None:
+            continue
+        now = tunables.value(key)
+        if key in TUNABLE_ONLY_RAISE:
+            if new is None or (isinstance(new, int) and not isinstance(new, bool) and new < now):
+                raise ApiError(403, f'{t.label}: a shorter gap spends more, so an agent may only lengthen it (now {now}); a person shortens it in the web interface')
+            continue
+        if not (t.caution == 'cap' or key in TUNABLE_SWITCHES):
+            continue
+        number = tunables.resolve(key, {})['value'] if new is None else new
+        if isinstance(number, bool) or not isinstance(number, (int, float)):
+            continue  # the handler refuses a value that is not a number
+        def reach(n):  # a cap of 0 on these keys means no cap
+            return float('inf') if key in TUNABLE_ZERO_IS_UNLIMITED and n == 0 else n
+        if reach(number) > reach(now):
+            raise ApiError(403, f'{t.label} is a limit on cost or scope: an agent may only lower it (now {now}); a person raises it in the web interface')
+
+
+def _throughput_write(ctx, name, method, fn, request, values, groups):
+    """AM-3: the keys auto-tune manages go to the engine (``autotune.agent_change``); everything else of the same write goes to the page's handler.
+    The reply is the page's own answer plus ``agent_changes`` (one result per managed key) and ``agent_summary`` in plain words."""
+    from cveFeed import autotune
+    inner = values.get('values')
+    managed = autotune.by_key()
+    mine = {k: v for k, v in inner.items() if k in managed and managed[k].registry == name}
+    rest = {k: v for k, v in inner.items() if k not in mine}
+    if name == 'tunables':
+        _tunable_rules(rest)
+    who = _who(ctx)
+    data = None
+    if rest:
+        request = RequestFactory(REMOTE_ADDR=BRIDGE_ADDRESS).generic(method, request.path, json.dumps({**values, 'values': rest}), content_type='application/json')
+        request.user = ctx.user
+        data = _run(ctx, name, ENTRIES[name][0], fn, request, groups)
+    try:
+        results = autotune.agent_change(ctx.user, mine, who)
+    except PermissionError as exc:
+        raise ApiError(403, str(exc))
+    if data is None:
+        data = _run(ctx, name, ENTRIES[name][0], _find(ENTRIES[name][0], ENTRIES[name][1], 'GET'), _get_request(ctx, name), groups)
+    summary = ' '.join(r['text'] for r in results.values())
+    if not rest and all(r['status'] == 'refused' for r in results.values()):
+        off = autotune.agent_policy() == 'off'
+        raise ApiError(403 if off else 409, summary, agent_changes=results)
+    return {**data, 'agent_changes': results, 'agent_summary': summary}
+
+
+def _get_request(ctx, name):
+    api, pattern, _t, _i = ENTRIES[name]
+    request = RequestFactory(REMOTE_ADDR=BRIDGE_ADDRESS).get('/cve/api/%s/%s/' % (api, pattern))
+    request.user = ctx.user
+    return request
+
+
+def _who(ctx):
+    """How the agent is named in a decision's reason and the activity line: the registered agent's name, else the token's."""
+    from tenancy import audit
+    info = audit.describe_token(ctx.token)
+    return info.get('agent_name') or info.get('name') or 'an agent'
+
+
+_READABLE = ('ip_allowlist', 'ip_allowlist_entry_add', 'ip_allowlist_entry')
+
+
 def list_settings(ctx):
     return {'settings': catalogue(),
             'how': 'get_setting(name) reads it; change_setting(name, values) changes it with the same limits as the web page; '
                    'entries marked with an id take it as "id" (for example "3/shodan"). Secrets are never returned.',
             'not_exposed': [{'api': a, 'route': r, 'why': why} for (a, r), why in NOT_EXPOSED.items()]
-                           + [{'api': ENTRIES[n][0], 'route': ENTRIES[n][1], 'why': 'can be read, not changed by an agent: ' + why} for n, why in READ_ONLY_FOR_AGENTS.items()]}
+                           + [{'api': ENTRIES[n][0], 'route': ENTRIES[n][1], 'why': ('can be read, not changed by an agent: ' if n in _READABLE else 'not available to agents: ') + why} for n, why in READ_ONLY_FOR_AGENTS.items()]}
 
 
 def get_setting(ctx, name, ident=None, query=None):

@@ -692,7 +692,8 @@ def dispatch(request, path):
         try:
             if request.method != 'GET' and ctx.token and ctx.token.read_only and not path.startswith('tokens') and not READ_ONLY_POSTS.match(path) and not SELF_GATED_POSTS.match(path):
                 raise ApiError(403, 'this token is read only')
-            result = fn(request, ctx, **match.groupdict())
+            with audit.acting_as(ctx):  # an audit row written meanwhile names the token (and the agent) next to its owner
+                result = fn(request, ctx, **match.groupdict())
         except ApiError as e:
             response = JsonResponse({**getattr(e, 'extra', {}), 'error': e.message}, status=e.status)
             wait = getattr(e, 'extra', {}).get('retry_after_seconds')
