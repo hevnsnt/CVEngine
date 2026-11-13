@@ -70,7 +70,7 @@ class HarnessServeTests(NoRealSleep, DispatchBase):
     def test_a_task_is_served_through_claim_accept_and_report_with_the_contract_fixture(self):
         with FakeScanner(kinds=['nmap']) as fake:
             result = self.dispatch('nmap')
-        self.assertEqual(result, {**fixture('nmap'), 'hosts': result['hosts']})  # clean_result rebuilds the host rows; the outcome and fields are the fixture's
+        self.assertEqual(result, {**fixture('nmap', version=4), 'hosts': result['hosts']})  # clean_result rebuilds the host rows; the outcome and fields are the fixture's
         self.assertEqual(result['hosts'][0]['ip'], '192.0.2.10')
         self.assertEqual(result['hosts'][0]['ports'][0]['product'], 'OpenSSH')
         task = SentinelTask.objects.get(kind='nmap')
@@ -405,7 +405,7 @@ class NucleiLightServedTests(StageBase, NoScannerBase):
 
     def test_the_scanner_serves_a_finding_and_the_pass_stores_the_technology(self):
         self.arm('nuclei_light')
-        with FakeScanner(kinds=['nuclei_light'], responders={'nuclei_light': lambda task: for_host(fixture('nuclei_light'), HOST)}) as fake:
+        with FakeScanner(kinds=['nuclei_light'], responders={'nuclei_light': lambda task: for_host(fixture('nuclei_light', version=4), HOST)}) as fake:
             stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light')
             result = nuclei_scan.run_light_nuclei(self.scan.id, stream=stream)
         self.assertServed(fake, 'nuclei_light')
@@ -444,7 +444,7 @@ class NucleiTargetedServedTests(StageBase, NoScannerBase):
 
     def test_the_scanner_serves_a_finding_and_the_pass_stores_the_vulnerability(self):
         self.arm('nuclei_targeted')
-        with FakeScanner(kinds=['nuclei_targeted'], responders={'nuclei_targeted': lambda task: for_host(fixture('nuclei_targeted'), HOST)}) as fake:
+        with FakeScanner(kinds=['nuclei_targeted'], responders={'nuclei_targeted': lambda task: for_host(fixture('nuclei_targeted', version=4), HOST)}) as fake:
             result = self.run_pass(dispatch.wrap_nuclei_stream(self.scan, 'nuclei_targeted'))
         self.assertGreaterEqual(result['groups'], 1, 'the fixture must form a group, or this proves nothing')
         self.assertServed(fake, *['nuclei_targeted'] * result['groups'])
@@ -492,7 +492,7 @@ class NucleiDeepServedTests(StageBase, NoScannerBase):
 
     def test_the_scanner_serves_a_finding_and_the_host_is_stored_and_marked_checked(self):
         self.arm('nuclei_deep')
-        with FakeScanner(kinds=['nuclei_deep'], responders={'nuclei_deep': lambda task: for_host(fixture('nuclei_deep'), HOST)}) as fake:
+        with FakeScanner(kinds=['nuclei_deep'], responders={'nuclei_deep': lambda task: for_host(fixture('nuclei_deep', version=4), HOST)}) as fake:
             result = self.run_sweep()
         self.assertServed(fake, 'nuclei_deep')
         self.assertEqual((result['status'], result['host'], result['findings']), ('done', HOST, 1))

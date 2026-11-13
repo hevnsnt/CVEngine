@@ -370,6 +370,15 @@ export function newestLine(d) {
   return parts.length ? el("p", "note ss-detail", parts.join(", ")) : null;
 }
 
+// "Tools behind" next to "version behind": the tool versions the Sentinel reports against the ones this release ships (``d.tools_state`` from agentapi/sentinel_tools.py).
+// Drawn in the error style an update that did not happen uses, since a Sentinel on stale tools is something to act on; nothing for a Sentinel that reports none.
+export function toolsLine(d) {
+  const t = d.tools_state;
+  if (!t || t.status !== "behind" || !(t.behind || []).length) return null;
+  const parts = t.behind.map((b) => `${b.tool} ${b.running} (this release ships ${b.current})`);
+  return el("p", t.flagged ? "msg err ss-detail" : "note ss-detail", `Tools behind: ${parts.join(", ")}`);
+}
+
 // "running abc1234, newest def5678, update requested 10:42": what cvENGINE knows about keeping this Sentinel on the newest version, in plain words
 // (``d.auto_update`` from agentapi/sentinel_autoupdate.py). Nothing is drawn for a server that does not report it.
 const short = (v) => (v ? String(v).slice(0, 7) : "");
@@ -474,6 +483,8 @@ export function versionBlock(d, { onChange, builtin = false }) {
   box.append(line);
   const newest = newestLine(d);
   if (newest) box.append(newest);
+  const tools = toolsLine(d);
+  if (tools) box.append(tools);
   const keeping = updateLine(d);
   if (keeping) box.append(keeping);
   if (d.contract && d.contract.note)

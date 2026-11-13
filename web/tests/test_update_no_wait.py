@@ -1,12 +1,15 @@
 """An update does not wait for scans that run on Sentinels: the update window, leases kept through it, adoption of what a Sentinel held, the drain query,
 the opt-in, and the optional spool count a Sentinel reports. The Sentinel's own spool is tested in the Sentinel repository."""
 import contextlib
+import fcntl
 import io
+import os
 import re
 from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
+from django.conf import settings
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
@@ -18,6 +21,7 @@ from cveFeed.models import AgentActivity, ScanControl, ServiceRun
 from dashboard.models import AuditLog
 from startScan.models import IpAddress, ScanHistory
 from tests.test_agentapi import call
+from tests.test_scan_control import OwnUpdateLock
 from tests.test_sentinels import SentinelBase, register_sentinel
 
 APPLY = Path(__file__).resolve().parents[2] / 'scripts' / 'apply-update.sh'
@@ -34,7 +38,19 @@ def open_window(started_ago=timedelta(minutes=8), ended_ago=None, grace=600):
         'update_grace_until': (now - ended_ago + timedelta(seconds=grace)) if ended_ago is not None else None})
 
 
-class UpdateWindowTests(TestCase):
+SHARED_HOME = settings.RENGINE_HOME  # what every parallel test process would use
+
+
+class UpdateWindowTests(OwnUpdateLock, TestCase):
+    def test_another_process_holding_the_shared_lock_file_does_not_stop_this_one(self):
+        with open(os.path.join(SHARED_HOME, '.update-lock'), 'a+') as other:
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)  # a parallel test process in the middle of its own pause
+            try:
+                scan_control.request_drain_pause()
+                scan_control.release_update_pause()
+            finally:
+                fcntl.flock(other, fcntl.LOCK_UN)
+
     def test_a_drain_pause_opens_the_window_and_a_second_request_keeps_it(self):
         scan_control.request_drain_pause()
         first = ScanControl.objects.get(pk=1)
@@ -87,7 +103,7 @@ class UpdateWindowTests(TestCase):
         self.assertEqual(scan_control.close_update_window(row, timezone.now()), [])  # closed once
 
 
-class SentinelLeaseTests(SentinelBase):
+class SentinelLeaseTests(OwnUpdateLock, SentinelBase):
     def setUp(self):
         super().setUp()
         _, self.agent = register_sentinel(self.t['dana'], name='lease-sentinel', capabilities=['nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'testssl'])
@@ -258,6 +274,23 @@ class AdoptionTests(SentinelBase):
         self.assertFalse(AuditLog.objects.filter(action='sentinel.task.late', detail__task_id=task.pk).exists())  # not a discarded late result
         self.scan.refresh_from_db()
         self.assertEqual(ScanHistory.objects.get(pk=self.scan.pk).scan_status, 0)  # the scan record stays interrupted
+
+    def test_a_late_naabu_result_leaves_the_addresses_the_sentinel_did_not_finish_due(self):
+        task = self.held(kind='naabu', ips=('192.0.2.50', '192.0.2.51'))
+        self.interrupted()
+        status, out = self.report(task, {'outcome': 'done', 'ports': {'192.0.2.50': [22]}, 'incomplete': True, 'unfinished': ['192.0.2.51']})
+        self.assertEqual((status, out['adopted']), (200, True), out)
+        self.assertEqual(list(ServiceRun.objects.filter(service='naabu', asset='192.0.2.50').values_list('status', flat=True)), ['done'])
+        self.assertEqual(list(ServiceRun.objects.filter(service='naabu', asset='192.0.2.51').values_list('status', flat=True)), ['failed'])  # a failed scan is not a clean host
+
+    def test_a_late_nmap_result_does_not_file_or_mark_a_host_nmap_timed_out_on(self):
+        task = self.held(kind='nmap', ips=('192.0.2.50', '192.0.2.51'))
+        self.interrupted()
+        body = {'outcome': 'done', 'hosts': [NMAP_RESULT['hosts'][0], {'ip': '192.0.2.51', 'os_guess': '', 'ports': [], 'timed_out': True}]}
+        status, out = self.report(task, body)
+        self.assertEqual((status, out['adopted']), (200, True), out)
+        self.assertTrue(ServiceRun.objects.filter(service='nmap-fast', asset='192.0.2.50', status='done').exists())
+        self.assertFalse(ServiceRun.objects.filter(service='nmap-fast', asset='192.0.2.51').exists())  # left due
 
     def test_the_second_delivery_is_a_duplicate_and_files_nothing_again(self):
         task = self.held()

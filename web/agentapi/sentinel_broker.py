@@ -42,8 +42,10 @@ from agentapi import sentinel_settings
 from agentapi import sentinel_contract
 from agentapi import sentinel_stream
 from agentapi import sentinel_autoupdate
+from agentapi import sentinel_tools
 from agentapi import sentinel_version
 from agentapi import web_screenshot_results
+from cveFeed import result_cuts
 from agentapi import services as svc
 from agentapi.auth import SCOPE_SENTINEL, create_token
 from agentapi.models import SENTINEL_ACTIVE_STATUSES, Agent, SentinelEnrollment, SentinelTask
@@ -66,6 +68,7 @@ RATES = {'claim': broker.RATES['claim'], 'report': broker.RATES['report'], 'rele
          'policy': (60, 60), 'bundle': (12, 60),  # the template policy is a cheap read, the bundle a download of several MiB
          'secret': (6, 60),  # a stored credential is read once per signed-in task; more than a few a minute is a caller gone wrong, or guessing ids
          'partial': (240, 60),  # a streamed task posts a batch every few seconds while it runs (sentinel_stream.report_partial)
+         'bootstrap': (30, 60),  # per client address, and the one call that needs no bearer token (``limit_address``): a throttle on what an unknown caller can make the server hash and query
          'check': (60, 60)}  # an AI-written check's approval is asked once per nuclei_validate task (approved_check)
 # Kinds the built-in scanner keeps to itself while the install has one (``builtin_only_kind``). ``route_probe_signed`` is its alone whatever happens: it
 # reads a stored sign-in (secret_ref), which only a built-in image that reads one is offered. ``path_probe`` (the path a scanner's packets leave from) and
@@ -129,6 +132,11 @@ def register(ctx, body):
 
 
 def heartbeat(ctx, body=None):
+    with sentinel_policy.shared_lookups():  # the defaults, the user's reach and sign-in facts are read once for the whole call, not once by each step of it
+        return _heartbeat(ctx, body)
+
+
+def _heartbeat(ctx, body=None):
     """Say the Sentinel is alive. The same call as any agent's: it already extends SentinelTask leases too (see
     ``agent_broker.heartbeat``). An optional ``running`` list (the ids of the tasks the Sentinel is working on) ends, as expired, any of its own
     claimed or running tasks it does not list once they were accepted more than ``RUNNING_GRACE`` ago, so a task a restart or a crash lost
@@ -153,6 +161,13 @@ def heartbeat(ctx, body=None):
     return out
 
 
+def _in_update_grace(now=None):
+    """``scan_control.in_update_grace``, read once inside ``sentinel_policy.shared_lookups`` (the reaper, the lease extension and the unreported-task check of one heartbeat ask it
+    each, and a read of the control row is a query)."""
+    from cveFeed import scan_control
+    return sentinel_policy.shared(('update-grace',), lambda: scan_control.in_update_grace(now))
+
+
 def _clean_running(body):
     """The set of task ids in a heartbeat's ``running``, or ``None`` when the field is absent (or null)."""
     value = body.get('running') if isinstance(body, dict) else None
@@ -168,8 +183,7 @@ def _end_unreported(agent_id, running):
     """End this Sentinel's own claimed or running tasks that are not in ``running`` and were accepted (or, never accepted, claimed) more than
     ``RUNNING_GRACE`` ago, through ``expire`` (so the dispatcher falls back and the slot frees). Returns the set of ended task ids. Another
     Sentinel's tasks are never in the query."""
-    from cveFeed import scan_control
-    if scan_control.in_update_grace():  # the Sentinel may have been talking to a server that was down: what it does not list now is not lost yet
+    if _in_update_grace():  # the Sentinel may have been talking to a server that was down: what it does not list now is not lost yet
         return set()
     cutoff = timezone.now() - RUNNING_GRACE
     ended = set()
@@ -203,6 +217,15 @@ def _limit(token, action, limit=None):
     if not (broker._hit(f'agentapi:{action}:{token.key_hash[:16]}', limit, window)
             and broker._hit(f'agentapi:{action}:user:{token.user_id}', limit * broker.USER_RATE_FACTOR, window)):
         raise ApiError(429, f'too many {action} calls: at most {limit} per {window} seconds', retry_after_seconds=broker._window_left(f'agentapi:{action}:{token.key_hash[:16]}', window))
+
+
+def limit_address(address, action='bootstrap'):
+    """Count one call of ``action`` against the caller's address (``agent_broker._hit``: every call counts, a refused or failed one too), 429 with ``Retry-After`` past it.
+    For the call that has no token to count against. ``address`` is ``reNgine.client_ip.client_ip`` (behind a trusted proxy, the real client)."""
+    limit, window = RATES[action]
+    name = f'agentapi:{action}:addr:{address or "unknown"}'
+    if not broker._hit(name, limit, window):
+        raise ApiError(429, f'too many {action} calls from this address: at most {limit} per {window} seconds', retry_after_seconds=broker._window_left(name, window))
 
 
 def _template_bundle(ctx, action):
@@ -385,8 +408,7 @@ def failing_kinds(agent, now=None):
     after the round trip. Work of that kind goes straight to this server (``capacity_state`` finds no Sentinel) until the cool-off ends; then the
     next task of the kind is the one more try, and a success clears the streak while a failure withholds it for another cool-off. Needs no state of
     its own: it reads the last tasks the Sentinel finished. ``CVENGINE_SENTINEL_KIND_COOLDOWN_MINUTES=0`` turns it off."""
-    streak = max(2, _env_int('CVENGINE_SENTINEL_KIND_FAIL_STREAK', FAIL_STREAK_DEFAULT))
-    cooldown = _env_int('CVENGINE_SENTINEL_KIND_COOLDOWN_MINUTES', FAIL_COOLDOWN_DEFAULT_MINUTES)
+    streak, cooldown = _fail_settings()
     if cooldown <= 0 or not agent.pk:
         return {}
     now = now or timezone.now()
@@ -398,12 +420,43 @@ def failing_kinds(agent, now=None):
         if status == 'failed' and any(marker in (error or '') for marker in TARGET_CAUSED_ERRORS):
             continue
         by_kind.setdefault(kind, []).append((status, finished))
+    return _streaks(by_kind, streak, window, now)
+
+
+def _fail_settings():
+    return max(2, _env_int('CVENGINE_SENTINEL_KIND_FAIL_STREAK', FAIL_STREAK_DEFAULT)), _env_int('CVENGINE_SENTINEL_KIND_COOLDOWN_MINUTES', FAIL_COOLDOWN_DEFAULT_MINUTES)
+
+
+def _streaks(by_kind, streak, window, now):
     out = {}
     for kind, rows in by_kind.items():
         last = rows[:streak]
         if len(last) == streak and all(status == 'failed' for status, _ in last) and now - last[0][1] < window:
             out[kind] = {'failures': streak, 'since': last[-1][1], 'retry_at': last[0][1] + window}
     return out
+
+
+def failing_kinds_many(agents, now=None):
+    """``{agent id: failing_kinds(agent)}`` for a page of Sentinels in one query (the last ``FAIL_STREAK`` finished tasks of each kind of each Sentinel, a
+    failure the scanned host caused left out), where ``failing_kinds`` is one query per Sentinel."""
+    from django.db.models import Window
+    from django.db.models.functions import RowNumber
+    streak, cooldown = _fail_settings()
+    ids = [a.pk for a in agents if a.pk and a.kind == 'scanner']
+    if cooldown <= 0 or not ids:
+        return {a.pk: {} for a in agents}
+    now = now or timezone.now()
+    window = timedelta(minutes=cooldown)
+    caused = Q()
+    for marker in TARGET_CAUSED_ERRORS:
+        caused |= Q(error__contains=marker)
+    rows = (SentinelTask.objects.filter(agent_id__in=ids, status__in=('done', 'failed'), finished_at__gte=now - 4 * window).exclude(Q(status='failed') & caused)
+            .annotate(rank=Window(RowNumber(), partition_by=[F('agent_id'), F('kind')], order_by=F('finished_at').desc()))
+            .values_list('agent_id', 'kind', 'status', 'finished_at', 'rank'))
+    by_agent = {}
+    for agent_id, kind, status, finished, rank in sorted((r for r in rows if r[4] <= streak), key=lambda r: (r[0], r[1], r[4])):
+        by_agent.setdefault(agent_id, {}).setdefault(kind, []).append((status, finished))
+    return {a.pk: _streaks(by_agent.get(a.pk, {}), streak, window, now) for a in agents}
 
 
 def prefer_defer_seconds():
@@ -763,6 +816,19 @@ def _bare(host):
     return host_of({'host': host if isinstance(host, str) else ''})
 
 
+def _port_of(value):
+    """The port a nuclei target or result host names (``host:port``, ``[v6]:port``, a URL with or without one: its scheme's default), 0 when it names none."""
+    text = str(value or '').strip().lower()
+    scheme = text.split('://', 1)[0] if '://' in text else ''
+    text = text.split('://', 1)[-1].split('/', 1)[0]
+    port = text.split(']', 1)[1].lstrip(':') if text.startswith('[') else (text.rsplit(':', 1)[1] if text.count(':') == 1 else '')
+    return int(port) if port.isdigit() else {'https': 443, 'http': 80}.get(scheme, 0)
+
+
+def _hit_port(*values):
+    return next((p for p in map(_port_of, values) if p), 0)
+
+
 def task_hosts(task):
     """``(names, ips)`` a task acts on: its own host and addresses plus whatever its target names (nmap/naabu addresses, nuclei targets, a
     WordPress scan url, a testssl host, an nmap -sU address, an OpenVAS host map). What the Sentinel's ``scope.hosts`` and the internal-network rule
@@ -825,14 +891,15 @@ def secret_refusal(eff, task):
 
 
 class SentinelEff:
-    def __init__(self, agent, now):
+    def __init__(self, agent, now, withheld=None):
+        """``withheld`` is ``failing_kinds(agent, now)`` when the caller has read it for many Sentinels at once (``failing_kinds_many``)."""
         self.agent, self.now = agent, now
         token = agent.token
         self.problem = broker.Eff._problem(agent, token, token.user, now)
         if agent.kind != 'scanner':
             self.problem = self.problem or "this agent is not a Sentinel (kind='scanner')"
         limits = agent.limits or {}
-        self.withheld = failing_kinds(agent, now) if agent.kind == 'scanner' else {}
+        self.withheld = (failing_kinds(agent, now) if withheld is None else withheld) if agent.kind == 'scanner' else {}
         self._builtin = sentinel_policy.is_builtin(agent) if agent.kind == 'scanner' else None
         self.policy = sentinel_policy.resolve(agent, self._builtin) if agent.kind == 'scanner' else {}
         caps = effective_capabilities(agent, self.withheld, self.policy)
@@ -1664,8 +1731,7 @@ def reap_expired(now=None):
     dispatcher that normally expires it is gone when its worker died, so without this an orphan would stay claimable, and counted as waiting
     work, for ever. Called by every broker entry point, like ``agent_broker.reap_expired``."""
     now = now or timezone.now()
-    from cveFeed import scan_control
-    if scan_control.in_update_grace(now):  # an update is running (or has just ended): Sentinels were talking to a server that was down, nothing is judged lost yet
+    if _in_update_grace(now):  # an update is running (or has just ended): Sentinels were talking to a server that was down, nothing is judged lost yet
         return 0
     stale = (Q(status='queued', kind='openvas', created_at__lt=now - queued_ttl('openvas'))
              | (Q(status='queued', created_at__lt=now - queued_ttl('nmap')) & ~Q(kind='openvas')))
@@ -1751,8 +1817,7 @@ def max_runtime(task):
 def extend_leases(agent, now):
     """Extend the lease of every SentinelTask this agent is running, the same way ``agent_broker.heartbeat`` extends
     AgentTask leases (and capped like them, at ``max_runtime`` after it was accepted); called from there so one heartbeat call covers both."""
-    from cveFeed import scan_control
-    grace = scan_control.in_update_grace(now)  # a lease that lapsed while the server was down is taken up again, not left for the reaper
+    grace = _in_update_grace(now)  # a lease that lapsed while the server was down is taken up again, not left for the reaper
     leases = []
     for task in SentinelTask.objects.filter(agent=agent, status__in=('claimed', 'running')).order_by('id'):
         if task.status == 'running' and agent.status == 'active':
@@ -2332,7 +2397,60 @@ def _clip(value, key):
     return _text(value, _STR[key])
 
 
-def _clean_ports(ports):
+_SCRIPT_ID = re.compile(r'[a-z0-9][a-z0-9._-]{0,63}')
+MAX_SCRIPTS, MAX_SCRIPT_TEXT, MAX_SCRIPT_TOTAL = 24, 4000, 16000
+MAX_BANNER, MAX_CPES = 1024, 8
+_PORT_TEXT = {'service_extra': 200, 'ostype': 40, 'hostname': 255, 'devicetype': 64}  # a service's own words, one line, clipped (contract 5)
+_TLS_TEXT = {'subject': 300, 'issuer': 300, 'not_before': 40, 'not_after': 40, 'key_type': 20, 'key_bits': 10, 'signature': 60}
+_TLS_DIGESTS = {'fingerprint_sha1': 40, 'fingerprint_sha256': 64, 'fingerprint_md5': 32}
+_CPE = re.compile(r'cpe:/\S{1,250}')
+MAX_SCANNED_RANGES = 4096
+
+
+def _int_in(value, low, high):
+    return value if isinstance(value, int) and not isinstance(value, bool) and low <= value <= high else None
+
+
+def _block_text(value, limit):
+    """A multi-line text from a scanned host (a banner, an NSE script's output): at most ``limit`` characters, control characters other than newline and tab
+    removed. Data to store and escape when shown, never interpreted."""
+    from cveFeed.nuclei_fp import bounded
+    return bounded(value, limit) if isinstance(value, str) else ''
+
+
+def _clean_scripts(value):
+    """``{script id: output}`` of NSE output: at most ``MAX_SCRIPTS`` ids of the plain shape, ``MAX_SCRIPT_TEXT`` characters each and ``MAX_SCRIPT_TOTAL`` in all.
+    (``cveFeed.port_inventory.persist_inventory`` then keeps only the reviewed ids.)"""
+    out, total = {}, 0
+    for sid, text in (value.items() if isinstance(value, dict) else ()):
+        if len(out) >= MAX_SCRIPTS or total >= MAX_SCRIPT_TOTAL:
+            break
+        if isinstance(sid, str) and _SCRIPT_ID.fullmatch(sid) and isinstance(text, str):
+            text = _block_text(text, MAX_SCRIPT_TEXT)[:MAX_SCRIPT_TOTAL - total]
+            out[sid] = text
+            total += len(text)
+    return out
+
+
+def _clean_tls(value):
+    """The certificate summary of a port (``cvengine_scanner.nmap.parse_ssl_cert``'s fields): known keys only, each clipped, a digest only when it is hex of
+    the right length; {} without a subject (the library's own rule: no subject is no certificate)."""
+    if not isinstance(value, dict):
+        return {}
+    out = {key: _text(value[key], limit) for key, limit in _TLS_TEXT.items() if isinstance(value.get(key), str) and _text(value[key], limit)}
+    if isinstance(value.get('sans'), list):
+        out['sans'] = [_text(v, 200) for v in value['sans'][:40] if isinstance(v, str) and _text(v, 200)]
+    for key, size in _TLS_DIGESTS.items():
+        digest = value.get(key)
+        if isinstance(digest, str) and len(digest) == size and re.fullmatch(r'[0-9a-f]+', digest):
+            out[key] = digest
+    return out if out.get('subject') else {}
+
+
+def _clean_ports(ports, cuts=None, target=None):
+    """The ports of one nmap host. The six fields of contract 1 are always rebuilt; the detail contract 5 added (the service's extra info, how the name was
+    found, the TLS tunnel, CPEs, banner, reviewed script output, the certificate summary) only when the Sentinel sent it, so a contract 4 result comes back
+    exactly as before. More than ``MAX_PORTS_PER_HOST`` ports are cut and said so in ``cuts`` (a list, changed in place) for ``target``."""
     if not isinstance(ports, list):
         raise ApiError(400, 'ports must be a list')
     out = []
@@ -2342,29 +2460,78 @@ def _clean_ports(ports):
         number = item.get('number')
         if not isinstance(number, int) or isinstance(number, bool) or not 0 < number < 65536:
             continue
-        out.append({'number': number, 'protocol': item.get('protocol') if item.get('protocol') in _PROTOCOLS else 'tcp',
-                    'state': item.get('state') if item.get('state') in _PORT_STATES else 'open',
-                    'service_name': _clip(item.get('service_name'), 'service_name'), 'product': _clip(item.get('product'), 'product'),
-                    'version': _clip(item.get('version'), 'version')})
+        row = {'number': number, 'protocol': item.get('protocol') if item.get('protocol') in _PROTOCOLS else 'tcp',
+               'state': item.get('state') if item.get('state') in _PORT_STATES else 'open',
+               'service_name': _clip(item.get('service_name'), 'service_name'), 'product': _clip(item.get('product'), 'product'),
+               'version': _clip(item.get('version'), 'version')}
+        for key, limit in _PORT_TEXT.items():
+            if _text(item.get(key), limit):
+                row[key] = _text(item[key], limit)
+        if item.get('method') in ('probed', 'table'):
+            row['method'] = item['method']
+        if item.get('tunnel') == 'ssl':  # the one tunnel there is: the service speaks TLS (name http and tunnel ssl is HTTPS)
+            row['tunnel'] = 'ssl'
+        if isinstance(item.get('confidence'), str) and re.fullmatch(r'[0-9]|10', item['confidence']):
+            row['confidence'] = item['confidence']
+        cpes = [c.strip() for c in (item.get('cpes') if isinstance(item.get('cpes'), list) else [])[:MAX_CPES] if isinstance(c, str) and _CPE.fullmatch(c.strip())]
+        if cpes:
+            row['cpes'] = cpes
+        if isinstance(item.get('cpe'), str) and _CPE.fullmatch(item['cpe'].strip()):
+            row['cpe'] = item['cpe'].strip()
+        if _block_text(item.get('banner'), MAX_BANNER):
+            row['banner'] = _block_text(item['banner'], MAX_BANNER)
+        scripts = _clean_scripts(item.get('scripts'))
+        if scripts:
+            row['scripts'] = scripts
+        tls = _clean_tls(item.get('tls'))
+        if tls:
+            row['tls'] = tls
+        out.append(row)
+    if cuts is not None and len(ports) > MAX_PORTS_PER_HOST:
+        result_cuts.add(cuts, 'ports', MAX_PORTS_PER_HOST, len(ports) - MAX_PORTS_PER_HOST, target=target)
     return out
+
+
+def _clean_nmap_host(item, cuts):
+    ip = _address(item.get('ip')) if isinstance(item, dict) and isinstance(item.get('ip'), str) else None
+    if ip is None:  # an address row is only ever made from an IP literal, never from free text
+        return None
+    row = {'ip': ip, 'os_guess': _clip(item.get('os_guess'), 'os_guess'), 'ports': _clean_ports(item.get('ports') or [], cuts, ip)}
+    if item.get('timed_out') is True:  # nmap gave up on this host: only the explicit True is kept, so a result without the field reads as before
+        row['timed_out'] = True
+    if 'os_accuracy' in item and (item['os_accuracy'] is None or _int_in(item['os_accuracy'], 0, 100) is not None):
+        row['os_accuracy'] = item['os_accuracy']
+    matches = [{'name': _text(m['name'], 100), **({'accuracy': m['accuracy']} if 'accuracy' in m and (m['accuracy'] is None or _int_in(m['accuracy'], 0, 100) is not None) else {}),
+                **({'cpe': _text(m['cpe'], 120)} if _text(m.get('cpe'), 120) else {})}
+               for m in (item.get('os_matches') if isinstance(item.get('os_matches'), list) else [])[:3] if isinstance(m, dict) and _text(m.get('name'), 100)]
+    if matches:
+        row['os_matches'] = matches
+    if _int_in(item.get('closed_tcp'), 1, 65535):
+        row['closed_tcp'] = item['closed_tcp']  # a port the host answered with a reset: the path check's candidate
+    ranges = [[r[0], r[1]] for r in (item.get('scanned_ranges') if isinstance(item.get('scanned_ranges'), list) else [])[:MAX_SCANNED_RANGES]
+              if isinstance(r, list) and len(r) == 2 and _int_in(r[0], 1, 65535) and _int_in(r[1], 1, 65535) and r[0] <= r[1]]
+    if ranges:
+        row['scanned_ranges'] = ranges
+    hostscripts = _clean_scripts(item.get('hostscripts'))
+    if hostscripts:
+        row['hostscripts'] = hostscripts
+    if item.get('status') in ('up', 'down'):
+        row['status'] = item['status']
+    extra = [_text(v, 20) for v in (item.get('extraports') if isinstance(item.get('extraports'), list) else [])[:8] if isinstance(v, str) and _text(v, 20)]
+    if extra:
+        row['extraports'] = extra
+    return row
 
 
 def _clean_nmap_result(body):
     hosts = body.get('hosts')
     if not isinstance(hosts, list) or len(hosts) > MAX_ADDRESSES:
         raise ApiError(400, f'hosts must be a list of at most {MAX_ADDRESSES} entries')
-    out = []
-    for item in hosts:
-        ip = _address(item.get('ip')) if isinstance(item, dict) and isinstance(item.get('ip'), str) else None
-        if ip is None:  # an address row is only ever made from an IP literal, never from free text
-            continue
-        row = {'ip': ip, 'os_guess': _clip(item.get('os_guess'), 'os_guess'), 'ports': _clean_ports(item.get('ports') or [])}
-        if item.get('timed_out') is True:  # nmap gave up on this host: only the explicit True is kept, so a result without the field reads as before
-            row['timed_out'] = True
-        out.append(row)
+    cuts = result_cuts.clean(body.get('cuts'))
+    out = [row for row in (_clean_nmap_host(item, cuts) for item in hosts) if row]
     # Docker Desktop can make an OS guess describe its gateway instead of the target.
     # Preserve only the explicit boolean opt-out through result sanitization.
-    return {'hosts': out, 'os_reliable': body.get('os_reliable') is not False}
+    return {'hosts': out, 'os_reliable': body.get('os_reliable') is not False, **({'cuts': cuts} if cuts else {})}
 
 
 def _clean_naabu_result(body):
@@ -2468,6 +2635,10 @@ def _clean_findings(findings):
 def _clean_nuclei_result(body):
     findings, dropped = _clean_findings(body.get('findings') or [])
     out = {'findings': findings, **({'dropped_findings': dropped} if dropped else {})}
+    cuts = result_cuts.clean(body.get('cuts'))  # the Sentinel's own cuts (the findings it kept, clipped descriptions and evidence, its time limit) and this server's
+    result_cuts.add(cuts, 'findings', MAX_FINDINGS, dropped)
+    if cuts:
+        out['cuts'] = cuts
     unreachable = body.get('unreachable')
     if isinstance(unreachable, list):  # the hosts the Sentinel could not resolve or connect to: not scanned, whatever the findings say
         out['unreachable'] = sorted({_text(h, 260).strip().lower() for h in unreachable[:MAX_ADDRESSES * 4] if isinstance(h, str) and h.strip()})
@@ -2560,7 +2731,7 @@ def _clean_discover_result(body):
     raw = body.get('hosts')
     if not isinstance(raw, list) or len(raw) > MAX_DISCOVER_HOSTS:
         raise ApiError(400, f'hosts must be a list of at most {MAX_DISCOVER_HOSTS} entries')
-    hosts, seen = [], set()
+    hosts, seen, cuts = [], set(), []
     for item in raw:
         if not isinstance(item, dict) or not isinstance(item.get('ip'), str):
             continue
@@ -2570,7 +2741,8 @@ def _clean_discover_result(body):
         seen.add(ip)
         names = item.get('hostnames') if isinstance(item.get('hostnames'), list) else []
         hosts.append({'ip': ip, 'hostnames': [_clip(n, 'host') for n in names[:5] if isinstance(n, str) and n.strip()]})
-    return {'hosts': hosts}
+        result_cuts.add(cuts, 'names', 5, len([n for n in names[5:] if isinstance(n, str) and n.strip()]), target=ip)
+    return {'hosts': hosts, **({'cuts': cuts} if cuts else {})}
 
 
 def _clean_openvas_result(body):
@@ -2855,8 +3027,14 @@ def _bind_to_task(kind, result, task):
             dropped = len(result['ports']) - len(kept)
             result = {**result, 'ports': kept}
     else:
-        asked = {_bare(t) for t in target.get('targets') or [] if isinstance(t, str)} - {''}
-        kept = [f for f in result['findings'] if _bare(f['host'] or f['matched_at']) in asked]
+        ports = {}  # host -> the ports the task named for it; 0 stands for a target with none (any port of that host is then its own)
+        for t in target.get('targets') or []:
+            if isinstance(t, str) and _bare(t):
+                ports.setdefault(_bare(t), set()).add(_port_of(t))
+        def on_asked_port(f):
+            asked_ports = ports.get(_bare(f['host'] or f['matched_at']))
+            return asked_ports is not None and (0 in asked_ports or _hit_port(f['matched_at'], f['host']) in (0, *asked_ports))
+        kept = [f for f in result['findings'] if on_asked_port(f)]
         dropped = len(result['findings']) - len(kept)
         result = {**result, 'findings': kept}
     return {**result, 'dropped': dropped} if dropped else result
@@ -2873,7 +3051,8 @@ def _held_to_its_host(outcome):
         return outcome
     own = _bare(outcome['host'])
     named = {_bare(hit[k]) for k in ('host', 'matched-at') if isinstance(hit.get(k), str) and hit[k].strip()}
-    if named and named != {own}:
+    port, hit_port = _port_of(outcome['host']), _hit_port(hit.get('matched-at'), hit.get('host'))
+    if (named and named != {own}) or (port and hit_port and port != hit_port):  # a hit on another port of the host is not a hit on the port asked
         return {**outcome, 'vulnerable': False, 'hit': None, 'output': '', 'error': OTHER_HOST_HIT}
     return outcome
 
@@ -3002,6 +3181,7 @@ def report_result(ctx, task_id, body):
                                                             error=explain_error(result.get('error', '')) if status == 'failed' else '', **_scrubbed(task))
             audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
                          agent_id=agent.pk, agent=agent.name, outcome=result['outcome'])
+            _note_cuts(task, agent, result)
             if status == 'done' and sentinel_adopt.orphaned(task, now):  # nothing waits for it (the update that ran while it was held ended its stage): filed here
                 task.refresh_from_db()
                 adopted = _adopted(ctx, agent, task, result)
@@ -3022,6 +3202,21 @@ def report_result(ctx, task_id, body):
         sentinel_adopt.note_adopted(task)
         return {'task': task_brief(task), 'duplicate': False, 'adopted': True}
     return {'task': task_brief(task), 'duplicate': False}
+
+
+def _note_cuts(task, agent, result):
+    """Say in the scan's activity feed (and so on the scan page) that a result was cut: what, and how many were dropped (``cveFeed.result_cuts``). One line per task,
+    written when the result is filed, so a capped list or a stopped tool is never silent. The words come from the cleaned cuts only."""
+    if result.get('outcome') != 'done':
+        return
+    notes = result_cuts.summary(result)
+    if not notes:
+        return
+    from agentapi import sentinel_dispatch
+    from cveFeed import activity
+    more = f' and {len(notes) - 4} more' if len(notes) > 4 else ''
+    activity.log('run_check', f'{agent.name} cut its {task.kind} result for {sentinel_dispatch._label(task.host, task.ips)}: {"; ".join(notes[:4])}{more}',
+                 project=task.project, status='done', scan_id=task.scan_id, sentinel_task_id=task.pk, cuts=True)
 
 
 def _adopted(ctx, agent, task, result):
@@ -3057,6 +3252,7 @@ def _adopt_late(ctx, agent, task, body, now):
     task.refresh_from_db()
     audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
                  agent_id=agent.pk, agent=agent.name, outcome=result['outcome'], late=True)
+    _note_cuts(task, agent, result)
     if status == 'done':
         outcome = _adopted(ctx, agent, task, result)
         sentinel_adopt.note_adopted(task)
@@ -3081,13 +3277,23 @@ def release_task(ctx, task_id, reason=''):
 
 # --- reading / admin -------------------------------------------------------------------------------------
 
+def result_notes(result):
+    """What a stored result says about itself, for the task row (REST, MCP and the Sentinels page): ``cuts`` in plain words (empty when nothing was left out,
+    and for a Sentinel of contract 4, which sends none), whether the targets were only partly checked because of them, and the nuclei template release the
+    run used (``templates_release``, so a stale one is visible)."""
+    result = result if isinstance(result, dict) else {}
+    release = result.get('templates_release')
+    return {'cut_notes': result_cuts.summary(result), 'partly_checked': result_cuts.partial(result),
+            'templates_release': release if isinstance(release, str) and release else None}
+
+
 def task_brief(task):
     agent = task.agent
     return {'id': task.pk, 'project': task.project.slug, 'scan_id': task.scan_id, 'kind': task.kind, 'status': task.status,
             'host': task.host, 'priority': task.priority, 'agent': {'id': agent.pk, 'name': agent.name} if agent else None,
             'attempts': task.attempts, 'max_attempts': task.max_attempts, 'lease_expires_at': svc._iso(task.lease_expires_at),
             'created': svc._iso(task.created_at), 'finished': svc._iso(task.finished_at), 'error': task.error,
-            'result': task.result or None}
+            'result': task.result or None, **result_notes(task.result)}
 
 
 def task_payload(task):
@@ -3128,8 +3334,9 @@ def list_project_sentinels(ctx, slug):
                                        token__revoked=False).exclude(status='revoked').select_related('token__user', 'held_by').order_by('name', 'id')[:CANDIDATES])
     rows = []
     with sentinel_policy.shared_lookups():
+        withheld = failing_kinds_many(agents, now)  # one query for the page, not one per Sentinel
         for agent in agents:
-            eff = SentinelEff(agent, now)
+            eff = SentinelEff(agent, now, withheld.get(agent.pk))
             if agent.status == 'active' and not eff.problem and project.slug not in eff.projects:
                 continue  # the owner's reach or an administrator's project limit keeps it out of this project
             rows.append((agent, eff))
@@ -3201,8 +3408,9 @@ def _live_task(task, allowed, **fields):
     row = {'id': task.pk, 'kind': task.kind, 'status': task.status, **fields}
     if allowed is not None and task.project_id not in allowed:
         return {**row, 'hidden': True, 'host': '', 'label': '', 'project': '', 'project_name': '', 'scan_id': None, 'error': ''}
+    notes = result_notes(task.result) if task.status == 'done' else {}
     return {**row, 'host': task.host, 'label': task_label(task), 'project': task.project.slug, 'project_name': task.project.name,
-            'scan_id': task.scan_id, 'error': task.error}
+            'scan_id': task.scan_id, 'error': task.error, 'cut_notes': notes.get('cut_notes') or [], 'templates_release': notes.get('templates_release')}
 
 
 def live_overview(ctx):
@@ -3238,10 +3446,17 @@ def _live_overview(ctx):
                  failed_24h=Count('id', filter=Q(status='failed')),
                  average_duration=Avg(duration, filter=Q(status='done') &
                                       (Q(accepted_at__isnull=False) | Q(claimed_at__isnull=False))))}
-    for agent_id in ids:
-        finished[agent_id] = list(tasks.filter(agent_id=agent_id, status__in=('done', 'failed')).order_by('-finished_at', '-id')[:5])
+    # each Sentinel's five latest finished tasks: their ids through the per-Sentinel index in one query (the table is large, so no window over all of it), then the rows
+    from django.contrib.postgres.expressions import ArraySubquery
+    from django.db.models import OuterRef
+    newest = (SentinelTask._base_manager.filter(agent_id=OuterRef('pk'), status__in=('done', 'failed')).order_by('-finished_at', '-id').values('id')[:5])
+    latest = {pk: got for pk, got in Agent.objects.filter(pk__in=ids).annotate(latest=ArraySubquery(newest)).values_list('pk', 'latest')}
+    by_id = {t.pk: t for t in tasks.filter(pk__in=[i for got in latest.values() for i in got])}
+    for agent_id, got in latest.items():
+        finished[agent_id] = [by_id[i] for i in got if i in by_id]
     queued = _for_viewer(SentinelTask.objects.filter(status='queued'), ctx.user, allowed).count()
-    effs = {a.pk: SentinelEff(a, now) for a in agents}
+    withheld = failing_kinds_many(agents, now)  # one query for the page, not one per Sentinel
+    effs = {a.pk: SentinelEff(a, now, withheld.get(a.pk)) for a in agents}
     activity = activity_metrics(ids, now, viewer=ctx.user, max_concurrent={pk: e.max_concurrent for pk, e in effs.items()}, allowed=allowed)
     orgs, org_of = _visible_orgs(ctx.user, allowed)
     instance_update = sentinel_settings.instance_self_update()  # one lookup for the page, not one per Sentinel
@@ -3266,9 +3481,10 @@ def _live_overview(ctx):
             'contract_note': sentinel_contract.note((agent.info or {}).get('contract_version')), 'version_since': (agent.info or {}).get('version_since'),
             'version': (agent.info or {}).get('version'), 'version_label': (agent.info or {}).get('version') or 'unknown (built without the updater)',
             'version_state': sentinel_version.state(agent, sentinel_settings.explicit(agent).get('self_update') or instance_update),
+            'tools_state': sentinel_tools.state(agent),  # "tools behind" next to "version behind": the tool versions it reports against the ones this release ships
             'auto_update': sentinel_autoupdate.view(agent, now, keep=keep_newest, instance_update=instance_update),  # "running abc1234, newest def5678, update requested 10:42"
             # moves when what the Sentinel's detail card shows (settings, version, update request) can have: the page refreshes the detail only then
-            'revision': '|'.join(str(x) for x in (svc._iso(agent.updated_at), svc._iso(agent.update_requested_at), (agent.info or {}).get('version'), (agent.info or {}).get('auto_update', {}).get('status'))),
+            'revision': '|'.join(str(x) for x in (svc._iso(agent.updated_at), svc._iso(agent.update_requested_at), (agent.info or {}).get('version'), (agent.info or {}).get('auto_update', {}).get('status'), json.dumps((agent.info or {}).get('tool_versions') or {}, sort_keys=True))),
             'current': [_live_task(t, allowed, since=svc._iso(t.accepted_at or t.claimed_at), lease_expires_at=svc._iso(t.lease_expires_at))
                         for t in mine],
             'recent': [_live_task(t, allowed, finished=svc._iso(t.finished_at), outcome=task_outcome(t),

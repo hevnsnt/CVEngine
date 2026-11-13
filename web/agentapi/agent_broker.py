@@ -109,6 +109,9 @@ def _hit(name, limit, window):
         return True
     if used > limit and used - limit == 1:  # once per window, at the first refusal
         logger.warning('rate limit reached: %s used %s of %s per %s s', name, used, limit, window)
+    if used > limit:
+        from agentapi import claim_refusals
+        claim_refusals.note(name)  # counted per caller and action in Redis, so the status can tell a refusing limiter from idle Sentinels
     return used <= limit
 
 
@@ -145,6 +148,8 @@ def _agent_of(ctx, usable=True, write=True):
         raise ApiError(404, 'this token has no registered agent: call register_agent first')
     if usable and agent.status == 'revoked':
         raise ApiError(403, 'this agent was revoked by an administrator')
+    if agent.token.user_id == getattr(ctx.user, 'pk', None) and getattr(ctx.user, 'mfa_checked_this_request', False):
+        agent.token.user.mfa_checked_this_request = True  # the request's sign-in check already ran for this very user a moment ago: not asked again (``Eff._problem``)
     return agent
 
 
@@ -415,7 +420,7 @@ class Eff:
             return 'its token is read only'
         from agentapi import sentinel_policy
         from tenancy.middleware import TenancyMiddleware
-        if sentinel_policy.shared(('must-enrol-mfa', user.pk), lambda: TenancyMiddleware.must_enrol_mfa(user)):  # once per user for a page of cards
+        if not getattr(user, 'mfa_checked_this_request', False) and sentinel_policy.shared(('must-enrol-mfa', user.pk), lambda: TenancyMiddleware.must_enrol_mfa(user)):  # once per user for a page of cards
             return 'its user has to set up two-step sign-in first'
         return ''
 
@@ -1034,6 +1039,8 @@ def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOW
         out['updater'] = sentinel_settings.updater_state(agent)
         from agentapi import sentinel_version
         out['version_state'] = sentinel_version.state(agent, out['self_update'])  # current, behind or unknown, from the cached check of the latest client
+        from agentapi import sentinel_tools
+        out['tools_state'] = sentinel_tools.state(agent)  # current, behind or unknown: the tool versions it reports against the ones this release ships
         from agentapi import sentinel_contract
         reported = (agent.info or {}).get('contract_version')
         out['contract'] = {'version': reported, 'state': sentinel_contract.state(reported), 'note': sentinel_contract.note(reported)}
@@ -1153,7 +1160,9 @@ def list_agents(ctx, params):
     page = svc.paginate(qs.order_by('name', 'id'), params, lambda a: a)
     counts = _counts([a.pk for a in page['results']])
     builtin_id = _sentinel().builtin_pk() if any(a.kind == 'scanner' for a in page['results']) else None  # once for the page, not per row
-    page['results'] = [agent_dict(a, counts=counts.get(a.pk), viewer=ctx.user, builtin_id=builtin_id) for a in page['results']]
+    from agentapi import sentinel_policy
+    with sentinel_policy.shared_lookups():  # the instance defaults are read once for the page, not once per Sentinel (four times each)
+        page['results'] = [agent_dict(a, counts=counts.get(a.pk), viewer=ctx.user, builtin_id=builtin_id) for a in page['results']]
     return page
 
 

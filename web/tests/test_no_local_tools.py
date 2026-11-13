@@ -48,6 +48,7 @@ ALLOWED = {
         'agentapi/sentinel_adopt.py',  # the kind name as a data key of the adopter registry and in its docstring: files a Sentinel's result, runs nothing
         'agentapi/sentinel_broker.py',
         'agentapi/sentinel_dispatch.py',
+        'agentapi/sentinel_tools.py',  # 1.4 contract 5: the names of the tools whose versions a Sentinel reports, compared with the shipped ones; runs nothing
         'agentapi/services.py',
         'agentapi/system_status.py',
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
@@ -86,6 +87,7 @@ ALLOWED = {
         'cveFeed/probes.py',
         'cveFeed/rdp_shot.py',
         'cveFeed/report_data.py',
+        'cveFeed/result_cuts.py',  # 1.4 contract 5: the names of what a result cut (a result kind or a limit), in plain words; runs nothing
         'cveFeed/route_auth.py',
         'cveFeed/runzero_sync.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
@@ -115,6 +117,7 @@ ALLOWED = {
         'agentapi/models.py',
         'agentapi/rest.py',
         'agentapi/sentinel_broker.py',
+        'agentapi/sentinel_tools.py',  # 1.4 contract 5: the names of the tools whose versions a Sentinel reports, compared with the shipped ones; runs nothing
         'agentapi/services.py',
         'agentapi/system_status.py',
         'agentapi/template_bundle.py',
@@ -154,6 +157,7 @@ ALLOWED = {
         'cveFeed/performance_review.py',
         'cveFeed/reaper.py',
         'cveFeed/report_data.py',
+        'cveFeed/result_cuts.py',  # 1.4 contract 5: the names of what a result cut (a result kind or a limit), in plain words; runs nothing
         'cveFeed/reviewer.py',  # AI reviewer: names nuclei as a finding kind and the template refresh task, runs nothing
         'cveFeed/safeyaml.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
@@ -189,6 +193,7 @@ ALLOWED = {
         'agentapi/sentinel_adopt.py',  # the kind name as a data key of the adopter registry and in its docstring: files a Sentinel's result, runs nothing
         'agentapi/sentinel_broker.py',
         'agentapi/sentinel_dispatch.py',
+        'agentapi/sentinel_tools.py',  # 1.4 contract 5: the names of the tools whose versions a Sentinel reports, compared with the shipped ones; runs nothing
         'agentapi/system_status.py',  # 1.3.4 egress status (develop): a docstring naming the tools counted from their probe plan, runs nothing
         'cveFeed/check_coverage.py',
         'cveFeed/heavy_process.py',
@@ -210,6 +215,7 @@ ALLOWED = {
         'agentapi/rest.py',  # capability and task kind lists in the route help name the kind, runs nothing
         'agentapi/sentinel_broker.py',  # the kind name as a data value: result cleaner and token scrub, runs nothing
         'agentapi/sentinel_dispatch.py',  # the kind name as a data value (NEVER_LOCAL, ceilings, dispatch of the task), runs nothing
+        'agentapi/sentinel_tools.py',  # 1.4 contract 5: the names of the tools whose versions a Sentinel reports, compared with the shipped ones; runs nothing
         'cveFeed/api_credentials.py',  # the stored credential service key is the kind name, a data value
         'cveFeed/autotune_policy.py',  # T8 leftover: per-kind CPU shares sum to 1; the lead removes the heavy-kind tunables in the final slice
         'cveFeed/check_coverage.py',  # ledger kinds and the check id are data values, runs nothing
@@ -235,6 +241,7 @@ ALLOWED = {
         'agentapi/rest.py',
         'agentapi/sentinel_broker.py',
         'agentapi/sentinel_dispatch.py',
+        'agentapi/sentinel_tools.py',  # 1.4 contract 5: the names of the tools whose versions a Sentinel reports, compared with the shipped ones; runs nothing
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/check_coverage.py',
         'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing
@@ -256,6 +263,7 @@ ALLOWED = {
         'agentapi/sentinel_broker.py',  # 1.4 bbot on a Sentinel: the run's time budget and the secure read of its module keys, runs nothing
         'agentapi/sentinel_policy.py',  # 1.4 bbot on a Sentinel: the kind's label, runs nothing
         'agentapi/sentinel_settings.py',  # bbot_keys: the name of the optional heartbeat feature a Sentinel advertises for a discovery's API keys (a data value and its comment), runs nothing
+        'agentapi/sentinel_tools.py',  # 1.4 contract 5: the names of the tools whose versions a Sentinel reports, compared with the shipped ones; runs nothing
         'agentapi/services.py',  # 1.4 T8: finding kind 'bbot' (a stored data value) and text shared with other tool words, runs nothing
         'cveFeed/autotune_policy.py',  # 1.3.2 auto-tuning (develop): names the per-tool concurrency settings, runs nothing
         'cveFeed/check_coverage.py',  # 1.4 T8: ledger service keys 'bbot' and 'bbot-deep' and the check label (stored data values), runs nothing
@@ -272,6 +280,7 @@ ALLOWED = {
         'cveFeed/models.py',  # 1.4 T8: finding kind and source values 'bbot' (stored data values), runs nothing
         'cveFeed/nuclei_templates.py',  # 1.4 T8: technology source key 'bbot' in the host profile (a data value), runs nothing
         'cveFeed/report_data.py',  # 1.4 T8: report labels for the ledger keys 'bbot' and 'bbot-deep' (data values), runs nothing
+        'cveFeed/result_cuts.py',  # 1.4 contract 5: the names of what a result cut (a result kind or a limit), in plain words; runs nothing
         'cveFeed/reviewer.py',  # AI reviewer: names bbot as a finding kind to review, runs nothing
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/secrets_catalog.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
@@ -287,6 +296,7 @@ ALLOWED = {
         'reNgine/tasks.py',  # 1.4 T8: stores a Sentinel's discovery results with source 'bbot' (a stored data value), runs nothing
     ],
     'wafw00f': [
+        'agentapi/sentinel_tools.py',  # 1.4 contract 5: the names of the tools whose versions a Sentinel reports, compared with the shipped ones; runs nothing
         'cveFeed/check_coverage.py',
         'cveFeed/discovery.py',
         'cveFeed/ledger.py',

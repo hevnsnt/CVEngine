@@ -8,6 +8,7 @@ from datetime import timedelta
 from unittest import mock
 
 from django.contrib.auth.models import User
+from django.core.cache import cache
 from django.db import connection
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
@@ -63,6 +64,7 @@ class Base(TestCase):
     base = '/api/v1/projects/rt-proj'
 
     def setUp(self):
+        cache.clear()  # the retest counts of a project are a shared snapshot: a test must not read another one's
         self.match = CVEMatch.objects.create(cve_entry=self.cve, subdomain=self.sub, source='tech', matched_product='panel', matched_version='1.2',
                                              version_in_range=True, confidence=0.8, ai_verdict='uncertain', scan_history=self.scan,
                                              evidence={'ip': '192.0.2.10', 'port': 443}, template_result='vulnerable')
@@ -323,6 +325,64 @@ class OutcomeTests(Base):
         sentinel_dispatch.Result({}, agent_id=self.agent.pk)  # outside the block nothing is kept anywhere
 
 
+
+class NonHttpPortTests(Base):
+    """A fix on a port that does not speak HTTP, or one that closed the port, is verified by a TCP connect and, for a closed port, by another
+    open port of the host (``fix_retest._reachable``); every port dead stays not verified."""
+    SSH = {'ip': '192.0.2.10', 'port': 22}
+    WEB = {'ip': '192.0.2.10', 'port': 443}
+
+    def run_check(self, kind, own, services, answers):
+        """Run the retest of a ``kind`` check on ``own`` that answered ``version_changed``; ``answers(ask)`` says whether a Sentinel's connect to
+        the ask succeeded. Returns the outcome and every ask sent to the Sentinel."""
+        self.mark()
+        job = FixRetest.objects.get()
+        asked = []
+
+        def try_alive(project, scan, asks):
+            asked.extend(asks)
+            return {a['id']: answers(a) for a in asks}
+        check = {'kind': kind, 'label': kind, 'display': kind, 'target': f"{own['ip']}:{own['port']}", 'asset': 'www.example.com', 'service': 'validate:x',
+                 'params': {'ip': own['ip'], 'port': own['port'], 'project_id': None}}
+        subject = {'kind': 'cve_match', 'host': 'www.example.com', 'ip': own['ip'], 'port': own['port'], 'candidate_services': services}
+        with mock.patch('cveFeed.fix_retest._planned', return_value=(subject, [check], [])), \
+                RunsAs(self, {'status': 'version_changed', 'summary': 'patched'}, self.agent, kind=kind), \
+                mock.patch('agentapi.probe_dispatch.try_alive', side_effect=try_alive):
+            out = fix_retest.run(job.pk)
+        return out['outcome'], asked
+
+    def test_a_patched_ssh_server_is_verified_by_a_tcp_connect_not_an_http_request(self):
+        outcome, asked = self.run_check('nmap_sv', self.SSH, [self.SSH, self.WEB], lambda a: a['scheme'] == 'tcp' and a['port'] == 22)
+        self.assertEqual(outcome, 'verified_fixed')
+        self.assertEqual([a['scheme'] for a in asked if a['port'] == 22], ['tcp'])
+
+    def test_a_database_fix_is_verified_the_same_way(self):
+        db = {'ip': '192.0.2.10', 'port': 5432}
+        outcome, _ = self.run_check('db_probe', db, [db], lambda a: a['scheme'] == 'tcp' and a['port'] == 5432)
+        self.assertEqual(outcome, 'verified_fixed')
+
+    def test_web_ports_keep_their_http_and_https_asks(self):
+        outcome, asked = self.run_check('nmap_sv', self.WEB, [self.WEB], lambda a: True)
+        self.assertEqual((outcome, [a['scheme'] for a in asked]), ('verified_fixed', ['https']))
+
+    def test_a_fix_that_closed_the_port_is_verified_when_the_host_answers_on_another_known_port(self):
+        db = {'ip': '192.0.2.10', 'port': 5432}
+        outcome, asked = self.run_check('db_probe', db, [db, self.WEB], lambda a: a['port'] == 443)
+        self.assertEqual(outcome, 'verified_fixed')
+        self.assertEqual(sorted(a['port'] for a in asked), [443, 5432])
+
+    def test_every_port_dead_is_not_verified(self):
+        db = {'ip': '192.0.2.10', 'port': 5432}
+        outcome, _ = self.run_check('db_probe', db, [db, self.WEB, self.SSH], lambda a: False)
+        self.assertEqual(outcome, 'not_verified')
+        self.refresh()
+        self.assertEqual((self.triage.retest_state, self.triage.retest_reason), ('not_verified', 'the host did not answer'))
+
+    def test_a_web_check_is_not_verified_by_another_port(self):
+        outcome, asked = self.run_check('nuclei_template', self.WEB, [self.WEB, self.SSH], lambda a: a['port'] == 22)
+        self.assertEqual(outcome, 'not_verified')
+        self.assertEqual([a['port'] for a in asked], [443])
+
 class RetryTests(Base):
     def failed_try(self, when):
         self.mark()
@@ -456,6 +516,20 @@ class ListTests(Base):
         self.assertEqual(counts.retest_counts([self.proj.pk]), {'verified_fixed': 1, 'unverified_fixed': 1, 'reopened': 1})
         self.assertEqual(counts.retest_counts([self.other.pk]), {'verified_fixed': 0, 'unverified_fixed': 0, 'reopened': 0})  # another project's findings never count
 
+    def test_the_cve_matches_list_filters_on_the_same_retest_states(self):
+        """The CVE matches page offers the three retest chips the Findings list has, so its status filter takes the same three values (UI-10)."""
+        verified = self.other_match(1)
+        self.match.remediation_status = 'fixed'
+        self.match.save()
+        reopened = self.other_match(2)
+        CVEMatch.objects.filter(pk=reopened.pk).update(remediation_status='open')
+        Triage.objects.filter(match=reopened).update(retest_state='still_reproduces')
+        ids = lambda status: sorted(r['id'] for r in call(self.t_alice, 'GET', f'{self.base}/matches?status={status}&verdict=')[1]['results'])  # noqa: E731
+        self.assertEqual(ids('verified_fixed'), [verified.pk])
+        self.assertEqual(ids('unverified_fixed'), [self.match.pk])
+        self.assertEqual(ids('reopened'), [reopened.pk])
+        self.assertEqual(ids('fixed'), sorted([verified.pk, self.match.pk]))  # the plain remediation statuses still filter on the status itself
+
     def test_a_list_of_fixed_findings_costs_no_query_per_row(self):
         def queries(n):
             for i in range(n):
@@ -477,6 +551,27 @@ class ListTests(Base):
         body = call(self.t_alice, 'GET', f'{self.base}/findings/match/{self.match.pk}')[1]
         self.assertEqual(body['retest']['state'], 'verifying')
         self.assertEqual(body['retest']['history'][0]['status'], 'queued')
+
+    def test_the_retest_counts_are_paid_once_and_follow_a_person_marking_fixed(self):
+        # DB-1: three whole-project aggregates ran on every Findings request, the count-only polls too; now one snapshot per scope (cveFeed.snapshot_cache)
+        def poll():
+            with CaptureQueriesContext(connection) as ctx:
+                status, body = self.listing(page_size=0)
+            self.assertEqual(status, 200)
+            return body['retest'], len(ctx)
+        aggregates = lambda: counts.retest_counts([self.proj.pk])  # noqa: E731
+        self.assertEqual(aggregates(), {'verified_fixed': 0, 'unverified_fixed': 0, 'reopened': 0})
+        poll()  # the first request reads the token and the caches: not the page's own work
+        cache.clear()
+        first, cost = poll()
+        self.assertEqual(first, {'verified_fixed': 0, 'unverified_fixed': 0, 'reopened': 0})
+        again, cheaper = poll()
+        self.assertEqual(again, first)
+        self.assertEqual(cost - cheaper, 3, 'the second poll must not run the three retest aggregates')
+        with self.captureOnCommitCallbacks(execute=True):  # what a person marking a finding fixed does: the revision moves on commit
+            self.assertEqual(self.mark()[0], 200)
+        after, _ = poll()
+        self.assertEqual(after, {'verified_fixed': 0, 'unverified_fixed': 1, 'reopened': 0})
 
 
 class GuardTests(Base):

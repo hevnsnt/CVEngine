@@ -104,6 +104,17 @@ class CleanResultTests(SimpleTestCase):
         with self.assertRaises(ApiError):
             self.clean('nmap_verify', {'xml': 'x' * (sentinel_broker.MAX_NMAP_UDP_XML + 1)})
 
+    def test_an_ipv6_address_is_compared_as_an_address_not_as_text(self):
+        """SN-11: the task stores ``2001:0db8::1``, nmap prints ``2001:db8::1``: the host is still the asked one, not a clean empty list."""
+        xml = fixture('nmap_full')['xml']
+        self.assertIn('addr="192.0.2.10" addrtype="ipv4"', xml)
+        v6 = xml.replace('addr="192.0.2.10" addrtype="ipv4"', 'addr="2001:db8::1" addrtype="ipv6"')
+        for asked in ('2001:db8::1', '2001:0db8::1', '2001:DB8:0:0:0:0:0:1', '[2001:db8::1]'):
+            with self.subTest(asked=asked):
+                self.assertEqual([h['ip'] for h in dispatch.nmap_hosts(v6, asked)], ['2001:db8::1'])
+        self.assertEqual(dispatch.nmap_hosts(v6, '2001:db8::2'), [])
+        self.assertEqual([h['ip'] for h in dispatch.nmap_hosts(xml, '192.0.2.10')], ['192.0.2.10'])
+
     def test_a_report_that_names_another_host_puts_only_the_asked_address_in_the_inventory(self):
         xml = fixture('nmap_full')['xml'].replace('</host>', '</host><host><status state="up"/><address addr="198.51.100.66" addrtype="ipv4"/>'
                                                   '<ports><port protocol="tcp" portid="22"><state state="open"/></port></ports></host>', 1)

@@ -85,8 +85,7 @@ def _nmap(task, result, agent):
     from cveFeed.port_inventory import persist_inventory
     from startScan.ip_rows import org_id_of_project
     chunk = {str(i) for i in (task.ips or (task.target or {}).get('addresses') or [])}
-    inventory = [{'ip': host['ip'], 'os_guess': host.get('os_guess', ''), 'os_accuracy': None, 'ports': host.get('ports', [])}
-                 for host in result.get('hosts', []) if host.get('ip') in chunk]
+    inventory = sentinel_dispatch.nmap_inventory(result, chunk)
     reliable = sentinel_dispatch.os_reliable(sentinel_dispatch.Result(result, agent_id=getattr(agent, 'pk', None)))
     done = persist_inventory(inventory, org_id=org_id_of_project(task.project_id), os_reliable=reliable) if inventory else {}
     if inventory:
@@ -103,9 +102,10 @@ def _naabu(task, result, agent):
     rejected = {ip for ip, ports in found.items() if len(ports) > port_stage.MAX_OPEN_PER_IP}  # a tarpit is not a result
     kept = {ip: ports for ip, ports in found.items() if ip not in rejected and ip in set(attempted)}
     port_stage.persist_open_ports(kept, org_id_of_project(task.project_id))
-    ledger.record(port_stage.SERVICE, [ip for ip in attempted if ip not in rejected], task.project_id, task.scan)
-    if rejected:
-        ledger.record(port_stage.SERVICE, rejected, task.project_id, task.scan, 'failed')
+    unfinished = {str(ip) for ip in (result.get('unfinished') or [])} if result.get('incomplete') else set()  # a scan that ran out of time did not look: not "nothing open"
+    ledger.record(port_stage.SERVICE, [ip for ip in attempted if ip not in rejected and ip not in unfinished], task.project_id, task.scan)
+    if rejected or unfinished:
+        ledger.record(port_stage.SERVICE, sorted(rejected | (unfinished & set(attempted))), task.project_id, task.scan, 'failed')
     return {'hosts': len(kept), 'ports': sum(len(p) for p in kept.values())}
 
 
