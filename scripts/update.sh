@@ -508,12 +508,12 @@ fi
 step 'Building application images while everything keeps running'
 # The proxy image is a moving tag that is meant to move with every update (nginx's security releases). Fetch it now, while nothing is stopped:
 # an unreachable registry only keeps the image already on the host, where a pull inside `up` after the migration would fail the update.
-if "${compose[@]}" config --services 2>/dev/null | grep -qx proxy; then
+if grep -qx proxy < <("${compose[@]}" config --services 2>/dev/null); then
     "${compose[@]}" pull --quiet proxy || echo 'Could not pull the newest proxy image (offline, or the registry is limiting pulls); the one on this host is kept.' >&2
 fi
 # Redis and Postgres are moving tags inside one major version (redis:alpine, postgres:18-alpine). Fetched now too (the production stack only, as
 # for the proxy); recreated below only when moved.
-if "${compose[@]}" config --services 2>/dev/null | grep -qx proxy; then
+if grep -qx proxy < <("${compose[@]}" config --services 2>/dev/null); then
     "${compose[@]}" pull --quiet db redis || echo 'Could not pull the newest Redis and Postgres images (offline, or the registry is limiting pulls); the ones on this host are kept.' >&2
 fi
 SENTINEL_SHA=$(scripts/sentinel-ref.sh 2>/dev/null) || SENTINEL_SHA=''  # the newest Sentinel library, resolved now: a moved main rebuilds that layer
@@ -521,7 +521,7 @@ export SENTINEL_SHA
 "${compose[@]}" build web celery celery-beat
 # The AI reviewer has its own small image (docs/AI-REVIEWER.md); an install whose compose file has it builds it here too. A failed build
 # never fails the update: the reviewer is not needed for scanning, and the next update builds it again.
-if "${compose[@]}" config --services 2>/dev/null | grep -qx reviewer; then
+if grep -qx reviewer < <("${compose[@]}" config --services 2>/dev/null); then
     "${compose[@]}" build reviewer || echo 'Could not build the AI reviewer image; scanning is not affected (the next update tries again).' >&2
 fi
 images_built=1
@@ -866,7 +866,7 @@ echo 'Publishing current static assets to the proxy volume...'
 "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py collectstatic --noinput
 services=(web celery celery-beat)
 ready_url=http://127.0.0.1:8000/
-if "${compose[@]}" config --services | grep -qx proxy; then
+if grep -qx proxy < <("${compose[@]}" config --services); then
     services+=(proxy)
     ready_url=https://127.0.0.1/
 fi
@@ -882,12 +882,12 @@ fi
 "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}"
 app_recreated=1
 # The AI reviewer is recreated after the application (it waits for the server's token on its own); its failing to start never fails the update.
-if "${compose[@]}" config --services 2>/dev/null | grep -qx reviewer; then
+if grep -qx reviewer < <("${compose[@]}" config --services 2>/dev/null); then
     "${compose[@]}" up -d --no-deps --force-recreate reviewer || echo 'Could not start the AI reviewer: docker compose up -d reviewer; scanning is not affected.' >&2
 fi
 # The Tailscale sidecar joins the celery container's network namespace by container id, so it is orphaned (no tailscale0, no tailnet route for
 # scans) once celery is recreated. Only present when the tailscale profile is on.
-if "${compose[@]}" config --services 2>/dev/null | grep -qx tailscale; then
+if grep -qx tailscale < <("${compose[@]}" config --services 2>/dev/null); then
     "${compose[@]}" up -d --no-deps --force-recreate tailscale ||
         echo 'Could not restart the Tailscale sidecar: run docker compose up -d --force-recreate tailscale, or scans of tailnet addresses fail.' >&2
 fi

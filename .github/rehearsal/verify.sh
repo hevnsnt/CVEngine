@@ -90,7 +90,7 @@ fi
 # The built-in scanner (docs/BUILTIN-SCANNER.md), on by default from 1.4: where the candidate's compose file has it, the update must have started it
 # with no one running anything, it must have enrolled itself and be heard from, and its heartbeats must reach the server. A first enrollment can
 # take a few minutes after the update (the server writes it when celery starts), so this waits up to ten.
-if dc config --services 2>/dev/null | grep -qx scanner; then
+if grep -qx scanner < <(dc config --services 2>/dev/null); then
   grep -qx scanner <<<"$(dc ps --status running --services)" || bad "the built-in scanner is not running after the update"
   scanner_ok=0
   for _ in $(seq 1 60); do
