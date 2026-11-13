@@ -2079,6 +2079,15 @@ class TuningDecision(models.Model):
     resolved_at = models.DateTimeField(null=True, blank=True)  # a recommendation applied or replaced, or a change reverted
     resolved_by = models.CharField(max_length=150, blank=True, default="")
     resolution = models.CharField(max_length=12, blank=True, default="")  # applied | superseded | reverted
+    # Verification (cveFeed.autotune ``verify_pending``, judged by cveFeed.autotune_policy ``verdict``): what the change expected to improve and the
+    # measurements before it; after ``verify_at`` the same measurements are taken again and the outcome stored. Every column has a database default
+    # so the code of the previous release can still insert a row during an update.
+    expected = models.CharField(max_length=32, blank=True, default="", db_default="")  # the measurement it expected to improve (autotune_policy.METRICS)
+    baseline = models.JSONField(default=dict, db_default=Value({}, output_field=models.JSONField()), blank=True)  # {metric, better, value, trouble, kills, n}: before
+    verify_at = models.DateTimeField(null=True, blank=True)  # when it is judged; None: nothing to verify (a recommendation, a person's change, a revert)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    outcome = models.CharField(max_length=12, blank=True, default="", db_default="")  # "" (not judged yet) | helped | no_effect | regressed | unknown | reverted
+    outcome_detail = models.CharField(max_length=300, blank=True, default="", db_default="")  # one sentence with the numbers
 
     class Meta:
         indexes = [models.Index(fields=["setting", "created_at"], name="tuning_setting_time_idx")]

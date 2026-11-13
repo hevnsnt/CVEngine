@@ -1,0 +1,14 @@
+{
+  "outcome": "done",
+  "dns": [
+    {"id": "d1", "status": "ok", "records": [], "canonical": "example.herokudns.com"},
+    {"id": "d2", "status": "ok", "records": ["ns1.example.net.", "ns2.example.net."]},
+    {"id": "d3", "status": "none", "records": []},
+    {"id": "d4", "status": "unknown", "records": [], "error": "not run: '192.0.2.10' is not allowed (a private address the server did not authorise)"}
+  ],
+  "certs": [
+    {"id": "c1", "status": "ok", "names": ["www.example.com", "example.com"]}
+  ],
+  "touched": ["www.example.com", "example.com", "192.0.2.10"],
+  "refused": []
+}
