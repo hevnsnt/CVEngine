@@ -12,7 +12,7 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from cveFeed import reviewer, templatefixture, templategen, templatevalidate, validation
-from cveFeed.models import AgentActivity, AIJob, CVEEntry, GeneratedTemplate
+from cveFeed.models import AgentActivity, AIJob, CVEEntry, GeneratedTemplate, ReviewerSettings
 from reNgine.resources import ScannerUnavailable
 
 GOOD = '''id: cve-2099-1234
@@ -45,6 +45,8 @@ class Base(TestCase):
                         mock.patch('cveFeed.ai_jobs.ai_on', return_value=True)):
             patcher.start()
             self.addCleanup(patcher.stop)
+        ReviewerSettings.current()
+        ReviewerSettings.objects.update(template_validation_enabled=True)  # these tests are about the validator itself; it ships off (test_template_validation_gate)
 
     def draft(self, text=GOOD, **extra):
         extra.setdefault('validation_started_at', timezone.now())
