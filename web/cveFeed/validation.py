@@ -115,7 +115,7 @@ def all_templates_allowed():
 # of placeholders (what a signed-in run's secrets file or an extractor supplies) is not fixed.
 _CRED_HEADER = re.compile(r'(?i)^(?:proxy-)?authorization$|^cookie2?$|auth|token|secret|passw|api[-_]?key|session|credential|jwt|csrf|xsrf|signature|bearer')
 _AUTH_SCHEME = re.compile(r'(?i)\b(?:bearer|basic|digest|negotiate|ntlm|token|apikey)\b')
-_USERINFO = re.compile(r'(?i)[a-z][a-z0-9+.-]*://[^/\s?#]*@')
+_USERINFO = re.compile(r'(?i)[a-z0-9+.-]://[^/\s?#]*@')  # one scheme character before ://, so a long run of letters is not rescanned from every position
 _PLACEHOLDER = re.compile(r'\{\{\s*([^}]*?)\s*\}\}')
 
 
