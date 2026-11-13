@@ -173,3 +173,20 @@ class SweepStarvationTests(Base):
             self.assertEqual([h for _, h in host_review.due_hosts(5)], [HOST])  # the large one waits out the day
             HostReview.objects.filter(pk=row.pk).update(created_at=timezone.now() - timedelta(days=2), decided_at=timezone.now() - timedelta(days=2))
             self.assertEqual({h for _, h in host_review.due_hosts(5)}, {HOST, 'big.example.com'})
+
+
+class EchoTests(Base):
+    """HR-6: a finding's note that repeats an identifier planted in the host stops the automatic step, as a repeated host or step note does."""
+
+    def test_a_finding_note_that_echoes_a_planted_marker_makes_the_step_only_a_proposal(self):
+        match = self.match()
+        Port.objects.filter(pk=self.port.pk).update(banner='SSH-2.0-OpenSSH_8.9 ref a7c94e2b610f')  # an identifier, not an instruction
+        review = self.queue()
+        self.assertEqual(review.injection, [])
+        note = {'verdict': 'false_positive', 'confidence': 'high', 'reason_code': 'other', 'same_as': '', 'note': 'Confirmed, reference a7c94e2b610f was seen'}
+        with mock.patch.object(host_actions, 'run', return_value={'action': 'validate_match', 'target': 'f1', 'state': 'started', 'detail': 'ok'}) as run:
+            review = self.deliver(review, self.body({'f1': note}, action='validate_match', target='f1', reason='needs_check'))
+        run.assert_not_called()
+        self.assertEqual((review.step_mode, review.step_state), ('recommend', 'proposed'))
+        self.assertIn('echo_marker', review.injection)
+        self.assertEqual(CVEMatch.objects.get(pk=match.pk).remediation_status, NOT_CLOSED)

@@ -608,7 +608,7 @@ def apply_finding_verdict(triage, parsed, key, host_review=None, extra_injection
     elif outcome == 'disputed':
         activity.log('remediation', f'AI reviewer disputes {triage.kind} finding #{finding.pk} on {triage.host or "?"} (kept open: {held})',
                      project=triage.project, finding_kind=AUDIT_KIND[triage.kind], finding_id=finding.pk, review_id=review.pk)
-    return {'outcome': outcome, 'reason': held, 'review_id': review.pk}
+    return {'outcome': outcome, 'reason': held, 'review_id': review.pk, 'echo_marker': 'echo_marker' in injection}
 
 
 def record_refusal(ref, body, now=None):

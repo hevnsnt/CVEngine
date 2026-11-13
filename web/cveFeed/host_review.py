@@ -761,7 +761,8 @@ def apply_reply(review, parsed, job, offered):
     host_note = reviewer.usable_note(parsed['host_note'], min_words=2)
     step = parsed['next_step']
     step_note = reviewer.usable_note(step['note'], min_words=2)
-    if injection_guard.repeats_marker(host_note, markers) or injection_guard.repeats_marker(step_note, markers):
+    echoed = any(isinstance(r, dict) and r.get('echo_marker') for _, r in results)  # a finding's note that repeated a planted identifier
+    if echoed or injection_guard.repeats_marker(host_note, markers) or injection_guard.repeats_marker(step_note, markers):
         injection = sorted(set(injection) | {'echo_marker'})  # a model that repeats an identifier planted in the host is one the host is steering
         host_note, step_note = '', ''
     HostReview.objects.filter(pk=review.pk).update(host_note=host_note, step_note=step_note, injection=injection, model=model[:100],
