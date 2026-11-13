@@ -105,8 +105,10 @@ def _disputed():
     not about the evidence (a person worked it, a critical scanner finding, closing switched off), and no retest reproduced it: as a flag,
     never NULL. A verdict the server refused because of hard evidence, a floor, or text aimed at an AI in the evidence, one the model was not
     sure of, and a finding a retest reopened never demote it: the ranking does not follow a model the server itself did not believe."""
+    from cveFeed import reviewer
     refused_for_evidence = (Q(review_outcome='disputed') | Q(review_held__startswith='hard evidence') | Q(review_held__startswith='its evidence carries text')
-                            | Q(review_held__startswith='contradicts the earlier verdict') | Q(review_held__startswith='the host review does not close'))  # a host review's closure an earlier real verdict holds
+                            | Q(review_held__startswith='contradicts the earlier verdict') | Q(review_held__startswith='the host review does not close')
+                            | Q(review_held__contains=reviewer.OTHER_HOSTS_SAID_REAL))  # earlier real verdicts of other hosts on the same evidence hold it; so does a host review's closure an earlier real verdict holds
     from django.db.models import Exists
     from cveFeed.models import ReviewerSettings
     # a verdict of the AI's review of a whole host moves nothing in the ranking while the host review may not close findings by itself (whatever the finding review's own
