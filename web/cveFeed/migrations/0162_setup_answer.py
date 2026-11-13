@@ -3,7 +3,7 @@ switches shipping off.
 
 This migration creates the table and answers nothing: it writes no row. ``ReviewerSettings.enabled`` and ``auto_close`` change their Python default
 from true to false (the row is created on first use, so a new install and an upgrade both get it off); no column changes, so nothing is rewritten.
-0162 turns off the rows that already exist and that no person has touched.
+0163 turns off the rows that already exist and that no person has touched.
 """
 import django.db.models.deletion
 import django.utils.timezone
@@ -14,7 +14,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('cveFeed', '0160_fix_retest'),
+        ('cveFeed', '0161_tuningdecision_verification'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

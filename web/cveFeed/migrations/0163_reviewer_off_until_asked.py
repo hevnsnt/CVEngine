@@ -15,6 +15,6 @@ def off_until_asked(apps, schema_editor):
 
 class Migration(migrations.Migration):
 
-    dependencies = [('cveFeed', '0161_setup_answer')]
+    dependencies = [('cveFeed', '0162_setup_answer')]
 
     operations = [migrations.RunPython(off_until_asked, migrations.RunPython.noop)]

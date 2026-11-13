@@ -32,7 +32,7 @@ class Base(TestCase):
         self.admin = User.objects.create_superuser('qadmin', 'q@x.io', 'x')
         self.plain = User.objects.create_user('qplain', 'p@x.io', 'x')
         org = Org.objects.create(name='QOrg', slug='qorg')
-        ProjectMembership.objects.create(user=self.plain, project=Project.objects.create(name='QP', slug='qp', org=org), role='user')
+        ProjectMembership.objects.create(user=self.plain, project=Project.objects.create(name='QP', slug='qp', org=org, insert_date=timezone.now()), role='user')
         self.c = client_for(self.admin)
         SetupWizard.objects.create(completed_at=timezone.now())  # a finished wizard: an existing install, so the dashboard is not the wizard
         env = mock.patch.dict(os.environ, {}, clear=False)
@@ -56,10 +56,10 @@ class Base(TestCase):
 class MigrationTests(Base):
     def test_the_migrations_answer_nothing(self):
         self.assertEqual(SetupAnswer.objects.count(), 0)
-        for name in ('0161_setup_answer', '0162_reviewer_off_until_asked'):
+        for name in ('0162_setup_answer', '0163_reviewer_off_until_asked'):
             source = open(os.path.join(os.path.dirname(__file__), '..', 'cveFeed', 'migrations', name + '.py'), encoding='utf-8').read()
             self.assertNotIn('SetupAnswer.objects', source)
-        module = importlib.import_module('cveFeed.migrations.0162_reviewer_off_until_asked')
+        module = importlib.import_module('cveFeed.migrations.0163_reviewer_off_until_asked')
         module.off_until_asked(apps, None)
         self.assertEqual(SetupAnswer.objects.count(), 0)
 
@@ -73,13 +73,13 @@ class MigrationTests(Base):
     def test_a_row_a_build_made_with_both_on_and_no_person_behind_it_is_turned_off(self):
         row = ReviewerSettings.objects.create()
         ReviewerSettings.objects.filter(pk=row.pk).update(enabled=True, auto_close=True)  # what a 1.4 build wrote
-        importlib.import_module('cveFeed.migrations.0162_reviewer_off_until_asked').off_until_asked(apps, None)
+        importlib.import_module('cveFeed.migrations.0163_reviewer_off_until_asked').off_until_asked(apps, None)
         row.refresh_from_db()
         self.assertEqual((row.enabled, row.auto_close), (False, False))
 
     def test_a_persons_earlier_choice_survives(self):
         row = ReviewerSettings.objects.create(enabled=True, auto_close=True, updated_by=self.admin)
-        importlib.import_module('cveFeed.migrations.0162_reviewer_off_until_asked').off_until_asked(apps, None)
+        importlib.import_module('cveFeed.migrations.0163_reviewer_off_until_asked').off_until_asked(apps, None)
         row.refresh_from_db()
         self.assertEqual((row.enabled, row.auto_close), (True, True))
         self.connect_ai()
