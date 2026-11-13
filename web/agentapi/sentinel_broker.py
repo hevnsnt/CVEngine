@@ -27,7 +27,7 @@ from datetime import timedelta
 
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import Avg, CharField, Count, DurationField, F, Q, Value
+from django.db.models import Avg, CharField, Count, DurationField, Exists, F, Q, Value
 from django.db.models.functions import Cast, Coalesce, Concat, Greatest
 from django.http import JsonResponse
 from django.utils import timezone
@@ -1095,7 +1095,7 @@ def eligible_sentinels(project, kind, now=None, internal=False, live_only=False,
     agents = agents.select_related('token__user')[:CANDIDATES]
     with sentinel_policy.shared_lookups():
         return [e for e in (SentinelEff(a, now) for a in agents)
-                if not e.problem and kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps)]
+                if not e.problem and kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps) and (e.credential_filter or not credential_work(kind))]
 
 
 def has_sentinels(project_slug, org_slug):
@@ -1888,6 +1888,11 @@ def prune_enrollments(now=None):
 
 def _claimable(eff, kinds, now):
     queued = SentinelTask.objects.filter(status='queued', kind__in=kinds & eff.caps, project__slug__in=eff.projects)
+    if not eff.credential_filter:
+        # while credential checks are off, a Sentinel that does not leave them out is never offered nuclei web work: the task stays queued for one that does (in SQL, so
+        # the poll of a Sentinel that never asks for these kinds costs nothing more)
+        from dashboard.models import ScanPolicy
+        queued = queued.filter(~Q(kind__in=CREDENTIAL_KINDS) | Exists(ScanPolicy.objects.filter(allow_credential_checks=True)))
     queued = eff.secret_filter(queued)  # a task that needs a stored credential goes only to a built-in scanner image that reads one; a discovery's keys also to a Sentinel the gate allows
     if not eff.builtin:
         queued = queued.exclude(VALIDATING_Q)  # a task that validates found secrets is never offered to any Sentinel but the built-in one
@@ -2073,6 +2078,8 @@ def _claim(agent, kinds, now):
                 continue  # (the query already left it out; this is the same rule where the task is actually taken)
             if not eff.builtin and builtin_only_kind(task.kind):
                 continue  # the built-in scanner's while it is in use
+            if credential_work(task.kind) and not eff.credential_filter:
+                continue  # (the query already left it out; this is the same rule where the task is actually taken)
             if task.kind == AI_CHECK and not eff.builtin:
                 from agentapi import ai_checks
                 why = ai_checks.task_problem(task, builtin=False)
@@ -2132,6 +2139,9 @@ def _claim(agent, kinds, now):
                 return task, ''
         if held_back:
             return None, 'no eligible work is queued right now (' + '; '.join(held_back.values()) + ')'
+        if not eff.credential_filter and kinds & eff.caps & set(CREDENTIAL_KINDS) and credential_work('nuclei_deep') \
+                and SentinelTask.objects.filter(status='queued', kind__in=CREDENTIAL_KINDS, project__slug__in=eff.projects).exists():
+            return None, CREDENTIAL_NOTE  # queued, and it waits for a Sentinel that leaves those checks out
         return None, 'no eligible work is queued'
 
 

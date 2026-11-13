@@ -43,7 +43,7 @@ import os
 import re
 import shlex
 from datetime import timedelta
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import yaml
 from django.utils import timezone
@@ -122,25 +122,29 @@ CREDENTIAL_URL_KEYS = ('path', 'raw', 'host', 'address', 'url')  # the keys whos
 CREDENTIAL_BODY_KEYS = ('body', 'path', 'raw')  # the keys whose strings are looked at for a password field (a form or JSON body, a query string, a raw request's body)
 CREDENTIAL_PAYLOADS_KEY = 'payloads'  # the block key whose names are lists of fixed values a request is repeated with
 # What makes a request field one that carries a password: a name with ``passw`` (password, passwd, hashedpasswd), ``passphrase`` or ``pwd`` in it, or ending in
-# ``pass`` (userpass, login_pass; not ``bypass``, ``compass``, ``trespass``, ``overpass``) or having ``pass`` as a segment of its own (pass1, pass_confirm).
-CREDENTIAL_FIELD_PATTERNS = ('passw', 'passphrase', 'pwd', '(?<!by)(?<!com)(?<!tres)(?<!over)pass\\d*$', '(?<![a-z])pass(?![a-z])')
+# ``pass`` (userpass, login_pass; not ``bypass``, ``compass``, ``trespass``, ``overpass``) or having ``pass`` as a segment of its own (pass1, pass_confirm), or
+# being ``pw`` (``pw1``) as a whole name (not ``pwr`` or ``pwa``).
+CREDENTIAL_FIELD_PATTERNS = ('passw', 'passphrase', 'pwd', '^pw\\d*$', '(?<!by)(?<!com)(?<!tres)(?<!over)pass\\d*$', '(?<![a-z])pass(?![a-z])')
 _CRED_HEADER = re.compile('(?i)' + '|'.join(CREDENTIAL_HEADER_PATTERNS))
 _AUTH_SCHEME = re.compile(r'(?i)\b(?:bearer|basic|digest|negotiate|ntlm|token|apikey)\b')
 _USERINFO = re.compile(r'(?i)[a-z0-9+.-]://[^/\s?#]*@')  # one scheme character before ://, so a long run of letters is not rescanned from every position
-_PLACEHOLDER = re.compile(r'\{\{\s*([^}]*?)\s*\}\}')
+_PLACEHOLDER = re.compile(r'\{\{([^{}]*)\}\}')  # no brace inside: a ``{{`` that is never closed is not rescanned to the end of the text from every position (the rule stays linear)
 
 
 _IDENT = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
 _PASSWORD_FIELD = re.compile('(?i)' + '|'.join(CREDENTIAL_FIELD_PATTERNS))
-_FIELD = re.compile(r'(?i)(?:^|[&?\s"{,;\'(])([\w.\[\]-]{1,40})["\']?\s*[=:]\s*["\']?((?:\{\{[^}]*\}\}|\{(?!\{[^}]*\}\})|[^&"\'\s,}<\\{])*)')  # name=value, "name": "value"
-_XML_FIELD = re.compile(r'(?i)<([\w:.-]{1,40})>((?:\{\{[^}]*\}\}|\{(?!\{[^}]*\}\})|[^<{])*)<')  # <password>value</password>
+_FIELD = re.compile(r'(?i)(?:^|[&?\s"{,;\'(])([\w.\[\]-]{1,40})(?:\\?["\'])?\s*[=:]\s*(?:\\?["\'])?((?:\{\{[^{}]*\}\}|\{(?!\{[^{}]*\}\})|[^&"\'\s,}<\\{])*)')  # name=value, "name": "value", \"name\":\"value\" (a body written inside a string)
+_MULTIPART_NAME = re.compile(r'(?i)\bname\s*=\s*\\?["\']?([\w.\[\]-]{1,40})')  # Content-Disposition: form-data; name="password"
+_LINE_END = re.compile(r'\r\n|\n|\r|\\r\\n|\\n|\\r')  # a line end, or the two characters that write one inside a quoted string
+_CONTENT_HEADER = re.compile(r'(?i)\s*content-[a-z-]+\s*:')
+_XML_FIELD = re.compile(r'(?i)<([\w:.-]{1,40})>((?:\{\{[^{}]*\}\}|\{(?!\{[^{}]*\}\})|[^<{])*)<')  # <password>value</password>
 
 
 def _fixed_text(value, literal_names):
     """What is left of ``value`` once every placeholder that is not a fixed value is taken out. A placeholder that holds a quoted literal
     (``{{base64('admin:admin')}}``) or in which any name (a variable, a payload) is one the template gives a fixed value counts as text."""
     def one(match):
-        inner = match.group(1)
+        inner = match.group(1).strip()
         return 'x' if ("'" in inner or '"' in inner or inner in literal_names or any(word in literal_names for word in _IDENT.findall(inner))) else ''
     return _PLACEHOLDER.sub(one, str(value))
 
@@ -156,16 +160,33 @@ def _literal_names(variables, payloads=()):
     return names
 
 
+def _multipart_value(text, start):
+    """The value of a multipart form field whose ``name=`` ends at ``start``: the first line after the part's headers and the blank line that ends them, or ''."""
+    lines = _LINE_END.split(text[start:start + 600], 12)
+    for i in range(1, len(lines) - 1):
+        if not lines[i].strip():
+            value = lines[i + 1]
+            return '' if value.startswith('--') else value
+        if not _CONTENT_HEADER.match(lines[i]):
+            return ''
+    return ''
+
+
 def _password_field_problem(text, literal_names):
-    """The name of a password field of a form, JSON or XML body (or query string) in ``text`` that is given a fixed value, else ``''``."""
+    """The name of a password field of a form, JSON, XML or multipart body (or query string) in ``text`` that is given a fixed value, else ``''``. Read as
+    written and URL-decoded (``p%61ssword=x``): a field is fixed if either reading says so."""
     if not isinstance(text, str) or len(text) > 200_000:
         return ''
-    for match in _FIELD.finditer(text):
-        if _PASSWORD_FIELD.search(match.group(1)) and re.search(r'[A-Za-z0-9]', _fixed_text(match.group(2), literal_names)):
-            return match.group(1)[:40]
-    for match in _XML_FIELD.finditer(text):
-        if _PASSWORD_FIELD.search(match.group(1)) and re.search(r'[A-Za-z0-9]', _fixed_text(match.group(2), literal_names)):
-            return match.group(1)[:40]
+    for reading in ((text, unquote(text)) if '%' in text else (text,)):
+        for match in _FIELD.finditer(reading):
+            if _PASSWORD_FIELD.search(match.group(1)) and re.search(r'[A-Za-z0-9]', _fixed_text(match.group(2), literal_names)):
+                return match.group(1)[:40]
+        for match in _XML_FIELD.finditer(reading):
+            if _PASSWORD_FIELD.search(match.group(1)) and re.search(r'[A-Za-z0-9]', _fixed_text(match.group(2), literal_names)):
+                return match.group(1)[:40]
+        for match in _MULTIPART_NAME.finditer(reading):
+            if _PASSWORD_FIELD.search(match.group(1)) and re.search(r'[A-Za-z0-9]', _fixed_text(_multipart_value(reading, match.end()), literal_names)):
+                return match.group(1)[:40]
     return ''
 
 
@@ -321,7 +342,8 @@ def credential_tag_problem(yaml_text):
 def installed_template_problem(yaml_text):
     """Why an INSTALLED template (never an AI-written one) may not run under the policy in force, or "": with every template allowed, only a credential of its
     own refuses it (and only while "Allow checks that send credentials" is off); under the read-only policy it is ``readonly_problem``, which also refuses
-    a credential of its own unless that switch is on. A document PyYAML cannot read is left to nuclei when every template is allowed, as it always was."""
+    a credential of its own unless that switch is on. A document PyYAML cannot read (an anchor, alias or merge key, which nuclei does read) is refused while
+    credential checks are off, as the Sentinel leaves it out of its web pass (fail closed); only a person's switch leaves it to nuclei."""
     allow = credential_checks_allowed()
     if not allow:  # a template tagged default-login or bruteforce is a check that sends credentials, whatever its text says (an older Sentinel has no tag filter of its own)
         tagged = credential_tag_problem(yaml_text)
@@ -331,8 +353,7 @@ def installed_template_problem(yaml_text):
         return readonly_problem(yaml_text, allow_credentials=allow)
     if allow:
         return ''
-    problem = credential_problem(yaml_text)
-    return '' if problem.endswith(('nested too deeply', 'not a template')) else problem
+    return credential_problem(yaml_text)
 
 
 _OWN_HOST = re.compile(r'^\{\{(?:Hostname|Host)\}\}(?::\{\{Port\}\})?$')

@@ -23,6 +23,7 @@ Every request and every flag is an audit entry (``sentinel.update_requested``, `
 import json
 import logging
 import os
+import re
 from datetime import timedelta
 
 from django.utils import timezone
@@ -100,6 +101,20 @@ def newest_contract_state(latest_contract):
     if not isinstance(wanted, int) or not isinstance(minimum, int):
         return 'unknown'
     return 'newer' if wanted > sentinel_contract.version() else 'ok'
+
+
+def pinned_target(agent):
+    """The commit this server pins (``cveFeed.software.SENTINEL_PINS_COMMIT``) as the target of a Sentinel that is told to update but has no newer one named, or
+    ``None``: for the built-in scanner (the host watcher moves it), for a Sentinel that already runs the pin, and for one the cached check knows is on the newest
+    version or newer. A Sentinel that is ahead of the pin, with no verdict to say so, is named the pin too: its updater never moves backwards (it waits)."""
+    from cveFeed import software
+    pin = str(software.SENTINEL_PINS_COMMIT or '').lower()
+    version = str(((agent.info or {}).get('version')) or '').strip().lower()
+    if not re.fullmatch(r'[0-9a-f]{40}', pin) or _is_builtin(agent) or (version and pin.startswith(version)):
+        return None
+    if sentinel_version.state(agent).get('status') == 'current':
+        return None
+    return pin
 
 
 def decide(agent, now=None, verdict=None, keep=None, instance_update=None, check_busy=True):

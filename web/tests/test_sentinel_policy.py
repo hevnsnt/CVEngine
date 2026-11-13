@@ -653,6 +653,64 @@ class CredentialFilterGateTests(DispatchBase):
         ScanPolicy.objects.create(allow_credential_checks=True)
         self.assertEqual(sb.capacity_state(self.project, 'nuclei_deep')['live'], 2)
 
+    def poll(self, agent, kinds=None, wait=0):
+        from agentapi import sentinel_broker as sb
+        from agentapi.services import Ctx
+        return sb.next_task(Ctx(user=agent.token.user, token=agent.token), {'kinds': kinds or ['nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'nmap'], 'wait': wait})
+
+    def test_an_old_sentinel_never_claims_nuclei_web_work_and_the_task_waits_for_a_current_one(self):
+        # FB-4: the claim path did not look at the filter, so the old one took the task, its accept was refused and the task was expired for everyone
+        from agentapi import sentinel_broker as sb
+        old, current = self.sentinel('old'), self.sentinel('current', ['credential_filter'])
+        for kind in ('nuclei_light', 'nuclei_targeted', 'nuclei_deep'):
+            task = self.task(kind)
+            answer = self.poll(old)
+            self.assertIsNone(answer['task'], kind)
+            self.assertIn('too old to leave out checks that send credentials', answer['reason'])
+            task.refresh_from_db()
+            self.assertEqual((task.status, task.agent_id), ('queued', None), kind)  # not taken, and not expired because an unqualified Sentinel asked
+            self.assertEqual(sb._try_claim(old, {kind}, timezone.now())[0], None)
+            answer = self.poll(current)
+            self.assertEqual(answer['task']['id'], task.pk, kind)
+            task.refresh_from_db()
+            self.assertEqual((task.status, task.agent_id), ('claimed', current.pk))
+            task.delete()
+
+    def test_the_old_sentinel_still_gets_its_other_work_while_nuclei_web_work_waits(self):
+        old = self.sentinel('old')
+        web, scan = self.task('nuclei_deep'), self.task('nmap')
+        self.assertEqual(self.poll(old)['task']['id'], scan.pk)
+        web.refresh_from_db()
+        self.assertEqual(web.status, 'queued')
+
+    def test_with_only_an_old_sentinel_the_task_waits_and_the_status_says_why(self):
+        from agentapi import sentinel_broker as sb
+        old = self.sentinel('old')
+        task = self.task('nuclei_deep')
+        for _ in range(3):
+            self.assertIsNone(self.poll(old)['task'])
+        task.refresh_from_db()
+        self.assertEqual(task.status, 'queued')
+        state = sb.capacity_state(self.project, 'nuclei_deep', why=True)
+        self.assertEqual((state['state'], state['reason']), ('none', 'outdated'))
+        self.assertIn('too old to leave out checks that send credentials', state['message'])
+
+    def test_with_the_setting_on_the_old_sentinel_claims_it_as_before(self):
+        from dashboard.models import ScanPolicy
+        old = self.sentinel('old')
+        task = self.task('nuclei_deep')
+        ScanPolicy.objects.create(allow_credential_checks=True)
+        self.assertEqual(self.poll(old)['task']['id'], task.pk)
+
+    def test_an_old_sentinel_is_not_woken_for_nuclei_web_work(self):
+        from agentapi import sentinel_broker as sb
+        old, current = self.sentinel('old'), self.sentinel('current', ['credential_filter'])
+        self.assertEqual({e.agent.pk for e in sb.eligible_sentinels(self.project, 'nuclei_deep', live_only=True)}, {current.pk})
+        self.assertEqual({e.agent.pk for e in sb.eligible_sentinels(self.project, 'nmap', live_only=True)}, {old.pk, current.pk})
+        from dashboard.models import ScanPolicy
+        ScanPolicy.objects.create(allow_credential_checks=True)
+        self.assertEqual({e.agent.pk for e in sb.eligible_sentinels(self.project, 'nuclei_deep', live_only=True)}, {old.pk, current.pk})
+
     def test_an_older_built_in_scanner_image_is_the_same_case(self):
         builtin = self.sentinel('builtin-old', ['secret_read', 'vantage'])
         self.assertIn('too old to leave out', self.refusal(builtin)[1])
