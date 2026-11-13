@@ -6,17 +6,22 @@ or an update is running. The infrastructure part
 (database and broker, queue depths, workers, schedules, memory, disk, feeds, AI budget) belongs to an App Admin: it describes the
 whole server, not a project, so for anyone else it is left out and ``system_note`` says so.
 
-Every probe is wrapped, so one that fails or times out turns into ``{"error": ...}`` and a line in ``problems`` instead of failing
-the whole answer. Nothing here returns an address, credential, command line or task argument."""
+Every probe runs under a deadline of its own and the whole answer under a budget (``agentapi.status_probes``), so one that fails or times out
+turns into ``{"error": ...}`` and a line in ``problems`` (``<probe>: timed out after 5 s``) instead of holding the whole answer; an App Admin gets
+``system.timings``, the seconds each probe took. Nothing here returns an address, credential, command line or task argument."""
 import logging
 import os
 import re
 import shutil
+import threading
 import time
 from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.conf import settings
 from django.utils import timezone
+
+from agentapi import status_probes
+from agentapi.status_probes import Probe
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +32,6 @@ DISK_LOW_PERCENT = 10
 FEED_STALE_HOURS = 48
 MEMORY_REPORT_STALE_SECONDS = 180
 CT_BACKLOG_WARN = 5000  # lookups waiting in ctwatch_queue before status says so; the reaper stops recovering orphans past broker_recovery.MAX_QUEUE_SCAN
-
-
-def _probe(problems, name, fn):
-    try:
-        return fn()
-    except Exception as exc:  # noqa: BLE001 - a probe must never fail the whole snapshot, and never leak its message
-        problems.append(f'{name}: could not be read ({type(exc).__name__})')
-        return {'error': type(exc).__name__}
 
 
 def _iso(value):
@@ -153,19 +150,34 @@ def _screenshots(problems, notes):
     return out
 
 
-def _projects(ctx):
-    """One row per project the caller may see. A row costs several whole-project counts and agents poll this, so a row is kept for
-    ``CVENGINE_STATUS_CACHE_SECONDS`` (60) per project: the counts may be up to that old. The row is the project's, the same for everyone who may see
-    it (which projects are listed is still decided per caller), so every caller shares one: it was kept per caller and project, and each caller computed
-    every project again."""
+INVENTORY_SECONDS = 6  # the inventory's own deadline inside the status budget; a cold project row is worked out in the background past it
+INVENTORY_MARGIN = 1.0  # the inventory stops starting rows this long before its deadline, so it answers with what it has
+LAST_ROW_SECONDS = 24 * 3600  # the last row worked out per project is kept this long, to be shown (marked stale) while a new one is being counted
+WARM_LOCK = 'sysstatus:warming'
+WARM_MAX_SECONDS = 600
+
+
+def _row_keys(project):
+    return f'sysstatus:project:{project.id}', f'sysstatus:project:last:{project.id}'
+
+
+def _projects_partial(ctx, deadline=None):
+    """``(rows, waiting)``: one row per project the caller may see, and the slugs of the projects whose row is not counted yet. A row costs several
+    whole-project counts and agents poll this, so a row is kept for ``CVENGINE_STATUS_CACHE_SECONDS`` (60) per project: the counts may be up to that
+    old. The row is the project's, the same for everyone who may see it (which projects are listed is still decided per caller), so every caller shares
+    one. Cold, after a restart or a cache that is off, a row is counted here only while ``deadline`` (a ``time.monotonic`` time) has not passed and each
+    of its statements may take only the time that is left; a project that does not fit gets its last known row (``stale: True``) or none, and is
+    counted by ONE background thread (``_warm_rows``, a statement timeout of its own) so the next call finds it cached, instead of fifteen rows in
+    a row inside one request."""
     from django.core.cache import cache
+    from django.db import connection
 
     from agentapi.services import _allowed_ids
     from dashboard.models import Project
 
-    seconds, rows = _cache_seconds(), []
+    seconds, rows, waiting = _cache_seconds(), [], []
     for project in Project.objects.filter(id__in=list(_allowed_ids(ctx.user))).order_by('name')[:MAX_PROJECTS]:
-        key = f'sysstatus:project:{project.id}'
+        key, last_key = _row_keys(project)
         row = None
         if seconds:
             try:
@@ -173,14 +185,97 @@ def _projects(ctx):
             except Exception:  # noqa: BLE001 - a cache outage only means computing it
                 row = None
         if row is None:
-            row = _project_row(project)
-            if seconds:
-                try:
+            left = None if deadline is None else deadline - time.monotonic()
+            if left is not None and left <= 0:
+                waiting.append(project)
+                continue
+            try:
+                if left is not None and not connection.in_atomic_block:
+                    from agentapi import status_probes
+                    status_probes._bound_database(left)
+                row = _project_row(project)
+            except Exception:  # noqa: BLE001 - a row that does not fit the time left is counted in the background, the rest still answer
+                if deadline is None:
+                    raise
+                logger.info('status: the counts of project %s did not finish in time', project.slug, exc_info=True)
+                waiting.append(project)
+                continue
+            try:
+                cache.set(last_key, row, LAST_ROW_SECONDS)
+                if seconds:
                     cache.set(key, row, seconds)
-                except Exception:  # noqa: BLE001
-                    pass
+            except Exception:  # noqa: BLE001
+                pass
         rows.append(row)
-    return rows
+    for project in waiting:
+        try:
+            last = cache.get(_row_keys(project)[1])
+        except Exception:  # noqa: BLE001
+            last = None
+        if isinstance(last, dict):
+            rows.append({**last, 'stale': True})
+    if waiting:
+        _warm_rows([p.id for p in waiting])
+    return rows, [p.slug for p in waiting]
+
+
+def _projects(ctx):
+    """The rows of ``_projects_partial`` without a deadline: every project is counted here."""
+    return _projects_partial(ctx)[0]
+
+
+def _warm_rows(project_ids):
+    """Count the rows of these projects in ONE background thread (a cache lock keeps it to one) and keep them, so a call right after a restart does not
+    count fifteen projects in a row inside the request. Bounded: a statement timeout of 30 s on the thread's own connection, ``WARM_MAX_SECONDS``
+    for the whole walk, and the connection is closed when the thread ends. Not started inside a transaction (the thread would not see its rows)."""
+    from django.core.cache import cache
+    from django.db import connection
+    if connection.in_atomic_block:
+        return
+    try:
+        if not cache.add(WARM_LOCK, 1, WARM_MAX_SECONDS + 60):
+            return
+    except Exception:  # noqa: BLE001
+        return
+
+    def run():
+        from django.db import connections
+
+        from agentapi import status_probes
+        from dashboard.models import Project
+        started, seconds = time.monotonic(), _cache_seconds()
+        try:
+            status_probes._bound_database(30)
+            for project in Project.objects.filter(id__in=project_ids).order_by('name'):
+                if time.monotonic() - started > WARM_MAX_SECONDS:
+                    break
+                key, last_key = _row_keys(project)
+                row = _project_row(project)
+                cache.set(last_key, row, LAST_ROW_SECONDS)
+                if seconds:
+                    cache.set(key, row, seconds)
+        except Exception:  # noqa: BLE001 - the next call asks again
+            logger.info('status: counting the projects in the background failed', exc_info=True)
+        finally:
+            try:
+                connections.close_all()
+                cache.delete(WARM_LOCK)
+            except Exception:  # noqa: BLE001
+                pass
+
+    threading.Thread(target=run, name='status-warm-rows', daemon=True).start()
+
+
+def _inventory(ctx, problems):
+    """``{'rows': [...], 'pending': n}``: the projects' rows within the inventory's deadline, and how many projects are still being counted (a line
+    for ``problems`` says so)."""
+    rows, waiting = _projects_partial(ctx, time.monotonic() + INVENTORY_SECONDS - INVENTORY_MARGIN)
+    if waiting:
+        total = len(rows) - sum(1 for r in rows if r.get('stale')) + len(waiting)  # the stale rows stand for projects that are in ``waiting``
+        problems.append(f'inventory: {len(waiting)} of {total} project(s) could not be counted '
+                        f'within {INVENTORY_SECONDS} s (a cold start or a slow database); they are being counted in the background and show their last counts '
+                        '(stale) or none until then, so ask again in a minute')
+    return {'rows': rows, 'pending': len(waiting)}
 
 
 def _totals(rows):
@@ -209,6 +304,12 @@ def _database():
 
 
 def _broker_client():
+    """The Redis client of the broker, with socket timeouts (``resources.redis_client``: 2 s to connect, 3 s a read, one client per URL). The client of
+    Celery's own connection has none, and each call of it opened a connection that nothing closed; it is only the fallback for a broker that is not Redis."""
+    from reNgine import resources
+    client = resources.redis_client()
+    if client is not None:
+        return client
     from reNgine.celery import app
     return app.connection_for_read().default_channel.client
 
@@ -600,12 +701,68 @@ def _signals(queues):
     return maintainer_signals.collect(queues if isinstance(queues, dict) and 'error' not in queues else None, client)
 
 
-def _system(user, problems, notes):
+def _probes(ctx, admin):
+    """Every probe of the status with its name (the name ``problems`` and ``timings`` use), in the order they start. The first five are everyone's,
+    the rest an App Admin's (``_system_probes``). Each takes ``(problems, notes, done)``: its own lists, merged into the answer only when it finished
+    in time, and what the probes that ended before it found (``signals`` reads the queues)."""
+    probes = [
+        Probe('inventory', lambda p, n, d: _inventory(ctx, p), limit=INVENTORY_SECONDS),
+        Probe('scan control', lambda p, n, d: _scanning()),
+        Probe('scanner', lambda p, n, d: _scanner(admin)),
+        Probe('built-in scanner', lambda p, n, d: _builtin_scanner(admin, p)),
+        Probe('update', lambda p, n, d: _update(), db=False),
+    ]
+    return probes + _system_probes(ctx.user) if admin else probes
+
+
+def _system_probes(user):
+    return [
+        Probe('database', lambda p, n, d: _database()),
+        Probe('broker', lambda p, n, d: _broker(), db=False),
+        Probe('queues', lambda p, n, d: _queues()),
+        Probe('workers', lambda p, n, d: _workers_and_jobs(user)),
+        Probe('work', lambda p, n, d: _work()),
+        Probe('memory', lambda p, n, d: _memory(), db=False),
+        Probe('certificate', lambda p, n, d: _certificate(), db=False),
+        Probe('disk', lambda p, n, d: _disk(), db=False),
+        Probe('feeds', lambda p, n, d: _feeds()),
+        Probe('os_detection', lambda p, n, d: _os_detection(), db=False),
+        Probe('ai', lambda p, n, d: _ai(p)),
+        Probe('signals', lambda p, n, d: _signals(d.get('queues')), after='queues'),
+        Probe('autotune', lambda p, n, d: _autotune()),
+        Probe('runzero', lambda p, n, d: _runzero(p)),
+        Probe('udp_scan', lambda p, n, d: _udp_scan(p)),
+        Probe('screenshots', lambda p, n, d: _screenshots(p, n)),
+        Probe('sentinels', lambda p, n, d: _sentinels(p)),
+        Probe('egress', lambda p, n, d: _egress(p), db=False),
+        Probe('live_cache', lambda p, n, d: _live_cache(n), db=False),
+        Probe('tools', lambda p, n, d: _tools()),
+    ]
+
+
+def _taker(run, problems, notes):
+    """``take(name)``: the value of a probe of ``run``, with its own problems and notes merged in; one that did not finish gives ``{'error': ...}`` and its line."""
+    def take(name):
+        result = run.results[name]
+        if result.state == 'ok':
+            problems.extend(result.problems)
+            notes.extend(result.notes)
+            return result.value
+        problems.append(result.line)
+        return {'error': result.error or result.state}
+    return take
+
+
+def _system(user, problems, notes, run=None):
+    """The App Admin's part: the infrastructure probes (``run``: the ``status_probes.Run`` of the whole status; they are run here when it is not given), their
+    problem lines and notes, and ``timings``."""
+    run = run or status_probes.run(_system_probes(user))
+    take = _taker(run, problems, notes)
     out = {}
-    out['database'] = _probe(problems, 'database', _database)
-    out['broker'] = _probe(problems, 'broker', _broker)
-    out['queues'] = _probe(problems, 'queues', _queues)
-    health = _probe(problems, 'workers', lambda: _workers_and_jobs(user))
+    out['database'] = take('database')
+    out['broker'] = take('broker')
+    out['queues'] = take('queues')
+    health = take('workers')
     if 'error' in health:
         out['workers'] = health
     else:
@@ -622,45 +779,46 @@ def _system(user, problems, notes):
             problems.append(f"celery beat has not ticked for {beat.get('seconds_since_tick', 0) // 60} minutes; no schedule is being dispatched")
         elif out['schedules']['past_due']:
             problems.append('schedules past due: ' + ', '.join(out['schedules']['past_due'][:10]))
-    out['work'] = _probe(problems, 'work', _work)
+    out['work'] = take('work')
     beat_state = ((out.get('schedules') or {}).get('beat') or {}).get('state')
     problem = _work_problem(out['work'], beat_state)
     if problem:
         problems.append(problem)
-    out['memory'] = _probe(problems, 'memory', _memory)
+    out['memory'] = take('memory')
     if 'containers' in out['memory']:
         for c in out['memory']['containers']:
             if c['available_mb'] is not None and c['critical_mb'] is not None and c['available_mb'] < c['critical_mb']:
                 problems.append(f"memory: {c['host']} has {c['available_mb']} MB free, below its critical level")
             if (c['report_age_seconds'] or 0) > MEMORY_REPORT_STALE_SECONDS:
                 problems.append(f"memory: {c['host']} has not reported for {c['report_age_seconds']} seconds")
-    out['certificate'] = _probe(problems, 'certificate', _certificate)
+    out['certificate'] = take('certificate')
     if isinstance(out['certificate'], dict) and out['certificate'].get('problem'):
         problems.append(f"certificate: {out['certificate']['problem']}")
-    out['disk'] = _probe(problems, 'disk', _disk)
+    out['disk'] = take('disk')
     if out['disk'].get('free_percent') is not None and out['disk']['free_percent'] < DISK_LOW_PERCENT:
         problems.append(f"disk: only {out['disk']['free_percent']}% free ({out['disk']['free_mb']} MB)")
-    out['feeds'] = _probe(problems, 'feeds', _feeds)
+    out['feeds'] = take('feeds')
     last = out['feeds'].get('last_feed_dispatch')
     if last:
         age = (timezone.now() - datetime.fromisoformat(last)).total_seconds() / 3600
         if age > FEED_STALE_HOURS:
             problems.append(f'feeds: the CVE feed has not been dispatched for {int(age)} hours')
-    out['os_detection'] = _probe(problems, 'os_detection', _os_detection)
-    out['ai'] = _probe(problems, 'ai', lambda: _ai(problems))
-    out['signals'] = _probe(problems, 'signals', lambda: _signals(out.get('queues')))
+    out['os_detection'] = take('os_detection')
+    out['ai'] = take('ai')
+    out['signals'] = take('signals')
     if isinstance(out['signals'], dict) and out['signals'].get('unknown'):
         notes.append('maintainer signals not fully known: ' + ', '.join(out['signals']['unknown']) + ' (see system.signals for why)')
-    out['autotune'] = _probe(problems, 'autotune', _autotune)
+    out['autotune'] = take('autotune')
     if (out['autotune'] or {}).get('discovery_pin'):
         notes.append(out['autotune']['discovery_pin']['text'])
-    out['runzero'] = _probe(problems, 'runzero', lambda: _runzero(problems))
-    out['udp_scan'] = _probe(problems, 'udp_scan', lambda: _udp_scan(problems))
-    out['screenshots'] = _probe(problems, 'screenshots', lambda: _screenshots(problems, notes))
-    out['sentinels'] = _probe(problems, 'sentinels', lambda: _sentinels(problems))
-    out['egress'] = _probe(problems, 'egress', lambda: _egress(problems))
-    out['live_cache'] = _probe(problems, 'live_cache', lambda: _live_cache(notes))
-    out['tools'] = _probe(problems, 'tools', _tools)
+    out['runzero'] = take('runzero')
+    out['udp_scan'] = take('udp_scan')
+    out['screenshots'] = take('screenshots')
+    out['sentinels'] = take('sentinels')
+    out['egress'] = take('egress')
+    out['live_cache'] = take('live_cache')
+    out['tools'] = take('tools')
+    out['timings'] = run.timings()
     problem = _template_problem((out['tools'] or {}).get('nuclei_templates') or {})
     if problem:
         problems.append(problem)
@@ -674,32 +832,41 @@ def _system(user, problems, notes):
 
 
 def system_status(ctx):
+    """The whole snapshot. Every probe runs under its own deadline and the answer under one budget (``status_probes``: 5 s a probe, 8 s in all unless
+    ``CVENGINE_STATUS_PROBE_SECONDS`` / ``CVENGINE_STATUS_BUDGET_SECONDS`` say otherwise); a probe that does not finish is named in ``problems`` and the
+    rest is still returned. An App Admin also gets ``system.timings``: the seconds each probe took."""
     problems, notes = [], []
     admin = ctx.user.is_superuser
-    scanning = _probe(problems, 'scan control', _scanning)
+    run = status_probes.run(_probes(ctx, admin))
+    take = _taker(run, problems, notes)
+
+    scanning = take('scan control')
     if scanning.get('paused'):
         notes.append('scanning is paused' + (f": {scanning['reason']}" if admin and scanning.get('reason') else ''))
-    scanner = _probe(problems, 'scanner', lambda: _scanner(admin))
+    scanner = take('scanner')
     if scanner.get('message'):
         notes.append(scanner['message'])
     if admin and scanner.get('never_seen'):
         problems.append(scanner['never_seen_message'])
     scanning['scanner'] = scanner
-    scanning['builtin_scanner'] = _probe(problems, 'built-in scanner', lambda: _builtin_scanner(admin, problems))
-    update = _probe(problems, 'update', _update)
+    scanning['builtin_scanner'] = take('built-in scanner')
+    update = take('update')
     if update.get('phase') not in (None, 'idle', 'done'):
         notes.append(f"an update is in progress ({update['phase']})")
     if not admin:  # who paused, why, and what the whole instance is running describe the server, not the caller's projects
         scanning = {k: scanning.get(k) for k in ('paused', 'paused_by_update', 'error', 'scanner', 'builtin_scanner') if k in scanning}
         update = {k: update.get(k) for k in ('phase', 'error') if k in update}
-    projects = _probe(problems, 'inventory', lambda: _projects(ctx))
+    inventory = take('inventory')
+    projects = inventory.get('rows') if 'rows' in inventory else inventory
     totals = _totals(projects) if isinstance(projects, list) else None
+    if totals and inventory.get('pending'):
+        totals['projects_pending'] = inventory['pending']
     if totals and totals['scans_stalled']:
         problems.append(f"{totals['scans_stalled']} scan(s) marked running for too long (stalled)")
     out = {'at': timezone.now().isoformat(), 'version': _version(), 'scanning': scanning, 'update': update,
            'totals': totals, 'projects': projects if isinstance(projects, list) else []}
     if admin:
-        out['system'] = _system(ctx.user, problems, notes)
+        out['system'] = _system(ctx.user, problems, notes, run)
         out['scope'] = 'instance'
     else:
         out['system'] = None

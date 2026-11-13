@@ -702,12 +702,13 @@ class ApiTests(SyncFixture):
         self.assertEqual(self.req('rzs', 'GET', 'runzero')[0], 404)  # another organization's admin cannot even see it exists
 
     def test_settings_need_the_admin_role_and_are_validated(self):
-        self.assertEqual(self.req('rzoa', 'PUT', 'runzero', {'import_enabled': True, 'search': 'tag:edge'})[1]['import_enabled'], True)
+        self.assertEqual(self.req('rzoa', 'PUT', 'runzero', {'import_enabled': True, 'search': 'tag:edge'})[0], 403)  # a token may not switch the import on (FB-5)
+        self.assertEqual(self.req(self.org_admin, 'PUT', 'runzero', {'import_enabled': True, 'search': 'tag:edge'})[1]['import_enabled'], True)  # a person may
         row = RunZeroSync.objects.get(project=self.pa)
         self.assertEqual((row.import_enabled, row.search), (True, 'tag:edge'))
         self.assertTrue(AuditLog.objects.filter(action='project.runzero.settings', target='rz-pa').exists())
-        self.assertEqual(self.req('rzoa', 'PUT', 'runzero', {'search': '   '})[1]['search'], 'alive:true')
-        self.assertEqual(self.req('rzoa', 'PUT', 'runzero', {'search': 'x' * 900})[1]['search'], 'x' * 300)
+        self.assertEqual(self.req(self.org_admin, 'PUT', 'runzero', {'search': '   '})[1]['search'], 'alive:true')
+        self.assertEqual(self.req(self.org_admin, 'PUT', 'runzero', {'search': 'x' * 900})[1]['search'], 'x' * 300)
         for body in ({}, {'import_enabled': 'yes'}, {'search': 5}):
             self.assertEqual(self.req('rzoa', 'PUT', 'runzero', body)[0], 400, body)
         for user in ('rzm', 'rzau', 'rzs'):
@@ -739,7 +740,9 @@ class ApiTests(SyncFixture):
             error, data = tool_call(self.tokens['rzoa'], 'get_runzero_sync', {'project': 'rz-pa'})
             self.assertFalse(error)
             self.assertTrue(data['configured'])
-            self.assertFalse(tool_call(self.tokens['rzoa'], 'set_runzero_sync', {'project': 'rz-pa', 'import_enabled': True})[0])
+            self.assertTrue(tool_call(self.tokens['rzoa'], 'set_runzero_sync', {'project': 'rz-pa', 'import_enabled': True})[0])  # FB-5: only a person switches the import on
+            self.assertFalse(tool_call(self.tokens['rzoa'], 'set_runzero_sync', {'project': 'rz-pa', 'import_enabled': False})[0])
+            RunZeroSync.objects.filter(project=self.pa).update(import_enabled=True)
             self.assertEqual(tool_call(self.tokens['rzoa'], 'run_runzero_sync', {'project': 'rz-pa'}), (False, {'queued': True}))
             delay.assert_called_once()
         for name in ('get_runzero_sync', 'run_runzero_sync'):

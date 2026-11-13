@@ -487,6 +487,7 @@ export function versionBlock(d, { onChange, builtin = false }) {
   if (tools) box.append(tools);
   const keeping = updateLine(d);
   if (keeping) box.append(keeping);
+  if (d.credential_filter && d.credential_filter.note) box.append(el("p", "msg err ss-detail", d.credential_filter.note));
   if (d.contract && d.contract.note)
     box.append(el("p", d.contract.state === "unsupported" ? "msg err ss-detail" : "note ss-detail", d.contract.note));
   box.append(...waitingLines(d));

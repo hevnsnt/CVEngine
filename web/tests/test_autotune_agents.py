@@ -325,7 +325,7 @@ class AgentLimitTests(AgentBase):
         self.write({'plan_daily_total': 50}, name='ai')
         self.assertEqual(AIProviderSettings.objects.first().plan_daily_total, 50)
         for name, body in (('ai', {'enabled': True}), ('ai', {'auto_fire': True}), ('reviewer', {'enabled': True}), ('openvas', {'enabled': True}),
-                           ('scan_policy', {'nuclei_all_templates': True}), ('updates', {'mode': 'automatic'}), ('scanner_plan', {'plan': 'both'}),
+                           ('scan_policy', {'nuclei_all_templates': True}), ('updates', {'mode': 'auto'}), ('scanner_plan', {'plan': 'both'}),
                            ('reviewer', {'review_daily_max': 20000})):
             with self.assertRaises(ApiError, msg=(name, body)) as caught:
                 self.write(body, name=name)

@@ -200,6 +200,71 @@ def block_network(allowed=None):
     guard(requests.adapters.HTTPAdapter, 'send', lambda self, request, *a, **k: urlsplit(request.url).hostname)
     return stack.close
 
+# Per-process memos that expire on the real clock and are read by ordinary requests: whichever request lands after an expiry pays a reload (one to
+# three queries), so a count that two requests are compared on, or that a test pins, depended on the machine's speed and on the tests that ran before
+# (17 != 15, 4 != 6, which turned CI red three times). Every test therefore starts with them unloaded (the first read loads them) and they cannot expire
+# while it runs: the two 10 second ones by a frozen clock, the others by an infinite window. A test that is ABOUT one of them (its expiry, its reload,
+# its refresh) opts out with ``tests.steady.expiring_caches`` on the test or its class; ``steady_caches()`` remains for a test that wants none of them to read at all.
+EXPIRING_CACHES_ATTR = 'expiring_caches'
+
+
+class _FrozenTime:
+    """The ``time`` module with ``time()`` stopped: a memo that compares against it never expires."""
+    def __init__(self, at):
+        self._at = at
+
+    def time(self):
+        return self._at
+
+    def __getattr__(self, name):
+        import time
+        return getattr(time, name)
+
+
+def pin_process_caches():
+    """Unload and pin the memos listed above. Returns the function that unpins and unloads them again."""
+    import time
+    from unittest import mock
+
+    from cveFeed import egress_proxy, internal_view, scan_concurrency, tailscale_scope, tunables
+    from reNgine import input_guard, ip_allowlist, resources
+    forever = float('inf')
+    stack = ExitStack()
+
+    def unload():
+        input_guard._ban_cache.update(at=0.0, ips=frozenset())
+        ip_allowlist._cache.update(at=0.0)
+        internal_view.invalidate()
+        tunables.invalidate()
+        tunables._cache.update(values={})  # not even the last copy of an outage carries over
+        scan_concurrency.invalidate()
+        tailscale_scope.invalidate()
+        egress_proxy.reset_cache()
+        resources._saved.update(at=None, values={})
+        resources._auto.update(at=None, values={})
+    unload()
+    frozen = _FrozenTime(time.time())
+    for owner, name, value in ((input_guard, 'time', frozen), (ip_allowlist, 'time', frozen), (internal_view, 'CACHE_SECONDS', forever), (tunables, 'CACHE_SECONDS', forever),
+                               (scan_concurrency, 'CACHE_SECONDS', forever), (tailscale_scope, 'CACHE_SECONDS', forever), (egress_proxy, 'CACHE_SECONDS', forever),
+                               (resources, 'SAVED_CACHE_SECONDS', forever)):
+        patch = mock.patch.object(owner, name, value)
+        patch.start()
+        stack.callback(patch.stop)
+    stack.callback(unload)
+    return stack.close
+
+
+def _pin_quietly():
+    try:
+        return pin_process_caches()
+    except Exception:  # noqa: BLE001 - a run without the app loaded (the runner's own tests) has nothing to pin
+        return None
+
+
+def _opts_out(test):
+    method = getattr(test, getattr(test, '_testMethodName', ''), None)
+    return bool(getattr(type(test), EXPIRING_CACHES_ATTR, False) or getattr(method, EXPIRING_CACHES_ATTR, False))
+
 
 def isolate_tests(restore_environment=True):
     """Run every test with its ``allow_network`` visible to the network guards, and put ``os.environ`` back as it was when the test began.
@@ -211,9 +276,12 @@ def isolate_tests(restore_environment=True):
     def run(self, result=None):
         before, environment = dict(_current), dict(os.environ)
         _current.update(test=self.id(), allow=bool(getattr(self, 'allow_network', False)))
+        unpin = None if _opts_out(self) else _pin_quietly()
         try:
             return real_run(self, result)
         finally:
+            if unpin:
+                unpin()
             _current.update(before)
             if restore_environment and dict(os.environ) != environment:
                 os.environ.clear()

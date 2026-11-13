@@ -81,14 +81,16 @@ def _template_facts():
     from cveFeed import templategen
     cap = templategen.generation_limit('TEMPLATE_GEN_MAX_PER_DAY')
     return [f'AI-written checks: the AI writes a check for a CVE that no installed template covers (at most {cap} a day), and then validates it on its own: two AI calls per draft, '
-            f'more when a try has to be repeated, so up to {cap * 2} calls a day and about {cap * 6} at the most. A check that passes every gate runs on your hosts. '
-            'With this off the drafts wait unused, and checks that already passed keep working.']
+            f'more when a try has to be repeated, so up to {cap * 2} calls a day and about {cap * 6} at the most. Only "Act on safe steps" switches this on, and then a check that '
+            'passes every gate runs on your hosts with no person approving it. With this off the drafts wait unused, and checks that already passed keep working.']
 
 
 def _apply_templates(user, mode):
-    """Off leaves it off; Recommend only and Act on safe steps switch the automatic validation on (a check it passes is run on hosts)."""
+    """Only Act on safe steps switches the automatic validation on, because a check that passes it runs on hosts with no person deciding (FB-11): "Recommend only" promises
+    that a person decides, so it leaves this switch as it is (off unless a person turned it on in Settings > AI model), and so does Off."""
     from cveFeed import settings_api
-    _call(settings_api.reviewer_put, user, {'template_validation_enabled': mode != 'off'})
+    if mode == 'act':
+        _call(settings_api.reviewer_put, user, {'template_validation_enabled': True})
 
 
 # (title, the cost facts of the line as a list of sentences, apply(user, mode)): a later release adds its AI feature here, and the three choices cover it.
@@ -99,7 +101,7 @@ AI_LINES = (
 )
 NEW_LINES = {2: ('AI host review',), 3: ('AI-written checks',)}  # the lines each version of the AI question added: an answer given before is asked again for them
 LINE_WORDS = {'AI host review': ('the host review', 'The AI reviews hosts that changed and suggests a next step; a person starts it. Every project stays on recommend, and a false positive from the host review is never closed by itself.'),
-              'AI-written checks': ('the AI-written checks', 'The AI validates the checks it wrote, and one that passes every gate is run on your hosts.')}
+              'AI-written checks': ('the AI-written checks', 'The AI validates the checks it wrote, and one that passes every gate is run on your hosts with no person approving it.')}
 
 
 def _ai_applies():
@@ -138,9 +140,11 @@ def _ai_choices():
     return [
         {'value': 'off', 'label': 'Off', 'tag': 'Nothing is billed', 'effect': 'No AI review. You can turn it on later.'},
         {'value': 'recommend', 'label': 'Recommend only',
-         'effect': 'The AI gives a verdict on each finding and each host and a person decides. It never closes or changes a finding, and every host review waits for you to press Start.'},
+         'effect': 'The AI gives a verdict on each finding and each host and a person decides. It never closes or changes a finding, and every host review waits for you to press Start. '
+                   'AI-written checks stay off: a check that passes its own validation would run on your hosts with no person deciding, so switch them on in Settings > AI model if you want them.'},
         {'value': 'act', 'label': 'Act on safe steps',
-         'effect': 'As Recommend, and the AI may also close a finding as a false positive when it is sure and the evidence is not hard proof. Host reviews stay on recommend in every project: '
+         'effect': 'As Recommend, and the AI may also close a finding as a false positive when it is sure and the evidence is not hard proof. It also switches on the AI-written checks: one that '
+                   'passes every automatic gate runs on your hosts with no person approving it. Host reviews stay on recommend in every project: '
                    'only a person sets a project to automatic, on the host card or in Settings > AI model.'},
     ]
 
@@ -151,7 +155,8 @@ def _ai_apply(user, value, since=None):
     newer = {title for version, titles in NEW_LINES.items() if since is not None and version > since for title in titles}
     for title, _facts, apply in AI_LINES:
         if since is None or title in newer:
-            apply(user, value)
+            # asked again about one new line, "Switch it on" is the choice recorded as recommend: for the AI-written checks that is the one way to switch them on
+            apply(user, 'act' if since is not None and title == 'AI-written checks' and value == 'recommend' else value)
 
 
 # --- the scanner question ------------------------------------------------------------------------------------------------------------------------------
@@ -251,6 +256,47 @@ def settle(user=None):
         return False
 
 
+# --- the credential checks question ---------------------------------------------------------------------------------------------------------------------
+
+def _cred_applies():
+    """Asked only where checks have run before: a brand-new install never relied on default-login findings, and its default is the same safe one."""
+    try:
+        from cveFeed.models import ServiceRun
+        if ServiceRun.objects.filter(service__startswith='nuclei').exists():
+            return True, ''
+    except Exception:  # noqa: BLE001 - a question that cannot be worked out is not asked
+        pass
+    return False, 'No checks have run on this install yet, so nothing relied on them. They stay off until you turn them on in Settings > Scan policy.'
+
+
+def _cred_current():
+    from cveFeed import validation
+    return 'on' if validation.credential_checks_allowed() else 'off'
+
+
+def _cred_decided():
+    """A person already turned them on in Settings > Scan policy: that is a choice. "Off" is what the update set, so it is not one until a person answers."""
+    return _cred_current() == 'on'
+
+
+def _cred_choices():
+    return [
+        {'value': 'off', 'label': 'No', 'tag': 'Keeps what this update set',
+         'effect': 'Checks that send credentials stay off. Findings that came from those checks (default logins) are no longer re-confirmed.'},
+        {'value': 'on', 'label': 'Yes',
+         'effect': 'Turns on the checks that try vendor default logins and send fixed credentials to your hosts. Use it only on hosts you are allowed to log in to.'},
+    ]
+
+
+def _cred_apply(user, value):
+    from cveFeed import settings_api
+    _call(settings_api.scan_policy_put, user, {'allow_credential_checks': value == 'on'})
+
+
+# What the page says about the update itself, as information only (nothing to answer).
+NOTES = ('Every host is checked once more with nuclei after this update, because the check set changed. Nothing needs to be done.',)
+
+
 # --- the agent policy question ---------------------------------------------------------------------------------------------------------------------
 
 def _agent_current():
@@ -304,6 +350,10 @@ QUESTIONS = (
              'An AI model can double-check your findings and watch the health of the server. It stays off until you say otherwise. Features you already turned '
              'on in an earlier release are not touched.',
              _ai_choices, lambda: 'off', _ai_applies, _ai_decided, _ai_apply, _ai_current, '/cve/settings/#ai', 'Settings > AI model', facts=_ai_facts, version=3),
+    Question('credential_checks', '1.4.0', 'Run checks that send credentials?',
+             'Some checks try vendor default logins and send fixed credentials (a default password, an API key) to your hosts to see whether they are accepted. '
+             'This update turned them off, and they stay off until you say yes.',
+             _cred_choices, lambda: 'off', _cred_applies, _cred_decided, _cred_apply, _cred_current, '/cve/settings/#scan_policy', 'Settings > Scan policy'),
     Question('agent_policy', '1.4.0', 'May AI agents change performance settings by themselves?',
              'AI agents that work on this instance over MCP or the API can ask for changes to the throughput settings that auto-tuning manages. This spends nothing. '
              'A number you saved yourself is never touched.',
@@ -321,7 +371,7 @@ def _describe(q, answers):
     applies, why = q.applies()
     row = answers.get(q.key)
     new_lines = []
-    if row is not None and row.version < q.version:  # answered before the question gained a line: it is asked again, for the new line only
+    if row is not None and row.version < q.version and row.answer != LATER:  # answered before the question gained a line: it is asked again, for the new line only (FB-13: "decide later" decided no line, so the whole question is asked)
         new_lines = [line for version, lines in NEW_LINES.items() if q.key == 'ai_validation' and version > row.version for line in lines]
         row = None
     if not applies:
@@ -363,7 +413,7 @@ def snapshot():
     questions = [_describe(q, answers) for q in QUESTIONS]
     pending = sum(1 for q in questions if q['state'] == 'pending')
     later = sum(1 for q in questions if q['state'] == 'later')
-    return {'questions': questions, 'pending': pending, 'later': later, 'open': pending + later, 'url': PAGE,
+    return {'questions': questions, 'pending': pending, 'later': later, 'open': pending + later, 'url': PAGE, 'notes': list(NOTES),
             'safe_default': 'A feature that costs money or changes what is scanned stays off until you answer.'}
 
 
@@ -413,8 +463,8 @@ def answer(user, key, value):
     if value != LATER and value not in [c['value'] for c in q.choices()]:
         raise QuestionError(400, 'that is not one of the choices')
     from cveFeed.models import SetupAnswer
-    earlier = SetupAnswer.objects.filter(key=key).values_list('version', flat=True).first()
-    stale = earlier is not None and earlier < q.version  # answered before the question gained a line: only the new line is carried out
+    earlier, earlier_answer = next(iter(SetupAnswer.objects.filter(key=key).values_list('version', 'answer')), (None, None))
+    stale = earlier is not None and earlier < q.version and earlier_answer != LATER  # answered before the question gained a line: only the new line is carried out
     with transaction.atomic():
         if value != LATER:
             if stale and key == 'ai_validation':

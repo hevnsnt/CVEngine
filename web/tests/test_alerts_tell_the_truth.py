@@ -697,7 +697,7 @@ class DismissedAlertStaysDismissedTests(Base):
         self.assertNotIn('sentinel_waiting', before)
         self.tasks(1, 'expired', WAIT, kind='nmap', ago=timedelta(minutes=5))
         reviewer.run_ops_checks()
-        self.assertEqual([a['code'] for a in reviewer.open_alerts()], before)
+        self.assertEqual(sorted(a['code'] for a in reviewer.open_alerts()), sorted(before))  # the same alerts, whatever their order
 
     def test_a_new_kind_waiting_or_falling_behind_brings_it_back(self):
         facts = {'waited': 80, 'by_kind': {'nmap': 80}, 'slots': 8, 'falling_behind': False, 'saturated': True, 'waited_recent': 40, 'growing': False}

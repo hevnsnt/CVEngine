@@ -1016,7 +1016,7 @@ def cancel_task(ctx, slug, task_id):
 _UNKNOWN = object()
 
 
-def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOWN):
+def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOWN, credential_needed=None):
     """``builtin_id`` is the id of the built-in scanner's Agent (or ``None``), which a caller building many rows reads once; left out, a Sentinel
     looks it up (one query)."""
     now = timezone.now()
@@ -1044,6 +1044,10 @@ def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOW
         from agentapi import sentinel_contract
         reported = (agent.info or {}).get('contract_version')
         out['contract'] = {'version': reported, 'state': sentinel_contract.state(reported), 'note': sentinel_contract.note(reported)}
+        from agentapi import sentinel_broker
+        declared = sentinel_broker.CREDENTIAL_FEATURE in ((agent.info or {}).get('features') or [])
+        needed = sentinel_broker.credential_work('nuclei_deep') if credential_needed is None else credential_needed  # a list reads the setting once for the page
+        out['credential_filter'] = {'declared': declared, 'needed': needed, 'note': sentinel_broker.CREDENTIAL_NOTE if needed and not declared else ''}  # old client: web checks wait
         out['version_since'] = (agent.info or {}).get('version_since')  # when it last changed the version it runs
         from agentapi import sentinel_autoupdate
         out['auto_update'] = sentinel_autoupdate.view(agent)  # running / newest / update requested / flagged, in plain words
@@ -1162,7 +1166,9 @@ def list_agents(ctx, params):
     builtin_id = _sentinel().builtin_pk() if any(a.kind == 'scanner' for a in page['results']) else None  # once for the page, not per row
     from agentapi import sentinel_policy
     with sentinel_policy.shared_lookups():  # the instance defaults are read once for the page, not once per Sentinel (four times each)
-        page['results'] = [agent_dict(a, counts=counts.get(a.pk), viewer=ctx.user, builtin_id=builtin_id) for a in page['results']]
+        from agentapi import sentinel_broker
+        needed = sentinel_broker.credential_work('nuclei_deep') if any(a.kind == 'scanner' for a in page['results']) else False
+        page['results'] = [agent_dict(a, counts=counts.get(a.pk), viewer=ctx.user, builtin_id=builtin_id, credential_needed=needed) for a in page['results']]
     return page
 
 
@@ -1196,6 +1202,15 @@ def _clean_limits(value):
     return out
 
 
+def _refuse_wider_limits(now, new):
+    """The limits an agent has are replaced as a whole (a key left out is no limit): a token may keep or tighten each one, never drop or loosen one."""
+    for key in ('capabilities', 'projects'):
+        if key in now and not (key in new and set(map(str, new[key])) <= set(map(str, now[key]))):
+            raise ApiError(403, f'limits.{key}: an agent may only tighten what an agent is limited to; a person loosens it in the web interface')
+    if 'max_concurrent' in now and not new.get('max_concurrent', MAX_CONCURRENT_CAP + 1) <= now['max_concurrent']:
+        raise ApiError(403, 'limits.max_concurrent: an agent may only lower it; a person raises it in the web interface')
+
+
 def update_agent(ctx, agent_id, body):
     """An administrator approves, limits, suspends or revokes an agent: ``status`` (active, suspended, revoked), ``note`` and ``limits``.
     A suspended or revoked agent loses its leases at once; a tighter limit releases what it no longer allows."""
@@ -1214,6 +1229,12 @@ def update_agent(ctx, agent_id, body):
     if 'update' in body and body['update'] != 'now':
         raise ApiError(400, 'update must be "now"')
     before = {'status': agent.status, 'limits': agent.limits}
+    if ctx.token is not None:  # an API token or MCP call (FB-5): it may narrow what an agent does, never widen it
+        if 'limits' in body:
+            _refuse_wider_limits(agent.limits or {}, _clean_limits(body['limits']))
+        if 'settings' in body:
+            from agentapi import sentinel_settings
+            sentinel_settings.refuse_wider_raw(agent, body['settings'])
     if 'status' in body:
         if body['status'] not in ADMIN_STATUSES:
             raise ApiError(400, f'status must be one of {", ".join(ADMIN_STATUSES)}')

@@ -84,6 +84,58 @@ class CredentialInATemplateTests(TestCase):
 			with self.subTest(fine=name):
 				self.assertEqual(validation.readonly_problem(text), '')
 
+	BODY = {
+		'form_body': "id: c\ninfo: {name: c, severity: info}\nhttp:\n  - method: POST\n    path: [\"{{BaseURL}}/login\"]\n    body: 'user=admin&password=admin'\n    matchers:\n      - type: word\n        words: [ok]\n",
+		'json_body': "id: c\ninfo: {name: c, severity: info}\nhttp:\n  - method: POST\n    path: [\"{{BaseURL}}/login\"]\n    body: '{\"username\":\"a\",\"password\":\"admin\"}'\n    matchers:\n      - type: word\n        words: [ok]\n",
+		'raw_body': "id: c\ninfo: {name: c, severity: info}\nhttp:\n  - raw:\n      - |\n        POST /login HTTP/1.1\n        Host: {{Hostname}}\n\n        log=admin&pwd=secret1\n",
+		'query_string': "id: c\ninfo: {name: c, severity: info}\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/login?user=a&password=admin\"]\n    matchers:\n      - type: word\n        words: [ok]\n",
+		'literal_variable': "id: c\ninfo: {name: c, severity: info}\nvariables:\n  pw: admin\nhttp:\n  - method: POST\n    path: [\"{{BaseURL}}/login\"]\n    body: 'password={{pw}}'\n    matchers:\n      - type: word\n        words: [ok]\n",
+		'payload_list': "id: c\ninfo: {name: c, severity: info}\nhttp:\n  - method: POST\n    path: [\"{{BaseURL}}/login\"]\n    body: 'password={{pass}}'\n    payloads:\n      pass: [admin, password]\n    matchers:\n      - type: word\n        words: [ok]\n",
+		'helper_over_a_variable': "id: c\ninfo: {name: c, severity: info}\nvariables:\n  auth: admin:admin\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/\"]\n    headers:\n      Authorization: 'Basic {{base64(auth)}}'\n    matchers:\n      - type: word\n        words: [ok]\n",
+	}
+	PASSWORD_PLACEHOLDERS = "id: c\ninfo: {name: c, severity: info}\nhttp:\n  - method: POST\n    path: [\"{{BaseURL}}/login\"]\n    body: 'user={{username}}&password={{password}}&bypass=1'\n    matchers:\n      - type: word\n        words: [ok]\n"
+
+	def test_a_password_in_a_body_or_behind_a_placeholder_over_a_fixed_value_is_a_credential(self):
+		for name, text in self.BODY.items():
+			with self.subTest(name=name):
+				self.assertTrue(validation.credential_problem(text).startswith('template not validated: it sends a credential'), name)
+		self.assertEqual(validation.credential_problem(self.PASSWORD_PLACEHOLDERS), '')  # what a signed-in run supplies, and a field that only looks like one
+
+	def test_a_template_tagged_default_login_or_bruteforce_is_left_out_by_its_tag_until_the_switch_is_on(self):
+		from dashboard.models import ScanPolicy
+		login = "id: dl\ninfo: {name: x, severity: high, tags: 'default-login,vendor'}\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/status\"]\n    matchers:\n      - type: word\n        words: [ok]\n"
+		brute = login.replace('default-login', 'bruteforce').replace('id: dl', 'id: bf')
+		listed = login.replace("tags: 'default-login,vendor'", "tags: [vendor, default-login]").replace('id: dl', 'id: dl2')
+		for everything in (False, True):
+			ScanPolicy.objects.all().delete()
+			ScanPolicy.objects.create(nuclei_all_templates=everything)
+			for text in (login, brute, listed):
+				self.assertIn('check that sends credentials', validation.installed_template_problem(text), everything)
+			self.assertEqual(validation.installed_template_problem(GET_TEMPLATE), '')
+			self.assertEqual(validation.installed_template_problem(GET_TEMPLATE.replace('tags: cve-2099-1', 'description: a default-login page')), '')  # a word is not a tag
+			ScanPolicy.objects.update(allow_credential_checks=True)
+			self.assertEqual(validation.installed_template_problem(login), '', everything)
+
+	def test_the_bundle_leaves_out_a_default_login_template_that_posts_a_body_password_until_the_switch_is_on(self):
+		"""FA-2a: the approved snapshot a Sentinel downloads (an older one has no tag filter of its own)."""
+		from dashboard.models import ScanPolicy
+		ScanPolicy.objects.create(nuclei_all_templates=True)
+		posting = "id: dl\ninfo: {name: x, severity: high, tags: 'default-login,vendor'}\nhttp:\n  - method: POST\n    path: [\"{{BaseURL}}/login\"]\n    body: 'user=admin&password=admin'\n    matchers:\n      - type: word\n        words: [ok]\n"
+		with tempfile.TemporaryDirectory() as root:
+			os.makedirs(os.path.join(root, 'http'))
+			for name, text in (('plain', GET_TEMPLATE), ('login', posting)):
+				with open(os.path.join(root, 'http', f'{name}.yaml'), 'w') as output:
+					output.write(text)
+			with mock.patch.object(templategen, 'TEMPLATES_ROOT', root):
+				nuclei_scan._APPROVED.update(value=None, root=None, rev=None, at=0)
+				directory, off_revision, count = nuclei_scan.approved_templates()
+				self.assertEqual((count, sorted(os.listdir(os.path.join(directory, 'http')))), (1, ['plain.yaml']))
+				ScanPolicy.objects.update(allow_credential_checks=True)
+				nuclei_scan._APPROVED.update(value=None, root=None, rev=None, at=0)
+				directory, on_revision, count = nuclei_scan.approved_templates()
+				self.assertEqual(count, 2)
+				self.assertNotEqual(off_revision, on_revision)  # the bundle hash changes with the switch
+
 	def test_an_installed_template_needs_the_switch_under_either_policy(self):
 		from dashboard.models import ScanPolicy
 		hostile = self.HOSTILE['basic']
@@ -131,8 +183,8 @@ class CredentialInATemplateTests(TestCase):
 		self.assertEqual(ai_checks.approval_problem('test', hostile, builtin=True), '')
 
 	def test_the_template_policy_revisions_moved_so_hosts_are_judged_again(self):
-		self.assertNotIn(nuclei_scan.TEMPLATE_POLICY_REV, ('readonly-1', 'readonly-2'))
-		self.assertNotIn(nuclei_scan.ALL_TEMPLATES_REV, ('all-1', 'all-2'))
+		self.assertNotIn(nuclei_scan.TEMPLATE_POLICY_REV, ('readonly-1', 'readonly-2', 'readonly-3', 'readonly-4'))
+		self.assertNotIn(nuclei_scan.ALL_TEMPLATES_REV, ('all-1', 'all-2', 'all-3', 'all-4'))
 
 
 class AllTemplatesSettingTests(TestCase):

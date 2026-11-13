@@ -246,7 +246,7 @@ class SentinelMachineDataTests(TestCase):
 
 		from agentapi.models import Agent, SentinelTask
 		_, self.token = create_token(self.user, 'sentinel-token')
-		response = Client().put('/api/v1/sentinel', json.dumps({'name': 'guarded', 'scope': {'projects': ['s-g-p']}, 'capabilities': ['nuclei_light']}),
+		response = Client().put('/api/v1/sentinel', json.dumps({'name': 'guarded', 'scope': {'projects': ['s-g-p']}, 'capabilities': ['nuclei_light'], 'info': {'features': ['credential_filter']}}),
 								content_type='application/json', HTTP_AUTHORIZATION=f'Bearer {self.token}', REMOTE_ADDR='8.8.4.4')
 		self.assertIn(response.status_code, (200, 201), response.content)
 		self.agent = Agent.objects.get(name='guarded')

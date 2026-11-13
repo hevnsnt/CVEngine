@@ -27,7 +27,7 @@ from datetime import timedelta
 
 from django.core.cache import cache
 from django.db import transaction
-from django.db.models import Avg, CharField, Count, DurationField, F, Q, Value
+from django.db.models import Avg, CharField, Count, DurationField, Exists, F, Q, Value
 from django.db.models.functions import Cast, Coalesce, Concat, Greatest
 from django.http import JsonResponse
 from django.utils import timezone
@@ -923,6 +923,12 @@ class SentinelEff:
         return self._builtin
 
     @property
+    def credential_filter(self):
+        """Whether this Sentinel says (``info.features``) that it leaves checks that send credentials out of its nuclei web runs. An older one does not, and its web
+        pass would run default-login and brute-force templates whatever this server says: it is not given such work while they are off."""
+        return CREDENTIAL_FEATURE in ((self.agent.info or {}).get('features') or [])
+
+    @property
     def reads_secrets(self):
         """Whether this is the built-in scanner and its image reads a stored sign-in (``info.features`` has ``secret_read``): only then is it offered
         signed-in work. An older built-in image would run such a task signed out and report it as signed in."""
@@ -972,6 +978,8 @@ class SentinelEff:
             return 'capability', VALIDATING  # opt-in secret validation is the built-in scanner's alone (cveFeed.secrets_validation)
         if INTERNAL_CAPABILITY not in self.caps and self._internal(task):
             return 'capability', INTERNAL_CAPABILITY  # a Sentinel outside the network cannot reach it and would report an empty result as clean
+        if credential_work(task.kind) and not self.credential_filter:
+            return 'capability', CREDENTIAL_FILTER  # an older client would run default-login and brute-force templates while credential checks are off
         return None
 
     def _in_hosts(self, task):
@@ -997,7 +1005,19 @@ def effective(agent, now=None):
     return SentinelEff(agent, now or timezone.now())
 
 
+CREDENTIAL_FEATURE = 'credential_filter'  # ``info.features`` entry of a client that leaves checks that send credentials out of a nuclei web run (sentinel_settings.FEATURES)
+CREDENTIAL_KINDS = ('nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'nuclei_validate')  # the kinds that run installed templates against a host
+CREDENTIAL_FILTER = 'too old to leave out checks that send credentials'  # the refusal reason of such a task offered to a Sentinel that does not declare the filter
+CREDENTIAL_NOTE = ('This Sentinel is too old to leave out checks that send credentials: update it; its web checks wait until then.')
 VALIDATING = 'secret validation (built-in scanner only)'
+
+
+def credential_work(kind):
+    """Whether ``kind`` work must go only to a Sentinel that declares the credential filter right now: a nuclei kind, while "Allow checks that send credentials" is off."""
+    if kind not in CREDENTIAL_KINDS:
+        return False
+    from cveFeed import validation
+    return not validation.credential_checks_allowed()
 VALIDATING_Q = Q(kind='secrets_scan', target__validate=True)  # a secrets scan that validates what it finds (cveFeed.secrets_validation)
 
 
@@ -1075,7 +1095,7 @@ def eligible_sentinels(project, kind, now=None, internal=False, live_only=False,
     agents = agents.select_related('token__user')[:CANDIDATES]
     with sentinel_policy.shared_lookups():
         return [e for e in (SentinelEff(a, now) for a in agents)
-                if not e.problem and kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps)]
+                if not e.problem and kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps) and (e.credential_filter or not credential_work(kind))]
 
 
 def has_sentinels(project_slug, org_slug):
@@ -1162,6 +1182,8 @@ def capacity_state(project, kind, internal=False, now=None, exclude=None, builti
     now = now or timezone.now()
     builtin_only = builtin_only or builtin_only_kind(kind)  # a kind only the built-in scanner takes has no other slots
     live = [e for e in (_live_for(project, now) if kind else []) if kind in e.caps and (not internal or INTERNAL_CAPABILITY in e.caps)]
+    if live and credential_work(kind):
+        live = [e for e in live if e.credential_filter]  # an older client is not given nuclei web work while credential checks are off: it stays due for one that is not
     if builtin_only:
         own = builtin_pk()
         live = [e for e in live if e.agent.pk == own and (not secret or e.reads_secrets)]  # ``secret``: a task with a secret_ref, for an image that reads one
@@ -1259,6 +1281,9 @@ def _explain(kind, agents, live, internal=False, only=None, load=None, builtin_o
         elif kind not in e.caps and not sentinel_contract.can_run((a.info or {}).get('contract_version'), kind):
             reasons.add('outdated')
             clauses.append(f'{a.name} has it but its client is too old to run {word}')
+        elif credential_work(kind) and kind in e.caps and not e.credential_filter:
+            reasons.add('outdated')
+            clauses.append(f'{a.name} is too old to leave out checks that send credentials: update it; its {word} work waits until then')
         elif builtin_only and not e.builtin:
             reasons.add('builtin')
             clauses.append(f'{a.name} has it but this work reads a stored key, so only the built-in scanner may run it')
@@ -1627,6 +1652,9 @@ def kind_report(agent, now=None, eff=None):
         elif not sentinel_contract.can_run(reported_contract, kind):
             row['source'] = 'contract'
             state, note = 'outdated', 'its client is too old to run this kind; update it'
+        elif credential_work(kind) and not eff.credential_filter:
+            row['source'] = 'contract'
+            state, note = 'outdated', CREDENTIAL_NOTE
         else:
             state, note = 'on', ''
         row['state'], row['note'] = state, note
@@ -1860,6 +1888,11 @@ def prune_enrollments(now=None):
 
 def _claimable(eff, kinds, now):
     queued = SentinelTask.objects.filter(status='queued', kind__in=kinds & eff.caps, project__slug__in=eff.projects)
+    if not eff.credential_filter:
+        # while credential checks are off, a Sentinel that does not leave them out is never offered nuclei web work: the task stays queued for one that does (in SQL, so
+        # the poll of a Sentinel that never asks for these kinds costs nothing more)
+        from dashboard.models import ScanPolicy
+        queued = queued.filter(~Q(kind__in=CREDENTIAL_KINDS) | Exists(ScanPolicy.objects.filter(allow_credential_checks=True)))
     queued = eff.secret_filter(queued)  # a task that needs a stored credential goes only to a built-in scanner image that reads one; a discovery's keys also to a Sentinel the gate allows
     if not eff.builtin:
         queued = queued.exclude(VALIDATING_Q)  # a task that validates found secrets is never offered to any Sentinel but the built-in one
@@ -2045,6 +2078,8 @@ def _claim(agent, kinds, now):
                 continue  # (the query already left it out; this is the same rule where the task is actually taken)
             if not eff.builtin and builtin_only_kind(task.kind):
                 continue  # the built-in scanner's while it is in use
+            if credential_work(task.kind) and not eff.credential_filter:
+                continue  # (the query already left it out; this is the same rule where the task is actually taken)
             if task.kind == AI_CHECK and not eff.builtin:
                 from agentapi import ai_checks
                 why = ai_checks.task_problem(task, builtin=False)
@@ -2104,6 +2139,9 @@ def _claim(agent, kinds, now):
                 return task, ''
         if held_back:
             return None, 'no eligible work is queued right now (' + '; '.join(held_back.values()) + ')'
+        if not eff.credential_filter and kinds & eff.caps & set(CREDENTIAL_KINDS) and credential_work('nuclei_deep') \
+                and SentinelTask.objects.filter(status='queued', kind__in=CREDENTIAL_KINDS, project__slug__in=eff.projects).exists():
+            return None, CREDENTIAL_NOTE  # queued, and it waits for a Sentinel that leaves those checks out
         return None, 'no eligible work is queued'
 
 

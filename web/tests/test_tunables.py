@@ -17,6 +17,7 @@ from dashboard.models import AuditLog, Org, OrgMembership
 from reNgine import resources
 from tests.test_settings import send
 from tests.test_tenancy import client_for
+from tests.steady import expiring_caches
 
 WEB = Path(__file__).resolve().parent.parent
 ROOT = WEB.parent
@@ -451,6 +452,8 @@ class PublishTests(Isolated, TestCase):
             self.assertFalse(tunables.publish({'stage_parallel': 2}, 1.0))
 
 
+
+@expiring_caches
 class CacheTests(Isolated, SimpleTestCase):
     """Another process sees a change when its cached copy is older than CACHE_SECONDS, with no restart. The clock is injected."""
 
