@@ -100,6 +100,12 @@ class LanePolicyTests(SimpleTestCase):
         busy = history(15, lanes={'cve_feed': {'percent': 75, 'restarts_24h': 0}})
         self.assertIn('holds 75% of its memory limit', decide(LANE_FEED, 2, 4, busy, past)['why_not_raised'])
 
+    def test_after_a_restart_a_lowered_lane_comes_back_one_step_not_in_one_jump(self):
+        calm = history(3, **LANE_CALM)
+        plan = decide(LANE_FEED, 1, 4, calm, boot_at=NOW - 1200)  # restarted twenty minutes ago, nothing changed since
+        self.assertEqual((plan['phase'], plan['new']), ('aim_high', 2))
+        self.assertEqual(decide(SHARE, 35, 75, history(3), boot_at=NOW - 1200)['new'], 75)  # the share is not memory: it aims at its target as before
+
     def test_what_a_lane_change_expects_and_is_judged_by(self):
         self.assertEqual(policy.expectation(LANE_FEED, 'less'), 'trouble')
         trouble = history(3, **LANE_AT_LIMIT)

@@ -672,9 +672,10 @@ def decide(setting, value, baseline, samples, history, *, now, boot_at, target, 
             out['reason'] = f'at the target for this machine ({target_reason or target})'
             out['why_not_raised'] = remembered or out['reason']
             return out
-        out.update(direction='more', new=ceiling, phase='aim_high', ai_range=tuple(sorted((value, ceiling))),
-                   reason=(f'the facts that lowered it are back: aimed again at the target for this machine ({target_reason or "sized"}): {value} to {ceiling}'
-                           if reaim else f'aim high for this machine ({target_reason or "sized"}): {value} to {ceiling}') + (f'; {remembered}' if remembered else ''))
+        aimed = _step_to(setting, value, ceiling) if setting.kind.startswith('lane:') else ceiling  # a lane lowered for memory comes back one step at a time, never in one jump after a restart
+        out.update(direction='more', new=aimed, phase='aim_high', ai_range=tuple(sorted((value, aimed))),
+                   reason=(f'the facts that lowered it are back: aimed again at the target for this machine ({target_reason or "sized"}): {value} to {aimed}'
+                           if reaim else f'aim high for this machine ({target_reason or "sized"}): {value} to {aimed}') + (f'; {remembered}' if remembered else ''))
         return out
 
     recovery = _recovery(setting, value, samples, history, now=now, ceiling=ceiling, held=held)
