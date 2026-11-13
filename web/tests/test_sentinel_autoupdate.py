@@ -331,6 +331,62 @@ class HeartbeatTests(Base):
         self.assertEqual(self.audits('sentinel.update_requested'), [])
 
 
+class PinnedTargetTests(Base):
+    """FB-7: a Sentinel on Automatic (or one an administrator asked) is always told its target. With nothing newer to name (the instance keeps no Sentinel on the newest
+    version, or GitHub cannot be read) the target is the commit this server pins: no GitHub access needed, never anything newer."""
+    def beat(self, body=None):
+        status, out = call(self.tokens['alice'], 'POST', '/api/v1/sentinel/heartbeat', body)
+        self.assertEqual(status, 200, out)
+        return out
+
+    def pin(self):
+        from cveFeed import software
+        return software.SENTINEL_PINS_COMMIT
+
+    def test_with_keep_newest_off_an_automatic_sentinel_that_is_behind_is_told_the_pinned_commit(self):
+        self.sentinel()
+        self.refresh()  # GitHub's newest is HEAD, which is NOT what is named
+        SentinelDefaults.objects.update_or_create(pk=1, defaults={'keep_newest': False, 'self_update': 'automatic'})  # (off, the instance default would be Manual: Automatic is chosen)
+        out = self.beat({'info': {'version': OLD}})['update']
+        self.assertEqual((out['setting'], out['target'], out['reason']), ('automatic', self.pin(), 'pinned'))
+        self.assertNotEqual(out['target'], HEAD)
+        self.assertFalse(out['requested'])  # nobody asked: the Sentinel's own timer moves it to the named commit
+        self.assertEqual(self.audits('sentinel.update_requested'), [])
+
+    def test_when_the_server_cannot_read_github_an_automatic_sentinel_is_still_told_the_pinned_commit(self):
+        self.sentinel()  # no refresh: no verdict at all
+        out = self.beat({'info': {'version': OLD}})['update']
+        self.assertEqual((out['target'], out['reason']), (self.pin(), 'pinned'))
+
+    def test_keep_newest_on_still_names_the_newest_commit_not_the_pin(self):
+        self.sentinel()
+        self.refresh()
+        out = self.beat({'info': {'version': OLD}})['update']
+        self.assertEqual((out['target'], out['reason']), (HEAD, 'newest'))
+
+    def test_a_sentinel_already_on_the_pin_or_known_current_is_told_nothing(self):
+        self.sentinel(self.pin()[:12])
+        SentinelDefaults.objects.update_or_create(pk=1, defaults={'keep_newest': False, 'self_update': 'automatic'})
+        self.assertNotIn('target', self.beat({'info': {'version': self.pin()[:12]}})['update'])
+
+    def test_manual_and_off_get_a_target_only_when_asked(self):
+        agent = self.sentinel()
+        SentinelDefaults.objects.update_or_create(pk=1, defaults={'keep_newest': False, 'self_update': 'manual'})
+        self.assertNotIn('target', self.beat({'info': {'version': OLD}})['update'])
+        self.assertEqual(call(self.tokens['root'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'update': 'now'})[0], 200)  # no verdict: the request names no commit of its own
+        agent.refresh_from_db()
+        self.assertTrue(ss.update_reply(agent)['requested'])
+        self.assertEqual(ss.update_reply(agent)['target'], self.pin())
+        SentinelDefaults.objects.update(self_update='off')
+        self.assertNotIn('target', ss.update_reply(agent))
+
+    def test_the_decision_with_keep_off_is_unchanged_so_nothing_asks_for_a_newer_build(self):
+        agent = self.sentinel()
+        self.refresh()
+        found = au.decide(agent, self.now, keep=False)
+        self.assertEqual((found['action'], found['code']), ('none', 'switched_off'))
+
+
 class PermissionTests(Base):
     def test_only_an_app_admin_changes_the_instance_switch_and_it_is_audited(self):
         for who, expected in (('alice', 403), ('dana', 403), ('root', 200)):
