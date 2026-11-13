@@ -147,7 +147,7 @@ class AliveTests(TestCase):
 		client = Client()
 		client.force_login(User.objects.create_superuser('alive', password='x'))
 		response = client.get('/cve/api/alive')
-		self.assertEqual((response.status_code, response.json()), (200, {'ok': True, 'build': ''}))  # the build the server runs: unknown in a test run (no .commit)
+		self.assertEqual((response.status_code, sorted(response.json())), (200, ['build', 'ok']))  # the build the server runs, to a signed-in caller
 		self.assertEqual(response['Cache-Control'], 'no-store')
 		# any answer below 500 means the site is up, a refusal for someone without a project included (sitewatch.js)
 		client.force_login(User.objects.create_user('alive-no-project', password='x'))

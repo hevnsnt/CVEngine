@@ -19,6 +19,8 @@ class HtmlRevalidateMiddleware:
     headers; a response that already sets one (``no-store`` on the sign-in pages, a download) is left alone."""
 
     def __init__(self, get_response):
+        from cveFeed import updater
+        updater.build_id()  # Django builds the middleware when the web process starts (not for manage.py commands or Celery): the build is fixed here
         self.get_response = get_response
 
     def __call__(self, request):

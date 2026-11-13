@@ -4,8 +4,8 @@ uses (database, broker, cache) and a superuser:
 
   STALE_USER=... STALE_PASS=... STALE_PORT=8171 python3 tests/e2e_stale_page_after_update.py [a b c d ...]
 
-"Updating" here is what a real update does to a page: the served build changes (web/.commit and a static file's content hash) and the web
-process restarts. A page is stale when its own script URL carries a hash other than the one the server hands out now. The static file it edits
+"Updating" here is what a real update does to a page: the served files change (a static file's content, so the build fingerprint of
+updater.build_id() and the script's hash change; web/.commit is written too, for the update bar) and the web process restarts. A page is stale when its own script URL carries a hash other than the one the server hands out now. The static file it edits
 (static/cve/theme.js, one trailing comment) and web/.commit are put back at the end. Scenarios: a hidden tab, a same-document hash link to
 Settings#updates, back/forward, an administrator's page that is watching the update (updatebar.js).
 """
@@ -188,19 +188,19 @@ def scenario_d(browser):
 
 
 def scenario_e(browser):
-    """web/.commit changes WITHOUT a restart (a deploy has started, the old process still serves): the page must not reload, the stamp stays."""
+    """The files change on disk WITHOUT a restart (a deploy has started, the old process still serves): the page must not reload, the stamp stays."""
     ctx, page = login(browser)
     page.goto(BASE + '/cve/settings/#updates')
     page.wait_for_load_state('networkidle')
     before = page.evaluate("() => document.querySelector('meta[name=cvengine-build]').content")
-    open(COMMIT, 'w').write(sha(9) + '\n')
+    open(THEME, 'w').write(original + '\n/* rewritten under a running process */\n')
     page.evaluate("() => { window.__marker = 1; }")
     time.sleep(20)  # past one poll
     check(page.evaluate('() => window.__marker') == 1, 'e: the page did not reload')
     page.reload()
     page.wait_for_load_state('networkidle')
     after = page.evaluate("() => document.querySelector('meta[name=cvengine-build]').content")
-    check(before == after and before != '', 'e: .commit changed without a restart: the stamp is unchanged')
+    check(before == after and before != '', 'e: files changed without a restart: the stamp is unchanged')
     ctx.close()
 
 

@@ -12,6 +12,7 @@ shares with the branch, GitHub being unable to say anything about commits it has
 
 Pure helpers take their HTTP function as a parameter so they are testable without a network.
 """
+import hashlib
 import json
 import logging
 import math
@@ -76,17 +77,37 @@ def installed_sha():
     return env if SHA_RE.match(env) else ''
 
 
-_build_seen = None  # the answer of the first call; tests put None back
+_build_seen = None  # the answer, computed when the web process starts (reNgine.middleware.HtmlRevalidateMiddleware); tests put None back
+
+
+def fingerprint(*roots):
+    """12 hex characters over the sorted (relative path, content hash) of every file under ``roots`` (directories). Nothing else goes in: no
+    mtime, no commit file."""
+    seen = []
+    for index, root in enumerate(roots):
+        for folder, dirs, names in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if d != '__pycache__')
+            for name in sorted(names):
+                path = os.path.join(folder, name)
+                try:
+                    with open(path, 'rb') as f:
+                        seen.append((index, os.path.relpath(path, root), hashlib.sha256(f.read()).hexdigest()))
+                except OSError:
+                    continue
+    return hashlib.sha256(repr(sorted(seen)).encode()).hexdigest()[:12]
 
 
 def build_id():
-    """The build this process serves, as the short commit ('' when unknown): stamped into every page (``<meta name="cvengine-build">``) and
-    answered by /cve/api/alive to a signed-in caller, so a page rendered by an older build can tell, from the poll it makes anyway, that the
-    server has been updated (static/cve/sitewatch.js). Read ONCE, when the process first asks, and kept: web/.commit is written by the host
-    when a deploy starts and ./web is a bind mount, so a process that re-read it would announce the new build while still running the old code."""
+    """The build this process serves to a browser: a fingerprint of the static ``cve/`` files and the page templates as they were on disk when
+    the process started (stamped into every page as ``<meta name="cvengine-build">``, answered by /cve/api/alive to a signed-in caller). A page
+    rendered by another build can tell, from the poll it makes anyway, that the server was updated (static/cve/sitewatch.js). Computed once,
+    when the web process is built (not at the first call: an old process whose files change under it, ./web is a bind mount, would otherwise
+    fingerprint the new ones), and kept. It does not depend on web/.commit, which the host writes at different moments on different update paths."""
     global _build_seen
     if _build_seen is None:
-        _build_seen = installed_sha()[:12]
+        roots = [os.path.join(root, 'cve') for root in settings.STATICFILES_DIRS]
+        roots += [os.path.join(settings.BASE_DIR, 'cveFeed', 'templates'), os.path.join(settings.BASE_DIR, 'templates')]
+        _build_seen = fingerprint(*[r for r in roots if os.path.isdir(r)])
     return _build_seen
 
 

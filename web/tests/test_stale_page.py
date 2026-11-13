@@ -14,40 +14,63 @@ A, B = 'a' * 40, 'b' * 40
 
 
 class BuildIdTests(SimpleTestCase):
-    """The build a process serves (updater.build_id): the short commit, re-read only when web/.commit changes."""
+    """The build a process serves (updater.build_id): a fingerprint of the static cve/ files and the page templates, fixed when the process starts."""
 
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
-        settings_override = override_settings(BASE_DIR=self.dir.name)
-        settings_override.enable()
-        self.addCleanup(settings_override.disable)
-        env = mock.patch.dict(os.environ)
-        env.start()
-        self.addCleanup(env.stop)
-        os.environ.pop('CVENGINE_COMMIT', None)
+        root = self.dir.name
+        for sub in ('static/cve', 'web/cveFeed/templates/cveFeed', 'web/templates'):
+            os.makedirs(os.path.join(root, sub))
+        self.write('static/cve/app.js', 'one')
+        self.write('web/cveFeed/templates/cveFeed/base.html', '<p>base</p>')
+        self.write('web/.commit', A)
+        override = override_settings(BASE_DIR=os.path.join(root, 'web'), STATICFILES_DIRS=[os.path.join(root, 'static')])
+        override.enable()
+        self.addCleanup(override.disable)
+        self.addCleanup(setattr, updater, '_build_seen', None)
         updater._build_seen = None
 
-    def commit(self, sha):
-        with open(os.path.join(self.dir.name, '.commit'), 'w') as f:
-            f.write(sha + '\n')
+    def write(self, name, text):
+        with open(os.path.join(self.dir.name, name), 'w') as f:
+            f.write(text)
 
-    def test_it_is_the_short_commit_and_empty_when_unknown(self):
-        self.assertEqual(updater.build_id(), '')
+    def fresh(self):
         updater._build_seen = None
-        self.commit(A)
-        self.assertEqual(updater.build_id(), A[:12])
+        return updater.build_id()
 
-    def test_it_is_read_once_so_a_process_never_announces_a_build_it_is_not_running(self):
-        """The host writes web/.commit when a deploy starts and ./web is a bind mount: the old process must keep answering the old build."""
-        self.commit(A)
-        self.assertEqual(updater.build_id(), A[:12])
-        self.commit(B)
-        self.assertEqual(updater.build_id(), A[:12])
+    def test_the_same_files_give_the_same_twelve_hex_characters(self):
+        first = self.fresh()
+        self.assertRegex(first, r'^[0-9a-f]{12}$')
+        self.assertEqual(self.fresh(), first)
 
-    def test_the_environment_names_the_build_when_there_is_no_file(self):
+    def test_one_changed_script_or_template_changes_it(self):
+        first = self.fresh()
+        self.write('static/cve/app.js', 'two')
+        second = self.fresh()
+        self.assertNotEqual(second, first)
+        self.write('web/cveFeed/templates/cveFeed/base.html', '<p>changed</p>')
+        self.assertNotIn(self.fresh(), (first, second))
+
+    def test_a_new_file_changes_it_and_the_commit_file_does_not(self):
+        first = self.fresh()
+        self.write('web/.commit', B)
         os.environ['CVENGINE_COMMIT'] = B
-        self.assertEqual(updater.build_id(), B[:12])
+        self.addCleanup(os.environ.pop, 'CVENGINE_COMMIT', None)
+        self.assertEqual(self.fresh(), first)
+        self.write('static/cve/new.js', 'x')
+        self.assertNotEqual(self.fresh(), first)
+
+    def test_a_running_process_keeps_its_answer_when_files_change_under_it(self):
+        """A deploy rewrites ./web (a bind mount) while the old process still serves: it must not announce the new build."""
+        first = self.fresh()
+        self.write('static/cve/app.js', 'rewritten by a deploy')
+        self.assertEqual(updater.build_id(), first)
+
+    def test_the_web_process_computes_it_when_it_starts(self):
+        self.assertIsNone(updater._build_seen)
+        HtmlRevalidateMiddleware(lambda request: None)
+        self.assertRegex(updater._build_seen, r'^[0-9a-f]{12}$')
 
 
 class HtmlRevalidateTests(SimpleTestCase):
@@ -82,19 +105,17 @@ class PagesCarryTheBuildTests(TestCase):
         self.addCleanup(setattr, updater, '_build_seen', None)
 
     def test_alive_names_the_build_and_stays_uncached(self):
-        with mock.patch.object(updater, 'installed_sha', return_value=A):
-            response = self.client.get('/cve/api/alive')
-        self.assertEqual(response.json(), {'ok': True, 'build': A[:12]})
+        response = self.client.get('/cve/api/alive')
+        self.assertEqual(response.json(), {'ok': True, 'build': updater.build_id()})
+        self.assertRegex(updater.build_id(), r'^[0-9a-f]{12}$')
         self.assertEqual(response['Cache-Control'], 'no-store')
 
     def test_an_anonymous_caller_gets_no_build_from_alive_nor_from_any_page_before_sign_in(self):
         anonymous = Client()
-        with mock.patch.object(updater, 'installed_sha', return_value=A):
-            alive = anonymous.get('/cve/api/alive')
-            login = anonymous.get('/login/')
+        alive = anonymous.get('/cve/api/alive')
+        login = anonymous.get('/login/')
         self.assertEqual((alive.status_code, alive['Location'].split('?')[0]), (302, '/login/'))  # the sign-in middleware answers first
-        self.assertNotIn(A[:12], alive.content.decode())
-        with mock.patch.object(updater, 'installed_sha', return_value=A):  # and were it to answer, the view itself tells no stranger the build
+        if True:  # were it to answer, the view itself tells no stranger the build
             from django.test import RequestFactory
             from django.contrib.auth.models import AnonymousUser
             from cveFeed import views
@@ -103,19 +124,13 @@ class PagesCarryTheBuildTests(TestCase):
             self.assertEqual(json.loads(views.api_alive(request).content), {'ok': True})
         self.assertEqual(login.status_code, 200)
         self.assertNotIn('cvengine-build', login.content.decode())
-        self.assertNotIn(A[:12], login.content.decode())
+        self.assertNotIn(updater.build_id(), login.content.decode())
 
     def test_a_page_carries_the_build_it_was_rendered_by_and_is_revalidated(self):
-        with mock.patch.object(updater, 'installed_sha', return_value=A):
-            response = self.client.get('/cve/settings/')
+        response = self.client.get('/cve/settings/')
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, f'<meta name="cvengine-build" content="{A[:12]}">')
+        self.assertContains(response, f'<meta name="cvengine-build" content="{updater.build_id()}">')
         self.assertEqual(response['Cache-Control'], 'private, no-cache')
 
-    def test_a_server_that_does_not_know_its_build_stamps_an_empty_one(self):
-        with mock.patch.object(updater, 'installed_sha', return_value=''):
-            self.assertContains(self.client.get('/cve/settings/'), '<meta name="cvengine-build" content="">')
-
     def test_the_updates_state_names_the_build_so_the_settings_page_can_compare_it(self):
-        with mock.patch.object(updater, 'installed_sha', return_value=A):
-            self.assertEqual(self.client.get('/cve/api/settings/updates').json()['build'], A[:12])
+        self.assertEqual(self.client.get('/cve/api/settings/updates').json()['build'], updater.build_id())
