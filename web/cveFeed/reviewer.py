@@ -1256,6 +1256,16 @@ def apply_ops_report(body, now=None):
 ALERT_STALE_AFTER = timedelta(hours=1)  # the checks run every 30 minutes (the watchdog tick, or the beat task): an alert not refreshed for this long was not re-checked
 
 
+def answering_decision(alert):
+    """The id of the newest auto-tuning decision made while this alert was open that answered it (its ``signals['alerts']`` holds the alert's code,
+    ``autotune.open_alert_codes``), or None: the alert strip links to that decision's line in Settings, configMaxxing, Auto-tuning."""
+    from cveFeed import autotune
+    if alert.code not in autotune.ALERT_CODES:
+        return None
+    from cveFeed.models import TuningDecision
+    return TuningDecision.objects.filter(created_at__gte=alert.first_seen, signals__alerts__contains=[alert.code]).order_by('-created_at', '-pk').values_list('pk', flat=True).first()
+
+
 def open_alerts(user=None):
     """The open alerts an App Admin sees: not resolved, and not dismissed unless the problem changed since."""
     from cveFeed.models import AdminAlert
@@ -1275,7 +1285,8 @@ def open_alerts(user=None):
         if stale:
             detail = f'Not re-checked for {maintainer_checks.span(age.total_seconds())}, so this may no longer be true. {detail}'
         out.append({'id': a.pk, 'code': a.code, 'severity': a.severity, 'title': a.title, 'detail': detail, 'ai_detail': ai_detail, 'stale': stale,
-                    'age_minutes': int(age.total_seconds() // 60), 'ai_model': a.ai_model if ai_detail else '', 'first_seen': a.first_seen.isoformat(), 'last_seen': a.last_seen.isoformat()})
+                    'age_minutes': int(age.total_seconds() // 60), 'ai_model': a.ai_model if ai_detail else '', 'first_seen': a.first_seen.isoformat(), 'last_seen': a.last_seen.isoformat(),
+                    'decision_id': answering_decision(a)})
     return out
 
 
