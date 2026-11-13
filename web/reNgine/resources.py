@@ -1051,7 +1051,7 @@ def adaptive_history(since):
     if not isinstance(store, RedisStore):
         return []
     samples = []
-    for key in store.r.scan_iter(match='cvengine:heavy:*:history'):
+    for key in store.r.scan_iter(match='cvengine:heavy:*:history', count=1000):
         for raw in store.r.lrange(key, 0, 399):
             try:
                 item = json.loads(raw)
@@ -1069,7 +1069,7 @@ def cluster_snapshot(now_fn=time.time):
     if _store['kind'] != 'redis':
         return {'store': 'process', 'containers': [{'host': socket.gethostname(), **snapshot(store, now_fn=now_fn)}]}
     containers = []
-    for key in sorted(store.r.scan_iter(match='cvengine:heavy:*:state')):
+    for key in sorted(store.r.scan_iter(match='cvengine:heavy:*:state', count=1000)):
         namespace = key[:-len(':state')]
         other = RedisStore(store.r, namespace)
         try:
