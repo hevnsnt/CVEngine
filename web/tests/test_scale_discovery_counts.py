@@ -58,4 +58,4 @@ class DiscoveryCountsTests(TestCase):
         counts, many = self.counts()
         self.assertEqual(counts['hosts'], 40)
         self.assertEqual(few, many)
-        self.assertLessEqual(many, 6)
+        self.assertLessEqual(many, 8)  # 8: the whole-inventory collapse is five set-based reads (scans, hosts, targets, address links, open ports) instead of one big statement; it still does not grow with the hosts
