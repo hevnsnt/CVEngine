@@ -1239,7 +1239,41 @@ def _tick(now, probes, out):
     except Exception:  # noqa: BLE001
         logger.debug('watchdog: housekeeping failed', exc_info=True)
     out['snapshot_seconds'] = snap.get('seconds')
+    if not stand and (snap.get('seconds') or 0) < OPS_CHECKS_MAX_TICK_SECONDS:
+        try:
+            out['ops_checks'] = _run_ops_checks(all_state, now)
+        except Exception:  # noqa: BLE001 - the checks must never cost the tick its record
+            logger.warning('watchdog: the operations checks failed', exc_info=True)
     return out
+
+
+OPS_CHECKS_EVERY = timedelta(minutes=30)       # the operations checks (cveFeed.reviewer.ops_checks) run from this tick this often, whatever the Celery lane is doing
+OPS_CHECKS_RETRY = timedelta(minutes=5)        # ...and again this soon after a run that failed
+OPS_CHECKS_MAX_TICK_SECONDS = 15               # a tick whose own snapshot took this long leaves no room for them: they wait for the next one
+
+
+def _run_ops_checks(all_state, now):
+    """AM-9: the operations checks used to run only as a Celery task on the lane that dies in the incidents they report, so they stopped when it did and their
+    alerts stayed on screen as current. Run them from here (the web container, no Celery) when this tick's last run is
+    older than ``OPS_CHECKS_EVERY``. The time is kept in the watchdog's own row. Returns what ``run_ops_checks`` returned, or '' when it was not due."""
+    from cveFeed import reviewer
+    data = dict(all_state.data or {})
+    try:
+        last = datetime.fromisoformat(data['ops_checks_at']) if data.get('ops_checks_at') else None
+    except (TypeError, ValueError):
+        last = None
+    if last is not None and last.tzinfo is None:
+        last = last.replace(tzinfo=dt_timezone.utc)
+    if last is not None and now - last < OPS_CHECKS_EVERY:
+        return ''
+    data['ops_checks_at'] = (now - (OPS_CHECKS_EVERY - OPS_CHECKS_RETRY)).isoformat()  # a run that raises is tried again in OPS_CHECKS_RETRY
+    all_state.data = data
+    all_state.save(update_fields=['data'])
+    result = reviewer.run_ops_checks(now)
+    data['ops_checks_at'] = now.isoformat()
+    all_state.data = data
+    all_state.save(update_fields=['data'])
+    return result
 
 
 # --- what the Watchdog panel shows ---------------------------------------------------------------------------------------------------
