@@ -183,8 +183,8 @@ class CredentialInATemplateTests(TestCase):
 		self.assertEqual(ai_checks.approval_problem('test', hostile, builtin=True), '')
 
 	def test_the_template_policy_revisions_moved_so_hosts_are_judged_again(self):
-		self.assertNotIn(nuclei_scan.TEMPLATE_POLICY_REV, ('readonly-1', 'readonly-2', 'readonly-3'))
-		self.assertNotIn(nuclei_scan.ALL_TEMPLATES_REV, ('all-1', 'all-2', 'all-3'))
+		self.assertNotIn(nuclei_scan.TEMPLATE_POLICY_REV, ('readonly-1', 'readonly-2', 'readonly-3', 'readonly-4'))
+		self.assertNotIn(nuclei_scan.ALL_TEMPLATES_REV, ('all-1', 'all-2', 'all-3', 'all-4'))
 
 
 class AllTemplatesSettingTests(TestCase):
