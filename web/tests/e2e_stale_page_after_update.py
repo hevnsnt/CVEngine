@@ -187,7 +187,24 @@ def scenario_d(browser):
     ctx.close()
 
 
-SCENARIOS = {'a': scenario_a, 'b': scenario_b, 'c': scenario_c, 'd': scenario_d}
+def scenario_e(browser):
+    """web/.commit changes WITHOUT a restart (a deploy has started, the old process still serves): the page must not reload, the stamp stays."""
+    ctx, page = login(browser)
+    page.goto(BASE + '/cve/settings/#updates')
+    page.wait_for_load_state('networkidle')
+    before = page.evaluate("() => document.querySelector('meta[name=cvengine-build]').content")
+    open(COMMIT, 'w').write(sha(9) + '\n')
+    page.evaluate("() => { window.__marker = 1; }")
+    time.sleep(20)  # past one poll
+    check(page.evaluate('() => window.__marker') == 1, 'e: the page did not reload')
+    page.reload()
+    page.wait_for_load_state('networkidle')
+    after = page.evaluate("() => document.querySelector('meta[name=cvengine-build]').content")
+    check(before == after and before != '', 'e: .commit changed without a restart: the stamp is unchanged')
+    ctx.close()
+
+
+SCENARIOS = {'a': scenario_a, 'b': scenario_b, 'c': scenario_c, 'd': scenario_d, 'e': scenario_e}
 
 try:
     release(1)

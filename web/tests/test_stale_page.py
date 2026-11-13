@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 from unittest import mock
@@ -25,26 +26,24 @@ class BuildIdTests(SimpleTestCase):
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop('CVENGINE_COMMIT', None)
-        updater._build_seen = (False, False, '')
+        updater._build_seen = None
 
-    def commit(self, sha, tick):
-        path = os.path.join(self.dir.name, '.commit')
-        with open(path, 'w') as f:
+    def commit(self, sha):
+        with open(os.path.join(self.dir.name, '.commit'), 'w') as f:
             f.write(sha + '\n')
-        os.utime(path, ns=(tick, tick))  # a distinct mtime however fast the test runs
 
     def test_it_is_the_short_commit_and_empty_when_unknown(self):
         self.assertEqual(updater.build_id(), '')
-        self.commit(A, 1_000_000_000)
+        updater._build_seen = None
+        self.commit(A)
         self.assertEqual(updater.build_id(), A[:12])
 
-    def test_a_new_build_is_seen_without_a_restart_and_an_unchanged_one_is_not_read_again(self):
-        self.commit(A, 1_000_000_000)
+    def test_it_is_read_once_so_a_process_never_announces_a_build_it_is_not_running(self):
+        """The host writes web/.commit when a deploy starts and ./web is a bind mount: the old process must keep answering the old build."""
+        self.commit(A)
         self.assertEqual(updater.build_id(), A[:12])
-        with mock.patch.object(updater, 'installed_sha', side_effect=AssertionError('read again')):
-            self.assertEqual(updater.build_id(), A[:12])
-        self.commit(B, 2_000_000_000)
-        self.assertEqual(updater.build_id(), B[:12])
+        self.commit(B)
+        self.assertEqual(updater.build_id(), A[:12])
 
     def test_the_environment_names_the_build_when_there_is_no_file(self):
         os.environ['CVENGINE_COMMIT'] = B
@@ -79,14 +78,32 @@ class PagesCarryTheBuildTests(TestCase):
     def setUp(self):
         self.client = Client()
         self.client.force_login(User.objects.create_superuser('stale-root', password='x'))
-        updater._build_seen = (False, False, '')
-        self.addCleanup(setattr, updater, '_build_seen', (False, False, ''))
+        updater._build_seen = None
+        self.addCleanup(setattr, updater, '_build_seen', None)
 
     def test_alive_names_the_build_and_stays_uncached(self):
         with mock.patch.object(updater, 'installed_sha', return_value=A):
             response = self.client.get('/cve/api/alive')
         self.assertEqual(response.json(), {'ok': True, 'build': A[:12]})
         self.assertEqual(response['Cache-Control'], 'no-store')
+
+    def test_an_anonymous_caller_gets_no_build_from_alive_nor_from_any_page_before_sign_in(self):
+        anonymous = Client()
+        with mock.patch.object(updater, 'installed_sha', return_value=A):
+            alive = anonymous.get('/cve/api/alive')
+            login = anonymous.get('/login/')
+        self.assertEqual((alive.status_code, alive['Location'].split('?')[0]), (302, '/login/'))  # the sign-in middleware answers first
+        self.assertNotIn(A[:12], alive.content.decode())
+        with mock.patch.object(updater, 'installed_sha', return_value=A):  # and were it to answer, the view itself tells no stranger the build
+            from django.test import RequestFactory
+            from django.contrib.auth.models import AnonymousUser
+            from cveFeed import views
+            request = RequestFactory().get('/cve/api/alive')
+            request.user = AnonymousUser()
+            self.assertEqual(json.loads(views.api_alive(request).content), {'ok': True})
+        self.assertEqual(login.status_code, 200)
+        self.assertNotIn('cvengine-build', login.content.decode())
+        self.assertNotIn(A[:12], login.content.decode())
 
     def test_a_page_carries_the_build_it_was_rendered_by_and_is_revalidated(self):
         with mock.patch.object(updater, 'installed_sha', return_value=A):

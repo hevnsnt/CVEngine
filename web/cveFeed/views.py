@@ -922,9 +922,13 @@ def cached_stats_snapshot(params=(), scope=None):
 def api_alive(request):
     """Answers for as long as the web service does, and touches nothing else: every page asks it now and then (static/cve/sitewatch.js)
     and covers itself with the rebuilding scene when it stops answering, during an update or a restart. It also says which build answers
-    (``updater.build_id``, no query): a page rendered by another build reloads itself."""
+    (``updater.build_id``, no query): a page rendered by another build reloads itself. Only to a signed-in caller: the exact commit of a
+    public repository tells a stranger which fixes are missing."""
     from cveFeed import updater
-    response = JsonResponse({'ok': True, 'build': updater.build_id()})
+    body = {'ok': True}
+    if request.user.is_authenticated:
+        body['build'] = updater.build_id()
+    response = JsonResponse(body)
     response['Cache-Control'] = 'no-store'
     return response
 

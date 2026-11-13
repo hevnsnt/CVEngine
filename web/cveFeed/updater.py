@@ -76,22 +76,18 @@ def installed_sha():
     return env if SHA_RE.match(env) else ''
 
 
-_build_seen = (False, False, '')  # (mtime of .commit, CVENGINE_COMMIT, answer): re-read only when either changes
+_build_seen = None  # the answer of the first call; tests put None back
 
 
 def build_id():
     """The build this process serves, as the short commit ('' when unknown): stamped into every page (``<meta name="cvengine-build">``) and
-    answered by /cve/api/alive, so a page rendered by an older build can tell, from the poll it makes anyway, that the server has been
-    updated (static/cve/sitewatch.js). One stat per call; the file is read again only when it changed (a new build writes it)."""
+    answered by /cve/api/alive to a signed-in caller, so a page rendered by an older build can tell, from the poll it makes anyway, that the
+    server has been updated (static/cve/sitewatch.js). Read ONCE, when the process first asks, and kept: web/.commit is written by the host
+    when a deploy starts and ./web is a bind mount, so a process that re-read it would announce the new build while still running the old code."""
     global _build_seen
-    try:
-        stamp = os.stat(_file('.commit')).st_mtime_ns
-    except OSError:
-        stamp = None
-    env = os.environ.get('CVENGINE_COMMIT')
-    if _build_seen[:2] != (stamp, env):
-        _build_seen = (stamp, env, installed_sha()[:12])
-    return _build_seen[2]
+    if _build_seen is None:
+        _build_seen = installed_sha()[:12]
+    return _build_seen
 
 
 UPSTREAM_STALE_SECONDS = 3 * 86400  # the host refreshes it every half hour while its updater runs; this is days of silence
