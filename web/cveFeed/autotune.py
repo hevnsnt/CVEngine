@@ -1095,7 +1095,7 @@ def back_off_for_pause(mode, row, samples, now_dt, boot_at, since, summary):
                              probe_cooldown=probe_cooldown, pause='the watchdog paused the starting of work: host memory is over 90 percent')
         if plan['phase'] != 'back_off':
             continue
-        used = {'summary': signals_summary(samples[-6:]), 'controller': plan['reason'], 'watchdog_memory_pause': True}
+        used = {'summary': signals_summary(samples[-6:]), 'controller': plan['reason'], 'watchdog_memory_pause': True, 'alerts': open_alert_codes()}
         if mode == 'auto':
             decision = apply_tuned(m, value, plan['new'], mode=mode, source='controller', reason=plan['reason'], signals=used, pressure=True,
                                    phase='back_off', verify=_verification(m, value, plan['new'], samples, now_dt))
@@ -1105,6 +1105,20 @@ def back_off_for_pause(mode, row, samples, now_dt, boot_at, since, summary):
         if decision is not None:
             made.append({'setting': m.key, 'from': value, 'to': plan['new'], 'source': 'controller', 'applied': mode == 'auto', 'id': decision.pk})
     return made
+
+
+# The open alerts a throughput change can answer (cveFeed.reviewer ``OPS_CODES``): a decision made while one of these is open carries its code in
+# ``signals['alerts']``, which is how the alert strip links to the decision (``reviewer.open_alerts``) and the maintainer report names it.
+ALERT_CODES = ('memory', 'queue_starvation', 'sentinel_waiting', 'sentinels_idle', 'scan_errors', 'workers_down')
+
+
+def open_alert_codes():
+    """The codes of the open admin alerts a change of these settings may answer, sorted; empty when none is open or the alerts cannot be read."""
+    try:
+        from cveFeed.models import AdminAlert
+        return sorted(set(AdminAlert.objects.filter(resolved_at__isnull=True, code__in=ALERT_CODES).values_list('code', flat=True)))
+    except Exception:  # noqa: BLE001 - the record is a convenience: a change is never held back for want of it
+        return []
 
 
 def signals_summary(samples):
@@ -1223,7 +1237,7 @@ def run(now_dt=None):
             if mode == 'suggest':
                 _retire_suggestions(key, now_dt)
             continue
-        signals_used = {'summary': compact, 'controller': plan['reason']}
+        signals_used = {'summary': compact, 'controller': plan['reason'], 'alerts': open_alert_codes()}
         if mode == 'auto' and gate_closed and policy.is_calm(phase, pressured):
             summary['settings'][key]['why_not_raised'] = 'waiting: an earlier change is still being verified (one calm change at a time)'
             continue
@@ -1388,19 +1402,33 @@ def record_emergency(now_dt):
 # --- what the page, the API and the system status show ---------------------------------------------------------------------
 
 def serialize(d):
+    marks = d.signals if isinstance(d.signals, dict) else {}
     return {'id': d.pk, 'at': _iso(d.created_at), 'setting': d.setting, 'label': getattr(by_key().get(d.setting), 'label', d.setting),
             'old_value': d.old_value, 'new_value': d.new_value, 'mode': d.mode, 'source': d.source, 'action': d.action, 'layer': d.layer,
             'applied': d.applied, 'pressure': d.pressure, 'phase': d.phase or None, 'reason': d.reason, 'actor': d.actor.username if d.actor_id else None,
             'resolution': d.resolution or None, 'resolved_at': _iso(d.resolved_at), 'resolved_by': d.resolved_by or None,
             'expected': d.expected or None, 'baseline': d.baseline or None, 'verify_at': _iso(d.verify_at), 'verified_at': _iso(d.verified_at),
-            'outcome': d.outcome or None, 'outcome_detail': d.outcome_detail or None}
+            'outcome': d.outcome or None, 'outcome_detail': d.outcome_detail or None,
+            'alerts': [c for c in (marks.get('alerts') if isinstance(marks.get('alerts'), list) else []) if isinstance(c, str)][:10],
+            'undoes': marks.get('verified_decision') if isinstance(marks.get('verified_decision'), int) else None}
 
 
-def list_decisions(setting=None, limit=50, offset=0):
+OUTCOMES = ('helped', 'no_effect', 'regressed', 'unknown', 'reverted', 'pending')  # ``pending``: applied, to be judged, not judged yet
+
+
+def list_decisions(setting=None, limit=50, offset=0, outcome=None, source=None):
+    """Decisions newest first. ``outcome``: one of ``OUTCOMES`` (``pending`` is a change still waiting to be judged); ``source``: who made them
+    (controller, ai, person, agent). A value that is not an outcome is a ``TuningError`` (400), never an empty list."""
     from cveFeed.models import TuningDecision
     qs = TuningDecision.objects.select_related('actor').order_by('-created_at', '-pk')
     if setting:
         qs = qs.filter(setting=str(setting)[:64])
+    if outcome:
+        if outcome not in OUTCOMES:
+            raise TuningError(400, f'outcome must be one of {", ".join(OUTCOMES)}')
+        qs = qs.filter(applied=True, outcome='', verify_at__isnull=False) if outcome == 'pending' else qs.filter(outcome=outcome)
+    if source:
+        qs = qs.filter(source=str(source)[:12])
     limit = max(1, min(200, int(limit)))
     offset = max(0, int(offset))
     rows = list(qs[offset:offset + limit + 1])
