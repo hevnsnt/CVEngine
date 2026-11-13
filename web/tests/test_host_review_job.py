@@ -256,7 +256,7 @@ class ApplyTests(Fixture):
     def test_a_state_that_changed_while_the_ai_read_it_makes_the_answer_stale_and_applies_nothing(self):
         m1 = self.match()
         review = self.queue()
-        HostState.objects.filter(project=self.proj, host=HOST).update(fingerprint='e' * 40)
+        Port.objects.filter(pk=self.port.pk).update(version='9.9')  # a changed service version is a new state of the host
         review = self.deliver(review, self.body({'f1': ('false_positive', 'high')}, action='validate_match', target='f1'))
         self.assertEqual(review.status, 'stale')
         self.assertFalse(FindingReview.objects.exists())

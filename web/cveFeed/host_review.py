@@ -85,11 +85,43 @@ def _load_sub(state):
             .prefetch_related('technologies', 'ip_addresses__ports', 'waf').order_by('-id').first())
 
 
-def state_key(fingerprint, rows):
-    """The key of one host state: the host's fingerprint and the sorted ``(kind, evidence_key)`` of the host's open findings. A new port, a new
-    version, a finding that came or went is a new key, and the host is reviewed again."""
-    basis = json.dumps([fingerprint or '', sorted((r.kind, r.evidence_key or r.signature) for r in rows)])
+def services_digest(sub):
+    """The stable facts of a host's services, as a short hash: each open port's number, protocol, service, product and version, and the technologies
+    with a version (a bare name that was also seen with a version is the same technology: the light scan flips between the two). Not the addresses
+    (a CDN rotates them), the page title, the HTTP status, the screenshot hash, timestamps or counters: they change without the host changing, and a
+    review is a billed AI call."""
+    from cveFeed.correlation import split_name_version
+    if sub is None:
+        return ''
+    ports = set()
+    for ip in sub.ip_addresses.all():
+        for port in ip.ports.all():
+            if (port.state or '') in ('', 'open'):
+                ports.add((port.number, port.protocol or 'tcp', port.service_name or '', port.product or '', port.version or ''))
+    techs = {}
+    for tech in sub.technologies.all():
+        name, version = split_name_version(tech.name or '')
+        if name:
+            techs.setdefault(name.lower(), set())
+            if version:
+                techs[name.lower()].add(version)
+    listed = sorted((name, version) for name, versions in techs.items() for version in (sorted(versions) or ['']))
+    return hashlib.sha1(json.dumps([sorted(ports), listed]).encode()).hexdigest()
+
+
+def state_key(digest, rows):
+    """The key of one host state. It holds only facts that matter to a verdict and do not change by themselves: ``digest`` (``services_digest``: the
+    ports, products, versions and technologies) and, for each open finding, its kind, its evidence key (a new version or new evidence is a new key),
+    its validation status and its retest state (a new check result is a new key). A new, changed or closed finding, a new port or version, a check
+    that came back: the host is reviewed again. A new page title, screenshot, address or timestamp is not, and a person's Dismiss holds until the key
+    changes."""
+    basis = json.dumps([digest or '', sorted((r.kind, r.evidence_key or r.signature, r.validation_status or '', r.retest_state or '') for r in rows)])
     return hashlib.sha1(basis.encode()).hexdigest()
+
+
+def key_of(state, rows, sub=None):
+    """The state key of the host of ``state`` (a ``HostState``) with the open ``rows``: loads the host's services unless ``sub`` is given."""
+    return state_key(services_digest(sub if sub is not None else _load_sub(state)), rows)
 
 
 def _jsonable(value):
@@ -326,7 +358,7 @@ def build(project, host, offered=None, now=None):
         if row.reason:
             earlier.append({'ref': ref, 'written_by_a_model': triage_lib.strip_instructions(str(row.reason)[:REASON_CHARS])})
     counts = Counter(e['row'].kind for e in rest)
-    key = state_key(state.fingerprint, rows)  # every open finding, not only the ones shown: the sweep reads the same key without building a packet
+    key = state_key(services_digest(sub), rows)  # every open finding, not only the ones shown: the sweep reads the same key without building a packet
     header = {
         'host': _host_facts(project, state, sub), 'findings': trusted_findings,
         'not_judged_in_this_call': {'count': len(rest), 'by_kind': dict(sorted(counts.items()))},
@@ -734,7 +766,7 @@ def apply_reply(review, parsed, job, offered):
     review.refresh_from_db()
     state = HostState.objects.filter(project=review.project, host=review.host).first()
     why = unavailable(review.project, review.host)
-    current = state_key(state.fingerprint, open_rows(review.project, review.host)) if state is not None and not why else ''
+    current = key_of(state, open_rows(review.project, review.host)) if state is not None and not why else ''
     if current != review.state_key:
         _finish(review, 'stale', 'stale: the host changed while the AI was reading it', now)
         return 'stale'
@@ -964,10 +996,16 @@ def _recent_blocks(candidates, now):
     for row in HostReview.objects.filter(q).order_by('project_id', 'host', '-created_at', '-id').distinct('project_id', 'host'):
         newest[(row.project_id, row.host)] = row
     blocked = set()
-    fingerprints = {(s['project_id'], s['host']): s['fingerprint'] for s in HostState.objects.filter(q).values('project_id', 'host', 'fingerprint')}
+    from startScan.models import Subdomain
+    states = {(s.project_id, s.host): s for s in HostState.objects.filter(q)}
+    subs = {}
+    for sub in (Subdomain.objects.filter(target_domain_id__in={s.domain_id for s in states.values()}, name__in={s.host for s in states.values()})
+                .prefetch_related('technologies', 'ip_addresses__ports').order_by('id')):
+        subs[(sub.target_domain_id, sub.name)] = sub  # the newest row of a name wins, as ``_load_sub`` does
     for (project_id, host), row in newest.items():
         rows = open_rows(row.project, host)
-        if not rows or state_key(fingerprints.get((project_id, host), ''), rows) != row.state_key:
+        state = states.get((project_id, host))
+        if not rows or state is None or key_of(state, rows, subs.get((state.domain_id, host))) != row.state_key:
             continue  # the host changed since: due
         if row.status in HostReview.OPEN or row.status == 'applied':
             blocked.add((project_id, host))
@@ -1020,7 +1058,7 @@ def _record_refusal(project, host, why, now):
     if state is None or HostReview.objects.filter(project=project, host=host, status__in=HostReview.OPEN).exists():
         return
     try:
-        HostReview.objects.create(project=project, domain=state.domain, host=host, state_key=state_key(state.fingerprint, open_rows(project, host)), status='failed',
+        HostReview.objects.create(project=project, domain=state.domain, host=host, state_key=key_of(state, open_rows(project, host)), status='failed',
                                   step_detail=f'failed: not reviewed ({re.sub(r"[^ -~]", "", why)[:150]})', decided_at=now)
     except Exception:  # noqa: BLE001 - a record that cannot be written leaves the host to be picked again, nothing worse
         logger.warning('host review sweep: could not record a refusal', exc_info=True)

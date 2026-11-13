@@ -136,7 +136,7 @@ class PacketTests(PacketFixture):
         self.match()
         first = self.build().state_key
         self.assertEqual(self.build().state_key, first)  # nothing changed: the same key
-        HostState.objects.filter(pk=self.state.pk).update(fingerprint='e' * 40)
+        Port.objects.filter(pk=self.port.pk).update(version='9.9')  # a changed service version is a new state of the host
         second = self.build().state_key
         self.assertNotEqual(second, first)
         self.match()

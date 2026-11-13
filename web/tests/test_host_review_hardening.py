@@ -6,7 +6,7 @@ from django.utils import timezone
 
 from cveFeed import host_actions, host_review, situations, triage
 from cveFeed.models import (CVEEntry, CVEMatch, FindingReview, HostExclusion, HostReview, HostState, ProjectSettings, TlsCertificate, Triage)
-from startScan.models import Port, Subdomain
+from startScan.models import IpAddress, Port, Subdomain
 from tests.test_host_ai_review import HOSTILE
 from tests.test_host_review_job import HOST, Fixture
 
@@ -215,3 +215,57 @@ class AllOrNothingTests(Base):
         self.assertEqual((CVEMatch.objects.get(pk=first.pk).remediation_status, CVEMatch.objects.get(pk=second.pk).remediation_status), (NOT_CLOSED, NOT_CLOSED))
         self.assertFalse(FindingReview.objects.filter(host_review=review).exists())
         run.assert_not_called()
+
+
+class StableStateTests(Base):
+    """HR-5: the state key holds only stable facts that matter to a verdict (the ports, products, versions and technologies, each open finding's kind,
+    evidence key, validation status and retest state), so a host whose page title or screenshot changes at every visit is not reviewed again and a
+    person's Dismiss holds, while a new finding, a new version or a new check result is a new question."""
+
+    def setUp(self):
+        super().setUp()
+        self.match()
+        self.first = self.deliver(self.queue(), self.body({'f1': ('true_open', 'high')}, action='assess_host', reason='needs_proof', step_note='A fresh look would settle it.'))
+
+    def key(self):
+        return host_review.build(self.proj, HOST, offered={'none': {'class': 'auto', 'targets': []}}).state_key
+
+    def test_a_new_page_title_screenshot_address_or_timestamp_is_the_same_state(self):
+        before = self.key()
+        Subdomain.objects.filter(pk=self.sub.pk).update(page_title='Welcome back 2026-11-13 12:00:01', http_status=503, screenshot_hash='b' * 16)
+        HostState.objects.filter(project=self.proj, host=HOST).update(fingerprint='1' * 40)  # the host fingerprint carries the title and the hash
+        IpAddress.objects.filter(pk=self.sub.ip_addresses.first().pk).update(address='198.51.100.77')  # a CDN rotates addresses
+        Port.objects.filter(pk=self.port.pk).update(banner='SSH-2.0-OpenSSH_8.9 ' + 'changed', last_seen=timezone.now())
+        self.assertEqual(self.key(), before)
+
+    def test_it_does_not_queue_a_new_review_and_a_dismiss_holds(self):
+        from cveFeed.models import AIJob
+        HostReview.objects.filter(pk=self.first.pk).update(step_mode='recommend', step_state='proposed')
+        host_review.dismiss_step(HostReview.objects.get(pk=self.first.pk), self.user)
+        Subdomain.objects.filter(pk=self.sub.pk).update(page_title='Another title', screenshot_hash='c' * 16)
+        HostState.objects.filter(project=self.proj, host=HOST).update(fingerprint='2' * 40)
+        self.assertEqual(host_review.sweep()['queued'], 0)
+        self.assertEqual(HostReview.objects.count(), 1)
+        again = self.queue()  # "Review now" on the same state: the dismissed step is not proposed again
+        again = self.deliver(again, self.body({'f1': ('true_open', 'high')}, action='assess_host', reason='needs_proof', step_note='A fresh look would settle it.'))
+        self.assertEqual((again.state_key, again.step_state), (self.first.state_key, 'dismissed'))
+        self.assertTrue(AIJob.objects.exists())
+
+    def test_a_new_finding_a_changed_version_a_new_check_result_or_a_closed_finding_is_a_new_state(self):
+        keys = [self.key()]
+        Port.objects.filter(pk=self.port.pk).update(version='9.9')
+        keys.append(self.key())
+        second = self.match()
+        keys.append(self.key())
+        Triage.objects.filter(match=second).update(validation_status='clean')
+        keys.append(self.key())
+        Triage.objects.filter(match=second).update(retest_state='still_reproduces')
+        keys.append(self.key())
+        self.assertEqual(len(set(keys)), len(keys), keys)
+        CVEMatch.objects.filter(pk=second.pk).update(remediation_status='fixed')
+        self.assertNotEqual(self.key(), keys[-1])  # a finding that is closed is a change too
+
+    def test_a_changed_state_is_queued_again_by_the_sweep(self):
+        self.assertEqual(host_review.sweep()['queued'], 0)
+        Port.objects.filter(pk=self.port.pk).update(version='9.9')
+        self.assertEqual(host_review.sweep()['queued'], 1)

@@ -190,7 +190,7 @@ class StepTests(Fixture):
         run.assert_not_called()
         self.assertEqual((again.step_state, again.state_key), ('dismissed', first.state_key))
         self.assertIn('dismissed this step', again.step_detail)
-        HostState.objects.filter(host=HOST).update(fingerprint='9' * 40)  # a changed host is a new question
+        Port.objects.filter(pk=self.port.pk).update(version='9.9')  # a changed service version is a new state of the host  # a changed host is a new question
         third, _ = self.run_step('rescan_host', '')
         self.assertEqual(third.step_state, 'proposed')
 
@@ -278,7 +278,7 @@ class SweepTests(Fixture):
         review = self.deliver(self.queue(), self.body({'f1': ('true_open', 'high')}))
         self.assertEqual(review.status, 'applied')
         self.assertEqual(host_review.sweep()['queued'], 0)
-        HostState.objects.filter(host=HOST).update(fingerprint='9' * 40)
+        Port.objects.filter(pk=self.port.pk).update(version='9.9')  # a changed service version is a new state of the host
         self.assertEqual(host_review.sweep()['queued'], 1)
         HostReview.objects.filter(status='queued').delete()
         self.match()  # a new finding is a new state too
