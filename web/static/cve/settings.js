@@ -122,6 +122,8 @@ function reviewerPanel(r, markDirty) {
   const daily = text(r.review_daily_max, { type: "number", min: "0", max: "20000" });
   const hours = text((r.ops_hours || []).join(", "), { placeholder: (r.default_ops_hours || []).join(", ") });
   // the AI host review (docs/AI-REVIEWER.md "Host review"): off until a person turns it on here, because every review is a billed AI call
+  // AI-written checks (cveFeed.templatevalidate): two AI calls a draft, and a draft that passes runs on hosts; off until a person turns it on
+  const tmplOn = check("Validate AI-written checks automatically (two AI calls per draft; a check that passes then runs on hosts)", r.template_validation_enabled);
   const hostOn = check("Review whole hosts with the AI (one AI call per changed host)", r.host_review_enabled);
   const hostClose = check("Let the host review close false positives by itself (off: a person closes them, with one click on the host page)", r.host_review_auto_close);
   const hostDaily = text(r.host_review_daily_max, { type: "number", min: "0", max: "20000" });
@@ -166,6 +168,7 @@ function reviewerPanel(r, markDirty) {
     close.wrap,
     field("Findings reviewed per day at most", daily),
     field("Operations check hours (UTC, comma separated)", hours),
+    tmplOn.wrap,
     el("h3", "sec", "AI review of whole hosts"),
     el("p", "note", "The AI reads every open finding of a host together, says which look real and which look like false positives, and picks one next step. It is off until you turn it on. Every review is an AI call that your AI provider bills you for (up to the daily limit below), so it stays off on a fresh install and after an update. Each project then chooses on the host page whether the AI only recommends a step (the default) or starts safe read-only steps by itself."),
     hostOn.wrap,
@@ -182,7 +185,7 @@ function reviewerPanel(r, markDirty) {
     body() {
       const list = hours.value.split(",").map((h) => h.trim()).filter(Boolean).map(Number);
       return { enabled: on.box.checked, auto_close: close.box.checked, review_daily_max: Number(daily.value), ops_hours: list,
-        host_review_enabled: hostOn.box.checked, host_review_auto_close: hostClose.box.checked, host_review_daily_max: Number(hostDaily.value),
+        template_validation_enabled: tmplOn.box.checked, host_review_enabled: hostOn.box.checked, host_review_auto_close: hostClose.box.checked, host_review_daily_max: Number(hostDaily.value),
         ...(chosen.size ? { host_review_modes: Object.fromEntries(chosen) } : {}) };
     },
   };

@@ -85,9 +85,9 @@ class MigrationTests(Base):
         self.connect_ai()
         question = self.question('ai_validation')
         # chosen in Settings before the host review existed: the host review line was never decided, so it is asked once, and stays off until then
-        self.assertEqual((question['state'], question['current'], question['new_lines']), ('pending', 'act', []))
+        self.assertEqual((question['state'], question['current'], question['new_lines']), ('pending', 'act', []))  # (a state in Settings is not a stale answer: no 'new lines' text)
         self.assertFalse(ReviewerSettings.objects.get().host_review_enabled)
-        ReviewerSettings.objects.update(host_review_enabled=True)  # a person switched the host review on in Settings: nothing left to ask
+        ReviewerSettings.objects.update(host_review_enabled=True, template_validation_enabled=True)  # a person switched both later lines on in Settings: nothing left to ask
         self.assertEqual(self.question('ai_validation')['state'], 'decided')
 
 
@@ -216,7 +216,8 @@ class AnswerTests(Base):
         self.assertEqual(question['facts'][:2], ['Finding review: at most 300 findings a day, one provider call each.', 'Server health check: 4 calls a day.'])
         self.assertIn('Host review: the AI reads every open finding of a host that changed, one provider call per host, at most 100 a day', question['facts'][2])
         self.assertIn('at most 50 safe read-only steps per project a day, and only in a project a person set to automatic', question['facts'][2])
-        self.assertEqual(question['facts'][3], 'Your AI provider bills every call.')
+        self.assertIn('AI-written checks: ', question['facts'][3])  # the third line (FA-5), tested in test_template_validation_gate
+        self.assertEqual(question['facts'][4], 'Your AI provider bills every call.')
         self.assertEqual(question['choices'][0]['tag'], 'Nothing is billed')
         for choice in question['choices']:
             self.assertNotIn('300', choice['effect'])
@@ -334,7 +335,7 @@ class HostReviewLineTests(Base):
         SetupAnswer.objects.create(key='ai_validation', answer='recommend', answered_by=self.admin)  # version 1: the question before the host review
         ReviewerSettings.objects.create(enabled=True, auto_close=False, updated_by=self.admin)
         question = self.question('ai_validation')
-        self.assertEqual((question['state'], question['new_lines'], question['safe_default']), ('pending', ['AI host review'], 'off'))
+        self.assertEqual((question['state'], question['new_lines'], question['safe_default']), ('pending', ['AI host review', 'AI-written checks'], 'off'))
         self.assertFalse(self.enabled())
         self.assertEqual(self.c.get('/cve/')['Location'], '/cve/update-questions/')  # an administrator is taken to the page again, once
         self.assertEqual(self.question('scan_from')['new_lines'], [])
@@ -347,7 +348,7 @@ class HostReviewLineTests(Base):
             self.assertEqual(out.status_code, 200, out.content)
             self.assertEqual(self.enabled(), expected, answer)
             self.assertEqual(host_review.mode_of(self.project), 'recommend', answer)
-            self.assertEqual(SetupAnswer.objects.get(key='ai_validation').version, 2)
+            self.assertEqual(SetupAnswer.objects.get(key='ai_validation').version, 3)
         self.assertEqual(self.question('ai_validation')['new_lines'], [])
 
     def test_an_agent_cannot_answer_it(self):
@@ -371,7 +372,7 @@ class ReaskTests(Base):
         super().setUp()
         self.connect_ai()
         ReviewerSettings.objects.create(enabled=True, auto_close=False, updated_by=self.admin)  # the finding review as answered before: on, closing off
-        SetupAnswer.objects.create(key='ai_validation', answer='recommend', answered_by=self.admin)  # version 1
+        SetupAnswer.objects.create(key='ai_validation', answer='recommend', answered_by=self.admin, version=1)  # the question before the host review
 
     def state(self):
         row = ReviewerSettings.current()
@@ -379,7 +380,7 @@ class ReaskTests(Base):
 
     def test_the_reask_is_about_the_host_review_alone(self):
         question = self.question('ai_validation')
-        self.assertEqual((question['state'], question['new_lines']), ('pending', ['AI host review']))
+        self.assertEqual((question['state'], question['new_lines']), ('pending', ['AI host review', 'AI-written checks']))
         self.assertIn('Your earlier answer about finding review', question['text'])
         self.assertEqual([c['value'] for c in question['choices']], ['off', 'recommend'])
         self.assertTrue(all('Your finding review is not changed' in c['effect'] for c in question['choices']))
@@ -389,7 +390,7 @@ class ReaskTests(Base):
         out = post(self.c, {'key': 'ai_validation', 'answer': 'recommend'})
         self.assertEqual(out.status_code, 200, out.content)
         self.assertEqual(self.state(), (True, False, True))
-        self.assertEqual(SetupAnswer.objects.get(key='ai_validation').version, 2)
+        self.assertEqual(SetupAnswer.objects.get(key='ai_validation').version, 3)
 
     def test_the_act_answer_does_not_turn_closing_on(self):
         out = post(self.c, {'key': 'ai_validation', 'answer': 'act'})
@@ -402,6 +403,6 @@ class ReaskTests(Base):
         self.assertEqual(self.state(), (True, False, False))
 
     def test_an_answer_at_the_current_version_still_carries_out_every_line(self):
-        SetupAnswer.objects.filter(key='ai_validation').update(version=2)
+        SetupAnswer.objects.filter(key='ai_validation').update(version=3)
         post(self.c, {'key': 'ai_validation', 'answer': 'act'})
         self.assertEqual(self.state(), (True, True, True))

@@ -319,6 +319,7 @@ The page has one **Connection** block (provider, API key, address, and a status 
 | Reviews per day | 300 | The most findings reviewed in one UTC day. |
 | Operations hours (UTC) | 3, 9, 15, 21 | When the operations check runs. |
 | Let the host review close false positives by itself | **off** | When off, a host review's false positive is recorded and a person closes it. Only a person sets it. |
+| Validate AI-written checks automatically | **off** | The automatic validation of the checks the AI wrote ([below](#ai-written-templates-validated-by-the-system-never-by-a-person)): two AI calls per draft, and a check that passes runs on hosts. Off, drafts wait unused (as in 1.3.6), nothing is asked of the AI and no draft expires; checks already validated keep working. Only a person switches it on (an agent cannot), here or in the AI question after an update. |
 | AI review of whole hosts | **off** | Turns the [host review](#host-review) on. Every review is a billed AI call. |
 | Hosts reviewed per day | 100 | The most host reviews queued in one UTC day, for the whole install. |
 
@@ -356,7 +357,7 @@ Some models (measured: `claude-sonnet-5-5` and `claude-opus-5-5`) answer the Nuc
 
 ## AI-written templates: validated by the system, never by a person
 
-There is no review page, so nothing waits for one. A draft (`GeneratedTemplate`, status `draft`, shown as "being checked") is taken through every gate by `cveFeed/templatevalidate.py`, a task that runs every five minutes (`validate_template_drafts`, scheduled by migration 0154, which also pushes every draft that was stuck waiting into the validator once):
+Since 1.4 this runs only after an administrator switched it on (it ships off: see the setting above). There is no review page, so nothing waits for one. A draft (`GeneratedTemplate`, status `draft`, shown as "being checked") is taken through every gate by `cveFeed/templatevalidate.py`, a task that runs every five minutes (`validate_template_drafts`, scheduled by migration 0154, which also pushes every draft that was stuck waiting into the validator once):
 
 1. **Static gate** again (protocols, destinations bound to the scanned host, at most six read-only requests, real matchers, nothing generic).
 2. **`nuclei -validate` and the benign loopback control on a Sentinel**, the existing `nuclei_validate` kind: on the built-in scanner while the install has one, else on a Sentinel of the project's own (contract version 4 or newer; see **AI-written checks on your own Sentinels** below). With no Sentinel that can run it the draft waits and no try is used.
