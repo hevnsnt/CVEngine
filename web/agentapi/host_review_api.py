@@ -17,6 +17,19 @@ RUNNING = ('queued', 'answered')
 NO_START = ('none', 'ask_person')  # steps with nothing for a person to start: "nothing more" and the notification
 
 
+TOKEN_REVIEWS_PER_HOUR = 5  # reviews one API key may queue an hour: it cannot spend the day's cap by itself (a person is not limited)
+
+
+def _token_reviews(ctx, count=False):
+    from django.core.cache import cache
+    from django.utils import timezone
+    key = f'cvengine:hostreview:token:{ctx.token.pk}:{timezone.now():%Y%m%d%H}'
+    if count:
+        cache.add(key, 0, 3700)
+        return cache.incr(key)
+    return int(cache.get(key) or 0)
+
+
 def reviewer_settings():
     from cveFeed import reviewer
     return reviewer.settings_row()
@@ -59,6 +72,8 @@ def readiness(project, host):
         return {'can_request': False, 'reason_code': 'open', 'reason': 'a review of this host is already running'}
     if not host_review.open_rows(project, host):
         return {'can_request': False, 'reason_code': 'nothing_open', 'reason': 'nothing is open on this host to review'}
+    if host_review.unchanged_review(project, host) is not None:
+        return {'can_request': False, 'reason_code': 'unchanged', 'reason': 'nothing has changed on this host since the last review'}
     return {'can_request': True, 'reason_code': '', 'reason': ''}
 
 
@@ -164,11 +179,18 @@ def request_host_review(ctx, slug, host_id):
     excluded, gone)."""
     from cveFeed import host_review
     project, _sub, host = _host_row(ctx, slug, host_id, write=True)
+    spent = _token_reviews(ctx) if ctx.token is not None else 0
+    if spent >= TOKEN_REVIEWS_PER_HOUR and host_review.unchanged_review(project, host) is None:
+        raise ApiError(429, f'this API key has already asked for {TOKEN_REVIEWS_PER_HOUR} host reviews this hour: a person can ask for more, in the web interface')
     try:
-        host_review.request(project, host, priority=2)
+        review = host_review.request(project, host, priority=2)
     except host_review.HostReviewRefused as exc:
         raise ApiError(exc.status, str(exc)) from exc
-    return {**get_host_review(ctx, slug, host_id), 'created': True}
+    from cveFeed.models import HostReview
+    created = review.status in HostReview.OPEN
+    if created and ctx.token is not None:
+        _token_reviews(ctx, count=True)
+    return {**get_host_review(ctx, slug, host_id), 'created': created}
 
 
 def _newest_for_write(ctx, slug, host_id):

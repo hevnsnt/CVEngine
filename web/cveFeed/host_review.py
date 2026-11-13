@@ -565,10 +565,22 @@ def available(now=None):
     return True, ''
 
 
+def unchanged_review(project, host):
+    """The newest applied review of the host when its state key is still the host's current one (nothing that matters to a verdict changed since), else None."""
+    from cveFeed.models import HostReview, HostState
+    last = HostReview.objects.filter(project=project, host=host, status='applied').order_by('-created_at', '-id').first()
+    state = HostState.objects.filter(project=project, host=host).select_related('domain').first()
+    if last is None or state is None:
+        return None
+    rows = open_rows(project, host)
+    return last if rows and key_of(state, rows) == last.state_key else None
+
+
 def request(project, host, priority=5, now=None):
     """Queue the review of one host now and return its ``HostReview`` (status ``queued``). Raises ``HostReviewRefused``: 404 for a host that is not
     reviewable, 409 while a review of the host is open, 429 at the daily cap, 503 with no AI provider or while scanning is paused, 409 when the
-    project's mode is off. The sweep and a person's "Review this host now" take this one path."""
+    project's mode is off. A host whose state has not changed since its last review gets that review back and no AI call (``unchanged_review``). The
+    sweep and a person's "Review this host now" take this one path."""
     from django.db import IntegrityError, transaction
     from cveFeed import ai_jobs
     from cveFeed.models import HostReview
@@ -583,6 +595,9 @@ def request(project, host, priority=5, now=None):
         raise HostReviewRefused(why, 429 if 'limit' in why else 503)
     if HostReview.objects.filter(project=project, host=host, status__in=HostReview.OPEN).exists():
         raise HostReviewRefused('a review of this host is already open', 409)
+    unchanged = unchanged_review(project, host)
+    if unchanged is not None:  # nothing changed since the last review: it is returned, and no AI call is made (a person or a token, however often it asks)
+        return unchanged
     try:
         built = build(project, host, now=now)
     except HostReviewError as exc:

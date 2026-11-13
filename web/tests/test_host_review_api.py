@@ -398,3 +398,45 @@ class AgentStartTests(ApiFixture):
         status, data = self.post('/step')
         self.assertEqual(status, 409, data)
         self.assertEqual(HostReview.objects.get().step_state, 'refused')
+
+
+class UnchangedReviewTests(ApiFixture):
+    """HV-4: Review now on a host whose state has not changed returns the last review and makes no AI call; a token has a small hourly number."""
+
+    def test_an_unchanged_host_returns_its_review_for_a_person_and_a_token_without_an_ai_call(self):
+        review = self.applied()
+        from django.test import Client
+        person = Client()
+        person.force_login(self.member)
+        for status, data in ((self.post()[0], None), (person.post(self.base, data='{}', content_type='application/json').status_code, None)):
+            self.assertEqual(status, 202)
+        self.assertEqual(HostReview.objects.count(), 1)
+        self.assertEqual(AIJob.objects.filter(kind='host_review').count(), 1)  # the one the first review made
+        status, data = self.post()
+        self.assertEqual((data['created'], data['review']['id']), (False, review.pk))
+        self.assertEqual(data['readiness']['reason_code'], 'unchanged')
+        with mock.patch.object(host_review, 'build') as build:
+            self.post()
+        build.assert_not_called()
+
+    def test_a_changed_host_queues_a_new_review(self):
+        self.applied()
+        Port.objects.filter(pk=self.port.pk).update(version='9.9')
+        status, data = self.post()
+        self.assertEqual((status, data['created']), (202, True))
+        self.assertEqual(HostReview.objects.count(), 2)
+
+    def test_a_token_may_queue_only_a_few_reviews_an_hour_but_a_person_may_queue_more(self):
+        from django.core.cache import cache
+        sub2 = self.host_of(self.domain, self.scan, 'x2.example.com', self.proj, '192.0.2.90')
+        self.match(sub=sub2)
+        cache.clear()
+        with mock.patch('agentapi.host_review_api.TOKEN_REVIEWS_PER_HOUR', 1):
+            self.assertEqual(self.post()[0], 202)
+            status, data = self.post(base=f'/api/v1/projects/{self.proj.slug}/hosts/{sub2.pk}/review')
+            self.assertEqual(status, 429, data)
+            self.assertFalse(HostReview.objects.filter(host='x2.example.com').exists())
+            from django.test import Client
+            person = Client()
+            person.force_login(self.member)
+            self.assertEqual(person.post(f'/api/v1/projects/{self.proj.slug}/hosts/{sub2.pk}/review', data='{}', content_type='application/json').status_code, 202)
