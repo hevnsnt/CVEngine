@@ -2862,3 +2862,16 @@ a.score-label:hover{text-decoration-color:var(--ink)}
   #section[data-kind="hygiene"] .table-page .table tr{column-gap:var(--s-2)}
   #section[data-kind="hygiene"] .table-page .table td[data-label="Host"]::before{display:none}
 }
+
+/* ---- Changes: a host name is one line (cut with an ellipsis when it cannot fit, the whole name is the tooltip) and the detail is two lines at most ---- */
+@media (min-width:640px){
+  #section[data-kind="changes"] td.change-host{white-space:nowrap;max-width:30ch;overflow:hidden;text-overflow:ellipsis;overflow-wrap:normal}
+  #section[data-kind="changes"] td.change-host a{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}
+  #section[data-kind="changes"] .change-detail{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden}
+}
+@media (min-width:640px){
+  /* tighter rows and a tighter head, so five changes fit under the chart's line on a 720px screen */
+  #section[data-kind="changes"] .changes-trend{margin-bottom:0}
+  #section[data-kind="changes"] .chart-slot:not(:empty){margin-bottom:0}
+  #section[data-kind="changes"] .table td{padding:var(--s-2) var(--s-3)}
+}

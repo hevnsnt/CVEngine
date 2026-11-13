@@ -13,9 +13,10 @@ At 1366x768, 1280x720, 1440x900, 1920x1080 and 390x844 (a touch screen) it asser
   - Overview: no button, label or sentence sits on the title, and the purpose sentence is whole or "About this page" shows it;
   - the purpose sentence of Overview, Situations, Hygiene, Sentinels, Suppliers, Secrets and Scans is whole, or an "About this page" button is on screen and
     opens the whole sentence with a tap and with Enter, and Escape closes it again and gives the focus back to the button;
-  - Changes: at least 3 data rows fully on the first screen at 1366x768 and 1280x720 (the daily chart is closed under its own line), 1 on a phone;
+  - Changes: at least 5 data rows fully on the first screen at 1366x768 and 1280x720 (the daily chart is closed under its own line), 1 on a phone;
   - Sentinels: at least 3 rows fully on the first screen on a desktop and 2 on a phone, no summary strip that scrolls sideways, no text cut at the side, and a Sentinel's note
     (why its update failed) is on its closed row;
+  - no host name on a list page is broken over two lines;
   - Findings and CVE matches: each row's severity chip is inside the row, whole, not under the row menu, and not faded out;
   - CVE matches has the three retest chips the Findings filter has;
   - an empty, never-scanned project says nothing has been scanned yet on Findings and Hygiene, never "healthy" or "Every finding is fixed";
@@ -82,6 +83,7 @@ MEASURE = r"""(sel) => {
     if (!vis(e) || e.children.length) continue;
     if (e.scrollWidth > e.clientWidth + 1 && /(hidden|clip)/.test(getComputedStyle(e).overflowX) && !/-webkit-box/.test(getComputedStyle(e).display)) cut.push((e.textContent || '').trim().slice(0, 40));
   }
+  const wrapped = [...document.querySelectorAll('main td a.host-link, main .host-row a.host-link, main td .host-link')].filter((e) => { if (!vis(e)) return false; const r = document.createRange(); r.selectNodeContents(e); return new Set([...r.getClientRects()].map((q) => Math.round(q.top / 4))).size > 1; }).map((e) => e.textContent.trim().slice(0, 40));
   const sum = document.querySelector('.sl-sum');
   const sumScroll = sum ? sum.scrollWidth - sum.clientWidth : 0;
   const SEV = /^(critical|high|medium|low|info|fire|smoke|ice|clean)$/i;
@@ -101,7 +103,7 @@ MEASURE = r"""(sel) => {
   return {rows: rows.length, fullRows: full, firstTop: rows.length ? Math.round(rows[0].getBoundingClientRect().top) : null, floor,
     hscroll: document.documentElement.scrollWidth - innerWidth, over, h1: h1 && h1.textContent.trim(),
     sub: sub && {text: sub.textContent.replace(/\s+/g, ' ').trim(), cut: sub.scrollWidth > sub.clientWidth + 1 || sub.scrollHeight > sub.clientHeight + 1, drawn},
-    sumScroll,
+    sumScroll, wrapped,
     about: about && vis(about) ? Math.round(about.getBoundingClientRect().height) : null, cut, chips,
     alert: !!document.querySelector('.ab-row')};
 }"""
@@ -186,9 +188,11 @@ def measure_all(b, shots):
             if name in PURPOSE_PAGES:
                 purpose_checks(pg, name, m, tag)
             if name == 'changes':
-                need = 1 if touch else 3
+                need = 1 if touch else 5
                 if touch or (w, h) in ((1366, 768), (1280, 720)):
                     check(m['fullRows'] >= need, f'changes {tag}: {m["fullRows"]} data rows fully on the first screen, first at y={m["firstTop"]} (need {need})')
+            if name in ('changes', 'findings', 'matches', 'hygiene', 'hosts', 'scans', 'secrets', 'situations'):
+                check(not m['wrapped'], f'{name} {tag}: no host name is broken over two lines ({m["wrapped"][:3]})')
             if name == 'sentinels':
                 need = 2 if touch else 3
                 check(m['fullRows'] >= need, f'sentinels {tag}: {m["fullRows"]} Sentinel rows fully on the first screen, first at y={m["firstTop"]} (need {need})')

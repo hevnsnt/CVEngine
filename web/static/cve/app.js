@@ -910,7 +910,7 @@ function shotPair(c, project = slug) {
   return pair;
 }
 function changeCell(c, project = slug) {
-  const box = el("div");
+  const box = el("div", "change-detail", null, { title: changeDetail(c) }); // two lines at most in a list, the whole sentence is the tooltip
   box.append(linkify(el("span"), changeDetail(c), project, { kinds: ["ip"] }));
   if (c.kind === "screenshot_changed" && project) box.append(shotPair(c, project));
   return box;
@@ -4761,7 +4761,7 @@ pages.changes = function changes(mount) {
     render: table(withProject([
       { label: "When", render: (c) => whenCell(c.detected) },
       { label: "Kind", render: (c) => badge(CHANGE_LABEL[c.kind] || c.kind, changeClass(c)) },
-      { label: "Host", cls: "mono", render: (c) => hostLink(c.host, projectOf(c)) },
+      { label: "Host", cls: "mono change-host", render: (c) => Object.assign(hostLink(c.host, projectOf(c)), { title: c.host }) },
       { label: "Detail", render: (c) => changeCell(c, projectOf(c)) },
       {
         label: "Scan",
