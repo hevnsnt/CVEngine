@@ -37,6 +37,7 @@ from agentapi import sentinel_contract
 from agentapi import storage_safe
 from agentapi.models import SentinelPartial, SentinelTask
 from agentapi.services import ApiError
+from cveFeed import result_cuts
 
 logger = logging.getLogger(__name__)
 
@@ -245,10 +246,13 @@ def _finding(item, scope):
     name = _text(item.get('name'), 200)
     if not name:
         return None
+    port = item.get('port')
     return {'name': name, 'informational': item.get('informational') is True,
             'severity': severity if isinstance(severity, int) and not isinstance(severity, bool) and 0 <= severity <= 4 else 0,
             'host': scope.host(host) if host else '', 'url': url, 'description': _text(item.get('description'), 4000),
-            'module': _text(item.get('module'), 64)}
+            'module': _text(item.get('module'), 64),
+            # contract 5: the port a TCP or TLS finding is about; only when the Sentinel sent one in range, so an older Sentinel's batch is unchanged
+            **({'port': port} if isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65535 else {})}
 
 
 def _http(item, scope):
@@ -298,7 +302,8 @@ def clean_bbot_result(body):
         raise ApiError(400, f'mode must be one of {", ".join(MODES)}')
     web = body.get('web_events') if isinstance(body.get('web_events'), dict) else {}
     name = body.get('scan_name')
-    return {'partials': partials, 'mode': body['mode'], 'incomplete': _text(body.get('incomplete'), 300),
+    cuts = result_cuts.clean(body.get('cuts'))  # what the run left out (events, http, screenshots past their caps, clipped texts, the time limit)
+    return {'partials': partials, 'mode': body['mode'], 'incomplete': _text(body.get('incomplete'), 300), **({'cuts': cuts} if cuts else {}),
             'scan_name': name if isinstance(name, str) and _SCAN_NAME.match(name) else '',
             'web_events': {key: web[key] if isinstance(web.get(key), int) and not isinstance(web.get(key), bool) and web[key] >= 0 else 0
                            for key in ('URL', 'HTTP_RESPONSE')},

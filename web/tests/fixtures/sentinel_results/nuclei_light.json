@@ -16,5 +16,13 @@
         "tech"
       ]
     }
+  ],
+  "cuts": [
+    {
+      "what": "findings",
+      "kind": "items",
+      "limit": 5000,
+      "dropped": 120
+    }
   ]
 }

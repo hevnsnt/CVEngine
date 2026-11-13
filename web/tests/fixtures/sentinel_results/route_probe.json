@@ -98,7 +98,9 @@
       "credentials": [
         {
           "type": "aws_key",
-          "value": "AKIA0000000000000000"
+          "value": "AKIA0000000000000000",
+          "line": 1,
+          "context": "{\"aws_access_key_id\": \"AKIA…0000\", \"region\": \"eu-west-1\"}"
         }
       ]
     },

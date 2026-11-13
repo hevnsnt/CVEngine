@@ -362,8 +362,12 @@ def clean_result(body, task_target=None):
     names = None
     if isinstance(task_target, dict):
         names = {str(h.get('host') or '').lower() for h in task_target.get('hosts') or [] if isinstance(h, dict)}
+    from cveFeed import result_cuts
+    cuts = result_cuts.clean(body.get('cuts'))  # what the Sentinel cut, and below what this server cuts: one list, so a capped result never reads as a whole one
+    asked = body.get('fetched') or []
+    result_cuts.add(cuts, 'fetched', MAX_FETCHED, max(0, len(asked) - MAX_FETCHED))
     fetched, urls = [], set()
-    for item in (body.get('fetched') or [])[:MAX_FETCHED]:
+    for item in asked[:MAX_FETCHED]:
         if not isinstance(item, dict) or not isinstance(item.get('url'), str) or item.get('kind') not in ('page', 'script', 'sourcemap'):
             continue
         url = item['url'][:2000]
@@ -381,6 +385,7 @@ def clean_result(body, task_target=None):
         fetched.append(row)
         urls.add(url)
     findings = []
+    result_cuts.add(cuts, 'findings', MAX_FINDINGS, max(0, len(body.get('findings') or []) - MAX_FINDINGS))
     for item in (body.get('findings') or [])[:MAX_FINDINGS]:
         if not isinstance(item, dict) or not catalog.rule_id_ok(item.get('rule_id')) or item.get('url') not in urls:
             continue
@@ -402,6 +407,7 @@ def clean_result(body, task_target=None):
             row['context'] = context
         findings.append(row)
     references = []
+    result_cuts.add(cuts, 'references', MAX_REFERENCES, max(0, len(body.get('references') or []) - MAX_REFERENCES))
     for item in (body.get('references') or [])[:MAX_REFERENCES]:
         if (isinstance(item, dict) and item.get('kind') in REFERENCE_KINDS and isinstance(item.get('value'), str) and item['value'].strip()
                 and isinstance(item.get('url'), str) and item['url'] in urls):
@@ -413,6 +419,8 @@ def clean_result(body, task_target=None):
     if isinstance(stats.get('kingfisher_version'), str):
         clean_stats['kingfisher_version'] = stats['kingfisher_version'][:20]
     out = {'findings': findings, 'fetched': fetched, 'references': references}
+    if cuts:
+        out['cuts'] = cuts
     if isinstance(body.get('summary'), str):
         out['summary'] = body['summary'][:300]
     if clean_stats:

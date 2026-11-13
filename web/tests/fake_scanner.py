@@ -304,7 +304,9 @@ class FakeScanner:
     def result_for(self, task):
         responder = self.responders.get(task['kind'])
         if responder is None:
-            body = fixture(task['kind'], version=self.contract_version)
+            # a stage test wants a whole answer: the current fixtures of nmap and the nuclei kinds are cut on purpose (a host nmap gave up on, a findings cap), so those
+            # kinds are served their contract 4 copy, which is whole; test_sentinel_nmap_detail and test_sentinel_result_cuts hold the cut shapes
+            body = fixture(task['kind'], version=min(self.contract_version, 4) if task['kind'] in ('nmap', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep') else self.contract_version)
             if task['kind'] == 'nuclei_validate' and 'template_sha256' in body:
                 # a correct contract-4 client names the hash of the check it was handed, not the fixture's own (agentapi.ai_checks.result_problem)
                 sent = (task.get('target') or {}).get('template_sha256')

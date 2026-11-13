@@ -16,6 +16,8 @@ and limits (``agent_broker``): a setting only changes how this Sentinel presents
 """
 import hashlib
 import json
+import logging
+import re
 from datetime import datetime
 
 from django.utils import timezone
@@ -26,6 +28,8 @@ from agentapi import sentinel_policy as policy_lib
 from agentapi.models import Agent, SentinelDefaults, SentinelEnrollment, SentinelTask
 from agentapi.services import ApiError
 from tenancy import audit
+
+logger = logging.getLogger(__name__)
 
 SETTINGS = ('name', 'network', 'profile', 'disabled_kinds', 'kinds', 'max_concurrent', 'self_update', 'discovery_keys')
 # ``kinds`` and ``discovery_keys`` are set from cvENGINE only. ``discovery_keys`` is a boolean: false is this Sentinel's opt-out from being sent the project's discovery API
@@ -409,9 +413,35 @@ def clean_info(raw):
     spool = clean_spool(raw.get('spool'))
     if spool:
         out['spool'] = spool
+    versions = clean_tool_versions(raw.get('tool_versions'))
+    if versions is not None:
+        out['tool_versions'] = versions
     watchdog = clean_watchdog(raw.get('watchdog'))
     if watchdog is not None:
         out['watchdog'] = watchdog
+    return out
+
+
+MAX_TOOL_VERSIONS = 16
+_TOOL_NAME = re.compile(r'[a-z0-9_-]{1,20}')
+
+
+def clean_tool_versions(raw):
+    """``{tool: version}`` a Sentinel reports in ``info.tool_versions`` (contract version 5), or ``None`` when it sends none. At most ``MAX_TOOL_VERSIONS`` entries, a
+    tool named by 1 to 20 of ``a-z 0-9 _ -`` (else 400), only the tools of ``sentinel_tools.KNOWN_TOOLS`` are kept, and a version is printable text clipped to 40
+    characters (a version string comes from a tool's own output). Anything that is not an object, or has a version that is not text, is a 400."""
+    from agentapi import sentinel_tools
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or len(raw) > MAX_TOOL_VERSIONS:
+        raise ApiError(400, f'tool_versions must be an object of at most {MAX_TOOL_VERSIONS} tools')
+    out = {}
+    for tool, version in raw.items():
+        if not isinstance(tool, str) or not _TOOL_NAME.fullmatch(tool) or not isinstance(version, str):
+            raise ApiError(400, 'tool_versions must map a tool name (a-z, 0-9, _ and -, at most 20) to its version as text')
+        text = ''.join(c for c in version if c.isprintable()).strip()[:sentinel_tools.MAX_VERSION]
+        if tool in sentinel_tools.KNOWN_TOOLS and text:
+            out[tool] = text
     return out
 
 
@@ -553,6 +583,8 @@ def record_info(agent, raw, now=None):
     merged = {**(agent.info or {}), **info}
     if 'contract_version' in info and 'spool' not in info:
         merged.pop('spool', None)  # a full report that says nothing about a spool says it holds none now
+    if 'contract_version' in info and 'tool_versions' not in info:
+        merged.pop('tool_versions', None)  # a full report without tool versions (a client that cannot read them now): the old ones are not kept as if current
     # when the Sentinel last changed the version it runs (or first reported one): "last updated" on the Sentinels page. Only the server writes it.
     if 'version' in info and (agent.info or {}).get('version') != info['version']:
         from django.utils import timezone
@@ -564,10 +596,26 @@ def record_info(agent, raw, now=None):
     failed = (info.get('update') or {}).get('status') == 'failed'
     if agent.update_requested_at and (version_changed or failed):
         fields['update_requested_at'] = None
+    before = (agent.info or {}).get('tool_versions')
     for key, value in fields.items():
         setattr(agent, key, value)
     Agent.objects.filter(pk=agent.pk).update(**fields)
+    _note_tools_behind(agent, before, merged.get('tool_versions'))
     return True
+
+
+def _note_tools_behind(agent, before, now_reported):
+    """The administrator's notice for tools behind (``sentinel_tools``): one audit entry, ``sentinel.tools_behind``, each time the set of tools behind changes (never on
+    every heartbeat), like the entry the client-version check writes (``sentinel.update_flagged``). Never stops a registration or heartbeat."""
+    try:
+        from agentapi import sentinel_tools
+        from tenancy import audit
+        old, new = sentinel_tools.behind_of(before), sentinel_tools.behind_of(now_reported)
+        if new and new != old:
+            audit.record_for_user(None, 'sentinel.tools_behind', agent.token.user, target=agent.name, agent_id=agent.pk,
+                                  tools=[{k: b[k] for k in ('tool', 'running', 'current')} for b in new])
+    except Exception:  # noqa: BLE001 - a notice must never cost a heartbeat
+        logger.warning('could not record the tools-behind notice of Sentinel %s', getattr(agent, 'pk', '?'), exc_info=True)
 
 
 def update_reply(agent):
