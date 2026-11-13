@@ -3,12 +3,12 @@
 // reason) is passed through untouched and is only ever shown as text. Tested in tests/test_host_review_logic.mjs.
 
 export const MODES = [
-  ["auto", "Automatic: the AI starts safe read-only steps by itself"],
-  ["recommend", "Recommend only: the AI proposes, a person starts"],
-  ["off", "Off: no AI review of hosts in this project"],
+  ["auto", "Automatic", "Automatic: the AI starts safe read-only steps by itself"],
+  ["recommend", "Recommend only", "Recommend only: the AI proposes, a person starts"],
+  ["off", "Off", "Off: no AI review of hosts in this project"],
 ];
 
-export const modeHelp = (mode) => (MODES.find((m) => m[0] === mode) || MODES[0])[1];
+export const modeHelp = (mode) => (MODES.find((m) => m[0] === mode) || MODES[1])[2];
 
 const humanize = (code) => String(code || "").replace(/_/g, " ").trim();
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
