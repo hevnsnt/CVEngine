@@ -49,7 +49,7 @@ def _log_slow(generation, took):
         _state['slow_skipped'] += 1
         return
     _state['slow_logged_at'] = now
-    more = ' (%d more since the last line)' % _state['slow_skipped'] if _state['slow_skipped'] else ''
+    more = f" ({_state['slow_skipped']} more since the last line)" if _state['slow_skipped'] else ''
     _state['slow_skipped'] = 0
     logger.warning('gevent_gc: a %s collection took %.1f s%s', 'full' if generation >= 2 else 'young', took, more)
 
@@ -109,7 +109,7 @@ def publish(now=None):
             return
         cache.set(GC_KEY + lane, json.dumps(dict(stats(), pid=os.getpid(), at=time.time() if now is None else now)), GC_KEEP_SECONDS)
     except Exception:  # noqa: BLE001 - a measurement must never end the timer
-        pass
+        logger.debug('gevent_gc: could not publish the collection timing', exc_info=True)
 
 
 def _loop(sleep):

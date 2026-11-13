@@ -241,7 +241,7 @@ class FrozenStartupTests(SimpleTestCase):
         self.addCleanup(cache.delete, lane_memory.CACHE_PREFIX + 'classic')
         cache.set(gevent_gc.GC_KEY + 'classic', json.dumps({'at': 1000.0, 'last_s': 0.01, 'last_full_s': None, 'worst_s': 1.5, 'frozen': 9}), 600)
         self.addCleanup(cache.delete, gevent_gc.GC_KEY + 'classic')
-        row = [r for r in lane_memory.report(1005.0) if r['lane'] == 'classic'][0]
+        row = next(r for r in lane_memory.report(1005.0) if r['lane'] == 'classic')
         self.assertEqual(row['gc']['worst_s'], 1.5)
 
     def test_publishing_never_fails_the_timer(self):
