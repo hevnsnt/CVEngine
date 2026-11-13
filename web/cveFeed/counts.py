@@ -189,6 +189,9 @@ def host_reps(domain_id=None, domain_ids=None, in_scope=False):
 def rep_ids(domain_id=None, domain_ids=None, in_scope=False):
     """The ids of ``host_reps``, read in ONE statement. The collapse is the dearest query CVEngine has (a window over every host's address set), so a request
     that needs several numbers over the same hosts reads the ids once and derives each number from them (``reps_of``) instead of collapsing again per number."""
+    if domain_id is None and domain_ids is None and not in_scope:  # the whole inventory: worked out in Python from set-based reads (cveFeed.inventory_counts)
+        from cveFeed import inventory_counts
+        return inventory_counts.rep_ids()
     return list(host_reps(domain_id=domain_id, domain_ids=domain_ids, in_scope=in_scope).values_list('pk', flat=True))
 
 
@@ -309,17 +312,23 @@ def oldest_open(now=None):
     first_match = Subquery(CVEMatch.objects.filter(
         cve_entry=OuterRef('cve_entry'), subdomain__target_domain=OuterRef('subdomain__target_domain'),
         subdomain__name=OuterRef('subdomain__name')).order_by('created_at').values('created_at')[:1])
-    row = (exposed_matches().filter(cve_entry__cvss__gte=HIGH_CVSS).annotate(first=first_match).order_by('first').values('id', 'first').first())
+    row = (exposed_matches().filter(cve_entry__cvss__gte=HIGH_CVSS).annotate(first=first_match).order_by('first', 'id').values('id', 'first').first())
     if row:
         consider('cve', row['first'], row['id'])
-    first_finding = Subquery(Vulnerability.objects.filter(
-        name=OuterRef('name'), subdomain__target_domain=OuterRef('subdomain__target_domain'), subdomain__name=OuterRef('subdomain__name'),
-        discovered_date__isnull=False).order_by('discovered_date').values('discovered_date')[:1])
-    row = (actionable_findings(Vulnerability.objects.filter(severity__gte=3, subdomain__isnull=False)).annotate(first=first_finding)
-           .filter(first__isnull=False).order_by('first').values('id', 'first').first())
-    if row:
-        consider('scanner', row['first'], row['id'])
-    row = actionable_hygiene(HygieneFinding.objects.all(), 3).order_by('first_seen').values('id', 'first_seen').first()
+    # The scanner finding that has been open longest, open since the earliest discovery of the same finding (name) on the same host (target and name). It was a
+    # correlated subquery per candidate (0.4 s for 20,000 findings); now the candidates and the earliest discoveries of their names are two reads and the
+    # comparison is made here. Ties are broken by id (the SQL left them to the database).
+    from django.db.models import Min
+    candidates = list(actionable_findings(Vulnerability.objects.filter(severity__gte=3, subdomain__isnull=False)).values_list('id', 'name', 'subdomain__target_domain', 'subdomain__name'))
+    if candidates:
+        earliest = {(name, domain, host): first for name, domain, host, first in
+                    Vulnerability.objects.filter(name__in={c[1] for c in candidates}, discovered_date__isnull=False)
+                    .values_list('name', 'subdomain__target_domain', 'subdomain__name').annotate(first=Min('discovered_date')).order_by()}
+        found = [(earliest[(name, domain, host)], row_id) for row_id, name, domain, host in candidates if (name, domain, host) in earliest]
+        if found:
+            first, row_id = min(found)
+            consider('scanner', first, row_id)
+    row = actionable_hygiene(HygieneFinding.objects.all(), 3).order_by('first_seen', 'id').values('id', 'first_seen').first()
     if row:
         consider('hygiene', row['first_seen'], row['id'])
     if best['at'] is None:

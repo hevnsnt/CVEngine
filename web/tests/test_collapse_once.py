@@ -29,10 +29,14 @@ COLLAPSE = re.compile(r'ROW_NUMBER\(\) OVER \(PARTITION BY CASE')
 
 
 def collapses(run):
-    """``(statements that run the host collapse, result)`` of one call."""
-    with CaptureQueriesContext(connection) as captured:
+    """``(times the host collapse ran, result)`` of one call: the SQL statements that run it, and the runs of the collapse worked out in Python from set-based
+    reads (``cveFeed.inventory_counts``, which the whole-inventory ``counts.rep_ids`` uses; it was the SQL statement alone until then)."""
+    from cveFeed import inventory_counts
+    python_runs = []
+    original = inventory_counts._collapse
+    with mock.patch.object(inventory_counts, '_collapse', lambda *a, **k: python_runs.append(1) or original(*a, **k)), CaptureQueriesContext(connection) as captured:
         result = run()
-    return sum(1 for q in captured.captured_queries if COLLAPSE.search(q['sql'])), result
+    return sum(1 for q in captured.captured_queries if COLLAPSE.search(q['sql'])) + len(python_runs), result
 
 
 class CollapseWorld(TestCase):

@@ -52,6 +52,19 @@ def computers():
     }
 
 
+def fingerprints():
+    """``name -> function`` returning ``snapshot_cache.table_fingerprint`` of the tables a snapshot is computed from, for the snapshots worth not recomputing
+    when none of them changed (the headline counts and the ticker; the others cost milliseconds)."""
+    from cveFeed.models import AutoFireRun, CVEEntry, CVEMatch, GeneratedTemplate, HygieneFinding, InternalRange, TlsCertificate, Triage
+    from dashboard.models import Project
+    from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Vulnerability
+    from targetApp.models import Domain
+    tables = sorted({m._meta.db_table for m in (AutoFireRun, CVEEntry, CVEMatch, GeneratedTemplate, HygieneFinding, InternalRange, TlsCertificate, Triage, Project,
+                                                IpAddress, Port, ScanHistory, Subdomain, Vulnerability, Domain, Subdomain.ip_addresses.through, IpAddress.ports.through)})
+    shared = lambda: snapshot_cache.table_fingerprint(*tables)  # noqa: E731
+    return {'stats': shared, 'discovery-counts': shared}
+
+
 def _prebuild_graph(recipe, entry, previous):
     """A graph whose version moved is built here, once, so the viewers' ``?v=`` polls that find it changed are served from the cache instead of
     each walking the inventory (a request that finds the payload missing still builds it, as before). Kept as long as a payload a request builds
@@ -110,7 +123,7 @@ def refresh_hot_scopes(budget=None):
         return {'enabled': True, 'skipped': 'the cache is not answering'}
     started = time.monotonic()
     ran = False
-    summary = {'enabled': True, 'hot': 0, 'refreshed': 0, 'fresh': 0, 'busy': 0, 'dropped': 0, 'errors': 0, 'out_of_time': 0, 'idle': 0}
+    summary = {'enabled': True, 'hot': 0, 'refreshed': 0, 'fresh': 0, 'busy': 0, 'unchanged': 0, 'dropped': 0, 'errors': 0, 'out_of_time': 0, 'idle': 0}
     try:
         last = snapshot_cache.last_beat() or {}
         own, classic = backlog()
@@ -123,7 +136,7 @@ def refresh_hot_scopes(budget=None):
             return {**summary, 'skipped': reason}
         ran = True
         snapshot_cache.beat({'state': 'running'})
-        known = computers()
+        known, prints = computers(), fingerprints()
         recipes = snapshot_cache.hot_recipes()
         summary['hot'] = len(recipes)
         keys = {f"cve:snap:{r['name']}:{r['scope']}": r for r in recipes}
@@ -159,7 +172,7 @@ def refresh_hot_scopes(budget=None):
                     summary['dropped'] += 1  # the scope's projects changed since the request: that key is no one's now
                     continue
                 status, entry, previous = snapshot_cache.refresh(rec['name'], rec['scope'], lambda: compute(rec['args']), fresh, etag_of,
-                                                                 due_age=max(0, fresh - interval))
+                                                                 due_age=max(0, fresh - interval), fingerprint=prints.get(rec['name']))
                 summary[status] += 1
                 if after and status == 'refreshed':
                     after(rec, entry, previous)

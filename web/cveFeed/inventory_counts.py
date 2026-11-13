@@ -84,14 +84,12 @@ def _exposed_ids(ids):
             | set(findings.filter(subdomain_id__in=ids).values_list('subdomain_id', flat=True).distinct()))
 
 
-def shared_host_counts(rows=None):
-    """``{'hosts': {project_id: n}, 'exposed': {project_id: n}}`` for every project, the numbers ``compute_snapshot`` gets for each alone. ``rows``: the
-    current inventory (``_current_rows``) when the caller has read it."""
-    rows = current_rows() if rows is None else rows
+def _collapse(rows):
+    """``(best, host_key, links)``: ``best`` maps each host key to ``(rank, name, project_id, subdomain id)`` of the one row that stands for the host,
+    ``host_key(sub_id, name, project_id)`` is the key of any row and ``links`` the address links read for them."""
     ids = [r[0] for r in rows]
     links = _links(ids)
     ports = _open_ports({ip for ls in links.values() for ip, _ in ls})
-    exposed_ids = _exposed_ids(ids)
 
     def open_ports(sub_id):
         found = set()
@@ -119,14 +117,30 @@ def shared_host_counts(rows=None):
         key = host_key(sub_id, name, project_id)
         rank = (0 if name == domain_name else 1, len(name), name, -open_count, -sub_id)
         if key not in best or rank < best[key][0]:
-            best[key] = (rank, name, project_id)
+            best[key] = (rank, name, project_id, sub_id)
+    return best, host_key
+
+
+def rep_ids(rows=None):
+    """The ids of the one row per host of the whole inventory: what ``counts.host_reps()`` selects with no narrowing (``counts.rep_ids``)."""
+    rows = current_rows() if rows is None else rows
+    best, _key = _collapse(rows)
+    return [sub_id for _rank, _name, _project, sub_id in best.values()]
+
+
+def shared_host_counts(rows=None):
+    """``{'hosts': {project_id: n}, 'exposed': {project_id: n}}`` for every project, the numbers ``compute_snapshot`` gets for each alone. ``rows``: the
+    current inventory (``current_rows``) when the caller has read it."""
+    rows = current_rows() if rows is None else rows
+    best, host_key = _collapse(rows)
+    exposed_ids = _exposed_ids([r[0] for r in rows])
     exposed_keys, exposed_names = set(), set()
     for sub_id, name, _scan, project_id, _domain in rows:
         if sub_id in exposed_ids:
             exposed_keys.add(host_key(sub_id, name, project_id))
             exposed_names.add((project_id, name))
     hosts, exposed = defaultdict(int), defaultdict(int)
-    for key, (_rank, name, project_id) in best.items():
+    for key, (_rank, name, project_id, _sub_id) in best.items():
         hosts[project_id] += 1
         if key in exposed_keys or (project_id, name) in exposed_names:
             exposed[project_id] += 1

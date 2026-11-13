@@ -52,7 +52,7 @@ MAX_HOT_PER_USER = 24  # one user's share of them (a screen asks for about four 
 BEAT_KEY = 'cve:snap:refresher'  # the refresher's heartbeat: {'at', 'interval', ...}
 METRIC_TTL = 3 * 3600
 # a request: served fresh / served stale / computed / waited for a winner; the refresher: refreshed a snapshot, skipped a run (a stressed worker), overran its budget
-OUTCOMES = ('hit', 'stale', 'miss', 'waited', 'refreshed', 'skipped', 'overran')
+OUTCOMES = ('hit', 'stale', 'miss', 'waited', 'refreshed', 'unchanged', 'skipped', 'overran')
 NAMES = ('stats', 'discovery-counts', 'graph-version', 'graph-live', 'search-facets', 'activity-days', 'retest-counts', 'situations', 'refresher')
 
 INTERNAL = ('host-reps',)  # snapshots the others are built from: not counted as polls (the per-hour counters are what people asked for)
@@ -269,14 +269,37 @@ def token_of(payload):
     return hashlib.sha1(json.dumps(payload, sort_keys=True, default=str, separators=(',', ':')).encode()).hexdigest()[:20]
 
 
-def _build(compute, etag_of, rev, by='request'):
+def _build(compute, etag_of, rev, by='request', fingerprint=None):
     started = _elapsed()
+    seen = fingerprint() if fingerprint is not None else None  # taken before the computation: a write during it makes the next look find a change
     flag = _building.set(True)
     try:
         payload = compute()
     finally:
         _building.reset(flag)
-    return {'payload': payload, 'etag': (etag_of or token_of)(payload), 'at': _now(), 'rev': rev, 'by': by, 'took': round(_elapsed() - started, 3)}
+    entry = {'payload': payload, 'etag': (etag_of or token_of)(payload), 'at': _now(), 'rev': rev, 'by': by, 'took': round(_elapsed() - started, 3)}
+    if seen is not None:
+        entry['fp'] = seen
+    return entry
+
+
+UNCHANGED_KEEP_SECONDS = 300  # a snapshot whose inputs did not change is renewed instead of recomputed, for at most this long (clock-dependent numbers move slowly)
+
+
+def table_fingerprint(*tables):
+    """A string that changes whenever a row of any of these tables (database table names) is inserted, updated or deleted: PostgreSQL's own counters, one
+    cheap read, no scan of the tables. A change shows up within about ten seconds (a backend reports its counters when it goes idle). ``None`` when they
+    cannot be read, which is never "unchanged"."""
+    from django.db import connection
+    try:
+        if connection.vendor != 'postgresql':
+            return None
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT relname, n_tup_ins, n_tup_upd, n_tup_del FROM pg_stat_user_tables WHERE relname = ANY(%s) ORDER BY relname', [sorted(tables)])
+            rows = cursor.fetchall()
+        return json.dumps(rows) if len(rows) == len(set(tables)) else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def snapshot(name, scope, compute, fresh, etag_of=None, hot=None):
@@ -350,11 +373,15 @@ def snapshot(name, scope, compute, fresh, etag_of=None, hot=None):
             pass
 
 
-def refresh(name, scope, compute, fresh, etag_of=None, due_age=None):
+def refresh(name, scope, compute, fresh, etag_of=None, due_age=None, fingerprint=None):
     """What the refresher does for one hot scope: ``(status, entry, previous)`` (``previous`` is the snapshot it replaced, or None). ``'fresh'`` when the stored snapshot is of the current revision and younger
     than ``due_age`` (default ``fresh``), ``'busy'`` when a request or another refresher holds the lock, else ``'refreshed'`` with the new
     snapshot, stored under the key a request would have written (``by: 'refresher'``, so requests know to leave it to us). Raises what
-    ``compute`` raises (the lock is released first)."""
+    ``compute`` raises (the lock is released first).
+
+    ``fingerprint`` (a function returning ``table_fingerprint`` of what ``compute`` reads) lets a snapshot that is due but whose inputs have not
+    changed since it was computed be renewed (``'unchanged'``: the same payload with a new time, for up to ``UNCHANGED_KEEP_SECONDS``) instead of recomputed:
+    a paused instance with a page open used to recompute its headline counts every few seconds for nothing."""
     key = f'cve:snap:{name}:{scope}'
     lock = f'{key}:lock'
     entry, rev = cache.get(key), revision()
@@ -366,7 +393,13 @@ def refresh(name, scope, compute, fresh, etag_of=None, due_age=None):
     if not cache.add(lock, 1, LOCK_SECONDS):
         return 'busy', previous, previous
     try:
-        entry = _build(compute, etag_of, rev, by='refresher')
+        if (fingerprint is not None and previous is not None and previous['rev'] == rev and previous.get('fp') is not None
+                and _now() - previous['at'] < UNCHANGED_KEEP_SECONDS and fingerprint() == previous['fp']):
+            renewed = {**previous, 'at': _now(), 'by': 'refresher'}
+            cache.set(key, renewed, store_seconds(fresh))
+            count(name, 'unchanged')
+            return 'unchanged', renewed, previous
+        entry = _build(compute, etag_of, rev, by='refresher', fingerprint=fingerprint)
         cache.set(key, entry, store_seconds(fresh))
         count(name, 'refreshed')
         return 'refreshed', entry, previous

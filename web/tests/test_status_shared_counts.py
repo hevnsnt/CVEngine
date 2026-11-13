@@ -92,8 +92,8 @@ class StatementCountTests(World):
         cache.clear()
         own_run = self.statements(lambda: [system_status._project_row(p) for p in self.projects])
         collapses = lambda run: [q for q in run if 'ROW_NUMBER() OVER' in q]
-        self.assertEqual(len(collapses(own_run)), 3)       # one collapse per project
-        self.assertEqual(len(collapses(shared_run)), 1)    # one for all of them
+        self.assertEqual(len(collapses(own_run)), 3)       # one SQL collapse per project
+        self.assertEqual(len(collapses(shared_run)), 0)    # none: the hosts of every project are collapsed once, in Python, from set-based reads
         cve_groups = lambda run: [q for q in run if '"cveFeed_cveentry"."cvss" >=' in q and 'GROUP BY' in q]
         self.assertEqual((len(cve_groups(own_run)), len(cve_groups(shared_run))), (3, 1))
         self.assertLess(len(shared_run), len(own_run))

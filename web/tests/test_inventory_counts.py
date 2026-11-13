@@ -13,7 +13,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from agentapi import system_status
-from cveFeed import correlation, inventory_counts, stats_history, subdir_apps, vhost_scan, web_shot, wpscan_scan
+from cveFeed import correlation, counts, inventory_counts, stats_history, subdir_apps, vhost_scan, web_shot, wpscan_scan
 from cveFeed.models import CVEEntry, CVEMatch, HostScreenshot, HygieneFinding, ProbeObservation
 from dashboard.models import Org, Project
 from scanEngine.models import EngineType
@@ -24,6 +24,35 @@ TASKS = [None, [], ['host_pipeline'], ['host_pipeline'], ['host_pipeline', 'x'],
 STATUS = [2, 2, 2, 2, 2, 0, 1, -1, 3]
 WORLDS = int(os.environ.get('INVENTORY_FUZZ_WORLDS', '15'))
 SEED = int(os.environ.get('INVENTORY_FUZZ_SEED', '7001'))
+
+
+def previous_oldest_open(now):
+    """``counts.oldest_open`` as it was (a correlated first-seen subquery per scanner finding), with ties broken by id: the oracle."""
+    from django.db.models import OuterRef, Subquery
+
+    from cveFeed.threat import HIGH_CVSS
+    best = {'at': None, 'kind': None, 'id': None}
+
+    def consider(kind, at, row_id):
+        if at is not None and (best['at'] is None or at < best['at']):
+            best.update(at=at, kind=kind, id=row_id)
+    first_match = Subquery(CVEMatch.objects.filter(cve_entry=OuterRef('cve_entry'), subdomain__target_domain=OuterRef('subdomain__target_domain'),
+                                                   subdomain__name=OuterRef('subdomain__name')).order_by('created_at').values('created_at')[:1])
+    row = counts.exposed_matches().filter(cve_entry__cvss__gte=HIGH_CVSS).annotate(first=first_match).order_by('first', 'id').values('id', 'first').first()
+    if row:
+        consider('cve', row['first'], row['id'])
+    first_finding = Subquery(Vulnerability.objects.filter(name=OuterRef('name'), subdomain__target_domain=OuterRef('subdomain__target_domain'),
+                                                          subdomain__name=OuterRef('subdomain__name'), discovered_date__isnull=False).order_by('discovered_date').values('discovered_date')[:1])
+    row = (counts.actionable_findings(Vulnerability.objects.filter(severity__gte=3, subdomain__isnull=False)).annotate(first=first_finding)
+           .filter(first__isnull=False).order_by('first', 'id').values('id', 'first').first())
+    if row:
+        consider('scanner', row['first'], row['id'])
+    row = counts.actionable_hygiene(HygieneFinding.objects.all(), 3).order_by('first_seen', 'id').values('id', 'first_seen').first()
+    if row:
+        consider('hygiene', row['first_seen'], row['id'])
+    if best['at'] is None:
+        return {'days': None, 'kind': None, 'id': None}
+    return {'days': max(0, (now - best['at']).days), 'kind': best['kind'], 'id': best['id']}
 
 
 class RandomInventories(TestCase):
@@ -104,6 +133,10 @@ class RandomInventories(TestCase):
                 if {r[0] for r in rows} != expected:
                     bad.append(('current', w, sorted({r[0] for r in rows} ^ expected)[:10]))
                 shared = system_status._shared_inputs(ids)
+                if counts.oldest_open(now) != previous_oldest_open(now):
+                    bad.append(('oldest_open', w, counts.oldest_open(now), previous_oldest_open(now)))
+                if set(inventory_counts.rep_ids()) != set(counts.host_reps().values_list('pk', flat=True)):
+                    bad.append(('rep_ids', w))
                 web = inventory_counts.web_hosts_by_project()
                 for project in projects:
                     own = stats_history.compute_snapshot(project, with_fixed=False)
