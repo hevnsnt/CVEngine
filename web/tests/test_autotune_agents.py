@@ -373,6 +373,10 @@ class AuditTests(AgentBase):
         send(client_for(self.root), 'PUT', 'tunables', {'values': {'triage_max_per_project_day': 100}})
         person = AuditLog.objects.get(action='tunable.set', target='triage_max_per_project_day')
         self.assertNotIn('via_token', person.detail)
+        # a Sentinel's token is not marked: its rows already name the Sentinel
+        from tenancy import audit as audit_module
+        with audit_module.acting_as(SimpleNamespace(token=SimpleNamespace(name='sentinel:x', scope='sentinel', pk=None))):
+            self.assertEqual(audit_module.token_detail(), {})
         # the mark does not leak into the next call on the same thread
         from tenancy import audit
         self.assertEqual(audit.token_detail(), {})
