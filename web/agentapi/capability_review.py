@@ -36,6 +36,8 @@ REVIEW = [
         'set_project_settings', 'PUT P/settings',  # host review mode lower-only, inventory create_hosts cannot be switched on
         'PUT P/secrets/settings',  # validation cannot be switched on
         'POST P/internal-ranges',  # refused to a token; removing a range stays open
+        'PUT P/api-keys/{service}',  # storing a key switches a paid outside service on: refused; removing one is open
+        'PUT P/targets/{target_id}/auth-credential',  # a stored sign-in makes the scanners send credentials: refused; deleting one is open
         'generate_sentinel_enrollment', 'POST P/sentinels/enroll', 'POST orgs/{org}/sentinels/enroll', 'POST sentinels/enroll',  # an internal Sentinel is a person's
     ]),
     ('allow', 'adds or removes a target or what a write role may do to its own project: the role and project scope were chosen by the person who made the token', [
@@ -68,9 +70,6 @@ REVIEW = [
         'set_finding_assignee', 'set_finding_heat', 'POST P/findings/{kind}/{finding_id}/heat', 'POST P/findings/heat', 'add_finding_comment',
         'POST P/findings/{kind}/{finding_id}/comments', 'add_supplier', 'POST P/suppliers', 'set_supplier_finding_status', 'PATCH P/suppliers/findings/{finding_id}',
         'update_cve_detection', 'PUT cves/{cve_id}/detection', 'PUT secrets/rules',
-    ]),
-    ('allow', 'the caller supplies its own value for a service or sign-in it uses; nothing switches on by itself and nothing is sent that the caller did not give', [
-        'PUT P/api-keys/{service}', 'PUT P/targets/{target_id}/auth-credential',
     ]),
     ('allow', 'host-reported data, or the protocol of the agent or Sentinel that holds the token (its own registration, heartbeat and tasks); a new agent is pending until a person approves it', [
         'POST P/inventory', 'POST P/inventory/{inventory_id}/adopt', 'register_assets', 'PUT assets', 'register_agent', 'PUT agent', 'agent_heartbeat', 'POST agent/heartbeat',

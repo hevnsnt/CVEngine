@@ -51,6 +51,8 @@ def set_credential(ctx, slug, target_id, body):
     ``clear_cookie: true`` removes it) ``origins`` the ``scheme:port`` list it may go to (default ``["https:443"]``) and ``allow_untrusted_certificate`` (boolean, default false,
     kept when left out): also send it over a connection whose certificate does not verify, which lets anyone in the network path read it. REST and the web
     page only: a secret never passes through an MCP tool."""
+    if ctx.token is not None:  # an API token or MCP call: a stored sign-in makes the scanners send credentials to the target, so only a person stores one (deleting one stays open)
+        raise ApiError(403, 'a stored sign-in makes the scanners send credentials to the target, so only a person stores one, in the web interface (the target\'s sign-in); a token may delete one')
     from cveFeed.admin_api import audit
     from cveFeed.models import AuthCredential
     project = _admin(ctx, slug, write=True)

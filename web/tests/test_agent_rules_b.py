@@ -585,16 +585,53 @@ class PersonOnlyCapabilitiesTests(TestCase):
         self.assertEqual(call(self.root, 'PUT', url, {'inventory': {'create_hosts': True}})[0], 200)  # a person
         self.assertEqual(call(self.root_token, 'PUT', url, {'inventory': {'create_hosts': False}})[0], 200)
 
+    def test_a_token_cannot_store_a_service_key_anywhere_but_can_remove_one(self):
+        from dashboard.models import ApiCredential, Org
+        from tests.test_agentapi import call, tool_call
+        url = '/api/v1/projects/sen-a/api-keys/shodan'
+        status, out = call(self.root_token, 'PUT', url, {'api_key': 'sk-secret'})
+        self.assertEqual(status, 403, out)
+        self.assertIn('person', json.dumps(out))
+        self.assertFalse(ApiCredential.objects.filter(project=self.pa).exists())
+        self.assertEqual(call(self.root, 'PUT', url, {'api_key': 'sk-secret'})[0], 200)  # a person
+        self.assertEqual(call(self.root_token, 'DELETE', url)[0], 200)
+        self.assertFalse(ApiCredential.objects.filter(project=self.pa).exists())
+        # the instance keys and an organization key, through the settings tool
+        error, text = tool_call(self.root_token, 'change_setting', {'name': 'keys', 'values': {'openai': {'key': 'sk-x'}}})
+        self.assertTrue(error)
+        self.assertIn('person', text)
+        error, text = tool_call(self.root_token, 'change_setting', {'name': 'org_api_key', 'id': f'{self.org1.pk}/shodan', 'values': {'api_key': 'sk-x'}})
+        self.assertTrue(error)
+        self.assertFalse(tool_call(self.root_token, 'change_setting', {'name': 'keys', 'values': {'openai': {'clear': True}}})[0])  # removing is open
+        self.assertIsInstance(Org.objects.get(pk=self.org1.pk), Org)
+
+    def test_a_token_cannot_store_a_target_sign_in_but_can_delete_one(self):
+        from agentapi import authcheck
+        from cveFeed.models import AuthCredential
+        from tests.test_agentapi import call
+        url = f'/api/v1/projects/sen-a/targets/{self.da.pk}/auth-credential'
+        body = {'label': 'test account', 'scope': 'target', 'headers': [{'name': 'Authorization', 'secret': 'Bearer abc'}], 'expires': 30}
+        status, out = call(self.root_token, 'PUT', url, body)
+        self.assertEqual(status, 403, out)
+        self.assertIn('person', json.dumps(out))
+        self.assertFalse(AuthCredential.objects.exists())
+        status, out = call(self.root, 'PUT', url, body)  # a person
+        self.assertEqual(status, 200, out)
+        row = AuthCredential.objects.get()
+        self.assertEqual(call(self.root_token, 'DELETE', f'/api/v1/projects/sen-a/auth-credentials/{row.pk}')[0], 200)
+        self.assertIsNotNone(authcheck)
+
     def test_the_ai_probes_are_limited_per_token_an_hour(self):
         from django.core.cache import cache
         from tests.test_agentapi import tool_call
         from dashboard.models import ApiToken
         for token in ApiToken.objects.all():
             cache.delete(f'agentapi:ai-probe:{token.pk}')
+        limit = getattr(bridge, 'AI_PROBE_PER_HOUR', 6)  # a build without the limit fails the assertions below instead of erroring here
         codes = []
-        for _ in range(bridge.AI_PROBE_PER_HOUR + 2):
+        for _ in range(limit + 2):
             error, text = tool_call(self.root_token, 'change_setting', {'name': 'ai_models', 'values': {}})
             codes.append('429' if error and 'an hour' in str(text) else 'other')
-        self.assertEqual(codes[:bridge.AI_PROBE_PER_HOUR], ['other'] * bridge.AI_PROBE_PER_HOUR)
-        self.assertEqual(codes[bridge.AI_PROBE_PER_HOUR:], ['429', '429'])
+        self.assertEqual(codes[:limit], ['other'] * limit)
+        self.assertEqual(codes[limit:], ['429', '429'])
         self.assertEqual(sum(1 for c in codes if c == '429'), 2)
