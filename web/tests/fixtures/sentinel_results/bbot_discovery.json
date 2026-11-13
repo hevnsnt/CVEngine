@@ -14,5 +14,18 @@
       "reason": "API key was rejected"
     }
   ],
-  "hard_failures": []
+  "hard_failures": [],
+  "cuts": [
+    {
+      "what": "events",
+      "kind": "items",
+      "limit": 5000,
+      "dropped": 12
+    },
+    {
+      "what": "time_limit",
+      "kind": "time",
+      "limit": 21600
+    }
+  ]
 }
