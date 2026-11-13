@@ -220,6 +220,8 @@ def set_secrets_settings(ctx, slug, body):
     wanted = (body or {}).get('validation') if isinstance(body, dict) else None
     if not isinstance(wanted, dict) or not isinstance(wanted.get('enabled'), bool):
         raise ApiError(400, 'send {validation: {enabled: true|false, attestation}}')
+    if wanted['enabled'] and ctx.token is not None:  # an API token or MCP call: validation sends the secrets it found to their provider, so only a person switches it on
+        raise ApiError(403, 'switching secret validation on sends the secrets found to their provider, so only a person does it, in the web interface (the attestation is theirs to give); a token may switch it off')
     try:
         secrets_validation.switch(project, ctx.user, wanted['enabled'], wanted.get('attestation') or '')
     except secrets_validation.SwitchError as exc:

@@ -166,6 +166,9 @@ TUNABLE_ZERO_IS_UNLIMITED = ('egress_port25_per_hour',)
 # through), a ``skip`` list the more entries it has. {entry: {field: 'only' | 'skip'}}
 AGENT_SCOPE_LISTS = {'tailscale_project': {'only_tags': 'only', 'only_os': 'only', 'skip_tags': 'skip'}}
 WRITE_METHODS = ('PUT', 'PATCH', 'POST')
+# ai_test and ai_models each make a paid call to the AI provider that no cap counts: a token may make this many of them an hour (all the two together), so a loop cannot spend.
+AI_PROBE_ENTRIES = ('ai_test', 'ai_models')
+AI_PROBE_PER_HOUR = 6
 NOT_EXPOSED[('admin', 'openvas')] = 'the same add-on settings as the openvas entry (settings table).'
 IDENTITY_ROUTES_NOT_YET = ('users', 'memberships', 'orgs', 'projects')  # people, roles and organizations: a separate slice, owner to say how far an agent may go
 
@@ -238,6 +241,8 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
         require_write_token(ctx)
         if name in READ_ONLY_FOR_AGENTS:
             raise ApiError(403, f'{name} is not available to agents: {READ_ONLY_FOR_AGENTS[name]}; use change_setting on the setting itself where there is one')
+        if name in AI_PROBE_ENTRIES and ctx.token is not None:
+            _ai_probe_budget(ctx)
         if method == 'DELETE' and name in AGENT_CANNOT_REMOVE:
             raise ApiError(403, f'{name} cannot be removed by an agent: {AGENT_CANNOT_REMOVE[name]}')
     if method != 'GET' and isinstance(values, dict):
@@ -259,6 +264,19 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
     if method == 'PUT' and name in ('scan_concurrency', 'tunables') and isinstance(values, dict) and isinstance(values.get('values'), dict) and values['values']:
         return _throughput_write(ctx, name, method, fn, request, values, groups)
     return _run(ctx, name, api, fn, request, groups)
+
+
+def _ai_probe_budget(ctx):
+    from django.core.cache import cache
+    key = f'agentapi:ai-probe:{getattr(ctx.token, "pk", "token")}'
+    cache.add(key, 0, 3600)
+    try:
+        used = cache.incr(key)
+    except ValueError:
+        cache.set(key, 1, 3600)
+        used = 1
+    if used > AI_PROBE_PER_HOUR:
+        raise ApiError(429, f'each of these calls is paid for by your AI provider: a token may make {AI_PROBE_PER_HOUR} an hour; try again later')
 
 
 def _run(ctx, name, api, fn, request, groups):
