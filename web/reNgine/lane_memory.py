@@ -219,6 +219,25 @@ def install():
     task_postrun.connect(lambda task_id=None, task=None, **kw: after(task_id, getattr(task, 'name', '?')), weak=False, dispatch_uid='lane-memory-post')
 
 
+GC_FRESH_SECONDS = 300  # a lane's collection timing older than this (ten ticks of its timer) is not shown: the lane is gone or has no timer
+
+
+def gc_timing(lane, now):
+    """The last and the worst garbage collection of ``lane``'s timer (reNgine/gevent_gc.py), in seconds: ``{last_s, last_full_s, worst_s, frozen}``, or None when the lane
+    has published none lately (a collection is slow when ``last_s`` or ``worst_s`` is a second or more)."""
+    try:
+        from django.core.cache import cache
+
+        from reNgine import gevent_gc
+        raw = cache.get(gevent_gc.GC_KEY + lane)
+        data = json.loads(raw) if raw else None
+        if not isinstance(data, dict) or now - data['at'] > GC_FRESH_SECONDS:
+            return None
+        return {key: round(data[key], 3) if isinstance(data.get(key), (int, float)) and key != 'frozen' else data.get(key) for key in ('last_s', 'last_full_s', 'worst_s', 'frozen')}
+    except Exception:  # noqa: BLE001 - a measurement must never hide the lane's memory
+        return None
+
+
 def report(now=None):
     """What the status shows: one row per lane that has reported, biggest first, with its five biggest tasks by size after the task and by growth."""
     from django.core.cache import cache
@@ -234,7 +253,8 @@ def report(now=None):
             continue
         try:
             tasks = data.get('tasks') or {}
-            out.append({'lane': lane, 'rss_mb': data.get('rss_mb'), 'peak_mb': data.get('peak_mb'), 'age_seconds': int(now - data.get('at', now)),
+            out.append({'gc': gc_timing(lane, now),
+                        'lane': lane, 'rss_mb': data.get('rss_mb'), 'peak_mb': data.get('peak_mb'), 'age_seconds': int(now - data.get('at', now)),
                         'limit_mb': data.get('limit_mb'),
                         'by_size': [{'task': n, 'runs': t['n'], 'max_rss_mb': t['max_rss_mb']} for n, t in sorted(tasks.items(), key=lambda i: -i[1]['max_rss_mb'])[:5]],
                         'by_growth': [{'task': n, 'runs': t['n'], 'max_growth_mb': t['max_growth_mb']} for n, t in sorted(tasks.items(), key=lambda i: -i[1]['max_growth_mb'])[:5]

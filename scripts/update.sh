@@ -344,9 +344,10 @@ except ValueError:
 def host(mapping):
     ip = str(mapping.get("host_ip") or "")
     return "127.0.0.1" if ip in ("", "0.0.0.0", "::") else ip
-for mapping in (services.get("proxy") or {}).get("ports") or []:
-    if int(mapping.get("target") or 0) == 443 and mapping.get("published"):
-        print("https://" + host(mapping) + ":" + str(mapping["published"]) + "/"); sys.exit(0)
+for target in (443, 8443):  # 8443 is the proxy listener a tunnel overlay publishes instead of 443 (docs/HOSTING-ONLINE.md)
+    for mapping in (services.get("proxy") or {}).get("ports") or []:
+        if int(mapping.get("target") or 0) == target and mapping.get("published"):
+            print("https://" + host(mapping) + ":" + str(mapping["published"]) + "/"); sys.exit(0)
 for mapping in (services.get("web") or {}).get("ports") or []:
     if int(mapping.get("target") or 0) == 8000 and mapping.get("published"):
         print("http://" + host(mapping) + ":" + str(mapping["published"]) + "/"); sys.exit(0)

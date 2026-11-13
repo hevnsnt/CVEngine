@@ -12,6 +12,7 @@ shares with the branch, GitHub being unable to say anything about commits it has
 
 Pure helpers take their HTTP function as a parameter so they are testable without a network.
 """
+import hashlib
 import json
 import logging
 import math
@@ -74,6 +75,40 @@ def installed_sha():
         return first
     env = os.environ.get('CVENGINE_COMMIT', '').strip().lower()
     return env if SHA_RE.match(env) else ''
+
+
+_build_seen = None  # the answer, computed when the web process starts (reNgine.middleware.HtmlRevalidateMiddleware); tests put None back
+
+
+def fingerprint(*roots):
+    """12 hex characters over the sorted (relative path, content hash) of every file under ``roots`` (directories). Nothing else goes in: no
+    mtime, no commit file."""
+    seen = []
+    for index, root in enumerate(roots):
+        for folder, dirs, names in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if d != '__pycache__')
+            for name in sorted(names):
+                path = os.path.join(folder, name)
+                try:
+                    with open(path, 'rb') as f:
+                        seen.append((index, os.path.relpath(path, root), hashlib.sha256(f.read()).hexdigest()))
+                except OSError:
+                    continue
+    return hashlib.sha256(repr(sorted(seen)).encode()).hexdigest()[:12]
+
+
+def build_id():
+    """The build this process serves to a browser: a fingerprint of the static ``cve/`` files and the page templates as they were on disk when
+    the process started (stamped into every page as ``<meta name="cvengine-build">``, answered by /cve/api/alive to a signed-in caller). A page
+    rendered by another build can tell, from the poll it makes anyway, that the server was updated (static/cve/sitewatch.js). Computed once,
+    when the web process is built (not at the first call: an old process whose files change under it, ./web is a bind mount, would otherwise
+    fingerprint the new ones), and kept. It does not depend on web/.commit, which the host writes at different moments on different update paths."""
+    global _build_seen
+    if _build_seen is None:
+        roots = [os.path.join(root, 'cve') for root in settings.STATICFILES_DIRS]
+        roots += [os.path.join(settings.BASE_DIR, 'cveFeed', 'templates'), os.path.join(settings.BASE_DIR, 'templates')]
+        _build_seen = fingerprint(*[r for r in roots if os.path.isdir(r)])
+    return _build_seen
 
 
 UPSTREAM_STALE_SECONDS = 3 * 86400  # the host refreshes it every half hour while its updater runs; this is days of silence
@@ -532,7 +567,7 @@ def state(row):
     return {
         'status': status, 'enabled': row.enabled, 'repo': row.repo, 'branch': row.branch, 'branch_warning': branch_warning(row.branch),
         'has_token': bool(row.token),
-        'installed': installed[:7], 'installed_known': bool(installed),
+        'installed': installed[:7], 'installed_known': bool(installed), 'build': build_id(),
         'local_commits': host['ahead'] if host else None, 'common': host['base'][:7] if host else '', 'host_comparison': note,
         'latest': row.latest_sha[:7], 'latest_message': row.latest_message, 'latest_url': row.latest_url,
         'latest_date': row.latest_date.isoformat() if row.latest_date else None, 'behind_by': row.behind_by,

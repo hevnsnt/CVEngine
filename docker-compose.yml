@@ -205,6 +205,7 @@ services:
       - ./config/nginx/rengine.conf:/etc/nginx/conf.d/rengine.conf:ro
       - ./web/static/cve/maintenance.html:/usr/share/nginx/maintenance/maintenance.html:ro
       - ./config/nginx/state:/etc/nginx/state:ro  # holds the maintenance flag while an update runs
+      - ./config/nginx/trusted-upstreams.conf:/etc/nginx/trusted-upstreams.conf:ro  # empty: no peer is believed to have set X-Forwarded-For (HOSTING-ONLINE.md, Cloudflare Tunnel)
       - static_volume:/usr/src/app/staticfiles/
       - scan_results:/usr/src/scan_results:ro
     networks:
