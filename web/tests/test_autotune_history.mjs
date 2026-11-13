@@ -135,6 +135,7 @@ test('a recommendation, a revert row and a release say what they are', () => {
   const auto = h.historyLine(SHAPES.auto_revert, NOW);
   assert.equal(auto.why, 'Undone because the change before it made things worse');
   assert.equal(auto.happened, 'put back: trouble for this setting appeared after the change');  // not "undid decision 6: ..."
+  assert.equal(h.historyLine({action: 'pause', setting: 'sentinel_pause:nmap', label: 'nmap on sentinel-1', new_value: 2, at: NOW}, NOW).what, 'nmap on sentinel-1 paused for 2 hours');
   assert.equal(h.historyLine(SHAPES.release, NOW).what, 'Hosts assessed at once handed back to auto-tune at 12');
 });
 

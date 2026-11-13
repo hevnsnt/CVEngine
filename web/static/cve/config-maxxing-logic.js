@@ -196,6 +196,7 @@ export const SOURCE_LABEL = { controller: "controller", ai: "AI advisor", person
 export function autoTuneLine(field, mode, formatDate = (x) => x) {
   const at = field && field.autotune;
   const none = { text: "", kind: "", release: false, suggestion: null };
+  if (at && !at.managed && at.why_not_managed && mode && mode !== "off") return { text: `Not auto-tuned: ${String(at.why_not_managed)}`, kind: "floor", release: false, suggestion: null };
   if (!at || !at.managed || !mode || mode === "off") return none;
   if (at.pinned && at.pinned_env && !at.pinned_by) {
     return { text: "Fixed by the server's own settings: save a value here to take it over", kind: "pinned", release: false, suggestion: null, detail: `Server setting: ${at.pinned_env}. Remove it from the server's .env file to let auto-tuning manage this number.` };
