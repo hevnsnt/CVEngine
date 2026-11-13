@@ -115,7 +115,7 @@ if [ "$(wc -l <"$ACTIONS_LOG" 2>/dev/null || echo 0)" -gt 500 ]; then tail -n 20
 
 if ! layout; then answer failed "could not work out the Compose layout (see the log on the host)"; exit 0; fi
 recreate() { timeout -k 10 300 "${COMPOSE[@]}" up -d --no-deps --force-recreate "$@" >>"$LOG" 2>&1 </dev/null 6>&- 9>&-; }
-present() { "${COMPOSE[@]}" ps -a --services 2>/dev/null </dev/null | grep -qx "$1"; }
+present() { grep -qx "$1" < <("${COMPOSE[@]}" ps -a --services 2>/dev/null </dev/null); }
 rc=0
 case $action in
   restart-celery)
