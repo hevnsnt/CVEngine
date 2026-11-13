@@ -110,6 +110,26 @@ class BridgeTests(TestCase):
         self.assertTrue(timings['read'] and timings['change'])
 
 
+class CredentialChecksThroughTheBridgeTests(TestCase):
+    """Owner rule: no check that sends credentials runs unless a person turned it on. An agent token, even one of an App Admin, cannot turn it on."""
+
+    def setUp(self):
+        self.root = User.objects.create_superuser('cred_root', 'c@x.io', 'x')
+
+    def test_an_agent_cannot_switch_credential_checks_on_but_can_switch_them_off_and_change_the_other_switch(self):
+        from dashboard.models import ScanPolicy
+        for values in ({'allow_credential_checks': True}, {'allow_credential_checks': True, 'nuclei_all_templates': False}):
+            with self.assertRaises(ApiError) as caught:
+                bridge.change_setting(ctx(self.root), 'scan_policy', values)
+            self.assertEqual(caught.exception.status, 403, values)
+        self.assertFalse(ScanPolicy.current().allow_credential_checks)
+        self.assertFalse(ScanPolicy.current().nuclei_all_templates is False and ScanPolicy.objects.exists())  # nothing was half applied
+        self.assertIs(bridge.get_setting(ctx(self.root), 'scan_policy')['allow_credential_checks'], False)
+        ScanPolicy.objects.create(allow_credential_checks=True)  # a person turned it on in the web interface
+        self.assertIs(bridge.change_setting(ctx(self.root), 'scan_policy', {'allow_credential_checks': False})['allow_credential_checks'], False)
+        self.assertEqual(bridge.change_setting(ctx(self.root), 'scan_policy', {'nuclei_all_templates': False})['nuclei_all_templates'], False)
+
+
 class AllowlistThroughTheBridgeTests(TestCase):
     """AM-2: the bridge's own request has an address of its own, so an agent must not be able to put it on the list and switch the list on."""
 

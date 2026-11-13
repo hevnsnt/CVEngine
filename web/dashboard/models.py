@@ -286,6 +286,9 @@ class ScanPolicy(models.Model):
 	# On (the default): every template Nuclei ships may run (the AI-written ones always stay read-only). Off: only Nuclei templates
 	# whose own text is a read-only check run.
 	nuclei_all_templates = models.BooleanField(default=True, db_default=True)
+	# Off (the default, for a new install and for an upgraded one): no check that sends credentials runs (Nuclei's default-login and bruteforce templates, which
+	# post vendor default logins to login forms), and the targeted pass never picks those tags. On: an App Admin turned it on; the web pass may run them.
+	allow_credential_checks = models.BooleanField(default=False, db_default=False)
 
 	@classmethod
 	def current(cls):

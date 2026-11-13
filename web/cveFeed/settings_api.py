@@ -384,7 +384,8 @@ def cve_seed_import(request):
 
 def scan_policy_get(request):
     from dashboard.models import ScanPolicy
-    return {'nuclei_all_templates': ScanPolicy.current().nuclei_all_templates}
+    row = ScanPolicy.current()
+    return {'nuclei_all_templates': row.nuclei_all_templates, 'allow_credential_checks': row.allow_credential_checks}
 
 
 def scan_policy_put(request):
@@ -400,6 +401,14 @@ def scan_policy_put(request):
         row.save()
         if changed:
             audit(request.user, 'scan_policy.nuclei_all_templates', 'on' if row.nuclei_all_templates else 'off')
+    if 'allow_credential_checks' in data:
+        if not isinstance(data['allow_credential_checks'], bool):
+            raise SettingsError(400, 'allow_credential_checks must be true or false')
+        changed = row.allow_credential_checks != data['allow_credential_checks']
+        row.allow_credential_checks = data['allow_credential_checks']
+        row.save()
+        if changed:
+            audit(request.user, 'scan_policy.allow_credential_checks', 'on' if row.allow_credential_checks else 'off')
     return scan_policy_get(request)
 
 
