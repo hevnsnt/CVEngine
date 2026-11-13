@@ -7,10 +7,10 @@ import { HELD_TEXT, MODES, canReview, conclusion, emptyText, failureText, findin
 const POLL_MS = 5000;
 const OPEN_VERDICTS = 6; // up to this many verdict lines are open by default; more sit behind the summary
 
-function verdictList(review, project, openFindings) {
+function verdictList(review, hostId, openFindings) {
   const views = (review.findings || []).map(findingView);
   if (!views.length) return null;
-  const box = el("details", "host-review-verdicts");
+  const box = el("details", "host-review-verdicts", null, { "data-keep-key": `host-review-verdicts-${hostId}` });
   if (views.length <= OPEN_VERDICTS) box.setAttribute("open", "");
   box.append(el("summary", "", `Verdict on each finding (${views.length})`));
   const list = el("ul", "host-review-list", null, { style: "list-style:none;margin:8px 0 0;padding:0;display:grid;gap:10px" });
@@ -117,7 +117,7 @@ export function hostReviewCard({ base, hostId, hostName = "this host", isCurrent
       status.append(el("p", "", conclusion(review), { style: "margin:8px 0 0" }));
       if (review.host_note) status.append(el("p", "note", review.host_note, { style: "margin:4px 0 0;overflow-wrap:anywhere" }));
       status.append(el("p", "note", `Reviewed ${when ? new Date(when).toLocaleString() : ""}${review.model ? ` by ${review.model}` : ""}.`, { style: "margin:4px 0 8px" }));
-      const verdicts = verdictList(review, base, openFindings);
+      const verdicts = verdictList(review, hostId, openFindings);
       if (verdicts) status.append(verdicts);
       const step = stepView(review.step);
       if (step) {
