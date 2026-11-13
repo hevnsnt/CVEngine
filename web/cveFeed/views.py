@@ -523,6 +523,9 @@ def dashboard(request):
     from dashboard.models import AIProviderSettings, Project
     if needs_welcome(request.user) and request.GET.get('skip') != '1':
         return redirect('cve_welcome')  # first run: the guided setup
+    from cveFeed.setup_questions import should_redirect
+    if should_redirect(request):
+        return redirect('cve_update_questions')  # an App Admin, once per session, while a question about an update has no answer (cveFeed.setup_questions)
     cfg = AIProviderSettings.objects.first()
     # The dashboard spans every project the viewer can see by default (the combined "All projects" view); a
     # ?project=<slug> they may see narrows every panel to that one. The switcher stays here when it changes.
@@ -715,6 +718,13 @@ def welcome_page(request):
     if row is not None and row.completed_at and request.GET.get('again') != '1':
         return redirect('cve_dashboard')  # a finished wizard is not shown again as an empty Step 1; ?again=1 opens it on purpose
     return render(request, 'cveFeed/welcome.html', ui_context(request, 'welcome'))
+
+
+def update_questions_page(request):
+    """"A few questions about this update": what costs money or changes what is scanned stays off until an App Admin answers (cveFeed.setup_questions)."""
+    if not (request.user.is_authenticated and request.user.is_superuser):
+        return redirect('cve_dashboard')  # everyone else sees nothing and is not blocked
+    return render(request, 'cveFeed/update_questions.html', ui_context(request, 'settings'))
 
 
 def account_page(request):

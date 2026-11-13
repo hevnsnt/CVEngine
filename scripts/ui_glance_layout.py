@@ -81,7 +81,8 @@ def run(page, shots, tag, generic=False):
         pg.fill('input[name=username]', USER)
         pg.fill('input[name=password]', PASSWORD)
         pg.click('button[type=submit], input[type=submit]')
-        pg.wait_for_load_state('networkidle')
+        pg.wait_for_selector('main', timeout=15000)  # not networkidle: a page that polls never reaches it
+        pg.wait_for_timeout(1500)
         pg.goto(f'{BASE}/cve/{PROJECT}/{page}')
         pg.add_style_tag(content='.scannerbar{display:none!important}')
         pg.wait_for_selector('.host-row', timeout=20000)

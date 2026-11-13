@@ -773,7 +773,7 @@ def state_view(request):
 
 def view(request):
     """Everything the wizard page draws from: saved values (never a secret), step status and the step to resume at."""
-    from cveFeed import welcome
+    from cveFeed import setup_questions, welcome
     from dashboard.models import AIProviderSettings
     from scanEngine.models import Notification
     row = wizard_row()
@@ -796,5 +796,6 @@ def view(request):
         'enrollments': enrollments_state(row),
         'notify': {'slack': bool(note and note.slack_hook_url), 'discord': bool(note and note.discord_hook_url)},
         'ai': {'connected': bool(ai and ai.enabled), 'provider': ai.provider if ai and ai.enabled else ''},
+        'ai_validation': next((q for q in setup_questions.snapshot()['questions'] if q['key'] == 'ai_validation'), None),  # the AI question of cveFeed.setup_questions, asked here on a new install
         'dwell_seconds': dwell_seconds(),
     }

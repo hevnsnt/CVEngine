@@ -48,6 +48,7 @@ class Fixture(TestCase):
         cls.alice = User.objects.create_user('rev-alice', password='x')
         cls.cve = CVEEntry.objects.create(cve_id='CVE-2099-7701', cvss=9.8, published_at=now, affected=[])
         AIProviderSettings.objects.create(provider='anthropic', api_key='sk-test-key', enabled=True)
+        ReviewerSettings.objects.create(enabled=True, auto_close=True)  # the reviewer ships off until an administrator answers (cveFeed.setup_questions)
 
     def setUp(self):
         cache.clear()

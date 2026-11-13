@@ -1364,7 +1364,7 @@ class LiveDashboardTests(TestCase):
 	def test_dashboard_redirects_to_welcome_until_onboarded(self):
 		root = User.objects.create_superuser('liveroot', 'l@x.io', 'x')
 		c = client_for(root)
-		self.assertEqual(c.get('/cve/').status_code, 200)  # this install already has targets: the wizard is not forced on it (cveFeed.setup_flow.needs_wizard)
+		self.assertEqual(c.get('/cve/?skip=1').status_code, 200)  # this install already has targets: the wizard is not forced on it (cveFeed.setup_flow.needs_wizard)
 		from dashboard.models import SetupWizard
 		SetupWizard.objects.create(started_at=timezone.now())  # a wizard somebody started resumes
 		r = c.get('/cve/')
@@ -1373,8 +1373,8 @@ class LiveDashboardTests(TestCase):
 		self.assertEqual(client_for(self.user).get('/cve/welcome/').status_code, 403)  # superuser only
 		self.assertEqual(client_for(self.user).get('/cve/').status_code, 200)  # members go straight in
 		c.post('/cve/api/welcome/finish', content_type='application/json')
-		self.assertEqual(c.get('/cve/').status_code, 200)
-		self.assertContains(c.get('/cve/'), 'AI activity')
+		self.assertEqual(c.get('/cve/?skip=1').status_code, 200)  # (?skip=1: an App Admin is otherwise sent once to the update questions, cveFeed.setup_questions)
+		self.assertContains(c.get('/cve/?skip=1'), 'AI activity')
 
 
 class NodeDetailTests(TestCase):

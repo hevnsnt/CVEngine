@@ -110,12 +110,12 @@ def options(live, limit_mb, small, recommended):
     def label(plan, base, detail):
         return f'{base} (recommended: {detail})' if plan == recommended else (f'{base} ({detail})' if plan == 'external' and live else base)
     return [
-        {'value': 'external', 'recommended': recommended == 'external',
+        {'value': 'external', 'recommended': recommended == 'external', 'base': 'Use my own Sentinels only',
          'label': label('external', 'Use my own Sentinels only',
                         f'you have {live} live; frees up to {free}' if live else 'none is live yet')},
-        {'value': 'internal', 'recommended': recommended == 'internal',
+        {'value': 'internal', 'recommended': recommended == 'internal', 'base': 'Use the built-in scanner only',
          'label': label('internal', 'Use the built-in scanner only', f'it uses at most {free} here')},
-        {'value': 'both', 'recommended': recommended == 'both',
+        {'value': 'both', 'recommended': recommended == 'both', 'base': 'Use both',
          'label': label('both', 'Use both', f'you have {live} live Sentinel of your own and the built-in scanner stays as the backup' if live == 1
                         else 'your Sentinels first, the built-in scanner as the backup')},
     ]

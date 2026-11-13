@@ -29,7 +29,7 @@ def unschedule_sweep(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("cveFeed", "0161_tuningdecision_verification"),
+        ("cveFeed", "0163_reviewer_off_until_asked"),
         ("dashboard", "0035_apitoken_suffix_db_default"),
         ("targetApp", "0008_domain_expect_private_ca"),
         ("django_celery_beat", "0001_initial"),
