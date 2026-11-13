@@ -28,6 +28,7 @@ import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation, pa
 import { inventoryBadge, openInventoryDialog, renderHostInventory } from "/staticfiles/cve/inventory.js";
 import { loadSignIns, signInButton } from "/staticfiles/cve/authcheck.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
+import { hostReviewCard } from "/staticfiles/cve/host-review-card.js";
 import { STORED, canDiscover, defaultChoice, discoverBody, discoverHint, discoverOptions, modeAfter, modeText, startedText } from "/staticfiles/cve/discover-mode-logic.js";
 import { suppliersPage } from "/staticfiles/cve/suppliers.js";
 import { situationsPage } from "/staticfiles/cve/situations.js";
@@ -1037,7 +1038,9 @@ const coverageLine = (c) => {
   if (!c.applicable) return "no check applies yet";
   const due = (c.checks || []).filter((x) => x.state === "due").map((x) => x.label);
   const shown = due.slice(0, 4).join(", ") + (due.length > 4 ? ` and ${due.length - 4} more` : "");
-  return `${c.done} of ${c.applicable} applicable checks done` + (due.length ? `; due: ${shown}` : "");
+  const none = (c.no_check || []).map((x) => x.port);
+  const noCheck = none.length ? `; no check exists for the service on port${none.length > 1 ? "s" : ""} ${none.slice(0, 6).join(", ")}${none.length > 6 ? ` and ${none.length - 6} more` : ""}` : "";
+  return `${c.done} of ${c.applicable} applicable checks done` + (due.length ? `; due: ${shown}` : "") + noCheck;
 };
 const hostOverview = (h) => {
   const http = h.http || {};
@@ -3858,6 +3861,7 @@ const pages = {
         tile("CVE matches", h.cve_matches, { hot: "fire", href: h.cve_matches ? `/cve/${encodeURIComponent(projectOf(h))}/matches/?host=${encodeURIComponent(h.host)}` : "" }),
       );
       pane.append(stats);
+      OV.main.append(hostReviewCard({ base: baseOf(projectOf(h)), hostId: h.id, isCurrent: () => current === h.id, ago: fullScanAgo }));
       OV.side.append(hostOverview(h));
       // why the host has its colour, so the rating can be checked rather than trusted
       const why = el("div", "why");

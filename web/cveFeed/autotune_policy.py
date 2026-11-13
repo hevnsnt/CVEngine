@@ -359,7 +359,7 @@ def sized_for_text(facts):
 def _memory_pressure(last):
     mem = last.get('memory') or {}
     if mem.get('kills'):
-        return f'{mem["kills"]} memory kill(s)'
+        return f'{mem["kills"]} memory kill{"" if mem["kills"] == 1 else "s"}'
     if mem.get('free_frac') is not None and mem['free_frac'] < MEMORY_FREE_PRESSURE:
         return f'only {round(mem["free_frac"] * 100)}% memory free'
     return None
@@ -496,7 +496,7 @@ def room(sample):
     if mem['free_frac'] < MEMORY_FREE_RAISE:
         return f'{round(mem["free_frac"] * 100)}% memory free (a probe needs {round(MEMORY_FREE_RAISE * 100)}%)'
     if mem.get('kills'):
-        return f'{mem["kills"]} memory kill(s)'
+        return f'{mem["kills"]} memory kill{"" if mem["kills"] == 1 else "s"}'
     db = _frac(_get(sample, 'db', 'used'), _get(sample, 'db', 'max'))
     if db is None:
         return 'database connections could not be counted'
@@ -898,10 +898,10 @@ def verdict(before, after):
     if metric not in METRICS or after.get('metric') != metric:
         return Verdict('unknown', 'the change did not record what it expected to improve')
     better, floor, label = METRICS[metric]
-    for name, text in (('kills', 'memory kill(s)'), ('oom', 'kernel oom kill(s) and Celery lane restart(s) in the last day')):
+    for name, text in (('kills', 'memory kill{s}'), ('oom', 'kernel oom kill{s} and Celery lane restart{s} in the last day')):
         was, now = before.get(name), after.get(name)
         if was is not None and now is not None and now > was:
-            return Verdict('regressed', f'{now} {text} after the change, {was} before')
+            return Verdict('regressed', f'{now} {text.format(s="" if now == 1 else "s")} after the change, {was} before')
     if after.get('trouble') and not before.get('trouble'):
         return Verdict('regressed', 'trouble for this setting appeared after the change')
     was, now = before.get('value'), after.get('value')

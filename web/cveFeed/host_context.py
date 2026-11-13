@@ -42,10 +42,12 @@ def edge_of(sub, project_id=None, observations=None, route_headers=None):
     from cvengine_scanner import versions
 
     from cveFeed import hosting
+    from cveFeed.triage import note_raw
     providers, basis = set(), []
     ips = list(sub.ip_addresses.all())
     pointers = [ip.reverse_pointer for ip in ips if ip.reverse_pointer]
     flagged = bool(sub.is_cdn or any(ip.is_cdn for ip in ips))
+    note_raw([sub.cname, sub.webserver, sub.cdn_name, pointers])  # what the host's own DNS and headers said, which the edge verdict below is made of
     info = hosting.classify(name=sub.name, cname=sub.cname or '', webserver=sub.webserver or '', reverse_pointers=pointers, cdn_name=sub.cdn_name or '',
                             is_cdn=flagged)
     dns_info = hosting.classify(name=sub.name, cname=sub.cname or '', webserver='', reverse_pointers=pointers, cdn_name=sub.cdn_name or '',
@@ -55,6 +57,7 @@ def edge_of(sub, project_id=None, observations=None, route_headers=None):
         providers.add(info['provider'])
         basis += info['evidence'][:2]
     for waf in sub.waf.all():
+        note_raw(waf.name)
         providers.add(waf.name[:60])
         basis.append(f'WAF fingerprint {waf.name[:40]}')
     for provider in versions.edges_from_headers(route_headers or {}):
@@ -62,6 +65,7 @@ def edge_of(sub, project_id=None, observations=None, route_headers=None):
         basis.append(f'edge response headers ({provider})')
     for row in observations or ():
         if row.outcome in ('edge', 'challenged') and row.product:
+            note_raw([row.product, row.probe])
             providers.add(row.product[:60])
             basis.append(f'probe {row.probe}: {row.outcome}')
     return {'fronted': bool(providers), 'verified': verified, 'providers': sorted(providers)[:6], 'basis': basis[:6]}
@@ -102,6 +106,7 @@ def library_copies(record, names=(), limit=6):
 
 
 def _technologies(sub, names, observed, libraries=None):
+    from cveFeed.triage import note_raw
     from cvengine_scanner import fingerprint
 
     from cveFeed import js_libraries
@@ -111,7 +116,7 @@ def _technologies(sub, names, observed, libraries=None):
     for tech in sub.technologies.all()[:200]:
         base, version = split_name_version(tech.name or '')
         row = {'name': _s(base or tech.name, 60, names), 'version': _s(version, 40, names), 'category': fingerprint.categorize(tech.name or ''),
-               'source': observed.get(tech.name, 'scan')}
+               'source': note_raw(observed.get(tech.name, 'scan'))}
         record = by_product.get((base or '').lower()) if js_libraries.is_library(tech.name) else None
         if record:  # where the version came from and every copy on the page, with the one that runs
             row['version_source'] = _s(record.get('version_source'), 12)
@@ -123,12 +128,13 @@ def _technologies(sub, names, observed, libraries=None):
 
 
 def _ports(sub, names):
+    from cveFeed.triage import note_raw
     from startScan.models import open_services
     out = []
     for ip in sub.ip_addresses.all():
         for port in open_services(ip):
             extra = port.extra or {}
-            record = {'number': port.number, 'protocol': port.protocol, 'service': _s(port.service_name, 40, names),
+            record = {'number': port.number, 'protocol': note_raw(port.protocol), 'service': _s(port.service_name, 40, names),
                       'product': _s(port.product, 80, names), 'version': _s(port.version, 40, names),
                       'extra_info': _s(port.service_extra, 100, names), 'cpe': _s(port.cpe, 100, names),
                       'tls': extra.get('tunnel') == 'ssl' or bool(port.tls), 'detection': _s(extra.get('method'), 12),
@@ -189,9 +195,10 @@ def _tailscale(project_id, host):
 
 
 def _certificates(project_id, host):
+    from cveFeed.triage import note_raw
     from cveFeed.models import TlsCertificate
     rows = TlsCertificate.objects.filter(domain__project_id=project_id, host=host)[:MAX_CERTS]
-    return [{'port': r.port, 'issuer': _s(r.issuer, 80), 'days_left': r.days_left, 'protocol': r.protocol, 'legacy_tls': r.legacy_tls,
+    return [{'port': r.port, 'issuer': _s(r.issuer, 80), 'days_left': r.days_left, 'protocol': note_raw(r.protocol), 'legacy_tls': r.legacy_tls,
              'san_count': len(r.sans or [])} for r in rows]
 
 
@@ -231,8 +238,9 @@ def _probe_rows(project_id, host):
 
 
 def _probes(rows, names):
-    return [{'probe': r.probe, 'kind': r.kind, 'product': _s(r.product, 60, names), 'version': _s(r.version, 40, names),
-             'variant': _s(r.variant, 40, names), 'outcome': r.outcome, 'confidence': round(r.confidence, 2), 'source': _s(r.source, 40),
+    from cveFeed.triage import note_raw
+    return [{'probe': note_raw(r.probe), 'kind': note_raw(r.kind), 'product': _s(r.product, 60, names), 'version': _s(r.version, 40, names),
+             'variant': _s(r.variant, 40, names), 'outcome': note_raw(r.outcome), 'confidence': round(r.confidence, 2), 'source': _s(r.source, 40),
              'port': r.port, 'observed': r.observed_at.date().isoformat()} for r in rows]
 
 
@@ -242,9 +250,10 @@ def wordpress_summary(rows):
     nothing suggests WordPress."""
     from cveFeed import wpscan_scan
     state = wpscan_scan.state_of(rows)
-    plugins = [{'slug': r.product, 'title': (r.evidence or {}).get('title', ''), 'version': r.version, 'latest': (r.evidence or {}).get('latest', ''),
-                'outdated': bool((r.evidence or {}).get('outdated')), 'source': r.source} for r in sorted(rows, key=lambda r: r.product) if r.kind == 'wp-plugin']
-    themes = [{'slug': r.product, 'version': r.version, 'source': r.source} for r in sorted(rows, key=lambda r: r.product) if r.kind == 'wp-theme']
+    from cveFeed.triage import note_raw
+    plugins = [{'slug': note_raw(r.product), 'title': note_raw((r.evidence or {}).get('title', '')), 'version': note_raw(r.version), 'latest': note_raw((r.evidence or {}).get('latest', '')),
+                'outdated': bool((r.evidence or {}).get('outdated')), 'source': note_raw(r.source)} for r in sorted(rows, key=lambda r: r.product) if r.kind == 'wp-plugin']
+    themes = [{'slug': note_raw(r.product), 'version': note_raw(r.version), 'source': note_raw(r.source)} for r in sorted(rows, key=lambda r: r.product) if r.kind == 'wp-theme']
     if state is None and not plugins and not themes:
         return None
     core = next((r.version for r in rows if r.probe == 'wpscan-core' and r.version), '') or (state or {}).get('core', '')

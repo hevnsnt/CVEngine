@@ -61,6 +61,10 @@ def set_mode(ctx, body):
         raise ApiError(403, 'what agents may do to the throughput settings is a person\'s decision: change it in Settings, Auto-tuning')
     if not isinstance(body, dict) or not body or set(body) - {'mode', 'advisor', 'agent_policy'}:
         raise ApiError(400, 'send {"mode": "off" | "suggest" | "auto"} and/or {"advisor": true | false}')
+    if ctx.token is not None:  # a token (an agent, or a person's key) may only lower autonomy
+        why = autotune.raises_autonomy(body.get('mode'), body.get('advisor'))
+        if why:
+            raise ApiError(403, why)
     return _call(autotune.set_mode, ctx.user, body.get('mode'), body.get('advisor'), body.get('agent_policy'))
 
 

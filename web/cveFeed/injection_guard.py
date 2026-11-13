@@ -45,6 +45,27 @@ FAMILIES = {
         r"|\breview\s+(?:ssrf|sql\s+injection|template\s+injection|xxe|path\s+traversal)\s+there\b", re.I),
 }
 
+# Claims a scanned host makes about how its own findings should be judged: not instructions, so they are not in FAMILIES and never stop a step, but a
+# false positive that rests on such a claim is not closed by the AI alone. Run only on strings a host controls (``triage.collecting().host``), never on
+# cvENGINE's or a feed's own text. Narrow on purpose: an ordinary banner ("Apache/2.4.52 (Ubuntu)", "(Debian)", "OpenSSH_8.9p1 Ubuntu-3ubuntu0.6") says none of these.
+VERDICT_CLAIM = 'verdict_claim'
+_CLAIM = re.compile(
+    r"\b(?:honey-?pot|decoy)\b"
+    r"|\ball\s+(?:\w+\s+){0,2}(?:matches|findings|vulnerabilit(?:y|ies)|results|alerts)\b.{0,60}?\b(?:are|is)\s+(?:all\s+)?(?:false\s+positives?|not\s+real|fake)"
+    r"|\b(?:are|is)\s+(?:all\s+)?false\s+positives?\b"
+    r"|\bnot\s+(?:vulnerable|exploitable|affected\s+by)\b"
+    r"|\b(?:fully\s+patched|(?:security\s+)?(?:patches|fixes)\s+(?:have\s+been\s+|were\s+|are\s+)?back-?ported|(?:vulnerabilit(?:y|ies)|cves?)\s+(?:have\s+been\s+|were\s+|are\s+)?(?:patched|fixed|mitigated))\b", re.I)
+
+
+def verdict_claims(*values):
+    """``['verdict_claim']`` when any string of ``values`` (host-controlled text) claims how its findings should be judged, else ``[]``."""
+    for value in values:
+        for text in _texts(value):
+            if _CLAIM.search(text):
+                return [VERDICT_CLAIM]
+    return []
+
+
 _HEX_RUN = re.compile(r'(?<![0-9a-fA-F])[0-9a-fA-F]{12,64}(?![0-9a-fA-F])')
 
 

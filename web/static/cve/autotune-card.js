@@ -105,7 +105,7 @@ export async function build(host, ctx = {}) {
   const a = data.advisor || {};
   const advisorNote = a.provider
     ? `Every ${a.interval_hours} hours the tuner also asks your AI provider for a second opinion on the numbers it measured (numbers only, never a host or a finding). ` +
-      `Used today: ${a.used_today ?? "?"} of ${a.cap} (AI spend, Auto-tuning AI advice per day).` + (a.last_error ? ` Last question: ${a.last_error}.` : "")
+      (a.used_today == null ? `Used today: not known yet, limit ${a.cap} (AI spend, Auto-tuning AI advice per day).` : `Used today: ${a.used_today} of ${a.cap} (AI spend, Auto-tuning AI advice per day).`) + (a.last_error ? ` Last question: ${a.last_error}.` : "")
     : "No AI provider is set up, so the deterministic controller tunes alone (it always can).";
   const save = button("Save", async () => {
     await api("PUT", PATH, { mode: select.value, advisor: advisor.checked });

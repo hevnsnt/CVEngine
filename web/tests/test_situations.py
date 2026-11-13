@@ -4,7 +4,9 @@ A situation is one host of a project with everything open on it that needs a per
 order, the narrative (deterministic, plain text), the three empty states, tenancy, REST and MCP parity, and that the work stays set-based.
 """
 import json
+import time
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -362,11 +364,40 @@ class QueryCountTests(Seeded):
 		# the first request of a process reads its caches (the token) and the internal ranges are cached for a minute: neither is the page's own work
 		# and the token middleware writes last_used_at when it is over a minute old (agentapi.auth.LAST_USED_RESOLUTION): one more UPDATE for a request that
 		# lands on the wrong side of the minute, so the test never lets it write (the count is then the same whatever the clock says)
-		with mock.patch('cveFeed.internal_view.table', return_value={}), mock.patch('agentapi.auth.LAST_USED_RESOLUTION', timedelta(days=3650)):
+		# two middleware caches last ten seconds of real time: the ban list (reNgine.input_guard.banned_ips, one statement) and the IP allowlist's switch
+		# (reNgine.ip_allowlist._load, one more). A request that starts more than ten seconds after the one before it (the warm-up here ranks every host, which on a loaded
+		# runner takes that long) reads them again: the 17 != 15 seen on CI. Neither is the page's own work, so neither is read here
+		with mock.patch('cveFeed.internal_view.table', return_value={}), mock.patch('agentapi.auth.LAST_USED_RESOLUTION', timedelta(days=3650)), \
+				mock.patch('reNgine.input_guard.banned_ips', return_value=frozenset()), mock.patch('reNgine.ip_allowlist._load', return_value=(False, [])):
 			self.api('projects/sa/situations')
 			with CaptureQueriesContext(connection) as ctx, mock.patch('agentapi.auth.timezone.now', return_value=timezone.now() + timedelta(seconds=125)):
 				self.assertEqual(self.api('projects/sa/situations', **params)[0], 200)  # a clock two minutes on: last_used_at would be stale, and is still not written
 		return len(ctx)
+
+	def test_a_slow_warm_up_does_not_change_the_count(self):
+		# the cause of the 17 != 15 seen on CI: the middleware's ban list is cached for ten seconds of real time, so when the warm-up request ranks every host and takes
+		# longer than that, the measured request reads the list again
+		from reNgine import input_guard, ip_allowlist
+		clock = {'t': 1000.0}
+		original = self.api
+		calls = []
+
+		def api(*args, **kwargs):
+			out = original(*args, **kwargs)
+			calls.append(1)
+			if len(calls) == 1 and clock['skip']:
+				clock['t'] += 11  # the warm-up took eleven seconds
+			return out
+		counts = []
+		for skip in (False, True):
+			calls.clear()
+			clock['skip'] = skip
+			input_guard._ban_cache.update(at=0.0, ips=frozenset())
+			ip_allowlist._cache.update(at=0.0)
+			with mock.patch.object(input_guard, 'time', SimpleNamespace(time=lambda: clock['t'])), mock.patch.object(ip_allowlist, 'time', SimpleNamespace(time=lambda: clock['t'])), \
+					mock.patch.object(self, 'api', side_effect=api):
+				counts.append(self.count(page_size=2))
+		self.assertEqual(counts[0], counts[1], 'a warm-up that takes more than ten seconds must not add a statement to the count')
 
 	def test_no_query_per_row(self):
 		few = self.count(page_size=2)
@@ -381,9 +412,14 @@ class QueryCountTests(Seeded):
 
 	def test_the_ranking_is_computed_once_and_a_closed_finding_drops_it(self):
 		# DB-2: every list, detail, REST and MCP call used to rank every host of the project; now one snapshot per scope
-		with mock.patch('cveFeed.internal_view.table', return_value={}), mock.patch('agentapi.auth.LAST_USED_RESOLUTION', timedelta(days=3650)):
+		# the snapshot is fresh for 10 seconds by the entries' clock: it is frozen here, so a slow runner that takes ten seconds between two requests cannot make
+		# the second one rank again (nor the copy served after the close below go stale before the assertion that it is still served)
+		from cveFeed import snapshot_cache
+		with mock.patch('cveFeed.internal_view.table', return_value={}), mock.patch('agentapi.auth.LAST_USED_RESOLUTION', timedelta(days=3650)), \
+				mock.patch.object(snapshot_cache, '_now', return_value=time.time()):
 			self.api('projects/sa/situations')  # warms the token
 			cache.clear()
+			snapshot_cache.reset_hot()
 
 			def run(path, **params):
 				with CaptureQueriesContext(connection) as ctx:
@@ -394,7 +430,6 @@ class QueryCountTests(Seeded):
 			detail = run('projects/sa/situations/proven.sa.test')
 			self.assertLess(detail, warm + 3, 'the detail of a host reads the same ranking and then only that host')
 			before = self.names()
-			from cveFeed import snapshot_cache
 			CVEMatch.objects.filter(pk=self.m_proven.pk).update(remediation_status='fixed')  # a person closes the proven finding ...
 			self.assertEqual(self.names(), before)  # ... within the 10 seconds the old copy is served,
 			snapshot_cache.bump_revision()  # ... but the close drops it at once (services.update_finding_status does this on commit)

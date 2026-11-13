@@ -4,6 +4,7 @@ It used to read at most 1,000 rows of each list and print that as the total: eve
 """
 from datetime import datetime, timedelta, timezone as dt_timezone
 import re
+import time
 from pathlib import Path
 
 from django.contrib.auth.models import User
@@ -146,10 +147,14 @@ class ActivityDaysTests(TestCase):
         self.assertFalse([q for q in grouped if re.search(r'LIMIT \d+\s*$', q)])  # no outer LIMIT: nothing is sampled (the "latest scan" rule has its own inner one)
 
     def test_the_second_ask_is_served_from_the_snapshot(self):
+        from unittest import mock
+
+        from cveFeed import snapshot_cache
         self.vulns(10, days_ago(1))
-        self.card()
-        with CaptureQueriesContext(connection) as again:
-            body = self.card()
+        with mock.patch.object(snapshot_cache, '_now', return_value=time.time()):  # the snapshot's age is the entries' clock: frozen, a slow runner cannot age it out between the two asks
+            self.card()
+            with CaptureQueriesContext(connection) as again:
+                body = self.card()
         self.assertEqual(body['findings']['total'], 10)
         self.assertFalse([q for q in again.captured_queries if 'GROUP BY' in q['sql']], 'the grouped queries ran again')
 

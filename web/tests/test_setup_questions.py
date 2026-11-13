@@ -84,7 +84,11 @@ class MigrationTests(Base):
         self.assertEqual((row.enabled, row.auto_close), (True, True))
         self.connect_ai()
         question = self.question('ai_validation')
-        self.assertEqual((question['state'], question['current']), ('decided', 'act'))  # already chosen in Settings: not asked again
+        # chosen in Settings before the host review existed: the host review line was never decided, so it is asked once, and stays off until then
+        self.assertEqual((question['state'], question['current'], question['new_lines']), ('pending', 'act', []))
+        self.assertFalse(ReviewerSettings.objects.get().host_review_enabled)
+        ReviewerSettings.objects.update(host_review_enabled=True)  # a person switched the host review on in Settings: nothing left to ask
+        self.assertEqual(self.question('ai_validation')['state'], 'decided')
 
 
 class AskingTests(Base):
@@ -209,8 +213,10 @@ class AnswerTests(Base):
         self.assertEqual([c['value'] for c in question['choices']], ['off', 'recommend', 'act'])
         self.assertEqual(question['safe_default'], 'off')
         self.assertEqual([c['value'] for c in question['choices'] if c['safe']], ['off'])
-        self.assertEqual(question['facts'], ['Finding review: at most 300 findings a day, one provider call each.', 'Server health check: 4 calls a day.',
-                                             'Your AI provider bills every call.'])
+        self.assertEqual(question['facts'][:2], ['Finding review: at most 300 findings a day, one provider call each.', 'Server health check: 4 calls a day.'])
+        self.assertIn('Host review: the AI reads every open finding of a host that changed, one provider call per host, at most 100 a day', question['facts'][2])
+        self.assertIn('at most 50 safe read-only steps per project a day, and only in a project a person set to automatic', question['facts'][2])
+        self.assertEqual(question['facts'][3], 'Your AI provider bills every call.')
         self.assertEqual(question['choices'][0]['tag'], 'Nothing is billed')
         for choice in question['choices']:
             self.assertNotIn('300', choice['effect'])
@@ -305,3 +311,97 @@ class AnswerTests(Base):
         self.assertEqual(len(keys), len(set(keys)))
         for q in setup_questions.QUESTIONS:
             self.assertTrue(callable(q.choices) and callable(q.applies) and callable(q.decided) and callable(q.apply), q.key)
+
+
+class HostReviewLineTests(Base):
+    """The host review is one more line of the AI question: it ships off, an answer given before it existed is asked again for it, and a page answer never
+    sets a project to automatic."""
+
+    def setUp(self):
+        super().setUp()
+        self.connect_ai()
+        org = Org.objects.get(slug='qorg')
+        self.project = Project.objects.create(name='QP2', slug='qp2', org=org, insert_date=timezone.now())
+
+    def enabled(self):
+        return ReviewerSettings.current().host_review_enabled
+
+    def test_a_fresh_install_has_it_off_and_asks(self):
+        question = self.question('ai_validation')
+        self.assertEqual((question['state'], self.enabled()), ('pending', False))
+
+    def test_an_answer_from_before_the_host_review_is_asked_again_as_one_new_line_and_nothing_is_switched_on(self):
+        SetupAnswer.objects.create(key='ai_validation', answer='recommend', answered_by=self.admin)  # version 1: the question before the host review
+        ReviewerSettings.objects.create(enabled=True, auto_close=False, updated_by=self.admin)
+        question = self.question('ai_validation')
+        self.assertEqual((question['state'], question['new_lines'], question['safe_default']), ('pending', ['AI host review'], 'off'))
+        self.assertFalse(self.enabled())
+        self.assertEqual(self.c.get('/cve/')['Location'], '/cve/update-questions/')  # an administrator is taken to the page again, once
+        self.assertEqual(self.question('scan_from')['new_lines'], [])
+
+    def test_each_answer_switches_the_host_review_on_or_leaves_it_off_and_no_project_becomes_automatic(self):
+        from cveFeed import host_review
+        for answer, expected in (('off', False), ('recommend', True), ('act', True)):
+            ReviewerSettings.objects.filter().update(host_review_enabled=False)
+            out = post(self.c, {'key': 'ai_validation', 'answer': answer})
+            self.assertEqual(out.status_code, 200, out.content)
+            self.assertEqual(self.enabled(), expected, answer)
+            self.assertEqual(host_review.mode_of(self.project), 'recommend', answer)
+            self.assertEqual(SetupAnswer.objects.get(key='ai_validation').version, 2)
+        self.assertEqual(self.question('ai_validation')['new_lines'], [])
+
+    def test_an_agent_cannot_answer_it(self):
+        from agentapi import settings_bridge as bridge
+        from agentapi.services import ApiError, Ctx
+        with self.assertRaises(ApiError):
+            bridge.change_setting(Ctx(user=self.admin), 'setup_questions', {'key': 'ai_validation', 'answer': 'recommend'})
+        self.assertFalse(self.enabled())
+
+    def test_the_page_says_it_in_one_line(self):
+        text = (os.path.join(os.path.dirname(__file__), '..', 'static', 'cve', 'update-questions.js'))
+        self.assertIn('new line', open(text, encoding='utf-8').read())
+        act = next(c for c in self.question('ai_validation')['choices'] if c['value'] == 'act')
+        self.assertIn('Host reviews stay on recommend in every project', act['effect'])
+
+
+class ReaskTests(Base):
+    """HV-2: answering the question again for its one new line changes ONLY the new line."""
+
+    def setUp(self):
+        super().setUp()
+        self.connect_ai()
+        ReviewerSettings.objects.create(enabled=True, auto_close=False, updated_by=self.admin)  # the finding review as answered before: on, closing off
+        SetupAnswer.objects.create(key='ai_validation', answer='recommend', answered_by=self.admin)  # version 1
+
+    def state(self):
+        row = ReviewerSettings.current()
+        return (row.enabled, row.auto_close, row.host_review_enabled)
+
+    def test_the_reask_is_about_the_host_review_alone(self):
+        question = self.question('ai_validation')
+        self.assertEqual((question['state'], question['new_lines']), ('pending', ['AI host review']))
+        self.assertIn('Your earlier answer about finding review', question['text'])
+        self.assertEqual([c['value'] for c in question['choices']], ['off', 'recommend'])
+        self.assertTrue(all('Your finding review is not changed' in c['effect'] for c in question['choices']))
+        self.assertTrue(all('Finding review:' not in f for f in question['facts']))
+
+    def test_switching_the_host_review_on_leaves_the_finding_review_as_it_was(self):
+        out = post(self.c, {'key': 'ai_validation', 'answer': 'recommend'})
+        self.assertEqual(out.status_code, 200, out.content)
+        self.assertEqual(self.state(), (True, False, True))
+        self.assertEqual(SetupAnswer.objects.get(key='ai_validation').version, 2)
+
+    def test_the_act_answer_does_not_turn_closing_on(self):
+        out = post(self.c, {'key': 'ai_validation', 'answer': 'act'})
+        self.assertEqual(out.status_code, 200, out.content)
+        self.assertEqual(self.state(), (True, False, True))
+
+    def test_declining_the_host_review_does_not_switch_the_finding_review_off(self):
+        out = post(self.c, {'key': 'ai_validation', 'answer': 'off'})
+        self.assertEqual(out.status_code, 200, out.content)
+        self.assertEqual(self.state(), (True, False, False))
+
+    def test_an_answer_at_the_current_version_still_carries_out_every_line(self):
+        SetupAnswer.objects.filter(key='ai_validation').update(version=2)
+        post(self.c, {'key': 'ai_validation', 'answer': 'act'})
+        self.assertEqual(self.state(), (True, True, True))

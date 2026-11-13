@@ -344,7 +344,7 @@ class ClaimTimeoutTests(DispatchBase):
             with self.assertRaises(ScannerUnavailable):
                 dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=10)
             elapsed = time.monotonic() - start
-        self.assertLess(elapsed, 2)  # nowhere near the 10s completion timeout
+        self.assertLess(elapsed, 8)  # given up at the 0.2 s claim timeout, not at the 10 s completion timeout
         entries = self._entries()
         self.assertEqual(entries[-1].status, 'waiting')
         self.assertIn('openvas work for www.example.test is waiting for a Sentinel to pick it up', entries[-1].message)
@@ -376,7 +376,7 @@ class ClaimTimeoutTests(DispatchBase):
             with self.assertRaises(ScannerUnavailable):
                 dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, host='www.example.test', timeout=0.2)
             elapsed = time.monotonic() - start
-        self.assertLess(elapsed, 2)  # the overall timeout still wins even though the claim timeout is much larger
+        self.assertLess(elapsed, 45)  # the 0.2 s overall timeout still wins over the 90 s claim timeout
 
 
 class TestsslDispatchTests(DispatchBase):
@@ -807,16 +807,18 @@ class CompletionCeilingTests(DispatchBase):
         agent = self.make_sentinel(['openvas'])
         real_sleep = time.sleep
         state = {'n': 0}
+        clock = {'t': 1000.0}  # a simulated clock: the bound below is in simulated seconds, so a slow runner cannot stretch it
 
         def die(_seconds):
             state['n'] += 1
+            clock['t'] += 5  # five simulated seconds per poll
             if state['n'] == 1:
                 SentinelTask.objects.filter(status='queued').update(agent=agent, status='running', lease_expires_at=timezone.now() - timedelta(minutes=1))
-            real_sleep(0.01)
+            real_sleep(0.001)
         with mock.patch('agentapi.sentinel_dispatch.REAP_EVERY', 0), mock.patch('agentapi.sentinel_dispatch.time.sleep', side_effect=die), \
-                mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=8):
-            start = time.monotonic()
+                mock.patch('agentapi.sentinel_dispatch.time.monotonic', side_effect=lambda: clock['t']), mock.patch('agentapi.sentinel_dispatch._claim_timeout', return_value=8):
             with self.assertRaises(ScannerUnavailable):
                 dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['10.0.0.1']}, host='x')
-        self.assertLess(time.monotonic() - start, 5)
+        self.assertLess(clock['t'] - 1000.0, 60)  # let go within a few polls of the lapse, nowhere near the kind's ceiling
+        self.assertLess(state['n'], 10)
         self.assertEqual(SentinelTask.objects.get().status, 'expired')

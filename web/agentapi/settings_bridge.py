@@ -201,6 +201,7 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
         body = json.dumps(values if values is not None else {})
         request = factory.generic(method, path, body, content_type='application/json')
     request.user = ctx.user
+    request.via_agent = True  # a handler that spends the owner's money or widens what runs by itself refuses an agent (settings_api.reviewer_put)
     if method == 'PUT' and name in ('scan_concurrency', 'tunables') and isinstance(values, dict) and isinstance(values.get('values'), dict) and values['values']:
         return _throughput_write(ctx, name, method, fn, request, values, groups)
     return _run(ctx, name, api, fn, request, groups)
@@ -236,6 +237,11 @@ def _agent_body_rules(ctx, name, values):
             raise ApiError(403, f'{field} {values.get(field)!r} can only be chosen by a person in the web interface; an agent may choose the other way')
     if name == 'autotune' and 'agent_policy' in values:
         raise ApiError(403, 'what agents may do to the throughput settings is a person\'s decision: change it in Settings, Auto-tuning')
+    if name == 'autotune':
+        from cveFeed import autotune
+        why = autotune.raises_autonomy(values.get('mode') if isinstance(values.get('mode'), str) else None, values.get('advisor'))
+        if why:
+            raise ApiError(403, why)
     for field in AGENT_LOWER_ONLY.get(name, ()):
         if field not in values:
             continue

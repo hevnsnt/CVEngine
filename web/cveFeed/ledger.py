@@ -49,11 +49,24 @@ def failed_service(service):
     return f'{base}-failed{colon}{rest}'
 
 
-def nocheck_service(service):
-    """The ledger key under which a target that no check exists for is remembered (``nuclei:<tags>`` becomes ``nuclei-nocheck:<tags>``): a port of a service no
-    template speaks to (postgres) is not failed and not covered, and is not asked again before the row's TTL (``nuclei-nocheck``, 7 days) is over."""
-    base, colon, rest = service.partition(':')
-    return f'{base}-nocheck{colon}{rest}'
+def allowlist_release():
+    """A short name for which service classes the Sentinel library's service-port allowlist has a template for (``cvengine_scanner.nuclei_allowlist``): it changes
+    exactly when a class gains or loses its first template, which is when a port that had no check may have one."""
+    try:
+        import hashlib
+        from cvengine_scanner import nuclei_allowlist
+        classes = sorted({k for e in nuclei_allowlist.load_allowlist()['templates'].values() if isinstance(e, dict) for k in (e.get('classes') or ())})
+        return hashlib.sha1(','.join(classes).encode()).hexdigest()[:8]
+    except Exception:  # noqa: BLE001 - a library without the list: one fixed name, so the 7 day window alone decides
+        return '00000000'
+
+
+def nocheck_service(service, release=None):
+    """The ledger key under which a target that no check exists for is remembered (``nuclei:<tags>`` becomes ``nuclei-nocheck:<release>:<tags>``): a port of a
+    service no template speaks to (postgres) is not failed and not covered, and is not asked again before the row's TTL (``nuclei-nocheck``, 7 days) is over or
+    the allowlist's classes change (``allowlist_release``: a check may exist now). ``release`` defaults to the library in use."""
+    base, _colon, rest = service.partition(':')
+    return f'{base}-nocheck:{release or allowlist_release()}' + (f':{rest}' if rest else '')
 
 
 def ttl(service):

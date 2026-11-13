@@ -524,6 +524,20 @@ def release(user, key):
     return serialize(done)
 
 
+MODE_RANK = {'off': 0, 'suggest': 1, 'auto': 2}
+
+
+def raises_autonomy(mode=None, advisor=None):
+    """What a change would raise that only a person may raise (an agent may only lower autonomy): the mode (off, suggest, auto, in that order) and the AI advisor
+    (switching it on spends provider calls). The agent policy has its own refusal. Returns a sentence naming the first, or None."""
+    row = settings_row()
+    if mode is not None and MODE_RANK.get(mode, 0) > MODE_RANK.get(row.mode, 2):
+        return f'raising auto-tuning from {row.mode} to {mode} is a person\'s decision; an agent may only lower it (auto, then suggest, then off)'
+    if advisor is True and not row.advisor:
+        return 'switching the AI advisor on spends AI provider calls: a person does that, an agent may switch it off'
+    return None
+
+
 AGENT_POLICY_TEXT = {'off': 'not change throughput settings', 'suggest': 'only recommend throughput changes, which a person applies',
                      'auto': 'change throughput settings inside the safe ranges, each checked after 30 minutes'}
 

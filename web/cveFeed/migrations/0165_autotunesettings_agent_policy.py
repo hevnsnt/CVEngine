@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('cveFeed', '0163_reviewer_off_until_asked'),
+        ('cveFeed', '0164_host_review'),
     ]
 
     operations = [

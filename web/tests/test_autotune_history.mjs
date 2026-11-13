@@ -99,7 +99,7 @@ test('the design lines: what, why, what happened', () => {
   assert.equal(h.historyLine(SHAPES.being_checked, NOW).tone, 'wait');
   assert.equal(h.historyLine(SHAPES.being_checked_late, NOW).happened, 'being checked, result due now');
   assert.equal(h.historyLine(SHAPES.person_apply, NOW).happened, 'not judged: a person changed it');
-  assert.equal(h.historyLine(SHAPES.unknown, NOW).happened, 'not judged: only 2 measurement(s) came after the change');
+  assert.equal(h.historyLine(SHAPES.unknown, NOW).happened, 'not judged: only 2 measurements came after the change');
   assert.equal(h.historyLine(SHAPES.unknown_empty, NOW).happened, 'not judged');
 });
 
@@ -153,4 +153,12 @@ test('times: relative words, and nothing when the time is missing', () => {
   assert.equal(h.ago(iso(-60 * 24 * 4), NOW), '4 days ago');
   assert.equal(h.ago(null, NOW), '');
   assert.equal(h.ago('never', NOW), '');
+});
+
+test('a count in the server\'s sentence reads as singular or plural', () => {
+  const said = (detail) => h.historyLine(base({outcome: 'regressed', resolution: 'reverted', baseline: null, outcome_detail: detail}), NOW).happened;
+  assert.match(said('2 memory kill(s) after the change, 0 before'), /2 memory kills after the change, 0 before/);
+  assert.match(said('1 memory kill(s) after the change, 0 before'), /1 memory kill after the change, 0 before/);
+  assert.match(said('1 kernel oom kill(s) and Celery lane restart(s) in the last day after the change, 0 before'), /1 kernel oom kill and Celery lane restart in the last day/);
+  assert.doesNotMatch(said('3 memory kill(s) after the change, 0 before'), /\(s\)/);
 });

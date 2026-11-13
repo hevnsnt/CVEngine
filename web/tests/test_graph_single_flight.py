@@ -119,7 +119,7 @@ class SlowGraphBuildTests(SimpleTestCase):
         started = time.monotonic()
         with mock.patch.object(views, 'graph_payload', side_effect=AssertionError('built a second one')):
             self.assertIsNone(views.cached_graph('scope-a', 'v2', None, None, wait=False))
-        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertLess(time.monotonic() - started, views.GRAPH_WAIT_SECONDS / 2)  # a refresher that waited would wait the whole GRAPH_WAIT_SECONDS
 
     def test_the_refresher_builds_a_graph_nobody_is_building(self):
         with mock.patch.object(views, 'graph_payload', return_value={'nodes': [], 'edges': []}) as build:
