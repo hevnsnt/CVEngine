@@ -13,7 +13,7 @@ REVIEW_TASK = (
     'with a strong justification: answer false_positive and, in the note, name the specific evidence you read and why it does not '
     'support the finding. If the evidence is not enough to decide, say so and answer uncertain, which leaves the finding open.')
 OPS_TASK = (
-    'Your task: diagnose the product\'s own health checks that are not ok, for the operator who administers this server.')
+    'Your task: diagnose the product\'s own health checks that are not ok, for the operator who administers this server, using the measurements and the auto-tuner\'s recent decisions sent with them.')
 
 REVIEW_SYSTEM = PREAMBLE + '\n\n' + REVIEW_TASK + """
 
@@ -73,6 +73,10 @@ For every check that is not ok, write a diagnosis for the server's administrator
 do, in at most 600 characters of plain text. Name settings, pages and commands the administrator can use (for example Settings, the \
 Sentinels page, docker compose logs celery). No links, no markup.
 
+The message may also hold SIGNALS (memory of lanes and containers, oom kills, restarts, queue ages, refused claims, database, Redis, AI spend; \
+"unknown" lists what could not be read) and TUNING (the auto-tuner's recent decisions). Use them to name the cause, never to invent numbers. \
+Refused claims are the server's limiter, not a lack of Sentinels: never advise adding capacity for them.
+
 Never say no Sentinel is online if live_sentinels > 0, nor to start a built-in one if builtin_scanner is false.
 
 Then choose actions, only from the actions a check offers: feed_sentinels gives idle Sentinels due hosts now, refresh_nuclei_templates \
@@ -81,7 +85,7 @@ action only when its own check still offers it.
 
 Answer with the JSON object the schema describes and nothing else."""
 
-OPS_CODES = ['sentinels_idle', 'sentinels_offline', 'nuclei_templates', 'sentinel_errors', 'scan_errors', 'system', 'generated_templates', 'ai_errors', 'workers_down', 'sentinel_waiting']  # the fallback for a server that sends no list of its own (``codes`` in the snapshot); a test holds it equal to the checks the server can return
+OPS_CODES = ['sentinels_idle', 'sentinels_offline', 'nuclei_templates', 'sentinel_errors', 'scan_errors', 'system', 'generated_templates', 'ai_errors', 'workers_down', 'sentinel_waiting', 'memory', 'queue_starvation', 'sentinel_claims_refused']  # the fallback for a server that sends no list of its own (``codes`` in the snapshot); a test holds it equal to the checks the server can return
 
 def ops_schema(codes=None):
     """The answer schema with the check codes the server named (a list of short names) in place of the fallback list."""
