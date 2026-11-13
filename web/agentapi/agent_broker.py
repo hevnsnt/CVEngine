@@ -109,6 +109,9 @@ def _hit(name, limit, window):
         return True
     if used > limit and used - limit == 1:  # once per window, at the first refusal
         logger.warning('rate limit reached: %s used %s of %s per %s s', name, used, limit, window)
+    if used > limit:
+        from agentapi import claim_refusals
+        claim_refusals.note(name)  # counted per caller and action in Redis, so the status can tell a refusing limiter from idle Sentinels
     return used <= limit
 
 

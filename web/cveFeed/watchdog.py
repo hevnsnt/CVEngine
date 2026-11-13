@@ -1188,6 +1188,11 @@ def tick(now=None, probes=None, limit=TICK_SECONDS, alarm=True):
 
 
 def _tick(now, probes, out):
+    try:  # the web container cannot publish its own memory from a Celery task: this tick runs in it (reNgine/container_signals.py); it only measures
+        from reNgine import container_signals
+        container_signals.publish('web', client=probes.redis() if probes else None, force=True)
+    except Exception:  # noqa: BLE001
+        logger.debug('watchdog: could not publish the web container memory', exc_info=True)
     states = _states()
     all_state = states[ALL]
     all_state.last_tick_at = now
