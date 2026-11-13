@@ -743,7 +743,7 @@ class OpsTests(Fixture):
         reviewer.dismiss_alert(alert.pk, self.admin)
         self.assertEqual(reviewer.open_alerts(), [])
         changed = self.checks(system='problem')
-        changed[2]['facts'] = {'n': 2}
+        changed[2]['facts'] = {'problems': ['the cache does not answer']}  # a different problem; a count moving inside the same one does not bring it back (AM-10)
         reviewer.sync_alerts(changed)
         self.assertEqual([a['code'] for a in reviewer.open_alerts()], ['system'])
         reviewer.sync_alerts(self.checks())

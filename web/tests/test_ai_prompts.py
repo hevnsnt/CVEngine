@@ -385,3 +385,22 @@ class UnnamedStageTests(TestCase):
         ai_providers._UNNAMED_SEEN.clear()
         with self.assertNoLogs('reNgine.ai_usage_stage', 'WARNING'):
             self.run_call(named=True)
+
+
+class OpsCodesParityTests(TestCase):
+    """AM-4: the operations AI's answer format names every check the server can return (the model was refused two of them, and a reply naming one
+    threw the whole pass away)."""
+
+    def test_the_servers_list_is_the_codes_written_in_ops_checks_and_the_containers_fallback_is_the_same_set(self):
+        import inspect
+        from cveFeed import reviewer
+        written = set(re.findall(r"_check\('(\w+)'", inspect.getsource(reviewer.ops_checks)))
+        self.assertEqual(set(reviewer.OPS_CODES), written)
+        self.assertEqual(len(reviewer.OPS_CODES), len(set(reviewer.OPS_CODES)))
+        self.assertEqual(set(_reviewer_prompts().OPS_CODES), written)
+
+    def test_every_check_the_server_returns_has_a_code_in_the_list_and_the_snapshot_sends_the_list(self):
+        from cveFeed import reviewer
+        snap = reviewer.snapshot()
+        self.assertTrue({c['code'] for c in snap['checks']} <= set(snap['codes']))
+        self.assertEqual(snap['codes'], list(reviewer.OPS_CODES))

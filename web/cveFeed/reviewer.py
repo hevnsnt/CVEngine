@@ -754,6 +754,12 @@ def installed_templates_version():
     return str(data.get('nuclei-templates-version') or '')[:40] if isinstance(data, dict) else ''
 
 
+# Every code ops_checks can return, in the order it computes them. The snapshot sends it to the reviewer container, which builds the model's answer
+# format from it; tests/test_ai_prompts.py holds it equal to the codes written in ops_checks and to the container's fallback copy.
+OPS_CODES = ('sentinels_idle', 'workers_down', 'nuclei_templates', 'sentinel_errors', 'sentinel_waiting', 'sentinels_offline', 'scan_errors', 'system',
+             'generated_templates', 'ai_errors')
+
+
 def _check(code, state, title, detail, facts=None, actions=(), severity=None):
     return {'code': code, 'state': state, 'severity': severity or ('critical' if state == 'problem' else 'warning' if state == 'warning' else 'info'),
             'title': title, 'detail': detail, 'facts': facts or {}, 'actions': list(actions)}
@@ -1019,9 +1025,23 @@ def ops_checks(now=None, templates_release=None):
     return checks
 
 
+def _meaning(value):
+    """What a fact says apart from how big it is: names, switches and states stay, a count is only "there is one". A dismissed alert comes back
+    when the problem changes (another Sentinel or kind, a state turning true), not because one more task waited or failed."""
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        return '#'
+    if isinstance(value, dict):
+        return {str(k): _meaning(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return sorted((_meaning(v) for v in value), key=lambda v: json.dumps(v, sort_keys=True, default=str))
+    return str(value)
+
+
 def _digest(check):
-    keep = {k: v for k, v in (check.get('facts') or {}).items() if k not in ('last_errors', 'last_messages', 'hours_since_refresh', 'done_2h', 'completed', 'queued_now', 'live_sentinels', 'slots',
-                                                                       'restart_cut', 'waited_earlier', 'waited_recent', 'growing')}
+    keep = {k: _meaning(v) for k, v in (check.get('facts') or {}).items() if k not in ('last_errors', 'last_messages', 'hours_since_refresh', 'done_2h', 'completed', 'queued_now', 'live_sentinels', 'slots',
+                                                                                    'restart_cut', 'waited_earlier', 'waited_recent', 'growing')}
     return hashlib.sha1(json.dumps([check['code'], check['state'], keep], sort_keys=True, default=str).encode()).hexdigest()
 
 
@@ -1070,7 +1090,7 @@ def _watchdog_events(limit=10):
 def snapshot(now=None, templates_release=None):
     checks = ops_checks(now, templates_release)
     from cveFeed import fleet
-    return {'at': (now or timezone.now()).isoformat(), 'checks': checks, 'watchdog': _watchdog_events(), 'fleet': fleet.fleet_facts(now),
+    return {'at': (now or timezone.now()).isoformat(), 'checks': checks, 'codes': list(OPS_CODES), 'watchdog': _watchdog_events(), 'fleet': fleet.fleet_facts(now),
             'actions': {name: f'at most once every {int(gap.total_seconds() // 60)} minutes' for name, gap in ACTIONS.items()}}
 
 
@@ -1120,6 +1140,9 @@ def record_usage(body, now=None):
     return {'recorded': True}
 
 
+SEVERITY_RANK = {'info': 0, 'warning': 1, 'critical': 2}
+
+
 def apply_ops_report(body, now=None):
     """Take the operations job's report: ``{alerts: [{code, severity, diagnosis}], actions: [names], model, templates_release}``. The
     checks are computed again here; a diagnosis is kept only for a check that is not ``ok``, and an action runs only when that check offers
@@ -1151,7 +1174,9 @@ def apply_ops_report(body, now=None):
             alert.ai_detail = usable_note(fleet.without_contradictions(alert.ai_detail, facts), min_words=DIAGNOSIS_MIN_WORDS)[:NOTE_MAX]
         alert.ai_model = model if alert.ai_detail else ''
         if item.get('severity') in ('info', 'warning', 'critical') and check['state'] != 'problem':
-            alert.severity = item['severity'] if item['severity'] != 'critical' else 'warning'  # only a problem the server sees is critical
+            wanted = item['severity'] if item['severity'] != 'critical' else 'warning'  # only a problem the server sees is critical
+            if SEVERITY_RANK[wanted] > SEVERITY_RANK.get(alert.severity, 0):  # the model may raise a note to a warning, never quiet what the server's own check says
+                alert.severity = wanted
         alert.save(update_fields=['ai_detail', 'ai_model', 'severity'])
         updated += 1
     ran, refused = [], []
