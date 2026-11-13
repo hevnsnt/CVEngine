@@ -36,6 +36,7 @@ import { scoreList } from "/staticfiles/cve/score-detail.js";
 import { openSecret } from "/staticfiles/cve/secret-panel.js";
 import * as FG from "/staticfiles/cve/finding-groups-logic.js";
 import * as CL from "/staticfiles/cve/closure-logic.js";
+import { changeDetail, authLabel, pathOf } from "/staticfiles/cve/change-text.js";
 import * as RT from "/staticfiles/cve/retest-logic.js";
 import { askClosureNote } from "/staticfiles/cve/closure-note.js";
 import * as LM from "/staticfiles/cve/loadmore-logic.js";
@@ -853,16 +854,6 @@ const CHANGE_LABEL = {
   screenshot_changed: "Screenshot changed",
 };
 const AUTH_RANK = { open: 0, login: 1, session_required: 2, sso: 3 };
-const AUTH_LABEL = { open: "open", login: "login page", session_required: "session required", sso: "SSO", redirect: "redirect", not_found: "not found", catch_all: "same as a missing page" };
-const authLabel = (s) => AUTH_LABEL[s] || s || "unknown";
-const pathOf = (url) => {
-  try {
-    const u = new URL(url);
-    return u.pathname + u.search;
-  } catch (_) {
-    return url || "";
-  }
-};
 // Amber ("smoke") for more exposure, slate ("ice") for less, plain for the rest.
 function changeClass(c) {
   if (["host_new", "host_returned", "port_opened", "zombie_host", "zombie_route", "sensitive_found"].includes(c.kind)) return "smoke";
@@ -873,56 +864,6 @@ function changeClass(c) {
     return was != null && now != null && now < was ? "smoke" : "";
   }
   return "";
-}
-const svcText = (s) => [s.product || s.service, s.version].filter(Boolean).join(" ");
-const dateOnly = (iso) => (iso ? String(iso).slice(0, 10) : "?");
-function changeDetail(c) {
-  const b = c.before || {};
-  const a = c.after || {};
-  switch (c.kind) {
-    case "host_new":
-      return `New host${a.ips && Object.keys(a.ips).length ? ` · ${Object.keys(a.ips).join(", ")}` : ""}`;
-    case "host_returned":
-      return "Resolves again after being retired";
-    case "host_retired":
-      return "No longer resolves";
-    case "port_opened":
-      return `${c.ip}:${a.port || c.port} ${svcText(a)}`.trim();
-    case "port_closed":
-      return `${c.ip}:${b.port || c.port} ${svcText(b)}`.trim();
-    case "service_changed":
-      return `${a.port || c.port} ${svcText(b) || "?"} -> ${svcText(a) || "?"}`;
-    case "tech_added":
-      return String(a);
-    case "tech_removed":
-      return String(b);
-    case "tech_version_changed":
-      return `${b} -> ${a}`;
-    case "cert_changed": {
-      const parts = [];
-      if (b.issuer !== a.issuer) parts.push(`issuer ${b.issuer || "?"} -> ${a.issuer || "?"}`);
-      if (b.subject !== a.subject) parts.push(`subject ${b.subject || "?"} -> ${a.subject || "?"}`);
-      if (b.not_after !== a.not_after) parts.push(`expires ${dateOnly(b.not_after)} -> ${dateOnly(a.not_after)}`);
-      if (!parts.length) parts.push("names or key changed");
-      return parts.join(", ");
-    }
-    case "auth_changed":
-      return `${pathOf(a.url || b.url)}: ${authLabel(b.auth_state)} -> ${authLabel(a.auth_state)}`;
-    case "sensitive_found":
-      return `${pathOf(a.url)}: ${(a.types || []).join(", ")}`;
-    case "zombie_host":
-      return `DNS is gone but it still answers on ${(a.alive || []).join(", ")}`;
-    case "zombie_cleared":
-      return "Resolves again";
-    case "route_retired":
-      return `${pathOf(b.url || a.url)}: ${authLabel(b.auth_state)} -> gone (${a.http_status})`;
-    case "zombie_route":
-      return `${pathOf(a.url)} answers again (${a.http_status})`;
-    case "screenshot_changed":
-      return `front page changed (distance ${a.distance} of 64)${["login", "sso"].includes(a.root_auth) ? ", now shows a login page" : ""}`;
-    default:
-      return c.kind;
-  }
 }
 const SENSITIVE_GROUP = {
   credentials: ["aws_key", "google_key", "slack_token", "github_token", "stripe_key", "jwt", "private_key"],
