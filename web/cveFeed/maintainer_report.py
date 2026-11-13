@@ -55,7 +55,8 @@ def _decisions(since):
     tally = window.aggregate(
         total=Count('pk'), helped=Count('pk', filter=Q(outcome='helped')), no_effect=Count('pk', filter=Q(outcome='no_effect')),
         regressed=Count('pk', filter=Q(outcome='regressed')), unknown=Count('pk', filter=Q(outcome='unknown')), reverted=Count('pk', filter=Q(outcome='reverted')),
-        pending=Count('pk', filter=Q(applied=True, outcome='', verify_at__isnull=False)), recommended=Count('pk', filter=Q(applied=False)))
+        pending=Count('pk', filter=Q(applied=True, outcome='', verify_at__isnull=False)), recommended=Count('pk', filter=Q(applied=False) & ~Q(resolution__in=('refused', 'held'))),
+        refused=Count('pk', filter=Q(resolution__in=('refused', 'held'))))
     total = tally.pop('total')
     shown = []
     for d in window.select_related('actor').order_by('-created_at', '-pk')[:MAX_DECISIONS]:

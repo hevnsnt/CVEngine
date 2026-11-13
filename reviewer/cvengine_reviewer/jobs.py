@@ -117,20 +117,46 @@ def ops_message(snapshot):
     for key, label in (('signals', 'SIGNALS'), ('tuning', 'TUNING')):
         if isinstance(snapshot.get(key), dict) and snapshot[key]:
             extra += '\n\n' + guard.fence(label, snapshot[key])[0]  # the server's measurements (names of Sentinels among them): fenced like the checks, and bounded by the server
-    return f'{head}\n\n{fenced}{extra}\n\nDiagnose every check that is not ok and choose actions, then answer with the JSON object.'
+    return f'{head}\n\n{fenced}{extra}\n\nDiagnose every check that is not ok and choose actions (and, only if settings you may change are listed and the measurements show a problem one addresses, at most two proposals), then answer with the JSON object.'
 
 
 def parse_ops_reply(text, schema):
-    """The operations reply checked against ``schema``, except that an alert naming a check code that is not in it is dropped on its own: a
-    model (or a provider that does not enforce the enum) that names one unknown check must not cost the diagnosis of every other."""
+    """The operations reply checked against ``schema``, except that two parts may fail on their own: an alert naming a check code that is not in it is dropped by
+    itself, and the optional ``tuning`` list is parsed apart from the rest, each proposal on its own (a wrong type, an extra or missing key, a setting that was not
+    offered, a third item): a model (or a provider that does not enforce the schema) that gets one of them wrong must not cost the diagnosis of every other alert
+    and the actions of the same reply."""
     allowed = schema['properties']['alerts']['items']['properties']['code']['enum']
+    wanted = schema['properties'].get('tuning')
+    value = guard.reply_value(text)
+    raw_tuning = value.pop('tuning', None) if isinstance(value, dict) else None
     lenient = json.loads(json.dumps(schema))
     del lenient['properties']['alerts']['items']['properties']['code']['enum']
-    answer = guard.parse_reply(text, lenient)
+    lenient['properties'].pop('tuning', None)
+    lenient['required'] = [k for k in lenient['required'] if k != 'tuning']
+    answer = guard.check_value(value, lenient, 'reply')
     kept = [a for a in answer['alerts'] if a['code'] in allowed]
     if len(kept) < len(answer['alerts']):
         logger.warning('operations: dropped %d alert(s) naming a check the server does not have', len(answer['alerts']) - len(kept))
-    return {**answer, 'alerts': kept}
+    proposals = []
+    if wanted and isinstance(raw_tuning, list):
+        item_schema = json.loads(json.dumps(wanted['items']))
+        offered = item_schema['properties']['setting'].pop('enum')
+        item_schema['properties']['alert'].pop('enum', None)  # an unknown check code is the server's to judge (it keeps the code of an open alert only)
+        for item in raw_tuning[:wanted.get('maxItems', 2)]:
+            try:
+                checked = guard.check_value(item, item_schema, 'tuning[]')
+            except guard.ReplyError as exc:
+                logger.warning('operations: dropped a tuning proposal (%s)', exc)
+                continue
+            if checked['setting'] in offered:
+                proposals.append(checked)
+            else:
+                logger.warning('operations: dropped a tuning proposal naming a setting that was not offered')
+        if len(raw_tuning) > wanted.get('maxItems', 2):
+            logger.warning('operations: only the first %d tuning proposals are read', wanted.get('maxItems', 2))
+    elif raw_tuning not in (None, []) and wanted:
+        logger.warning('operations: dropped a tuning field that is not a list')
+    return {**answer, 'alerts': kept, 'tuning': proposals}
 
 
 def run_ops(server, provider, release=None):
@@ -138,17 +164,24 @@ def run_ops(server, provider, release=None):
     snapshot = server.ops_snapshot(release)
     if all((c.get('state') == 'ok') for c in snapshot.get('checks') or []):
         return server.ops_report({'alerts': [], 'actions': [], 'model': '', 'templates_release': release})
-    schema = prompts.ops_schema(snapshot.get('codes'))  # the server's own list of its checks: the model is offered every one, and the list cannot drift from the server
+    schema = prompts.ops_schema(snapshot.get('codes'), snapshot.get('tuning_settings'))  # the server's own list of its checks: the model is offered every one, and the list cannot drift from the server
     text, _usage, model = measured_call(server, 'operations_check', provider, prompts.OPS_SYSTEM, ops_message(snapshot), schema,
                                         OPS_MAX_TOKENS, effort='low')
     try:
         answer = parse_ops_reply(text, schema)
     except guard.ReplyError as exc:
         logger.warning('operations: unusable answer (%s)', exc)
-        answer = {'alerts': [], 'actions': []}
+        answer = {'alerts': [], 'actions': [], 'tuning': []}
     alerts = [{'code': a['code'], 'severity': a['severity'], 'diagnosis': guard.scrub(a['diagnosis'], NOTE_LIMIT)} for a in answer['alerts']
               if not guard.is_filler(guard.scrub(a['diagnosis'], NOTE_LIMIT))]  # a diagnosis that is filler ("Placeholder") is not sent: the alert shows no reviewer line
-    return server.ops_report({'alerts': alerts, 'actions': answer['actions'], 'model': str(model)[:100], 'templates_release': release})
+    report = {'alerts': alerts, 'actions': answer['actions'], 'model': str(model)[:100], 'templates_release': release}
+    tuning = [{'setting': t['setting'], 'value': t['value'], 'reason': guard.scrub(t['reason'], 300), 'alert': None if t['alert'] == 'none' else t['alert']}
+              for t in answer.get('tuning', [])[:2] if not guard.is_filler(guard.scrub(t['reason'], 300))]
+    if tuning:
+        report['tuning'] = tuning  # the server judges each against what may be proposed at that moment; nothing here decides
+        if isinstance(snapshot.get('snapshot_id'), str):
+            report['snapshot_id'] = snapshot['snapshot_id']  # which snapshot this answers: the server holds proposals whose snapshot it cannot find
+    return server.ops_report(report)
 
 
 JOB_REPLY_LIMIT = 200_000  # characters of one pipeline answer sent back (the server refuses more)

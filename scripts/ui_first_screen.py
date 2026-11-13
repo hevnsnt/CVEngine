@@ -256,6 +256,14 @@ def autotune_history(b):
                   buttons: [...document.querySelectorAll('.at-line button')].map((e) => Math.round(e.getBoundingClientRect().height)), sideways: document.documentElement.scrollWidth > innerWidth}; }""")
         tag = f'Auto-tuning History at {width}x{height}'
         check(m['lines'] >= 5, f'{tag}: the seeded changes are listed ({m["lines"]})')
+        if pg.query_selector('text=Show more'):
+            pg.click('text=Show more')
+            pg.wait_for_timeout(300)
+        words = pg.evaluate("(document.getElementById('configmaxxing-autotune') || document.body).innerText")
+        for want in ('proposed by the AI, held back: text aimed at an AI may be in what it read (instructions to an AI)', 'proposed by the AI, not applied: outside what the controller allows now',
+                     'nothing has changed yet: apply it to make the change', 'being checked, result at'):
+            check(want in words, f'{tag}: a health-check AI line reads "{want[:60]}"')
+        check('ai_directive' not in words and ' · the AI' in words, f'{tag}: the AI is named as the AI, and no family code shows')
         if not touch:
             check(m['whole'] == 5, f'{tag}: the newest five changes are whole on the first screen ({m["whole"]})')
         check(m['labelled'] == min(5, m['lines']), f'{tag}: every line says Why and What happened')

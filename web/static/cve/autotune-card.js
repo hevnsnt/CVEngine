@@ -118,6 +118,7 @@ export async function build(host, ctx = {}) {
   const advisorRow = el("div", "field", null, { style: "display:flex;gap:8px;align-items:center;margin-top:8px" });
   advisorRow.append(advisor, el("label", "", "Ask the AI advisor", { for: "autotune-advisor" }));
   card.append(modeRow, advisorRow, el("p", "note", advisorNote, { style: "margin:4px 0 0" }));
+  card.append(el("p", "note", "This switch covers the AI advisor and the changes the server health check (the AI reviewer's operations check) may propose. The health check is an AI agent: its proposals follow the mode above and the setting for AI agents below, and are suggestions unless both are Automatic.", { style: "margin:4px 0 0" }));
   const actions = el("div", "", null, { style: "display:flex;gap:8px;align-items:center;margin-top:12px" });
   actions.append(save);
   card.append(actions);

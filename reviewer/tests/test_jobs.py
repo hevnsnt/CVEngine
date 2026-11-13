@@ -1,10 +1,11 @@
 """The container's side of the pipeline's AI jobs: the prompt it builds from a job, what it posts back, and the loop that serves the queue
 (run as test_llm.py says)."""
+import json
 import unittest
 from unittest import mock
 
 from cvengine_reviewer import __main__ as loop
-from cvengine_reviewer import jobs, llm
+from cvengine_reviewer import guard, jobs, llm, prompts
 
 
 def job(**changes):
@@ -408,3 +409,111 @@ class OpsCodesTests(unittest.TestCase):
     def test_a_reply_with_the_wrong_shape_is_still_refused_whole(self):
         sent, _ = self.run_with({'checks': self.CHECKS}, '{"alerts": [{"code": "workers_down"}], "actions": []}')
         self.assertEqual((sent['alerts'], sent['actions']), ([], []))
+
+
+class OpsTuningProposals(unittest.TestCase):
+    """The health-check answer's optional ``tuning`` list: built per request from the settings the server offered, at most two, and a proposal that names
+    anything else is dropped on its own while the diagnoses and actions of the same reply stand."""
+    CHECKS = [{'code': 'memory', 'state': 'warning', 'title': 't', 'detail': 'd', 'facts': {}}]
+    OFFER = ['discovery_concurrency', 'assess_batch']
+    DIAG = 'A worker lane uses most of its memory: raise the limit in the .env file, then check docker compose logs celery.'
+
+    def run_with(self, snapshot, reply):
+        class Server:
+            sent = None
+
+            def ops_snapshot(self, release):
+                return snapshot
+
+            def ops_report(self, body):
+                self.sent = body
+                return {}
+        server = Server()
+        with mock.patch.object(llm, 'call', return_value=(reply, {}, 'm')) as call:
+            jobs.run_ops(server, {'provider': 'anthropic', 'model': 'm', 'api_key': 'k'})
+        return server.sent, call
+
+    def snap(self, **extra):
+        return {'checks': self.CHECKS, 'codes': ['memory', 'system'], 'tuning_settings': self.OFFER, **extra}
+
+    def test_the_schema_names_only_the_offered_settings_and_the_codes_of_the_server(self):
+        schema = prompts.ops_schema(['memory', 'system'], self.OFFER)
+        item = schema['properties']['tuning']['items']['properties']
+        self.assertEqual(item['setting']['enum'], self.OFFER)
+        self.assertEqual(item['alert']['enum'], ['memory', 'system', 'none'])
+        self.assertEqual(item['value'], {'type': 'integer'})
+        self.assertEqual(schema['properties']['tuning']['maxItems'], 2)
+        self.assertIn('tuning', schema['required'])
+
+    def test_with_nothing_offered_there_is_no_tuning_field_at_all(self):
+        for none in (None, [], 'x', ['a'] * 41):
+            self.assertNotIn('tuning', prompts.ops_schema(['memory'], none)['properties'])
+        self.assertNotIn('tuning', prompts.OPS_SCHEMA['properties'])  # the fallback schema is unchanged
+
+    def test_the_proposals_go_to_the_server_with_the_alert_they_answer(self):
+        reply = json.dumps({'alerts': [{'code': 'memory', 'severity': 'warning', 'diagnosis': self.DIAG}], 'actions': [],
+                            'tuning': [{'setting': 'discovery_concurrency', 'value': 8, 'reason': 'The worker lane is at 93 percent of its limit.', 'alert': 'memory'},
+                                       {'setting': 'assess_batch', 'value': 12, 'reason': 'The oldest assessment waits 52 minutes.', 'alert': 'none'}]})
+        sent, call = self.run_with(self.snap(), reply)
+        self.assertEqual([(t['setting'], t['value'], t['alert']) for t in sent['tuning']], [('discovery_concurrency', 8, 'memory'), ('assess_batch', 12, None)])
+        self.assertEqual(len(sent['alerts']), 1)
+        self.assertIn('tuning', call.call_args[0][3]['properties'])
+
+    def test_a_setting_that_was_not_offered_is_dropped_and_the_rest_of_the_reply_stands(self):
+        reply = json.dumps({'alerts': [{'code': 'memory', 'severity': 'warning', 'diagnosis': self.DIAG}], 'actions': [],
+                            'tuning': [{'setting': 'review_daily_max', 'value': 500, 'reason': 'More reviews.', 'alert': 'memory'},
+                                       {'setting': 'assess_batch', 'value': 12, 'reason': 'The oldest assessment waits 52 minutes.', 'alert': 'bogus'}]})
+        sent, _ = self.run_with(self.snap(), reply)
+        self.assertEqual([t['setting'] for t in sent['tuning']], ['assess_batch'])  # an unknown check code is a lenient 'alert': the server checks it
+        self.assertEqual([a['code'] for a in sent['alerts']], ['memory'])
+
+    GOOD = {'setting': 'assess_batch', 'value': 12, 'reason': 'The oldest assessment waits 52 minutes.', 'alert': 'none'}
+
+    def reply(self, tuning, **extra):
+        return json.dumps({'alerts': [{'code': 'memory', 'severity': 'warning', 'diagnosis': self.DIAG}], 'actions': ['feed_sentinels'], 'tuning': tuning, **extra})
+
+    def test_no_tuning_key_when_nothing_was_proposed_and_the_third_proposal_is_not_read(self):
+        sent, _ = self.run_with(self.snap(), json.dumps({'alerts': [], 'actions': [], 'tuning': []}))
+        self.assertNotIn('tuning', sent)
+        sent, _ = self.run_with(self.snap(), self.reply([self.GOOD, {**self.GOOD, 'setting': 'discovery_concurrency'}, {**self.GOOD, 'value': 1}]))
+        self.assertEqual([t['setting'] for t in sent['tuning']], ['assess_batch', 'discovery_concurrency'])
+        self.assertEqual(len(sent['alerts']), 1)  # the diagnosis and the action of the same reply stand
+        self.assertEqual(sent['actions'], ['feed_sentinels'])
+
+    def test_a_malformed_proposal_is_dropped_by_itself_and_the_alerts_and_actions_survive(self):
+        """WS-4: a float, an extra key, a missing key, a wrong type, a text where a list belongs: none of them costs the report."""
+        for bad in ({**self.GOOD, 'value': 4.0}, {**self.GOOD, 'extra': 1}, {k: v for k, v in self.GOOD.items() if k != 'alert'}, {**self.GOOD, 'value': 'many'},
+                    {**self.GOOD, 'value': True}, {**self.GOOD, 'reason': 5}, 'free text', 7, None, []):
+            sent, _ = self.run_with(self.snap(), self.reply([bad, self.GOOD]))
+            self.assertEqual([t['setting'] for t in sent['tuning']], ['assess_batch'], repr(bad))
+            self.assertEqual([a['code'] for a in sent['alerts']], ['memory'], repr(bad))
+            self.assertEqual(sent['actions'], ['feed_sentinels'], repr(bad))
+        for not_a_list in ('assess_batch', {'setting': 'assess_batch'}, 12, True):
+            sent, _ = self.run_with(self.snap(), self.reply(not_a_list))
+            self.assertNotIn('tuning', sent)
+            self.assertEqual([a['code'] for a in sent['alerts']], ['memory'])
+            self.assertEqual(sent['actions'], ['feed_sentinels'])
+
+    def test_the_rest_of_the_reply_is_still_checked_strictly(self):
+        bad = json.dumps({'alerts': [{'code': 'memory', 'severity': 'warning', 'diagnosis': self.DIAG, 'extra': 1}], 'actions': [], 'tuning': [self.GOOD]})
+        sent, _ = self.run_with(self.snap(), bad)
+        self.assertEqual(sent['alerts'], [])
+        self.assertNotIn('tuning', sent)  # an unusable answer as a whole is still unusable
+
+    def test_the_report_names_the_snapshot_it_answers(self):
+        sent, _ = self.run_with(self.snap(snapshot_id='ab' * 12), self.reply([self.GOOD]))
+        self.assertEqual(sent['snapshot_id'], 'ab' * 12)
+        sent, _ = self.run_with(self.snap(), self.reply([self.GOOD]))  # an older server sends none: nothing is invented
+        self.assertNotIn('snapshot_id', sent)
+        sent, _ = self.run_with(self.snap(snapshot_id='ab' * 12), self.reply([]))
+        self.assertNotIn('snapshot_id', sent)  # nothing proposed, nothing to bind
+
+    def test_a_reply_without_the_field_from_a_server_that_offered_nothing_still_parses(self):
+        sent, call = self.run_with({'checks': self.CHECKS, 'codes': ['memory']}, '{"alerts": [], "actions": []}')
+        self.assertNotIn('tuning', sent)
+        self.assertNotIn('tuning', call.call_args[0][3]['properties'])
+
+    def test_the_prompt_says_what_the_field_is_for_and_what_it_may_not_do(self):
+        for words in ('"tuning" list', 'at most two proposals', 'prefer lowering under trouble', 'never name a setting that is not listed', 'not_offered'):
+            self.assertIn(words, prompts.OPS_SYSTEM)
+        self.assertNotIn('review_daily_max', prompts.OPS_SYSTEM)
