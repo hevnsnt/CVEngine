@@ -61,7 +61,7 @@ class ScannerScriptBase(unittest.TestCase):
         self.save()
 
     def run_fn(self, *calls):
-        script = '. scripts/scanner.sh\n' + '\n'.join(f'{c} docker compose -f docker-compose.yml' for c in calls)
+        script = 'set -o pipefail\n. scripts/scanner.sh\n' + '\n'.join(f'{c} docker compose -f docker-compose.yml' for c in calls)
         return subprocess.run(['bash', '-c', script], cwd=self.work, env=self.env, capture_output=True, text=True, timeout=60)
 
     def calls(self):
@@ -128,6 +128,29 @@ class ScannerCapabilityTests(ScannerScriptBase):
         result = self.run_fn('cvengine_scanner_start --no-wait')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.extra(), [])
+
+
+class ScannerListingTests(ScannerScriptBase):
+    """`docker compose config --services | grep -q scanner` under `set -o pipefail` (every update script has it) read as "no scanner" whenever grep left before
+    compose had written its last line (SIGPIPE, status 141): the scanner was then neither started nor recreated, and the update ended with it down (seen
+    in the upgrade rehearsal on a few runs in ten). The services are read first and searched after."""
+
+    def test_the_scanner_is_found_when_compose_is_slower_than_grep(self):
+        self.state['slow_services'] = True
+        self.running_old()
+        result = self.run_fn('cvengine_scanner_enabled')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_an_update_with_a_slow_listing_still_starts_the_scanner(self):
+        self.state['slow_services'] = True
+        self.running_old()
+        result = self.run_fn('cvengine_scanner_update')
+        self.assertEqual(self.running_image(), NEW, result.stderr)
+
+    def test_a_compose_file_without_the_scanner_is_still_off(self):
+        self.state['no_scanner'] = True
+        self.save()
+        self.assertEqual(self.run_fn('cvengine_scanner_enabled').returncode, 1)
 
 
 class ScannerUpdateTests(ScannerScriptBase):

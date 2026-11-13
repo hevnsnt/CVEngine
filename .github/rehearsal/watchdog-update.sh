@@ -30,14 +30,26 @@ wait_for_ticks() {
   return 1
 }
 
-nohup env -i PATH=/usr/bin:/bin HOME="$HOME" CVENGINE_WATCHDOG_SECONDS=10 scripts/update-watch.sh 3000 >"$HOME/watcher3.log" 2>&1 &
-watcher=$!
+start_watcher() { nohup env -i PATH=/usr/bin:/bin HOME="$HOME" CVENGINE_WATCHDOG_SECONDS=10 scripts/update-watch.sh 3000 >"$HOME/watcher3.log" 2>&1 & watcher=$!; }
 trap 'kill "$watcher" 2>/dev/null || true' EXIT
 # A real install already has a watcher: the update that installed the host updater (scripts/update.sh) started one, and it holds the watcher's lock, so a
-# second one exits at once. Then the installed watcher is the one under test (it runs the watchdog at its own interval); only a stopped one is a failure.
-sleep 3
-if ! kill -0 "$watcher" 2>/dev/null; then
-  if flock -n 9 9>"$state/watch.lock"; then cat "$HOME/watcher3.log" || true; bad "the host watcher exited and nobody else holds its lock"; fi
+# second one exits at once. Then the installed watcher is the one under test (it runs the watchdog at its own interval). The installed one listens for 55
+# seconds and cron starts the next (no cron runs on this runner), so it can let go of the lock right after ours found it held and left: then ours is
+# started again. Only a lock nobody holds after repeated starts is a failure.
+installed=0
+for attempt in 1 2 3 4 5 6; do
+  start_watcher
+  sleep 3
+  kill -0 "$watcher" 2>/dev/null && break
+  if flock -n 9 9>"$state/watch.lock"; then
+    echo "attempt $attempt: our watcher exited and the lock was free (the installed watcher had just let go); starting it again"
+    cat "$HOME/watcher3.log" || true
+    [ "$attempt" -lt 6 ] || bad "the host watcher exited and nobody else holds its lock"
+  else
+    installed=1; break
+  fi
+done
+if [ "$installed" = 1 ]; then
   echo "The host watcher the install already runs is the one under test."
   sleep 7200 &  # stands in for the installed watcher in the checks below; the trap ends it
   watcher=$!

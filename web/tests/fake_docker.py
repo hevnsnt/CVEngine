@@ -55,9 +55,14 @@ if sub and sub[0] == 'compose':
         i += 2
     rest = rest[i:]
     if rest[:2] == ['config', '--services']:
-        out('web\ncelery\ncelery-beat\ndb\nredis')
-        if not state.get('no_scanner'):
-            out('scanner')
+        names = ['scanner'] if not state.get('no_scanner') else []
+        names += ['web', 'celery', 'celery-beat', 'db', 'redis']
+        for name in names:
+            out(name)
+            sys.stdout.flush()
+            if state.get('slow_services'):  # a reader that stops at the first match (grep -q) is gone before the rest is written
+                import time
+                time.sleep(0.3)
         sys.exit(0)
     if rest[:2] == ['ps', '-aq']:
         if state.get('container'):
