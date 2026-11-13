@@ -134,11 +134,24 @@ if ! [[ "$discovery_concurrency" =~ ^[0-9]+$ ]] || [ "$discovery_concurrency" -l
 fi
 echo "Discovery pool size (autoscale ceiling): $discovery_concurrency"
 commands+="$(generate_worker_command "discovery_queue" "$discovery_concurrency" "discovery_worker")"$'\n'
-commands+="$(generate_worker_command "cve_feed_queue" "4" "cve_feed_worker")"$'\n'
+# The CVE-feed and classic lanes start with what an App Admin saved on Settings, configMaxxing, else what auto-tuning chose (it lowers a lane that is killed for memory and
+# never goes above the configured number), else CVE_FEED_CONCURRENCY / CLASSIC_CONCURRENCY, else 4 and 10. A save or a tuned change also resizes the running worker live.
+lane_concurrency() {
+    local value
+    value=$(python3 manage.py scan_concurrency_value "$1" 2>/dev/null | tail -n 1)
+    if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 1 ]; then
+        value="$2"
+    fi
+    echo "$value"
+}
+cve_feed_concurrency=$(lane_concurrency lane.cve_feed "${CVE_FEED_CONCURRENCY:-4}")
+classic_concurrency=$(lane_concurrency lane.classic "${CLASSIC_CONCURRENCY:-10}")
+echo "Lane sizes (autoscale ceilings): cve_feed $cve_feed_concurrency, classic $classic_concurrency"
+commands+="$(generate_worker_command "cve_feed_queue" "$cve_feed_concurrency" "cve_feed_worker")"$'\n'
 # A reserved one-at-a-time lane keeps requested validation ahead of routine feed work.
 # Redis priority 0 is highest; this worker reserves one task for future severity-aware dispatch.
 commands+="$(generate_worker_command "validation_priority_queue" "1" "validation_priority_worker")"$'\n'
-commands+="$(generate_worker_command "$classic_queues" "${CLASSIC_CONCURRENCY:-10}" "classic_worker")"$'\n'
+commands+="$(generate_worker_command "$classic_queues" "$classic_concurrency" "classic_worker")"$'\n'
 
 # --- start_lanes: the four workers, each its own background job, with its pid and name recorded ---------------------------------------------
 # Every line of $commands is one `celery ... -n <node> &`. The pid of each is kept next to the lane's name, so the supervisor below can say WHICH lane
