@@ -24,6 +24,7 @@ export function stateOf(data) {
   if (code === "no_provider") return "no_provider";
   if (code === "nothing_open") return "nothing";
   if (code === "off") return "off";
+  if (code === "disabled") return "disabled";
   if (code === "unavailable" || code === "paused" || code === "daily_limit") return "blocked";
   return "never";
 }
@@ -53,6 +54,7 @@ export function emptyText(data) {
   const why = (data && data.readiness && data.readiness.reason) || "";
   if (state === "no_provider") return "No AI provider is set up, so this host cannot be reviewed by the AI. An administrator adds one in Settings.";
   if (state === "nothing") return "Nothing is open on this host, so there is nothing for the AI to review.";
+  if (state === "disabled") return "The AI host review is switched off for this installation. It is off until an administrator turns it on in Settings, because every review is an AI call your provider bills for.";
   if (state === "off") return "The AI host review is switched off for this project.";
   if (state === "blocked") return `A review cannot be asked for now: ${why || "the host is not reviewable"}.`;
   return "The AI has not reviewed this host yet. It reads every open finding of the host together, says which look real and which look like false positives, and picks one next step.";

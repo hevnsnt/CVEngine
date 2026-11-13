@@ -57,7 +57,7 @@ class ReadTests(ApiFixture):
     def test_each_reason_review_now_would_be_refused_is_named(self):
         def reason():
             return self.get()[1]['readiness']['reason_code']
-        ProjectSettings.objects.create(project=self.proj, host_review_mode='off')
+        ProjectSettings.objects.update_or_create(project=self.proj, defaults={'host_review_mode': 'off'})
         self.assertEqual(reason(), 'off')
         ProjectSettings.objects.filter(project=self.proj).update(host_review_mode='auto')
         row = ReviewerSettings.current()
@@ -214,7 +214,7 @@ class ReviewNowTests(ApiFixture):
         CVEMatch.objects.all().update(remediation_status='fixed')
         status, data = self.post()
         self.assertEqual(status, 409, data)
-        ProjectSettings.objects.create(project=self.proj, host_review_mode='off')
+        ProjectSettings.objects.update_or_create(project=self.proj, defaults={'host_review_mode': 'off'})
         self.assertEqual(self.post()[0], 409)
         ProjectSettings.objects.update(host_review_mode='auto')
         CVEMatch.objects.all().update(remediation_status='open')

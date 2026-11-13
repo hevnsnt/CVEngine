@@ -104,6 +104,10 @@ export function hostReviewCard({ base, hostId, hostName = "this host", isCurrent
       status.append(badge(state === "failed" ? "Review failed" : "Host changed", state === "failed" ? "high" : "queued"), el("p", "note", failureText(review), { style: "margin:8px 0 0" }));
     } else if (state !== "applied") {
       status.append(el("p", "note", emptyText(data), { style: "margin:8px 0 0" }));
+      if (state === "disabled") {
+        const settings = document.querySelector('a[href^="/cve/settings"]'); // the rail shows Settings only to people who may open it
+        if (settings) status.append(el("a", "", "Open Settings to turn it on", { href: `${settings.getAttribute("href")}`, style: "display:inline-block;margin-top:6px" }));
+      }
       if (!now.enabled && now.reason && state === "never") status.append(el("p", "note", `Review now is not available: ${now.reason}.`));
     }
 

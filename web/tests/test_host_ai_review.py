@@ -27,10 +27,11 @@ class ModelTests(TestCase):
         cls.other = Project.objects.create(name='HR2', slug='hr-proj2', insert_date=now, org=cls.org)
         cls.domain = Domain.objects.create(name='example.com', project=cls.proj, insert_date=now)
 
-    def test_the_settings_default_to_a_review_that_starts_read_only_steps_on_its_own(self):
-        self.assertEqual(ProjectSettings.objects.create(project=self.proj).host_review_mode, 'auto')
+    def test_the_settings_default_to_a_review_that_is_off_and_only_recommends(self):
+        # it costs the owner money (one AI call per host): off until a person turns it on, and a person starts each step until a person sets auto
+        self.assertEqual(ProjectSettings.objects.create(project=self.proj).host_review_mode, 'recommend')
         row = ReviewerSettings.current()
-        self.assertEqual((row.host_review_enabled, row.host_review_daily_max, row.host_review_auto_per_project_day), (True, 100, 50))
+        self.assertEqual((row.host_review_enabled, row.host_review_daily_max, row.host_review_auto_per_project_day), (False, 100, 50))
 
     def test_every_new_column_of_an_existing_table_has_a_database_default(self):
         # the previous release's code keeps inserting rows without these columns until the workers restart

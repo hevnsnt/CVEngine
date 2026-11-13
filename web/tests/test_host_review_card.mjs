@@ -122,6 +122,8 @@ test('each honest state: no provider, running, failed, stale, held, nothing to r
   assert.equal(buttonNamed(await draw(none('no_provider')), 'Review now').disabled, true);
   t = (await draw(none('nothing_open', 'x'))).textContent;
   assert.match(t, /Nothing is open on this host/);
+  t = (await draw(none('disabled', 'the AI host review is switched off'))).textContent;
+  assert.match(t, /switched off for this installation.*turns it on in Settings.*bills for/);
   t = (await draw(none('off'))).textContent;
   assert.match(t, /switched off for this project/);
   t = (await draw(data({status: 'queued', review: review({status: 'queued', running: true, findings: [], step: null})}))).textContent;
@@ -169,4 +171,18 @@ test('a card that cannot read the review says so', async () => {
   const card = hostReviewCard({base: BASE, hostId: 9});
   await new Promise((r) => setImmediate(r));
   assert.match(card.textContent, /could not be read: boom/);
+});
+
+test('a switched-off review links to Settings only where the page has a Settings link', async () => {
+  const link = (list) => (sel) => (sel.includes('csrf') ? {value: 'x'} : sel.includes('/cve/settings') ? list : null);
+  const keep = document.querySelector;
+  document.querySelector = link({getAttribute: () => '/cve/settings/'});
+  let card = await draw(none('disabled', 'the AI host review is switched off'));
+  const a = find(card, (n) => n.tag === 'a');
+  assert.equal(a.length, 1);
+  assert.equal(a[0].attrs.href, '/cve/settings/');
+  document.querySelector = link(null);
+  card = await draw(none('disabled', 'x'));
+  assert.equal(find(card, (n) => n.tag === 'a').length, 0);
+  document.querySelector = keep;
 });

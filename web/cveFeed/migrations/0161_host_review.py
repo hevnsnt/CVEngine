@@ -40,7 +40,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name="projectsettings",
             name="host_review_mode",
-            field=models.CharField(db_default="auto", default="auto", max_length=10),
+            field=models.CharField(db_default="recommend", default="recommend", max_length=10),
         ),
         migrations.AddField(
             model_name="reviewersettings",
@@ -55,7 +55,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name="reviewersettings",
             name="host_review_enabled",
-            field=models.BooleanField(db_default=True, default=True),
+            field=models.BooleanField(db_default=False, default=False),
         ),
         migrations.CreateModel(
             name="HostReview",

@@ -37,7 +37,7 @@ def _newest(project, host):
 
 def readiness(project, host):
     """Whether "Review now" would be accepted, and if not why: ``{can_request, reason_code, reason}``. The codes are ``unavailable`` (not a host of the
-    project, archived, excluded, gone), ``off`` (switched off for the project or the install), ``no_provider``, ``paused``, ``daily_limit``,
+    project, archived, excluded, gone), ``off`` (switched off for the project), ``disabled`` (switched off for the install: the default until a person turns it on in Settings), ``no_provider``, ``paused``, ``daily_limit``,
     ``open`` (a review is already running) and ``nothing_open`` (no open finding to review)."""
     from cveFeed import host_review
     from cveFeed.models import HostReview
@@ -48,7 +48,7 @@ def readiness(project, host):
         return {'can_request': False, 'reason_code': 'off', 'reason': 'the AI host review is switched off for this project'}
     ok, why = host_review.available()
     if not ok:
-        code = 'no_provider' if 'provider' in why else 'daily_limit' if 'limit' in why else 'paused' if 'paused' in why else 'off'
+        code = 'no_provider' if 'provider' in why else 'daily_limit' if 'limit' in why else 'paused' if 'paused' in why else 'disabled'
         return {'can_request': False, 'reason_code': code, 'reason': why}
     if HostReview.objects.filter(project=project, host=host, status__in=HostReview.OPEN).exists():
         return {'can_request': False, 'reason_code': 'open', 'reason': 'a review of this host is already running'}

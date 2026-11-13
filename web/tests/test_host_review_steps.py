@@ -101,7 +101,7 @@ class StepTests(Fixture):
         self.assertFalse(reviewer.worked_by_person('cve_match', self.m1))
 
     def test_recommend_mode_starts_nothing(self):
-        ProjectSettings.objects.create(project=self.proj, host_review_mode='recommend')
+        ProjectSettings.objects.update_or_create(project=self.proj, defaults={'host_review_mode': 'recommend'})
         review, run = self.run_step()
         run.assert_not_called()
         self.assertEqual((review.step_mode, review.step_state), ('recommend', 'proposed'))
@@ -208,7 +208,7 @@ class StepTests(Fixture):
         self.assertEqual(host_review.needs_person(self.proj), [])
 
     def test_ask_person_in_recommend_mode_is_proposed_and_still_a_needs_person_state_until_dismissed(self):
-        ProjectSettings.objects.create(project=self.proj, host_review_mode='recommend')
+        ProjectSettings.objects.update_or_create(project=self.proj, defaults={'host_review_mode': 'recommend'})
         review = self.queue()
         review = self.deliver(review, self.body({}, action='ask_person', reason='needs_person'))
         self.notified.assert_not_called()
@@ -216,7 +216,7 @@ class StepTests(Fixture):
         self.assertEqual(len(host_review.needs_person(self.proj)), 1)
 
     def test_a_persons_start_runs_the_same_function_as_the_person_and_cannot_be_clicked_twice(self):
-        ProjectSettings.objects.create(project=self.proj, host_review_mode='recommend')
+        ProjectSettings.objects.update_or_create(project=self.proj, defaults={'host_review_mode': 'recommend'})
         review, run = self.run_step()
         with mock.patch.object(host_actions, 'run', return_value={'action': 'validate_match', 'target': 'f1', 'state': 'started', 'detail': 'queued'}) as run:
             result = host_review.start_step(review, self.user)
@@ -233,7 +233,7 @@ class StepTests(Fixture):
             host_review.dismiss_step(review, self.user)
 
     def test_a_start_that_is_no_longer_offered_is_stored_refused(self):
-        ProjectSettings.objects.create(project=self.proj, host_review_mode='recommend')
+        ProjectSettings.objects.update_or_create(project=self.proj, defaults={'host_review_mode': 'recommend'})
         review, _ = self.run_step()
         CVEMatch.objects.filter(pk=self.m1.pk).update(remediation_status='fixed')  # the finding the step names closed meanwhile
         result = host_review.start_step(review, self.user)
@@ -242,7 +242,7 @@ class StepTests(Fixture):
         self.assertEqual(review.step_state, 'refused')
 
     def test_a_proposal_expires_when_a_newer_review_exists_or_after_a_week(self):
-        ProjectSettings.objects.create(project=self.proj, host_review_mode='recommend')
+        ProjectSettings.objects.update_or_create(project=self.proj, defaults={'host_review_mode': 'recommend'})
         old, _ = self.run_step()
         old.status = 'applied'
         old.save()
@@ -315,7 +315,7 @@ class SweepTests(Fixture):
         self.assertFalse(HostReview.objects.exists())
 
     def test_hosts_of_a_project_set_to_off_archived_or_excluded_are_skipped(self):
-        ProjectSettings.objects.create(project=self.proj, host_review_mode='off')
+        ProjectSettings.objects.update_or_create(project=self.proj, defaults={'host_review_mode': 'off'})
         self.assertEqual(host_review.sweep()['queued'], 0)
         ProjectSettings.objects.update(host_review_mode='auto')
         HostState.objects.filter(host=HOST).update(archived_at=timezone.now())

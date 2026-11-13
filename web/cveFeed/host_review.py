@@ -497,8 +497,8 @@ class HostReviewRefused(Exception):
 def mode_of(project):
     """The project's host review mode: ``auto``, ``recommend`` or ``off``."""
     from cveFeed.models import ProjectSettings
-    mode = ProjectSettings.objects.filter(project=project).values_list('host_review_mode', flat=True).first() or 'auto'
-    return mode if mode in ('auto', 'recommend', 'off') else 'auto'
+    mode = ProjectSettings.objects.filter(project=project).values_list('host_review_mode', flat=True).first() or 'recommend'
+    return mode if mode in ('auto', 'recommend', 'off') else 'recommend'
 
 
 def _day_start(now):
@@ -989,6 +989,10 @@ def sweep(limit=SWEEP_BATCH, now=None):
     from django.core.cache import cache
     now = now or timezone.now()
     out = {'queued': 0, 'skipped': '', 'closed': 0, 'expired': 0}
+    from cveFeed import reviewer
+    if not reviewer.settings_row().host_review_enabled:  # switched off (the default until a person turns it on): nothing is read, queued or spent
+        out['skipped'] = 'the AI host review is switched off'
+        return out
     if not cache.add(SWEEP_LOCK, 1, 540):
         out['skipped'] = 'another sweep is running'
         return out

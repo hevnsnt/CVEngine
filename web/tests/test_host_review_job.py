@@ -39,6 +39,9 @@ class Fixture(TestCase):
         self.user = User.objects.create_user('hj-user', password='x')
         self.counter = 0
         ai_queue.configure('vllm', model='m')
+        ReviewerSettings.objects.filter(pk=ReviewerSettings.current().pk).update(host_review_enabled=True)  # off by default: a person turns it on (test_host_review_default_off)
+        for project in (self.proj, self.other):  # and a project starts on recommend: these tests are about the automatic mode unless one says otherwise
+            ProjectSettings.objects.update_or_create(project=project, defaults={'host_review_mode': 'auto'})
         for patcher in (mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, project=None: list(hosts)),):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -147,7 +150,7 @@ class QueueTests(Fixture):
             self.queue()
         self.assertEqual(caught.exception.status, 429)
         ReviewerSettings.objects.update(host_review_daily_max=100)
-        ProjectSettings.objects.create(project=self.proj, host_review_mode='off')
+        ProjectSettings.objects.update_or_create(project=self.proj, defaults={'host_review_mode': 'off'})
         with self.assertRaises(host_review.HostReviewRefused):
             self.queue()
         ReviewerSettings.objects.update(host_review_enabled=False)
@@ -420,7 +423,7 @@ class AdmitTests(Fixture):
         self.assertTrue(host_review.job_admit(job))
         review.refresh_from_db()
         self.assertGreaterEqual(review.created_at, timezone.now() - timedelta(minutes=1))  # it counts against today now
-        ProjectSettings.objects.create(project=self.proj, host_review_mode='off')
+        ProjectSettings.objects.update_or_create(project=self.proj, defaults={'host_review_mode': 'off'})
         self.assertEqual(host_review.job_admit(job), 'drop')
         HostReview.objects.filter(pk=review.pk).update(status='failed')
         ProjectSettings.objects.update(host_review_mode='auto')

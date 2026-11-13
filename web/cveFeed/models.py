@@ -1687,9 +1687,10 @@ class ProjectSettings(models.Model):
     secrets_validation_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
     secrets_validation_at = models.DateTimeField(null=True, blank=True)
     secrets_validation_attestation = models.TextField(blank=True, default="", db_default="")
-    # the AI host review (cveFeed.host_review): auto (a read-only next step starts by itself), recommend (nothing starts without a person) or off
+    # the AI host review (cveFeed.host_review): recommend (the default: nothing starts without a person), auto (a read-only next step starts by itself;
+    # only a person sets it, never an agent token) or off
     HOST_REVIEW_MODES = ("auto", "recommend", "off")
-    host_review_mode = models.CharField(max_length=10, default="auto", db_default="auto")
+    host_review_mode = models.CharField(max_length=10, default="recommend", db_default="recommend")
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
 
@@ -2309,7 +2310,7 @@ class ReviewerSettings(models.Model):
     ops_hours = models.JSONField(default=list, blank=True)  # UTC hours; [] = the default (3, 9, 15, 21)
     last_ops_at = models.DateTimeField(null=True, blank=True)  # when the operations job last reported
     # the host review (cveFeed.host_review): one call per host state instead of one per finding. db_default: old code still inserting rows during an update
-    host_review_enabled = models.BooleanField(default=True, db_default=True)
+    host_review_enabled = models.BooleanField(default=False, db_default=False)  # OFF until a person switches it on in Settings: every review is a billed AI call
     host_review_daily_max = models.PositiveIntegerField(default=100, db_default=100)  # hosts reviewed a day, for the whole install
     host_review_auto_per_project_day = models.PositiveIntegerField(default=50, db_default=50)  # next steps a project's reviews start by themselves a day
     updated_at = models.DateTimeField(auto_now=True)
