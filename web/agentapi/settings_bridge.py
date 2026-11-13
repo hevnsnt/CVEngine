@@ -95,6 +95,31 @@ READ_ONLY_FOR_AGENTS = {
     'ip_allowlist_entry': 'the allowed addresses are the perimeter of the instance; a person changes them in the web interface.',
     'updates_approve': 'approving an update restarts the whole instance; an agent may check for one and read its state, a person presses the button.',
     'setup_questions': 'an answer can switch on a feature the AI provider or the host bills for, or change what is scanned; only a person decides that, in the web interface. An agent can read the questions.',
+    'config_maxxing_reset': 'it puts auto-tuning back on Auto with the AI advisor on, puts every spend cap back to its default (raising any a person lowered) and removes every pin; an agent lowers one number at a time with change_setting, a person resets in the web interface.',
+    'cve_guidance_run': 'it asks the AI model for guidance on up to 5000 CVEs whatever is left of the day\'s budget, which spends past the cap a person set; a person starts it in the web interface.',
+    'scanner_plan': 'the choice of scanner decides whether the built-in scanner runs and counts as the scanner question being answered; only a person chooses, in the web interface. An agent can read the plan.',
+}
+# Entries whose DELETE (``change_setting(..., remove=True)``) an agent may not send although it may change them otherwise: taking the entry away widens something.
+AGENT_CANNOT_REMOVE = {
+    'org_excluded_address': 'removing an exclusion lets the organization scan that address again; an agent may add exclusions, a person lifts them in the web interface.',
+}
+# FB-1 audit: every entry whose change is a POST (an Action, or a save that is sent as a POST) is either refused to agents above or listed here with why it is safe for
+# an agent: none of these raises autonomy, raises a spend cap, removes a person's pin or spends money beyond a cap a person set. A new POST entry is in neither
+# list until someone decides, and ``tests.test_agent_rules_b`` fails until then.
+AGENT_ACTIONS_ALLOWED = {
+    'ai_test': 'one small call to the AI provider already switched on, with a short time-out: it changes nothing',
+    'ai_models': 'lists the models of the provider already set up: it changes nothing',
+    'updates_check': 'asks GitHub for a newer version and records it: nothing is installed',
+    'updates_cancel': 'cancels an update that has not started: the cautious direction',
+    'updates_dismiss': 'hides the update notice: nothing is installed or changed',
+    'email_test': 'one test mail through the mail server a person set up; the mail server and sender are not changed by it',
+    'tailscale_test': 'tries the saved connection: it imports and scans nothing',
+    'tailscale_sync': 'runs the sync as a person configured it (the scope and the scan switch are the person\'s), at most once in 30 seconds',
+    'alert_dismiss': 'hides one notice: nothing is installed or changed',
+    'cve_seed_build': 'builds a file from CVE data already stored: CPU only, no AI call, nothing scanned',
+    'scan_control': 'pausing is the cautious direction; resuming only returns to what a person set',
+    'watchdog': 'a watchdog switch on is the safety net coming back (see AGENT_MAY_SWITCH_ON)',
+    'org_excluded_addresses': 'an exclusion only narrows what is scanned',
 }
 # What the handlers see as the caller's address. Not a loopback address: nothing that trusts the caller's address may take the bridge for the local machine.
 BRIDGE_ADDRESS = ''
@@ -124,7 +149,12 @@ AGENT_NUMBERS_FREE = {
 GENERIC_RULE_SKIPS = ('scan_concurrency', 'tunables', 'autotune')
 # A value an agent may not send for an entry: {entry: {field: the values refused}}. Automatic updates install without a person pressing the button; the
 # two scanner plans that keep the built-in scanner running spend the host's memory.
-AGENT_CANNOT_SET = {'updates': {'mode': ('automatic',)}, 'scanner_plan': {'plan': ('internal', 'both')}}
+AGENT_CANNOT_SET = {'tailscale_project': {'routing': ('host',)}}  # "host" is taken at the operator's word that the Docker host is on the tailnet: scanning of the tailnet begins
+# The only value an agent may send for a field: {entry: {field: the values allowed}}. FB-2: an update is never switched to automatic by an agent (the handler's word is
+# 'auto', which the old rule, spelt 'automatic', let through), whatever word is sent.
+AGENT_ONLY_VALUES = {'updates': {'mode': ('manual',)}}
+# Fields an agent may send only with the value they have now (read-only for an agent): where an install updates from decides what the Update button installs.
+AGENT_READ_ONLY_FIELDS = {'updates': ('repo', 'branch')}
 # Numbers of an entry's body that cost money or work: an agent may only lower them. {entry: {field: how the current number is read}}
 AGENT_LOWER_ONLY = {'ai': ('plan_daily_total', 'plan_daily_per_project', 'cve_guidance_daily', 'auto_fire_max_scans'), 'reviewer': ('review_daily_max',)}
 # Tunables an agent may only lower: every cap (``caution='cap'``, which includes each AI spend cap) and the two switches that widen what is scanned or sent.
@@ -159,7 +189,7 @@ def catalogue():
         methods = _methods(api, pattern)
         out.append({'name': name, 'what': text, 'id': ident, 'read': 'GET' in methods,
                     'change': name not in READ_ONLY_FOR_AGENTS and next((m for m in methods if m in WRITE_METHODS), None) is not None,
-                    'remove': name not in READ_ONLY_FOR_AGENTS and 'DELETE' in methods})
+                    'remove': name not in READ_ONLY_FOR_AGENTS and name not in AGENT_CANNOT_REMOVE and 'DELETE' in methods})
     return out
 
 
@@ -204,7 +234,9 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
     if method != 'GET':
         require_write_token(ctx)
         if name in READ_ONLY_FOR_AGENTS:
-            raise ApiError(403, f'{name} is not available to agents: {READ_ONLY_FOR_AGENTS[name]}')
+            raise ApiError(403, f'{name} is not available to agents: {READ_ONLY_FOR_AGENTS[name]}; use change_setting on the setting itself where there is one')
+        if method == 'DELETE' and name in AGENT_CANNOT_REMOVE:
+            raise ApiError(403, f'{name} cannot be removed by an agent: {AGENT_CANNOT_REMOVE[name]}')
     if method != 'GET' and isinstance(values, dict):
         for field in AGENT_CANNOT_ENABLE.get(name, ()):
             if values.get(field) not in (None, False):  # anything but off: a string or a number is refused by the handler, and must not slip past here
@@ -268,6 +300,12 @@ def _agent_body_rules(ctx, name, values, ident=None):
     for field, refused in AGENT_CANNOT_SET.get(name, {}).items():
         if values.get(field) in refused:
             raise ApiError(403, f'{field} {values.get(field)!r} can only be chosen by a person in the web interface; an agent may choose the other way')
+    for field, allowed in AGENT_ONLY_VALUES.get(name, {}).items():
+        if field in values and values[field] not in allowed:
+            raise ApiError(403, f'{field} {values[field]!r} can only be chosen by a person in the web interface; an agent may only choose {" or ".join(map(repr, allowed))}')
+    for field in AGENT_READ_ONLY_FIELDS.get(name, ()):
+        if field in values and values[field] != _current(ctx, name, ident).get(field):
+            raise ApiError(403, f'{field} is read-only for an agent: where the install updates from is a person\'s choice, in the web interface')
     if name == 'autotune' and 'agent_policy' in values:
         raise ApiError(403, 'what agents may do to the throughput settings is a person\'s decision: change it in Settings, Auto-tuning')
     if name == 'autotune':
