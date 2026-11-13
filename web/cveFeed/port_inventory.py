@@ -60,6 +60,16 @@ def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
             # smb-os-discovery and nbstat describe the host, not one port
             ip_obj.fingerprint = {**(ip_obj.fingerprint or {}), 'scripts': host_scripts}
             ip_obj.save(update_fields=['fingerprint'])
+        if 'cuts' in host:
+            # what this run cut for the host (a port list past its cap, a clipped banner, nmap's own time limit), shown on the host page: a run that cut nothing clears the last note
+            fingerprint = dict(ip_obj.fingerprint or {})
+            if host['cuts']:
+                fingerprint['result_cuts'] = {'nmap': host['cuts'], 'at': now.isoformat()}
+            else:
+                fingerprint.pop('result_cuts', None)
+            if fingerprint != (ip_obj.fingerprint or {}):
+                ip_obj.fingerprint = fingerprint
+                ip_obj.save(update_fields=['fingerprint'])
         for rec in host.get('ports', []):
             if not rec.get('number'):
                 continue

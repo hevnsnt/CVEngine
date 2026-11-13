@@ -1,0 +1,140 @@
+{
+  "outcome": "done",
+  "routes": [
+    {
+      "id": "https://www.example.com/",
+      "status": 200,
+      "title": "Example",
+      "content_type": "text/html",
+      "state": "open",
+      "evidence": {
+        "markers": [],
+        "bytes": 1256,
+        "cookies": [
+          "sid"
+        ],
+        "server": "nginx",
+        "provider": "",
+        "redirect_to": "",
+        "fingerprints": [
+          {
+            "name": "nginx",
+            "source": "header:server"
+          }
+        ],
+        "fingerprint_names": [
+          "nginx"
+        ],
+        "script_urls": [
+          "https://www.example.com/static/app.js"
+        ]
+      },
+      "sensitive": {},
+      "sensitive_score": 0,
+      "bytes": 1256,
+      "credentials": []
+    },
+    {
+      "id": "https://www.example.com/login",
+      "status": 200,
+      "title": "Sign in",
+      "content_type": "text/html",
+      "state": "login",
+      "evidence": {
+        "markers": [
+          "password_input"
+        ],
+        "bytes": 900,
+        "cookies": [],
+        "provider": "",
+        "redirect_to": ""
+      },
+      "sensitive": {},
+      "sensitive_score": 0,
+      "bytes": 900,
+      "credentials": []
+    },
+    {
+      "id": "https://www.example.com/admin",
+      "status": 302,
+      "title": "",
+      "content_type": "text/html",
+      "state": "sso",
+      "evidence": {
+        "markers": [
+          "redirect"
+        ],
+        "bytes": 0,
+        "cookies": [],
+        "provider": "Okta",
+        "redirect_to": "https://example.okta.com/app/x"
+      },
+      "sensitive": {},
+      "sensitive_score": 0,
+      "bytes": 0,
+      "credentials": []
+    },
+    {
+      "id": "https://api.example.com/",
+      "status": 200,
+      "title": "",
+      "content_type": "application/json",
+      "state": "open",
+      "evidence": {
+        "markers": [],
+        "bytes": 80,
+        "cookies": [],
+        "provider": "",
+        "redirect_to": ""
+      },
+      "sensitive": {
+        "aws_key": {
+          "count": 1,
+          "sample": "AWS access key, 20 chars (AKIA...)"
+        }
+      },
+      "sensitive_score": 25,
+      "bytes": 80,
+      "credentials": [
+        {
+          "type": "aws_key",
+          "value": "AKIA0000000000000000",
+          "line": 1,
+          "context": "{\"aws_access_key_id\": \"AKIA…0000\", \"region\": \"eu-west-1\"}"
+        }
+      ]
+    },
+    {
+      "id": "https://api.example.com/api/",
+      "status": 200,
+      "title": "",
+      "content_type": "text/html",
+      "state": "catch_all",
+      "evidence": {
+        "markers": [],
+        "bytes": 4000,
+        "cookies": [],
+        "provider": "",
+        "redirect_to": "",
+        "catch_all": {
+          "status": 200,
+          "type": "text/html",
+          "redirect": "",
+          "hash": "0123456789abcdef",
+          "length": 4000,
+          "kind": "bare",
+          "note": "the same answer as for a path that cannot exist"
+        }
+      },
+      "sensitive": {},
+      "sensitive_score": 0,
+      "bytes": 4000,
+      "credentials": []
+    }
+  ],
+  "touched": [
+    "api.example.com",
+    "www.example.com"
+  ],
+  "refused": []
+}

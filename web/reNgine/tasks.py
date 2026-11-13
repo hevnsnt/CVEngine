@@ -223,11 +223,11 @@ def _persist_bbot_findings(result, ctx, subdomains):
 			# a dangling name often does not resolve, so no host row exists for it yet: the finding is still about that name ("Matched at")
 			sub, _ = save_subdomain(f['host'], ctx=ctx)
 		save_vulnerability(
-			target_domain=domain, scan_history=scan, subdomain=sub, http_url=f['url'] or f['host'], name=f['name'],
-			severity=severity, description=description, source='bbot', type='bbot', template_id=f['module'],
+			target_domain=domain, scan_history=scan, subdomain=sub, http_url=f['url'] or (f"{f['host']}:{f['port']}" if f['host'] and f.get('port') else f['host']), name=f['name'],
+			severity=severity, description=description, source='bbot', type='bbot', template_id=f['module'],  # a finding with a port is filed against host:port
 			matcher_name=finding_key(f['description']),
 			request=f"bbot {f['module']} event on {f['host']}" + (f" at {f['url']}" if f['url'] else ''),
-			extracted_results=[x[:5000] for x in (f['host'], f['url']) if x])
+			extracted_results=[x[:5000] for x in (f['host'], f['url'], f"port {f['port']}" if f.get('port') else '') if x])
 
 
 	# with open(self.output_path, 'w') as f:

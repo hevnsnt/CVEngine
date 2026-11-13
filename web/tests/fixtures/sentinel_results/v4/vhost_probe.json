@@ -1,0 +1,66 @@
+{
+  "outcome": "done",
+  "addresses": [
+    {
+      "id": "203.0.113.10",
+      "default": {
+        "state": "answered",
+        "fingerprint": {
+          "status": 200,
+          "title": "Welcome to nginx!",
+          "length": 615,
+          "location": "",
+          "server": "nginx"
+        }
+      },
+      "names": [
+        {
+          "name": "portal.example.com",
+          "state": "answered",
+          "fingerprint": {
+            "status": 200,
+            "title": "Portal login",
+            "length": 4200,
+            "location": "",
+            "server": "nginx"
+          },
+          "own": null,
+          "page": {
+            "status": 200,
+            "title": "Portal login",
+            "server": "nginx",
+            "content_type": "text/html",
+            "powered_by": "PHP/8.1.2",
+            "url": "https://portal.example.com/",
+            "body": "<html><title>Portal login</title></html>",
+            "headers": {
+              "server": "nginx",
+              "x-powered-by": "PHP/8.1.2"
+            }
+          }
+        },
+        {
+          "name": "wiki.example.com",
+          "state": "answered",
+          "fingerprint": {
+            "status": 200,
+            "title": "Wiki",
+            "length": 3000,
+            "location": "",
+            "server": "nginx"
+          }
+        },
+        {
+          "name": "gone.example.com",
+          "state": "no_answer"
+        }
+      ]
+    }
+  ],
+  "touched": [
+    "203.0.113.10",
+    "portal.example.com",
+    "wiki.example.com"
+  ],
+  "refused": []
+}

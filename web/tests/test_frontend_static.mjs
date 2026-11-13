@@ -255,10 +255,20 @@ test('Sentinel page shows the OpenVAS idle state without a deferred list', () =>
 const settingsSource = read('sentinel-settings.js').replace(/^import[\s\S]*?from "[^"]*";\n/gm, '');
 globalThis.__sentinelUi.button = (label, _fn, cls) => sentinelEl('button', cls, label);
 globalThis.__sentinelUi.text = (value = '', attrs = {}) => Object.assign(sentinelEl('input', '', null, attrs), {value});
-const {versionBlock, newestLine, updateLine, waitingLines, watchdogLines, WAIT_RED_SECONDS, kindState, kindNote, kindChips, kindsChange, modesOffered, canReset, capProblem, defaultHint, kindsPanel} = await import(`data:text/javascript,${encodeURIComponent(
+const {versionBlock, newestLine, toolsLine, updateLine, waitingLines, watchdogLines, WAIT_RED_SECONDS, kindState, kindNote, kindChips, kindsChange, modesOffered, canReset, capProblem, defaultHint, kindsPanel} = await import(`data:text/javascript,${encodeURIComponent(
   `const {el, badge, button, text} = globalThis.__sentinelUi;\n${settingsSource}`,
 )}`);
 const buttonLabels = (node) => (node.tag === 'button' ? [node.text] : []).concat(...node.children.filter((c) => typeof c !== 'string').map(buttonLabels));
+
+test('a card names the tools that are behind, next to the version, and draws nothing for a Sentinel that reports none or is current', () => {
+  const behind = {status: 'behind', flagged: true, behind: [{tool: 'nuclei', running: '3.10.0', current: '3.11.1'}, {tool: 'nmap', running: '7.97', current: '7.993'}]};
+  const line = toolsLine({tools_state: behind});
+  assert.match(sentinelText(line), /Tools behind: nuclei 3\.10\.0 \(this release ships 3\.11\.1\), nmap 7\.97 \(this release ships 7\.993\)/);
+  assert.match(line.cls, /msg err/);
+  assert.equal(toolsLine({tools_state: {status: 'current', behind: []}}), null);
+  assert.equal(toolsLine({tools_state: {status: 'unknown', behind: []}}), null);
+  assert.equal(toolsLine({}), null);
+});
 
 test('a Sentinel card has Update now, the built-in scanner does not and says why', () => {
   const detail = {id: 7, name: 'CVEngine Scanner', version: 'abc1234', update: {requested_at: null}, settings: {}};

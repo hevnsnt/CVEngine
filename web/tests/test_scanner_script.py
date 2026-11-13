@@ -19,6 +19,7 @@ FAKE_DOCKER = Path(__file__).resolve().parent / 'fake_docker.py'
 MOVING = 'ghcr.io/hevnsnt/cvengine-sentinel:main'
 ROLLBACK = 'cvengine-sentinel-rollback:previous'
 OLD, NEW = 'sha256:' + 'a' * 64, 'sha256:' + 'b' * 64
+FLOOR = json.loads((ROOT / 'scanner.lock.json').read_text())['floor']['contract_version']  # the contract the floor commit speaks: the tests follow it, they do not repeat it
 
 
 @unittest.skipUnless(shutil.which('bash'), 'needs bash')
@@ -42,8 +43,8 @@ class ScannerScriptBase(unittest.TestCase):
         (self.work / '.env').write_text('POSTGRES_DB=x\n')
         self.env = {**{k: v for k, v in os.environ.items() if not k.startswith('CVENGINE_')}, 'PATH': f'{self.stub}:{os.environ["PATH"]}',
                     'STUB_DIR': str(self.stub), 'CVENGINE_SCANNER_READY_SECONDS': '1', 'CVENGINE_SCANNER_POLL': '0'}
-        self.state = {'images': {}, 'registry': {MOVING: NEW}, 'container': None, 'contract': {OLD: '3', NEW: '3'},
-                      'release': {OLD: 'oldrelease0001', NEW: 'newrelease0002'}, 'healthy': {OLD: True, NEW: True}, 'server': '3 1', 'default_ref': MOVING}
+        self.state = {'images': {}, 'registry': {MOVING: NEW}, 'container': None, 'contract': {OLD: str(FLOOR), NEW: str(FLOOR)},
+                      'release': {OLD: 'oldrelease0001', NEW: 'newrelease0002'}, 'healthy': {OLD: True, NEW: True}, 'server': f'{FLOOR} 1', 'default_ref': MOVING}
         self.save()
 
     def save(self):
@@ -114,30 +115,30 @@ class ScannerUpdateTests(ScannerScriptBase):
 
     def test_a_new_image_that_checks_in_with_a_contract_below_the_floor_is_rolled_back(self):
         self.running_old()
-        self.state['contract'][NEW] = '2'  # healthy, and speaking an older contract than the floor (3) this release was tested with
+        self.state['contract'][NEW] = str(FLOOR - 1)  # healthy, and speaking an older contract than the floor this release was tested with
         self.save()
         result = self.run_fn('cvengine_scanner_update')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.running_image(), OLD)
-        self.assertIn('contract version 2 is below the floor 3', result.stderr)
+        self.assertIn(f'contract version {FLOOR - 1} is below the floor {FLOOR}', result.stderr)
         self.assertIn(f'CVENGINE_SCANNER_ROLLBACK_IMAGE={ROLLBACK}', self.env_file())
-        self.assertTrue(any('report failed' in r and 'below the floor 3' in r for r in self.state['reports']))
+        self.assertTrue(any('report failed' in r and f'below the floor {FLOOR}' in r for r in self.state['reports']))
 
     def test_a_contract_the_server_no_longer_speaks_is_refused_too(self):
         self.running_old()
         data = dict(self.lock)
-        data['floor'] = {**self.lock['floor'], 'contract_version': 1}  # a low floor: the server's own line (min_supported 3 here) is what refuses it
+        data['floor'] = {**self.lock['floor'], 'contract_version': 1}  # a low floor: the server's own line (min_supported FLOOR here) is what refuses it
         (self.work / 'scanner.lock.json').write_text(json.dumps(data))
-        self.state['contract'][NEW] = '2'
-        self.state['server'] = '4 3'
+        self.state['contract'][NEW] = str(FLOOR - 1)
+        self.state['server'] = f'{FLOOR + 1} {FLOOR}'
         self.save()
         result = self.run_fn('cvengine_scanner_update')
-        self.assertIn('older than the 3 this server still speaks', result.stderr)
+        self.assertIn(f'older than the {FLOOR} this server still speaks', result.stderr)
         self.assertEqual(self.running_image(), OLD)
 
     def test_a_scanner_on_a_newer_contract_than_the_server_is_kept(self):
         self.running_old()
-        self.state['contract'][NEW] = '9'  # newer than the server's 3: it is offered what this server knows, so it is fine
+        self.state['contract'][NEW] = str(FLOOR + 6)  # newer than the server's: it is offered what this server knows, so it is fine
         self.save()
         result = self.run_fn('cvengine_scanner_update')
         self.assertEqual(self.running_image(), NEW)
@@ -349,16 +350,16 @@ class LockTests(unittest.TestCase):
 
     def test_check_fails_when_the_compose_default_is_a_digest_or_another_tag(self):
         pinned = self.compose.replace(MOVING + '}}', 'ghcr.io/hevnsnt/cvengine-sentinel@' + OLD + '}}')
-        problems = self.lock.check(self.data, pinned, server=(3, 1))
+        problems = self.lock.check(self.data, pinned, server=(FLOOR, 1))
         self.assertTrue(any('not the moving tag' in p for p in problems) and any('not a digest' in p for p in problems), problems)
         other = self.compose.replace(MOVING + '}}', 'ghcr.io/hevnsnt/cvengine-sentinel:1.4}}')
-        self.assertTrue(self.lock.check(self.data, other, server=(3, 1)))
-        self.assertEqual(self.lock.check(self.data, self.compose, server=(3, 1)), [])
+        self.assertTrue(self.lock.check(self.data, other, server=(FLOOR, 1)))
+        self.assertEqual(self.lock.check(self.data, self.compose, server=(FLOOR, 1)), [])
 
     def test_check_fails_when_the_floor_is_above_the_contract_the_server_reads(self):
-        data = {**self.data, 'floor': {**self.data['floor'], 'contract_version': 4}}
-        problems = self.lock.check(data, self.compose, server=(3, 1))
-        self.assertTrue(any('above the contract version 3 this server reads' in p for p in problems), problems)
+        data = {**self.data, 'floor': {**self.data['floor'], 'contract_version': FLOOR + 1}}
+        problems = self.lock.check(data, self.compose, server=(FLOOR, 1))
+        self.assertTrue(any(f'above the contract version {FLOOR} this server reads' in p for p in problems), problems)
 
     def test_the_floor_is_not_above_what_the_installed_library_reads(self):
         pair = self.lock.server_contract()
@@ -371,7 +372,7 @@ class LockTests(unittest.TestCase):
     def test_check_fails_when_the_tag_is_not_the_one_the_publish_workflow_moves(self):
         data = {**self.data, 'tag': 'latest'}
         compose = self.compose.replace(MOVING + '}}', 'ghcr.io/hevnsnt/cvengine-sentinel:latest}}')
-        self.assertTrue(any("moves 'main'" in p for p in self.lock.check(data, compose, server=(3, 1))))
+        self.assertTrue(any("moves 'main'" in p for p in self.lock.check(data, compose, server=(FLOOR, 1))))
 
     def test_the_floor_commit_is_checked_against_the_sentinel_main_branch(self):
         def reply(status):
@@ -393,19 +394,19 @@ class LockTests(unittest.TestCase):
 
     def test_accepts_follows_the_floor_and_the_servers_own_line(self):
         accepts = self.lock.accepts
-        self.assertEqual(accepts(self.data, 3, 3, 1), (True, ''))
-        self.assertEqual(accepts(self.data, 9, 3, 1), (True, ''), 'a newer contract is fine')
-        self.assertFalse(accepts(self.data, 2, 3, 1)[0])
-        self.assertIn('below the floor 3', accepts(self.data, 2, 3, 1)[1])
+        self.assertEqual(accepts(self.data, FLOOR, FLOOR, 1), (True, ''))
+        self.assertEqual(accepts(self.data, FLOOR + 6, FLOOR, 1), (True, ''), 'a newer contract is fine')
+        self.assertFalse(accepts(self.data, FLOOR - 1, FLOOR, 1)[0])
+        self.assertIn(f'below the floor {FLOOR}', accepts(self.data, FLOOR - 1, FLOOR, 1)[1])
         low = {**self.data, 'floor': {**self.data['floor'], 'contract_version': 1}}
-        self.assertEqual(accepts(low, 1, 3, 1), (True, ''))
-        self.assertIn('older than the 2 this server still speaks', accepts(low, 1, 3, 2)[1])
+        self.assertEqual(accepts(low, 1, FLOOR, 1), (True, ''))
+        self.assertIn('older than the 2 this server still speaks', accepts(low, 1, FLOOR, 2)[1])
         for bad in (None, True, 0, 'x'):
             self.assertFalse(accepts(self.data, bad)[0], bad)
 
     def test_the_command_line_says_yes_and_no(self):
-        self.assertEqual(self.run_cli('accepts', '3', '3', '1').returncode, 0)
-        refused = self.run_cli('accepts', '2', '3', '1')
+        self.assertEqual(self.run_cli('accepts', str(FLOOR), str(FLOOR), '1').returncode, 0)
+        refused = self.run_cli('accepts', str(FLOOR - 1), str(FLOOR), '1')
         self.assertEqual(refused.returncode, 1)
         self.assertIn('below the floor', refused.stderr)
         self.assertEqual(self.run_cli('accepts', 'x').returncode, 2)
@@ -417,7 +418,7 @@ class LockTests(unittest.TestCase):
         with self.assertRaises(self.lock.LockError):
             self.lock.raise_floor(self.data, new, self.data['floor']['contract_version'] - 1)
         with self.assertRaises(self.lock.LockError):
-            self.lock.raise_floor(self.data, 'short', 3)
+            self.lock.raise_floor(self.data, 'short', FLOOR)
         with self.assertRaises(self.lock.LockError):
             self.lock.validate({**self.data, 'tag': 'sha256:' + 'a' * 64})
         self.lock.validate({**self.data, 'image': 'localhost:5055/cvengine-sentinel'})  # a registry with a port is a registry
@@ -431,7 +432,7 @@ class LockTests(unittest.TestCase):
             shutil.copy(SCRIPTS / 'scanner_lock.py', work / 'scripts')
             shutil.copy(ROOT / 'scanner.lock.json', work)
             shutil.copy(ROOT / 'docker-compose.yml', work)
-            out = subprocess.run(['python3', 'scripts/scanner_lock.py', 'raise-floor', '--commit', 'a' * 40, '--contract', '3'], cwd=work, capture_output=True, text=True)
+            out = subprocess.run(['python3', 'scripts/scanner_lock.py', 'raise-floor', '--commit', 'a' * 40, '--contract', str(FLOOR)], cwd=work, capture_output=True, text=True)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertEqual((work / 'docker-compose.yml').read_text(), self.compose)
             self.assertEqual(subprocess.run(['python3', 'scripts/scanner_lock.py', 'check'], cwd=work).returncode, 0)
