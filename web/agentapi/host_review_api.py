@@ -202,7 +202,7 @@ def dismiss_host_review_step(ctx, slug, host_id, reason=''):
     if reason is not None and not isinstance(reason, str):
         raise ApiError(400, 'reason must be text')
     try:
-        row = host_review.dismiss_step(row, ctx.user, reason or '')
+        row = host_review.dismiss_step(row, ctx.user, reason or '', agent=ctx.token is not None)
     except host_review.HostReviewRefused as exc:
         raise ApiError(exc.status, str(exc)) from exc
     return {'review': describe(row, project)}

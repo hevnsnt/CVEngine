@@ -285,12 +285,26 @@ class StartAndDismissTests(ApiFixture):
         self.assertEqual(self.post('/dismiss', {'reason': ['x']})[0], 400)
         self.assertEqual(self.post('/dismiss')[0], 200)
 
-    def test_the_needs_a_person_flag_is_cleared_by_dismiss(self):
+    def test_the_needs_a_person_flag_is_cleared_by_a_person_and_never_by_a_token(self):
         self.applied(action='ask_person', mode='recommend')
         step = self.get()[1]['review']['step']
         self.assertEqual((step['needs_person'], step['can_start'], step['can_dismiss']), (True, False, True))
-        self.assertEqual(self.post('/dismiss')[0], 200)
+        status, data = self.post('/dismiss')
+        self.assertEqual(status, 403, data)  # HV-3: an API key may not clear it
+        self.assertTrue(self.get()[1]['review']['step']['needs_person'])
+        from django.test import Client
+        person = Client()
+        person.force_login(self.member)
+        self.assertEqual(person.post(self.base + '/dismiss', data='{}', content_type='application/json').status_code, 200)
         self.assertFalse(self.get()[1]['review']['step']['needs_person'])
+
+    def test_a_token_cannot_dismiss_a_step_held_for_planted_text_but_may_dismiss_any_other(self):
+        review = self.applied(action='assess_host')
+        HostReview.objects.filter(pk=review.pk).update(injection=['ai_directive'])
+        self.assertEqual(self.post('/dismiss')[0], 403)
+        self.assertEqual(HostReview.objects.get().step_state, 'proposed')
+        HostReview.objects.filter(pk=review.pk).update(injection=['verdict_claim'])  # a claim about the verdict holds closures, not steps
+        self.assertEqual(self.post('/dismiss')[0], 200)
 
 
 class McpTests(ApiFixture):

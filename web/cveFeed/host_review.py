@@ -942,13 +942,15 @@ def start_step(review, by, agent=False):
     return result
 
 
-def dismiss_step(review, by, reason=''):
+def dismiss_step(review, by, reason='', agent=False):
     """A person's Dismiss: the proposed step (or the needs-person flag of ``ask_person``) is dismissed, with who and when, and the same step is not
     proposed again for this state of the host. Raises ``HostReviewRefused`` 409 when there is nothing to dismiss."""
     from django.db.models import Q
     from cveFeed import reviewer
     from cveFeed.models import HostReview
     now = timezone.now()
+    if agent and (hard_flags(review.injection) or review.step_action == 'ask_person'):  # clearing the needs-a-person flag, or a step held for planted text, is a person's
+        raise HostReviewRefused('a person dismisses a step that is held for planted text or asks for a person, in the web interface', 403)
     detail = ('dismissed' + (f': {reviewer.clean_note(reason)[:200]}' if reason else ''))[:300]
     flag = Q(step_state='proposed') | Q(step_action='ask_person', step_state='done')
     if not HostReview.objects.filter(flag, pk=review.pk, status='applied').update(step_state='dismissed', step_detail=detail, dismissed_by=by, dismissed_at=now):
