@@ -208,7 +208,7 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
     if method != 'GET' and isinstance(values, dict):
         for field in AGENT_CANNOT_ENABLE.get(name, ()):
             if values.get(field) not in (None, False):  # anything but off: a string or a number is refused by the handler, and must not slip past here
-                raise ApiError(403, f'{field} can only be switched on by a person in the web interface; an agent may switch it off')
+                raise ApiError(403, f'{field} is for a person to switch on (only a person does, in the web interface); an agent may switch it off')
     if method != 'GET' and isinstance(values, dict):
         _agent_body_rules(ctx, name, values, ident)
     groups = _groups(pattern, ident)
@@ -284,7 +284,7 @@ def _agent_body_rules(ctx, name, values, ident=None):
             continue
         new, now = values[field], _current_body_number(name, field)
         if isinstance(new, bool) or not isinstance(new, int) or (isinstance(now, int) and new > now):
-            raise ApiError(403, f'{field} is a limit on what this instance spends: an agent may only lower it (now {now}); a person raises it in the web interface')
+            raise ApiError(403, f'{field} is a limit on what this instance spends: an agent may only lower it (now {now}); only a person raises it, in the web interface')
 
 
 def _ops_hours_rule(hours):
@@ -338,7 +338,7 @@ def _default_deny(ctx, name, values, ident):
             matches = [v for k, v in current.items() if k == path or k.rsplit('.', 1)[-1] == field]
             now = matches[0] if len(matches) == 1 else None
             if not (isinstance(now, (int, float)) and not isinstance(now, bool) and value <= now):  # a number the page does not show under that name is as good as unknown: refused
-                raise ApiError(403, f'{name}.{field}: an agent may only lower a number (now {now if now is not None else "not known here"}); a person raises or sets it in the web interface')
+                raise ApiError(403, f'{name}.{field}: an agent may only lower a number (now {now if now is not None else "not known here"}); only a person raises or sets it, in the web interface')
 
 
 def _tunable_rules(values):
@@ -361,7 +361,7 @@ def _tunable_rules(values):
         def reach(n):  # a cap of 0 on these keys means no cap
             return float('inf') if key in TUNABLE_ZERO_IS_UNLIMITED and n == 0 else n
         if reach(number) > reach(now):
-            raise ApiError(403, f'{t.label} is a limit on cost or scope: an agent may only lower it (now {now}); a person raises it in the web interface')
+            raise ApiError(403, f'{t.label} is a limit on cost or scope: an agent may only lower it (now {now}); only a person raises it, in the web interface')
 
 
 def _throughput_write(ctx, name, method, fn, request, values, groups):
