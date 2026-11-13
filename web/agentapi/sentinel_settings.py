@@ -182,7 +182,7 @@ def instance_self_update():
     """The instance-wide default for Sentinels' self-update: the administrators' choice (``SentinelDefaults.self_update``), else ``automatic`` while
     "Keep Sentinels on the newest version" is on (the default) and ``manual`` once an administrator turned it off. A Sentinel with a value of its own,
     and a machine's own ceiling (``CVENGINE_SENTINEL_UPDATE``), still win over this."""
-    row = SentinelDefaults.current()
+    row = policy_lib.defaults_row()
     if row.self_update in SELF_UPDATE:
         return row.self_update
     return 'automatic' if row.keep_newest else 'manual'
@@ -190,7 +190,7 @@ def instance_self_update():
 
 def keep_newest():
     """Whether the instance keeps Sentinels on the newest version (Settings, Sentinels). On unless an administrator turned it off."""
-    return bool(SentinelDefaults.current().keep_newest)
+    return bool(policy_lib.defaults_row().keep_newest)
 
 
 def explicit(agent):

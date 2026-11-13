@@ -148,6 +148,8 @@ def _agent_of(ctx, usable=True, write=True):
         raise ApiError(404, 'this token has no registered agent: call register_agent first')
     if usable and agent.status == 'revoked':
         raise ApiError(403, 'this agent was revoked by an administrator')
+    if agent.token.user_id == getattr(ctx.user, 'pk', None) and getattr(ctx.user, 'mfa_checked_this_request', False):
+        agent.token.user.mfa_checked_this_request = True  # the request's sign-in check already ran for this very user a moment ago: not asked again (``Eff._problem``)
     return agent
 
 
@@ -418,7 +420,7 @@ class Eff:
             return 'its token is read only'
         from agentapi import sentinel_policy
         from tenancy.middleware import TenancyMiddleware
-        if sentinel_policy.shared(('must-enrol-mfa', user.pk), lambda: TenancyMiddleware.must_enrol_mfa(user)):  # once per user for a page of cards
+        if not getattr(user, 'mfa_checked_this_request', False) and sentinel_policy.shared(('must-enrol-mfa', user.pk), lambda: TenancyMiddleware.must_enrol_mfa(user)):  # once per user for a page of cards
             return 'its user has to set up two-step sign-in first'
         return ''
 
@@ -1156,7 +1158,9 @@ def list_agents(ctx, params):
     page = svc.paginate(qs.order_by('name', 'id'), params, lambda a: a)
     counts = _counts([a.pk for a in page['results']])
     builtin_id = _sentinel().builtin_pk() if any(a.kind == 'scanner' for a in page['results']) else None  # once for the page, not per row
-    page['results'] = [agent_dict(a, counts=counts.get(a.pk), viewer=ctx.user, builtin_id=builtin_id) for a in page['results']]
+    from agentapi import sentinel_policy
+    with sentinel_policy.shared_lookups():  # the instance defaults are read once for the page, not once per Sentinel (four times each)
+        page['results'] = [agent_dict(a, counts=counts.get(a.pk), viewer=ctx.user, builtin_id=builtin_id) for a in page['results']]
     return page
 
 

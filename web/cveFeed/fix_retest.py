@@ -174,6 +174,106 @@ def status_changed(obj, before, after):
     return None
 
 
+def status_changed_many(changes, after, now=None):
+    """``status_changed`` for many findings at once (``agentapi.services.bulk_update_finding_status``): ``changes`` is ``[(finding, status before)]``, every finding
+    now at ``after``. Each gets what ``status_changed`` gives it (a retest queued with its activity line, or ``no_check`` stored, or the state started over), in a
+    fixed number of queries instead of five or more each. Never raises."""
+    try:
+        from django.core.exceptions import ObjectDoesNotExist
+        now = now or timezone.now()
+        wanted, reset = {}, {}
+        for obj, before in changes:
+            try:
+                triage = obj.triage
+            except ObjectDoesNotExist:
+                continue
+            if after == 'fixed' and before != 'fixed':
+                wanted.setdefault(triage.pk, (triage, getattr(obj, 'remediation_by', None)))
+            elif after != 'fixed' and triage.retest_state:
+                reset.setdefault(triage.pk, triage)
+        if reset:
+            for triage in reset.values():
+                triage.retest_state, triage.retest_reason, triage.retest_at, triage.retest_sentinel, triage.updated_at = '', '', None, '', now
+            _save_states(list(reset.values()))
+        if wanted:
+            _request_many(list(wanted.values()), now)
+    except Exception:  # noqa: BLE001
+        logger.warning('retest hook failed for a batch of findings', exc_info=True)
+
+
+_STATE_FIELDS = ['retest_state', 'retest_reason', 'retest_at', 'retest_sentinel', 'updated_at']
+
+
+def _save_states(triages):
+    from cveFeed.models import Triage
+    Triage.objects.bulk_update(triages, _STATE_FIELDS)
+
+
+def _stored_checks_many(triage_ids):
+    """``{triage id: checks}`` of ``_stored_checks`` for these findings, in one query (only those that have some)."""
+    from cveFeed.models import FixRetest
+    seen, out = {}, {}
+    for triage_id, checks in FixRetest.objects.filter(triage_id__in=triage_ids).order_by('triage_id', '-id').values_list('triage_id', 'check_run'):
+        seen[triage_id] = seen.get(triage_id, 0) + 1
+        if triage_id not in out and seen[triage_id] <= 5 and (checks or {}).get('checks'):
+            out[triage_id] = checks['checks']
+    return out
+
+
+def _request_many(asked, now):
+    """``request(triage, user, 'automatic')`` for each ``(triage, user)`` of ``asked``, queries shared: the checks to repeat, the retests already running, the rows
+    created and the states stored are one query each, and the activity lines one insert. A retest that cannot be created with the others (two requests at once) is
+    asked for by itself, as ``request`` does."""
+    from cveFeed.models import AgentActivity, FixRetest
+    checks = {}
+    for triage, _user in asked:
+        found = proof_checks(triage)
+        if found:
+            checks[triage.pk] = found
+    missing = [t.pk for t, _ in asked if t.pk not in checks]
+    checks.update(_stored_checks_many(missing) if missing else {})
+    nothing = [t for t, _ in asked if t.pk not in checks]
+    for triage in nothing:
+        triage.retest_state, triage.retest_reason, triage.retest_at, triage.retest_sentinel, triage.updated_at = NO_CHECK, NO_CHECK_REASON, now, '', now
+    if nothing:
+        _save_states(nothing)
+    todo = [(t, u) for t, u in asked if t.pk in checks]
+    if not todo:
+        return
+    running = set(FixRetest.objects.filter(triage_id__in=[t.pk for t, _ in todo], status__in=('queued', 'running')).values_list('triage_id', flat=True))
+    todo = [(t, u) for t, u in todo if t.pk not in running]  # one at a time per finding: a retest already queued stands
+    if not todo:
+        return
+    try:
+        with transaction.atomic():
+            jobs = FixRetest.objects.bulk_create([FixRetest(triage=t, project_id=t.project_id, source='automatic', requested_by=u, attempts=1,
+                                                            check_run={'checks': checks[t.pk]}) for t, u in todo])
+            for triage, _user in todo:
+                triage.retest_state, triage.retest_reason, triage.retest_at, triage.retest_sentinel, triage.updated_at = VERIFYING, '', None, '', now
+            _save_states([t for t, _ in todo])
+    except IntegrityError:  # two requests at once: each finding is asked for by itself, the other one's stands
+        for triage, user in todo:
+            request(triage, user, 'automatic', now)
+        return
+    from cveFeed.tasks import retest_fixed_finding
+    lines = []
+    for job in jobs:
+        try:
+            retest_fixed_finding.apply_async(args=[job.pk], priority=3)
+        except Exception:  # noqa: BLE001 - a broker that refuses: it is tried again later
+            logger.warning('retest %s could not be queued', job.pk, exc_info=True)
+            _settle_not_verified(job, 'the retest could not be queued', None, '', timezone.now())
+            continue
+        lines.append(AgentActivity(kind='validate', message=f'Retest queued for finding #{job.triage_id}: re-running the check that proved it', status='done',
+                                   project_id=job.project_id, cve_id='', detail={'finding_id': job.triage_id, 'job_id': job.pk, 'source': job.source},
+                                   finished_at=timezone.now()))
+    if lines:
+        try:
+            AgentActivity.objects.bulk_create(lines)
+        except Exception:  # noqa: BLE001 - the feed is telemetry, as ``activity.log``
+            logger.warning('could not record the retest activity', exc_info=True)
+
+
 # ---------------------------------------------------------------------------------------------------------------- running one
 
 @contextlib.contextmanager

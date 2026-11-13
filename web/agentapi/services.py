@@ -4122,20 +4122,11 @@ def start_finding_retest(ctx, slug, kind, finding_id):
     return {**get_finding_retest(ctx, slug, kind, finding_id), 'queued': job is not None and not already}
 
 
-def bulk_update_finding_status(ctx, slug, items, status, note=None):
-    """Set the same remediation status and note on up to MAX_BULK_STATUS findings at once (closing them as fixed, accepted_risk or
-    false_positive puts the one note on every one, each audited on its own). Each item is independent
-    (one bad kind or id never blocks the rest, and a finding belonging to another project 404s exactly like a missing
-    one); returns {updated, failed: [{kind, id, error}]} so the caller can report partial failures. A bad status or note fails the
-    whole call before anything is written."""
-    from cveFeed import activity
-    project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before any body validation
-    _check_status(status)
-    note = _clean_note(note)
-    if not isinstance(items, list) or not items:
-        raise ApiError(400, 'items must be a non-empty list')
-    if len(items) > MAX_BULK_STATUS:
-        raise ApiError(400, f'at most {MAX_BULK_STATUS} items per call')
+MAX_FINDING_ID = 2 ** 31 - 1
+
+
+def _bulk_status_each(ctx, project, items, status, note):
+    """The bulk status change one finding at a time (``update_finding_status`` for each): the way back when the batched one could not be written."""
     updated, failed, hosts = 0, [], set()
     for item in items:
         kind = item.get('kind') if isinstance(item, dict) else None
@@ -4158,6 +4149,91 @@ def bulk_update_finding_status(ctx, slug, items, status, note=None):
         except Exception:  # noqa: BLE001 - one bad row must never fail the rest of the batch
             logger.warning('bulk remediation update failed for %s %s', kind, finding_id, exc_info=True)
             failed.append({'kind': kind, 'id': finding_id, 'error': 'could not be updated'})
+    return updated, failed, hosts
+
+
+def _bulk_status_batched(ctx, project, items, status, note):
+    """``(updated, failed, hosts)`` of a bulk status change in a fixed number of queries (a query per kind to read the findings, one to write each kind, one for the
+    audit events, a few for the retests) where ``_bulk_status_each`` runs about five per finding. Each finding gets what a single change gives it: the status, who and when,
+    its audit event and the retest hook (``fix_retest.status_changed_many``); the statistics revision and the host rescoring happen once. ``None`` when the batch could not
+    be written (nothing of it is kept): the caller then does it one finding at a time."""
+    from django.db import transaction
+
+    from cveFeed import closure, fix_retest
+    from cveFeed.models import FindingAuditEvent
+    from cveFeed.views import bump_stats_revision
+    failed, wanted = {}, {}  # item position -> failure; (kind, id) -> the positions asking for it
+    for position, item in enumerate(items):
+        kind = item.get('kind') if isinstance(item, dict) else None
+        finding_id = item.get('id') if isinstance(item, dict) else None
+        if not isinstance(item, dict) or kind is None or finding_id is None:
+            failed[position] = {'kind': kind, 'id': finding_id, 'error': 'each item must be an object with kind and id'}
+        elif kind not in STATUS_KINDS:
+            failed[position] = {'kind': kind, 'id': finding_id, 'error': f'kind must be one of {", ".join(STATUS_KINDS)}'}
+        else:
+            try:
+                number = int(finding_id)
+            except (TypeError, ValueError, OverflowError):
+                failed[position] = {'kind': kind, 'id': finding_id, 'error': 'could not be updated'}
+                continue
+            if not 0 <= number <= MAX_FINDING_ID:
+                failed[position] = {'kind': kind, 'id': finding_id, 'error': 'finding not found'}
+                continue
+            wanted.setdefault((kind, number), []).append(position)
+    try:
+        found = {}
+        for kind in STATUS_KINDS:
+            ids = [n for k, n in wanted if k == kind]
+            if ids:
+                found.update({(kind, o.pk): o for o in _finding_qs(project, kind).filter(pk__in=ids)})
+        now = timezone.now()
+        clipped = closure.clip_note(note)  # as ``_apply_remediation`` stores it
+        changes, events, written = [], [], {}
+        for (kind, number), positions in wanted.items():
+            obj = found.get((kind, number))
+            if obj is None:
+                for position in positions:
+                    failed[position] = {'kind': items[position]['kind'], 'id': items[position]['id'], 'error': 'finding not found'}
+                continue
+            for position in positions:  # a finding named twice is changed twice, as one at a time: the second time from what the first left
+                before = obj.remediation_status
+                obj.remediation_status, obj.remediation_updated_at, obj.remediation_by = status, now, ctx.user
+                if note is not None:
+                    obj.remediation_note = clipped
+                changes.append((obj, before, position))
+                written.setdefault(kind, {})[obj.pk] = obj
+                events.append(FindingAuditEvent(project=project, finding_kind=kind, finding_id=obj.pk, event='status', actor=ctx.user, before={'status': before},
+                                                after={'status': status, **({'note': note} if note is not None else {})}))
+        fields = ['remediation_status', 'remediation_updated_at', 'remediation_by'] + (['remediation_note'] if note is not None else [])
+        with transaction.atomic():
+            for objs in written.values():
+                type(next(iter(objs.values()))).objects.bulk_update(list(objs.values()), fields)
+            FindingAuditEvent.objects.bulk_create(events)
+    except Exception:  # noqa: BLE001 - whatever stopped the batch, the findings are then changed one at a time, each failing on its own
+        logger.warning('bulk remediation update could not be written in one go', exc_info=True)
+        return None
+    fix_retest.status_changed_many([(o, before) for o, before, _ in changes], status, now)  # marked fixed: the check that proved it is run again on a Sentinel (never raises)
+    transaction.on_commit(bump_stats_revision)  # the dashboards read a snapshot: whoever closed the findings sees the numbers move now (review 1 F11)
+    hosts = {h for h in (_host_of(o) for o, _, _ in changes) if h}
+    return len(changes), [failed[p] for p in sorted(failed)], hosts
+
+
+def bulk_update_finding_status(ctx, slug, items, status, note=None):
+    """Set the same remediation status and note on up to MAX_BULK_STATUS findings at once (closing them as fixed, accepted_risk or
+    false_positive puts the one note on every one, each audited on its own). Each item is independent
+    (one bad kind or id never blocks the rest, and a finding belonging to another project 404s exactly like a missing
+    one); returns {updated, failed: [{kind, id, error}]} so the caller can report partial failures. A bad status or note fails the
+    whole call before anything is written."""
+    from cveFeed import activity
+    project, _ = get_project(ctx, slug, write=True)  # the _all / audit-role / read-only-token gate comes before any body validation
+    _check_status(status)
+    note = _clean_note(note)
+    if not isinstance(items, list) or not items:
+        raise ApiError(400, 'items must be a non-empty list')
+    if len(items) > MAX_BULK_STATUS:
+        raise ApiError(400, f'at most {MAX_BULK_STATUS} items per call')
+    done = _bulk_status_batched(ctx, project, items, status, note)
+    updated, failed, hosts = done if done is not None else _bulk_status_each(ctx, project, items, status, note)
     _rescore_hosts(hosts)  # once per host, not once per finding
     # findings and the hosts they are on: a grouped row of the Findings list is sent as its members, so this counts hosts, not rows
     activity.log('remediation', f'bulk marked {updated} finding(s) on {len(hosts)} host(s) {status}', project=project, count=updated,
@@ -4587,23 +4663,27 @@ def _triage_brief(t):
             'first_seen': _iso(t.first_seen), 'last_seen': _iso(t.last_seen)}
 
 
-def _finding_obj(project, kind, finding_id):
-    """The project's finding of ``kind`` with this id, or 404: another project's id is 404 exactly like a missing one."""
+def _finding_qs(project, kind):
+    """The project's findings of ``kind`` as the finding screens read them (the rows ``_finding_obj`` and ``_finding_objs`` pick from)."""
     from cveFeed.models import HygieneFinding, RouteAuth
     from startScan.models import Vulnerability
     if kind not in FINDING_KINDS:
         raise ApiError(404, 'unknown finding kind')
     if kind == 'match':
-        obj = _matches_qs(project).filter(pk=finding_id).first()
-    elif kind == 'vulnerability':
-        obj = Vulnerability.objects.filter(target_domain__project=project, pk=finding_id).select_related(
-            'subdomain', 'target_domain', 'triage__verdict', 'triage__heat_override_by', 'remediation_by', 'assignee') \
-            .prefetch_related('cve_ids', 'cwe_ids', 'tags').annotate(comment_count=_comment_count_annotation('vulnerability')).first()
-    elif kind == 'route':
-        obj = RouteAuth.objects.filter(project=project, pk=finding_id).select_related('domain', 'triage__verdict').first()
-    else:
-        obj = HygieneFinding.objects.filter(domain__project=project, pk=finding_id).select_related(
-            'domain', 'triage__verdict', 'remediation_by', 'assignee').annotate(comment_count=_comment_count_annotation('hygiene')).first()
+        return _matches_qs(project)
+    if kind == 'vulnerability':
+        return Vulnerability.objects.filter(target_domain__project=project).select_related(
+            'subdomain__target_domain', 'target_domain', 'triage__verdict', 'triage__heat_override_by', 'remediation_by', 'assignee') \
+            .prefetch_related('cve_ids', 'cwe_ids', 'tags').annotate(comment_count=_comment_count_annotation('vulnerability'))
+    if kind == 'route':
+        return RouteAuth.objects.filter(project=project).select_related('domain', 'triage__verdict')
+    return HygieneFinding.objects.filter(domain__project=project).select_related(
+        'domain', 'triage__verdict', 'remediation_by', 'assignee').annotate(comment_count=_comment_count_annotation('hygiene'))
+
+
+def _finding_obj(project, kind, finding_id):
+    """The project's finding of ``kind`` with this id, or 404: another project's id is 404 exactly like a missing one."""
+    obj = _finding_qs(project, kind).filter(pk=finding_id).first()
     if obj is None:
         raise ApiError(404, 'finding not found')
     return obj
