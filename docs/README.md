@@ -40,7 +40,7 @@ Start with the [project README](../README.md) for what cvENGINE is and how to in
 | Document                               | What it covers                                                                                                         |
 | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | [DEPLOYMENT.md](DEPLOYMENT.md)         | Ports, HTTPS, proxies, AI models, backups and restore, dev stack, factory reset, uninstall                             |
-| [HOSTING-ONLINE.md](HOSTING-ONLINE.md) | Putting an install on the Internet under a real name: DNS, Let's Encrypt, Cloudflare, your own proxy                   |
+| [HOSTING-ONLINE.md](HOSTING-ONLINE.md) | Putting an install on the Internet under a real name: DNS, Let's Encrypt, Cloudflare, a Cloudflare Tunnel with no inbound port, your own proxy                   |
 | [CONFIGURATION.md](CONFIGURATION.md)   | Every environment variable: memory, workers, scan windows, Sentinels, AI limits, feeds, retention, PDF reports, access |
 | [UPDATES.md](UPDATES.md)               | Automatic deployment, in-app approval, and the manual updater                                                          |
 | [UPGRADE.md](UPGRADE.md)               | Moving an older install to the current release, including the 1.3 to 1.4 notes                                         |
