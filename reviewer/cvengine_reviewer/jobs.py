@@ -121,24 +121,41 @@ def ops_message(snapshot):
 
 
 def parse_ops_reply(text, schema):
-    """The operations reply checked against ``schema``, except that an alert naming a check code that is not in it is dropped on its own: a
-    model (or a provider that does not enforce the enum) that names one unknown check must not cost the diagnosis of every other."""
+    """The operations reply checked against ``schema``, except that two parts may fail on their own: an alert naming a check code that is not in it is dropped by
+    itself, and the optional ``tuning`` list is parsed apart from the rest, each proposal on its own (a wrong type, an extra or missing key, a setting that was not
+    offered, a third item): a model (or a provider that does not enforce the schema) that gets one of them wrong must not cost the diagnosis of every other alert
+    and the actions of the same reply."""
     allowed = schema['properties']['alerts']['items']['properties']['code']['enum']
+    wanted = schema['properties'].get('tuning')
+    value = guard.reply_value(text)
+    raw_tuning = value.pop('tuning', None) if isinstance(value, dict) else None
     lenient = json.loads(json.dumps(schema))
     del lenient['properties']['alerts']['items']['properties']['code']['enum']
-    wanted = lenient['properties'].get('tuning')
-    offered = wanted['items']['properties']['setting']['enum'] if wanted else []
-    if wanted:  # a proposal naming a setting that was not offered, or a check that does not exist, is dropped on its own: the rest of the reply stands
-        del wanted['items']['properties']['setting']['enum']
-        del wanted['items']['properties']['alert']['enum']
-        lenient['required'] = [k for k in lenient['required'] if k != 'tuning']
-    answer = guard.parse_reply(text, lenient)
+    lenient['properties'].pop('tuning', None)
+    lenient['required'] = [k for k in lenient['required'] if k != 'tuning']
+    answer = guard.check_value(value, lenient, 'reply')
     kept = [a for a in answer['alerts'] if a['code'] in allowed]
     if len(kept) < len(answer['alerts']):
         logger.warning('operations: dropped %d alert(s) naming a check the server does not have', len(answer['alerts']) - len(kept))
-    proposals = [t for t in answer.get('tuning', []) if t['setting'] in offered]
-    if len(proposals) < len(answer.get('tuning', [])):
-        logger.warning('operations: dropped %d tuning proposal(s) naming a setting that was not offered', len(answer['tuning']) - len(proposals))
+    proposals = []
+    if wanted and isinstance(raw_tuning, list):
+        item_schema = json.loads(json.dumps(wanted['items']))
+        offered = item_schema['properties']['setting'].pop('enum')
+        item_schema['properties']['alert'].pop('enum', None)  # an unknown check code is the server's to judge (it keeps the code of an open alert only)
+        for item in raw_tuning[:wanted.get('maxItems', 2)]:
+            try:
+                checked = guard.check_value(item, item_schema, 'tuning[]')
+            except guard.ReplyError as exc:
+                logger.warning('operations: dropped a tuning proposal (%s)', exc)
+                continue
+            if checked['setting'] in offered:
+                proposals.append(checked)
+            else:
+                logger.warning('operations: dropped a tuning proposal naming a setting that was not offered')
+        if len(raw_tuning) > wanted.get('maxItems', 2):
+            logger.warning('operations: only the first %d tuning proposals are read', wanted.get('maxItems', 2))
+    elif raw_tuning not in (None, []) and wanted:
+        logger.warning('operations: dropped a tuning field that is not a list')
     return {**answer, 'alerts': kept, 'tuning': proposals}
 
 
@@ -162,6 +179,8 @@ def run_ops(server, provider, release=None):
               for t in answer.get('tuning', [])[:2] if not guard.is_filler(guard.scrub(t['reason'], 300))]
     if tuning:
         report['tuning'] = tuning  # the server judges each against what may be proposed at that moment; nothing here decides
+        if isinstance(snapshot.get('snapshot_id'), str):
+            report['snapshot_id'] = snapshot['snapshot_id']  # which snapshot this answers: the server holds proposals whose snapshot it cannot find
     return server.ops_report(report)
 
 

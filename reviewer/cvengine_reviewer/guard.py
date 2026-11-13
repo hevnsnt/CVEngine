@@ -81,6 +81,16 @@ def _strip_thinking(text):
 def parse_reply(text, schema):
     """The reply as a dict that matches ``schema`` exactly (an object of the subset of JSON Schema the prompts use: object, string with
     enum or maxLength, array of such with maxItems), else ReplyError."""
+    return _check(reply_value(text), schema, 'reply')
+
+
+def check_value(value, schema, where='value'):
+    """One value checked against ``schema`` on its own (a part of a reply that may be dropped without costing the rest); ReplyError when it does not fit."""
+    return _check(value, schema, where)
+
+
+def reply_value(text):
+    """The JSON value of a model's reply (thinking and a code fence removed), else ReplyError."""
     if not isinstance(text, str) or not text.strip():
         raise ReplyError('empty reply')
     text = _strip_thinking(text).strip()
@@ -90,7 +100,7 @@ def parse_reply(text, schema):
         value = json.loads(text)
     except ValueError as exc:
         raise ReplyError('the reply is not JSON') from exc
-    return _check(value, schema, 'reply')
+    return value
 
 
 def _check(value, schema, where):

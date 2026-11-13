@@ -467,14 +467,46 @@ class OpsTuningProposals(unittest.TestCase):
         self.assertEqual([t['setting'] for t in sent['tuning']], ['assess_batch'])  # an unknown check code is a lenient 'alert': the server checks it
         self.assertEqual([a['code'] for a in sent['alerts']], ['memory'])
 
-    def test_no_tuning_key_when_nothing_was_proposed_and_more_than_two_is_an_unusable_answer(self):
-        reply = json.dumps({'alerts': [], 'actions': [], 'tuning': []})
-        sent, _ = self.run_with(self.snap(), reply)
+    GOOD = {'setting': 'assess_batch', 'value': 12, 'reason': 'The oldest assessment waits 52 minutes.', 'alert': 'none'}
+
+    def reply(self, tuning, **extra):
+        return json.dumps({'alerts': [{'code': 'memory', 'severity': 'warning', 'diagnosis': self.DIAG}], 'actions': ['feed_sentinels'], 'tuning': tuning, **extra})
+
+    def test_no_tuning_key_when_nothing_was_proposed_and_the_third_proposal_is_not_read(self):
+        sent, _ = self.run_with(self.snap(), json.dumps({'alerts': [], 'actions': [], 'tuning': []}))
         self.assertNotIn('tuning', sent)
-        three = [{'setting': 'assess_batch', 'value': 12, 'reason': 'The oldest assessment waits 52 minutes.', 'alert': 'none'}] * 3
-        sent, _ = self.run_with(self.snap(), json.dumps({'alerts': [], 'actions': [], 'tuning': three}))
-        self.assertNotIn('tuning', sent)
+        sent, _ = self.run_with(self.snap(), self.reply([self.GOOD, {**self.GOOD, 'setting': 'discovery_concurrency'}, {**self.GOOD, 'value': 1}]))
+        self.assertEqual([t['setting'] for t in sent['tuning']], ['assess_batch', 'discovery_concurrency'])
+        self.assertEqual(len(sent['alerts']), 1)  # the diagnosis and the action of the same reply stand
+        self.assertEqual(sent['actions'], ['feed_sentinels'])
+
+    def test_a_malformed_proposal_is_dropped_by_itself_and_the_alerts_and_actions_survive(self):
+        """WS-4: a float, an extra key, a missing key, a wrong type, a text where a list belongs: none of them costs the report."""
+        for bad in ({**self.GOOD, 'value': 4.0}, {**self.GOOD, 'extra': 1}, {k: v for k, v in self.GOOD.items() if k != 'alert'}, {**self.GOOD, 'value': 'many'},
+                    {**self.GOOD, 'value': True}, {**self.GOOD, 'reason': 5}, 'free text', 7, None, []):
+            sent, _ = self.run_with(self.snap(), self.reply([bad, self.GOOD]))
+            self.assertEqual([t['setting'] for t in sent['tuning']], ['assess_batch'], repr(bad))
+            self.assertEqual([a['code'] for a in sent['alerts']], ['memory'], repr(bad))
+            self.assertEqual(sent['actions'], ['feed_sentinels'], repr(bad))
+        for not_a_list in ('assess_batch', {'setting': 'assess_batch'}, 12, True):
+            sent, _ = self.run_with(self.snap(), self.reply(not_a_list))
+            self.assertNotIn('tuning', sent)
+            self.assertEqual([a['code'] for a in sent['alerts']], ['memory'])
+            self.assertEqual(sent['actions'], ['feed_sentinels'])
+
+    def test_the_rest_of_the_reply_is_still_checked_strictly(self):
+        bad = json.dumps({'alerts': [{'code': 'memory', 'severity': 'warning', 'diagnosis': self.DIAG, 'extra': 1}], 'actions': [], 'tuning': [self.GOOD]})
+        sent, _ = self.run_with(self.snap(), bad)
         self.assertEqual(sent['alerts'], [])
+        self.assertNotIn('tuning', sent)  # an unusable answer as a whole is still unusable
+
+    def test_the_report_names_the_snapshot_it_answers(self):
+        sent, _ = self.run_with(self.snap(snapshot_id='ab' * 12), self.reply([self.GOOD]))
+        self.assertEqual(sent['snapshot_id'], 'ab' * 12)
+        sent, _ = self.run_with(self.snap(), self.reply([self.GOOD]))  # an older server sends none: nothing is invented
+        self.assertNotIn('snapshot_id', sent)
+        sent, _ = self.run_with(self.snap(snapshot_id='ab' * 12), self.reply([]))
+        self.assertNotIn('snapshot_id', sent)  # nothing proposed, nothing to bind
 
     def test_a_reply_without_the_field_from_a_server_that_offered_nothing_still_parses(self):
         sent, call = self.run_with({'checks': self.CHECKS, 'codes': ['memory']}, '{"alerts": [], "actions": []}')
