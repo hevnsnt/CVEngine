@@ -23,7 +23,7 @@ from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
-from tests.steady import steady_caches
+from tests.steady import steady_caches, expiring_caches
 from tests.test_agentapi import call, tool_call
 from tests.test_tenancy import client_for
 
@@ -373,6 +373,7 @@ class QueryCountTests(Seeded):
 				self.assertEqual(self.api('projects/sa/situations', **params)[0], 200)  # a clock two minutes on: last_used_at would be stale, and is still not written
 		return len(ctx)
 
+	@expiring_caches
 	def test_a_slow_warm_up_does_not_change_the_count(self):
 		# the cause of the 17 != 15 seen on CI: the middleware's ban list is cached for ten seconds of real time, so when the warm-up request ranks every host and takes
 		# longer than that, the measured request reads the list again
