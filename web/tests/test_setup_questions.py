@@ -203,17 +203,73 @@ class AnswerTests(Base):
         self.assertTrue(AuditLog.objects.filter(action='scanner_plan.changed', target='both').exists())
         self.assertEqual(SetupAnswer.objects.get(key='scan_from').answer, 'both')
 
-    def test_the_choices_show_the_daily_caps_and_say_the_provider_bills(self):
+    def test_the_cost_facts_are_stated_once_and_each_choice_is_one_sentence(self):
         self.connect_ai()
         question = self.question('ai_validation')
         self.assertEqual([c['value'] for c in question['choices']], ['off', 'recommend', 'act'])
         self.assertEqual(question['safe_default'], 'off')
-        self.assertTrue([c for c in question['choices'] if c['safe']][0]['value'] == 'off')
-        for choice in question['choices'][1:]:
-            self.assertIn('300 findings a day', choice['effect'])
-            self.assertIn('4 times a day', choice['effect'])
-            self.assertIn('bills every call', choice['effect'])
-        self.assertIn('Nothing is billed', question['choices'][0]['effect'])
+        self.assertEqual([c['value'] for c in question['choices'] if c['safe']], ['off'])
+        self.assertEqual(question['facts'], ['Finding review: at most 300 findings a day, one provider call each.', 'Server health check: 4 calls a day.',
+                                             'Your AI provider bills every call.'])
+        self.assertEqual(question['choices'][0]['tag'], 'Nothing is billed')
+        for choice in question['choices']:
+            self.assertNotIn('300', choice['effect'])
+
+    def test_the_scan_question_uses_inside_and_outside_words_and_defaults_to_no_change(self):
+        question = self.question('scan_from')
+        self.assertEqual(question['title'], 'Where will you scan from?')
+        self.assertEqual([c['label'] for c in question['choices']], ['From outside only (external)', 'From inside only (internal)', 'Both (external and internal)'])
+        self.assertEqual(question['safe_default'], 'external')
+        self.assertEqual([c['tag'] for c in question['choices'] if c.get('tag')], ['Keeps what runs now'])
+        self.assertEqual(question['current'], 'external')  # the built-in scanner only runs now, which is "outside"
+
+    def test_outside_only_changes_nothing_and_asks_the_host_for_nothing(self):
+        out = post(self.c, {'key': 'scan_from', 'answer': 'external'})
+        self.assertEqual(out.status_code, 200)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, '.scanner-plan-wanted')))
+        self.assertEqual(SetupAnswer.objects.get(key='scan_from').answer, 'external')  # stored as asked: internal, external or both
+        self.assertIsNone(self.question('scan_from')['next'])
+
+    def test_inside_only_with_no_sentinel_keeps_the_scanner_until_the_first_one_checks_in(self):
+        with mock.patch('cveFeed.scanner_plan.externals_live', return_value=0):
+            out = post(self.c, {'key': 'scan_from', 'answer': 'internal'})
+            self.assertEqual(out.status_code, 200, out.content)
+            self.assertFalse(os.path.exists(os.path.join(self.dir, '.scanner-plan-wanted')))  # nothing was switched off: scanning goes on
+            question = self.question('scan_from')
+            self.assertTrue(question['next']['waiting'])
+            self.assertIn('nothing was switched off', question['next']['notes'][0])
+            self.assertEqual([s['text'] for s in question['next']['steps']], ['Install a Sentinel inside your network', 'Tell cvENGINE which internal ranges to scan'])
+            self.c.get('/cve/api/settings/alerts')  # still none live: still nothing
+            self.assertFalse(os.path.exists(os.path.join(self.dir, '.scanner-plan-wanted')))
+        with mock.patch('cveFeed.scanner_plan.externals_live', return_value=1):
+            self.c.get('/cve/api/settings/alerts')  # the first Sentinel is live: the choice is applied
+        with open(os.path.join(self.dir, '.scanner-plan-wanted')) as f:
+            self.assertEqual(f.read().strip(), 'external')
+
+    def test_inside_only_with_a_sentinel_switches_to_your_own_sentinels_at_once(self):
+        with mock.patch('cveFeed.scanner_plan.externals_live', return_value=2):
+            self.assertEqual(post(self.c, {'key': 'scan_from', 'answer': 'internal'}).status_code, 200)
+        with open(os.path.join(self.dir, '.scanner-plan-wanted')) as f:
+            self.assertEqual(f.read().strip(), 'external')  # the scanner plan word for "your own Sentinels only"
+        self.assertFalse(self.question('scan_from')['next']['waiting'])
+
+    def test_one_request_saves_every_answer_or_none(self):
+        self.connect_ai()
+        out = post(self.c, {'answers': {'scan_from': 'external', 'ai_validation': 'recommend'}})
+        self.assertEqual(out.status_code, 200, out.content)
+        self.assertEqual(dict(SetupAnswer.objects.values_list('key', 'answer')), {'scan_from': 'external', 'ai_validation': 'recommend'})
+        self.assertEqual((out.json()['pending'], out.json()['open']), (0, 0))  # choosing Off or anything counts as answered: the reminder is gone
+        self.assertIsNone(self.c.get('/cve/api/settings/alerts').json()['questions'])
+        SetupAnswer.objects.all().delete()
+        bad = post(self.c, {'answers': {'scan_from': 'external', 'ai_validation': 'maximum'}})
+        self.assertEqual(bad.status_code, 400)
+        self.assertFalse(SetupAnswer.objects.exists())
+
+    def test_the_reminder_names_the_action(self):
+        post(self.c, {'later': True})
+        reminder = self.c.get('/cve/api/settings/alerts').json()['questions']
+        self.assertEqual(reminder['text'], '1 question about this update is waiting.')
+        self.assertEqual(reminder['url'], '/cve/update-questions/')
 
     def test_the_questions_list_every_question_with_its_state(self):
         data = self.c.get(API).json()

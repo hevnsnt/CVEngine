@@ -1236,6 +1236,7 @@ def reviewer_put(request):
 
 def alerts_get(request):
     from cveFeed import reviewer, setup_questions
+    setup_questions.settle(request.user)  # an "inside only" answer that waited for the first Sentinel of your own is applied once one is live
     return {'alerts': reviewer.open_alerts(request.user), 'questions': setup_questions.reminder()}  # the reminder of the questions about an update, or None
 
 
@@ -1252,8 +1253,10 @@ def setup_questions_post(request):
     try:
         if data.get('later') is True:
             return setup_questions.defer_all(request.user)
+        if 'answers' in data:
+            return setup_questions.answer_many(request.user, data['answers'])
         if not isinstance(data.get('key'), str) or not isinstance(data.get('answer'), str):
-            raise SettingsError(400, 'send key and answer, or later: true')
+            raise SettingsError(400, 'send answers (a key and its choice for each question), or key and answer, or later: true')
         return setup_questions.answer(request.user, data['key'], data['answer'])
     except setup_questions.QuestionError as exc:
         raise SettingsError(exc.status, exc.message)

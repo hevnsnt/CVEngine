@@ -67,7 +67,7 @@ function render(alerts) {
     const row = el("div", "ab-row ab-info");
     const text = el("div", "ab-text");
     text.append(el("p", "ab-detail", reminder.text));
-    const open = el("a", "btn sm", "Answer the questions");
+    const open = el("a", "btn sm", "Answer them");
     open.href = "/cve/update-questions/";
     row.append(text, open);
     items.unshift({ kind: "questions", text: reminder.text, node: row, rank: 2 });

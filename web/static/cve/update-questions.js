@@ -1,64 +1,93 @@
-// "A few questions about this update" (cveFeed/setup_questions.py): each question that costs money or changes what is scanned, with its choices and what
-// each one does. An answer goes through the Settings API (POST /cve/api/settings/setup_questions), which carries it out with the Settings handler of the feature.
-// "Decide later" leaves everything off. Every word from the server is set with textContent.
+// "A few questions about this update" (cveFeed/setup_questions.py): one form. Each question that costs money or changes what is scanned has its choices and what
+// each one does; "Save answers" saves every question on the page in one request (POST /cve/api/settings/setup_questions, which carries each answer out with the
+// Settings handler of its feature) and "Decide later" leaves everything off. Every word from the server is set with textContent.
 import { api, el, toast } from '/staticfiles/cve/ui.js';
 
 const API = '/cve/api/settings/setup_questions';
 const root = document.getElementById('uq');
-const STATES = { pending: 'Not answered', later: 'Decide later', answered: 'Answered', decided: 'Set in Settings' };
+const DASHBOARD = '/cve/?skip=1';
 
-function card(q, reload) {
+function card(q) {
   const box = el('section', 'card uq-card', null, { 'aria-labelledby': `uq-${q.key}` });
-  const head = el('h2', '', q.title, { id: `uq-${q.key}` });
-  head.append(' ', el('span', `uq-state ${q.state}`, STATES[q.state] || ''));
-  box.append(head, el('p', 'note', q.text));
+  box.append(el('h2', '', q.title, { id: `uq-${q.key}` }), el('p', 'note', q.text));
   if (!q.applies) {
     box.append(el('p', 'note', q.why_not));
-    return box;
+    return { box, read: () => null };
   }
-  const group = el('fieldset', 'plan-choices uq-choices');
-  group.append(el('legend', 'note', 'Choose one'));
+  if (q.facts.length) {
+    const list = el('ul', 'uq-facts');
+    q.facts.forEach((f) => list.append(el('li', '', f)));
+    box.append(list);
+  }
+  const group = el('fieldset', 'uq-choices');
+  group.append(el('legend', 'visually-hidden', q.title));
   const start = q.state === 'answered' && q.answer ? q.answer : q.state === 'decided' ? q.current : q.safe_default;
   q.choices.forEach((c) => {
     const id = `uq-${q.key}-${c.value}`;
     const input = el('input', '', null, { type: 'radio', name: `uq-${q.key}`, value: c.value, id });
     input.checked = c.value === start;
-    const row = el('label', 'plan-opt uq-opt', null, { for: id });
-    const words = el('span', '');
-    words.append(el('b', '', c.safe ? `${c.label} (the safe choice)` : c.label), el('span', 'note uq-effect', c.effect));
+    const row = el('label', 'uq-opt', null, { for: id });
+    const words = el('span', 'uq-words');
+    const head = el('b', '', c.label);
+    if (c.tag) head.append(' ', el('span', 'uq-tag', c.tag));
+    words.append(head, el('span', 'note uq-effect', c.effect));
     row.append(input, words);
     group.append(row);
   });
   box.append(group);
-  if (q.state === 'decided') box.append(el('p', 'note', `You already chose this in ${q.link_text}. Saving here does the same as changing it there.`));
-  const actions = el('div', 'actions');
-  const save = el('button', 'btn', 'Save my answer', { type: 'button' });
-  save.onclick = async () => {
+  const foot = el('p', 'note uq-later');
+  foot.append('Change this later in ', el('a', '', q.link_text, { href: q.link }), '.');
+  box.append(foot);
+  // a question already set in Settings is sent again only when the choice here differs from what is set
+  const read = () => {
     const picked = group.querySelector('input:checked');
-    if (!picked) return toast('Choose one first.', true);
-    save.disabled = true;
-    try { await api('POST', API, { key: q.key, answer: picked.value }); toast('Saved.'); await reload(); } catch (err) { toast(err.message, true); } finally { save.disabled = false; }
+    if (!picked) return null;
+    return q.state === 'decided' && picked.value === q.current ? null : picked.value;
   };
-  actions.append(save, el('a', 'btn ghost', q.link_text, { href: q.link }));
-  box.append(actions);
+  return { box, read };
+}
+
+function nextSteps(next) {
+  const box = el('section', 'card uq-card uq-next', null, { 'aria-labelledby': 'uq-next' });
+  box.append(el('h2', '', 'One more step', { id: 'uq-next' }));
+  next.notes.forEach((n) => box.append(el('p', 'note', n)));
+  const list = el('ul', 'uq-steps');
+  next.steps.forEach((s) => { const li = el('li'); li.append(el('a', '', s.text, { href: s.url })); list.append(li); });
+  box.append(list, el('a', 'btn', 'Open the dashboard', { href: DASHBOARD }));
   return box;
 }
 
 async function draw() {
   const data = await api('GET', API);
   root.querySelectorAll(':scope > :not([name=csrfmiddlewaretoken])').forEach((n) => n.remove());
-  data.questions.forEach((q) => root.append(card(q, draw)));
-  const foot = el('div', 'actions uq-foot');
-  if (data.pending) {
-    const later = el('button', 'btn ghost', 'Decide later', { type: 'button' });
-    later.onclick = async () => {
-      later.disabled = true;
-      try { await api('POST', API, { later: true }); toast('Nothing was switched on. The questions stay in Settings.'); await draw(); } catch (err) { toast(err.message, true); later.disabled = false; }
-    };
-    foot.append(later, el('span', 'note', 'Everything stays off, and a reminder stays at the top of the app.'));
-  }
-  foot.append(el('a', 'btn', 'Open the dashboard', { href: '/cve/?skip=1' }));
-  root.append(foot);
+  const cards = data.questions.map(card);
+  cards.forEach((c) => root.append(c.box));
+  const actions = el('div', 'uq-actions');
+  const save = el('button', 'btn', 'Save answers', { type: 'button' });
+  const later = el('button', 'btn ghost', 'Decide later', { type: 'button' });
+  const why = el('p', 'note', 'Everything stays off, and a reminder stays at the top of the app until you answer.');
+  save.onclick = async () => {
+    const answers = {};
+    cards.forEach((c, i) => { const v = c.read(); if (v) answers[data.questions[i].key] = v; });
+    save.disabled = later.disabled = true;
+    try {
+      const out = Object.keys(answers).length ? await api('POST', API, { answers }) : data;
+      const next = (out.questions.find((q) => q.key === 'scan_from') || {}).next;
+      if (next && answers.scan_from) {
+        root.querySelectorAll(':scope > :not([name=csrfmiddlewaretoken])').forEach((n) => n.remove());
+        root.append(nextSteps(next));
+        window.scrollTo(0, 0);
+      } else {
+        window.location.href = DASHBOARD;
+      }
+    } catch (err) { toast(err.message, true); save.disabled = later.disabled = false; }
+  };
+  later.onclick = async () => {
+    save.disabled = later.disabled = true;
+    try { await api('POST', API, { later: true }); toast('Nothing was switched on. You can answer from the reminder at the top of the app.'); window.location.href = DASHBOARD; } catch (err) { toast(err.message, true); save.disabled = later.disabled = false; }
+  };
+  actions.append(save, later, why);
+  root.append(actions);
 }
 
 draw().catch((err) => root.append(el('p', 'msg err', err.message, { role: 'alert' })));
