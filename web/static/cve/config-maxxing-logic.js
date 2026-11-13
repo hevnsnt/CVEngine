@@ -176,7 +176,7 @@ export const AGENT_POLICIES = [
   ["off", "Off: agents may not change performance settings"],
 ];
 export const AGENT_POLICY_HELP =
-  "May AI agents change performance settings by themselves? Only the settings auto-tuning manages, and never a number a person saved. Agents can never raise a spend cap, " +
+  "Whether AI agents may change performance settings by themselves. Only the settings auto-tuning manages, and never a number a person saved. Agents can never raise a spend cap, " +
   "approve an update or switch on a paid or wider-scanning feature, whatever this says.";
 export const AUTOTUNE_INTRO =
   "Auto-tuning is on by default. It aims high: about ten minutes after each restart or update it sets the throughput settings below to the most this machine sensibly " +
