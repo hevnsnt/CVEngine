@@ -1179,10 +1179,14 @@ MODEL_NAME = re.compile(r'^[A-Za-z0-9._:/@+-]{0,100}$')
 
 def reviewer_get(request):
     from agentapi import builtin_reviewer
-    from cveFeed import ai_jobs, reviewer
+    from cveFeed import ai_jobs, host_review, reviewer
+    from dashboard.models import Project
     row, provider = reviewer.settings_row(), reviewer.provider_row()
     out = {'enabled': row.enabled, 'env_enabled': reviewer.env_enabled(), 'review_model': row.review_model, 'ops_model': row.ops_model,
            'auto_close': row.auto_close, 'review_daily_max': row.review_daily_max, 'ops_hours': reviewer.ops_hours(row),
+           'host_review_enabled': row.host_review_enabled, 'host_review_auto_close': row.host_review_auto_close, 'host_review_daily_max': row.host_review_daily_max,
+           'host_review_auto_per_project_day': row.host_review_auto_per_project_day, 'host_reviews_today': host_review.reviews_today(),
+           'host_review_projects': [{'slug': p.slug, 'name': p.name, 'mode': host_review.mode_of(p)} for p in Project.objects.order_by('name')[:500]],
            'default_ops_hours': list(reviewer.DEFAULT_OPS_HOURS), 'default_models': reviewer.DEFAULT_MODELS,
            'reviews_today': reviewer.reviews_today(), 'last_ops_at': row.last_ops_at.isoformat() if row.last_ops_at else None,
            'container': builtin_reviewer.status(), 'working': reviewer.enabled(row, provider)}
@@ -1220,6 +1224,48 @@ def reviewer_put(request):
             raise SettingsError(400, 'reviews per day must be between 0 and 20000')
         row.review_daily_max = value
         fields.append('review_daily_max')
+    # the AI host review spends the provider's money on every host: a person switches it on and sets its caps in the web interface. An agent (the MCP
+    # bridge marks its request) may switch it off or lower a cap, never turn it on or raise one
+    via_agent = bool(getattr(request, 'via_agent', False))
+    if 'host_review_enabled' in data:
+        if not isinstance(data['host_review_enabled'], bool):
+            raise SettingsError(400, 'host_review_enabled must be true or false')
+        if data['host_review_enabled'] and via_agent:
+            raise SettingsError(403, 'the AI host review is billed by the AI provider: only a person switches it on, in Settings in the web interface')
+        row.host_review_enabled = data['host_review_enabled']
+        fields.append('host_review_enabled')
+    if 'host_review_auto_close' in data:
+        if not isinstance(data['host_review_auto_close'], bool):
+            raise SettingsError(400, 'host_review_auto_close must be true or false')
+        if data['host_review_auto_close'] and via_agent:
+            raise SettingsError(403, 'only a person lets the AI host review close findings by itself, in Settings in the web interface')
+        row.host_review_auto_close = data['host_review_auto_close']
+        fields.append('host_review_auto_close')
+    for name, top in (('host_review_daily_max', 20000), ('host_review_auto_per_project_day', 20000)):
+        if name in data:
+            value = data[name]
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= top:
+                raise SettingsError(400, f'{name} must be a whole number from 0 to {top}')
+            if via_agent and value > getattr(row, name):
+                raise SettingsError(403, 'an agent may lower this limit; only a person raises it, in Settings in the web interface')
+            setattr(row, name, value)
+            fields.append(name)
+    modes = data.get('host_review_modes')  # {project slug: auto | recommend | off}: the same setting as the host page's, listed here so there is one obvious place
+    if modes is not None:
+        from cveFeed.models import ProjectSettings
+        from dashboard.models import Project
+        if not isinstance(modes, dict) or len(modes) > 500 or not all(isinstance(k, str) and v in ProjectSettings.HOST_REVIEW_MODES for k, v in modes.items()):
+            raise SettingsError(400, 'host_review_modes is {project slug: auto, recommend or off}')
+        projects = {p.slug: p for p in Project.objects.filter(slug__in=list(modes))}
+        if set(modes) - set(projects):
+            raise SettingsError(404, 'no such project: ' + ', '.join(sorted(set(modes) - set(projects))[:5]))
+        from cveFeed import host_review
+        if via_agent and any(host_review.MODE_RANK[mode] > host_review.MODE_RANK[host_review.mode_of(projects[slug])] for slug, mode in modes.items()):
+            raise SettingsError(403, 'only a person raises the host review of a project, in Settings in the web interface; an agent may only lower it')
+        for slug, mode in modes.items():
+            ProjectSettings.objects.update_or_create(project=projects[slug], defaults={'host_review_mode': mode, 'updated_by': request.user})
+        from cveFeed.admin_api import audit
+        audit(request.user, 'settings.reviewer', 'AI host review mode per project', projects=sorted(modes))
     if 'ops_hours' in data:
         hours = data['ops_hours']
         if not isinstance(hours, list) or len(hours) > 24 or not all(isinstance(h, int) and not isinstance(h, bool) and 0 <= h <= 23 for h in hours):

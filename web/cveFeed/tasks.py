@@ -1298,7 +1298,7 @@ def automatic_validate_finding(job_id):
         row = Triage.objects.get(pk=job.triage_id, project_id=job.project_id)
         fresh_row = Triage.objects.select_related(
             'match__cve_entry', 'vulnerability__target_domain', 'route', 'hygiene__domain').get(pk=row.pk)
-        if not (hot_validation.manual_eligible(fresh_row) if job.source == 'manual' else hot_validation.tier_for(fresh_row)):
+        if not (hot_validation.manual_eligible(fresh_row) if job.source in ('manual', 'host_review') else hot_validation.tier_for(fresh_row)):  # the host review may ask for a finding the sweep would not
             return _skip_automatic_validation(job, progress, 'no_longer_eligible')
         stage = f'load_{row.kind}'
         findings = triage.load_findings([row])
@@ -2050,6 +2050,14 @@ def ai_jobs_housekeeping():
     a week expire and their stage asks again (``cveFeed.ai_jobs.housekeeping``)."""
     from cveFeed import ai_jobs
     return ai_jobs.housekeeping()
+
+
+@app.task(name="host_review_sweep", bind=False, queue="cve_feed_queue", time_limit=900, soft_time_limit=840)
+def host_review_sweep():
+    """Every ten minutes: queue the AI review of the hosts whose state changed (``cveFeed.host_review.sweep``): a few hosts a run, within the daily caps,
+    nothing while scanning is paused. The reviewer container asks the model; a Celery task applies the answer."""
+    from cveFeed import host_review
+    return host_review.sweep()
 
 
 @app.task(name="validate_template_drafts", bind=False, queue="cve_feed_queue", time_limit=900, soft_time_limit=840)

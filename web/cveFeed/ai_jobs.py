@@ -63,6 +63,7 @@ HANDLERS = {
     'rdp_screenshot': 'cveFeed.rdp_shot',
     'template_generation': 'cveFeed.templategen',
     'template_validation': 'cveFeed.templatevalidate',
+    'host_review': 'cveFeed.host_review',
 }
 
 

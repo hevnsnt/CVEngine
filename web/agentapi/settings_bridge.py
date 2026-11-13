@@ -186,6 +186,7 @@ def _call(ctx, name, method, values=None, ident=None, query=None):
         body = json.dumps(values if values is not None else {})
         request = factory.generic(method, path, body, content_type='application/json')
     request.user = ctx.user
+    request.via_agent = True  # a handler that spends the owner's money or widens what runs by itself refuses an agent (settings_api.reviewer_put)
     from cveFeed import admin_api, settings_api
     error_types = (settings_api.SettingsError, admin_api.AdminError)
     try:

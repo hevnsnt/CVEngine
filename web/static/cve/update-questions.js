@@ -14,6 +14,7 @@ function card(q) {
     box.append(el('p', 'note', q.why_not));
     return { box, read: () => null };
   }
+  if ((q.new_lines || []).length) box.append(el('p', 'note uq-new', `${q.new_lines.length} new line${q.new_lines.length === 1 ? '' : 's'} since your last answer: ${q.new_lines.join(', ')}. It stays off until you choose.`));
   if (q.facts.length) {
     const list = el('ul', 'uq-facts');
     q.facts.forEach((f) => list.append(el('li', '', f)));

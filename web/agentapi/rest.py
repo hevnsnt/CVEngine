@@ -13,6 +13,7 @@ from django.http.response import HttpResponseBase
 from agentapi import agent_broker as broker
 from agentapi import db_timeout, storage_safe
 from agentapi import host_manage as hosts
+from agentapi import host_review_api as hostreview
 from agentapi import saved_search as saved
 from agentapi import inventory
 from agentapi import sentinel_broker as sentinels
@@ -260,6 +261,14 @@ ROUTES = [
      lambda r, c, slug, assessment_id, **k: svc.get_host_assessment(c, slug, int(assessment_id))),
     ('POST', r'projects/(?P<slug>[-\w]+)/host-assessments/(?P<assessment_id>\d+)/stop', 'Stop a queued or running host assessment',
      lambda r, c, slug, assessment_id, **k: svc.stop_host_assessment(c, slug, int(assessment_id))),
+    ('GET', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/review', 'The newest AI review of one host: a verdict for each finding, the next step and its state, why a review failed or a step was held',
+     lambda r, c, slug, host_id, **k: hostreview.get_host_review(c, slug, host_id)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/review', 'Review now: queue the AI review of one host (409 while one is open, 429 at the daily limit, 503 with no AI provider)',
+     lambda r, c, slug, host_id, **k: (hostreview.request_host_review(c, slug, host_id), 202)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/review/step', 'Start the next step the AI proposed for the host (409 when it is no longer proposed or no longer offered)',
+     lambda r, c, slug, host_id, **k: hostreview.start_host_review_step(c, slug, host_id)),
+    ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/review/dismiss', 'Dismiss the next step the AI proposed; body {reason?}',
+     lambda r, c, slug, host_id, **k: hostreview.dismiss_host_review_step(c, slug, host_id, _body(r).get('reason'))),
     ('POST', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/screenshot', 'Take screenshot: queue a fresh browser capture of every web page of one inventoried host (the Take screenshot button)',
      lambda r, c, slug, host_id, **k: (svc.request_host_screenshot(c, slug, host_id), 202)),
     ('GET', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host_id>\d+)/screenshots', 'The browser captures of one host: each page\'s outcome, reason, final URL, status and title, and what is queued',
