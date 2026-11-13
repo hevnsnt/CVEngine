@@ -2767,9 +2767,9 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 /* ---- questions about an update (static/cve/update-questions.js) ---- */
 .uq-card{margin:0 0 var(--s-4);max-width:720px}
 .uq-card h2{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2);margin:0 0 var(--s-2)}
-.uq-state{font:var(--fw-semi) var(--fs-1) var(--mono);text-transform:uppercase;color:var(--muted)}
+.uq-state{font:var(--fw-semi) var(--fs-1) var(--mono);color:var(--muted)}
 .uq-state.answered,.uq-state.decided{color:var(--ok-ink,var(--ink))}
 .uq-opt{align-items:flex-start;padding:var(--s-2) 0}
-.uq-opt input{margin-top:3px}
+.uq-opt input{margin-top:4px}
 .uq-opt span{display:block}.uq-opt b{display:block;font-size:var(--fs-3)}.uq-effect{display:block;margin-top:2px}
 .uq-foot{align-items:center;flex-wrap:wrap;max-width:720px}
