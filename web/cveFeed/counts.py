@@ -218,13 +218,20 @@ def live_hosts(domain_id=None):
     return Subdomain.objects.filter(pk__in=host_reps(domain_id).filter(LIVE_HOST_Q).values('pk'))
 
 
-def exposure_filter(prefix=''):
-    """A Q over hosts (``prefix`` reaches the host from another model) that holds when the host is exposed."""
+def exposure_sources():
+    """``(matches, findings)``: the CVE matches not ruled out or closed and the open findings of medium or above, each of a host (``subdomain`` set); a host
+    is exposed when any of them names it."""
     from cveFeed.models import CVEMatch
     from startScan.models import Vulnerability
-    matches = CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).exclude(subdomain=None).values('subdomain')
-    findings = Vulnerability.objects.filter(open_status=True, severity__gte=2).exclude(remediation_status__in=CLOSED).exclude(subdomain=None).values('subdomain')
-    return Q(**{prefix + 'pk__in': matches}) | Q(**{prefix + 'pk__in': findings})
+    matches = CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).exclude(subdomain=None)
+    findings = Vulnerability.objects.filter(open_status=True, severity__gte=2).exclude(remediation_status__in=CLOSED).exclude(subdomain=None)
+    return matches, findings
+
+
+def exposure_filter(prefix=''):
+    """A Q over hosts (``prefix`` reaches the host from another model) that holds when the host is exposed."""
+    matches, findings = exposure_sources()
+    return Q(**{prefix + 'pk__in': matches.values('subdomain')}) | Q(**{prefix + 'pk__in': findings.values('subdomain')})
 
 
 def exposed_host_count(reps=None):

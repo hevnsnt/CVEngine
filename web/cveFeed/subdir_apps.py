@@ -596,3 +596,27 @@ def status_counts(project_ids):
                                   'with_version': rows.filter(subapp, outcome='found').exclude(version='').count(),
                                   'leads': rows.filter(subapp, outcome='found', variant='lead').count(),
                                   'challenged': rows.filter(subapp, outcome='challenged').count()}}
+
+
+def status_counts_by_project(project_ids):
+    """``{project_id: status_counts([project_id])}`` for each of ``project_ids`` from one grouped read instead of five reads per project."""
+    from django.db.models import Count, Q
+
+    from cveFeed.models import ProbeObservation
+    ids = list(project_ids)
+    subapp = Q(probe=PROBE)
+    grouped = {row['project_id']: row for row in ProbeObservation.objects.filter(project_id__in=ids, probe__in=(PROBE, vhost_scan.PROBE)).values('project_id').annotate(
+        other_sites=Count('host', distinct=True, filter=Q(probe=vhost_scan.PROBE, outcome='found')),
+        vhost_challenged=Count('id', filter=Q(probe=vhost_scan.PROBE, outcome='challenged')),
+        confirmed=Count('id', filter=subapp & Q(outcome__in=('found', 'hidden')) & ~Q(variant='lead')),
+        with_version=Count('id', filter=subapp & Q(outcome='found') & ~Q(version='')),
+        leads=Count('id', filter=subapp & Q(outcome='found', variant='lead')),
+        subapp_challenged=Count('id', filter=subapp & Q(outcome='challenged'))).order_by()}
+    vhost_on, subapp_on = vhost_scan.enabled(), enabled()
+    out = {}
+    for pid in ids:
+        g = grouped.get(pid) or {}
+        out[pid] = {'virtual_hosts': {'enabled': vhost_on, 'other_sites': g.get('other_sites', 0), 'challenged': g.get('vhost_challenged', 0)},
+                    'subdirectory_apps': {'enabled': subapp_on, 'confirmed': g.get('confirmed', 0), 'with_version': g.get('with_version', 0),
+                                          'leads': g.get('leads', 0), 'challenged': g.get('subapp_challenged', 0)}}
+    return out

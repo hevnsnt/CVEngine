@@ -3563,10 +3563,15 @@ def _agent_task_annotations():
             'agent_task_agent': Subquery(active.values('agent__name')[:1])}
 
 
-def _matches_qs(project):
+def _matches_qs(project, current_ids=None):
+    """``current_ids``: the ids of the current inventory's hosts when the caller has them already (``cveFeed.inventory_counts``), so the current-scans filter is not
+    evaluated again inside the statement."""
+    from django.db.models import Q
+
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch
-    qs = _scoped(CVEMatch.objects.all(), project, 'subdomain__target_domain__project').filter(latest_scan_q('subdomain__')) \
+    qs = _scoped(CVEMatch.objects.all(), project, 'subdomain__target_domain__project').filter(
+        latest_scan_q('subdomain__') if current_ids is None else Q(subdomain_id__in=current_ids)) \
         .select_related('cve_entry', 'subdomain', 'triage__verdict', 'triage__heat_override_by', 'remediation_by', 'assignee') \
         .annotate(comment_count=_comment_count_annotation('match'), **_agent_task_annotations()).order_by('-confidence', '-id')
     # the host's target joined in either case: a list row reads its project (``_finding_row``) and must not ask for it row by row
@@ -3632,7 +3637,7 @@ def _kev_only(params):
     return str(params.get('kev') or '').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
-def _finding_sources(project, params):
+def _finding_sources(project, params, current_ids=None):
     """The querysets the facets allow, keyed by type, each annotated with ``heat_rank`` (3 fire, 2 smoke, 1 ice, 0 none: the
     host card's rules, threat.match_temperature and SEVERITY_HEAT) and ``sev`` (0 info .. 4 critical; a CVE by its CVSS band,
     an unscored one as low), and filtered by heat, severity, status and host.
@@ -3673,7 +3678,7 @@ def _finding_sources(project, params):
                     When(cve_entry__cvss__gte=4.0, then=Value(2)), default=Value(1), output_field=IntegerField())
     sources = {}
     if wanted in ('all', 'cve'):
-        qs = _matches_qs(project).annotate(heat_rank=match_heat_rank_expr(), sev=cve_band, when=F('created_at'))
+        qs = _matches_qs(project, current_ids).annotate(heat_rank=match_heat_rank_expr(), sev=cve_band, when=F('created_at'))
         if kev:
             qs = qs.filter(cve_entry__kev=True)
         if status == 'actionable':
