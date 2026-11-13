@@ -18,6 +18,7 @@ from startScan.models import ScanHistory, Subdomain
 from targetApp.models import Domain
 from tests.fake_scanner import FakeScanner
 from tests.test_tenancy import client_for
+from tests.steady import steady_caches
 
 
 def post(client, path, body=None):
@@ -670,6 +671,7 @@ class ExtrasTests(WizardBase):
 
 
 class ProgressTests(WizardBase):
+    @steady_caches()
     def test_the_counts_come_from_the_discovery_and_cost_a_bounded_number_of_queries(self):
         self.seed()
         scan = ScanHistory.objects.get()

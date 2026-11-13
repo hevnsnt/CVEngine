@@ -128,7 +128,7 @@ class BuiltinOnlyKindTests(RouteFixture, TestCase):
         user = User.objects.create_user('ext-owner', password='x')
         token, _raw = create_token(user, 'ext-token')
         return Agent.objects.create(token=token, name='remote', kind='scanner', status='active', scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []},
-                                    capabilities=capabilities, last_seen=timezone.now(), info={'contract_version': contract_version})
+                                    capabilities=capabilities, last_seen=timezone.now(), info={'contract_version': contract_version, 'features': ['credential_filter']})
 
     def test_an_external_sentinel_is_never_offered_path_probe_or_nuclei_validate(self):
         # while the install has a built-in scanner (here: one that does not declare the kinds), whatever the external's contract version

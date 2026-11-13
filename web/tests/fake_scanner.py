@@ -234,7 +234,7 @@ class FakeScanner:
         token, _ = create_token(admin, f'fake-external-{self.name}'[:100], scope=SCOPE_SENTINEL)
         return Agent.objects.create(token=token, name=self.name, kind='scanner', status='active', capabilities=scope_lib.clean_capabilities(self.kinds),
                                     max_concurrent=self.max_concurrent, last_seen=timezone.now(),
-                                    scope=self.scope or {'orgs': [], 'projects': [], 'hosts': [], 'instance': True})
+                                    scope=self.scope or {'orgs': [], 'projects': [], 'hosts': [], 'instance': True}, info={'features': ['credential_filter']})
 
     @staticmethod
     def _admin():
@@ -264,7 +264,9 @@ class FakeScanner:
         # what the built-in scanner image reports: it is the built-in one, it reads stored sign-ins and it applies the vantage settings
         info = {'contract_version': self.contract_version}
         if not self.external:
-            info.update(builtin=True, features=['secret_read', 'vantage'])
+            info.update(builtin=True, features=['secret_read', 'vantage', 'credential_filter'])
+        else:
+            info['features'] = ['credential_filter']  # a current client leaves out checks that send credentials
         out = sentinel_broker.heartbeat(self._ctx(), {'info': info})
         self.agent.refresh_from_db()
         self._forget_scanner_state()

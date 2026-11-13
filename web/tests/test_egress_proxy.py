@@ -23,6 +23,7 @@ from reNgine import crypto_fields
 from scanEngine.models import Proxy
 from tests import library_http
 from tests.library_http import transport
+from tests.steady import expiring_caches
 
 HTTP_PROXY = 'http://203.0.113.50:3128'
 SOCKS_PROXY = 'socks5://203.0.113.51:1080'
@@ -171,6 +172,7 @@ class SelectionTests(ProxyOn, TestCase):
         egress_proxy.reset_cache()
         self.assertIsNone(egress_proxy.pick('www.example.com'))
 
+    @expiring_caches
     def test_a_database_failure_keeps_the_last_known_setting_and_logs_no_url(self):
         self.turn_on(LOGIN_PROXY)
         self.assertTrue(egress_proxy.enabled())

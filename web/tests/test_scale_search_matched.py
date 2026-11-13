@@ -17,6 +17,7 @@ from scanEngine.models import EngineType
 from startScan.models import IpAddress, ScanHistory, Subdomain
 from targetApp.models import Domain
 from tests.test_agentapi import call
+from tests.steady import steady_caches
 
 
 class MatchedReasonsTests(TestCase):
@@ -70,6 +71,7 @@ class MatchedReasonsTests(TestCase):
             self.assertIn('seen in web archive: nginx (3 URLs)', row['matched'])
             self.assertNotIn('seen in web archive: php (1 URLs)', row['matched'])
 
+    @steady_caches()
     def test_the_cost_does_not_grow_with_the_rows_of_the_page(self):
         # Both readings are of a warm cache: the first search of each state fills it and is thrown away. The version that read the first
         # state warm and the second straight after cache.clear() compared a warm page with a partly cold one, and the few queries a cold

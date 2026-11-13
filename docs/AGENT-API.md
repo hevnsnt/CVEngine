@@ -253,7 +253,7 @@ The task carries the scope it must keep to (`$defs/scope_policy`): the target as
 
 ```json
 {
-  "rev": "readonly-3",
+  "rev": "readonly-4",
   "read_only": true,
   "bundle": {
     "sha256": "9f2c0c1ad3b5e0c7a4f1b86d2e7c5a0b3d4e8f9a1b2c3d4e5f60718293a4b5c6",
@@ -264,7 +264,7 @@ The task carries the scope it must keep to (`$defs/scope_policy`): the target as
 }
 ```
 
-`rev` is `readonly-3` (only the read-only templates the server itself runs, `read_only: true`) or `all-3` (`all-3-cred` when credential checks are allowed too; an administrator allowed every installed template, `read_only: false`); the bundle differs between the two, so a changed `rev` or `bundle.sha256` means "fetch again". `sha256` is the hash of the archive's bytes, `bytes` its size, `templates` the number of templates in it.
+`rev` is `readonly-4` (only the read-only templates the server itself runs, `read_only: true`) or `all-4` (`all-4-cred` when credential checks are allowed too; an administrator allowed every installed template, `read_only: false`); the bundle differs between the two, so a changed `rev` or `bundle.sha256` means "fetch again". `sha256` is the hash of the archive's bytes, `bytes` its size, `templates` the number of templates in it.
 
 `GET /api/v1/sentinel/template-policy/bundle` streams that archive from disk: `Content-Type: application/gzip`, `Content-Length`, and `ETag` set to the same sha256 in double quotes (`"9f2c...b5c6"`). Send the sha256 you already hold as `If-None-Match` (quoted, bare, weak or in a list all match) and the server answers `304` with no body when it is still current. The archive holds only regular template files (`.yaml` or `.yml`) with relative paths, no `..` or absolute path, no directory or link entries, in sorted order with fixed times and owner, so identical content always gives the same sha256. Extract it into an empty directory and run nuclei with that directory as the template path. Verify the downloaded bytes against the `ETag` before using them (the set can change between the two calls; the `ETag` of the download is the truth for what you got).
 

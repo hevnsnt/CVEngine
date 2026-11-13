@@ -24,6 +24,7 @@ from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests.test_agentapi import call, tool_call
+from tests.steady import steady_caches
 
 HIT_STEP = {'kind': 'nuclei_template', 'label': 'nuclei template CVE-2099-7001', 'display': 'nuclei -t cve-2099-7001.yaml -u www.example.com',
             'target': 'www.example.com', 'ran_at': '2026-11-01T10:00:00+00:00', 'result': 'hit', 'summary': 'the template matched (panel)'}
@@ -530,6 +531,7 @@ class ListTests(Base):
         self.assertEqual(ids('reopened'), [reopened.pk])
         self.assertEqual(ids('fixed'), sorted([verified.pk, self.match.pk]))  # the plain remediation statuses still filter on the status itself
 
+    @steady_caches()
     def test_a_list_of_fixed_findings_costs_no_query_per_row(self):
         def queries(n):
             for i in range(n):

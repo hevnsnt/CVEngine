@@ -16,6 +16,7 @@ from dashboard.models import AuditLog, Org, OrgMembership
 from reNgine import resources as res
 from tests.test_settings import send
 from tests.test_tenancy import client_for
+from tests.steady import expiring_caches
 
 REAL_REQUEST_APPLY = sc.request_apply
 ENV_NAMES = [f.env for f in sc.FIELDS] + [n for f in sc.FIELDS for n in ('HEAVY_TUNE_MIN_' + f.key.split('.', 1)[-1].upper().replace('-', '_'),
@@ -274,6 +275,7 @@ class AdmissionTests(Isolated, TestCase):
 		sc.update({'heavy.nmap': None}, self.root)
 		self.assertEqual(res.max_concurrent('nmap'), 3)
 
+	@expiring_caches
 	def test_another_process_sees_a_save_within_the_cache_time(self):
 		sc.update({'heavy.nmap': 5}, self.root)
 		self.assertEqual(sc.stored_values(now_fn=lambda: 1000.0), {'heavy.nmap': 5})

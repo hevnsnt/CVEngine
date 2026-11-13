@@ -603,3 +603,83 @@ class OpenvasQueuedTaskTests(Fixture, TestCase):
         self.age(run, minutes=45)
         self.assertEqual(self.tick()['sentinel_status'], 'queued')
 
+
+
+class CredentialFilterGateTests(DispatchBase):
+    """FA-2b: while "Allow checks that send credentials" is off, nuclei web work goes only to a Sentinel that says (``info.features``) it leaves those checks out. An older
+    one (and an older built-in scanner image) gets none of it, keeps its other kinds, and the Sentinels page says why in plain words."""
+
+    def sentinel(self, name, features=None, kinds=('nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'nuclei_validate', 'nmap')):
+        user = User.objects.create_user(f'gate-{name}', password='x', is_superuser=True)
+        token, _raw = create_token(user, f'gate-{name}')
+        info = {'features': features} if features is not None else {}
+        return Agent.objects.create(token=token, name=name, kind='scanner', status='active', scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []},
+                                    capabilities=list(kinds), last_seen=timezone.now(), info=info)
+
+    def task(self, kind='nuclei_deep'):
+        return SentinelTask.objects.create(agent=None, project=self.project, kind=kind, target={'targets': ['www.example.test']}, status='queued', host='www.example.test')
+
+    def refusal(self, agent, kind='nuclei_deep'):
+        from agentapi import sentinel_broker as sb
+        return sb.effective(agent).refusal(self.task(kind))
+
+    def test_with_the_setting_off_an_old_sentinel_is_refused_nuclei_web_work_and_keeps_its_other_kinds(self):
+        old, current = self.sentinel('old'), self.sentinel('current', ['credential_filter'])
+        for kind in ('nuclei_light', 'nuclei_targeted', 'nuclei_deep'):  # nuclei_validate is the built-in scanner's alone while it is in use
+            self.assertEqual(self.refusal(old, kind)[0] if self.refusal(old, kind) else None, 'capability', kind)
+            self.assertIn('too old to leave out checks that send credentials', self.refusal(old, kind)[1])
+        self.assertNotEqual((self.refusal(current) or ('', ''))[1], 'too old to leave out checks that send credentials')
+        self.assertIsNone(self.refusal(current))
+        self.assertIsNone(self.refusal(old, 'nmap'))  # its other kinds keep running
+
+    def test_with_the_setting_on_an_old_sentinel_is_served_as_before(self):
+        from dashboard.models import ScanPolicy
+        old = self.sentinel('old')
+        ScanPolicy.objects.create(allow_credential_checks=True)
+        self.assertIsNone(self.refusal(old))
+
+    def test_the_work_goes_to_a_sentinel_that_qualifies_or_stays_due_never_to_the_old_one(self):
+        from agentapi import sentinel_broker as sb
+        self.sentinel('old')
+        self.assertFalse(dispatch.any_scanner_for(self.project, 'nuclei_deep'))  # nobody qualifies: the stage waits and the targets stay due
+        state = sb.capacity_state(self.project, 'nuclei_deep', why=True)
+        self.assertEqual((state['state'], state['reason']), ('none', 'outdated'))
+        self.assertIn('too old to leave out checks that send credentials', state['message'])
+        self.assertTrue(dispatch.any_scanner_for(self.project, 'nmap'))
+        self.sentinel('current', ['credential_filter'])
+        self.assertTrue(dispatch.any_scanner_for(self.project, 'nuclei_deep'))
+        self.assertEqual(sb.capacity_state(self.project, 'nuclei_deep')['live'], 1)  # only the current one counts
+        from dashboard.models import ScanPolicy
+        ScanPolicy.objects.create(allow_credential_checks=True)
+        self.assertEqual(sb.capacity_state(self.project, 'nuclei_deep')['live'], 2)
+
+    def test_an_older_built_in_scanner_image_is_the_same_case(self):
+        builtin = self.sentinel('builtin-old', ['secret_read', 'vantage'])
+        self.assertIn('too old to leave out', self.refusal(builtin)[1])
+        builtin.info = {'features': ['secret_read', 'vantage', 'credential_filter']}
+        builtin.save()
+        self.assertIsNone(self.refusal(builtin))
+
+    def test_the_sentinels_page_says_so_in_plain_words_for_an_old_one_only(self):
+        from agentapi import sentinel_broker as sb
+        old, current = self.sentinel('old'), self.sentinel('current', ['credential_filter'])
+        note = sb.CREDENTIAL_NOTE
+        self.assertEqual(note, 'This Sentinel is too old to leave out checks that send credentials: update it; its web checks wait until then.')
+        shown = broker.agent_dict(old)['credential_filter']
+        self.assertEqual(shown, {'declared': False, 'needed': True, 'note': note})
+        self.assertEqual(broker.agent_dict(current)['credential_filter'], {'declared': True, 'needed': True, 'note': ''})
+        from dashboard.models import ScanPolicy
+        ScanPolicy.objects.create(allow_credential_checks=True)
+        self.assertEqual(broker.agent_dict(old)['credential_filter']['note'], '')  # nothing to wait for once a person allowed them
+        ScanPolicy.objects.update(allow_credential_checks=False)
+        kinds = sb.kind_report(old)
+        self.assertEqual((kinds['nuclei_deep']['state'], kinds['nuclei_deep']['note']), ('outdated', note))
+        self.assertEqual(kinds['nmap']['state'], 'on')
+        self.assertEqual(sb.kind_report(current)['nuclei_deep']['state'], 'on')
+
+    def test_a_sentinel_declares_the_feature_through_its_info_like_the_others(self):
+        from agentapi import sentinel_settings
+        self.assertIn('credential_filter', sentinel_settings.FEATURES)
+        info = sentinel_settings.clean_info({'features': ['credential_filter', 'made_up']}) if hasattr(sentinel_settings, 'clean_info') else None
+        if info is not None:
+            self.assertEqual(info['features'], ['credential_filter'])

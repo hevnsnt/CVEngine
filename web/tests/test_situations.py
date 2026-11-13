@@ -23,6 +23,7 @@ from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
+from tests.steady import steady_caches, expiring_caches
 from tests.test_agentapi import call, tool_call
 from tests.test_tenancy import client_for
 
@@ -364,16 +365,15 @@ class QueryCountTests(Seeded):
 		# the first request of a process reads its caches (the token) and the internal ranges are cached for a minute: neither is the page's own work
 		# and the token middleware writes last_used_at when it is over a minute old (agentapi.auth.LAST_USED_RESOLUTION): one more UPDATE for a request that
 		# lands on the wrong side of the minute, so the test never lets it write (the count is then the same whatever the clock says)
-		# two middleware caches last ten seconds of real time: the ban list (reNgine.input_guard.banned_ips, one statement) and the IP allowlist's switch
-		# (reNgine.ip_allowlist._load, one more). A request that starts more than ten seconds after the one before it (the warm-up here ranks every host, which on a loaded
-		# runner takes that long) reads them again: the 17 != 15 seen on CI. Neither is the page's own work, so neither is read here
-		with mock.patch('cveFeed.internal_view.table', return_value={}), mock.patch('agentapi.auth.LAST_USED_RESOLUTION', timedelta(days=3650)), \
-				mock.patch('reNgine.input_guard.banned_ips', return_value=frozenset()), mock.patch('reNgine.ip_allowlist._load', return_value=(False, [])):
+		# and the middleware's ban list and IP-allowlist switch (10 s of real time: 17 != 15 when the warm-up that ranks every host outlasts them) and the saved-settings
+		# memo (5 s) are cached per process and cost the request that lands after the expiry one to two queries each: steady_caches() pins them, so the count is the page's own whatever the machine's speed or the tests that ran before
+		with steady_caches(), mock.patch('cveFeed.internal_view.table', return_value={}), mock.patch('agentapi.auth.LAST_USED_RESOLUTION', timedelta(days=3650)):
 			self.api('projects/sa/situations')
 			with CaptureQueriesContext(connection) as ctx, mock.patch('agentapi.auth.timezone.now', return_value=timezone.now() + timedelta(seconds=125)):
 				self.assertEqual(self.api('projects/sa/situations', **params)[0], 200)  # a clock two minutes on: last_used_at would be stale, and is still not written
 		return len(ctx)
 
+	@expiring_caches
 	def test_a_slow_warm_up_does_not_change_the_count(self):
 		# the cause of the 17 != 15 seen on CI: the middleware's ban list is cached for ten seconds of real time, so when the warm-up request ranks every host and takes
 		# longer than that, the measured request reads the list again
@@ -415,8 +415,8 @@ class QueryCountTests(Seeded):
 		# the snapshot is fresh for 10 seconds by the entries' clock: it is frozen here, so a slow runner that takes ten seconds between two requests cannot make
 		# the second one rank again (nor the copy served after the close below go stale before the assertion that it is still served)
 		from cveFeed import snapshot_cache
-		with mock.patch('cveFeed.internal_view.table', return_value={}), mock.patch('agentapi.auth.LAST_USED_RESOLUTION', timedelta(days=3650)), \
-				mock.patch.object(snapshot_cache, '_now', return_value=time.time()):
+		with steady_caches(), mock.patch('cveFeed.internal_view.table', return_value={}), mock.patch('agentapi.auth.LAST_USED_RESOLUTION', timedelta(days=3650)), \
+				mock.patch.object(snapshot_cache, '_now', return_value=time.time()):  # the other caches that expire on the clock are pinned by steady_caches()
 			self.api('projects/sa/situations')  # warms the token
 			cache.clear()
 			snapshot_cache.reset_hot()
