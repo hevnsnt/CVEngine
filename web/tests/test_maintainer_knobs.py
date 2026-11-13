@@ -389,7 +389,9 @@ class KindPauseTests(SentinelBase):
         d = TuningDecision.objects.get(setting='sentinel_pause:nmap')
         self.assertEqual((d.action, d.phase, d.applied, d.new_value, d.source), ('pause', 'pause', True, 2, 'controller'))
         self.assertEqual(d.signals['sentinel'], 'sentinel-1')
-        self.assertFalse(autotune.list_decisions('sentinel_pause:nmap')['results'][0]['can_revert'])
+        listed = autotune.list_decisions('sentinel_pause:nmap')['results'][0]
+        self.assertFalse(listed['can_revert'])
+        self.assertEqual(listed['label'], 'nmap on sentinel-1')  # what the History line reads
         self.assertTrue(__import__('dashboard.models', fromlist=['AuditLog']).AuditLog.objects.filter(action='autotune.pause').exists())
         self.assertEqual(autotune.pause_failing_kinds('auto', timezone.now()), [])  # already paused: not again
         self.assertEqual(autotune.pause_failing_kinds('suggest', timezone.now()), [])

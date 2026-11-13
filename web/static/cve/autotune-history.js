@@ -42,6 +42,7 @@ export function whatText(d) {
   const label = clean(d && d.label) || clean(d && d.setting) || "A setting";
   const [from, to] = [number(d && d.old_value), number(d && d.new_value)];
   if (d && d.action === "release") return `${label} handed back to auto-tune${to ? ` at ${to}` : ""}`;
+  if (d && d.action === "pause") return `${label} paused for ${to || "a few"} hours`;
   if (d && d.action === "revert") return from && to ? `${label} put back ${from} → ${to}` : `${label} put back`;
   if (from && to) return `${label} ${from} → ${to}`;
   return to ? `${label} set to ${to}` : label;

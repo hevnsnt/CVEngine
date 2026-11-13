@@ -1403,7 +1403,7 @@ def record_emergency(now_dt):
 
 def serialize(d):
     marks = d.signals if isinstance(d.signals, dict) else {}
-    return {'id': d.pk, 'at': _iso(d.created_at), 'setting': d.setting, 'label': getattr(by_key().get(d.setting), 'label', d.setting),
+    return {'id': d.pk, 'at': _iso(d.created_at), 'setting': d.setting, 'label': getattr(by_key().get(d.setting), 'label', None) or (f"{(d.signals or {}).get('kind')} on {(d.signals or {}).get('sentinel')}" if d.action == 'pause' else d.setting),
             'old_value': d.old_value, 'new_value': d.new_value, 'mode': d.mode, 'source': d.source, 'action': d.action, 'layer': d.layer,
             'applied': d.applied, 'pressure': d.pressure, 'phase': d.phase or None, 'reason': d.reason, 'actor': d.actor.username if d.actor_id else None,
             'resolution': d.resolution or None, 'resolved_at': _iso(d.resolved_at), 'resolved_by': d.resolved_by or None,
