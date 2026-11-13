@@ -77,12 +77,29 @@ def _apply_host_review(user, mode):
     _call(settings_api.reviewer_put, user, {'host_review_enabled': mode != 'off'})
 
 
+def _template_facts():
+    from cveFeed import templategen
+    cap = templategen.generation_limit('TEMPLATE_GEN_MAX_PER_DAY')
+    return [f'AI-written checks: the AI writes a check for a CVE that no installed template covers (at most {cap} a day), and then validates it on its own: two AI calls per draft, '
+            f'more when a try has to be repeated, so up to {cap * 2} calls a day and about {cap * 6} at the most. A check that passes every gate runs on your hosts. '
+            'With this off the drafts wait unused, and checks that already passed keep working.']
+
+
+def _apply_templates(user, mode):
+    """Off leaves it off; Recommend only and Act on safe steps switch the automatic validation on (a check it passes is run on hosts)."""
+    from cveFeed import settings_api
+    _call(settings_api.reviewer_put, user, {'template_validation_enabled': mode != 'off'})
+
+
 # (title, the cost facts of the line as a list of sentences, apply(user, mode)): a later release adds its AI feature here, and the three choices cover it.
 AI_LINES = (
     ('AI finding review and server health check', _review_line_facts, _apply_reviewer),
     ('AI host review', _host_review_facts, _apply_host_review),
+    ('AI-written checks', _template_facts, _apply_templates),
 )
-NEW_LINES = {2: ('AI host review',)}  # the lines each version of the AI question added: an answer given before is asked again for them
+NEW_LINES = {2: ('AI host review',), 3: ('AI-written checks',)}  # the lines each version of the AI question added: an answer given before is asked again for them
+LINE_WORDS = {'AI host review': ('the host review', 'The AI reviews hosts that changed and suggests a next step; a person starts it. Every project stays on recommend, and a false positive from the host review is never closed by itself.'),
+              'AI-written checks': ('the AI-written checks', 'The AI validates the checks it wrote, and one that passes every gate is run on your hosts.')}
 
 
 def _ai_applies():
@@ -100,8 +117,10 @@ def _ai_decided():
     if not (row is not None and row.updated_by_id):  # every save of the reviewer settings records who made it
         return False
     from cveFeed.models import SetupAnswer
-    # the host review line is new: a person who saved the AI settings before it existed has not decided it, and an update never switches it on for them
-    return bool(row.host_review_enabled or SetupAnswer.objects.filter(key='ai_validation', version__gte=2).exists())
+    # a line added later (the host review, the AI-written checks) is decided when a person switched it on in Settings or answered the question at a version that has it;
+    # a person who saved the AI settings before it existed has not decided it, and an update never switches it on for them
+    answered = SetupAnswer.objects.filter(key='ai_validation').values_list('version', flat=True).first() or 0
+    return bool((row.host_review_enabled or answered >= 2) and (row.template_validation_enabled or answered >= 3))
 
 
 def _ai_current():
@@ -247,7 +266,7 @@ QUESTIONS = (
     Question('ai_validation', '1.4.0', 'Do you want AI validation?',
              'An AI model can double-check your findings and watch the health of the server. It stays off until you say otherwise. Features you already turned '
              'on in an earlier release are not touched.',
-             _ai_choices, lambda: 'off', _ai_applies, _ai_decided, _ai_apply, _ai_current, '/cve/settings/#ai', 'Settings > AI model', facts=_ai_facts, version=2),
+             _ai_choices, lambda: 'off', _ai_applies, _ai_decided, _ai_apply, _ai_current, '/cve/settings/#ai', 'Settings > AI model', facts=_ai_facts, version=3),
 )
 BY_KEY = {q.key: q for q in QUESTIONS}
 
@@ -282,14 +301,15 @@ def _describe(q, answers):
     out['choices'] = [{**c, 'safe': c['value'] == safe} for c in q.choices()] if applies else []
     out['facts'] = q.facts() if applies and q.facts else []
     out['new_lines'] = new_lines if applies else []
-    if applies and new_lines:  # asked again for the new line only: the words, the facts and the choices are about it alone
-        out['title'] = 'AI host review: one new question'
-        out['text'] = 'Your earlier answer about finding review and the server health check is kept as it is. This is only about the new AI host review.'
+    if applies and new_lines:  # asked again for the new lines only: the words, the facts and the choices are about them alone
+        words = [LINE_WORDS[line][0] for line in new_lines]
+        names = ' and '.join(words)
+        out['title'] = f"{' and '.join(new_lines)}: {'one new question' if len(new_lines) == 1 else 'new questions'}"
+        out['text'] = f"Your earlier answer about finding review and the server health check is kept as it is. This is only about the new {' and '.join(new_lines)}."
         out['facts'] = [f for title, facts, _apply in AI_LINES if title in new_lines for f in facts()] + ['Your AI provider bills every call.']
-        out['choices'] = [{'value': 'off', 'label': 'Keep the host review off', 'safe': True, 'tag': 'Nothing is billed', 'effect': 'The host review stays off. Your finding review is not changed.'},
-                          {'value': 'recommend', 'label': 'Switch the host review on', 'safe': False,
-                           'effect': 'The AI reviews hosts that changed and suggests a next step; a person starts it. Every project stays on recommend, and a false positive from the host review is never closed by itself. '
-                                     'Your finding review is not changed.'}]
+        out['choices'] = [{'value': 'off', 'label': f'Keep {names} off', 'safe': True, 'tag': 'Nothing is billed', 'effect': f'{names[0].upper() + names[1:]} stay{"s" if len(new_lines) == 1 else ""} off. Your finding review is not changed.'},
+                          {'value': 'recommend', 'label': f'Switch {names} on', 'safe': False,
+                           'effect': ' '.join(LINE_WORDS[line][1] for line in new_lines) + ' Your finding review is not changed.'}]
     if q.key == 'scan_from':
         out['next'] = _scan_next(row)
     return out
@@ -379,9 +399,16 @@ def answer_many(user, answers):
             raise QuestionError(409, q.applies()[1])
         if not isinstance(value, str) or (value != LATER and value not in [c['value'] for c in q.choices()]):
             raise QuestionError(400, 'that is not one of the choices')
+    # All or nothing: every answer is carried out inside ONE transaction, so a Settings handler that refuses a later answer undoes the earlier ones (the database
+    # side: the settings, the answer rows, the audit entries) and the message names the question. The one effect outside the database is the file the host helper
+    # reads for the scanner plan: that question runs LAST, so a refusal can only come before it writes anything (a refusal of the plan itself writes nothing).
     out = None
-    for key, value in answers.items():
-        out = answer(user, key, value)
+    with transaction.atomic():
+        for key, value in sorted(answers.items(), key=lambda item: item[0] == 'scan_from'):
+            try:
+                out = answer(user, key, value)
+            except QuestionError as exc:
+                raise QuestionError(exc.status, f'"{BY_KEY[key].title}": {str(exc.message).rstrip(".")}. Nothing was saved.')
     return out
 
 

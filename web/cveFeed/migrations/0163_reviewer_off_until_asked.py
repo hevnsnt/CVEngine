@@ -10,11 +10,15 @@ from django.db import migrations
 
 def off_until_asked(apps, schema_editor):
     ReviewerSettings = apps.get_model('cveFeed', 'ReviewerSettings')
-    ReviewerSettings.objects.filter(updated_by__isnull=True).update(enabled=False, auto_close=False)
+    AuditLog = apps.get_model('dashboard', 'AuditLog')
+    if AuditLog.objects.filter(action='settings.reviewer').exists():  # someone saved the reviewer settings, whatever became of their account
+        return
+    ReviewerSettings.objects.filter(updated_by__isnull=True, enabled=True, auto_close=True, review_model='', ops_model='', review_daily_max=300, ops_hours=[]) \
+        .update(enabled=False, auto_close=False)
 
 
 class Migration(migrations.Migration):
 
-    dependencies = [('cveFeed', '0162_setup_answer')]
+    dependencies = [('cveFeed', '0162_setup_answer'), ('dashboard', '0011_auditlog')]
 
     operations = [migrations.RunPython(off_until_asked, migrations.RunPython.noop)]
