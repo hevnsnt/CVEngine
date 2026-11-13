@@ -131,3 +131,45 @@ class EarlierVerdictTests(Base):
         self.earlier(match, verdict='uncertain', confidence='low')
         review, _ = self.reply(self.queue(), self.fp())
         self.assertEqual(FindingReview.objects.get(host_review=review).outcome, 'closed')
+
+
+class SweepStarvationTests(Base):
+    """HR-4: hosts that cannot be reviewed (excluded, or too large for one packet) never use up the sweep's places."""
+
+    def host(self, name, ip, score):
+        sub = self.host_of(self.domain, self.scan, name, self.proj, ip)
+        HostState.objects.filter(project=self.proj, host=name).update(score=score)
+        self.match(sub=sub)
+        return sub
+
+    def test_excluded_hosts_with_a_high_score_do_not_starve_the_sweep(self):
+        for i in range(3):
+            name = f'x{i}.example.com'
+            self.host(name, f'192.0.2.{60 + i}', 1000)
+            HostExclusion.objects.create(org=self.org, host=name)
+        self.match()  # the normal host (www.example.com), score 0
+        out = host_review.sweep(limit=3)
+        self.assertEqual(out['queued'], 1, out)
+        self.assertEqual(list(HostReview.objects.values_list('host', flat=True)), [HOST])
+
+    def test_a_host_whose_packet_cannot_be_built_is_recorded_so_it_is_not_picked_again_for_a_day(self):
+        self.host('big.example.com', '192.0.2.70', 1000)
+        self.match()
+        real = host_review.build
+
+        def build(project, host, **kw):
+            if host == 'big.example.com':
+                raise host_review.HostReviewError('the packet is too large (176979 characters)')
+            return real(project, host, **kw)
+        with mock.patch.object(host_review, 'build', side_effect=build):
+            out = host_review.sweep(limit=1)
+            self.assertEqual(out['queued'], 1, out)  # the normal host still gets its review in the same run
+            row = HostReview.objects.get(host='big.example.com')
+            self.assertEqual(row.status, 'failed')
+            self.assertIn('too large', row.step_detail)
+            HostReview.objects.filter(host=HOST).delete()
+            from cveFeed.models import AIJob
+            AIJob.objects.all().delete()
+            self.assertEqual([h for _, h in host_review.due_hosts(5)], [HOST])  # the large one waits out the day
+            HostReview.objects.filter(pk=row.pk).update(created_at=timezone.now() - timedelta(days=2), decided_at=timezone.now() - timedelta(days=2))
+            self.assertEqual({h for _, h in host_review.due_hosts(5)}, {HOST, 'big.example.com'})

@@ -987,10 +987,17 @@ def due_hosts(limit, now=None):
                   .exclude(project__in=ProjectSettings.objects.filter(host_review_mode='off').values('project'))
                   .select_related('project').order_by('-score', 'id')[:SWEEP_WINDOW])
     blocked = _recent_blocks([(s.project_id, s.host) for s in states], now)
+    from cveFeed.exclusions import excluded_names, normalize
+    excluded = {}  # the exclusion list of each project, read once: an excluded host is refused by ``request``, so picking it would only use up a place
     by_project = {}
     for s in states:
-        if (s.project_id, s.host) not in blocked:
-            by_project.setdefault(s.project_id, []).append(s)
+        if (s.project_id, s.host) in blocked:
+            continue
+        if s.project_id not in excluded:
+            excluded[s.project_id] = excluded_names(s.project_id)
+        if normalize(s.host) in excluded[s.project_id]:
+            continue
+        by_project.setdefault(s.project_id, []).append(s)
     picked = []
     while by_project and len(picked) < limit:
         for project_id in list(by_project):
@@ -1000,6 +1007,20 @@ def due_hosts(limit, now=None):
             if len(picked) >= limit:
                 break
     return [(s.project, s.host) for s in picked]
+
+
+def _record_refusal(project, host, why, now):
+    """A host the sweep picked and ``request`` refused (its packet is too large, it is not reviewable): a failed review of its current state, so the
+    ordinary wait (``RETRY_AFTER``) applies and the host is not picked again at every run. Nothing is asked of the AI."""
+    from cveFeed.models import HostReview, HostState
+    state = HostState.objects.filter(project=project, host=host).select_related('domain').first()
+    if state is None or HostReview.objects.filter(project=project, host=host, status__in=HostReview.OPEN).exists():
+        return
+    try:
+        HostReview.objects.create(project=project, domain=state.domain, host=host, state_key=state_key(state.fingerprint, open_rows(project, host)), status='failed',
+                                  step_detail=f'failed: not reviewed ({re.sub(r"[^ -~]", "", why)[:150]})', decided_at=now)
+    except Exception:  # noqa: BLE001 - a record that cannot be written leaves the host to be picked again, nothing worse
+        logger.warning('host review sweep: could not record a refusal', exc_info=True)
 
 
 def sweep(limit=SWEEP_BATCH, now=None):
@@ -1023,7 +1044,10 @@ def sweep(limit=SWEEP_BATCH, now=None):
             return out
         from cveFeed import reviewer
         room = reviewer.settings_row().host_review_daily_max - reviews_today(now)
-        for project, host in due_hosts(max(0, min(limit, room)), now):
+        wanted = max(0, min(limit, room))
+        for project, host in due_hosts(wanted * 3, now):  # a few more than wanted: a host that cannot be reviewed gives its place to the next one
+            if out['queued'] >= wanted:
+                break
             try:
                 request(project, host, priority=6, now=now)
                 out['queued'] += 1
@@ -1031,6 +1055,8 @@ def sweep(limit=SWEEP_BATCH, now=None):
                 if exc.status in (429, 503):
                     out['skipped'] = str(exc)
                     break
+                if 'already open' not in str(exc):
+                    _record_refusal(project, host, str(exc), now)  # so the same host is not picked again at every run
             except Exception:  # noqa: BLE001
                 logger.warning('host review sweep: could not queue a review', exc_info=True)
     finally:
