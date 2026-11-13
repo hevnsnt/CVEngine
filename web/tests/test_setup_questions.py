@@ -77,6 +77,31 @@ class MigrationTests(Base):
         row.refresh_from_db()
         self.assertEqual((row.enabled, row.auto_close), (False, False))
 
+    def row_of_a_deleted_user(self, **fields):
+        """A row a person saved (through the Settings handler, which audits it), whose account was deleted since: ``updated_by`` is emptied (SET_NULL)."""
+        gone = User.objects.create_superuser('gone-admin', 'g@x.io', 'x')
+        row = ReviewerSettings.objects.create(updated_by=gone, **fields)
+        if True:
+            AuditLog.objects.create(actor=gone, actor_name='gone-admin', action='settings.reviewer', target='AI reviewer settings', detail={})
+        gone.delete()
+        row.refresh_from_db()
+        self.assertIsNone(row.updated_by_id)
+        ReviewerSettings.objects.filter(pk=row.pk).update(enabled=True, auto_close=True)
+        return row
+
+    def test_a_choice_of_a_person_whose_account_was_deleted_is_not_undone(self):
+        row = self.row_of_a_deleted_user()  # on, closing on, and the audit record of the save
+        importlib.import_module('cveFeed.migrations.0163_reviewer_off_until_asked').off_until_asked(apps, None)
+        row.refresh_from_db()
+        self.assertEqual((row.enabled, row.auto_close), (True, True))
+
+    def test_a_row_that_is_not_what_the_builds_made_is_not_touched_either(self):
+        row = ReviewerSettings.objects.create(review_daily_max=500)  # no audit record and no user, but a person chose 500
+        ReviewerSettings.objects.filter(pk=row.pk).update(enabled=True, auto_close=True)
+        importlib.import_module('cveFeed.migrations.0163_reviewer_off_until_asked').off_until_asked(apps, None)
+        row.refresh_from_db()
+        self.assertEqual((row.enabled, row.auto_close), (True, True))
+
     def test_a_persons_earlier_choice_survives(self):
         row = ReviewerSettings.objects.create(enabled=True, auto_close=True, updated_by=self.admin)
         importlib.import_module('cveFeed.migrations.0163_reviewer_off_until_asked').off_until_asked(apps, None)
@@ -85,9 +110,9 @@ class MigrationTests(Base):
         self.connect_ai()
         question = self.question('ai_validation')
         # chosen in Settings before the host review existed: the host review line was never decided, so it is asked once, and stays off until then
-        self.assertEqual((question['state'], question['current'], question['new_lines']), ('pending', 'act', []))
+        self.assertEqual((question['state'], question['current'], question['new_lines']), ('pending', 'act', []))  # (a state in Settings is not a stale answer: no 'new lines' text)
         self.assertFalse(ReviewerSettings.objects.get().host_review_enabled)
-        ReviewerSettings.objects.update(host_review_enabled=True)  # a person switched the host review on in Settings: nothing left to ask
+        ReviewerSettings.objects.update(host_review_enabled=True, template_validation_enabled=True)  # a person switched both later lines on in Settings: nothing left to ask
         self.assertEqual(self.question('ai_validation')['state'], 'decided')
 
 
@@ -216,7 +241,8 @@ class AnswerTests(Base):
         self.assertEqual(question['facts'][:2], ['Finding review: at most 300 findings a day, one provider call each.', 'Server health check: 4 calls a day.'])
         self.assertIn('Host review: the AI reads every open finding of a host that changed, one provider call per host, at most 100 a day', question['facts'][2])
         self.assertIn('at most 50 safe read-only steps per project a day, and only in a project a person set to automatic', question['facts'][2])
-        self.assertEqual(question['facts'][3], 'Your AI provider bills every call.')
+        self.assertIn('AI-written checks: ', question['facts'][3])  # the third line (FA-5), tested in test_template_validation_gate
+        self.assertEqual(question['facts'][4], 'Your AI provider bills every call.')
         self.assertEqual(question['choices'][0]['tag'], 'Nothing is billed')
         for choice in question['choices']:
             self.assertNotIn('300', choice['effect'])
@@ -277,6 +303,37 @@ class AnswerTests(Base):
         self.assertEqual(bad.status_code, 400)
         self.assertFalse(SetupAnswer.objects.exists())
 
+    def test_a_later_answer_the_settings_refuse_applies_and_records_nothing_and_names_the_question(self):
+        self.connect_ai()
+        from cveFeed import settings_api
+        with mock.patch.object(settings_api, 'scanner_plan_post', side_effect=settings_api.SettingsError(400, 'the host helper is not reachable')):
+            out = post(self.c, {'answers': {'ai_validation': 'act', 'scan_from': 'both'}})  # the scanner plan is refused after the AI answer was carried out
+        self.assertEqual(out.status_code, 400)
+        self.assertIn('Which scanners will you use?', out.json()['error'])
+        self.assertIn('the host helper is not reachable', out.json()['error'])
+        self.assertFalse(SetupAnswer.objects.exists())
+        row = ReviewerSettings.current()
+        self.assertEqual((row.enabled, row.auto_close, row.host_review_enabled, row.template_validation_enabled), (False, False, False, False))
+        self.assertFalse(AuditLog.objects.filter(action__in=('setup.question', 'settings.reviewer')).exists())
+        self.assertFalse(os.path.exists(os.path.join(self.dir, '.scanner-plan-wanted')))
+
+    def test_the_scanner_plan_runs_last_so_a_refusal_after_it_cannot_leave_the_host_changed(self):
+        self.connect_ai()
+        from cveFeed import settings_api
+        with mock.patch.object(settings_api, 'reviewer_put', side_effect=settings_api.SettingsError(400, 'refused')):
+            out = post(self.c, {'answers': {'scan_from': 'both', 'ai_validation': 'act'}})  # the scanner answer is listed first
+        self.assertEqual(out.status_code, 400)
+        self.assertIn('Do you want AI validation?', out.json()['error'])
+        self.assertFalse(SetupAnswer.objects.exists())
+        self.assertFalse(os.path.exists(os.path.join(self.dir, '.scanner-plan-wanted')))  # the file the host helper reads was never written
+
+    def test_every_answer_is_saved_together_when_none_is_refused(self):
+        self.connect_ai()
+        out = post(self.c, {'answers': {'scan_from': 'both', 'ai_validation': 'act'}})
+        self.assertEqual(out.status_code, 200, out.content)
+        self.assertEqual(SetupAnswer.objects.count(), 2)
+        self.assertTrue(os.path.exists(os.path.join(self.dir, '.scanner-plan-wanted')))
+
     def test_the_reminder_names_the_action(self):
         post(self.c, {'later': True})
         reminder = self.c.get('/cve/api/settings/alerts').json()['questions']
@@ -334,7 +391,7 @@ class HostReviewLineTests(Base):
         SetupAnswer.objects.create(key='ai_validation', answer='recommend', answered_by=self.admin)  # version 1: the question before the host review
         ReviewerSettings.objects.create(enabled=True, auto_close=False, updated_by=self.admin)
         question = self.question('ai_validation')
-        self.assertEqual((question['state'], question['new_lines'], question['safe_default']), ('pending', ['AI host review'], 'off'))
+        self.assertEqual((question['state'], question['new_lines'], question['safe_default']), ('pending', ['AI host review', 'AI-written checks'], 'off'))
         self.assertFalse(self.enabled())
         self.assertEqual(self.c.get('/cve/')['Location'], '/cve/update-questions/')  # an administrator is taken to the page again, once
         self.assertEqual(self.question('scan_from')['new_lines'], [])
@@ -347,7 +404,7 @@ class HostReviewLineTests(Base):
             self.assertEqual(out.status_code, 200, out.content)
             self.assertEqual(self.enabled(), expected, answer)
             self.assertEqual(host_review.mode_of(self.project), 'recommend', answer)
-            self.assertEqual(SetupAnswer.objects.get(key='ai_validation').version, 2)
+            self.assertEqual(SetupAnswer.objects.get(key='ai_validation').version, 3)
         self.assertEqual(self.question('ai_validation')['new_lines'], [])
 
     def test_an_agent_cannot_answer_it(self):
@@ -371,7 +428,7 @@ class ReaskTests(Base):
         super().setUp()
         self.connect_ai()
         ReviewerSettings.objects.create(enabled=True, auto_close=False, updated_by=self.admin)  # the finding review as answered before: on, closing off
-        SetupAnswer.objects.create(key='ai_validation', answer='recommend', answered_by=self.admin)  # version 1
+        SetupAnswer.objects.create(key='ai_validation', answer='recommend', answered_by=self.admin, version=1)  # the question before the host review
 
     def state(self):
         row = ReviewerSettings.current()
@@ -379,7 +436,7 @@ class ReaskTests(Base):
 
     def test_the_reask_is_about_the_host_review_alone(self):
         question = self.question('ai_validation')
-        self.assertEqual((question['state'], question['new_lines']), ('pending', ['AI host review']))
+        self.assertEqual((question['state'], question['new_lines']), ('pending', ['AI host review', 'AI-written checks']))
         self.assertIn('Your earlier answer about finding review', question['text'])
         self.assertEqual([c['value'] for c in question['choices']], ['off', 'recommend'])
         self.assertTrue(all('Your finding review is not changed' in c['effect'] for c in question['choices']))
@@ -389,7 +446,7 @@ class ReaskTests(Base):
         out = post(self.c, {'key': 'ai_validation', 'answer': 'recommend'})
         self.assertEqual(out.status_code, 200, out.content)
         self.assertEqual(self.state(), (True, False, True))
-        self.assertEqual(SetupAnswer.objects.get(key='ai_validation').version, 2)
+        self.assertEqual(SetupAnswer.objects.get(key='ai_validation').version, 3)
 
     def test_the_act_answer_does_not_turn_closing_on(self):
         out = post(self.c, {'key': 'ai_validation', 'answer': 'act'})
@@ -402,6 +459,6 @@ class ReaskTests(Base):
         self.assertEqual(self.state(), (True, False, False))
 
     def test_an_answer_at_the_current_version_still_carries_out_every_line(self):
-        SetupAnswer.objects.filter(key='ai_validation').update(version=2)
+        SetupAnswer.objects.filter(key='ai_validation').update(version=3)
         post(self.c, {'key': 'ai_validation', 'answer': 'act'})
         self.assertEqual(self.state(), (True, True, True))
