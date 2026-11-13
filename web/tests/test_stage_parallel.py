@@ -125,7 +125,7 @@ class StageBase(DispatchBase):
         return Agent.objects.create(token=token, name=name, kind='scanner', status='active', max_concurrent=slots,
                                     scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []},
                                     capabilities=list(capabilities), last_seen=timezone.now(),
-                                    network='internal' if 'network:internal' in capabilities else 'external')
+                                    network='internal' if 'network:internal' in capabilities else 'external', info={'features': ['credential_filter']})
 
     def two_agents(self, slots=2):
         return [self.agent('sentinel-a', slots=slots), self.agent('sentinel-b', slots=slots)]

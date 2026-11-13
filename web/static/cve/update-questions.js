@@ -61,6 +61,7 @@ function nextSteps(next) {
 async function draw() {
   const data = await api('GET', API);
   root.querySelectorAll(':scope > :not([name=csrfmiddlewaretoken])').forEach((n) => n.remove());
+  (data.notes || []).forEach((n) => root.append(el('p', 'note uq-info', n)));
   const cards = data.questions.map(card);
   cards.forEach((c) => root.append(c.box));
   const actions = el('div', 'uq-actions');

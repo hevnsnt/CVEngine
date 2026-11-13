@@ -117,6 +117,7 @@ ALLOWED = {
         'agentapi/models.py',
         'agentapi/rest.py',
         'agentapi/sentinel_broker.py',
+        'agentapi/sentinel_settings.py',  # FA-2b: a comment on the ``credential_filter`` feature a Sentinel declares; runs nothing
         'agentapi/sentinel_tools.py',  # 1.4 contract 5: the names of the tools whose versions a Sentinel reports, compared with the shipped ones; runs nothing
         'agentapi/services.py',
         'agentapi/system_status.py',
@@ -166,6 +167,7 @@ ALLOWED = {
         'cveFeed/secrets_inventory.py',  # 1.4 secrets inventory: names the nuclei findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/settings_api.py',  # the setting name of the model for the nuclei tag choice (nuclei_model) and its audit action: names the tool, runs nothing
         'cveFeed/setup_flow.py',  # the setup wizard (1.4): scanner kind names such as nmap or nuclei as the toggles it offers (data values written to the Sentinel settings), runs nothing
+        'cveFeed/setup_questions.py',  # FA-10: the update question and its note name the tool in words an administrator reads; runs nothing
         'cveFeed/software.py',  # the About page list of the tools of both images (names, versions, licenses), runs nothing
         'cveFeed/supplier_scan.py',
         'cveFeed/tailscale_sync.py',

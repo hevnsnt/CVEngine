@@ -347,7 +347,9 @@ UPDATE_STATUSES = ('idle', 'waiting', 'draining', 'updating', 'done', 'failed')
 # enrollment (``builtin_scanner.builtin_agent``), never by this.
 # ``bbot_keys`` (any Sentinel: the Sentinel client's ``config.EXTERNAL_FEATURES``): it reads a bbot discovery task's API keys through the same single-use read, keeps
 # them in a private file for the run and masks them. A Sentinel that does not say so (every older client) is never sent them; the field is optional.
-FEATURES = ('secret_read', 'vantage', 'bbot_keys')
+# ``credential_filter`` (any Sentinel): it leaves default-login and bruteforce templates and every installed template that sends a fixed credential out of a nuclei web
+# run whose task does not say a person allowed credential checks. While they are off a Sentinel that does not say so is not given nuclei web work.
+FEATURES = ('secret_read', 'vantage', 'bbot_keys', 'credential_filter')
 
 
 def clean_info(raw):

@@ -58,7 +58,7 @@ class SecretBase(TestCase):
         self.assertEqual(status, 201, out)
         self.t['builtin'], self.builtin = out['token'], Agent.objects.get(pk=out['id'])
         # the built-in scanner image says it reads stored sign-ins (info.features): only such an image is offered signed-in work
-        Agent.objects.filter(pk=self.builtin.pk).update(info={'builtin': True, 'features': ['secret_read', 'vantage']})
+        Agent.objects.filter(pk=self.builtin.pk).update(info={'builtin': True, 'features': ['secret_read', 'vantage', 'credential_filter']})
         self.builtin.refresh_from_db()
         self.touch(self.builtin)
         self.external, self.t['external'] = self.enroll(self.t['dana'], '/api/v1/projects/sen-a/sentinels/enroll', 'external-1')
@@ -73,6 +73,8 @@ class SecretBase(TestCase):
         self.assertEqual(status, 201, boot)
         agent = Agent.objects.get(pk=boot['id'])
         self.assertEqual(agent.status, 'active')
+        Agent.objects.filter(pk=agent.pk).update(info={'features': ['credential_filter']})  # a current client
+        agent.refresh_from_db()
         self.touch(agent)
         return agent, boot['token']
 
@@ -331,7 +333,7 @@ class BrokerGateTests(SecretBase):
 
 class FeatureGateTests(SecretBase):
     def test_a_builtin_image_that_does_not_read_sign_ins_is_never_offered_signed_in_work(self):
-        Agent.objects.filter(pk=self.builtin.pk).update(info={'builtin': True})
+        Agent.objects.filter(pk=self.builtin.pk).update(info={'builtin': True, 'features': ['credential_filter']})
         self.task(agent=None, status='queued')
         status, out = call(self.t['builtin'], 'POST', '/api/v1/sentinel/tasks/next', {'kinds': ['nuclei_targeted']})
         self.assertEqual(status, 200, out)

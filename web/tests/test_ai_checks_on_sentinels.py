@@ -583,6 +583,15 @@ class ServerCorpusTests(SimpleTestCase):
                 self.assertEqual(validation.readonly_problem(case["template"]) == "", case["read_only"])
                 self.assertEqual(ai_checks.external_problem(case["template"]) == "", case["read_only"] and case["own_target"] and case["sentinel"])
 
+    def test_the_server_judges_the_credential_rule_of_every_case_that_names_one(self):
+        named = [c for c in self.corpus() if "credential" in c]
+        self.assertGreaterEqual(len(named), 20)
+        for case in named:
+            with self.subTest(case=case["name"]):
+                self.assertEqual(validation.credential_problem(case["template"]) == "", case["credential"])
+                if case["read_only"]:
+                    self.assertEqual(validation.readonly_problem(case["template"]) == "", case["credential"] or validation.readonly_problem(case["template"]) == "")
+
     def test_every_hostile_case_is_refused_by_the_allowlist_with_the_servers_reason(self):
         hostile = [c for c in self.corpus() if c["read_only"] and c["own_target"] and not c["sentinel"]]
         self.assertGreaterEqual(len(hostile), 40)

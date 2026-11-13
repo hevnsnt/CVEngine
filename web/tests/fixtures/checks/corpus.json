@@ -987,6 +987,174 @@
       "read_only": true,
       "own_target": true,
       "sentinel": true
+    },
+    {
+      "name": "credential_form_body_password",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: POST\n    path:\n      - \"{{BaseURL}}/login\"\n    body: 'user=admin&password=admin&go=1'\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": false
+    },
+    {
+      "name": "credential_json_body_password",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: POST\n    path:\n      - \"{{BaseURL}}/login\"\n    body: '{\"username\":\"admin\",\"password\":\"admin\"}'\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": false
+    },
+    {
+      "name": "credential_body_pwd_field",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: POST\n    path:\n      - \"{{BaseURL}}/login\"\n    body: 'log=admin&pwd=secret1&wp-submit=1'\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": false
+    },
+    {
+      "name": "credential_body_vendor_field_j_password",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: POST\n    path:\n      - \"{{BaseURL}}/login\"\n    body: 'j_username=admin&j_password=admin'\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": false
+    },
+    {
+      "name": "credential_body_userpass_field",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: POST\n    path:\n      - \"{{BaseURL}}/login\"\n    body: 'u=admin&userpass=admin'\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": false
+    },
+    {
+      "name": "credential_xml_body_password",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: POST\n    path:\n      - \"{{BaseURL}}/login\"\n    body: '<login><user>a</user><password>admin</password></login>'\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": false
+    },
+    {
+      "name": "credential_raw_request_body_password",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        POST /login HTTP/1.1\n        Host: {{Hostname}}\n        Content-Type: application/x-www-form-urlencoded\n        \n        user=admin&password=admin\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": false
+    },
+    {
+      "name": "credential_query_string_password",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/login?user=admin&password=admin\"\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": false
+    },
+    {
+      "name": "credential_body_password_from_a_literal_variable",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nvariables:\n  pw: admin\nhttp:\n  - method: POST\n    path:\n      - \"{{BaseURL}}/login\"\n    body: 'user=admin&password={{pw}}'\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": false
+    },
+    {
+      "name": "credential_body_password_from_a_payload_list",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: POST\n    path:\n      - \"{{BaseURL}}/login\"\n    body: 'user=admin&password={{pass}}'\n    payloads:\n      pass: [admin, password, 123456]\n    attack: batteringram\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": false
+    },
+    {
+      "name": "credential_header_helper_over_a_literal_variable",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nvariables:\n  auth: admin:admin\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/']\n    headers:\n      Authorization: 'Basic {{base64(auth)}}'\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": false
+    },
+    {
+      "name": "credential_header_helper_over_two_literal_variables",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nvariables:\n  u: admin\n  p: admin\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/']\n    headers:\n      Authorization: 'Basic {{base64(concat(u,p))}}'\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": false
+    },
+    {
+      "name": "credential_header_from_a_chained_literal_variable",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nvariables:\n  a: admin:admin\n  b: '{{a}}'\n  c: '{{b}}'\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/']\n    headers:\n      Authorization: 'Basic {{base64(c)}}'\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": false
+    },
+    {
+      "name": "credential_header_from_a_payload_list",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/']\n    payloads:\n      auth: ['YWRtaW46YWRtaW4=']\n    headers:\n      Authorization: 'Basic {{auth}}'\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": false
+    },
+    {
+      "name": "credential_escaped_userinfo_url",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: [\"http:\\x2f\\x2fadmin:admin@{{Hostname}}/\"]\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": false
+    },
+    {
+      "name": "credential_escaped_header_name",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/']\n    headers:\n      \"\\x41uthorization\": 'Basic YWRtaW46YWRtaW4='\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": false
+    },
+    {
+      "name": "password_field_from_the_signed_in_secret_placeholder",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: POST\n    path:\n      - \"{{BaseURL}}/login\"\n    body: 'user={{username}}&password={{password}}'\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": true
+    },
+    {
+      "name": "password_field_from_an_undefined_placeholder_in_json",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: POST\n    path:\n      - \"{{BaseURL}}/login\"\n    body: '{\"password\": \"{{password}}\"}'\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": true
+    },
+    {
+      "name": "password_field_in_a_raw_body_from_placeholders",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        POST /login HTTP/1.1\n        Host: {{Hostname}}\n        \n        log={{username}}&pwd={{password}}\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": true
+    },
+    {
+      "name": "bypass_and_compass_are_not_password_fields",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: POST\n    path:\n      - \"{{BaseURL}}/login\"\n    body: 'bypass=1&compass=north&passage=2'\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false,
+      "credential": true
+    },
+    {
+      "name": "header_from_a_variable_that_is_itself_a_placeholder",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nvariables:\n  token: '{{rand_text_alpha(8)}}'\nhttp:\n  - method: GET\n    path: ['{{BaseURL}}/']\n    headers:\n      Authorization: 'Bearer {{token}}'\n    matchers:\n      - type: word\n        words: [ok]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false,
+      "credential": true
     }
   ]
 }
