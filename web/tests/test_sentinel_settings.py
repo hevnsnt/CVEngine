@@ -6,6 +6,7 @@ from django.utils import timezone
 
 from agentapi import sentinel_settings as ss
 from agentapi.models import Agent
+from cveFeed import software
 from tests.test_agentapi import call
 from tests.test_sentinels import build_world, register_sentinel, reset_rates
 
@@ -24,7 +25,7 @@ class Base(TestCase):
         return Agent.objects.get(pk=out['id']), out
 
     def manage(self, agent, settings):
-        return call(self.tokens['root'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'settings': settings})
+        return call(self.root, 'PATCH', f'/api/v1/agents/{agent.pk}', {'settings': settings})  # a person: an API token may not widen (FB-5)
 
 
 class ReportedTests(Base):
@@ -149,7 +150,7 @@ class UpdateTests(Base):
         status, beat = call(self.tokens['alice'], 'POST', '/api/v1/sentinel/heartbeat',
                             {'info': {'version': 'abc1234', 'update': {'status': 'waiting', 'phase': 'drain', 'detail': '2 tasks running'}}})
         self.assertEqual(status, 200, beat)
-        self.assertEqual(beat['update'], {'mode': 'auto', 'setting': 'automatic', 'requested': False})
+        self.assertEqual(beat['update'], {'mode': 'auto', 'setting': 'automatic', 'requested': False, 'target': software.SENTINEL_PINS_COMMIT, 'reason': 'pinned'})  # Automatic is always told where to go (FB-7)
         status, detail = call(self.tokens['root'], 'GET', f'/api/v1/agents/{agent.pk}')
         self.assertEqual(detail['version'], 'abc1234')
         self.assertEqual(detail['update']['status'], 'waiting')
@@ -218,7 +219,7 @@ class SelfUpdateSettingTests(Base):
         self.assertEqual(self.effective(agent), 'automatic')  # an administrator's value for this Sentinel beats the default
         self.assertEqual(self.manage(agent, {'self_update': None})[0], 200)  # handed back: the default applies again
         self.assertEqual(self.effective(agent), 'off')
-        call(self.tokens['root'], 'PUT', '/api/v1/sentinels/defaults', {'self_update': None})
+        call(self.root, 'PUT', '/api/v1/sentinels/defaults', {'self_update': None})  # a person: an API token may not hand the default back to automatic (FB-5)
         self.assertEqual(self.effective(agent), 'automatic')
 
     def test_the_sentinels_own_configuration_and_the_dashboard_follow_the_most_recent_change(self):
@@ -240,7 +241,7 @@ class SelfUpdateSettingTests(Base):
 
     def test_a_change_of_the_default_is_audited(self):
         from dashboard.models import AuditLog
-        call(self.tokens['root'], 'PUT', '/api/v1/sentinels/defaults', {'self_update': 'automatic'})
+        call(self.root, 'PUT', '/api/v1/sentinels/defaults', {'self_update': 'automatic'})  # a person: an API token may not choose automatic (FB-5)
         entry = AuditLog.objects.filter(action='sentinel.defaults').latest('id')
         self.assertEqual((entry.detail['before'], entry.detail['after']), (None, 'automatic'))
 
@@ -248,7 +249,7 @@ class SelfUpdateSettingTests(Base):
         agent, _ = self.sentinel()
         self.manage(agent, {'self_update': 'automatic'})
         beat = call(self.tokens['alice'], 'POST', '/api/v1/sentinel/heartbeat')[1]
-        self.assertEqual(beat['update'], {'setting': 'automatic', 'mode': 'auto', 'requested': False})
+        self.assertEqual(beat['update'], {'setting': 'automatic', 'mode': 'auto', 'requested': False, 'target': software.SENTINEL_PINS_COMMIT, 'reason': 'pinned'})  # (FB-7)
         self.assertEqual(beat['settings']['values']['self_update'], 'automatic')
         self.assertEqual(call(self.tokens['root'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'update': 'now'})[0], 200)
         self.manage(agent, {'self_update': 'off'})

@@ -342,6 +342,8 @@ def set_target_scope(ctx, slug, target_id, scope_mode):
     d = Domain.objects.filter(project=project, id=target_id).first()
     if not d:
         raise ApiError(404, 'target not found')
+    if ctx.token is not None and scope_mode not in ('host', d.scope_mode):  # FB-5: auto and parent reach further than host
+        raise ApiError(403, 'scope_mode: an agent may only narrow a target to host; a person widens its scope in the web interface')
     d.scope_mode = scope_mode
     d.save(update_fields=['scope_mode'])
     return _target(d)
@@ -392,6 +394,9 @@ def set_target_discovery_mode(ctx, slug, target_id, discovery_mode):
     d = Domain.objects.filter(project=project, id=target_id).first()
     if not d:
         raise ApiError(404, 'target not found')
+    order = ('manual', 'passive', 'standard', 'deep')  # how much runs on its own, least first (FB-5)
+    if ctx.token is not None and order.index(discovery_mode) > order.index(d.discovery_mode):
+        raise ApiError(403, f'discovery_mode: an agent may only lower it (now {d.discovery_mode}); a person chooses a deeper mode in the web interface')
     if d.discovery_mode != discovery_mode:
         audit(ctx.user, 'target.discovery_mode', d.name, project.org, project=slug, was=d.discovery_mode, now=discovery_mode)
         d.discovery_mode = discovery_mode
@@ -3285,6 +3290,11 @@ def set_runzero(ctx, slug, body):
     if 'search' in body and not isinstance(body['search'], str):
         raise ApiError(400, 'search must be text')
     row = runzero_sync.settings_for(project)
+    if ctx.token is not None:  # an API token or MCP call (FB-5): importing every address runZero knows adds targets, so only a person switches it on
+        if body.get('import_enabled') and not row.import_enabled:
+            raise ApiError(403, 'import_enabled: adding every address runZero knows as a target widens what is scanned, so only a person switches it on, in the web interface; an agent may switch it off')
+        if 'search' in body and row.import_enabled and runzero_sync.clean_search(body['search']) != row.search:
+            raise ApiError(403, 'search: the import is on, and a different search can widen what it adds; an agent may switch the import off first')
     if 'import_enabled' in body:
         row.import_enabled = body['import_enabled']
     if 'search' in body:

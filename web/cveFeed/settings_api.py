@@ -1283,8 +1283,10 @@ def reviewer_put(request):
         row.ops_hours = sorted(set(hours))
         fields.append('ops_hours')
     if fields:
-        row.updated_by = request.user
-        row.save(update_fields=fields + ['updated_by', 'updated_at'])
+        by_person = not getattr(request, 'via_agent', False)  # FB-12: an agent's save is not a person's choice, so it leaves the mark alone (the audit row says who made it)
+        if by_person:
+            row.updated_by = request.user
+        row.save(update_fields=fields + (['updated_by'] if by_person else []) + ['updated_at'])
         from cveFeed.admin_api import audit
         audit(request.user, 'settings.reviewer', 'AI reviewer settings', fields=fields)
     return reviewer_get(request)

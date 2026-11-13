@@ -19,8 +19,8 @@ def call(token, method, path, body=None):
 	if path.endswith('/sentinels/bootstrap'):  # the call is counted per client address (SN-13), and every test is 127.0.0.1: a test that is not about the limit starts with none
 		from django.core.cache import cache
 		cache.delete('agentapi:bootstrap:addr:127.0.0.1')
-	c = Client()
-	headers = {'HTTP_AUTHORIZATION': f'Bearer {token}'} if token else {}
+	c = client_for(token) if isinstance(token, User) else Client()  # a User is a person signed in to the web interface (no token): the agent rules that refuse an API token do not apply
+	headers = {'HTTP_AUTHORIZATION': f'Bearer {token}'} if token and not isinstance(token, User) else {}
 	kwargs = dict(content_type='application/json', **headers)
 	data = json.dumps(body) if body is not None else None
 	fn = getattr(c, method.lower())

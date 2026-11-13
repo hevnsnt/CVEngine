@@ -1435,7 +1435,7 @@ def answering_decision(alert):
 def open_alerts(user=None):
     """The open alerts an App Admin sees: not resolved, and not dismissed unless the problem changed since."""
     from cveFeed.models import AdminAlert
-    rows = list(AdminAlert.objects.filter(resolved_at__isnull=True).order_by('-last_seen')[:20])
+    rows = list(AdminAlert.objects.filter(resolved_at__isnull=True).order_by('-last_seen', '-id')[:20])  # a tiebreak: the alerts of one check run share a time, and the order must not change from one read to the next
     from cveFeed import fleet
     facts = fleet.fleet_facts() if any(a.ai_detail for a in rows) else {}
     out = []

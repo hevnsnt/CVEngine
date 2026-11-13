@@ -211,7 +211,7 @@ class AgentCostRuleTests(TestCase):
                        {'host_review_enabled': True}, {'host_review_auto_close': True}):
             self.refused('reviewer', values)
         for name, values in (('scan_policy', {'nuclei_all_templates': True}), ('scan_policy', {'allow_credential_checks': True}), ('ai', {'enabled': True}),
-                             ('ai', {'auto_fire': True}), ('openvas', {'enabled': True}), ('scanner_plan', {'plan': 'both'}), ('updates', {'mode': 'automatic'}),
+                             ('ai', {'auto_fire': True}), ('openvas', {'enabled': True}), ('scanner_plan', {'plan': 'both'}), ('updates', {'mode': 'auto'}),
                              ('setup_questions', {'key': 'ai_validation', 'answer': 'act'})):
             self.refused(name, values)
         after = ReviewerSettings.objects.filter(pk=reviewer.settings_row().pk).values('enabled', 'auto_close', 'review_daily_max', 'ops_hours', 'updated_by_id').get()
