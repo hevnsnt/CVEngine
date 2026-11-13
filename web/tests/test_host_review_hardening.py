@@ -15,12 +15,12 @@ NOT_CLOSED = 'open'
 
 
 class Base(Fixture):
-    def kev_match(self, sub=None, scan=None, **over):
+    def kev_match(self, sub=None, scan=None, in_range=True, **over):
         """A match on the KEV: Situations ranks it Likely until something demotes it."""
         self.counter += 1
         cve = CVEEntry.objects.create(cve_id=f'CVE-2098-{6000 + self.counter}', cvss=9.8, kev=True, published_at=timezone.now(), affected=[], original_description='A flaw.')
         row = CVEMatch.objects.create(cve_entry=cve, subdomain=sub or self.sub, source='tech', matched_product=f'lib-{self.counter}', matched_version='1.2',
-                                      version_in_range=True, confidence=0.8, ai_verdict='uncertain', scan_history=scan or self.scan, evidence={'source': 'tech'}, **over)
+                                      version_in_range=in_range, confidence=0.8, ai_verdict='uncertain', scan_history=scan or self.scan, evidence={'source': 'tech'}, **over)
         triage.track([row])
         return row
 
@@ -342,3 +342,41 @@ class EveryStringIsScannedTests(PlantedTextTests):
         self.assertGreaterEqual(len(reached), 12, f'too few markers reached the packet to prove anything: {reached}')
         missing = [x for x in reached if x not in scanned]
         self.assertEqual(missing, [], 'these strings reached the packet without passing through the collector: add them to host_context with _s() or note_raw()')
+
+
+class EarlierRealVerdictAnywhereTests(EarlierVerdictTests):
+    """HS-2: any earlier real verdict holds the closure, not only the newest one."""
+
+    def test_an_opinion_recorded_in_between_does_not_hide_the_real_verdict(self):
+        match = self.match()
+        self.earlier(match)  # the finding reviewer: true_open / high
+        first, _ = self.reply(self.queue(), self.fp(confidence='low'))  # a held opinion on the same state
+        second, _ = self.reply(self.queue(), self.fp())  # "Review again" on the same state
+        rows = list(FindingReview.objects.filter(triage__match=match).order_by('id').values_list('verdict', 'outcome'))
+        self.assertEqual(rows, [('true_open', 'recorded'), ('false_positive', 'held'), ('false_positive', 'held')])
+        self.assertIn('contradicts the earlier verdict', FindingReview.objects.filter(host_review=second).get().held_reason)
+        self.assertEqual(CVEMatch.objects.get(pk=match.pk).remediation_status, NOT_CLOSED)
+
+
+class FlaggedReviewNeverDemotesTests(Base):
+    """HS-3: a finding a person has worked is not demoted in Situations by a false positive whose review found planted text."""
+
+    def test_a_worked_finding_on_a_host_with_planted_text_stays_likely(self):
+        from cveFeed.models import FindingComment
+        match = self.kev_match(in_range=None)
+        FindingComment.objects.create(project=self.proj, finding_kind='match', finding_id=match.pk, author=self.user, text='looking at it')
+        Port.objects.filter(pk=self.port.pk).update(banner='SSH-2.0-OpenSSH_8.9 ' + HOSTILE)
+        self.assertEqual(self.tier_of(match), (situations.LIKELY, False))
+        review, _ = self.reply(self.queue(), self.fp())
+        row = FindingReview.objects.get(host_review=review)
+        self.assertEqual((row.outcome, row.held_reason), ('held', 'a person has worked this finding'))
+        self.assertTrue(row.injection)
+        self.assertEqual(self.tier_of(match), (situations.LIKELY, False))
+
+    def test_a_worked_finding_without_planted_text_still_follows_the_explicit_rule(self):
+        from cveFeed.models import FindingComment
+        match = self.kev_match(in_range=None)
+        FindingComment.objects.create(project=self.proj, finding_kind='match', finding_id=match.pk, author=self.user, text='looking at it')
+        review, _ = self.reply(self.queue(), self.fp())
+        self.assertFalse(FindingReview.objects.get(host_review=review).injection)
+        self.assertEqual(self.tier_of(match), (situations.MINOR, True))

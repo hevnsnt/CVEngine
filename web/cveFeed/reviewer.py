@@ -579,9 +579,8 @@ def apply_finding_verdict(triage, parsed, key, host_review=None, extra_injection
         if outcome == 'closed' and host_review is not None:
             # a host review is a newer look at a state that may already have a verdict (the finding reviewer's, an earlier host review's, a person's
             # "Review now"): it may not undo a real verdict on the same evidence, so asking again is never another roll at closing the finding
-            earlier = FindingReview.objects.filter(triage=triage, review_key=key).exclude(outcome=REFUSED).exclude(verdict='').exclude(host_review=host_review) \
-                .order_by('-created_at', '-id').first()
-            if earlier is not None and earlier.verdict.startswith('true_'):
+            # ANY earlier real verdict on this evidence holds it, not only the newest: an opinion recorded in between must not hide it
+            if FindingReview.objects.filter(triage=triage, review_key=key, verdict__startswith='true_').exclude(outcome=REFUSED).exclude(host_review=host_review).exists():
                 outcome, held = 'held', CONTRADICTS
         review = FindingReview.objects.create(
             triage=triage, project_id=triage.project_id, review_key=key, verdict=parsed['verdict'], confidence=parsed['confidence'],
@@ -711,13 +710,14 @@ def review_summary(triage_id):
 def newest_review_q(prefix=''):
     """The newest review's verdict, outcome, confidence and held reason of a finding as subquery annotations, ``review_verdict``,
     ``review_outcome``, ``review_confidence`` and ``review_held`` (``prefix`` reaches the Triage row's id from the finding: ``triage__``)."""
-    from django.db.models import CharField, OuterRef, Subquery
+    from django.db.models import CharField, JSONField, OuterRef, Subquery
     from cveFeed.models import FindingReview
     newest = FindingReview.objects.filter(triage_id=OuterRef(prefix + 'id')).exclude(outcome=REFUSED).order_by('-created_at', '-id')
     return {'review_verdict': Subquery(newest.values('verdict')[:1], output_field=CharField()),
             'review_outcome': Subquery(newest.values('outcome')[:1], output_field=CharField()),
             'review_confidence': Subquery(newest.values('confidence')[:1], output_field=CharField()),
-            'review_held': Subquery(newest.values('held_reason')[:1], output_field=CharField())}
+            'review_held': Subquery(newest.values('held_reason')[:1], output_field=CharField()),
+            'review_injection': Subquery(newest.values('injection')[:1], output_field=JSONField())}
 
 
 def newest_review_row_q(prefix=''):
