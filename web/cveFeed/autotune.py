@@ -44,6 +44,8 @@ logger = logging.getLogger(__name__)
 
 MODES = ('off', 'suggest', 'auto')
 DEFAULT_MODE = 'auto'
+AGENT_POLICIES = ('off', 'suggest', 'auto')   # what an agent may do to a throughput setting (``agent_change``)
+DEFAULT_AGENT_POLICY = 'suggest'
 KILL_ENV = 'CVENGINE_AUTOTUNE'
 VALUES_KEY = resources.AUTO_VALUES_KEY
 LAST_RUN_KEY = 'cvengine:autotune:last'
@@ -162,6 +164,11 @@ def killed():
 def settings_row():
     from cveFeed.models import AutoTuneSettings
     return AutoTuneSettings.current()
+
+
+def agent_policy(row=None):
+    row = row or settings_row()
+    return row.agent_policy if row.agent_policy in AGENT_POLICIES else DEFAULT_AGENT_POLICY
 
 
 def effective_mode(row=None):
@@ -347,7 +354,7 @@ def apply_tuned(m, old, new, *, mode, source, reason, signals, pressure=False, a
                            layer='auto', old_layer_value=before, applied=True, pressure=pressure, phase=phase, reason=reason[:300], signals=signals,
                            actor=actor, **extra)
     publish(row)
-    who = {'controller': 'Auto-tuning', 'ai': 'Auto-tuning (AI advisor)'}.get(source, f'{getattr(actor, "username", "A person")}')
+    who = {'controller': 'Auto-tuning', 'ai': 'Auto-tuning (AI advisor)', 'agent': 'An agent'}.get(source, f'{getattr(actor, "username", "A person")}')
     _activity(f'{who}: {m.label} {old} -> {new}. {reason}', setting=m.key, decision_id=decision.pk)
     _audit(actor, 'autotune.change', m.key, before=old, after=new, source=source, reason=reason[:300], decision_id=decision.pk, env=m.env_name)
     _after_change([m.key])
@@ -516,15 +523,35 @@ def release(user, key):
     return serialize(done)
 
 
-def set_mode(user, mode=None, advisor=None):
+MODE_RANK = {'off': 0, 'suggest': 1, 'auto': 2}
+
+
+def raises_autonomy(mode=None, advisor=None):
+    """What a change would raise that only a person may raise (an agent may only lower autonomy): the mode (off, suggest, auto, in that order) and the AI advisor
+    (switching it on spends provider calls). The agent policy has its own refusal. Returns a sentence naming the first, or None."""
+    row = settings_row()
+    if mode is not None and MODE_RANK.get(mode, 0) > MODE_RANK.get(row.mode, 2):
+        return f'raising auto-tuning from {row.mode} to {mode} is a person\'s decision; an agent may only lower it (auto, then suggest, then off)'
+    if advisor is True and not row.advisor:
+        return 'switching the AI advisor on spends AI provider calls: a person does that, an agent may switch it off'
+    return None
+
+
+AGENT_POLICY_TEXT = {'off': 'not change throughput settings', 'suggest': 'only recommend throughput changes, which a person applies',
+                     'auto': 'change throughput settings inside the safe ranges, each checked after 30 minutes'}
+
+
+def set_mode(user, mode=None, advisor=None, policy=None):
     """App Admin only: the instance's mode (off, suggest, auto) and whether the AI advisor may be asked. Leaving Auto drops the tuned numbers at
     once (every setting goes back to its saved value, environment or default); coming back starts from there."""
     from django.db import transaction
 
     from cveFeed.models import AutoTuneSettings
     _need_admin(user)
-    if mode is None and advisor is None:
-        raise TuningError(400, 'send mode (off, suggest or auto) and/or advisor (true or false)')
+    if mode is None and advisor is None and policy is None:
+        raise TuningError(400, 'send mode (off, suggest or auto), advisor (true or false) and/or agent_policy (off, suggest or auto)')
+    if policy is not None and policy not in AGENT_POLICIES:
+        raise TuningError(400, f'agent_policy must be one of {", ".join(AGENT_POLICIES)}')
     if mode is not None and mode not in MODES:
         raise TuningError(400, f'mode must be one of {", ".join(MODES)}')
     if advisor is not None and not isinstance(advisor, bool):
@@ -532,6 +559,7 @@ def set_mode(user, mode=None, advisor=None):
     with transaction.atomic():
         row = AutoTuneSettings.objects.select_for_update().get(pk=settings_row().pk)
         before = {'mode': row.mode, 'advisor': row.advisor}
+        policy_before = agent_policy(row)
         dropped = []
         if mode is not None and mode != row.mode:
             if row.mode == 'auto':
@@ -540,14 +568,19 @@ def set_mode(user, mode=None, advisor=None):
             row.mode = mode
         if advisor is not None:
             row.advisor = advisor
+        if policy is not None:
+            row.agent_policy = policy
         row.changed_by, row.changed_at = user, _now()
         row.save()
     publish(row)
     after = {'mode': row.mode, 'advisor': row.advisor}
-    if after != before:
-        _audit(user, 'autotune.mode', 'auto-tuning', before=before, after=after, dropped=dropped)
+    policy_after = agent_policy(row)
+    if after != before or policy_after != policy_before:
+        extra = {'agent_policy': {'before': policy_before, 'after': policy_after}} if policy_after != policy_before else {}
+        _audit(user, 'autotune.mode', 'auto-tuning', before=before, after=after, dropped=dropped, **extra)
         _activity(f'{user.username} set auto-tuning to {row.mode}' + (' with the AI advisor' if row.advisor else ' without the AI advisor')
-                  + (f'; {len(dropped)} tuned setting(s) went back to their saved, environment or default values' if dropped else ''))
+                  + (f'; {len(dropped)} tuned setting(s) went back to their saved, environment or default values' if dropped else '')
+                  + (f'; agents may now {AGENT_POLICY_TEXT[policy_after]}' if policy_after != policy_before else ''))
     _after_change(dropped)
     return status()
 
@@ -853,6 +886,145 @@ def _auto_revert(m, d, detail, now_dt):
     TuningDecision.objects.filter(pk=d.pk).update(resolution='reverted', resolved_at=now_dt, resolved_by='auto-tune')
     TuningDecision.objects.filter(pk=done.pk).update(outcome='reverted', outcome_detail=f'undid decision {d.pk}: {detail}'[:300], verified_at=now_dt)
     return True
+
+
+# --- agents act through the engine (AM-3) -------------------------------------------------------------------------------------
+
+def recent_samples(now_dt):
+    """The stored measurements of the last window without the paused ones, oldest first, read without storing anything (the run stores them)."""
+    client, kept = _redis(), []
+    if client is None:
+        kept = list(_local_samples)
+    else:
+        try:
+            for raw in client.lrange(SAMPLES_KEY, 0, SAMPLES_KEPT - 1):
+                try:
+                    kept.append(json.loads(raw))
+                except ValueError:
+                    continue
+            kept.reverse()
+        except Exception:  # noqa: BLE001
+            kept = []
+    since = now_dt.timestamp() - _cooldowns()[2]
+    return [s for s in kept if float(s.get('t', 0)) >= since and not (s.get('paused') or s.get('updating'))]
+
+
+def _agent_result(m, raw, status, value, text, **extra):
+    return {'setting': m.key, 'label': m.label, 'requested': raw, 'status': status, 'value': value, 'text': text, **extra}
+
+
+def _agent_limit(m, current, number, samples, history, now_dt):
+    """What the controller would let this setting do, for a number that asks for more work than ``current``: ``(highest number allowed, why it is
+    not higher)``. The controller's own ceiling (the target for this machine, the level that caused trouble in the last day) and a scanner kind's
+    memory budget, so that the next round does not simply lower the number again."""
+    from cveFeed import autotune_policy as policy
+    setting, now = m.setting, now_dt.timestamp()
+    limit, why = setting.high, f'the auto-tuning maximum is {setting.high}'
+    if samples:
+        facts = policy.steady_facts(samples)
+        target, reason, known = policy.size_for(setting, facts, current=current)
+        if known and policy._beyond(setting, limit, target):
+            limit, why = target, f'the target for this machine is {target} ({reason or "sized"})'
+        if setting.kind.startswith('heavy:'):
+            cap = policy.memory_cap(setting.kind.split(':', 1)[1], samples[-1])
+            if cap is not None and setting.sense == 'more' and max(setting.low, cap) < limit:
+                limit, why = max(setting.low, cap), f'the memory budget holds {cap} at their real peak'
+    held, text = policy.remembered_ceiling(setting, limit, history, now=now)
+    if text:
+        limit, why = held, text
+    return limit, why
+
+
+def _agent_one(m, raw, user, row, who, mode, policy_name, samples, now_dt):
+    """One key of an agent's write. Returns the result dict (``status``: applied, suggested, refused or unchanged); nothing is raised for a refusal."""
+    from cveFeed import autotune_policy as policy
+    setting = m.setting
+    if raw is None or isinstance(raw, bool) or not isinstance(raw, int):
+        return _agent_result(m, raw, 'refused', None, f'{m.label}: send a whole number. An agent cannot reset a setting to its default; a person does that in Settings.')
+    pin = pin_of(m, _saved_rows())
+    if pin is not None:
+        return _agent_result(m, raw, 'refused', None, f'{m.label} is pinned by {pin[0]}: only a person may change a pinned number or hand it back to auto-tuning.')
+    number, clamp = raw, ''
+    if not setting.low <= raw <= setting.high:
+        number = max(setting.low, min(setting.high, raw))
+        clamp = f'clamped to {number}, the safe range is {setting.low} to {setting.high}'
+    tuned = applied_values(row)
+    current = _effective(m, {}, tuned)
+    now = now_dt.timestamp()
+    history = _history(m.key, now_dt)
+    direction = policy.direction_of(setting, current, number)
+    held = ''
+    if direction == 'more':
+        limit, why = _agent_limit(m, current, number, samples, history, now_dt)
+        if policy._beyond(setting, number, limit):
+            number, held = limit, f'held at {limit}: {why}'
+        if not policy._beyond(setting, number, current):
+            return _agent_result(m, raw, 'refused', current, f'{m.label} stays {current}: {why}, so it is not raised.')
+        trouble = policy.trouble(setting, samples) if samples else None
+        if trouble:
+            return _agent_result(m, raw, 'refused', current, f'{m.label} stays {current}: {trouble} right now, so it is not raised.')
+    elif direction == 'hold':
+        return _agent_result(m, raw, 'unchanged', current, f'{m.label} is already {current}; nothing changed.' + (f' ({clamp})' if clamp else ''))
+    notes = '; '.join(x for x in (clamp, held) if x)
+    reason = f'an agent ({who}) asked for {raw}' + (f'; {notes}' if notes else '')
+    used = {'agent': who, 'requested': raw, 'summary': signals_summary(samples[-6:]) if samples else {}}
+    if policy_name == 'suggest' or mode == 'suggest':
+        why_text = 'the agent policy is Suggest' if policy_name == 'suggest' else 'auto-tuning is in Suggest mode'
+        decision = recommend(m, current, number, mode=mode, source='agent', reason=reason, signals=used)
+        text = (f'Recorded as a recommendation, {m.label} {current} -> {number} ({why_text}): a person applies it with one click '
+                f'(apply_tuning_suggestion).' + (f' {notes}.' if notes else ''))
+        return _agent_result(m, raw, 'suggested', current, text, decision_id=decision.pk if decision else None)
+    if direction == 'more':
+        hold = _hold_until(row, m.key)
+        if hold and now < hold:
+            return _agent_result(m, raw, 'refused', current, f'{m.label} stays {current}: its last change was taken back, so it is not raised for a day.')
+        recent = max((h['at'] for h in history), default=None)
+        wait = _cooldowns()[1]
+        if recent is not None and now - recent < wait:
+            return _agent_result(m, raw, 'refused', current, f'{m.label} stays {current}: it changed {int((now - recent) // 60)} minutes ago, a raise waits {int(wait // 60)}.')
+        if calm_change_unverified():
+            return _agent_result(m, raw, 'refused', current, f'{m.label} stays {current}: an earlier change is still being verified (one calm change at a time). Ask again in half an hour.')
+    decision = apply_tuned(m, current, number, mode='auto', source='agent', reason=reason, signals=used, actor=user,
+                           verify=_verification(m, current, number, samples, now_dt))
+    if decision is None:
+        return _agent_result(m, raw, 'refused', current, f'{m.label} stays {current}: auto-tuning changed mode or the setting was pinned meanwhile.')
+    text = (f'Applied: {m.label} {current} -> {number}' + (f' ({notes})' if notes else '') + '. It is checked after 30 minutes and undone if it made things worse.')
+    return _agent_result(m, raw, 'applied', number, text, decision_id=decision.pk, clamped=bool(clamp or held))
+
+
+def agent_change(user, values, who='an agent'):
+    """AM-3. An agent's write to throughput settings (the keys ``managed`` lists) is not a saved value and not a pin: it is a decision of the engine,
+    ``source='agent'``. What happens depends on the agent policy a person set (``off``, ``suggest``, ``auto``) and on the mode:
+
+    * ``off`` (the policy), or auto-tuning off (the mode or the kill switch): refused, nothing is recorded;
+    * ``suggest`` (the policy, or the mode): recorded as a recommendation a person applies with one click (``apply_decision``);
+    * ``auto``: the number is clamped to the auto-tuning range and to what the controller itself would allow now (the target for this machine, the
+      level that caused trouble in the last day, a scanner kind's memory budget), refused while trouble shows for the setting, while another calm
+      change is unverified, after a revert's hold and inside the raise cooldown (a LOWER number is never held back by those), and applied through
+      ``apply_tuned`` with ``verify=``: judged after 30 minutes and taken back if it made things worse.
+
+    A pinned setting (a person's saved value, an environment pin) is refused: an agent never moves or removes a person's pin.
+    ``values``: ``{key: whole number}`` for keys of ``managed()``. Returns ``{key: result}``, each ``{'setting', 'label', 'requested', 'status',
+    'value', 'text'}`` (plus ``decision_id`` and ``clamped`` where they apply); ``status``: ``applied``, ``suggested``, ``refused`` or ``unchanged``."""
+    _need_admin(user)
+    row = settings_row()
+    policy_name, mode, keys, now_dt = agent_policy(row), effective_mode(row), by_key(), _now()
+    out = {}
+    for key, raw in values.items():
+        m = keys[key]
+        if policy_name == 'off':
+            out[key] = _agent_result(m, raw, 'refused', None, f'{m.label} was not changed: a person set the agent policy to Off, so agents may not change throughput settings.')
+        elif mode == 'off':
+            out[key] = _agent_result(m, raw, 'refused', None, f'{m.label} was not changed: auto-tuning is off'
+                                     + (f' ({KILL_ENV}=0)' if killed() else '') + ', so a person changes this setting in Settings.')
+    pending = {k: v for k, v in values.items() if k not in out}
+    if pending:
+        samples = recent_samples(now_dt)
+        for key, raw in pending.items():
+            out[key] = _agent_one(keys[key], raw, user, row, who, mode, policy_name, samples, now_dt)
+            if out[key]['status'] == 'applied':
+                row = settings_row()  # the tuned numbers changed: the next key reads them
+    return out
 
 
 def _watchdog_memory_pause(now):
@@ -1274,6 +1446,7 @@ def status():
             pinned.append({'setting': m.key, 'label': m.label, 'value': _effective(m, rows[m.registry][0], {}), 'by': pin[0], 'from': pin[1]})
     return {
         'mode': row.mode, 'effective_mode': mode, 'killed': killed(), 'kill_switch': KILL_ENV, 'advisor': advisor_state(row),
+        'agent_policy': agent_policy(row),
         'changed_by': row.changed_by.username if row.changed_by_id else None, 'changed_at': _iso(row.changed_at),
         'tuned': applied_values(row), 'pinned': pinned, 'discovery_pin': discovery_pin(),
         'managed': [{'setting': m.key, 'label': m.label, 'min': m.setting.low, 'max': m.setting.high, 'step': m.setting.step,

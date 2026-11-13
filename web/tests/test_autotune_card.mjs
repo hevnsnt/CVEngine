@@ -133,6 +133,23 @@ test('Save sends the mode and the advisor switch; Revert and Apply post to their
   assert.equal(buttonNamed(host, 'Revert').length, 1);  // only the newest applied change of a setting offers it
 });
 
+test('the agent policy is its own control: Suggest by default, and changing it sends only the policy', async () => {
+  reply = {status: status(), concurrency: concurrency()};
+  const host = new Node('div');
+  await maxxing.cards()[0].build(host);
+  const selects = find(host, (n) => n.tag === 'select');
+  assert.equal(selects.length, 2);
+  const policy = selects[1];
+  assert.equal(policy.attrs.id, 'autotune-agent-policy');
+  assert.equal(policy.value, 'suggest');
+  assert.match(host.textContent, /Whether AI agents may change performance settings by themselves/);
+  assert.match(host.textContent, /never raise a spend cap/);
+  policy.value = 'auto';
+  calls.length = 0;
+  await policy.onchange();
+  assert.deepEqual(calls[0], {url: '/cve/api/settings/autotune', method: 'PUT', body: {agent_policy: 'auto'}});
+});
+
 test('the kill switch disables the controls and says why', async () => {
   reply = {status: status({killed: true, effective_mode: 'off'}), concurrency: concurrency()};
   const host = new Node('div');

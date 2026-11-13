@@ -1,4 +1,5 @@
 """Every setting a person can change in the web UI can be read and changed by an agent through the MCP (owner, 2026-11-09), with the same limits."""
+import json
 import re
 from types import SimpleNamespace
 
@@ -187,3 +188,112 @@ class AllowlistThroughTheBridgeTests(TestCase):
         self.assertGreaterEqual(len(seen), 2)
         for addr in seen:
             self.assertNotIn(addr, ('127.0.0.1', '::1', 'localhost', None))
+
+
+# --- the cost and scope rule, default deny (final review FA-1 and FA-4) -------------------------------------------------------------------------------
+class AgentCostRuleTests(TestCase):
+    """An agent (MCP, a write token) may switch off and lower, never switch on or raise what costs money, widens what is scanned or changes who may reach the instance.
+    A person's own save in the web interface is unaffected."""
+
+    def setUp(self):
+        self.root = User.objects.create_superuser('cost_root', 'c@x.io', 'x')
+
+    def refused(self, name, values, ident=None):
+        with self.assertRaises(ApiError, msg=(name, values)) as caught:
+            bridge.change_setting(ctx(self.root), name, values, ident)
+        self.assertEqual(caught.exception.status, 403, (name, values))
+
+    def test_the_reviewers_probe_every_line_is_refused_and_leaves_the_row_untouched(self):
+        from cveFeed import reviewer
+        from cveFeed.models import ReviewerSettings
+        before = ReviewerSettings.objects.filter(pk=reviewer.settings_row().pk).values('enabled', 'auto_close', 'review_daily_max', 'ops_hours', 'updated_by_id').get()
+        for values in ({'enabled': True}, {'auto_close': True}, {'enabled': True, 'auto_close': True}, {'review_daily_max': 20000}, {'ops_hours': list(range(24))},
+                       {'host_review_enabled': True}, {'host_review_auto_close': True}):
+            self.refused('reviewer', values)
+        for name, values in (('scan_policy', {'nuclei_all_templates': True}), ('scan_policy', {'allow_credential_checks': True}), ('ai', {'enabled': True}),
+                             ('ai', {'auto_fire': True}), ('openvas', {'enabled': True}), ('scanner_plan', {'plan': 'both'}), ('updates', {'mode': 'automatic'}),
+                             ('setup_questions', {'key': 'ai_validation', 'answer': 'act'})):
+            self.refused(name, values)
+        after = ReviewerSettings.objects.filter(pk=reviewer.settings_row().pk).values('enabled', 'auto_close', 'review_daily_max', 'ops_hours', 'updated_by_id').get()
+        self.assertEqual(before, after)
+
+    def test_lowering_and_switching_off_still_work_and_hours_can_be_taken_away(self):
+        from cveFeed import reviewer
+        row = reviewer.settings_row()
+        row.enabled, row.auto_close, row.review_daily_max, row.ops_hours = True, True, 500, [3, 9, 15]
+        row.save()
+        out = bridge.change_setting(ctx(self.root), 'reviewer', {'auto_close': False, 'review_daily_max': 100, 'ops_hours': [9]})
+        row.refresh_from_db()
+        self.assertEqual((row.auto_close, row.review_daily_max, row.ops_hours, row.enabled), (False, 100, [9], True))
+        bridge.change_setting(ctx(self.root), 'reviewer', {'enabled': False})
+        row.refresh_from_db()
+        self.assertFalse(row.enabled)
+        self.refused('reviewer', {'ops_hours': [9, 10]})  # one hour added
+
+    def test_an_agents_save_does_not_look_like_a_persons_choice(self):
+        from cveFeed import reviewer, setup_questions
+        row = reviewer.settings_row()
+        self.assertIsNone(row.updated_by_id)
+        bridge.change_setting(ctx(self.root), 'reviewer', {'review_daily_max': 10, 'review_model': 'some-model'})
+        row.refresh_from_db()
+        self.assertEqual(row.review_model, 'some-model')  # the save happened
+        self.assertIsNone(row.updated_by_id)  # but nobody "chose"
+        with mock.patch.object(setup_questions.BY_KEY['ai_validation'], 'applies', return_value=(True, '')):
+            q = next(x for x in setup_questions.snapshot()['questions'] if x['key'] == 'ai_validation')
+        self.assertEqual(q['state'], 'pending')
+        self.assertTrue(AuditLog.objects.filter(action='settings.reviewer').exists())
+
+    def test_a_person_in_the_web_interface_is_unaffected(self):
+        from django.test import Client
+        c = Client()
+        c.force_login(self.root)
+        for path, body in (('reviewer', {'enabled': True, 'auto_close': True, 'review_daily_max': 20000, 'ops_hours': [1, 2, 3]}), ('scan_policy', {'nuclei_all_templates': True})):
+            response = c.put(f'/cve/api/settings/{path}', json.dumps(body), content_type='application/json')
+            self.assertEqual(response.status_code, 200, (path, response.content[:200]))
+
+    def test_every_bridge_entry_refuses_a_switch_that_is_not_on_the_allow_list_and_a_new_one_by_default(self):
+        """Walks EVERY entry an agent can write: a boolean True in any field is refused unless (entry, field) is in ``AGENT_MAY_SWITCH_ON``, and a field nobody has heard of
+        ('zz_new_switch') is refused the same way, so a setting added to a handler later stays closed to agents until someone lists it with a reason."""
+        for name, entry in bridge.ENTRIES.items():
+            method = next((m for m in bridge._methods(entry[0], entry[1]) if m in bridge.WRITE_METHODS), None)
+            if method is None or name in bridge.READ_ONLY_FOR_AGENTS or name in bridge.GENERIC_RULE_SKIPS:
+                continue
+            ident = '1/x' if entry[3] and '/' in entry[3] else '1' if entry[3] else None
+            for field in ('zz_new_switch',) + tuple(f for (n, f) in bridge.AGENT_MAY_SWITCH_ON if n == name):
+                try:
+                    bridge._default_deny(ctx(self.root), name, {field: True}, ident)
+                    refused = False
+                except ApiError as exc:
+                    refused = exc.status == 403
+                listed = (name, field) in bridge.AGENT_MAY_SWITCH_ON
+                self.assertEqual(refused, not listed, (name, field))
+                try:
+                    bridge._default_deny(ctx(self.root), name, {'nested': {field: True}}, ident)
+                    refused_nested = False
+                except ApiError:
+                    refused_nested = True
+                self.assertEqual(refused_nested, not listed, ('nested', name, field))
+        for (name, field), why in bridge.AGENT_MAY_SWITCH_ON.items():
+            self.assertIn(name, bridge.ENTRIES, f'{name} is not an entry')
+            self.assertGreater(len(why), 20, f'({name}, {field}) is allowed without a reason')
+        for name, why in bridge.AGENT_NUMBERS_FREE.items():
+            self.assertIn(name, bridge.ENTRIES)
+            self.assertGreater(len(why), 5)
+        # every explicit table names real entries
+        for table in (bridge.AGENT_CANNOT_ENABLE, bridge.AGENT_CANNOT_SET, bridge.AGENT_LOWER_ONLY):
+            for name in table:
+                self.assertIn(name, bridge.ENTRIES)
+
+    def test_a_number_the_entry_shows_cannot_be_raised_by_an_agent_unless_the_entry_is_listed(self):
+        for name in ('ai', 'reviewer'):
+            body = bridge.get_setting(ctx(self.root), name)
+            flat = bridge._flatten(body)
+            numeric = {k: v for k, v in flat.items() if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 < v < 10 ** 6}
+            self.assertTrue(numeric, name)
+            for path, value in numeric.items():
+                field = path.rsplit('.', 1)[-1]
+                if field in bridge.AGENT_LOWER_ONLY.get(name, ()):
+                    continue  # these have their own lower-only rule, tested in the agent tests
+                with self.assertRaises(ApiError, msg=(name, path)):
+                    bridge._default_deny(ctx(self.root), name, {field: value + 1}, None)
+        bridge._default_deny(ctx(self.root), 'timings', {'ct_watch_minutes': 10 ** 5}, None)  # a listed entry: pacing, no spend
