@@ -309,7 +309,7 @@ class AnswerTests(Base):
         self.assertEqual([c['value'] for c in question['choices']], ['off', 'recommend', 'act'])
         self.assertEqual(question['safe_default'], 'off')
         self.assertEqual([c['value'] for c in question['choices'] if c['safe']], ['off'])
-        self.assertEqual(question['facts'][:2], ['Finding review: at most 300 findings a day, one provider call each.', 'Server health check: 4 calls a day; it may also propose performance changes, which follow your auto-tuning mode.'])
+        self.assertEqual(question['facts'][:2], ['Finding review: at most 300 findings a day, one provider call each.', 'Server health check: 4 calls a day; it may also propose performance changes, which are only suggestions a person applies unless you allow agents to act automatically (Settings > Auto-tuning).'])
         self.assertIn('Host review: the AI reads every open finding of a host that changed, one provider call per host, at most 100 a day', question['facts'][2])
         self.assertIn('at most 50 safe read-only steps per project a day, and only in a project a person set to automatic', question['facts'][2])
         self.assertIn('AI-written checks: ', question['facts'][3])  # the third line (FA-5), tested in test_template_validation_gate

@@ -1000,17 +1000,22 @@ def _agent_one(m, raw, user, row, who, mode, policy_name, samples, now_dt, sourc
 MAX_AI_PROPOSALS = 2           # per report
 MAX_AI_CHANGES_PER_DAY = 6     # AI decisions that were applied or recommended in 24 hours: a confused model cannot thrash the settings
 AI_HOLD_HOURS = 24             # after a change of the AI was taken back, no proposal for that setting from it for this long
-AI_GATE_TEXT = {'advisor': 'the AI advisor switch is off (it covers the health-check AI\'s proposals too)', 'off': 'auto-tuning is off'}
+AI_GATE_TEXT = {'policy': 'a person set the agent policy to Off, and the health-check AI is an agent: it may not change throughput settings',
+                'advisor': 'the AI advisor switch is off (it covers the health-check AI\'s proposals too)', 'off': 'auto-tuning is off'}
 
 
 def ai_gate(row=None):
-    """Why the health-check AI's proposals are not taken, or '' when they may be: auto-tuning off (the mode, or the kill switch) or the AI advisor
-    switch off (only a person switches it on, ``raises_autonomy``)."""
+    """Why the health-check AI's proposals are not taken, or '' when they may be: auto-tuning off (the mode, or the kill switch), the AI advisor
+    switch off, or the agent policy Off. The health-check AI is an AI agent: its proposals obey the agent policy (a person's setting, ``Suggest`` until
+    a person says otherwise) as well as the mode, and the more careful of the two wins: a proposal is applied only when the policy AND the mode are Auto,
+    otherwise it is recorded as a recommendation a person applies (``_agent_one``)."""
     row = row or settings_row()
     if effective_mode(row) == 'off':
         return AI_GATE_TEXT['off'] + (f' ({KILL_ENV}=0)' if killed() else '')
     if not row.advisor:
         return AI_GATE_TEXT['advisor']
+    if agent_policy(row) == 'off':
+        return AI_GATE_TEXT['policy']
     return ''
 
 
@@ -1128,7 +1133,7 @@ def ai_apply(proposals, offer, now_dt=None):
             continue
         alert = item['alert'] if isinstance(item['alert'], str) and len(item['alert']) <= 40 else None
         extra = {'alerts': [alert]} if alert else {}
-        result = _agent_one(m, accepted[key]['value'], None, row, 'AI', mode, 'auto', samples, now_dt, source='ai', reason_text=accepted[key]['reason'], signals_extra=extra)
+        result = _agent_one(m, accepted[key]['value'], None, row, 'AI', mode, agent_policy(row), samples, now_dt, source='ai', reason_text=accepted[key]['reason'], signals_extra=extra)
         if result['status'] == 'refused':
             result['text'] = _ai_record_refused(m, current, item, result['text'], now_dt)
         results.append({'setting': key, 'status': result['status'], 'text': result['text'], 'decision_id': result.get('decision_id')})

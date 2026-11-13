@@ -321,5 +321,5 @@ test('the advisor note says in words when today\'s count is not known', async ()
 
 test('the AI advisor switch says it also covers the health check\'s proposals', async () => {
   const host = await buildCard([]);
-  assert.match(host.textContent, /This switch covers the AI advisor and the changes the server health check .* may propose; both follow the mode above\./);
+  assert.match(host.textContent, /This switch covers the AI advisor and the changes the server health check .* may propose\. The health check is an AI agent: its proposals follow the mode above and the setting for AI agents below, and are suggestions unless both are Automatic\./);
 });

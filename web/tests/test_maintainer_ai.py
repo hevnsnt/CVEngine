@@ -23,10 +23,14 @@ class Base(Isolated, TestCase):
         self.addCleanup(cache.delete, reviewer.OPS_FLAG_KEY)
         self.root = User.objects.create_superuser('ai_root', 'r@x.io', 'x')
         self.now = timezone.now()
+        self.policy('auto')  # most tests are about the gates after the agent policy let it act; DefaultsTests and PolicyTests are about the policy itself
 
     def samples(self, **over):
         for s in history(3, end=self.now.timestamp(), **over):
             autotune.store_sample(s)
+
+    def policy(self, name):
+        AutoTuneSettings.objects.update_or_create(pk=autotune.settings_row().pk, defaults={'agent_policy': name})
 
     def mode(self, mode='auto', advisor=True):
         AutoTuneSettings.objects.update_or_create(pk=autotune.settings_row().pk, defaults={'mode': mode, 'advisor': advisor})
@@ -322,3 +326,68 @@ class ParityTests(Base):
         TuningDecision.objects.create(setting=KEY, old_value=8, new_value=9, mode='suggest', source='ai', action='raise', applied=False)
         counts = maintainer_report.report(self.now)['counts']
         self.assertEqual((counts['refused'], counts['recommended']), (1, 1))
+
+
+class PolicyTests(Base):
+    """WS-0: the health-check AI is an AI agent. Its proposals obey the agent policy (a person's setting, Suggest by default) as well as the mode, and the more
+    careful of the two wins."""
+
+    def setUp(self):
+        super().setUp()
+        self.samples()
+        entry = self.offer()['offered'][KEY]
+        self.number = entry['range'][0] if entry['range'][0] < entry['value'] else entry['range'][1]
+
+    def test_a_fresh_install_with_the_reviewer_on_records_a_suggestion_and_applies_nothing(self):
+        AutoTuneSettings.objects.all().delete()
+        TuningDecision.objects.all().delete()
+        row = autotune.settings_row()
+        self.assertEqual((row.mode, row.advisor, row.agent_policy), ('auto', True, 'suggest'))  # the defaults: what an install that never touched them has
+        ReviewerSettings.objects.update_or_create(pk=ReviewerSettings.current().pk, defaults={'enabled': True})
+        out = self.apply(self.proposal(self.number))
+        self.assertEqual(out[0]['status'], 'suggested')
+        d = TuningDecision.objects.get(source='ai')
+        self.assertEqual((d.applied, d.resolution), (False, ''))
+        self.assertNotIn(KEY, autotune.applied_values())
+
+    def test_policy_auto_and_mode_auto_applies(self):
+        self.policy('auto')
+        self.assertEqual(self.apply(self.proposal(self.number))[0]['status'], 'applied')
+
+    def test_policy_auto_with_mode_suggest_is_a_suggestion(self):
+        self.policy('auto')
+        self.mode('suggest')
+        self.assertEqual(self.apply(self.proposal(self.number))[0]['status'], 'suggested')
+
+    def test_policy_suggest_with_mode_auto_is_a_suggestion(self):
+        self.policy('suggest')
+        out = self.apply(self.proposal(self.number))
+        self.assertEqual(out[0]['status'], 'suggested')
+        self.assertNotIn(KEY, autotune.applied_values())
+
+    def test_policy_off_ignores_the_proposals_and_says_so(self):
+        self.policy('off')
+        offer = self.offer()
+        self.assertIn('agent policy to Off', offer['gate'])
+        out = autotune.ai_apply([self.proposal(self.number)], offer, self.now)
+        self.assertEqual(out[0]['status'], 'refused')
+        self.assertIn('agent policy to Off', out[0]['text'])
+        self.assertFalse(TuningDecision.objects.filter(source='ai').exists())
+
+    def test_the_snapshot_tells_the_model_when_nothing_is_taken(self):
+        self.policy('off')
+        with mock.patch('cveFeed.reviewer.ops_checks', return_value=[reviewer._check(c, 'ok', 't', 'd') for c in reviewer.OPS_CODES]):
+            snap = reviewer.snapshot(self.now)
+        self.assertFalse(snap['tuning']['proposals']['allowed'])
+        self.assertEqual(snap['tuning_settings'], [])
+
+    def test_an_agent_cannot_change_the_policy_over_mcp_or_the_settings_api(self):
+        from agentapi import settings_bridge as bridge
+        from agentapi.services import ApiError
+        from tests.test_settings_bridge import ctx
+        with self.assertRaises(ApiError) as caught:
+            bridge.change_setting(ctx(self.root), 'autotune', {'agent_policy': 'auto'})
+        self.assertEqual(caught.exception.status, 403)
+        with self.assertRaises(ApiError):
+            bridge.change_setting(ctx(self.root), 'autotune', {'agent_policy': 'off'})  # even lowering it is a person's decision
+        self.assertEqual(autotune.agent_policy(), 'auto')
