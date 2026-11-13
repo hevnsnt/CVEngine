@@ -1392,15 +1392,14 @@ def apply_ops_tuning(proposals, checks, now):
     recent = [{'reason': d.reason, 'actor': d.actor.username if d.actor_id else ''} for d in TuningDecision.objects.select_related('actor').order_by('-created_at', '-pk')[:5]]
     flagged = sorted(set(flagged) | set(injection_guard.families({'checks': checks, 'decisions': recent})))
     if flagged:
-        return autotune.ai_hold_all(proposals, 'held: text that may come from a Sentinel, a scanned host, an agent or an earlier model was flagged as aimed at an AI ('
-                                    + ', '.join(flagged) + ') in what the AI read, so no proposal is applied; the alerts are not affected', now)
+        return autotune.ai_hold_all(proposals, 'text aimed at an AI may be in what it read (' + ', '.join(flagged) + '), so nothing was applied', now)
     clean, held = [], []
     for item in proposals[:autotune.MAX_AI_PROPOSALS]:
         if isinstance(item, dict) and injection_guard.families(item.get('reason') or ''):
             held.append(item)
         else:
             clean.append(item)
-    results = autotune.ai_hold_all(held, 'held: the reason itself reads as text aimed at an AI', now) if held else []
+    results = autotune.ai_hold_all(held, 'its reason reads as text aimed at an AI', now) if held else []
     return results + autotune.ai_apply(clean + list(proposals[autotune.MAX_AI_PROPOSALS:]), offer, now)
 
 
