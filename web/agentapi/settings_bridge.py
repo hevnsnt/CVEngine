@@ -53,6 +53,7 @@ ENTRIES = {
     'tailscale_project': ('settings', 'tailscale/(?P<project_id>\\d+)', 'Tailscale sync for one project. The id is the project id.', 'project_id'),
     'tailscale_test': ('settings', 'tailscale/(?P<project_id>\\d+)/test', 'Test the Tailscale connection of one project. Action.', 'project_id'),
     'tailscale_sync': ('settings', 'tailscale/(?P<project_id>\\d+)/sync', 'Sync one project\'s Tailscale devices now. Action.', 'project_id'),
+    'setup_questions': ('settings', 'setup_questions', 'The questions about an update (where you scan from, whether to use AI validation) with their state and choices. An agent reads them; a person answers in the web interface.', None),
     'alerts': ('settings', 'alerts', 'The notices the server is showing (cvENGINE reports problems).', None),
     'alert_dismiss': ('settings', 'alerts/(?P<alert_id>\\d{1,12})/dismiss', 'Dismiss one notice. The id is the notice id. Action.', 'alert_id'),
     'resources': ('settings', 'resources', 'CPU, memory and disk of this server and what the settings are sized for.', None),
@@ -92,6 +93,7 @@ READ_ONLY_FOR_AGENTS = {
     'ip_allowlist': 'the allowed addresses are the perimeter of the instance; an agent can read the list, a person changes it in the web interface.',
     'ip_allowlist_entry_add': 'the allowed addresses are the perimeter of the instance; a person changes them in the web interface.',
     'ip_allowlist_entry': 'the allowed addresses are the perimeter of the instance; a person changes them in the web interface.',
+    'setup_questions': 'an answer can switch on a feature the AI provider or the host bills for, or change what is scanned; only a person decides that, in the web interface. An agent can read the questions.',
 }
 # What the handlers see as the caller's address. Not a loopback address: nothing that trusts the caller's address may take the bridge for the local machine.
 BRIDGE_ADDRESS = ''

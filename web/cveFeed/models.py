@@ -2296,12 +2296,15 @@ class ReviewerSettings(models.Model):
     """Single-row settings of the AI reviewer (docs/AI-REVIEWER.md), the separate container that reviews every open finding once and checks
     the server's operations a few times a day. The provider and its key are the ones in Settings > AI model (``AIProviderSettings``); this row
     chooses a model per job ('' = ``claude-sonnet-5-5`` / ``claude-haiku-5-5`` on Anthropic, else the provider's own model), whether a false
-    positive is closed or only recorded, the daily review cap and the UTC hours of the operations check. Instance-wide."""
+    positive is closed or only recorded, the daily review cap and the UTC hours of the operations check. Instance-wide.
 
-    enabled = models.BooleanField(default=True)
+    Both switches ship OFF: the review and the operations check are billed by the AI provider and ``auto_close`` lets the model close findings, so an
+    update never starts them. An administrator answers "Do you want AI validation?" (``cveFeed.setup_questions``) or changes them in Settings."""
+
+    enabled = models.BooleanField(default=False)
     review_model = models.CharField(max_length=100, blank=True, default="")
     ops_model = models.CharField(max_length=100, blank=True, default="")
-    auto_close = models.BooleanField(default=True)
+    auto_close = models.BooleanField(default=False)
     review_daily_max = models.PositiveIntegerField(default=300)
     ops_hours = models.JSONField(default=list, blank=True)  # UTC hours; [] = the default (3, 9, 15, 21)
     last_ops_at = models.DateTimeField(null=True, blank=True)  # when the operations job last reported
@@ -2314,6 +2317,20 @@ class ReviewerSettings(models.Model):
 
     def __str__(self):
         return "AI reviewer settings"
+
+
+class SetupAnswer(models.Model):
+    """What an administrator answered to one question about an update (``cveFeed.setup_questions``). One row per question ``key``, instance-wide (it
+    holds no project, so there is nothing to scope). ``answer`` is one of the question's choices, or ``later`` for "decide later": the feature stays
+    off and the question stays listed. No migration ever writes a row: only a person answers."""
+
+    key = models.CharField(max_length=60, unique=True)
+    answer = models.CharField(max_length=60)
+    answered_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    answered_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return f"{self.key}: {self.answer}"
 
 
 class FindingReview(models.Model):

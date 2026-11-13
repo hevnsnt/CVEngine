@@ -1646,6 +1646,7 @@ cards().forEach((entry) => {
 cmGroup.append(cmToggle, cmItems);
 // Timings (feed interval, discovery and nuclei limits) live in Administration; a link here so Advanced is where one looks for them
 advItems.append(Object.assign(el("a", "btn ghost sm", "Timings", { href: "/cve/admin/#timings" })));
+advItems.append(Object.assign(el("a", "btn ghost sm", "Questions about updates", { href: "/cve/update-questions/" }))); // what costs money or changes what is scanned, answered or changed later
 advItems.append(cmGroup);
 const advGroup = el("div", "set-group", null, { role: "presentation" });
 advGroup.append(advToggle, advItems);

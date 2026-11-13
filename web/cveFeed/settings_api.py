@@ -1226,8 +1226,28 @@ def reviewer_put(request):
 
 
 def alerts_get(request):
-    from cveFeed import reviewer
-    return {'alerts': reviewer.open_alerts(request.user)}
+    from cveFeed import reviewer, setup_questions
+    return {'alerts': reviewer.open_alerts(request.user), 'questions': setup_questions.reminder()}  # the reminder of the questions about an update, or None
+
+
+def setup_questions_get(request):
+    from cveFeed import setup_questions
+    return setup_questions.snapshot()
+
+
+def setup_questions_post(request):
+    """Answer one question (``{key, answer}``: one of its choices, or ``later``), or leave them all for later (``{later: true}``). The answer is carried out
+    through the Settings handler of the feature it is about, so its limits and its audit entry apply."""
+    from cveFeed import setup_questions
+    data = _body(request)
+    try:
+        if data.get('later') is True:
+            return setup_questions.defer_all(request.user)
+        if not isinstance(data.get('key'), str) or not isinstance(data.get('answer'), str):
+            raise SettingsError(400, 'send key and answer, or later: true')
+        return setup_questions.answer(request.user, data['key'], data['answer'])
+    except setup_questions.QuestionError as exc:
+        raise SettingsError(exc.status, exc.message)
 
 
 def alert_dismiss(request, alert_id):
@@ -1244,6 +1264,7 @@ ROUTES = [
     ('GET', r'ai/usage', lambda r, **k: ai_usage_get(r)),
     ('GET', r'reviewer', lambda r, **k: reviewer_get(r)), ('PUT', r'reviewer', lambda r, **k: reviewer_put(r)),
     ('GET', r'alerts', lambda r, **k: alerts_get(r)),
+    ('GET', r'setup_questions', lambda r, **k: setup_questions_get(r)), ('POST', r'setup_questions', lambda r, **k: setup_questions_post(r)),
     ('POST', r'alerts/(?P<alert_id>\d{1,12})/dismiss', lambda r, alert_id, **k: alert_dismiss(r, alert_id)),
     ('PUT', r'ai/usage/rate', lambda r, **k: ai_usage_rate_put(r)),
     ('GET', r'scan_policy', lambda r, **k: scan_policy_get(r)), ('PUT', r'scan_policy', lambda r, **k: scan_policy_put(r)),
