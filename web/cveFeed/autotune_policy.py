@@ -76,6 +76,10 @@ VERIFY_COOLDOWN_SECONDS = 24 * 3600  # a reverted change is not tried again for 
 IMPROVE_RELATIVE = 0.20            # the measurement improved by at least this share of its value before (and the metric's floor) = helped
 REGRESS_RELATIVE = 0.50            # it got worse by at least this share (and twice the floor) = regressed
 REGRESS_FLOOR_FACTOR = 2
+LANE_AT_LIMIT_PERCENT = 90         # a Celery lane holding this share of its container's memory limit in two measurements in a row is memory trouble for the lane
+LANE_ROOM_PERCENT = 60             # a lane is raised back only while it holds less than this share of its limit
+LANE_OOM_PERCENT = 70              # a kernel oom kill counts against a lane that holds at least this share of its limit
+STARVE_SECONDS = 1800              # a queued scan that has waited this long while host assessments run is starved; three measurements in a row make it trouble
 REAIM_WINDOW = 24 * 3600           # after a cap, the aim is repeated once the facts are back, within this long
 MAX_AIMS_PER_DAY = 2               # ... and never more often than this (the first aim after a restart counts)
 # name: (better, floor, label). better: 'lower' or 'higher'. floor: the smallest change in that measurement that counts at all (the numbers move
@@ -87,6 +91,7 @@ METRICS = {
     'conductor_saturated_share': ('lower', 0.30, 'share of measurements held back by the conductor depth'),
     'conductor_idle_share': ('lower', 0.30, 'share of measurements with nothing due'),
     'sentinel_idle_share': ('lower', 0.15, 'share of Sentinel slots idle'),
+    'scan_oldest_s': ('lower', 600.0, 'age of the oldest queued scan (seconds)'),
     'trouble': ('lower', 1.0, 'trouble for this setting (1 yes, 0 no)'),
 }
 NO_ACTION_PHASES = ('cap', 'verify', 'emergency')  # never reverted, never hold the one-at-a-time gate
@@ -312,6 +317,8 @@ def size_for(setting, facts, current=None):
             target, reason = optimistic, 'no live Sentinel: optimistic value'
             known = sentinels_known
         target = _floor(setting, target)
+    elif kind in ('assess_share',) or kind.startswith('lane:'):
+        target, reason = setting.high, 'the number configured for this instance'  # these knobs only go down on trouble and come back up to what a person configured
     else:
         target, reason, known = optimistic, 'optimistic value', False
     disk = facts.get('disk_free_percent')
@@ -386,6 +393,42 @@ def _sentinel_trouble(samples):
     return None
 
 
+def _lane(sample, lane):
+    return _get(sample, 'maint', 'lanes', lane) or {}
+
+
+def _lane_trouble(lane, samples):
+    """Memory trouble of one Celery lane (``lane`` is ``cve_feed`` or ``classic``), from the measurements ``cveFeed.autotune_signals.maintainer`` takes: the lane
+    held ``LANE_AT_LIMIT_PERCENT`` of its container's memory limit in two measurements in a row; it was restarted since the measurement before (a rolling
+    count that grew); or the kernel killed something for memory (the oom count grew) while the lane held ``LANE_OOM_PERCENT`` of its limit or more. A
+    number that was not measured is not trouble."""
+    last = _lane(samples[-1], lane)
+    prev = _lane(samples[-2], lane) if len(samples) > 1 else {}
+    pct = last.get('percent')
+    if pct is not None and pct >= LANE_AT_LIMIT_PERCENT and (prev.get('percent') or 0) >= LANE_AT_LIMIT_PERCENT:
+        return f'the {lane} lane holds {pct:.0f}% of its memory limit'
+    now, was = last.get('restarts_24h'), prev.get('restarts_24h')
+    if isinstance(now, int) and isinstance(was, int) and now > was:
+        return f'the {lane} lane was restarted ({now - was} new restart(s))'
+    oom, oom_was = _get(samples[-1], 'maint', 'oom_kills_24h'), _get(samples[-2], 'maint', 'oom_kills_24h') if len(samples) > 1 else None
+    if isinstance(oom, int) and isinstance(oom_was, int) and oom > oom_was and pct is not None and pct >= LANE_OOM_PERCENT:
+        return f'the kernel killed a process for memory while the {lane} lane held {pct:.0f}% of its limit'
+    return None
+
+
+def _starvation_trouble(samples):
+    """Queued scans starve behind host assessments: the oldest queued scan waited ``STARVE_SECONDS`` or more in each of the last three measurements while
+    assessments were running (the 18 scans that waited 16 hours behind 360 assessments)."""
+    recent = samples[-HEALTHY_SAMPLES:]
+    if len(recent) < HEALTHY_SAMPLES:
+        return None
+    for sample in recent:
+        age, running = _get(sample, 'starve', 'scan_age_s'), _get(sample, 'assess', 'running')
+        if age is None or age < STARVE_SECONDS or not running:
+            return None
+    return f'queued scans waited {int(age // 60)} min while {running} host assessment(s) held the discovery pool'
+
+
 def _pause_trouble(setting, last, pause):
     """The watchdog paused the starting of work for memory (``pause`` says so): evidence of memory pressure for the settings that hold memory, even
     when the scanning container's own numbers did not show it (the watchdog reads the whole host). A scanner kind only counts when runs of it were
@@ -425,7 +468,10 @@ def _trouble(setting, samples, last, kind):
                                                  not _get(s, 'memory', 'running', scanner, default=0) for s in stuck):
             return f'{scanner} runs waited for memory for half an hour with none running'
         return None
+    if kind.startswith('lane:'):
+        return _lane_trouble(kind.split(':', 1)[1], samples)
     checks = {
+        'assess_share': (lambda: _starvation_trouble(samples),),
         'discovery': (lambda: _db_pressure(last), lambda: _worker_silent(samples), lambda: _memory_pressure(last), lambda: _load_pressure(samples)),
         'depth': (lambda: _db_pressure(last), lambda: _worker_silent(samples), lambda: _memory_pressure(last)),
         'batch': (lambda: _sentinel_trouble(samples), lambda: _worker_silent(samples)),
@@ -474,6 +520,16 @@ def demand(setting, value, sample):
         if running < value:
             return f'{running} of {value} {scanner} runs in use'
         return None
+    if kind.startswith('lane:'):
+        pct = _lane(sample, kind.split(':', 1)[1]).get('percent')
+        if pct is None:
+            return 'the lane\'s memory is not known'
+        return None if pct < LANE_ROOM_PERCENT else f'the lane holds {pct:.0f}% of its memory limit'
+    if kind == 'assess_share':
+        if _get(sample, 'starve', 'scan_age_s') is not None:
+            return 'a scan is waiting for a discovery slot'
+        oldest = _get(sample, 'assess', 'oldest_s')
+        return None if _get(sample, 'assess', 'queued') and oldest is not None and oldest >= BACKLOG_SECONDS else 'no assessment backlog'
     disc = sample.get('discovery') or {}
     sent = sample.get('sentinel') or {}
     if kind == 'discovery':
@@ -761,6 +817,8 @@ def expectation(setting, direction):
     More work: the backlog it serves gets shorter (a scanner kind: fewer runs waiting for their turn; the discovery pool: a shorter discovery queue;
     a batch: a younger oldest assessment; the conductor depth and gap: fewer measurements held back or idle; Sentinel stage and refresh: fewer idle
     Sentinel slots). Less work: the trouble that caused it is gone (or none appears)."""
+    if setting.kind == 'assess_share':
+        return 'scan_oldest_s' if direction == 'less' else 'assess_oldest_s'
     if direction != 'more':
         return 'trouble'
     return {'discovery': 'discovery_queue', 'batch': 'assess_oldest_s', 'depth': 'conductor_saturated_share', 'work_gap': 'conductor_idle_share',
@@ -784,6 +842,8 @@ def _metric_value(metric, setting, samples):
         return _mean([_get(s, 'memory', 'waiting', scanner, default=0) if (s.get('memory') or {}).get('reported') else None for s in samples])
     if metric == 'discovery_queue':
         return _mean([_get(s, 'discovery', 'queued') for s in samples])
+    if metric == 'scan_oldest_s':
+        return _mean([(_get(s, 'starve', 'scan_age_s') or 0) if _get(s, 'starve', 'scans_queued') is not None else None for s in samples])
     if metric == 'assess_oldest_s':
         return _mean([(_get(s, 'assess', 'oldest_s') or 0) if _get(s, 'assess', 'queued') is not None else None for s in samples])
     if metric in ('conductor_saturated_share', 'conductor_idle_share'):

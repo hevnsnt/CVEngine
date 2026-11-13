@@ -103,7 +103,8 @@ def managed():
             high = max(low, high)
             what = f'heavy:{kind}'
         else:
-            what = {'discovery_concurrency': 'discovery', 'assess_batch': 'batch', 'work_depth': 'depth'}[f.key]
+            what = {'discovery_concurrency': 'discovery', 'assess_batch': 'batch', 'work_depth': 'depth', 'assess_share_percent': 'assess_share',
+                    'lane.cve_feed': 'lane:cve_feed', 'lane.classic': 'lane:classic'}[f.key]
         optimistic = max(low, min(high, f.auto_optimistic))
         out.append(Managed(f.key, 'scan_concurrency', f.label, Setting(f.key, what, f.label, low, high, f.auto_step, 'more', optimistic,
                                                                                f.default), f.env))
@@ -305,9 +306,9 @@ def _audit(actor, action, target, **detail):
 
 
 def _after_change(keys):
-    """A tuned or released discovery pool is resized live, like a save."""
-    if 'discovery_concurrency' in keys:
-        from cveFeed import scan_concurrency
+    """A tuned or released discovery pool or worker lane is resized live, like a save."""
+    from cveFeed import scan_concurrency
+    if 'discovery_concurrency' in keys or any(k in scan_concurrency.LANE_KEYS for k in keys):
         scan_concurrency.request_apply()
 
 

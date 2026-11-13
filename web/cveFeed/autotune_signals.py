@@ -234,10 +234,29 @@ def sentinels(now, interval=INTERVAL_SECONDS):
     oldest = queued.order_by('created_at').values_list('created_at', flat=True).first()
     since = at - timedelta(seconds=interval)
     expired = SentinelTask.objects.filter(status='expired', finished_at__gte=since)
+    unclaimed = expired.filter(error__icontains='in time').count()
+    outage = claim_outage(now, unclaimed, slots, in_use)
     return {'live': len(live), 'slots': slots, 'in_use': in_use, 'queued': queued.count(),
             'oldest_queued_s': int((at - oldest).total_seconds()) if oldest else None,
             'timeouts': expired.filter(error__icontains='timed out').count(),
-            'fallbacks': expired.filter(error__icontains='in time').count()}
+            # AM-5: tasks that expired unclaimed while the slots were free, or while the server's limiter refused the Sentinels' claims, say the claims did not
+            # reach the server, not that the Sentinels are too small: they are not counted as waits that ran locally (the policy backs off on those)
+            'fallbacks': 0 if outage else unclaimed, 'unclaimed': unclaimed, 'claims_outage': outage}
+
+
+def claim_outage(now, unclaimed, slots, in_use):
+    """Whether tasks expiring unclaimed are a claim outage and not Sentinel capacity trouble (AM-5): the slots were mostly idle (``maintainer_checks.NOT_CLAIMING_SLOT_SHARE``
+    or less in use) while tasks expired, or the rate limiter refused enough claim calls in the last two clock hours to be a warning
+    (``maintainer_checks.CLAIM_REFUSED_WARN``, the same numbers the ops check uses)."""
+    from cveFeed import maintainer_checks as checks
+    if unclaimed and slots and in_use <= checks.NOT_CLAIMING_SLOT_SHARE * slots:
+        return True
+    try:
+        from agentapi import maintainer_signals
+        refusals = maintainer_signals.claim_refusals(now)
+        return (refusals.get('this_hour', 0) + refusals.get('previous_hour', 0)) >= checks.CLAIM_REFUSED_WARN
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def assessments():
@@ -301,7 +320,17 @@ def maintainer(now):
     for entry in (maintainer_signals.lanes(now).get('lanes') or []):
         if isinstance(entry.get('restarts_24h'), int):
             restarts.append(entry['restarts_24h'])
-    return {'oom_kills_24h': sum(oom) if oom else None, 'lane_restarts_24h': sum(restarts) if restarts else None}
+    lanes = {entry['lane']: {'percent': entry.get('percent_of_limit') if entry.get('state') == 'known' else None, 'restarts_24h': entry.get('restarts_24h')}
+             for entry in (maintainer_signals.lanes(now).get('lanes') or []) if entry.get('lane')}
+    return {'oom_kills_24h': sum(oom) if oom else None, 'lane_restarts_24h': sum(restarts) if restarts else None, 'lanes': lanes}
+
+
+def starve(now):
+    """Queued discovery scans: how many, and how long the oldest has waited (None when none waits), for the assessment share (``autotune_policy.STARVE_SECONDS``)."""
+    from startScan.models import ScanHistory
+    queued = ScanHistory.objects.filter(scan_status=-1)
+    since = queued.order_by('start_scan_date').values_list('start_scan_date', flat=True).first()
+    return {'scans_queued': queued.count(), 'scan_age_s': int(max(0, now - since.timestamp())) if since else None}
 
 
 def paused():
@@ -331,6 +360,7 @@ def collect(now=None, boot=''):
         'conductor': _probe('conductor', conductor_state, {}),
         'failures': _probe('failures', lambda: capacity_failures(now), {}),
         'maint': _probe('maintainer signals', lambda: maintainer(now), {}),
+        'starve': _probe('queued scans', lambda: starve(now), {}),
     }
     measured = _probe('load', lambda: load(now))
     if measured:

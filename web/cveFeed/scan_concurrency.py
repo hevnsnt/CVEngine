@@ -37,6 +37,19 @@ CACHE_SECONDS = resources.SAVED_CACHE_SECONDS
 RUNNING_STALE_SECONDS = 150                # the reconcile tick runs every 30 seconds
 DISCOVERY_WORKER_PREFIX = 'discovery_worker@'
 DISCOVERY_DEFAULT = 8
+ASSESS_SHARE_DEFAULT = 75                  # percent of the discovery pool host assessments may hold while a scan waits (host_assessment.over_share)
+
+
+def _lane_default(name, shipped):
+    """What the worker lane is configured with: the number the environment names (the entrypoint reads the same variable), else the shipped one. Auto-tuning never goes above it."""
+    try:
+        return max(1, int(float(os.environ[name])))
+    except (KeyError, ValueError):
+        return shipped
+
+
+CVE_FEED_LANE_DEFAULT = _lane_default('CVE_FEED_CONCURRENCY', 4)
+CLASSIC_LANE_DEFAULT = _lane_default('CLASSIC_CONCURRENCY', 10)
 WORK_DEPTH_DEFAULT = 3
 
 # auto_tunable must be stated for every field (True or False): the auto-tuner (cveFeed.autotune) only ever moves a field that opts in, inside
@@ -95,12 +108,27 @@ FIELDS = _heavy_fields() + [
     Field('work_depth', 'Discovery scans kept running',
           'How many discovery scans the work conductor keeps running or queued, starting the targets that have waited longest. 0 turns the conductor off: only people start scans.',
           'depth', 'CVENGINE_WORK_DEPTH', WORK_DEPTH_DEFAULT, 0, 32, 0, True, 1, 16, 1, 6),
+    Field('assess_share_percent', 'Share of the discovery pool host assessments may hold',
+          'While a discovery scan waits to start, host assessments may hold at most this share of the discovery pool, so queued scans cannot starve behind hundreds of assessments '
+          '(an assessment that waits on a Sentinel holds its slot for as long as it waits). With no scan waiting, assessments may use the whole pool. 100 turns the limit off. '
+          'Auto-tuning lowers it (never below 25) when scans wait for an hour behind assessments, and raises it back to 75 when they do not.',
+          'discovery', 'CVENGINE_ASSESS_SHARE_PERCENT', ASSESS_SHARE_DEFAULT, 10, 100, 1, True, 25, 75, 10, 75),
+    Field('lane.cve_feed', 'CVE-feed lane tasks at once',
+          'How many tasks the CVE-feed worker lane (feeds, the planner of checks, the ops checks and auto-tuning itself) runs at once. A restart or an update starts it with this number. '
+          'Auto-tuning lowers it (never below 1) when the lane is killed for memory or runs at its memory limit, and raises it back, never above the number set here or in '
+          'CVE_FEED_CONCURRENCY.',
+          'lanes', 'CVE_FEED_CONCURRENCY', CVE_FEED_LANE_DEFAULT, 1, max(CVE_FEED_LANE_DEFAULT, 32), 1, True, 1, CVE_FEED_LANE_DEFAULT, 1, CVE_FEED_LANE_DEFAULT),
+    Field('lane.classic', 'Classic lane tasks at once',
+          'How many tasks the classic worker lane (notifications, reports, the Live screen refresh, the slow sweeps) runs at once. A restart or an update starts it with this number. '
+          'Auto-tuning lowers it (never below 3) when the lane is killed for memory or runs at its memory limit, and raises it back, never above the number set here or in '
+          'CLASSIC_CONCURRENCY.',
+          'lanes', 'CLASSIC_CONCURRENCY', CLASSIC_LANE_DEFAULT, 1, max(CLASSIC_LANE_DEFAULT, 32), 1, True, min(3, CLASSIC_LANE_DEFAULT), CLASSIC_LANE_DEFAULT, 1, CLASSIC_LANE_DEFAULT),
 ]
 BY_KEY = {f.key: f for f in FIELDS}
 assert all(f.auto_tunable in (True, False) for f in FIELDS), 'every scan concurrency field states auto_tunable'
 assert all(not f.auto_tunable or f.low <= f.auto_min <= f.auto_optimistic <= f.auto_max <= f.high for f in FIELDS), \
     'an auto-tuning range (or its optimistic value) is outside the allowed range'
-GROUP_TITLES = {'heavy': 'Scanners at once', 'discovery': 'Discovery and assessment', 'depth': 'The work conductor'}
+GROUP_TITLES = {'heavy': 'Scanners at once', 'discovery': 'Discovery and assessment', 'depth': 'The work conductor', 'lanes': 'Worker lanes'}
 
 
 # --- resolving a value ------------------------------------------------------------------------------------------------
@@ -286,7 +314,7 @@ def after_saved(changed, stored):
                 client.delete(*[f'cvengine:adaptive:max:{kind}' for kind in kinds])
         except Exception:
             logger.warning('scan concurrency: could not clear the AI tuner step for %s', ', '.join(kinds))
-    if 'discovery_concurrency' in changed:
+    if 'discovery_concurrency' in changed or any(k in LANE_KEYS for k in changed):
         request_apply()
 
 
@@ -361,6 +389,54 @@ def apply_discovery(app=None, now_fn=time.time, saved=None):
     return record
 
 
+LANE_WORKERS = {'lane.cve_feed': 'cve_feed_worker', 'lane.classic': 'classic_worker'}  # the Celery node of each lane that auto-tuning may resize (``celery -n``)
+LANE_KEYS = tuple(LANE_WORKERS)
+
+
+def lane_ceilings(key, app=None, timeout=1.5):
+    """{worker name: its autoscale ceiling} for the worker of the lane ``key`` names (``lane.cve_feed``, ``lane.classic``)."""
+    if app is None:
+        from reNgine.celery import app
+    stats = app.control.inspect(timeout=timeout).stats() or {}
+    out = {}
+    for name, info in stats.items():
+        if str(name).split('@')[-1] == LANE_WORKERS[key]:
+            ceiling = ((info or {}).get('autoscaler') or {}).get('max')
+            out[name] = ceiling if isinstance(ceiling, int) else None
+    return out
+
+
+def apply_lanes(app=None, saved=None):
+    """Resize every worker lane whose autoscale ceiling differs from the number wanted (saved by a person, else tuned, else the configured one), with celery's
+    ``autoscale`` remote control, as ``apply_discovery`` does for the discovery pool. A lane that does not answer keeps the number it has (the 30 second tick
+    tries again). The entrypoint reads the same resolved number at start, so a restart keeps it. Returns {key: {'want', 'workers', 'changed'}}."""
+    if app is None:
+        from reNgine.celery import app
+    out = {}
+    stored = saved_values() if saved is None else saved
+    tuned = _tuned_from_database()
+    for key in LANE_KEYS:
+        want = effective(key, stored, tuned)
+        workers, changed = lane_ceilings(key, app), []
+        for name, ceiling in list(workers.items()):
+            if ceiling == want:
+                continue
+            try:
+                replies = app.control.broadcast('autoscale', arguments={'max': want}, destination=[name], reply=True, timeout=3) or []
+            except Exception:  # noqa: BLE001
+                logger.warning('scan concurrency: could not resize %s', name)
+                continue
+            for reply in replies:
+                answer = (reply or {}).get(name)
+                text = str(((answer or {}).get('ok')) or '') if isinstance(answer, dict) else ''
+                match = re.search(r'max=(\d+)', text)
+                if match:
+                    workers[name] = int(match.group(1))
+                    changed.append(name)
+        out[key] = {'want': want, 'workers': workers, 'changed': changed}
+    return out
+
+
 def _tuned_from_database():
     """The auto-tuned numbers that apply now, from the database (the truth), or the cached copy when it cannot be read."""
     try:
@@ -380,10 +456,15 @@ def reconcile():
         logger.debug('scan concurrency: reconcile could not read the saved values', exc_info=False)
         return None
     try:
-        return apply_discovery(saved=saved)
+        result = apply_discovery(saved=saved)
     except Exception:
         logger.debug('scan concurrency: the discovery workers could not be reached', exc_info=False)
         return None
+    try:
+        apply_lanes(saved=saved)
+    except Exception:
+        logger.debug('scan concurrency: the worker lanes could not be reached', exc_info=False)
+    return result
 
 
 def running_discovery(now_fn=time.time):

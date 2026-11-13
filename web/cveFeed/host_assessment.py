@@ -87,6 +87,40 @@ def batch_size():
     return max(1, min(MAX_BATCH, wanted))
 
 
+SHARE_DEFER_SECONDS = 90  # an assessment held back by the share limit is looked at again after this long (queued again with a delay; its row stays queued)
+
+
+def share_limit():
+    """The most discovery-pool slots host assessments may hold while a scan waits (``assess_share_percent`` of ``discovery_concurrency``, at least 1), or None when
+    the limit is off (100)."""
+    from cveFeed import scan_concurrency
+    percent = scan_concurrency.resolve('assess_share_percent')['value']
+    if percent >= 100:
+        return None
+    return max(1, int(scan_concurrency.resolve('discovery_concurrency')['value'] * percent // 100))
+
+
+def slots_held():
+    """How many pool slots the running assessments hold: one per running batch (a batch of ``batch_size()`` rows is one task), rounded up."""
+    running = HostAssessment.objects.filter(status='running').count()
+    return -(-running // max(1, batch_size()))
+
+
+def over_share():
+    """Whether a queued assessment must wait now: a discovery scan is waiting for a slot AND the running assessments already hold their share of the pool
+    (``share_limit``). With no scan waiting assessments may use the whole pool, so an instance that is not starved is not slowed. Never raises: a count that
+    cannot be read means no limit."""
+    try:
+        limit = share_limit()
+        if limit is None or slots_held() < limit:
+            return False
+        from startScan.models import ScanHistory
+        return ScanHistory.objects.filter(scan_status=-1).exists()
+    except Exception:  # noqa: BLE001
+        logger.debug('assessment share: could not be checked, so not limited', exc_info=False)
+        return False
+
+
 def batch_size_for(project):
     """``batch_size()``, except 1 where batching would do harm:
 
