@@ -1044,6 +1044,10 @@ def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOW
         from agentapi import sentinel_contract
         reported = (agent.info or {}).get('contract_version')
         out['contract'] = {'version': reported, 'state': sentinel_contract.state(reported), 'note': sentinel_contract.note(reported)}
+        from agentapi import sentinel_broker
+        declared = sentinel_broker.CREDENTIAL_FEATURE in ((agent.info or {}).get('features') or [])
+        needed = sentinel_broker.credential_work('nuclei_deep')
+        out['credential_filter'] = {'declared': declared, 'needed': needed, 'note': sentinel_broker.CREDENTIAL_NOTE if needed and not declared else ''}  # old client: web checks wait
         out['version_since'] = (agent.info or {}).get('version_since')  # when it last changed the version it runs
         from agentapi import sentinel_autoupdate
         out['auto_update'] = sentinel_autoupdate.view(agent)  # running / newest / update requested / flagged, in plain words
