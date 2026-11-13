@@ -123,6 +123,7 @@ function reviewerPanel(r, markDirty) {
   const hours = text((r.ops_hours || []).join(", "), { placeholder: (r.default_ops_hours || []).join(", ") });
   // the AI host review (docs/AI-REVIEWER.md "Host review"): off until a person turns it on here, because every review is a billed AI call
   const hostOn = check("Review whole hosts with the AI (one AI call per changed host)", r.host_review_enabled);
+  const hostClose = check("Let the host review close false positives by itself (off: a person closes them, with one click on the host page)", r.host_review_auto_close);
   const hostDaily = text(r.host_review_daily_max, { type: "number", min: "0", max: "20000" });
   // what the AI may do on each project: recommend only (the default), start safe read-only steps by itself, or nothing. The same setting as on a host page.
   const HOST_MODES = [["recommend", "Recommend only"], ["auto", "Automatic"], ["off", "Off"]];
@@ -168,6 +169,8 @@ function reviewerPanel(r, markDirty) {
     el("h3", "sec", "AI review of whole hosts"),
     el("p", "note", "The AI reads every open finding of a host together, says which look real and which look like false positives, and picks one next step. It is off until you turn it on. Every review is an AI call that your AI provider bills you for (up to the daily limit below), so it stays off on a fresh install and after an update. Each project then chooses on the host page whether the AI only recommends a step (the default) or starts safe read-only steps by itself."),
     hostOn.wrap,
+    hostClose.wrap,
+    el("p", "note", "Risk: a scanned host can try to talk the AI into calling its real findings false positives. cvENGINE cannot detect every such attempt, so by default a false positive from the host review is only recorded and a person closes it. Switch this on only if you accept that."),
     field("Hosts reviewed per day at most", hostDaily),
     el("h4", "", "What the AI may do in each project", { style: "margin:12px 0 0" }),
     el("p", "note", "Recommend only: the AI proposes a next step and a person presses Start. Automatic: it also starts safe read-only steps (a check, a screenshot) by itself, within the limits in the documentation. Only a person sets Automatic."),
@@ -179,7 +182,7 @@ function reviewerPanel(r, markDirty) {
     body() {
       const list = hours.value.split(",").map((h) => h.trim()).filter(Boolean).map(Number);
       return { enabled: on.box.checked, auto_close: close.box.checked, review_daily_max: Number(daily.value), ops_hours: list,
-        host_review_enabled: hostOn.box.checked, host_review_daily_max: Number(hostDaily.value),
+        host_review_enabled: hostOn.box.checked, host_review_auto_close: hostClose.box.checked, host_review_daily_max: Number(hostDaily.value),
         ...(chosen.size ? { host_review_modes: Object.fromEntries(chosen) } : {}) };
     },
   };

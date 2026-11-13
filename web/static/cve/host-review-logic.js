@@ -55,6 +55,8 @@ export const STEP_TITLES = {
 // Why a false positive was not closed: the server's reason (reviewer.close_gate and the rules after it) as a short phrase that finishes "stays open because ...".
 export function heldBecause(finding) {
   const held = String(finding.held_reason || "");
+  if (/the host review does not close/.test(held)) return "a person decides";
+  if (/verdict_claim/.test(held)) return "this host's text makes claims about its own findings";
   if (finding.outcome === "disputed" || /^hard evidence/.test(held)) return "a check reproduced it";
   if (/person has worked/.test(held)) return "a person is working on it";
   if (/text aimed at AI/.test(held)) return "this host's text contains instructions";
@@ -68,6 +70,7 @@ export function heldBecause(finding) {
 // The quiet tag at the right of a verdict row: what happened to the finding.
 export function outcomeTag(finding) {
   if (finding.outcome === "closed") return { text: "Closed", tone: "success" };
+  if (finding.summary === "false_positive" && /the host review does not close/.test(finding.held_reason || "")) return { text: "Looks like a false positive: a person decides", tone: "smoke" };
   if (finding.summary === "false_positive") {
     const why = heldBecause(finding);
     return { text: /instructions/.test(why) ? "Held: this host's text contains instructions" : `Kept open: ${why}`, tone: "queued" };
@@ -105,6 +108,16 @@ export function failureText(review) {
   if (/too large/.test(raw)) return "It has more to read than the AI can take at once. It is tried again tomorrow.";
   if (FAILURES[raw]) return `${FAILURES[raw]} Nothing was changed. It is tried again later.`;
   return raw ? `${raw.charAt(0).toUpperCase()}${raw.slice(1)}. Nothing was changed.` : "Nothing was changed.";
+}
+
+export const CLAIMS_TEXT = "Text on this host makes claims about how its findings should be judged, so cvENGINE does not let the AI close them by itself. A person decides.";
+export const CLOSE_NOTE = "Closed as a false positive on the AI host review's advice, after a person read it.";
+
+// "The host changed. The next automatic review is due at 14:20." for a host that changed within a day of its last review; ``when`` formats the time.
+export function waitingText(iso, when = (d) => d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : `The host changed. Its next automatic review is due ${when(d)}; Review now runs it at once.`;
 }
 
 export const HELD_TEXT = "Text on this host tells AI what to do, so cvENGINE closed nothing and started nothing by itself. A person decides.";
@@ -153,6 +166,9 @@ export function findingView(f) {
     reason,
     note: f.note || "",
     tag: outcomeTag(f),
+    canClose: !!f.can_close,
+    type: f.finding && f.finding.type,
+    id: f.finding && f.finding.id,
   };
 }
 

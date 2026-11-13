@@ -252,3 +252,47 @@ test('a card that cannot read the review says so', async () => {
   await new Promise((r) => setImmediate(r));
   assert.match(card.textContent, /could not be read\.boom/);
 });
+
+const decides = () => finding({finding: {type: 'match', id: 8}, link: '/cve/p/vulns/#match-8', title: 'CVE-2099-8', verdict: 'false_positive', summary: 'false_positive', outcome: 'held',
+  held_reason: 'the host review does not close findings by itself: a person decides', reason_code: 'version_not_affected', can_close: true, note: ''});
+
+test('a false positive that waits for a person says so and has a one-click Close, which uses the finding status route', async () => {
+  const card = await draw(data({review: review({counts: {real: 0, false_positive: 1, uncertain: 0, closed: 0, held: 1}, findings: [decides()]})}));
+  assert.match(card.textContent, /Looks like a false positive: a person decides/);
+  assert.match(card.textContent, /It stays open because a person decides\./);
+  const close = buttonNamed(card, 'Close as false positive');
+  assert.equal(close.attrs['aria-label'], 'Close CVE-2099-8 as a false positive');
+  answers[`PATCH ${BASE}/findings/match/8`] = {body: {}};
+  answers[`GET ${BASE}/hosts/9/review`] = {body: data({review: review({counts: {real: 0, false_positive: 1, uncertain: 0, closed: 1, held: 0}, findings: [{...decides(), outcome: 'closed', held_reason: '', can_close: false}]})})};
+  await close.onclick();
+  const call = calls.find((c) => c.key === `PATCH ${BASE}/findings/match/8`);
+  assert.equal(call.body.status, 'false_positive');
+  assert.match(call.body.note, /on the AI host review's advice/);
+  assert.equal(buttonNamed(card, 'Close as false positive'), undefined);
+  assert.match(card.textContent, /Closed/);
+});
+
+test('no Close button for a row held for proof, planted text or an earlier real verdict', async () => {
+  const rows = [finding({summary: 'false_positive', verdict: 'false_positive', outcome: 'disputed', held_reason: 'hard evidence: x', can_close: false}),
+    finding({summary: 'false_positive', verdict: 'false_positive', outcome: 'held', held_reason: 'its evidence carries text aimed at AI agents (verdict_claim)', can_close: false}),
+    finding({summary: 'false_positive', verdict: 'false_positive', outcome: 'held', held_reason: 'contradicts the earlier verdict on this state', can_close: false})];
+  const card = await draw(data({review: review({counts: {real: 0, false_positive: 3, uncertain: 0, closed: 0, held: 3}, findings: rows})}));
+  assert.equal(buttonNamed(card, 'Close as false positive'), undefined);
+  assert.match(card.textContent, /Held: this host's text contains instructions|Kept open: this host's text makes claims|Kept open: an earlier review called it real/);
+});
+
+test('host text that only makes claims about its findings gets its own sentence, and a host waiting for its next automatic review says when', async () => {
+  let t = (await draw(data({review: review({claims_about_findings: true})}))).textContent;
+  assert.match(t, /Text on this host makes claims about how its findings should be judged/);
+  t = (await draw(data({waiting_until: '2026-11-14T10:20:00Z'}))).textContent;
+  assert.match(t, /The host changed\. Its next automatic review is due .*; Review now runs it at once\./);
+  assert.equal(logic.waitingText(null), '');
+  assert.match(logic.waitingText('2026-11-14T10:20:00Z', () => 'at 10:20'), /due at 10:20;/);
+});
+
+test('an unchanged host disables Review again and says why', async () => {
+  const card = await draw(data({readiness: {can_request: false, reason_code: 'unchanged', reason: 'nothing has changed on this host since the last review'}}));
+  const run = buttonNamed(card, 'Review again');
+  assert.equal(run.disabled, true);
+  assert.equal(run.attrs.title, 'nothing has changed on this host since the last review');
+});

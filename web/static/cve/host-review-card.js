@@ -2,14 +2,14 @@
 // with Start and Dismiss, Review now, and (for administrators) the project's mode in a closed disclosure. Every word from the model or the scanned host is set
 // with textContent (the el() helper), never as markup. The plain words live in host-review-logic.js.
 import { api, badge, el, toast } from "/staticfiles/cve/ui.js";
-import { HELD_TEXT, MODES, canReview, emptyText, findingView, modeHelp, stateOf, stepView, summary, whenText } from "/staticfiles/cve/host-review-logic.js";
+import { CLAIMS_TEXT, CLOSE_NOTE, HELD_TEXT, MODES, canReview, emptyText, findingView, modeHelp, stateOf, stepView, summary, waitingText, whenText } from "/staticfiles/cve/host-review-logic.js";
 
 const POLL_MS = 5000;
 const FALLBACK_AGO = (iso) => (iso ? new Date(iso).toLocaleDateString() : "never");
 
 const settingsLink = () => document.querySelector('a[href^="/cve/settings"]'); // the rail shows Settings only to people who may open it: they are the administrators
 
-function verdictRows(review, openFindings) {
+function verdictRows(review, onClose) {
   const views = (review.findings || []).map(findingView);
   if (!views.length) return null;
   const list = el("ul", "hr-rows", null, { "aria-label": "Verdict on each finding" });
@@ -23,6 +23,11 @@ function verdictRows(review, openFindings) {
     main.append(name);
     if (v.reason) main.append(el("span", "hr-reason", v.reason));
     if (v.note) main.append(el("span", "note hr-note", v.note, { title: v.note }));
+    if (v.canClose && onClose) {
+      const close = el("button", "btn ghost sm hr-close", "Close as false positive", { type: "button", "aria-label": `Close ${v.title} as a false positive` });
+      close.onclick = () => onClose(v, close);
+      main.append(close);
+    }
     const tag = el("span", `note hr-tag${v.tag.tone ? ` ${v.tag.tone}` : ""}`, v.tag.text);
     row.append(chip, main, tag);
     list.append(row);
@@ -139,13 +144,25 @@ export function hostReviewCard({ base, hostId, isCurrent = () => true, ago = FAL
     return box;
   }
 
+  async function closeFinding(v, button) {
+    button.disabled = true;
+    try {
+      await api("PATCH", `${base}/findings/${v.type}/${v.id}`, { status: "false_positive", note: CLOSE_NOTE });
+      toast("Closed as a false positive");
+    } catch (e) {
+      toast(e.message, true);
+    }
+    await load(null, true);
+  }
+
   function reading(review, into) {
     const s = summary(review);
     if (review.held_for_instructions) into.append(el("p", "msg warn hr-held", HELD_TEXT));
+    else if (review.claims_about_findings) into.append(el("p", "msg warn hr-held", CLAIMS_TEXT));
     into.append(el("p", "hr-headline", s.headline));
     if (s.detail) into.append(el("p", "note hr-sub", s.detail));
     if (review.host_note) into.append(el("p", "note hr-sub", review.host_note));
-    const rows = verdictRows(review);
+    const rows = verdictRows(review, closeFinding);
     if (rows) into.append(rows);
   }
 
@@ -161,6 +178,8 @@ export function hostReviewCard({ base, hostId, isCurrent = () => true, ago = FAL
 
     if (state === "applied") {
       reading(review, body);
+      const waiting = waitingText(data.waiting_until);
+      if (waiting) body.append(el("p", "note hr-sub hr-waiting", waiting));
       const step = stepBlock(review);
       if (step) body.append(step);
     } else {
