@@ -8,6 +8,7 @@ urlpatterns = [
     path('', views.dashboard, name='cve_dashboard'),
     path('graph/', views.graph, name='cve_graph'),
     path('welcome/', views.welcome_page, name='cve_welcome'),
+    path('update-questions/', views.update_questions_page, name='cve_update_questions'),
     re_path(r'^api/welcome/(?P<path>.*)$', welcome.dispatch, name='cve_api_welcome'),
     path('account/', views.account_page, name='cve_account'),
     path('about/', views.about_page, name='cve_about'),

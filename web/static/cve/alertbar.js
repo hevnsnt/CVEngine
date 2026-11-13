@@ -19,6 +19,7 @@ const POLL_MS = 120000;
 // button that opens the whole list right here (and "Show fewer" folds it back); nothing sends the person to another page.
 let current = [];
 let showAll = false;
+let reminder = null; // the line about questions an update left open (cveFeed/setup_questions.py): it stays until they are answered, so it has no Dismiss
 
 function render(alerts) {
   current = alerts;
@@ -32,6 +33,11 @@ function render(alerts) {
       const ai = el("p", "ab-ai");
       ai.append(el("span", "ab-label", `AI reviewer${a.ai_model ? ` (${a.ai_model})` : ""}: `), document.createTextNode(a.ai_detail));
       text.append(ai);
+    }
+    if (a.decision_id != null) {  // auto-tune answered this alert: the link opens its line in Settings, configMaxxing, Auto-tuning
+      const link = el("a", "ab-decision", "See what auto-tune did about this");
+      link.setAttribute("href", `/cve/settings/#configmaxxing/autotune/${encodeURIComponent(a.decision_id)}`);
+      text.append(link);
     }
     const dismiss = el("button", "btn sm ab-dismiss", "Dismiss");
     dismiss.type = "button";
@@ -62,13 +68,26 @@ function render(alerts) {
     row.append(toggle);
     items.push({ kind: "more", text: label, node: row, rank: 3 });
   }
+  if (reminder && !location.pathname.startsWith("/cve/update-questions")) {
+    const row = el("div", "ab-row ab-info");
+    const text = el("div", "ab-text");
+    text.append(el("p", "ab-detail", reminder.text));
+    const open = el("a", "btn sm", "Answer them");
+    open.href = "/cve/update-questions/";
+    row.append(text, open);
+    items.unshift({ kind: "questions", text: reminder.text, node: row, rank: 2 });
+  }
   setNotices("alerts", items);
 }
 
 async function poll() {
   try {
     const r = await fetch("/cve/api/settings/alerts", { credentials: "same-origin", cache: "no-store" });
-    if (r.ok) render(((await r.json()).alerts) || []);
+    if (r.ok) {
+      const body = await r.json();
+      reminder = body.questions && body.questions.text ? body.questions : null;
+      render(body.alerts || []);
+    }
   } catch (_) {
     // the server is restarting or unreachable: keep what is shown
   }

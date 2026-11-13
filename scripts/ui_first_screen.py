@@ -8,17 +8,20 @@ Sentinels (one with a `status_note` such as "Update failed: could not pull image
     BASE=http://127.0.0.1:8141 PROJECT=acme-corp EMPTY_PROJECT=harbor-foods USER_NAME=admin PASSWORD=... python scripts/ui_first_screen.py [--json out.json] [--shots dir]
 
 At 1366x768, 1280x720, 1440x900, 1920x1080 and 390x844 (a touch screen) it asserts, per page:
+  - none of "[object", "undefined", "null", "NaN" or a bare "?" in the text of any of these pages (a value the server did not send is said in words);
   - no sideways scroll on any page that has rows (Suppliers used to push its Remove button off the right edge);
   - Overview: no button, label or sentence sits on the title, and the purpose sentence is whole or "About this page" shows it;
   - the purpose sentence of Overview, Situations, Hygiene, Sentinels, Suppliers, Secrets and Scans is whole, or an "About this page" button is on screen and
     opens the whole sentence with a tap and with Enter, and Escape closes it again and gives the focus back to the button;
-  - Changes: at least 3 data rows fully on the first screen at 1366x768 and 1280x720 (the daily chart is closed under its own line), 1 on a phone;
+  - Changes: at least 5 data rows fully on the first screen at 1366x768 and 1280x720 (the daily chart is closed under its own line), 1 on a phone;
   - Sentinels: at least 3 rows fully on the first screen on a desktop and 2 on a phone, no summary strip that scrolls sideways, no text cut at the side, and a Sentinel's note
     (why its update failed) is on its closed row;
+  - no host name on a list page is broken over two lines;
   - Findings and CVE matches: each row's severity chip is inside the row, whole, not under the row menu, and not faded out;
   - CVE matches has the three retest chips the Findings filter has;
   - an empty, never-scanned project says nothing has been scanned yet on Findings and Hygiene, never "healthy" or "Every finding is fixed";
   - on a phone the Hygiene tile buttons, the project switcher, the Overview map tiles and the About button are at least 44px.
+  - Settings, configMaxxing, Auto-tuning: the History's newest five changes are whole on a 1280x720 first screen, each says Why and What happened, none of the text above shows, and on a phone Revert and Apply are 44px;
 Rows must be above the bottom bar a phone draws, not only inside the window. Exit status 1 when any assertion fails. CHROMIUM=/path/to/chrome picks the browser.
 """
 import glob
@@ -50,7 +53,12 @@ PAGES = {
     'scans': (f'{PROJECT}/scans/', 'main tbody tr'),
     'findings': (f'{PROJECT}/vulns/', '.host-rows .host-row'),
     'matches': (f'{PROJECT}/matches/', '.host-rows .host-row'),
+    'hosts': (f'{PROJECT}/hosts/', '.host-rows .host-row'),
+    'targets': (f'{PROJECT}/targets/', 'main tbody tr'),
+    'activity': (f'{PROJECT}/activity/', 'main tbody tr'),
 }
+# text a person must never read on a page: an object printed as text, a missing value, a bare question mark standing for "unknown"
+BAD_TEXT = re.compile(r'\[object|\bundefined\b|\bnull\b|\bNaN\b|(?:^|[\s(:>])\?(?:$|[\s),.:])', re.M)
 PURPOSE_PAGES = ('overview', 'situations', 'hygiene', 'sentinels', 'suppliers', 'secrets', 'scans')
 MEASURE = r"""(sel) => {
   const vis = (e) => { const cs = getComputedStyle(e); return cs.display !== 'none' && cs.visibility !== 'hidden' && e.getClientRects().length > 0; };
@@ -76,6 +84,7 @@ MEASURE = r"""(sel) => {
     if (!vis(e) || e.children.length) continue;
     if (e.scrollWidth > e.clientWidth + 1 && /(hidden|clip)/.test(getComputedStyle(e).overflowX) && !/-webkit-box/.test(getComputedStyle(e).display)) cut.push((e.textContent || '').trim().slice(0, 40));
   }
+  const wrapped = [...document.querySelectorAll('main td a.host-link, main .host-row a.host-link, main td .host-link')].filter((e) => { if (!vis(e)) return false; const r = document.createRange(); r.selectNodeContents(e); return new Set([...r.getClientRects()].map((q) => Math.round(q.top / 4))).size > 1; }).map((e) => e.textContent.trim().slice(0, 40));
   const sum = document.querySelector('.sl-sum');
   const sumScroll = sum ? sum.scrollWidth - sum.clientWidth : 0;
   const SEV = /^(critical|high|medium|low|info|fire|smoke|ice|clean)$/i;
@@ -95,7 +104,7 @@ MEASURE = r"""(sel) => {
   return {rows: rows.length, fullRows: full, firstTop: rows.length ? Math.round(rows[0].getBoundingClientRect().top) : null, floor,
     hscroll: document.documentElement.scrollWidth - innerWidth, over, h1: h1 && h1.textContent.trim(),
     sub: sub && {text: sub.textContent.replace(/\s+/g, ' ').trim(), cut: sub.scrollWidth > sub.clientWidth + 1 || sub.scrollHeight > sub.clientHeight + 1, drawn},
-    sumScroll,
+    sumScroll, wrapped,
     about: about && vis(about) ? Math.round(about.getBoundingClientRect().height) : null, cut, chips,
     alert: !!document.querySelector('.ab-row')};
 }"""
@@ -168,6 +177,9 @@ def measure_all(b, shots):
             out[f'{name}@{tag}'] = m
             if shots:
                 pg.screenshot(path=os.path.join(shots, f'{name}-{tag}.png'))
+            text = pg.inner_text('main')
+            bad = sorted({text[max(0, x.start() - 25):x.end() + 15].replace('\n', ' ') for x in BAD_TEXT.finditer(text)})[:3]
+            check(not bad, f'{name} {tag}: no "[object", "undefined", "null", "NaN" or bare "?" in the page text ({bad})')
             if name == 'overview':
                 check(m['alert'], f'{tag}: the alert strip is showing (seed an AdminAlert: the first screen is measured with it)')
             if name != 'project-sentinels':
@@ -177,9 +189,11 @@ def measure_all(b, shots):
             if name in PURPOSE_PAGES:
                 purpose_checks(pg, name, m, tag)
             if name == 'changes':
-                need = 1 if touch else 3
+                need = 1 if touch else 5
                 if touch or (w, h) in ((1366, 768), (1280, 720)):
                     check(m['fullRows'] >= need, f'changes {tag}: {m["fullRows"]} data rows fully on the first screen, first at y={m["firstTop"]} (need {need})')
+            if name in ('changes', 'findings', 'matches', 'hygiene', 'hosts', 'scans', 'secrets', 'situations'):
+                check(not m['wrapped'], f'{name} {tag}: no host name is broken over two lines ({m["wrapped"][:3]})')
             if name == 'sentinels':
                 need = 2 if touch else 3
                 check(m['fullRows'] >= need, f'sentinels {tag}: {m["fullRows"]} Sentinel rows fully on the first screen, first at y={m["firstTop"]} (need {need})')
@@ -226,6 +240,32 @@ def matches_filter(b):
     ctx.close()
 
 
+def autotune_history(b):
+    """Settings, configMaxxing, Auto-tuning (static/cve/autotune-history.js): the newest five changes are whole on the first screen of a 1280x720 window once the card is
+    open, each says what, why and what happened, nothing reads "[object", "undefined", "null", "NaN" or a bare "?", and on a phone the Revert and Apply buttons are 44px."""
+    for width, height, touch in ((1280, 720, False), (390, 844, True)):
+        ctx = b.new_context(viewport={'width': width, 'height': height}, is_mobile=touch, has_touch=touch)
+        pg = login(ctx)
+        pg.goto(f'{BASE}/cve/settings/#configmaxxing/autotune')
+        pg.wait_for_selector('.at-line', timeout=15000)
+        pg.wait_for_timeout(1500)
+        m = pg.evaluate("""() => { const lines = [...document.querySelectorAll('.at-line')];
+          return {lines: lines.length, whole: lines.slice(0, 5).filter((l) => { const r = l.getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight; }).length,
+                  text: (document.getElementById('configmaxxing-autotune') || document.body).innerText,
+                  labelled: lines.slice(0, 5).filter((l) => /Why: /.test(l.innerText) && /What happened: /.test(l.innerText)).length,
+                  buttons: [...document.querySelectorAll('.at-line button')].map((e) => Math.round(e.getBoundingClientRect().height)), sideways: document.documentElement.scrollWidth > innerWidth}; }""")
+        tag = f'Auto-tuning History at {width}x{height}'
+        check(m['lines'] >= 5, f'{tag}: the seeded changes are listed ({m["lines"]})')
+        if not touch:
+            check(m['whole'] == 5, f'{tag}: the newest five changes are whole on the first screen ({m["whole"]})')
+        check(m['labelled'] == min(5, m['lines']), f'{tag}: every line says Why and What happened')
+        check(not BAD_TEXT.search(m['text']), f'{tag}: no [object, undefined, null, NaN or bare ? in the card')
+        check(not m['sideways'], f'{tag}: no sideways scroll')
+        if touch:
+            check(m['buttons'] and min(m['buttons']) >= 44, f'{tag}: Revert and Apply are 44px high ({m["buttons"]})')
+        ctx.close()
+
+
 def empty_project(b):
     if not EMPTY:
         print('skip the empty-project checks: EMPTY_PROJECT is not set')
@@ -251,7 +291,7 @@ def main():
         res = measure_all(b, shots)
         if out:
             json.dump(res, open(out, 'w'), indent=1)
-        for step in () if ONLY else (matches_filter, empty_project):
+        for step in () if ONLY else (matches_filter, empty_project, autotune_history):
             try:
                 step(b)
             except Exception as e:  # an older build without the page or the control fails here: say so and keep the rest

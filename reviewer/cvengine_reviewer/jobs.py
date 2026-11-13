@@ -113,7 +113,11 @@ def ops_message(snapshot):
               if isinstance(fleet.get(key), (int, bool))}  # the server's own numbers, whitelisted: nothing else is passed through unfenced
     head = (f'The server\'s own count of its Sentinels: {json.dumps(counts, sort_keys=True)}' if counts
             else 'The server did not send its count of Sentinels (an older server): say nothing about how many Sentinels are live or whether there is a built-in scanner.')
-    return f'{head}\n\n{fenced}\n\nDiagnose every check that is not ok and choose actions, then answer with the JSON object.'
+    extra = ''
+    for key, label in (('signals', 'SIGNALS'), ('tuning', 'TUNING')):
+        if isinstance(snapshot.get(key), dict) and snapshot[key]:
+            extra += '\n\n' + guard.fence(label, snapshot[key])[0]  # the server's measurements (names of Sentinels among them): fenced like the checks, and bounded by the server
+    return f'{head}\n\n{fenced}{extra}\n\nDiagnose every check that is not ok and choose actions, then answer with the JSON object.'
 
 
 def parse_ops_reply(text, schema):

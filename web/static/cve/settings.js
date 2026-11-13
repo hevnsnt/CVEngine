@@ -12,7 +12,7 @@ import { FIELDS, GROUPS, anySet, applies, checkDraft, collect, effective, initia
 import { OWN_SERVER, readyToFetch, sameLabel as sameLabelOf } from "/staticfiles/cve/ai-models-logic.js";
 import { autoLoad, connectionStatus, modelPicker, newSource } from "/staticfiles/cve/ai-models.js";
 import "/staticfiles/cve/tunables-card.js"; // registers the cards of the generic tunable registry (AI spend, Scan pacing)
-import { SECTION_ID, SECTION_LABEL, isSectionHash, parseHash, readOpen, writeOpen } from "/staticfiles/cve/config-maxxing-logic.js";
+import { SECTION_ID, SECTION_LABEL, hashItem, isSectionHash, parseHash, readOpen, writeOpen } from "/staticfiles/cve/config-maxxing-logic.js";
 
 const root = document.getElementById("settings");
 const csrf = root.querySelector("[name=csrfmiddlewaretoken]").value;
@@ -945,7 +945,7 @@ const sections = {
   },
 
   async [SECTION_ID](m) {
-    await buildSection(m, { card: parseHash(location.hash).card });
+    await buildSection(m, { card: parseHash(location.hash).card, item: hashItem(location.hash) });
   },
 
   async tailscale(m) {
@@ -1612,7 +1612,7 @@ function setCmOpen(isOpen, remember = true) {
   if (remember) writeOpen(storage, isOpen);
 }
 
-async function open(name, card = "") {
+async function open(name, card = "", item = "") {
   tabs
     .querySelectorAll("button[data-tab]")
     .forEach((b) =>
@@ -1624,7 +1624,7 @@ async function open(name, card = "") {
   if (name === SECTION_ID) setCmOpen(true);
   if (name === SECTION_ID || advanced.includes(name)) setAdvOpen(true); // a link into an advanced pane opens the fold around it
   panel.textContent = "";
-  history.replaceState(null, "", card ? `#${name}/${card}` : `#${name}`);
+  history.replaceState(null, "", card ? `#${name}/${card}${item ? `/${item}` : ""}` : `#${name}`);
   try {
     await sections[name](panel);
   } catch (err) {
@@ -1657,6 +1657,7 @@ cards().forEach((entry) => {
 cmGroup.append(cmToggle, cmItems);
 // Timings (feed interval, discovery and nuclei limits) live in Administration; a link here so Advanced is where one looks for them
 advItems.append(Object.assign(el("a", "btn ghost sm", "Timings", { href: "/cve/admin/#timings" })));
+advItems.append(Object.assign(el("a", "btn ghost sm", "Questions about updates", { href: "/cve/update-questions/" }))); // what costs money or changes what is scanned, answered or changed later
 advItems.append(cmGroup);
 const advGroup = el("div", "set-group", null, { role: "presentation" });
 advGroup.append(advToggle, advItems);
@@ -1669,10 +1670,10 @@ const legacyTabs = { engines: "scan_policy", notifications: "alerts", email: "al
 const hash = location.hash.slice(1);
 if (hash === "openvas") window.location.replace("/cve/admin/#openvas"); // its one place now
 const hashTab = isSectionHash(location.hash) ? SECTION_ID : legacyTabs[hash] || hash;
-open(sections[hashTab] ? hashTab : "ai", isSectionHash(location.hash) ? parseHash(location.hash).card : "");
+open(sections[hashTab] ? hashTab : "ai", isSectionHash(location.hash) ? parseHash(location.hash).card : "", isSectionHash(location.hash) ? hashItem(location.hash) : "");
 window.addEventListener("hashchange", () => {
   if (location.hash === "#openvas") window.location.replace("/cve/admin/#openvas");
-  if (isSectionHash(location.hash)) open(SECTION_ID, parseHash(location.hash).card);
+  if (isSectionHash(location.hash)) open(SECTION_ID, parseHash(location.hash).card, hashItem(location.hash));
   else if (legacyTabs[location.hash.slice(1)]) open(legacyTabs[location.hash.slice(1)]);
   else if (sections[location.hash.slice(1)]) open(location.hash.slice(1));
 });
