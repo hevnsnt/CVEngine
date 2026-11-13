@@ -186,11 +186,13 @@ class StepTests(Fixture):
         first.refresh_from_db()
         self.assertEqual((first.step_state, first.dismissed_by_id, first.step_detail), ('dismissed', self.user.pk, 'dismissed: not now'))
         self.assertIsNotNone(first.dismissed_at)
-        again, run = self.run_step('rescan_host', '')  # the same state key: the host did not change
+        self.assertEqual(host_review.request(self.proj, HOST).pk, first.pk)  # the same state: Review now returns the review it has, no new one, no AI call
+        Port.objects.filter(pk=self.port.pk).update(version='9.9')  # a changed banner or version does not lift a Dismiss ...
+        same, run = self.run_step('rescan_host', '')
         run.assert_not_called()
-        self.assertEqual((again.step_state, again.state_key), ('dismissed', first.state_key))
-        self.assertIn('dismissed this step', again.step_detail)
-        Port.objects.filter(pk=self.port.pk).update(version='9.9')  # a changed service version is a new state of the host  # a changed host is a new question
+        self.assertEqual((same.step_state, same.state_key == first.state_key), ('dismissed', False))
+        self.assertIn('dismissed this step', same.step_detail)
+        self.match()  # ... a new open finding does
         third, _ = self.run_step('rescan_host', '')
         self.assertEqual(third.step_state, 'proposed')
 
@@ -278,7 +280,9 @@ class SweepTests(Fixture):
         review = self.deliver(self.queue(), self.body({'f1': ('true_open', 'high')}))
         self.assertEqual(review.status, 'applied')
         self.assertEqual(host_review.sweep()['queued'], 0)
-        Port.objects.filter(pk=self.port.pk).update(version='9.9')  # a changed service version is a new state of the host
+        Port.objects.filter(pk=self.port.pk).update(version='9.9')  # a changed service version is a new state of the host ...
+        self.assertEqual(host_review.sweep()['queued'], 0)  # ... but a host is reviewed automatically at most once a day
+        HostReview.objects.filter(pk=review.pk).update(created_at=timezone.now() - timedelta(days=2))
         self.assertEqual(host_review.sweep()['queued'], 1)
         HostReview.objects.filter(status='queued').delete()
         self.match()  # a new finding is a new state too

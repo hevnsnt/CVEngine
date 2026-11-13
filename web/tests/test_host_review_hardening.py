@@ -561,3 +561,56 @@ class SteeringThatIsNotAnInstructionTests(Base):
             triage_lib.note_raw('earlier reason: not vulnerable', host=False)
         self.assertEqual(len(raw), 2)
         self.assertEqual(raw.host, [])
+
+
+class ChangingBannerTests(Base):
+    """HV-5: a host that changes its own version banner at every scan does not buy a billed review each time and does not shed its Dismiss: at most one
+    automatic review of a host a day whatever the state key does (a person's Review now is exempt), and a Dismiss holds for 7 days unless the open findings
+    or a finding's evidence change."""
+
+    def setUp(self):
+        super().setUp()
+        self.match()
+        self.first = self.deliver(self.queue(), self.body({'f1': ('true_open', 'high')}, action='assess_host', reason='needs_proof', step_note='A fresh look would settle it.'))
+
+    def test_a_banner_that_changes_at_every_scan_is_one_automatic_review_a_day(self):
+        for i in range(5):
+            Port.objects.filter(pk=self.port.pk).update(version=f'8.{i}p{i}-random')
+            self.assertEqual(host_review.sweep()['queued'], 0, i)
+        self.assertEqual(HostReview.objects.count(), 1)
+        HostReview.objects.filter(pk=self.first.pk).update(created_at=timezone.now() - timedelta(hours=25))
+        self.assertEqual(host_review.sweep()['queued'], 1)  # a day later it is due again
+
+    def test_a_persons_review_now_is_exempt(self):
+        Port.objects.filter(pk=self.port.pk).update(version='9.9')
+        self.assertEqual(self.queue().status, 'queued')
+
+    def dismissed(self):
+        HostReview.objects.filter(pk=self.first.pk).update(step_mode='recommend', step_state='proposed')
+        host_review.dismiss_step(HostReview.objects.get(pk=self.first.pk), self.user)
+        HostReview.objects.filter(pk=self.first.pk).update(created_at=timezone.now() - timedelta(days=2))
+
+    def again(self):
+        review = self.queue()
+        return self.deliver(review, self.body({'f1': ('true_open', 'high')}, action='assess_host', reason='needs_proof', step_note='A fresh look would settle it.'))
+
+    def test_a_dismiss_survives_a_changing_banner_for_seven_days(self):
+        self.dismissed()
+        Port.objects.filter(pk=self.port.pk).update(version='9.9', product='OpenSSH-changed')
+        self.assertEqual(self.again().step_state, 'dismissed')
+
+    def test_a_dismiss_ends_after_seven_days(self):
+        self.dismissed()
+        HostReview.objects.filter(pk=self.first.pk).update(dismissed_at=timezone.now() - timedelta(days=8))
+        Port.objects.filter(pk=self.port.pk).update(version='9.9')
+        self.assertEqual(self.again().step_state, 'proposed')
+
+    def test_a_new_finding_or_a_changed_evidence_key_lifts_a_dismiss(self):
+        self.dismissed()
+        self.match()
+        self.assertEqual(self.again().step_state, 'proposed')
+
+    def test_a_changed_evidence_key_of_a_finding_lifts_it(self):
+        self.dismissed()
+        Triage.objects.update(evidence_key='changed-evidence-key')
+        self.assertEqual(self.again().step_state, 'proposed')

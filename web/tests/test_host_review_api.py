@@ -440,3 +440,14 @@ class UnchangedReviewTests(ApiFixture):
             person = Client()
             person.force_login(self.member)
             self.assertEqual(person.post(f'/api/v1/projects/{self.proj.slug}/hosts/{sub2.pk}/review', data='{}', content_type='application/json').status_code, 202)
+
+
+class WaitingTests(ApiFixture):
+    def test_a_host_that_changed_within_a_day_says_when_its_next_automatic_review_is_due(self):
+        review = self.applied()
+        self.assertIsNone(self.get()[1]['waiting_until'])  # nothing changed
+        Port.objects.filter(pk=self.port.pk).update(version='9.9')
+        waiting = self.get()[1]['waiting_until']
+        self.assertEqual(waiting[:13], (review.created_at + host_review.AUTO_REVIEW_INTERVAL).isoformat()[:13])
+        HostReview.objects.filter(pk=review.pk).update(created_at=review.created_at - host_review.AUTO_REVIEW_INTERVAL)
+        self.assertIsNone(self.get()[1]['waiting_until'])  # due now: the sweep takes it

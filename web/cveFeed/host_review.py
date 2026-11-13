@@ -119,6 +119,12 @@ def state_key(digest, rows):
     return hashlib.sha1(basis.encode()).hexdigest()
 
 
+def findings_key(rows):
+    """The open findings alone, as a short hash: each one's kind and evidence key. A Dismiss holds until this changes (a new or a closed finding, or a finding whose
+    evidence changed), not when a banner or a version string moves."""
+    return hashlib.sha1(json.dumps(sorted((r.kind, r.evidence_key or r.signature) for r in rows)).encode()).hexdigest()
+
+
 def key_of(state, rows, sub=None):
     """The state key of the host of ``state`` (a ``HostState``) with the open ``rows``: loads the host's services unless ``sub`` is given."""
     return state_key(services_digest(sub if sub is not None else _load_sub(state)), rows)
@@ -361,7 +367,7 @@ def _build(project, host, offered, now, raw):
         size = sum(len(json.dumps(p, default=str)) for p in parts)
     if size > PACKET_CHARS:
         raise HostReviewError(f'the packet is too large ({size} characters)')
-    return Built(parts, refs, offered, state_key=key, injection=injection, rows=pairs, domain=state.domain, sub=sub, counts=dict(counts),
+    return Built(parts, refs, offered, state_key=key, findings_key=findings_key(rows), injection=injection, rows=pairs, domain=state.domain, sub=sub, counts=dict(counts),
                  size=size, state=state, scanned=raw)
 
 
@@ -409,6 +415,8 @@ OUTAGE = ('provider_rate_limit', 'provider_timeout', 'provider_connect_timeout',
 OPEN_STALE_AFTER = timedelta(days=8)       # an open review whose job is long gone is closed by the sweep (a job lives at most ai_jobs.TTL)
 PROPOSAL_LIFE = timedelta(days=7)          # a proposed step nobody started or dismissed expires
 AUTO_HOST_HOURS = 24
+DISMISS_HOLD = timedelta(days=7)           # how long a Dismiss holds, unless the open findings or a finding's evidence change
+AUTO_REVIEW_INTERVAL = timedelta(hours=24)  # at most one automatic (sweep) review of a host in this time, whatever its state key does
 AUTO_LOCK = 7140                           # the first key of the advisory lock that serialises one project's automatic steps
 SWEEP_BATCH = 20                           # reviews one sweep run may queue
 SWEEP_WINDOW = 500                         # hosts one sweep run looks at
@@ -612,7 +620,7 @@ def request(project, host, priority=5, now=None):
             ok, why = available(now)
             if not ok:
                 raise HostReviewRefused(why, 429 if 'limit' in why else 503)
-            review = HostReview.objects.create(project=project, domain=built.domain, host=host, state_key=built.state_key, refs=built[1],
+            review = HostReview.objects.create(project=project, domain=built.domain, host=host, state_key=built.state_key, findings_key=built.findings_key, refs=built[1],
                                                injection=built.injection)
     except IntegrityError as exc:  # another review of this host was queued at the same moment
         raise HostReviewRefused('a review of this host is already open', 409) from exc
@@ -874,10 +882,13 @@ def auto_blockers(review, action, injection, now=None):
 
 
 def dismissed_before(review, action, target):
-    """Whether a person dismissed this same step for this same state of the host: it is not proposed again."""
+    """Whether a person dismissed this same step of this host in the last ``DISMISS_HOLD`` while its open findings (and their evidence) were the same: it is not
+    proposed again. A new banner or version alone does not lift it."""
     from cveFeed.models import HostReview
-    return HostReview.objects.filter(project=review.project, host=review.host, state_key=review.state_key, step_action=action, step_target=target,
-                                     step_state='dismissed').exclude(pk=review.pk).exists()
+    if not review.findings_key:
+        return False
+    return HostReview.objects.filter(project=review.project, host=review.host, findings_key=review.findings_key, step_action=action, step_target=target,
+                                     step_state='dismissed', dismissed_at__gte=timezone.now() - DISMISS_HOLD).exclude(pk=review.pk).exists()
 
 
 def _announce(review, action, text):
@@ -1035,6 +1046,9 @@ def _recent_blocks(candidates, now):
     for (project_id, host), row in newest.items():
         rows = open_rows(row.project, host)
         state = states.get((project_id, host))
+        if row.status in HostReview.OPEN or (row.status == 'applied' and now - row.created_at < AUTO_REVIEW_INTERVAL):
+            blocked.add((project_id, host))  # one automatic review of a host a day, however often its banner moves (a person's Review now is exempt)
+            continue
         if not rows or state is None or key_of(state, rows, subs.get((state.domain_id, host))) != row.state_key:
             continue  # the host changed since: due
         if row.status in HostReview.OPEN or row.status == 'applied':

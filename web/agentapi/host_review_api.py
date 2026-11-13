@@ -162,13 +162,29 @@ def describe(review, project):
             'step': _step(review, project) if review.status == 'applied' else None}
 
 
+def _waiting_until(project, host, row):
+    """When the next AUTOMATIC review of a host that changed is due, or None: a host is reviewed by the sweep at most once a day, so a host that changed within a day of its
+    last review waits (a person's Review now does not)."""
+    from cveFeed import host_review
+    if row is None or row.status != 'applied' or timezone_now() - row.created_at >= host_review.AUTO_REVIEW_INTERVAL:
+        return None
+    if host_review.unchanged_review(project, host) is not None or not host_review.open_rows(project, host):
+        return None
+    return _iso(row.created_at + host_review.AUTO_REVIEW_INTERVAL)
+
+
+def timezone_now():
+    from django.utils import timezone
+    return timezone.now()
+
+
 def get_host_review(ctx, slug, host_id):
     """The newest AI review of one host with its verdicts and next step; ``review`` is null while the host has never been reviewed. ``mode`` is the
     project's host review mode, ``readiness`` whether "Review now" would be accepted and, if not, why."""
     from cveFeed import host_review
     project, sub, host = _host_row(ctx, slug, host_id)
     row = _newest(project, host)
-    return {'host_id': sub.pk, 'host': host, 'mode': host_review.mode_of(project), 'readiness': readiness(project, host),
+    return {'host_id': sub.pk, 'host': host, 'mode': host_review.mode_of(project), 'readiness': readiness(project, host), 'waiting_until': _waiting_until(project, host, row),
             'auto_close': reviewer_settings().host_review_auto_close,
             'status': row.status if row else 'none', 'review': describe(row, project) if row else None}
 

@@ -2401,6 +2401,7 @@ class HostReview(models.Model):
     domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
     host = models.CharField(max_length=500)
     state_key = models.CharField(max_length=40)
+    findings_key = models.CharField(max_length=40, blank=True, default="", db_default="")  # the open findings alone (kind and evidence key): a Dismiss holds until it changes
     status = models.CharField(max_length=10, default="queued", db_default="queued")
     ai_job = models.ForeignKey("cveFeed.AIJob", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     refs = models.JSONField(default=dict, blank=True)  # {'f1': triage_id}: server side only

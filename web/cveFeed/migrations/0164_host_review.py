@@ -81,6 +81,7 @@ class Migration(migrations.Migration):
                 ),
                 ("host", models.CharField(max_length=500)),
                 ("state_key", models.CharField(max_length=40)),
+                ("findings_key", models.CharField(blank=True, db_default="", default="", max_length=40)),
                 (
                     "status",
                     models.CharField(
