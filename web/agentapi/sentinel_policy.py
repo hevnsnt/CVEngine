@@ -145,13 +145,19 @@ def shared(key, compute):
     return memo[key]
 
 
+def defaults_row():
+    """The one SentinelDefaults row: a query each time, and inside ``shared_lookups`` only the first (every reader of the instance defaults, the policy and the
+    self-update settings alike, shares it). A writer reads it with ``SentinelDefaults.current()`` itself."""
+    return shared('defaults-row', SentinelDefaults.current)
+
+
 def defaults():
     """``{'builtin': {kind: entry}, 'external': {kind: entry}, 'builtin_shipped': bool, 'by': str, 'at': iso|None}`` from the one defaults row (one query, or
     none inside ``shared_lookups``)."""
     memo = getattr(_local, 'cache', None)
     if memo is not None and 'defaults' in memo:
         return memo['defaults']
-    row = SentinelDefaults.current()
+    row = defaults_row()
     shipped = row.builtin_kinds is None
     out = {'builtin': normalise(SHIPPED_BUILTIN if shipped else row.builtin_kinds), 'external': normalise(row.external_kinds),
            'builtin_shipped': shipped, 'by': row.changed_by or '', 'at': row.changed_at.isoformat() if row.changed_at else None}

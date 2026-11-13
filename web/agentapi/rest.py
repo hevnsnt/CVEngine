@@ -2,8 +2,10 @@
 import json
 import logging
 import re
+import time
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.db import transaction
 from django.http import JsonResponse
 from django.http.response import HttpResponseBase
@@ -633,6 +635,33 @@ ETAG_ROUTES = re.compile(r'^(sentinels/live|projects/[-\w]+/scans)$')
 CLOCK_FIELDS = {'server_time', 'seconds_since_seen'}
 
 
+LIVE_304_SECONDS = 10  # how long a poll that names the ETag of the last Sentinels page answer is taken to still be current: the 304 then costs no work at all
+
+
+def _live_304_key(request, ctx):
+    return f'cve:live304:{ctx.user.pk}:{getattr(ctx.token, "pk", 0)}:{getattr(ctx.org, "pk", 0)}'
+
+
+def _live_304(request, ctx, path):
+    """A ``304`` for a Sentinels page poll that names the ETag this viewer was last given less than ``LIVE_304_SECONDS`` ago, without building the page
+    (the page is built for the answer that changes, never to find out that nothing did). Only the display: whatever a person may do about a Sentinel is
+    checked by the call that does it."""
+    if request.method != 'GET' or path != 'sentinels/live' or not request.META.get('HTTP_IF_NONE_MATCH'):
+        return None
+    from django.http import HttpResponseNotModified
+    from cveFeed import snapshot_cache
+    try:
+        entry = cache.get(_live_304_key(request, ctx))
+    except Exception:  # noqa: BLE001 - an unreadable cache is a page built as usual
+        return None
+    if not isinstance(entry, dict) or time.time() - entry['at'] >= LIVE_304_SECONDS or not snapshot_cache.matches(request, entry['etag']):
+        return None
+    response = HttpResponseNotModified()
+    response['ETag'] = f'"{entry["etag"]}"'
+    response['Cache-Control'] = 'private, no-cache'
+    return response
+
+
 def _without_clocks(value):
     if isinstance(value, dict):
         return {k: _without_clocks(v) for k, v in value.items() if k not in CLOCK_FIELDS}
@@ -657,6 +686,9 @@ def dispatch(request, path):
             continue
         if any(len(v) > MAX_ID_DIGITS for k, v in match.groupdict().items() if k.endswith('id') and v.isdigit()):
             return JsonResponse({'error': 'not found'}, status=404)  # no such id: and int() of thousands of digits is refused by Python
+        not_modified = _live_304(request, ctx, path)
+        if not_modified is not None:
+            return not_modified
         try:
             if request.method != 'GET' and ctx.token and ctx.token.read_only and not path.startswith('tokens') and not READ_ONLY_POSTS.match(path) and not SELF_GATED_POSTS.match(path):
                 raise ApiError(403, 'this token is read only')
@@ -682,7 +714,13 @@ def dispatch(request, path):
         data, status = result if isinstance(result, tuple) else (result, 200)
         if request.method == 'GET' and status == 200 and ETAG_ROUTES.match(path):
             from cveFeed import snapshot_cache
-            return snapshot_cache.respond_payload(request, data, etag=snapshot_cache.token_of(_without_clocks(data)))
+            etag = snapshot_cache.token_of(_without_clocks(data))
+            if path == 'sentinels/live':
+                try:
+                    cache.set(_live_304_key(request, ctx), {'etag': etag, 'at': time.time()}, LIVE_304_SECONDS * 3)
+                except Exception:  # noqa: BLE001
+                    pass
+            return snapshot_cache.respond_payload(request, data, etag=etag)
         return JsonResponse(data, status=status, safe=False)  # a route (stats/history) can answer a bare list
     if allowed:
         response = JsonResponse({'error': 'method not allowed'}, status=405)
