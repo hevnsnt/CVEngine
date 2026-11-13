@@ -69,6 +69,18 @@ class SettingsApiTests(TestCase):
 		self.assertTrue(AuditLog.objects.filter(action='scan_policy.nuclei_all_templates', target='off').exists())
 		self.assertTrue(send(self.c, 'PUT', 'scan_policy', {'nuclei_all_templates': True})[1]['nuclei_all_templates'])
 
+	def test_checks_that_send_credentials_are_off_until_a_superuser_turns_them_on(self):
+		from dashboard.models import AuditLog, ScanPolicy
+		self.assertIs(send(self.c, 'GET', 'scan_policy')[1]['allow_credential_checks'], False)
+		self.assertIs(ScanPolicy.objects.create().allow_credential_checks, False)  # a new install, and a row an upgrade added
+		self.assertEqual(send(client_for(self.admin), 'PUT', 'scan_policy', {'allow_credential_checks': True})[0], 403)
+		self.assertEqual(send(self.c, 'PUT', 'scan_policy', {'allow_credential_checks': 'yes'})[0], 400)
+		self.assertIs(send(self.c, 'PUT', 'scan_policy', {'allow_credential_checks': True})[1]['allow_credential_checks'], True)
+		self.assertTrue(AuditLog.objects.filter(action='scan_policy.allow_credential_checks', target='on').exists())
+		self.assertTrue(send(self.c, 'GET', 'scan_policy')[1]['nuclei_all_templates'])  # the other switch is untouched
+		self.assertIs(send(self.c, 'PUT', 'scan_policy', {'nuclei_all_templates': False})[1]['allow_credential_checks'], True)
+		self.assertIs(send(self.c, 'PUT', 'scan_policy', {'allow_credential_checks': False})[1]['allow_credential_checks'], False)
+
 	@mock.patch('socket.getaddrinfo', side_effect=socket.gaierror)  # the saved addresses are names, and a name that does not resolve is not blocked
 	def test_a_stored_ai_key_is_never_kept_for_a_different_address_or_provider(self, _lookup):
 		send(self.c, 'PUT', 'ai', {'provider': 'openai', 'base_url': 'https://llm.example.com/v1', 'api_key': 'sk-keep-me'})

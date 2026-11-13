@@ -353,7 +353,7 @@ class TaskTargetCarriesTheShaTests(LibraryMixin, TestCase):
         target = self.target()
         expected = template_bundle.current().sha256
         self.assertEqual(target['template_policy'], {'rev': nuclei_scan.TEMPLATE_POLICY_REV, 'read_only': True, 'bundle_sha256': expected})
-        self.assertEqual(target['etags'], ['dos'])
+        self.assertEqual(target['etags'], ['dos', 'default-login', 'bruteforce'])
         self.assertEqual(target['targets'], ['www.example.test'])
 
     def test_the_field_follows_the_policy(self):

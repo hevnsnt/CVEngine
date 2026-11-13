@@ -842,7 +842,7 @@ CHECKS = (
     Check('ssh-inspection', 'SSH inspection (host key and banner, on a Sentinel)', plan_ssh, kinds=('ssh-probe', 'ssh-probe-failed'), stages=('ssh_probe',), ttl_kind='ssh-probe'),
     Check('db-exposure', 'Unauthenticated database check', plan_db_exposure, stages=('db_exposure_scan',)),
     Check('nuclei-tech', 'Nuclei technology pass', plan_nuclei_tech, kinds=('nuclei-light',), stages=('nuclei_light_scan',)),
-    Check('nuclei', 'Nuclei template scan', plan_nuclei, kinds=('nuclei',), stages=('nuclei_targeted_scan',)),
+    Check('nuclei', 'Nuclei template scan', plan_nuclei, kinds=('nuclei', 'nuclei-nocheck'), stages=('nuclei_targeted_scan',)),
     Check('nuclei-deep', 'Weekly deep Nuclei', plan_nuclei_deep, kinds=('nuclei-deep-host', 'nuclei-deep-target')),
     Check('nuclei-cve', 'CVE template tests', plan_nuclei_cve, kinds=('nuclei-cve',)),
     Check('waf', 'WAF fingerprint', plan_waf, kinds=('wafw00f',), stages=('wafw00f',)),

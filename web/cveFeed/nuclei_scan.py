@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 NUCLEI_CHUNK = 100  # targets handed to a stream per call: the ledger is written after each call, so a failure part way marks only the later ones
 # A run's flags and the ports a bare host is probed on are the scanner library's (cvengine_scanner.flags), shared with every Sentinel.
 TEMPLATE_POLICY_REV = 'readonly-2'
-ALL_TEMPLATES_REV = 'all-1'
+ALL_TEMPLATES_REV = 'all-2'  # all-1 ran default-login and bruteforce templates; all-2 leaves them out unless a person allowed them (``all-2-cred``)
 _APPROVED = {'root': None, 'at': 0, 'value': None}
 _APPROVED_LOCK = threading.Lock()
 
@@ -64,7 +64,9 @@ def _report_policy(revision, count, skipped, essential_skipped):
 def policy_rev():
     """The template policy in force: part of every coverage key, so changing the setting makes hosts due for the other set."""
     from cveFeed import validation
-    return ALL_TEMPLATES_REV if validation.all_templates_allowed() else TEMPLATE_POLICY_REV
+    if validation.all_templates_allowed():
+        return f'{ALL_TEMPLATES_REV}-cred' if validation.credential_checks_allowed() else ALL_TEMPLATES_REV
+    return TEMPLATE_POLICY_REV
 
 
 def approved_templates():
@@ -285,14 +287,37 @@ def backed_off(service, targets, project):
     return set(ledger.fresh(ledger.failed_service(service), targets, project))
 
 
+def no_check_held(service, targets, project):
+    """The targets of ``targets`` a Sentinel answered "no check exists for this service" for within the last week (``ledger.nocheck_service``): not asked again before then."""
+    from cveFeed import ledger
+    return set(ledger.fresh(ledger.nocheck_service(service), targets, project))
+
+
+def _is_no_check(row):
+    from agentapi.sentinel_dispatch import NO_CHECK_REASON
+    return isinstance(row, dict) and str(row.get('reason') or '').strip().lower() == NO_CHECK_REASON
+
+
 def record_reached(service, chunk, project, scan, stream):
     """Write the ledger for one chunk the stream returned from: the targets it reached as done, the ones it could not (a name that did not resolve, a host
     the Sentinel could not connect to: ``stream.unreached``, and a port it only partly checked: ``stream.not_checked``) as failed. A pass that finds nothing on a host it never reached is not a clean host."""
     from cveFeed import ledger
     # a port the Sentinel only partly checked (``stream.not_checked``: out of time part way, some template runs failed) was not scanned either: it stays due
-    partly = {str(row.get('target') or '').strip().lower() for row in getattr(stream, 'not_checked', ()) if isinstance(row, dict)}
-    unreached = {t for t in chunk if t in getattr(stream, 'unreached', ()) or t.strip().lower() in partly}
-    ledger.record(service, [t for t in chunk if t not in unreached], project, scan)
+    rows = [row for row in getattr(stream, 'not_checked', ()) if isinstance(row, dict)]
+    # a port of a service no allowlisted template speaks to (postgres, ldap...) was not checked because nothing can check it, not because a check failed: it is
+    # not failed and not covered, and it is held for a week under its own key. The library before that fix also names it in ``unreached``: that does not fail it.
+    no_check = {str(row.get('target') or '').strip().lower() for row in rows if _is_no_check(row)}
+    partly = {str(row.get('target') or '').strip().lower() for row in rows} - no_check
+    unreached = {t for t in chunk if (t in getattr(stream, 'unreached', ()) or t.strip().lower() in partly) and t.strip().lower() not in no_check}
+    held_back = [t for t in chunk if t.strip().lower() in no_check]
+    ledger.record(service, [t for t in chunk if t not in unreached and t not in held_back], project, scan)
+    if held_back:
+        ledger.record(ledger.nocheck_service(service), held_back, project, scan)
+        from cveFeed import activity
+        shown = '; '.join(held_back[:5]) + (f' and {len(held_back) - 5} more' if len(held_back) > 5 else '')
+        activity.log('run_check', f'No nuclei check exists for the service on {len(held_back)} port(s): {shown}. They are not counted as checked by nuclei and are not asked again for '
+                     f'{ledger.ttl_label(ledger.nocheck_service(service))}.', project=getattr(project, 'pk', project), scan_id=getattr(scan, 'pk', scan), status='done')
+        stream.not_checked = [row for row in getattr(stream, 'not_checked', ()) if not (isinstance(row, dict) and str(row.get('target') or '').strip().lower() in no_check and _is_no_check(row))]
     if unreached:
         ledger.record(service, sorted(unreached), project, scan, 'failed')
     retry_later = sorted(t for t in chunk if t.strip().lower() in partly)
@@ -363,7 +388,8 @@ def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, servi
     service = service_override or (ledger.nuclei_tag_service(tags) if tags else 'nuclei')
     covered = set() if force else ledger.fresh(service, targets, project)
     held = set() if force else backed_off(service, [t for t in targets if t not in covered], project)
-    todo = [t for t in targets if t not in covered and t not in held]
+    nothing = set() if force else no_check_held(service, [t for t in targets if t not in covered and t not in held], project)  # no check exists for them: asked again after a week
+    todo = [t for t in targets if t not in covered and t not in held and t not in nothing]
     if held:
         activity.log('run_check', f'Nuclei on {domain.name}: {len(held)} target(s) were only partly checked in the last {ledger.ttl_label(ledger.failed_service(service))} '
                      'and are asked again after that', project=project, scan_id=scan.id)
@@ -474,10 +500,33 @@ def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, servi
     return out
 
 
+def _without_credential_tags(scan_id, tags):
+    """``(tags, skip)``: a focused pass never names a credential tag (``nuclei_templates.refused_tags``) while credential checks are off. ``skip`` is True when the
+    pass asked for nothing else: it must not fall back to every template, so it does not run."""
+    if not tags:
+        return tags, False
+    from cveFeed import activity
+    from cveFeed.nuclei_templates import refused_tags
+    refused = refused_tags()
+    kept = [t for t in tags if t not in refused]
+    if len(kept) == len(tags):
+        return tags, False
+    if not kept:
+        from startScan.models import ScanHistory
+        scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
+        activity.log('run_check', f'Nuclei focused pass skipped for {scan.domain.name}: it asked only for checks that send credentials ({", ".join(sorted(tags))}), '
+                     'which are off (Settings > Scan policy)', project=scan.domain.project_id, scan_id=scan.id)
+        return kept, True
+    return kept, False
+
+
 def run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, service_override=None, force=False):
     """``_run_nuclei``, then, when the scan's target has a stored sign-in (cveFeed.auth_checks), the same selection again for the hosts that
     sign-in covers, on the built-in scanner only (cveFeed.auth_nuclei). A target with none runs exactly as before."""
     from cveFeed import auth_nuclei, ledger
+    tags, skip = _without_credential_tags(scan_id, tags)
+    if skip:
+        return {'targets': 0, 'findings': 0}
     scope = auth_nuclei.scope_for_scan(scan_id)
     if scope is None:
         return _run_nuclei(scan_id, stream, tags, targets, severities, service_override, force)
