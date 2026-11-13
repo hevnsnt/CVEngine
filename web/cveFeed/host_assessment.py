@@ -87,6 +87,7 @@ def batch_size():
     return max(1, min(MAX_BATCH, wanted))
 
 
+SHARE_DEFER_LIMIT = 40  # after this many looks (an hour at 90 seconds) an assessment held back by the share limit runs anyway: it must not wait for ever behind a gate that stays shut, and the reaper only fails a queued row after twelve hours
 SHARE_DEFER_SECONDS = 90  # an assessment held back by the share limit is looked at again after this long (queued again with a delay; its row stays queued)
 
 
@@ -101,9 +102,31 @@ def share_limit():
 
 
 def slots_held():
-    """How many pool slots the running assessments hold: one per running batch (a batch of ``batch_size()`` rows is one task), rounded up."""
-    running = HostAssessment.objects.filter(status='running').count()
-    return -(-running // max(1, batch_size()))
+    """How many discovery-pool slots the running assessments hold: one per running TASK. The rows of one batch share a ``celery_id`` and are one task; every other running row
+    is a task of its own (a project no live Sentinel covers, or one a host-narrowed Sentinel covers, runs one host per task, and so does a person's single request). FC-2:
+    this used to be rows divided by the batch size, which counted eight single-host tasks in a pool of eight as one slot."""
+    rows = list(HostAssessment.objects.filter(status='running').values_list('celery_id', flat=True))
+    return len({c for c in rows if c}) + sum(1 for c in rows if not c)
+
+
+def deferral_count(task_id):
+    """How many times this task has been put off by the share limit (a Redis counter that outlives the re-queued copies and expires after six hours). 0 when it cannot be read."""
+    try:
+        from reNgine import resources
+        client = resources.redis_client()
+        if client is None or not task_id:
+            return 0
+        key = f'cvengine:assess_deferred:{task_id}'
+        n = int(client.incr(key))
+        client.expire(key, 6 * 3600)
+        return n
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def still_queued(ids):
+    """Whether any of these assessment rows is still waiting to start. A message for rows that ended meanwhile (stopped, failed by the reaper, finished, deleted) is not put off again."""
+    return HostAssessment.objects.filter(pk__in=ids, status='queued').exists()
 
 
 def over_share():

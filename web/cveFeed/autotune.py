@@ -83,6 +83,11 @@ def _env_int(name):
 DISCOVERY_PIN_BELOW = 4  # scripts/update-deploy.sh warn_discovery_pin says the same at the same number
 
 
+def _scan():
+    from cveFeed import scan_concurrency
+    return scan_concurrency
+
+
 def managed():
     """Every setting that opts in to auto-tuning, from both registries, with its auto-tuning range (``cveFeed.autotune_policy.Setting``). For a
     scanner kind, HEAVY_TUNE_MIN_<KIND> / HEAVY_TUNE_MAX_<KIND> in the environment narrow or widen the range (never outside what the page
@@ -856,6 +861,8 @@ def verify_pending(now_dt, samples):
             outcome, detail = 'unknown', 'the setting is no longer auto-tuned, so the change was not judged'
         elif due == 'give_up':
             outcome, detail = 'unknown', f'only {len(after)} measurement(s) came after the change, so it was not judged'
+        elif _lane_unconfirmed(m, d):
+            outcome, detail = 'unknown', 'the lane still reports another size than the one set, so the change did not take effect and was not judged'
         else:
             after_m = policy.measure(m.setting, after, direction)
             outcome, detail = policy.verdict(base, after_m)
@@ -866,6 +873,16 @@ def verify_pending(now_dt, samples):
             reverted = _auto_revert(m, d, detail, now_dt)
         judged.append({'id': d.pk, 'setting': d.setting, 'outcome': outcome, 'detail': detail, 'reverted': reverted})
     return judged
+
+
+def _lane_unconfirmed(m, d):
+    """FC-4e: a worker lane's decision is recorded as applied when the number is written; the lane takes it with the next resize round. Judged after thirty minutes the lane
+    must report the new size: when it still reports another one the change did not happen, and what it did to memory says nothing about it."""
+    from cveFeed import scan_concurrency
+    if m.key not in scan_concurrency.LANE_KEYS:
+        return False
+    seen = scan_concurrency.running_lane(m.key)
+    return bool(seen and any(c != d.new_value for c in seen['ceilings']))
 
 
 def _auto_revert(m, d, detail, now_dt):
@@ -1035,6 +1052,26 @@ PAUSE_FAILURES = 3         # a Sentinel that failed a kind this many times and f
 PAUSE_HOURS = (2, 4, 6)    # the first pause, the second within a day, the third and later (``sentinel_policy.PAUSE_MAX_HOURS`` holds the last)
 
 
+KIND_ALERT = 'kind_failing'
+
+
+def _kind_alert(stuck):
+    """One notice while a kind fails every time on a Sentinel and could not be paused because no other live Sentinel could take it (FC-3); resolved by the first round that finds none."""
+    from cveFeed.models import AdminAlert
+    now = _now()
+    open_ = AdminAlert.objects.filter(code=KIND_ALERT, resolved_at__isnull=True).first()
+    if not stuck:
+        if open_ is not None:
+            AdminAlert.objects.filter(pk=open_.pk).update(resolved_at=now)
+        return
+    detail = '; '.join(stuck[:5])
+    title = 'A task kind fails every time on a Sentinel'
+    if open_ is None:
+        AdminAlert.objects.create(code=KIND_ALERT, severity='warning', title=title, detail=detail + '. Auto-tuning did not pause it, because that would leave the work nowhere to go. Look at that Sentinel, or bring another one online.')
+    else:
+        AdminAlert.objects.filter(pk=open_.pk).update(detail=detail + '. Auto-tuning did not pause it, because that would leave the work nowhere to go. Look at that Sentinel, or bring another one online.', last_seen=now)
+
+
 def pause_failing_kinds(mode, now_dt):
     """The knob for ``Sentinel kind pause``: a task kind that failed ``PAUSE_FAILURES`` times on one Sentinel and finished none there in the last
     ``PAUSE_WINDOW_HOURS`` (counted from the end of that Sentinel's last pause of the kind, so a pause is never repeated on the failures that caused it) is paused
@@ -1046,7 +1083,7 @@ def pause_failing_kinds(mode, now_dt):
     from agentapi.models import Agent, SentinelTask
     if mode != 'auto':
         return []
-    made = []
+    made, stuck = [], []
     for agent in Agent.objects.filter(kind='scanner', status='active'):
         stored = ((agent.managed_settings or {}).get('pauses') or {}).get('value') or {}
         active = sentinel_policy.active_pauses(agent, now_dt)
@@ -1066,6 +1103,8 @@ def pause_failing_kinds(mode, now_dt):
                 until = sentinel_policy.pause(agent, kind, hours, reason, by='auto-tuning', now=now_dt)
             except sentinel_policy.PauseRefused as exc:
                 logger.info('auto-tune: %s not paused on %s: %s', kind, agent.name, exc)
+                if 'last one' in str(exc):  # FC-3: no other live Sentinel can take the work: nothing is paused, and a person is told
+                    stuck.append(f'{sentinel_policy.label(kind)} fails every time on {agent.name} and no other live Sentinel can take it')
                 continue
             decision = _record(setting=f'sentinel_pause:{kind}', old_value=None, new_value=hours, mode=mode, source='controller', action='pause', layer='',
                                applied=True, pressure=True, phase='pause', reason=f'{reason}; paused until {until.isoformat(timespec="minutes")}',
@@ -1073,6 +1112,7 @@ def pause_failing_kinds(mode, now_dt):
             _audit(None, 'autotune.pause', f'{agent.name}:{kind}', hours=hours, until=until.isoformat(), reason=reason, decision_id=decision.pk)
             _activity(f'Auto-tuning paused {sentinel_policy.label(kind)} on {agent.name} for {hours} hours: {reason}', setting=decision.setting, decision_id=decision.pk)
             made.append({'sentinel': agent.name, 'kind': kind, 'hours': hours, 'until': until.isoformat(), 'id': decision.pk})
+    _kind_alert(stuck)
     return made
 
 
@@ -1529,6 +1569,10 @@ def annotate(fields):
         m = keys.get(f['key'])
         if m is None:
             f['autotune'] = {'managed': False}
+            floor = _scan().LANE_FLOORS.get(f['key'])
+            if floor is not None:  # FC-1: say why a worker lane is left alone
+                f['autotune']['why_not_managed'] = (f'this lane is set to {f.get("value")}, which is at or below its floor of {floor}: it also runs tasks that must not be starved '
+                                                    'by one long task, so auto-tuning never lowers it')
             continue
         env_pinned = f.get('source') == 'environment' and _registry(m.registry).env_pin(_registry(m.registry).BY_KEY[m.key])
         item = {'managed': True, 'pinned': f.get('source') == 'admin' or env_pinned,

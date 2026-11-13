@@ -19,8 +19,8 @@ from reNgine import resources
 from tests.test_alerts_tell_the_truth import Base as SentinelBase, WAIT
 from tests.test_autotune import BASE, NOW, Isolated, change, decide, history, merge
 
-LANE_FEED = policy.Setting('lane.cve_feed', 'lane:cve_feed', 'cve feed lane', 1, 4, 1, 'more', 4, 4)
-LANE_CLASSIC = policy.Setting('lane.classic', 'lane:classic', 'classic lane', 3, 10, 1, 'more', 10, 10)
+LANE_FEED = policy.Setting('lane.cve_feed', 'lane:cve_feed', 'cve feed lane', 3, 4, 1, 'more', 4, 4)
+LANE_CLASSIC = policy.Setting('lane.classic', 'lane:classic', 'classic lane', 6, 10, 1, 'more', 10, 10)
 SHARE = policy.Setting('assess_share_percent', 'assess_share', 'assessment share', 25, 75, 10, 'more', 75, 75)
 LANE_AT_LIMIT = {'lanes': {'cve_feed': {'percent': 95, 'restarts_24h': 0}, 'classic': {'percent': 30, 'restarts_24h': 0}}}
 LANE_CALM = {'lanes': {'cve_feed': {'percent': 40, 'restarts_24h': 0}, 'classic': {'percent': 30, 'restarts_24h': 0}}}
@@ -31,8 +31,8 @@ class RegistryTests(SimpleTestCase):
     def test_every_knob_is_in_the_registry_with_a_safe_range_and_auto_tuned(self):
         keys = autotune.by_key()
         feed, classic, share = keys['lane.cve_feed'].setting, keys['lane.classic'].setting, keys['assess_share_percent'].setting
-        self.assertEqual((feed.low, feed.high, feed.kind), (1, 4, 'lane:cve_feed'))  # never below 1, never above the shipped 4
-        self.assertEqual((classic.low, classic.high, classic.kind), (3, 10, 'lane:classic'))
+        self.assertEqual((feed.low, feed.high, feed.kind), (3, 4, 'lane:cve_feed'))  # never below its floor of 3, never above the shipped 4 (FC-1)
+        self.assertEqual((classic.low, classic.high, classic.kind), (6, 10, 'lane:classic'))
         self.assertEqual((share.low, share.high, share.kind), (25, 75, 'assess_share'))
         for key in ('lane.cve_feed', 'lane.classic', 'assess_share_percent'):
             self.assertTrue(sc.BY_KEY[key].auto_tunable)
@@ -47,6 +47,14 @@ class RegistryTests(SimpleTestCase):
         self.assertEqual(policy.size_for(LANE_FEED, {}, current=2)[0], 4)  # the target is the configured number, known
         self.assertTrue(policy.size_for(LANE_FEED, {}, current=2)[2])
 
+    def test_fc1_a_lane_at_or_below_its_floor_is_not_managed_and_the_card_says_why(self):
+        self.assertEqual(sc.LANE_FLOORS, {'lane.cve_feed': 3, 'lane.classic': 6})
+        self.assertEqual(sc.lane_range('lane.cve_feed', 4), (True, 3))
+        self.assertEqual(sc.lane_range('lane.cve_feed', 3), (False, 3))  # configured at the floor or under: no room to lower it
+        self.assertEqual(sc.lane_range('lane.cve_feed', 2), (False, 2))
+        self.assertEqual(sc.lane_range('lane.classic', 10), (True, 6))
+        self.assertEqual(sc.lane_range('lane.classic', 6), (False, 6))
+
     def test_no_knob_raises_a_memory_limit_or_spends_money(self):
         # the three knobs are numbers of concurrency and share; none is an AI spend cap or a container limit
         for m in autotune.managed():
@@ -58,7 +66,7 @@ class RegistryTests(SimpleTestCase):
 class LanePolicyTests(SimpleTestCase):
     def test_a_lane_at_its_memory_limit_in_two_measurements_in_a_row_backs_off_and_one_blip_does_not(self):
         plan = decide(LANE_FEED, 4, 4, history(3, **LANE_AT_LIMIT))
-        self.assertEqual((plan['phase'], plan['pressure'], plan['new']), ('back_off', True, 2))
+        self.assertEqual((plan['phase'], plan['pressure'], plan['new']), ('back_off', True, 3))  # one back-off, to the floor
         self.assertIn('95% of its memory limit', plan['reason'])
         blip = history(3, **LANE_CALM)
         blip[-1] = merge(blip[-1], LANE_AT_LIMIT)
@@ -79,31 +87,33 @@ class LanePolicyTests(SimpleTestCase):
         self.assertIsNone(policy.trouble(LANE_FEED, unknown))
         self.assertIsNone(policy.trouble(LANE_FEED, history(3)))  # no lane record at all
 
-    def test_never_below_one_and_a_lane_already_at_its_minimum_stays(self):
-        plan = decide(LANE_FEED, 1, 4, history(3, **LANE_AT_LIMIT))
+    def test_never_below_the_floor_and_a_lane_already_at_its_minimum_stays(self):
+        plan = decide(LANE_FEED, 3, 4, history(3, **LANE_AT_LIMIT))
         self.assertIsNone(plan['new'])
         self.assertIn('already at the auto-tuning minimum', plan['reason'])
-        self.assertEqual(policy.backoff(LANE_CLASSIC, 3), 3)  # the classic lane's floor is 3
+        self.assertEqual(policy.backoff(LANE_CLASSIC, 6), 6)  # the classic lane's floor is 6
+        self.assertEqual(policy.backoff(LANE_CLASSIC, 10), 7)
 
     def test_a_lane_is_raised_back_one_step_at_a_time_inside_the_remembered_trouble_ceiling_and_never_above_the_configured_number(self):
         calm = history(15, **LANE_CALM)  # 140 minutes without trouble
-        past = [change(5 * 3600, 4, 2, 'back_off', pressure=True)]  # 4 caused trouble five hours ago
-        plan = decide(LANE_FEED, 2, 4, calm, past)
-        self.assertEqual((plan['phase'], plan['new']), ('probe', 3))
+        past = [change(5 * 3600, 4, 3, 'back_off', pressure=True)]  # 4 caused trouble five hours ago
         self.assertEqual(decide(LANE_FEED, 3, 4, calm, past)['new'], None)  # 4 is the level that caused trouble
+        wide = policy.Setting('lane.classic', 'lane:classic', 'classic lane', 6, 10, 1, 'more', 10, 10)
+        plan = decide(wide, 6, 10, calm, [change(5 * 3600, 9, 6, 'back_off', pressure=True)])  # 9 caused trouble: the ceiling is 8, reached one step at a time
+        self.assertEqual((plan['phase'], plan['new']), ('probe', 7))
         self.assertIn('caused trouble', decide(LANE_FEED, 3, 4, calm, past)['why_not_raised'])
         # a day later the memory of it is gone, and the configured number is the most there is
-        old = [change(30 * 3600, 4, 2, 'back_off', pressure=True)]
+        old = [change(30 * 3600, 4, 3, 'back_off', pressure=True)]
         self.assertEqual(decide(LANE_FEED, 3, 4, calm, old)['new'], 4)
         self.assertIsNone(decide(LANE_FEED, 4, 4, calm, old)['new'])
         # a lane that still holds most of its memory is not raised
         busy = history(15, lanes={'cve_feed': {'percent': 75, 'restarts_24h': 0}})
-        self.assertIn('holds 75% of its memory limit', decide(LANE_FEED, 2, 4, busy, past)['why_not_raised'])
+        self.assertIn('holds 75% of its memory limit', decide(LANE_FEED, 3, 4, busy, [change(5 * 3600, 3, 3, 'probe')])['why_not_raised'])
 
     def test_after_a_restart_a_lowered_lane_comes_back_one_step_not_in_one_jump(self):
         calm = history(3, **LANE_CALM)
-        plan = decide(LANE_FEED, 1, 4, calm, boot_at=NOW - 1200)  # restarted twenty minutes ago, nothing changed since
-        self.assertEqual((plan['phase'], plan['new']), ('aim_high', 2))
+        plan = decide(LANE_CLASSIC, 6, 10, calm, boot_at=NOW - 1200)  # restarted twenty minutes ago, nothing changed since
+        self.assertEqual((plan['phase'], plan['new']), ('aim_high', 7))
         self.assertEqual(decide(SHARE, 35, 75, history(3), boot_at=NOW - 1200)['new'], 75)  # the share is not memory: it aims at its target as before
 
     def test_what_a_lane_change_expects_and_is_judged_by(self):
@@ -165,21 +175,21 @@ class RunTests(Isolated, TestCase):
         self.run_at(0, LANE_AT_LIMIT)
         summary = self.run_at(10, LANE_AT_LIMIT)
         changes = {c['setting']: c for c in summary['changes']}
-        self.assertEqual((changes['lane.cve_feed']['from'], changes['lane.cve_feed']['to'], changes['lane.cve_feed']['applied']), (4, 2, True))
+        self.assertEqual((changes['lane.cve_feed']['from'], changes['lane.cve_feed']['to'], changes['lane.cve_feed']['applied']), (4, 3, True))
         self.assertNotIn('lane.classic', changes)  # the other lane was fine
         d = TuningDecision.objects.get(setting='lane.cve_feed')
         self.assertEqual((d.source, d.layer), ('controller', 'auto'))
         self.assertEqual((d.phase, d.pressure, d.expected), ('back_off', True, 'trouble'))
         self.assertIsNotNone(d.verify_at)  # judged after 30 minutes
         resources.invalidate_auto()
-        self.assertEqual(sc.resolve('lane.cve_feed'), {'value': 2, 'source': 'auto'})
-        self.assertEqual(sc.bootstrap_value('lane.cve_feed'), 2)  # what the entrypoint starts the lane with
+        self.assertEqual(sc.resolve('lane.cve_feed'), {'value': 3, 'source': 'auto'})
+        self.assertEqual(sc.bootstrap_value('lane.cve_feed'), 3)  # what the entrypoint starts the lane with
         self.assertGreaterEqual(self.resized.call_count, 1)  # the live resize was asked for
         for minutes in (20, 30, 40):
             summary = self.run_at(minutes, LANE_CALM)
         d.refresh_from_db()
         self.assertEqual((d.outcome, d.resolution), ('helped', ''))
-        self.assertEqual(AutoTuneSettings.current().values['lane.cve_feed'], 2)  # kept
+        self.assertEqual(AutoTuneSettings.current().values['lane.cve_feed'], 3)  # kept
 
     def test_replay_18_scans_behind_360_assessments_lowers_the_share_and_judges_it_by_the_scan_wait(self):
         for minutes in (0, 10):
@@ -199,23 +209,23 @@ class RunTests(Isolated, TestCase):
 
     def test_simulated_day_a_lane_that_stays_at_its_limit_is_lowered_to_the_floor_and_held_there_without_flapping(self):
         # the worst case for a memory rule: lowering the concurrency does not lower the lane's resident memory (a gevent process keeps what it grew to until it is
-        # recycled), so the trouble never clears. Fifty hours of ten-minute rounds: the lane goes 4, 2, 1 and stays, nothing goes above the configured 4 or below 1,
+        # recycled), so the trouble never clears. Fifty hours of ten-minute rounds: the lane goes 4, 3 and stays at its floor of 3, nothing goes above the configured 4 or below 3,
         # and nothing is raised while the trouble lasts or inside the remembered-trouble ceiling after it
         values = []
         for step in range(0, 6 * 50):
             self.run_at(step * 10, LANE_AT_LIMIT)
             values.append(AutoTuneSettings.current().values.get('lane.cve_feed', 4))
-        self.assertEqual(values[-1], 1)
-        self.assertTrue(all(1 <= v <= 4 for v in values))
-        self.assertEqual(sorted(set(values), reverse=True), [4, 2, 1])
+        self.assertEqual(values[-1], 3)
+        self.assertTrue(all(3 <= v <= 4 for v in values))
+        self.assertEqual(sorted(set(values), reverse=True), [4, 3])
         changes = TuningDecision.objects.filter(setting='lane.cve_feed', applied=True)
-        self.assertLessEqual(changes.count(), 3)  # two back-offs and the verification judgements that never revert a forced back-off upwards
+        self.assertEqual(changes.count(), 1)  # one back-off to the floor; nothing after it (a forced back-off is never reverted upwards)
         self.assertFalse(changes.exclude(action='lower').exists())
 
     def test_simulated_day_after_the_trouble_clears_the_lane_climbs_back_one_step_at_a_time_and_never_past_the_configured_number(self):
         for step in range(0, 12):
             self.run_at(step * 10, LANE_AT_LIMIT)
-        self.assertLessEqual(AutoTuneSettings.current().values.get('lane.cve_feed', 4), 2)
+        self.assertLessEqual(AutoTuneSettings.current().values.get('lane.cve_feed', 4), 3)
         seen = []
         for step in range(12, 6 * 60):
             self.run_at(step * 10, LANE_CALM)
@@ -234,6 +244,28 @@ class RunTests(Isolated, TestCase):
         self.assertFalse(TuningDecision.objects.filter(setting='lane.cve_feed').exists())
 
 
+class LaneFloorTests(Isolated, TestCase):
+    def test_fc1_the_card_says_why_a_lane_at_its_floor_is_left_alone(self):
+        fields = [{'key': 'lane.cve_feed', 'value': 3}, {'key': 'lane.classic', 'value': 6}, {'key': 'work_depth', 'value': 3}]
+        with mock.patch.object(autotune, 'managed', return_value=[]):
+            autotune.annotate(fields)
+        self.assertIn('at or below its floor of 3', fields[0]['autotune']['why_not_managed'])
+        self.assertIn('floor of 6', fields[1]['autotune']['why_not_managed'])
+        self.assertNotIn('why_not_managed', fields[2]['autotune'])
+
+    def test_fc4e_a_lane_decision_the_lane_did_not_confirm_is_not_judged(self):
+        key = 'lane.cve_feed'
+        m = autotune.by_key()[key]
+        d = SimpleNamespace(new_value=3)
+        self.assertFalse(autotune._lane_unconfirmed(m, d))  # no record of the lane: judged as usual
+        resources.redis_client().set(sc.LANES_KEY, __import__('json').dumps({'t': timezone.now().timestamp(), 'lanes': {key: {'workers': {'cve_feed_worker@h': 4}}}}))
+        self.assertTrue(autotune._lane_unconfirmed(m, d))  # the lane still runs 4: the change did not take effect
+        resources.redis_client().set(sc.LANES_KEY, __import__('json').dumps({'t': timezone.now().timestamp(), 'lanes': {key: {'workers': {'cve_feed_worker@h': 3}}}}))
+        self.assertFalse(autotune._lane_unconfirmed(m, d))
+        self.assertFalse(autotune._lane_unconfirmed(autotune.by_key()['work_depth'], d))  # only lanes
+        resources.redis_client().delete(sc.LANES_KEY)
+
+
 class ApplyLaneTests(Isolated, TestCase):
     def fake_app(self, ceilings):
         app = mock.MagicMock()
@@ -243,11 +275,11 @@ class ApplyLaneTests(Isolated, TestCase):
 
     def test_a_tuned_number_resizes_the_running_lane_and_the_discovery_pool_is_left_alone(self):
         row = AutoTuneSettings.current()
-        row.values = {'lane.cve_feed': 2}
+        row.values = {'lane.cve_feed': 3}
         row.save()
         app = self.fake_app({'cve_feed_worker@host1': 4, 'classic_worker@host1': 10, 'discovery_worker@host1': 8})
         out = sc.apply_lanes(app=app, saved={})
-        self.assertEqual(out['lane.cve_feed'], {'want': 2, 'workers': {'cve_feed_worker@host1': 2}, 'changed': ['cve_feed_worker@host1']})
+        self.assertEqual(out['lane.cve_feed'], {'want': 3, 'workers': {'cve_feed_worker@host1': 3}, 'changed': ['cve_feed_worker@host1']})
         self.assertEqual(out['lane.classic']['changed'], [])
         sent = [c.kwargs['destination'] for c in app.control.broadcast.call_args_list]
         self.assertEqual(sent, [['cve_feed_worker@host1']])
@@ -291,9 +323,11 @@ class ShareGateTests(Isolated, TestCase):
         self.ScanHistory = ScanHistory
         sc.update({'discovery_concurrency': 8, 'assess_batch': 1}, SimpleNamespace(username='root', pk=None, is_authenticated=True, is_superuser=True))
 
-    def assessments(self, running):
+    def assessments(self, running, per_task=0):
+        """``running`` running rows. ``per_task`` 0: no task id (each row is a task of its own); a number: that many rows share one task id, as the hosts of one batch do."""
         for i in range(running):
-            HostAssessment.objects.create(project=self.project, domain=self.domain, host=f'h{i}.share.example.com', status='running', source='topup')
+            HostAssessment.objects.create(project=self.project, domain=self.domain, host=f'h{i}.share.example.com', status='running', source='topup',
+                                          celery_id=f'batch-{i // per_task}' if per_task else '')
 
     def scan(self):
         self.ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=timezone.now() - timedelta(hours=1), scan_status=-1)
@@ -317,10 +351,54 @@ class ShareGateTests(Isolated, TestCase):
 
     def test_a_batch_of_hosts_holds_one_slot_not_one_each(self):
         sc.update({'assess_batch': 8}, SimpleNamespace(username='root', pk=None, is_authenticated=True, is_superuser=True))
-        self.assessments(16)  # two batches
+        self.assessments(16, per_task=8)  # two batches: two tasks, two slots
         self.scan()
         self.assertEqual(host_assessment.slots_held(), 2)
         self.assertFalse(host_assessment.over_share())
+
+    def test_fc2_eight_single_host_tasks_fill_a_pool_of_eight_whatever_the_batch_size_says(self):
+        # the reviewer's probe: projects no live Sentinel covers (or a host-narrowed one) run one host per task although the instance's batch size is 8. The gate used to divide the
+        # rows by that size and see one slot held of a limit of six, so it never engaged where scans starved
+        sc.update({'assess_batch': 8}, SimpleNamespace(username='root', pk=None, is_authenticated=True, is_superuser=True))
+        self.assessments(8)
+        self.scan()
+        self.assertEqual(host_assessment.slots_held(), 8)
+        self.assertTrue(host_assessment.over_share())
+        HostAssessment.objects.all().delete()
+        self.assessments(8, per_task=8)  # the same eight hosts as one batch hold one slot
+        self.assertEqual(host_assessment.slots_held(), 1)
+        self.assertFalse(host_assessment.over_share())
+        HostAssessment.objects.all().delete()
+        self.assessments(5, per_task=4)  # a batch of four and a lone host: two tasks
+        self.assertEqual(host_assessment.slots_held(), 2)
+
+    def test_fc4_a_message_whose_row_already_ended_is_dropped_not_put_off_again(self):
+        from cveFeed import tasks
+        self.assessments(6)
+        self.scan()
+        job = HostAssessment.objects.create(project=self.project, domain=self.domain, host='done.share.example.com', status='failed', source='topup')
+        with mock.patch.object(host_assessment, 'execute') as execute, mock.patch.object(tasks.assess_host, 'apply_async') as again:
+            out = tasks.assess_host.apply(args=[job.pk], task_id='gone').get()
+        self.assertEqual(out['status'], 'dropped')
+        again.assert_not_called()
+        execute.assert_not_called()
+        with mock.patch.object(tasks.assess_hosts, 'apply_async') as again_batch:
+            self.assertEqual(tasks.assess_hosts.apply(args=[[job.pk, 10 ** 9]], task_id='gone2').get()['status'], 'dropped')
+        again_batch.assert_not_called()
+
+    def test_fc4_a_message_put_off_too_often_runs_anyway_so_it_does_not_wait_for_ever(self):
+        from cveFeed import tasks
+        self.assessments(6)
+        self.scan()
+        job = HostAssessment.objects.create(project=self.project, domain=self.domain, host='waits.share.example.com', status='queued', source='topup')
+        counts = [host_assessment.deferral_count('t-limit') for _ in range(3)]
+        self.assertEqual(counts, [1, 2, 3])  # the counter outlives the re-queued copies
+        with mock.patch.object(host_assessment, 'execute', return_value={'status': 'ran'}) as execute, mock.patch.object(tasks.assess_host, 'apply_async') as again, \
+                mock.patch.object(host_assessment, 'deferral_count', return_value=host_assessment.SHARE_DEFER_LIMIT + 1):
+            out = tasks.assess_host.apply(args=[job.pk], task_id='t-limit').get()
+        self.assertEqual(out, {'status': 'ran'})
+        execute.assert_called_once()
+        again.assert_not_called()
 
     def test_the_task_looks_again_later_instead_of_starting_and_keeps_its_row_and_task_id(self):
         from cveFeed import tasks
@@ -436,8 +514,58 @@ class KindPauseTests(SentinelBase):
         start = timezone.now()
         autotune.pause_failing_kinds('auto', start)
         later = start + timedelta(hours=2, minutes=5)
+        Agent.objects.filter(kind='scanner').update(last_seen=later)  # the others are still live at that time
         self.assertEqual(autotune.pause_failing_kinds('auto', later), [])  # the same three failures
         SentinelTask.objects.bulk_create([SentinelTask(project=self.proj, kind='nmap', target={}, status='failed', error='boom', finished_at=later - timedelta(minutes=1),
                                                        agent=self.agents[0]) for _ in range(3)])
         made = autotune.pause_failing_kinds('auto', later)
         self.assertEqual([m['hours'] for m in made], [4])
+
+
+class KindPauseLivenessTests(SentinelBase):
+    """FC-3: a kind is paused on a Sentinel only when ANOTHER live Sentinel can take that work for the same projects."""
+
+    def setUp(self):
+        super().setUp()
+        self.live(count=2)
+        Agent.objects.filter(kind='scanner').update(scope={'instance': True})
+        self.one, self.two = Agent.objects.get(name='sentinel-1'), Agent.objects.get(name='sentinel-2')
+
+    def test_fc3_an_approved_sentinel_that_is_offline_does_not_count(self):
+        Agent.objects.filter(pk=self.two.pk).update(last_seen=timezone.now() - timedelta(days=3))  # approved and active, not heard from for days
+        with self.assertRaises(sentinel_policy.PauseRefused) as caught:
+            sentinel_policy.pause(Agent.objects.get(pk=self.one.pk), 'nmap', 2, 'x')
+        self.assertIn('last one', str(caught.exception))
+        Agent.objects.filter(pk=self.two.pk).update(last_seen=timezone.now())
+        self.assertTrue(sentinel_policy.pause(Agent.objects.get(pk=self.one.pk), 'nmap', 2, 'x'))
+
+    def test_fc3_a_suspended_one_one_that_may_not_run_the_kind_and_one_with_another_scope_do_not_count(self):
+        one = Agent.objects.get(pk=self.one.pk)
+        Agent.objects.filter(pk=self.two.pk).update(status='suspended')
+        with self.assertRaises(sentinel_policy.PauseRefused):
+            sentinel_policy.pause(one, 'nmap', 2, 'x')
+        Agent.objects.filter(pk=self.two.pk).update(status='active', managed_settings={'kinds': {'value': {'nmap': {'mode': 'deny', 'max_concurrent': None}}, 'at': timezone.now().isoformat(), 'by': 'x'}})
+        with self.assertRaises(sentinel_policy.PauseRefused):
+            sentinel_policy.pause(Agent.objects.get(pk=self.one.pk), 'nmap', 2, 'x')
+        Agent.objects.filter(pk=self.two.pk).update(managed_settings={}, scope={'projects': ['some-other-project']})
+        Agent.objects.filter(pk=self.one.pk).update(scope={'projects': ['this-project']})
+        with self.assertRaises(sentinel_policy.PauseRefused):
+            sentinel_policy.pause(Agent.objects.get(pk=self.one.pk), 'nmap', 2, 'x')  # the other reaches none of this one's projects
+        Agent.objects.filter(pk=self.two.pk).update(scope={'projects': ['this-project', 'more']})
+        self.assertTrue(sentinel_policy.pause(Agent.objects.get(pk=self.one.pk), 'nmap', 2, 'x'))
+
+    def test_fc3_nothing_is_paused_and_an_alert_says_so_and_it_resolves_when_another_comes_online(self):
+        from cveFeed.models import AdminAlert
+        Agent.objects.filter(pk=self.two.pk).update(last_seen=timezone.now() - timedelta(days=3))
+        self.tasks(3, 'failed', 'boom', kind='nmap', ago=timedelta(minutes=20), agent='sentinel-1')
+        self.assertEqual(autotune.pause_failing_kinds('auto', timezone.now()), [])
+        self.assertFalse(TuningDecision.objects.filter(setting='sentinel_pause:nmap').exists())
+        alert = AdminAlert.objects.get(code=autotune.KIND_ALERT, resolved_at__isnull=True)
+        self.assertIn('sentinel-1', alert.detail)
+        self.assertIn('nowhere to go', alert.detail)
+        autotune.pause_failing_kinds('auto', timezone.now())  # a second round: still one notice
+        self.assertEqual(AdminAlert.objects.filter(code=autotune.KIND_ALERT, resolved_at__isnull=True).count(), 1)
+        Agent.objects.filter(pk=self.two.pk).update(last_seen=timezone.now())
+        made = autotune.pause_failing_kinds('auto', timezone.now())
+        self.assertEqual([m['sentinel'] for m in made], ['sentinel-1'])
+        self.assertFalse(AdminAlert.objects.filter(code=autotune.KIND_ALERT, resolved_at__isnull=True).exists())

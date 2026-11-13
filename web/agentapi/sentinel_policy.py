@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from django.utils import timezone
 
 from agentapi import agent_broker as broker
-from agentapi.models import SentinelDefaults, SentinelTask
+from agentapi.models import Agent, SentinelDefaults, SentinelTask
 from agentapi.services import ApiError
 
 MODES = ('allow', 'deny', 'prefer')
@@ -160,11 +160,32 @@ def paused_kinds_everywhere(now=None):
     return kinds
 
 
+def _scope_covers(other, agent):
+    """Whether ``other``'s declared scope reaches everything ``agent``'s does: instance-wide, or every project and organization ``agent`` names."""
+    theirs, mine = other.scope or {}, agent.scope or {}
+    if theirs.get('instance'):
+        return True
+    if mine.get('instance') or not (mine.get('projects') or mine.get('orgs')):
+        return False
+    return set(mine.get('projects') or []) <= set(theirs.get('projects') or []) and set(mine.get('orgs') or []) <= set(theirs.get('orgs') or [])
+
+
+def _another_live_sentinel(agent, kind, now):
+    """FC-3: whether ANOTHER Sentinel can take ``kind`` work the paused one would have taken: approved and not revoked, heard from within the live window (an approved Sentinel
+    that is offline does not count), not suspended (its status is not ``active``), allowed the kind by its capability policy and not paused for it, and whose scope reaches the
+    same projects."""
+    from agentapi import sentinel_broker as broker
+    from agentapi.agent_broker import LIVE_WINDOW
+    for other in Agent.objects.filter(kind='scanner', status='active', token__revoked=False, last_seen__gte=now - LIVE_WINDOW).exclude(pk=agent.pk):
+        if kind in broker.effective_capabilities(other) and not active_pauses(other, now).get(kind) and _scope_covers(other, agent):
+            return True
+    return False
+
+
 def pause(agent, kind, hours, reason, by='auto-tuning', now=None):
     """Withhold ``kind`` from ``agent`` for ``hours`` (held to ``PAUSE_MIN_HOURS``..``PAUSE_MAX_HOURS``). Refused (``PauseRefused``) for an unknown kind, when
     ``MAX_PAUSED_KINDS`` other kinds are paused already, or when this is the last live Sentinel that can run the kind (a pause must never leave the work nowhere to
     go). Returns the time the pause ends."""
-    from agentapi import sentinel_broker as broker
     from agentapi.models import Agent
     now = now or timezone.now()
     if kind not in SentinelTask.KINDS:
@@ -172,10 +193,8 @@ def pause(agent, kind, hours, reason, by='auto-tuning', now=None):
     others = paused_kinds_everywhere(now) - {kind}
     if len(others) >= MAX_PAUSED_KINDS and kind not in paused_kinds_everywhere(now):
         raise PauseRefused(f'{len(others)} kinds are paused already (at most {MAX_PAUSED_KINDS} at once)')
-    live = [a for a in Agent.objects.filter(kind='scanner', status='active') if a.pk != agent.pk and kind in broker.effective_capabilities(a)
-            and not active_pauses(a, now).get(kind)]
-    if not live:
-        raise PauseRefused(f'no other Sentinel can run {label(kind)}: it is not paused on the last one')
+    if not _another_live_sentinel(agent, kind, now):
+        raise PauseRefused(f'no other live Sentinel can run {label(kind)} for the same projects: it is not paused on the last one')
     until = now + timedelta(hours=max(PAUSE_MIN_HOURS, min(PAUSE_MAX_HOURS, hours)))
     managed = dict(agent.managed_settings or {})
     value = {k: v for k, v in (((managed.get('pauses') or {}).get('value')) or {}).items() if k in active_pauses(agent, now)}
