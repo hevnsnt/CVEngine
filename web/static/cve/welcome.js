@@ -367,6 +367,28 @@ const steps = {
         await mark('ai', 'done');
       }, 'Verify and save'));
 
+      // What the AI may do with your findings (cveFeed/setup_questions.py): asked only once a model is connected; it stays off until this is answered
+      const aiq = state.ai_validation;
+      if (state.ai.connected && aiq && aiq.applies) {
+        const box = el('div', 'extra');
+        const h = el('h3'); h.append(document.createTextNode(aiq.title), el('span', `st ${aiq.state === 'answered' ? 'done' : ''}`, aiq.state === 'answered' ? 'saved' : ''));
+        const group = el('div', 'choice');
+        const start = aiq.state === 'answered' && aiq.answer ? aiq.answer : aiq.safe_default;
+        aiq.choices.forEach((c) => {
+          const lab = el('label'); const input = el('input', '', null, { type: 'radio', name: 'ai-validation', value: c.value }); input.checked = c.value === start;
+          const words = el('span'); words.append(el('b', '', c.label), document.createTextNode(c.effect)); lab.append(input, words); group.append(lab);
+        });
+        const msg = el('div', 'msg err', '', { role: 'alert', style: 'display:none' });
+        const say = async (answer) => {
+          try { await api('POST', '/cve/api/settings/setup_questions', { key: aiq.key, answer }); state = await welcome('GET', 'state'); render(); } catch (e) { msg.textContent = e.message; msg.style.display = 'block'; }
+        };
+        const later = el('button', 'skip', 'Decide later', { type: 'button', 'data-extra': 'ai_validation' }); later.onclick = () => say('later');
+        const save = el('button', 'btn sm', 'Save', { type: 'button', 'data-save': 'ai_validation' }); save.onclick = () => say((group.querySelector('input:checked') || {}).value || aiq.safe_default);
+        const actions = el('div', 'actions'); actions.append(el('span', 'grow'), later, save);
+        box.append(h, el('p', 'note', aiq.text, { style: 'margin:0 0 10px' }), group, msg, actions);
+        holder.append(box);
+      }
+
       // Notifications
       const svc = el('select'); svc.append(Object.assign(el('option'), { value: 'slack', textContent: 'Slack' }), Object.assign(el('option'), { value: 'discord', textContent: 'Discord' }));
       const url = el('input', '', null, { type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: state.notify.slack || state.notify.discord ? 'A webhook is already saved. Paste a new one to replace it.' : 'https://hooks.slack.com/services/...' });

@@ -2764,6 +2764,21 @@ a.score-label:hover{text-decoration-color:var(--ink)}
   .discovery>.ticker{grid-area:ticker;height:auto;min-height:0;max-height:96px;padding-bottom:var(--s-4)}
   .hero #d-graph{flex:1;height:auto;min-height:clamp(144px,calc(100dvh - 620px),440px)}
 }
+
+/* ---- questions about an update (static/cve/update-questions.js) ---- */
+.uq-card{margin:0 0 var(--s-4);max-width:720px}
+.uq-card h2{margin:0 0 var(--s-2)}
+.uq-facts{margin:var(--s-3) 0;padding-left:var(--s-5);color:var(--ink-2);font-size:var(--fs-3)}
+.uq-choices{border:0;margin:var(--s-3) 0 0;padding:0}
+.uq-opt{display:flex;align-items:flex-start;gap:var(--s-3);padding:var(--s-3) 0;cursor:pointer}
+.uq-opt input{margin-top:4px;flex:none}
+.uq-words{display:block;min-width:0}.uq-words b{display:block;font-size:var(--fs-3)}.uq-effect{display:block;margin-top:2px}
+.uq-tag{margin-left:var(--s-2);font:var(--fw-semi) var(--fs-1) var(--font);color:var(--muted)}
+.uq-later{margin:var(--s-2) 0 0}
+.uq-steps{margin:var(--s-3) 0;padding-left:var(--s-5)}.uq-steps li{margin:var(--s-2) 0}
+.uq-actions{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-3);max-width:720px;padding-bottom:var(--s-12)}
+.uq-actions .note{margin:0;flex:1 1 220px}
+@media (max-width:639px){.uq-actions .btn{width:100%}.uq-actions .note{flex-basis:100%}}
 /* ---- UI-1: a page head that carries buttons keeps them off the title ---- */
 /* A head that carries buttons (the Overview: Connect your AI model, Download PDF report, Include closed findings) gives them their own line under the title
    and the sentence, whatever the width, so no button covers the title and the sentence is never squeezed to a character */
