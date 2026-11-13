@@ -290,7 +290,7 @@ class DefaultsTests(PolicyBase):
                          (200, {'openvas': {'mode': 'deny', 'max_concurrent': None}}, True, {}))
         status, out = call(self.root_token, 'PUT', '/api/v1/sentinels/defaults', {'external_kinds': {'wpscan': {'mode': 'deny', 'max_concurrent': 1}}})
         self.assertEqual((status, out['external_kinds']), (200, {'wpscan': {'mode': 'deny', 'max_concurrent': 1}}))
-        is_error, text = tool_call(self.root_token, 'set_sentinel_defaults', {'builtin_kinds': {}})
+        is_error, text = tool_call(self.root, 'set_sentinel_defaults', {'builtin_kinds': {}})  # a person: an API token may not lift the shipped OpenVAS deny (FB-5)
         self.assertFalse(is_error, text)
         self.assertEqual(SentinelDefaults.current().builtin_kinds, {})
         is_error, text = tool_call(self.root_token, 'get_sentinel_defaults', {})
@@ -661,7 +661,7 @@ class RestAndMcpTests(SentinelBase):
         Agent.objects.filter(pk=self.agent_id).update(last_seen=timezone.now(), info={'contract_version': sentinel_contract.version()})
 
     def patch(self, who, settings):
-        return call(self.t[who], 'PATCH', f'/api/v1/agents/{self.agent_id}', {'settings': settings})
+        return call(getattr(self, who), 'PATCH', f'/api/v1/agents/{self.agent_id}', {'settings': settings})  # a person: an API token may not widen (FB-5)
 
     def test_an_administrator_sets_the_policy_and_get_agent_shows_it_per_kind(self):
         status, out = self.patch('root', {'kinds': {'openvas': {'mode': 'deny', 'max_concurrent': None}, 'nmap': {'mode': 'prefer', 'max_concurrent': 2}}})

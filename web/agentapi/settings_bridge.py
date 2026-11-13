@@ -162,6 +162,9 @@ AGENT_LOWER_ONLY = {'ai': ('plan_daily_total', 'plan_daily_per_project', 'cve_gu
 TUNABLE_ONLY_RAISE = ('validate_min_gap_hours',)
 TUNABLE_SWITCHES = ('planner_enabled', 'sentinel_bbot_keys')
 TUNABLE_ZERO_IS_UNLIMITED = ('egress_port25_per_hour',)
+# Lists that decide what is scanned, with which way narrows them (FB-5): an ``only`` list lets less through the fewer entries it has (and an empty one lets everything
+# through), a ``skip`` list the more entries it has. {entry: {field: 'only' | 'skip'}}
+AGENT_SCOPE_LISTS = {'tailscale_project': {'only_tags': 'only', 'only_os': 'only', 'skip_tags': 'skip'}}
 WRITE_METHODS = ('PUT', 'PATCH', 'POST')
 NOT_EXPOSED[('admin', 'openvas')] = 'the same add-on settings as the openvas entry (settings table).'
 IDENTITY_ROUTES_NOT_YET = ('users', 'memberships', 'orgs', 'projects')  # people, roles and organizations: a separate slice, owner to say how far an agent may go
@@ -315,6 +318,9 @@ def _agent_body_rules(ctx, name, values, ident=None):
             raise ApiError(403, why)
     if name == 'reviewer' and 'ops_hours' in values:
         _ops_hours_rule(values['ops_hours'])
+    for field, kind in AGENT_SCOPE_LISTS.get(name, {}).items():
+        if field in values:
+            _scope_list_rule(ctx, name, field, kind, values[field], ident)
     if name not in GENERIC_RULE_SKIPS:
         _default_deny(ctx, name, values, ident)
     for field in AGENT_LOWER_ONLY.get(name, ()):
@@ -333,6 +339,28 @@ def _ops_hours_rule(hours):
         raise ApiError(403, f'ops_hours: every hour is a paid call to the AI provider, so an agent may only take hours away (now {sorted(now)}); a person adds them in the web interface')
 
 
+def _entries(value):
+    """The entries of a list as the handlers read it (a string is split on spaces and commas; entries are trimmed and unique), or None when it is not a list."""
+    if isinstance(value, str):
+        value = re.split(r'[\s,]+', value)
+    if not isinstance(value, list):
+        return None
+    return {str(item).strip() for item in value if str(item).strip()}
+
+
+def _scope_list_rule(ctx, name, field, kind, new, ident):
+    """FB-5: an agent may narrow a filter list (fewer entries let through, more entries skipped), never widen it: an emptied ``only`` list lets every device in."""
+    entries, now = _entries(new), _entries(_current(ctx, name, ident).get(field))
+    if entries is None or now is None:
+        raise ApiError(403, f'{name}.{field}: an agent may only narrow what is scanned, and this list cannot be compared with the one now; a person sets it in the web interface')
+    if kind == 'only':
+        narrower = bool(entries) and (not now or entries <= now)
+    else:
+        narrower = entries >= now
+    if not narrower:
+        raise ApiError(403, f'{name}.{field}: this would let more devices be scanned (now {sorted(now)}); an agent may only narrow the scope, a person widens it in the web interface')
+
+
 def _flatten(value, prefix=''):
     """{dotted path: leaf} of a nested answer, lists kept whole."""
     if isinstance(value, dict):
@@ -347,6 +375,11 @@ def _current(ctx, name, ident):
     """What the entry's own page shows now, flattened (empty when it cannot be read): the numbers an agent's write is compared with."""
     api, pattern, _text, _ident = ENTRIES[name]
     getter = _find(api, pattern, 'GET')
+    if getter is None and name == 'tailscale_project':  # this entry has no GET of its own: the link is shown by the list
+        from cveFeed import tailscale_admin
+        from cveFeed.models import TailscaleLink
+        link = TailscaleLink.objects.filter(project_id=ident).select_related('project').first() if str(ident).isdigit() else None
+        return _flatten(tailscale_admin.link_dict(link)) if link is not None else {}
     if getter is None:
         return {}
     try:
@@ -366,6 +399,17 @@ def _default_deny(ctx, name, values, ident):
     current = None
     for path, value in sent.items():
         field = path.rsplit('.', 1)[-1]
+        if isinstance(value, str) and value.strip() and not (name in AGENT_NUMBERS_FREE or field in AGENT_LOWER_ONLY.get(name, ())):
+            # a text where the page shows a switch or a number: the handlers coerce it (bool('false') is True, int('5000') is 5000), so it is read as what the field is
+            current = _current(ctx, name, ident) if current is None else current
+            now = next((v for k, v in current.items() if k == path or k.rsplit('.', 1)[-1] == field), None)
+            if isinstance(now, bool):
+                value = True
+            elif isinstance(now, (int, float)):
+                try:
+                    value = float(value.strip())
+                except ValueError:
+                    raise ApiError(403, f'{name}.{field}: a number is expected and an agent may only lower one; a person sets it in the web interface')
         if value is True:
             if (name, field) not in AGENT_MAY_SWITCH_ON:
                 raise ApiError(403, f'{name}.{field}: switching this on can cost money, widen what is scanned or change who may reach the instance, so only a person does it, in the web interface; an agent may switch it off')
@@ -402,6 +446,22 @@ def _tunable_rules(values):
             raise ApiError(403, f'{t.label} is a limit on cost or scope: an agent may only lower it (now {now}); only a person raises it, in the web interface')
 
 
+def _scan_concurrency_rules(values):
+    """FB-5: a scan concurrency number that auto-tuning does not manage (the heavy scanner limits) goes straight to the page's handler, which takes any number in
+    range: an agent may only lower it (a reset to the default counts as the default)."""
+    from cveFeed import scan_concurrency as sc
+    for key, new in values.items():
+        field = sc.BY_KEY.get(key)
+        if field is None:
+            continue  # the handler refuses a key it does not know
+        now = sc.resolve(key)['value']
+        number = sc.resolve(key, {}, {})['value'] if new is None else new
+        if isinstance(number, bool) or not isinstance(number, (int, float)):
+            continue  # the handler refuses a value that is not a number
+        if number > now:
+            raise ApiError(403, f'{field.label} is a limit on how much is scanned at once: an agent may only lower it (now {now}); only a person raises it, in the web interface')
+
+
 def _throughput_write(ctx, name, method, fn, request, values, groups):
     """AM-3: the keys auto-tune manages go to the engine (``autotune.agent_change``); everything else of the same write goes to the page's handler.
     The reply is the page's own answer plus ``agent_changes`` (one result per managed key) and ``agent_summary`` in plain words."""
@@ -412,6 +472,8 @@ def _throughput_write(ctx, name, method, fn, request, values, groups):
     rest = {k: v for k, v in inner.items() if k not in mine}
     if name == 'tunables':
         _tunable_rules(rest)
+    else:
+        _scan_concurrency_rules(rest)
     if not mine:
         return _run(ctx, name, ENTRIES[name][0], fn, request, groups)
     who = _who(ctx)

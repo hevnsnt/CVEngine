@@ -263,7 +263,7 @@ class DiscoverActionTests(DiscoveryModeBase):
 		self.assertEqual(self.modes_run(), {'mp.example': 'passive'})
 
 	def test_the_mode_can_be_changed_over_rest_and_mcp(self):
-		target = self.domain('chg.example', mode='manual')
+		target = self.domain('chg.example', mode='standard')  # a token may only lower the mode (FB-5)
 		status, data = call(self.tok, 'POST', f'/api/v1/projects/p1/targets/{target.id}/discovery-mode', {'discovery_mode': 'passive'})
 		self.assertEqual((status, data['discovery_mode']), (200, 'passive'))
 		err, data = tool(self.tok, 'set_target_discovery_mode', {'project': 'p1', 'target_id': target.id, 'discovery_mode': 'manual'})
