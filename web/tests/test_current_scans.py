@@ -4,7 +4,7 @@ the dashboard counts, the live snapshots), no longer walks every finished scan o
 Before: a host-pipeline scan was current when ``id > COALESCE((the newest full scan of its domain), 0)``, a subquery run once per finished host-pipeline
 scan that read every finished scan of the domain. On an install with 3,332 of them on a few domains (170 each) that was 590,000 row visits, 157,000 buffer
 hits and 1.4 s each time the set was built, once or twice in every host statement: the system status's project rows took 4.5 to 15 s each.
-Now: no full scan of the domain is newer than it (NOT EXISTS, the full scans hashed by domain once). The answer is the same.
+Now: one window over the finished scans gives each its domain's newest full scan, nothing correlated. The answer is the same.
 """
 import json
 from datetime import timedelta
@@ -41,7 +41,7 @@ class World(TestCase):
         return Subdomain.objects.create(name=name, target_domain=domain, scan_history=scan)
 
 
-def previous_latest_scan_q():
+def previous_latest_scan_q(prefix=""):
     """``latest_scan_q`` as it was before: the host-pipeline scans after the full scan found by a subquery per scan. Kept here as the oracle."""
     from django.db.models import Exists, F, Max, OuterRef, Q, Subquery
     from django.db.models.functions import Coalesce
@@ -51,13 +51,13 @@ def previous_latest_scan_q():
     newest_full_of = full.filter(domain_id=OuterRef("domain_id")).order_by("-id").values("id")[:1]
     after_full = done.filter(tasks__contains=[HOST_PIPELINE_TASK]).annotate(
         full_id=Coalesce(Subquery(newest_full_of), 0)).filter(id__gt=F("full_id")).values("id")
-    same_host = Subdomain.objects.filter(target_domain_id=OuterRef("target_domain_id"), name=OuterRef("name"))
-    newer_row = same_host.filter(scan_history_id__in=after_full, scan_history_id__gt=OuterRef("scan_history_id"))
-    newer_fallback = same_host.filter(scan_history__isnull=False, id__gt=OuterRef("id"))
-    return ((Q(scan_history_id__in=latest_full) | Q(scan_history_id__in=after_full) | Q(scan_history__isnull=True)
-             | ~Q(target_domain_id__in=full.values("domain_id")))
+    same_host = Subdomain.objects.filter(target_domain_id=OuterRef(prefix + "target_domain_id"), name=OuterRef(prefix + "name"))
+    newer_row = same_host.filter(scan_history_id__in=after_full, scan_history_id__gt=OuterRef(prefix + "scan_history_id"))
+    newer_fallback = same_host.filter(scan_history__isnull=False, id__gt=OuterRef(prefix + "id"))
+    return ((Q(**{prefix + "scan_history_id__in": latest_full}) | Q(**{prefix + "scan_history_id__in": after_full})
+             | Q(**{prefix + "scan_history__isnull": True}) | ~Q(**{prefix + "target_domain_id__in": full.values("domain_id")}))
             & ~Q(Exists(newer_row))
-            & (Q(scan_history__isnull=True) | Q(target_domain_id__in=full.values("domain_id")) | ~Q(Exists(newer_fallback))))
+            & (Q(**{prefix + "scan_history__isnull": True}) | Q(**{prefix + "target_domain_id__in": full.values("domain_id")}) | ~Q(Exists(newer_fallback))))
 
 
 class SameAnswerTests(World):
@@ -106,5 +106,5 @@ class PlanTests(World):
         plan = plan if isinstance(plan, list) else json.loads(plan)
         hits = plan[0]['Plan'].get('Shared Hit Blocks', 0) + plan[0]['Plan'].get('Shared Read Blocks', 0)
         
-        self.assertLess(hits, 5000, f'{hits} buffers')  # 1,118 now; 22,435 and 139 ms against 6 ms with the old form
+        self.assertLess(hits, 5000, f'{hits} buffers')  # 563 now; 22,435 and 139 ms with the old form
         self.assertNotIn('COALESCE((SELECT', sql.replace('\n', ' '))

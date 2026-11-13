@@ -1565,7 +1565,7 @@ def latest_scan_q(prefix=""):
     these scans, the newest row wins. A domain that has never had a successful full scan keeps all its rows (newest per host),
     so a first scan in progress (or one that failed part way) does not hide the hosts it found. ``prefix`` reaches the host
     from another model ("subdomain__" for a CVEMatch)."""
-    from django.db.models import Exists, Max, OuterRef, Q
+    from django.db.models import Case, Exists, F, Max, OuterRef, Q, Value, When, Window
 
     from cveFeed.discovery import HOST_PIPELINE_TASK
     from startScan.models import ScanHistory, Subdomain
@@ -1573,12 +1573,16 @@ def latest_scan_q(prefix=""):
     done = ScanHistory.objects.filter(scan_status=2)
     full = done.exclude(tasks__contains=[HOST_PIPELINE_TASK])
     latest_full = full.values("domain_id").annotate(last=Max("id")).values("last")
-    # A host-pipeline scan is "after the full scan" when no full scan of its domain is newer than it (that also holds when the domain has no full scan).
-    # It was ``id > COALESCE((the newest full scan of the domain), 0)``, a subquery run once per finished host-pipeline scan that walked every finished
-    # scan of the domain to find it: a domain keeps 170 or more of them, so 3,300 scans meant 590,000 row visits (1.4 s) each time the set was built,
-    # and every host statement builds it once or twice. As NOT EXISTS the full scans (a few per domain) are hashed by domain once.
-    after_full = done.filter(tasks__contains=[HOST_PIPELINE_TASK]).filter(
-        ~Exists(full.filter(domain_id=OuterRef("domain_id"), id__gt=OuterRef("id")))).values("id")
+    # A host-pipeline scan is "after the full scan" when it is newer than the newest full scan of its domain (any, when the domain has none). It was
+    # ``id > COALESCE((the newest full scan of the domain), 0)``, a subquery run once per finished host-pipeline scan that walked every finished scan of
+    # the domain to find it: a domain keeps 170 or more of them, so 3,300 scans meant 590,000 row visits (1.4 s) each time the set was built, and every
+    # host statement builds it once or twice. Now ONE pass over the finished scans: a window gives each row the newest full scan id of its domain, with
+    # nothing correlated for the planner to repeat per row (a NOT EXISTS version was hashed on PostgreSQL 16 and read 6.7 million buffers on 18).
+    # Both conditions are on windows so that both are applied after them (a plain filter on the tasks would cut the rows the window sees).
+    is_full = ~Q(tasks__contains=[HOST_PIPELINE_TASK])
+    after_full = (done.annotate(_newest_full=Window(Max(Case(When(is_full, then=F("id")))), partition_by=[F("domain_id")]),
+                                _is_pipeline=Window(Max(Case(When(is_full, then=Value(0)), default=Value(1))), partition_by=[F("id")]))
+                  .filter(_is_pipeline=1).filter(Q(_newest_full__isnull=True) | Q(id__gt=F("_newest_full"))).values("id"))
     same_host = Subdomain.objects.filter(target_domain_id=OuterRef(prefix + "target_domain_id"),
                                          name=OuterRef(prefix + "name"))
     newer_row = same_host.filter(scan_history_id__in=after_full,
