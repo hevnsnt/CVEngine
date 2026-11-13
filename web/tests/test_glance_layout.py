@@ -72,4 +72,5 @@ class GlanceLayoutTests(SimpleTestCase):
 			self.assertIn(number, SCRIPT)
 		for needle in ('>= 0.95 * g', '>= 180', 'broken mid-word'):
 			self.assertIn(needle, SCRIPT.replace('0.95 * g[', '0.95 * g'))
-		self.assertIn('web/tests/test_glance_logic.mjs', WORKFLOW)
+		self.assertIn('node --test web/tests/*.mjs', WORKFLOW)  # every node test file runs in CI (it was a hand-kept list); test_glance_logic.mjs is one of them
+		self.assertTrue((Path(__file__).parent / 'test_glance_logic.mjs').is_file())

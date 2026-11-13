@@ -16,6 +16,7 @@ from tests.test_tenancy import client_for
 # route name (or project section) -> why it has no link in the shell
 ALLOWED_UNLINKED = {
     'cve_welcome': 'first run only; the dashboard has a button to open it again (?again=1)',
+    'cve_update_questions': 'asked once after an update (the dashboard sends an App Admin here), then a reminder in the status strip and Settings > Questions about updates link to it',
     'cve_how': 'a card on the dashboard explains it and links here',
     'cve_scan': 'a scan detail page, reached from the Scans lists',
     'cve_host_screenshot': 'an image of a host, reached from the host page',

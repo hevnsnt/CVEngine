@@ -18,7 +18,7 @@ from agentapi.models import Agent
 from agentapi.services import ApiError, Ctx
 from cveFeed import autotune, scan_concurrency as sc, tunables
 from cveFeed import autotune_signals as signals
-from cveFeed.models import AutoTuneSettings, ScanConcurrency, TunableSettings, TuningDecision
+from cveFeed.models import AutoTuneSettings, ScanConcurrency, SetupAnswer, TunableSettings, TuningDecision
 from dashboard.models import AuditLog
 from reNgine import resources
 from tests.test_agentapi import call, tool_call
@@ -376,3 +376,51 @@ class AuditTests(AgentBase):
         # the mark does not leak into the next call on the same thread
         from tenancy import audit
         self.assertEqual(audit.token_detail(), {})
+
+
+class UpdateQuestionTests(AgentBase):
+    """The post-update question about the agent policy (``cveFeed.setup_questions``): no cost line, the safe default is Suggest, a person answers it, an agent never can."""
+
+    def question(self):
+        from cveFeed import setup_questions
+        return next(q for q in setup_questions.snapshot()['questions'] if q['key'] == 'agent_policy')
+
+    def test_it_is_asked_only_where_an_agent_could_use_it(self):
+        from dashboard.models import ApiToken
+        ApiToken.objects.all().update(revoked=True)
+        q = self.question()
+        self.assertEqual((q['state'], q['choices']), ('not_applicable', []))
+        self.assertIn('nothing to decide', q['why_not'])
+        ApiToken.objects.all().update(revoked=False, scope='sentinel')  # a Sentinel's key is not an agent's
+        self.assertEqual(self.question()['state'], 'not_applicable')
+        ApiToken.objects.all().update(scope='full')
+        self.assertEqual(self.question()['state'], 'pending')
+
+    def test_it_is_asked_with_the_safe_default_suggest_and_no_cost_line(self):
+        q = self.question()
+        self.assertEqual((q['state'], q['safe_default'], q['current']), ('pending', 'suggest', 'suggest'))
+        self.assertEqual(q['title'], 'May AI agents change performance settings by themselves?')
+        self.assertEqual([c['value'] for c in q['choices']], ['off', 'suggest', 'auto'])
+        self.assertEqual([c['value'] for c in q['choices'] if c['safe']], ['suggest'])
+        self.assertEqual(q['facts'], [])
+        self.assertIn('spends nothing', q['text'])
+
+    def test_a_person_answers_it_through_the_settings_handler_and_it_is_audited(self):
+        from cveFeed import setup_questions
+        setup_questions.answer(self.root, 'agent_policy', 'auto')
+        self.assertEqual(AutoTuneSettings.current().agent_policy, 'auto')
+        self.assertEqual(self.question()['state'], 'answered')
+        self.assertTrue(AuditLog.objects.filter(action='setup.question', target='agent_policy').exists())
+        self.assertTrue(AuditLog.objects.filter(action='autotune.mode').exists())
+        setup_questions.answer(self.root, 'agent_policy', 'off')
+        self.assertEqual(AutoTuneSettings.current().agent_policy, 'off')
+        SetupAnswer.objects.all().delete()
+        self.assertEqual(self.question()['state'], 'decided')  # a policy other than the default was chosen somewhere else (Settings): never asked
+
+    def test_deciding_later_changes_nothing_and_an_agent_cannot_answer(self):
+        from cveFeed import setup_questions
+        setup_questions.answer(self.root, 'agent_policy', 'later')
+        self.assertEqual(AutoTuneSettings.current().agent_policy, 'suggest')
+        with self.assertRaises(ApiError):
+            bridge.change_setting(self.ctx, 'setup_questions', {'answers': {'agent_policy': 'auto'}})
+        self.assertEqual(AutoTuneSettings.current().agent_policy, 'suggest')

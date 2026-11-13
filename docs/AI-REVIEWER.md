@@ -275,10 +275,10 @@ The page has one **Connection** block (provider, API key, address, and a status 
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| Enabled | on | The reviewer works only when an AI provider is configured (enabled, with its key, or with its server address for a self-hosted one) and this is on. |
+| Enabled | **off** | The reviewer works only when an AI provider is configured (enabled, with its key, or with its server address for a self-hosted one) and this is on. It ships off: the review and the operations check are billed by the provider, so an App Admin answers "Do you want AI validation?" (see [UPGRADE.md](UPGRADE.md#questions-after-an-update)) or switches it on here. |
 | Review model | empty: `claude-sonnet-5-5` on Anthropic, else the default model | The model for finding review. The page offers it as "Same as the default model" (on Anthropic: "Built-in: claude-sonnet-5-5", because that is what empty means there). |
 | Operations model | empty: `claude-haiku-5-5` on Anthropic, else the default model | The model for the operations check. |
-| Close false positives | on | Off: the reviewer records its verdicts and closes nothing. |
+| Close false positives | **off** | On: the reviewer may close a finding as a false positive when it is sure and the evidence is not hard proof. Off: it records its verdicts and closes nothing ("Recommend only"). |
 | Reviews per day | 300 | The most findings reviewed in one UTC day. |
 | Operations hours (UTC) | 3, 9, 15, 21 | When the operations check runs. |
 

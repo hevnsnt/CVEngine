@@ -206,7 +206,8 @@ class AccessTests(WizardBase):
         org = Org.objects.get(slug='default')
         project = Project.objects.create(name='Old', slug='old', org=org, insert_date=timezone.now())
         Domain.objects.create(name='old.test', project=project, insert_date=timezone.now())
-        self.assertEqual(self.c.get('/cve/').status_code, 200)
+        self.assertNotEqual(self.c.get('/cve/').headers.get('Location'), '/cve/welcome/')  # (an App Admin may be sent to the update questions instead: cveFeed.setup_questions)
+        self.assertEqual(self.c.get('/cve/?skip=1').status_code, 200)
 
     def test_a_started_wizard_resumes_even_with_targets(self):
         self.seed()
