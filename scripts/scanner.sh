@@ -75,7 +75,7 @@ cvengine_scanner_enabled() {  # docker compose [ARGS...]: the compose file has t
   file=$(_cvengine_scanner_env_file "$@")
   value=$(_cvengine_scanner_value CVENGINE_BUILTIN_SCANNER "$file" | tr '[:upper:]' '[:lower:]')
   case "$value" in 0|false|no|off) return 1 ;; esac
-  "$@" config --services 2>/dev/null | grep -qx scanner
+  grep -qx scanner < <("$@" config --services 2>/dev/null)
 }
 
 cvengine_scanner_wanted_image() {  # docker compose [ARGS...]: the image this release runs (an administrator's own wins)
@@ -93,7 +93,7 @@ cvengine_scanner_fetch() {
   local file wanted own
   _cv_scanner_pulled=''
   if ! cvengine_scanner_enabled "$@"; then
-    if "$@" config --services 2>/dev/null | grep -qx scanner; then
+    if grep -qx scanner < <("$@" config --services 2>/dev/null); then
       "$@" rm -sf scanner >/dev/null 2>&1 || true
       _cvengine_scanner_log "the built-in scanner is turned off (CVENGINE_BUILTIN_SCANNER=0); not fetching its image"
     fi
