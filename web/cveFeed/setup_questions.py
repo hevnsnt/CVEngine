@@ -122,24 +122,19 @@ def _scan_decided():
         return False
 
 
-# What the three answers mean, in the owner's words (where will you scan from) and in the scanner plan's (cveFeed.scanner_plan):
-#   external = from outside only    -> the scanner plan is not changed at all (the built-in scanner keeps running as it does now)
-#   internal = from inside only     -> plan "external": your own Sentinels only (the built-in scanner is removed; nothing else is switched off)
-#   both     = external and internal -> plan "both": your own Sentinels first, the built-in scanner as the backup
-# "Inside only" with no live Sentinel would leave nothing to scan with, so the plan stays as it is until the first one checks in (``settle``).
-PLAN_FOR = {'internal': 'external', 'both': 'both'}
-ANSWER_FOR_PLAN = {'internal': 'external', 'external': 'internal', 'both': 'both'}
-
-
+# The answer is the scanner plan itself (cveFeed.scanner_plan, the words of Settings > Sentinels > Which scanners run): internal = the built-in scanner only,
+# external = your own Sentinels only (the built-in scanner is removed), both. "External" with no live Sentinel of your own would leave nothing to scan with, so the
+# plan stays as it is until the first one checks in (``settle``).
 def _scan_choices():
-    return [
-        {'value': 'external', 'label': 'From outside only (external)', 'tag': 'Keeps what runs now',
-         'effect': 'What someone on the internet sees. Nothing changes: the built-in scanner on this server keeps running as it does now.'},
-        {'value': 'internal', 'label': 'From inside only (internal)',
-         'effect': 'What someone already on your network sees. Only your own Sentinels run checks, so the built-in scanner on this server is switched off.'},
-        {'value': 'both', 'label': 'Both (external and internal)',
-         'effect': 'Both views: your own Sentinels first, the built-in scanner on this server as the backup.'},
-    ]
+    from cveFeed import scanner_plan
+    effects = {
+        'internal': 'Internal: the built-in scanner on this server runs the checks. Nothing changes if this is what runs now.',
+        'external': 'External: only Sentinels you install on your own machines run the checks, so the built-in scanner is removed, which frees its memory.',
+        'both': 'Internal and external: your own Sentinels first, the built-in scanner on this server as the backup.',
+    }
+    now = scanner_plan.current_plan()
+    return [{'value': o['value'], 'label': o['base'], 'effect': effects[o['value']], **({'tag': 'Keeps what runs now'} if o['value'] == now else {})}
+            for o in scanner_plan.decision()['options']]
 
 
 def _live_sentinels():
@@ -152,23 +147,22 @@ def _live_sentinels():
 
 def _scan_apply(user, value):
     from cveFeed import scanner_plan, settings_api
-    plan = PLAN_FOR.get(value)
-    if plan is None or plan == scanner_plan.current_plan():
-        return  # outside only: nothing is changed, nothing restarts
-    if plan == 'external' and not _live_sentinels():
+    if value == scanner_plan.current_plan():
+        return  # what runs now: nothing is changed, nothing restarts
+    if value == 'external' and not _live_sentinels():
         return  # no Sentinel of your own yet: the built-in scanner stays until the first one checks in (settle)
-    _call(settings_api.scanner_plan_post, user, {'plan': plan})
+    _call(settings_api.scanner_plan_post, user, {'plan': value})
 
 
 def _scan_current():
     from cveFeed import scanner_plan
-    return ANSWER_FOR_PLAN[scanner_plan.current_plan()]
+    return scanner_plan.current_plan()
 
 
 def _scan_waiting(row):
     """True while an "inside only" answer waits for the first Sentinel of your own."""
     from cveFeed import scanner_plan
-    return bool(row and row.answer == 'internal' and scanner_plan.current_plan() != 'external' and scanner_plan._pending(scanner_plan.PENDING_PLAN) != 'external')
+    return bool(row and row.answer == 'external' and scanner_plan.current_plan() != 'external' and scanner_plan._pending(scanner_plan.PENDING_PLAN) != 'external')
 
 
 def _first_project_slug():
@@ -180,13 +174,14 @@ def _first_project_slug():
 
 
 def _scan_next(row):
-    """What to do next after an answer that needs a machine inside the network (``internal`` or ``both``), or ``None``."""
-    if not row or row.answer not in ('internal', 'both'):
+    """What to do next after an answer that uses Sentinels (``external`` or ``both``), or ``None``."""
+    if not row or row.answer not in ('external', 'both'):
         return None
     slug = _first_project_slug()
     steps = [{'text': 'Install a Sentinel inside your network', 'url': '/cve/sentinels/'},
-             {'text': 'Tell cvENGINE which internal ranges to scan', 'url': f'/cve/{slug}/sentinels/' if slug else '/cve/sentinels/'}]
-    lines = ['The server restarts briefly only if the built-in scanner is switched on or off by this.']
+             {'text': 'Tell cvENGINE which internal ranges to scan (only if you scan inside your network)', 'url': f'/cve/{slug}/sentinels/' if slug else '/cve/sentinels/'}]
+    from cveFeed import scanner_plan
+    lines = ['The server restarts briefly only if the built-in scanner is switched on or off by this.'] if row.answer != scanner_plan.current_plan() or _scan_waiting(row) else []
     if _scan_waiting(row):
         lines.insert(0, 'No Sentinel of your own has checked in yet, so nothing was switched off. The built-in scanner keeps running until the first one does; then your choice is applied.')
     return {'steps': steps, 'notes': lines, 'waiting': _scan_waiting(row)}
@@ -197,13 +192,14 @@ def settle(user=None):
     from cveFeed.admin_api import audit
     from cveFeed.models import SetupAnswer
     try:
-        row = SetupAnswer.objects.filter(key='scan_from', answer='internal').first()
+        row = SetupAnswer.objects.filter(key='scan_from', answer='external').first()
         if not _scan_waiting(row) or not _live_sentinels():
             return False
         from cveFeed import scanner_plan
+        prior = scanner_plan.current_plan()
         scanner_plan.request('external')
         if user is not None and getattr(user, 'pk', None):
-            audit(user, 'scanner_plan.changed', 'external', previous=scanner_plan.current_plan(), via='setup question, first Sentinel checked in')
+            audit(user, 'scanner_plan.changed', 'external', previous=prior, via='setup question, first Sentinel checked in')
         return True
     except Exception:  # noqa: BLE001 - a poll is never worth a failed page
         return False
@@ -217,10 +213,10 @@ class Question:
 
 
 QUESTIONS = (
-    Question('scan_from', '1.4.0', 'Where will you scan from?',
-             'Outside your network is what someone on the internet sees; inside is what someone already on your network sees. Scanning from inside needs a '
-             'Sentinel installed on a machine inside that network: the server itself never scans internal ranges.',
-             _scan_choices, lambda: 'external', lambda: (True, ''), _scan_decided, _scan_apply, _scan_current, '/cve/sentinels/', 'Settings > Sentinels'),
+    Question('scan_from', '1.4.0', 'Which scanners will you use?',
+             'The built-in scanner runs on this server (internal). Sentinels are scanners you install on your own machines (external), and one placed inside your '
+             'network also sees what an outsider cannot.',
+             _scan_choices, _scan_current, lambda: (True, ''), _scan_decided, _scan_apply, _scan_current, '/cve/sentinels/', 'Settings > Sentinels'),
     Question('ai_validation', '1.4.0', 'Do you want AI validation?',
              'An AI model can double-check your findings and watch the health of the server. It stays off until you say otherwise. Features you already turned '
              'on in an earlier release are not touched.',

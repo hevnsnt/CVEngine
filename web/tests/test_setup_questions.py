@@ -215,53 +215,59 @@ class AnswerTests(Base):
         for choice in question['choices']:
             self.assertNotIn('300', choice['effect'])
 
-    def test_the_scan_question_uses_inside_and_outside_words_and_defaults_to_no_change(self):
+    def test_the_scan_question_uses_the_words_of_settings_and_pre_selects_what_runs_now(self):
+        from cveFeed import scanner_plan
         question = self.question('scan_from')
-        self.assertEqual(question['title'], 'Where will you scan from?')
-        self.assertEqual([c['label'] for c in question['choices']], ['From outside only (external)', 'From inside only (internal)', 'Both (external and internal)'])
-        self.assertEqual(question['safe_default'], 'external')
-        self.assertEqual([c['tag'] for c in question['choices'] if c.get('tag')], ['Keeps what runs now'])
-        self.assertEqual(question['current'], 'external')  # the built-in scanner only runs now, which is "outside"
+        self.assertEqual(question['title'], 'Which scanners will you use?')
+        self.assertEqual([c['label'] for c in question['choices']], [o['base'] for o in scanner_plan.decision()['options']])  # the same words as Settings > Sentinels
+        self.assertEqual([c['label'] for c in question['choices']], ['Use my own Sentinels only', 'Use the built-in scanner only', 'Use both'])
+        self.assertEqual((question['safe_default'], question['current']), ('internal', 'internal'))  # the built-in scanner runs now
+        self.assertEqual([c['value'] for c in question['choices'] if c.get('tag') == 'Keeps what runs now'], ['internal'])
+        os.environ['CVENGINE_SENTINEL_PLAN'] = ''
+        os.environ['CVENGINE_BUILTIN_SCANNER'] = ''
+        self.assertEqual(self.question('scan_from')['state'], 'pending')  # an empty value is no choice
 
-    def test_outside_only_changes_nothing_and_asks_the_host_for_nothing(self):
-        out = post(self.c, {'key': 'scan_from', 'answer': 'external'})
+    def test_the_answer_that_is_what_runs_now_changes_nothing_and_asks_the_host_for_nothing(self):
+        out = post(self.c, {'key': 'scan_from', 'answer': 'internal'})
         self.assertEqual(out.status_code, 200)
         self.assertFalse(os.path.exists(os.path.join(self.dir, '.scanner-plan-wanted')))
-        self.assertEqual(SetupAnswer.objects.get(key='scan_from').answer, 'external')  # stored as asked: internal, external or both
+        self.assertEqual(SetupAnswer.objects.get(key='scan_from').answer, 'internal')  # the plan value itself is stored
         self.assertIsNone(self.question('scan_from')['next'])
 
-    def test_inside_only_with_no_sentinel_keeps_the_scanner_until_the_first_one_checks_in(self):
+    def test_external_with_no_sentinel_keeps_the_scanner_until_the_first_one_checks_in(self):
         with mock.patch('cveFeed.scanner_plan.externals_live', return_value=0):
-            out = post(self.c, {'key': 'scan_from', 'answer': 'internal'})
+            out = post(self.c, {'key': 'scan_from', 'answer': 'external'})
             self.assertEqual(out.status_code, 200, out.content)
             self.assertFalse(os.path.exists(os.path.join(self.dir, '.scanner-plan-wanted')))  # nothing was switched off: scanning goes on
             question = self.question('scan_from')
             self.assertTrue(question['next']['waiting'])
             self.assertIn('nothing was switched off', question['next']['notes'][0])
-            self.assertEqual([s['text'] for s in question['next']['steps']], ['Install a Sentinel inside your network', 'Tell cvENGINE which internal ranges to scan'])
+            self.assertEqual([s['text'] for s in question['next']['steps']][0], 'Install a Sentinel inside your network')
+            self.assertIn('only if you scan inside your network', question['next']['steps'][1]['text'])
             self.c.get('/cve/api/settings/alerts')  # still none live: still nothing
             self.assertFalse(os.path.exists(os.path.join(self.dir, '.scanner-plan-wanted')))
         with mock.patch('cveFeed.scanner_plan.externals_live', return_value=1):
             self.c.get('/cve/api/settings/alerts')  # the first Sentinel is live: the choice is applied
         with open(os.path.join(self.dir, '.scanner-plan-wanted')) as f:
             self.assertEqual(f.read().strip(), 'external')
+        self.assertTrue([a for a in AuditLog.objects.filter(action='scanner_plan.changed') if 'first Sentinel' in a.detail.get('via', '')])
 
-    def test_inside_only_with_a_sentinel_switches_to_your_own_sentinels_at_once(self):
+    def test_external_with_a_sentinel_switches_to_your_own_sentinels_at_once(self):
         with mock.patch('cveFeed.scanner_plan.externals_live', return_value=2):
-            self.assertEqual(post(self.c, {'key': 'scan_from', 'answer': 'internal'}).status_code, 200)
+            self.assertEqual(post(self.c, {'key': 'scan_from', 'answer': 'external'}).status_code, 200)
         with open(os.path.join(self.dir, '.scanner-plan-wanted')) as f:
-            self.assertEqual(f.read().strip(), 'external')  # the scanner plan word for "your own Sentinels only"
+            self.assertEqual(f.read().strip(), 'external')
         self.assertFalse(self.question('scan_from')['next']['waiting'])
 
     def test_one_request_saves_every_answer_or_none(self):
         self.connect_ai()
-        out = post(self.c, {'answers': {'scan_from': 'external', 'ai_validation': 'recommend'}})
+        out = post(self.c, {'answers': {'scan_from': 'internal', 'ai_validation': 'recommend'}})
         self.assertEqual(out.status_code, 200, out.content)
-        self.assertEqual(dict(SetupAnswer.objects.values_list('key', 'answer')), {'scan_from': 'external', 'ai_validation': 'recommend'})
+        self.assertEqual(dict(SetupAnswer.objects.values_list('key', 'answer')), {'scan_from': 'internal', 'ai_validation': 'recommend'})
         self.assertEqual((out.json()['pending'], out.json()['open']), (0, 0))  # choosing Off or anything counts as answered: the reminder is gone
         self.assertIsNone(self.c.get('/cve/api/settings/alerts').json()['questions'])
         SetupAnswer.objects.all().delete()
-        bad = post(self.c, {'answers': {'scan_from': 'external', 'ai_validation': 'maximum'}})
+        bad = post(self.c, {'answers': {'scan_from': 'internal', 'ai_validation': 'maximum'}})
         self.assertEqual(bad.status_code, 400)
         self.assertFalse(SetupAnswer.objects.exists())
 
