@@ -126,9 +126,13 @@ def _ai_choices():
     ]
 
 
-def _ai_apply(user, value):
-    for _title, _facts, apply in AI_LINES:
-        apply(user, value)
+def _ai_apply(user, value, since=None):
+    """Carry out an answer. ``since`` is the version of the answer being replaced, when there is one that is older than the question: only the lines added after it
+    are applied, so a person who is asked again about the host review changes nothing about the finding review they answered before."""
+    newer = {title for version, titles in NEW_LINES.items() if since is not None and version > since for title in titles}
+    for title, _facts, apply in AI_LINES:
+        if since is None or title in newer:
+            apply(user, value)
 
 
 # --- the scanner question ------------------------------------------------------------------------------------------------------------------------------
@@ -278,6 +282,14 @@ def _describe(q, answers):
     out['choices'] = [{**c, 'safe': c['value'] == safe} for c in q.choices()] if applies else []
     out['facts'] = q.facts() if applies and q.facts else []
     out['new_lines'] = new_lines if applies else []
+    if applies and new_lines:  # asked again for the new line only: the words, the facts and the choices are about it alone
+        out['title'] = 'AI host review: one new question'
+        out['text'] = 'Your earlier answer about finding review and the server health check is kept as it is. This is only about the new AI host review.'
+        out['facts'] = [f for title, facts, _apply in AI_LINES if title in new_lines for f in facts()] + ['Your AI provider bills every call.']
+        out['choices'] = [{'value': 'off', 'label': 'Keep the host review off', 'safe': True, 'tag': 'Nothing is billed', 'effect': 'The host review stays off. Your finding review is not changed.'},
+                          {'value': 'recommend', 'label': 'Switch the host review on', 'safe': False,
+                           'effect': 'The AI reviews hosts that changed and suggests a next step; a person starts it. Every project stays on recommend, and a false positive from the host review is never closed by itself. '
+                                     'Your finding review is not changed.'}]
     if q.key == 'scan_from':
         out['next'] = _scan_next(row)
     return out
@@ -339,9 +351,15 @@ def answer(user, key, value):
         raise QuestionError(409, why)
     if value != LATER and value not in [c['value'] for c in q.choices()]:
         raise QuestionError(400, 'that is not one of the choices')
+    from cveFeed.models import SetupAnswer
+    earlier = SetupAnswer.objects.filter(key=key).values_list('version', flat=True).first()
+    stale = earlier is not None and earlier < q.version  # answered before the question gained a line: only the new line is carried out
     with transaction.atomic():
         if value != LATER:
-            q.apply(user, value)
+            if stale and key == 'ai_validation':
+                _ai_apply(user, value, since=earlier)
+            else:
+                q.apply(user, value)
         _record(user, key, value)
     audit(user, 'setup.question', key, answer=value)
     return snapshot()

@@ -362,3 +362,46 @@ class HostReviewLineTests(Base):
         self.assertIn('new line', open(text, encoding='utf-8').read())
         act = next(c for c in self.question('ai_validation')['choices'] if c['value'] == 'act')
         self.assertIn('Host reviews stay on recommend in every project', act['effect'])
+
+
+class ReaskTests(Base):
+    """HV-2: answering the question again for its one new line changes ONLY the new line."""
+
+    def setUp(self):
+        super().setUp()
+        self.connect_ai()
+        ReviewerSettings.objects.create(enabled=True, auto_close=False, updated_by=self.admin)  # the finding review as answered before: on, closing off
+        SetupAnswer.objects.create(key='ai_validation', answer='recommend', answered_by=self.admin)  # version 1
+
+    def state(self):
+        row = ReviewerSettings.current()
+        return (row.enabled, row.auto_close, row.host_review_enabled)
+
+    def test_the_reask_is_about_the_host_review_alone(self):
+        question = self.question('ai_validation')
+        self.assertEqual((question['state'], question['new_lines']), ('pending', ['AI host review']))
+        self.assertIn('Your earlier answer about finding review', question['text'])
+        self.assertEqual([c['value'] for c in question['choices']], ['off', 'recommend'])
+        self.assertTrue(all('Your finding review is not changed' in c['effect'] for c in question['choices']))
+        self.assertTrue(all('Finding review:' not in f for f in question['facts']))
+
+    def test_switching_the_host_review_on_leaves_the_finding_review_as_it_was(self):
+        out = post(self.c, {'key': 'ai_validation', 'answer': 'recommend'})
+        self.assertEqual(out.status_code, 200, out.content)
+        self.assertEqual(self.state(), (True, False, True))
+        self.assertEqual(SetupAnswer.objects.get(key='ai_validation').version, 2)
+
+    def test_the_act_answer_does_not_turn_closing_on(self):
+        out = post(self.c, {'key': 'ai_validation', 'answer': 'act'})
+        self.assertEqual(out.status_code, 200, out.content)
+        self.assertEqual(self.state(), (True, False, True))
+
+    def test_declining_the_host_review_does_not_switch_the_finding_review_off(self):
+        out = post(self.c, {'key': 'ai_validation', 'answer': 'off'})
+        self.assertEqual(out.status_code, 200, out.content)
+        self.assertEqual(self.state(), (True, False, False))
+
+    def test_an_answer_at_the_current_version_still_carries_out_every_line(self):
+        SetupAnswer.objects.filter(key='ai_validation').update(version=2)
+        post(self.c, {'key': 'ai_validation', 'answer': 'act'})
+        self.assertEqual(self.state(), (True, True, True))
