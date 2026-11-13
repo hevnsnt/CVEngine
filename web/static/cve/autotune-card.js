@@ -3,7 +3,7 @@
 // suggested). Everything from the server is set with textContent or value.
 import { api, ask, button, details, el, selectOf, shortDate, toast } from "/staticfiles/cve/ui.js";
 import { API, registerCard } from "/staticfiles/cve/config-maxxing.js";
-import { AUTOTUNE_INTRO, AUTOTUNE_MODES, AUTOTUNE_OFF_DETAIL, AUTOTUNE_OFF_HELP, decisionText, lastRunText, modeDetail, modeNotice } from "/staticfiles/cve/config-maxxing-logic.js";
+import { AGENT_POLICIES, AGENT_POLICY_HELP, AUTOTUNE_INTRO, AUTOTUNE_MODES, AUTOTUNE_OFF_DETAIL, AUTOTUNE_OFF_HELP, decisionText, lastRunText, modeDetail, modeNotice } from "/staticfiles/cve/config-maxxing-logic.js";
 
 const PATH = `${API}/autotune`;
 
@@ -69,6 +69,17 @@ export async function build(host, ctx = {}) {
   const actions = el("div", "", null, { style: "display:flex;gap:8px;align-items:center;margin-top:12px" });
   actions.append(save);
   card.append(actions);
+  const policy = selectOf(AGENT_POLICIES, data.agent_policy || "suggest");
+  policy.setAttribute("id", "autotune-agent-policy");
+  policy.disabled = !!data.killed;
+  policy.onchange = async () => {
+    await api("PUT", PATH, { agent_policy: policy.value });
+    toast(`Agents: ${policy.value}`);
+    await reload();
+  };
+  const policyRow = el("div", "field", null, { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:16px" });
+  policyRow.append(el("label", "", "AI agents", { for: "autotune-agent-policy", style: "font-weight:500" }), policy);
+  card.append(policyRow, el("p", "note", AGENT_POLICY_HELP, { style: "margin:4px 0 0" }));
   if (data.changed_by) card.append(el("p", "note", `Mode last set by ${data.changed_by} on ${shortDate(data.changed_at)}`, { style: "margin:8px 0 0" }));
   card.append(el("p", "note", lastRunText(data.last_run, shortDate), { style: "margin:8px 0 0" }));
   if (data.sized_for) card.append(el("p", "note", `Sized for this machine: ${data.sized_for}.`, { style: "margin:4px 0 0" }));

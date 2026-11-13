@@ -544,7 +544,8 @@ def set_mode(user, mode=None, advisor=None, policy=None):
         raise TuningError(400, 'advisor must be true or false')
     with transaction.atomic():
         row = AutoTuneSettings.objects.select_for_update().get(pk=settings_row().pk)
-        before = {'mode': row.mode, 'advisor': row.advisor, 'agent_policy': agent_policy(row)}
+        before = {'mode': row.mode, 'advisor': row.advisor}
+        policy_before = agent_policy(row)
         dropped = []
         if mode is not None and mode != row.mode:
             if row.mode == 'auto':
@@ -558,12 +559,14 @@ def set_mode(user, mode=None, advisor=None, policy=None):
         row.changed_by, row.changed_at = user, _now()
         row.save()
     publish(row)
-    after = {'mode': row.mode, 'advisor': row.advisor, 'agent_policy': agent_policy(row)}
-    if after != before:
-        _audit(user, 'autotune.mode', 'auto-tuning', before=before, after=after, dropped=dropped)
+    after = {'mode': row.mode, 'advisor': row.advisor}
+    policy_after = agent_policy(row)
+    if after != before or policy_after != policy_before:
+        extra = {'agent_policy': {'before': policy_before, 'after': policy_after}} if policy_after != policy_before else {}
+        _audit(user, 'autotune.mode', 'auto-tuning', before=before, after=after, dropped=dropped, **extra)
         _activity(f'{user.username} set auto-tuning to {row.mode}' + (' with the AI advisor' if row.advisor else ' without the AI advisor')
                   + (f'; {len(dropped)} tuned setting(s) went back to their saved, environment or default values' if dropped else '')
-                  + (f'; agents may now {AGENT_POLICY_TEXT[after["agent_policy"]]}' if after['agent_policy'] != before['agent_policy'] else ''))
+                  + (f'; agents may now {AGENT_POLICY_TEXT[policy_after]}' if policy_after != policy_before else ''))
     _after_change(dropped)
     return status()
 

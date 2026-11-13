@@ -168,6 +168,14 @@ export const AUTOTUNE_MODES = [
   ["suggest", "Suggest: it recommends changes, with the reason and an Apply button, and changes nothing"],
   ["off", "Off: hand tuning, nothing is measured or changed"],
 ];
+export const AGENT_POLICIES = [
+  ["suggest", "Suggest: an agent's change is recorded as a recommendation, and a person applies it with one click"],
+  ["auto", "Automatic: an agent's change is applied inside the safe ranges, checked after 30 minutes and undone if it hurt"],
+  ["off", "Off: agents may not change performance settings"],
+];
+export const AGENT_POLICY_HELP =
+  "May AI agents change performance settings by themselves? Only the settings auto-tuning manages, and never a number a person saved. Agents can never raise a spend cap, " +
+  "approve an update or switch on a paid or wider-scanning feature, whatever this says.";
 export const AUTOTUNE_INTRO =
   "Auto-tuning is on by default. It aims high: about ten minutes after each restart or update it sets the throughput settings below to the most this machine sensibly " +
   "carries (sized from its CPU cores, memory budget, database connections and Sentinel slots), backs off at once when it sees trouble (memory kills, " +
