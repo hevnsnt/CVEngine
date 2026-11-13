@@ -1565,8 +1565,7 @@ def latest_scan_q(prefix=""):
     these scans, the newest row wins. A domain that has never had a successful full scan keeps all its rows (newest per host),
     so a first scan in progress (or one that failed part way) does not hide the hosts it found. ``prefix`` reaches the host
     from another model ("subdomain__" for a CVEMatch)."""
-    from django.db.models import Exists, F, Max, OuterRef, Q, Subquery
-    from django.db.models.functions import Coalesce
+    from django.db.models import Exists, Max, OuterRef, Q
 
     from cveFeed.discovery import HOST_PIPELINE_TASK
     from startScan.models import ScanHistory, Subdomain
@@ -1574,9 +1573,12 @@ def latest_scan_q(prefix=""):
     done = ScanHistory.objects.filter(scan_status=2)
     full = done.exclude(tasks__contains=[HOST_PIPELINE_TASK])
     latest_full = full.values("domain_id").annotate(last=Max("id")).values("last")
-    newest_full_of = full.filter(domain_id=OuterRef("domain_id")).order_by("-id").values("id")[:1]
-    after_full = done.filter(tasks__contains=[HOST_PIPELINE_TASK]).annotate(
-        full_id=Coalesce(Subquery(newest_full_of), 0)).filter(id__gt=F("full_id")).values("id")
+    # A host-pipeline scan is "after the full scan" when no full scan of its domain is newer than it (that also holds when the domain has no full scan).
+    # It was ``id > COALESCE((the newest full scan of the domain), 0)``, a subquery run once per finished host-pipeline scan that walked every finished
+    # scan of the domain to find it: a domain keeps 170 or more of them, so 3,300 scans meant 590,000 row visits (1.4 s) each time the set was built,
+    # and every host statement builds it once or twice. As NOT EXISTS the full scans (a few per domain) are hashed by domain once.
+    after_full = done.filter(tasks__contains=[HOST_PIPELINE_TASK]).filter(
+        ~Exists(full.filter(domain_id=OuterRef("domain_id"), id__gt=OuterRef("id")))).values("id")
     same_host = Subdomain.objects.filter(target_domain_id=OuterRef(prefix + "target_domain_id"),
                                          name=OuterRef(prefix + "name"))
     newer_row = same_host.filter(scan_history_id__in=after_full,
