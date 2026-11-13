@@ -176,11 +176,13 @@ def status(problems=None):
     if state == 'unavailable' and problems is not None:
         problems.append(f'udp scan: {reason}')
     cutoff = timezone.now() - timedelta(seconds=ledger.ttl(SERVICE))
+    from django.db.models import Count, Q
+
     from cveFeed.models import ServiceRun
+    udp = Port.objects.filter(protocol='udp').aggregate(open=Count('id', filter=Q(state='open')), unanswered=Count('id', filter=Q(state=OPEN_FILTERED)))  # one pass over the ports, not two
     return {'enabled': enabled(), 'state': state, 'reason': reason, 'last_firing_at': last.get('at'),
             'ports': ports(), 'ips_covered': ServiceRun.objects.filter(service=SERVICE, status='done', finished_at__gte=cutoff).count(),
-            'open_udp_ports': Port.objects.filter(protocol='udp', state='open').count(),
-            'unanswered_udp_ports': Port.objects.filter(protocol='udp', state=OPEN_FILTERED).count()}
+            'open_udp_ports': udp['open'], 'unanswered_udp_ports': udp['unanswered']}
 
 
 # ----------------------------------------------------------------------------- choosing the address

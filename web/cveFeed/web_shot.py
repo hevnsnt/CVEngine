@@ -942,8 +942,15 @@ def _last_error(last):
              'at': last['attempted_at'].isoformat()} if last else None)
 
 
-def _counts_row(by_outcome, shot_hosts, web_hosts, nla, last):
-    return {'enabled': enabled(), 'available': available(), 'unavailable_reason': unavailable_reason() or None, 'sandbox': sandbox_status(),
+def _common_status():
+    """What every project's row says alike: the switch, whether it can run and what the last proof of the sandbox found (a cache read, so a caller that builds
+    many rows asks once)."""
+    return {'enabled': enabled(), 'available': available(), 'unavailable_reason': unavailable_reason() or None, 'sandbox': sandbox_status()}
+
+
+def _counts_row(by_outcome, shot_hosts, web_hosts, nla, last, common=None):
+    common = _common_status() if common is None else {**common, 'sandbox': dict(common['sandbox'])}
+    return {**common,
             'hosts_with_web': web_hosts, 'hosts_with_screenshot': shot_hosts, 'pages': by_outcome,
             'queued': by_outcome.get(QUEUED, 0), 'failed': sum(by_outcome.get(k, 0) for k in FAILURES), 'blocked': by_outcome.get(BLOCKED, 0),
             'nla_required': nla, 'last_error': _last_error(last)}
@@ -981,4 +988,5 @@ def status_counts_by_project(project_ids, web_hosts):
     for row in (rows.filter(outcome__in=FAILURES).exclude(attempted_at=None).order_by('project_id', '-attempted_at')
                 .distinct('project_id').values('project_id', 'host', 'scheme', 'port', 'outcome', 'reason', 'attempted_at')):
         last[row['project_id']] = row
-    return {pid: _counts_row(by_outcome.get(pid, {}), shot_hosts.get(pid, 0), web_hosts.get(pid, 0), nla.get(pid, 0), last.get(pid)) for pid in ids}
+    common = _common_status()
+    return {pid: _counts_row(by_outcome.get(pid, {}), shot_hosts.get(pid, 0), web_hosts.get(pid, 0), nla.get(pid, 0), last.get(pid), common) for pid in ids}

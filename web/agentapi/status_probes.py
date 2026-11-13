@@ -14,12 +14,18 @@ How it is bounded, and why nothing is left stuck:
   it) and closes its database connection in ``finally``.
 * A probe is never started twice at once: while the thread of an earlier call is still alive the probe is reported as still running instead of
   starting another (so a poller cannot pile up threads or connections behind a slow probe).
+* The probes share one interpreter lock, and the inventory's counting is Python work that holds it for seconds on a small host. A thread that waits on the
+  database or Redis needs the lock back after every reply and, with CPython's 5 ms switch interval, waited up to that long for each of them: a probe of one
+  statement took 1 to 2 s, the queues probe (69 reads) 1.2 s next to a counting thread that took 6, and the thread of a probe that does nothing took 0.2 s to
+  start. While the probes run, the switch interval is 0.5 ms (``responsive_switching``; restored when the last status call ends).
 * The threads have connections of their own and so cannot see the uncommitted rows of a caller that is inside a transaction (a Django ``TestCase``,
   ``ATOMIC_REQUESTS``). Inside a transaction the probes run one after another in the calling thread instead, with their timings but without
   deadlines (nothing can interrupt them there). The server never calls it that way: it is for the tests.
 """
+import contextlib
 import logging
 import os
+import sys
 import threading
 import time
 
@@ -31,6 +37,28 @@ CONCURRENCY = 4  # database connections a status call may hold at once
 
 _inflight = {}  # probe name -> the thread of a run that has not ended yet
 _inflight_lock = threading.Lock()
+SWITCH_INTERVAL = 0.0005  # seconds a thread may hold the interpreter lock while another waits for it, during a status call (CPython's default is 0.005)
+_switching = {'calls': 0, 'saved': None}
+_switching_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def responsive_switching():
+    """A short thread switch interval for as long as any status call runs its probes: the probes that wait on the database or Redis get the interpreter
+    lock back within ``SWITCH_INTERVAL`` instead of the default 5 ms, whatever a counting thread of the same call is doing. Nested and overlapping
+    calls count; the interval in force before the first is restored after the last."""
+    with _switching_lock:
+        if _switching['calls'] == 0:
+            _switching['saved'] = sys.getswitchinterval()
+            sys.setswitchinterval(min(_switching['saved'], SWITCH_INTERVAL))
+        _switching['calls'] += 1
+    try:
+        yield
+    finally:
+        with _switching_lock:
+            _switching['calls'] -= 1
+            if _switching['calls'] == 0:
+                sys.setswitchinterval(_switching['saved'])
 
 
 def _env_seconds(name, default):
@@ -160,6 +188,11 @@ def run(probes, budget=None, concurrency=CONCURRENCY, clock=time.monotonic):
             _finish(result, clock)
             done[probe.name] = result.value if result.state == 'ok' else {'error': result.error}
         return Run(results, clock() - started, budget, False)
+    with responsive_switching():
+        return _run_threaded(probes, results, done, started, deadline, budget, concurrency, clock)
+
+
+def _run_threaded(probes, results, done, started, deadline, budget, concurrency, clock):
     lock, wake = threading.Lock(), threading.Event()
     pending, running = list(probes), []
     finished = set()

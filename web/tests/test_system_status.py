@@ -33,6 +33,21 @@ class FakeBroker:
 	def hlen(self, name):
 		return 2
 
+	def pipeline(self, transaction=True):
+		"""The queue depths are read in one pipeline (one round trip): the same answers, queued and returned together."""
+		broker, queued = self, []
+
+		class Pipe:
+			def llen(self, name):
+				queued.append(broker.llen(name))
+
+			def hlen(self, name):
+				queued.append(broker.hlen(name))
+
+			def execute(self):
+				return list(queued)
+		return Pipe()
+
 
 HEALTH = {'workers_state': 'responding', 'worker_note': 'ok', 'scheduler_note': 'n',
 		  'workers': [{'worker': 'discovery_worker', 'queue': 'discovery_queue', 'responding': True, 'consuming': True, 'active': 1}],
