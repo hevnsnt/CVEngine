@@ -3918,7 +3918,7 @@ const pages = {
         tile("CVE matches", h.cve_matches, { hot: "fire", href: h.cve_matches ? `/cve/${encodeURIComponent(projectOf(h))}/matches/?host=${encodeURIComponent(h.host)}` : "" }),
       );
       pane.append(stats);
-      OV.main.append(hostReviewCard({ base: baseOf(projectOf(h)), hostId: h.id, hostName: h.host, isCurrent: () => current === h.id, openFindings: () => openTab("findings") }));
+      OV.main.append(hostReviewCard({ base: baseOf(projectOf(h)), hostId: h.id, isCurrent: () => current === h.id, ago: fullScanAgo }));
       OV.side.append(hostOverview(h));
       // why the host has its colour, so the rating can be checked rather than trusted
       const why = el("div", "why");

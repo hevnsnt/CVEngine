@@ -1,53 +1,55 @@
-// The "AI review of this host" card of the host page (docs/AI-REVIEWER.md "Host review"): what the AI concluded about the host, each finding's verdict
-// with its reason, the next step with Start and Dismiss, Review now, and the project's mode. Every word from the model or the scanned host is set with
-// textContent (the el() helper), never as markup. Plain words and logic live in host-review-logic.js.
+// The "AI review of this host" card of the host page (docs/AI-REVIEWER.md "Host review"): one headline, a compact verdict row for each finding, the next step
+// with Start and Dismiss, Review now, and (for administrators) the project's mode in a closed disclosure. Every word from the model or the scanned host is set
+// with textContent (the el() helper), never as markup. The plain words live in host-review-logic.js.
 import { api, badge, el, toast } from "/staticfiles/cve/ui.js";
-import { HELD_TEXT, MODES, canReview, conclusion, emptyText, failureText, findingView, heldDetail, modeHelp, stateOf, stepView } from "/staticfiles/cve/host-review-logic.js";
+import { HELD_TEXT, MODES, canReview, emptyText, findingView, modeHelp, stateOf, stepView, summary, whenText } from "/staticfiles/cve/host-review-logic.js";
 
 const POLL_MS = 5000;
-const OPEN_VERDICTS = 6; // up to this many verdict lines are open by default; more sit behind the summary
+const FALLBACK_AGO = (iso) => (iso ? new Date(iso).toLocaleDateString() : "never");
 
-function verdictList(review, hostId, openFindings) {
+const settingsLink = () => document.querySelector('a[href^="/cve/settings"]'); // the rail shows Settings only to people who may open it: they are the administrators
+
+function verdictRows(review, openFindings) {
   const views = (review.findings || []).map(findingView);
   if (!views.length) return null;
-  const box = el("details", "host-review-verdicts", null, { "data-keep-key": `host-review-verdicts-${hostId}` });
-  if (views.length <= OPEN_VERDICTS) box.setAttribute("open", "");
-  box.append(el("summary", "", `Verdict on each finding (${views.length})`));
-  const list = el("ul", "host-review-list", null, { style: "list-style:none;margin:8px 0 0;padding:0;display:grid;gap:10px" });
+  const list = el("ul", "hr-rows", null, { "aria-label": "Verdict on each finding" });
   views.forEach((v) => {
-    const item = el("li", "host-review-item");
-    const head = el("div", "", null, { style: "display:flex;flex-wrap:wrap;gap:8px;align-items:center" });
-    head.append(badge(v.label, v.tone), el("b", "mono", v.title, { style: "overflow-wrap:anywhere" }));
-    item.append(head);
-    if (v.outcome) item.append(el("p", "note", v.outcome, { style: "margin:4px 0 0" }));
-    if (v.reason) item.append(el("p", "note", v.reason, { style: "margin:4px 0 0;overflow-wrap:anywhere" }));
-    list.append(item);
+    const row = el("li", "hr-row");
+    const chip = badge(v.chip, v.tone);
+    chip.setAttribute("title", v.tooltip);
+    const main = el("div", "hr-main");
+    const name = v.link ? el("a", "mono hr-name", v.title, { href: v.link }) : el("span", "mono hr-name", v.title);
+    if (v.link) name.setAttribute("aria-label", `Open ${v.title}`);
+    main.append(name);
+    if (v.reason) main.append(el("span", "hr-reason", v.reason));
+    if (v.note) main.append(el("span", "note hr-note", v.note, { title: v.note }));
+    const tag = el("span", `note hr-tag${v.tag.tone ? ` ${v.tag.tone}` : ""}`, v.tag.text);
+    row.append(chip, main, tag);
+    list.append(row);
   });
-  box.append(list);
-  if (openFindings) {
-    const open = el("button", "btn ghost sm", "Open this host's findings", { type: "button", style: "margin-top:8px" });
-    open.onclick = () => openFindings();
-    box.append(open);
-  }
-  return box;
+  return list;
 }
 
-export function hostReviewCard({ base, hostId, hostName = "this host", isCurrent = () => true, openFindings = null, poll = true }) {
-  const card = el("section", "why host-review", null, { "aria-labelledby": `host-review-h-${hostId}` });
+export function hostReviewCard({ base, hostId, isCurrent = () => true, ago = FALLBACK_AGO, poll = true }) {
+  const card = el("section", "card hr-card", null, { "aria-labelledby": `host-review-h-${hostId}` });
   const path = `${base}/hosts/${hostId}/review`;
   let token = 0;
   let data = null;
 
-  const heading = el("h3", "sec", "AI review of this host", { id: `host-review-h-${hostId}`, tabindex: "-1" });
-  const status = el("div", "", null, { role: "status", "aria-live": "polite" });
-  const modeBox = el("div", "host-review-mode", null, { style: "margin-top:12px" });
-  card.append(heading, status, modeBox);
+  const heading = el("h3", "", "AI review of this host", { id: `host-review-h-${hostId}`, tabindex: "-1" });
+  const when = el("span", "note hr-when");
+  const actions = el("div", "hr-actions");
+  const head = el("header", "hr-head");
+  head.append(heading, when, actions);
+  const body = el("div", "hr-body", null, { role: "status", "aria-live": "polite" });
+  const foot = el("div", "hr-foot");
+  card.append(head, body, foot);
 
   const refocus = () => { try { heading.focus(); } catch (_) { /* a card that is gone has no focus to give */ } };
 
-  async function act(method, tail, body, done) {
+  async function act(method, tail, payload, done) {
     try {
-      const out = await api(method, `${path}${tail}`, body);
+      const out = await api(method, `${path}${tail}`, payload);
       if (done) toast(done);
       await load(out, true);
     } catch (e) {
@@ -56,10 +58,12 @@ export function hostReviewCard({ base, hostId, hostName = "this host", isCurrent
     }
   }
 
-  function drawMode() {
-    modeBox.textContent = "";
+  function settingsBox() {
+    foot.textContent = "";
+    if (!settingsLink() || stateOf(data) === "off" && data.readiness.reason_code === "disabled") return;
+    const box = el("details", "hr-settings", null, { "data-keep-key": `host-review-settings-${hostId}` });
+    box.append(el("summary", "", "Settings for this project"));
     const id = `host-review-mode-${hostId}`;
-    const label = el("label", "note", "AI host review in this project", { for: id });
     const select = el("select", "", null, { id });
     MODES.forEach(([value, text]) => {
       const o = el("option", "", text, { value });
@@ -77,84 +81,105 @@ export function hostReviewCard({ base, hostId, hostName = "this host", isCurrent
       }
       await load(null, true);
     };
-    modeBox.append(label, el("br"), select, el("p", "note", `${modeHelp(data.mode)}. This applies to every host of the project.`, { style: "margin:4px 0 0" }));
+    box.append(el("label", "note", "AI host review in this project", { for: id }), select,
+      el("p", "note", `${modeHelp(data.mode)} This applies to every host of the project.`));
+    foot.append(box);
   }
 
-  function draw() {
-    status.textContent = "";
+  function reviewHeader(review) {
+    const ready = canReview(data);
+    actions.textContent = "";
     const state = stateOf(data);
-    const review = data.review;
-    const head = el("div", "host-assess-head");
-    const now = canReview(data);
-    const run = el("button", "btn sm", review && review.status === "applied" ? "Review again" : "Review now", { type: "button" });
-    run.disabled = !now.enabled;
-    if (!now.enabled && now.reason) run.setAttribute("title", now.reason);
+    if (state === "off") return;
+    const run = el("button", "btn ghost sm", review && review.status === "applied" ? "Review again" : "Review now", { type: "button" });
+    run.disabled = !ready.enabled;
+    if (!ready.enabled && ready.reason) run.setAttribute("title", ready.reason);
     run.onclick = async () => {
       run.disabled = true;
       run.textContent = "Queueing…";
       await act("POST", "", {}, "Review queued");
       refocus();
     };
-    head.append(run);
-    status.append(head);
+    actions.append(run);
+  }
 
-    if (state === "running") {
-      status.append(el("p", "note", "The AI is reading this host's findings now. This page updates by itself when it is done.", { style: "margin:8px 0 0" }));
-    } else if (state === "failed" || state === "stale") {
-      status.append(badge(state === "failed" ? "Review failed" : "Host changed", state === "failed" ? "high" : "queued"), el("p", "note", failureText(review), { style: "margin:8px 0 0" }));
-    } else if (state !== "applied") {
-      status.append(el("p", "note", emptyText(data), { style: "margin:8px 0 0" }));
-      if (state === "disabled") {
-        const settings = document.querySelector('a[href^="/cve/settings"]'); // the rail shows Settings only to people who may open it
-        if (settings) status.append(el("a", "", "Open Settings to turn it on", { href: `${settings.getAttribute("href")}`, style: "display:inline-block;margin-top:6px" }));
+  function stepBlock(review) {
+    const step = stepView(review.step);
+    if (!step) return null;
+    const box = el("div", `hr-step ${step.tone}`);
+    const top = el("div", "hr-step-top");
+    top.append(el("span", "hr-step-label note", "Suggested next step"), badge(step.chip, step.tone));
+    box.append(top);
+    box.append(step.href ? el("a", "hr-step-title", step.title, { href: step.href }) : el("p", "hr-step-title", step.title));
+    if (step.why) box.append(el("p", "hr-step-why", step.why));
+    if (step.start || step.dismiss) {
+      const row = el("div", "hr-step-buttons");
+      if (step.start) {
+        const start = el("button", "btn sm", "Start", { type: "button", "aria-label": `Start: ${step.title}` });
+        start.onclick = async () => {
+          start.disabled = true;
+          start.textContent = "Starting…";
+          await act("POST", "/step", {}, "Step started");
+          refocus();
+        };
+        row.append(start);
       }
-      if (!now.enabled && now.reason && state === "never") status.append(el("p", "note", `Review now is not available: ${now.reason}.`));
+      if (step.dismiss) {
+        const dismiss = el("button", "btn ghost sm", "Dismiss", { type: "button", "aria-label": `Dismiss: ${step.title}` });
+        dismiss.onclick = async () => {
+          dismiss.disabled = true;
+          await act("POST", "/dismiss", {}, "Dismissed");
+          refocus();
+        };
+        row.append(dismiss);
+      }
+      box.append(row);
     }
+    if (step.help) box.append(el("p", "note hr-step-help", step.help));
+    return box;
+  }
+
+  function reading(review, into) {
+    const s = summary(review);
+    if (review.held_for_instructions) into.append(el("p", "msg warn hr-held", HELD_TEXT));
+    into.append(el("p", "hr-headline", s.headline));
+    if (s.detail) into.append(el("p", "note hr-sub", s.detail));
+    if (review.host_note) into.append(el("p", "note hr-sub", review.host_note));
+    const rows = verdictRows(review);
+    if (rows) into.append(rows);
+  }
+
+  function draw() {
+    body.textContent = "";
+    const state = stateOf(data);
+    const review = data.review;
+    reviewHeader(review);
+    when.textContent = whenText(data, ago);
+    if (review && (review.decided || review.created)) when.setAttribute("title", `${new Date(review.decided || review.created).toLocaleString()}${review.model ? ` · ${review.model}` : ""}`);
+    else when.removeAttribute("title");
+    card.setAttribute("data-state", state);
 
     if (state === "applied") {
-      const when = review.decided || review.created;
-      if (review.held_for_instructions) status.append(el("p", "msg err", HELD_TEXT, { style: "margin:8px 0" }));
-      status.append(el("p", "", conclusion(review), { style: "margin:8px 0 0" }));
-      if (review.host_note) status.append(el("p", "note", review.host_note, { style: "margin:4px 0 0;overflow-wrap:anywhere" }));
-      status.append(el("p", "note", `Reviewed ${when ? new Date(when).toLocaleString() : ""}${review.model ? ` by ${review.model}` : ""}.`, { style: "margin:4px 0 8px" }));
-      const verdicts = verdictList(review, hostId, openFindings);
-      if (verdicts) status.append(verdicts);
-      const step = stepView(review.step);
-      if (step) {
-        const box = el("div", "host-review-step", null, { style: "margin-top:12px" });
-        box.append(el("h4", "", step.heading, { style: "margin:0 0 4px" }), badge(step.tone === "success" ? "Done" : step.tone === "high" ? "Refused" : step.start || step.dismiss ? "Waiting for you" : "Info", step.tone));
-        box.append(el("p", "", step.text, { style: "margin:6px 0 0;overflow-wrap:anywhere" }));
-        if (step.note) box.append(el("p", "note", step.note, { style: "margin:4px 0 0;overflow-wrap:anywhere" }));
-        const held = heldDetail(review.step);
-        if (held) box.append(el("p", "note", `Not started by itself: ${held}`, { style: "margin:4px 0 0" }));
-        if (step.detail && step.action !== "none" && !held && !/could not be started/.test(step.text)) box.append(el("p", "note", step.detail, { style: "margin:4px 0 0" }));
-        if (step.start || step.dismiss) {
-          const row = el("div", "", null, { style: "display:flex;flex-wrap:wrap;gap:8px;margin-top:8px" });
-          if (step.start) {
-            const start = el("button", "btn sm", "Start", { type: "button", "aria-label": `Start the next step: ${step.text}` });
-            start.onclick = async () => {
-              start.disabled = true;
-              start.textContent = "Starting…";
-              await act("POST", "/step", {}, "Step started");
-              refocus();
-            };
-            row.append(start);
-          }
-          if (step.dismiss) {
-            const dismiss = el("button", "btn ghost sm", "Dismiss", { type: "button", "aria-label": `Dismiss the next step: ${step.text}` });
-            dismiss.onclick = async () => {
-              dismiss.disabled = true;
-              await act("POST", "/dismiss", {}, "Dismissed");
-              refocus();
-            };
-            row.append(dismiss);
-          }
-          box.append(row);
+      reading(review, body);
+      const step = stepBlock(review);
+      if (step) body.append(step);
+    } else {
+      const t = emptyText(data);
+      body.append(el("p", "hr-headline", t.headline));
+      if (t.detail) body.append(el("p", "note hr-sub", t.detail));
+      if (state === "running") body.append(badge("Running", "running"));
+      if (state === "off") {
+        const link = settingsLink();
+        if (link && data.readiness.reason_code === "disabled") body.append(el("a", "hr-link", "Turn it on in Settings", { href: link.getAttribute("href") }));
+        if (review && review.status === "applied") {
+          const old = el("details", "hr-old", null, { "data-keep-key": `host-review-old-${hostId}` });
+          old.append(el("summary", "", `Last review, ${ago(review.decided || review.created)} (from before it was switched off)`));
+          reading(review, old);
+          body.append(old);
         }
-        status.append(box);
       }
     }
-    drawMode();
+    settingsBox();
   }
 
   async function load(known, quiet) {
@@ -164,20 +189,20 @@ export function hostReviewCard({ base, hostId, hostName = "this host", isCurrent
     } catch (e) {
       if (mine !== token) return;
       if (!data) {
-        status.textContent = "";
-        status.append(el("p", "note", `The AI review could not be read: ${e.message}`));
+        body.textContent = "";
+        body.append(el("p", "hr-headline", "The AI review could not be read."), el("p", "note hr-sub", e.message));
         return;
       }
       if (!quiet) toast(e.message, true);
     }
     if (mine !== token || !data) return;
     draw();
-    if (poll && data.review && data.review.running) {
+    if (poll && data.review && data.review.running && stateOf(data) !== "off") {
       setTimeout(() => { if (isCurrent() && mine === token) load(null, true); }, POLL_MS);
     }
   }
 
-  status.append(el("p", "note", "Reading the AI review of this host…"));
+  body.append(el("p", "note", "Reading the AI review of this host…"));
   load(null, false);
   return card;
 }
