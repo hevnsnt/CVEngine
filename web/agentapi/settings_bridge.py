@@ -275,6 +275,8 @@ def _throughput_write(ctx, name, method, fn, request, values, groups):
     rest = {k: v for k, v in inner.items() if k not in mine}
     if name == 'tunables':
         _tunable_rules(rest)
+    if not mine:
+        return _run(ctx, name, ENTRIES[name][0], fn, request, groups)
     who = _who(ctx)
     data = None
     if rest:

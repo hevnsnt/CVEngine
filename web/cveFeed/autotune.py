@@ -958,8 +958,6 @@ def _agent_one(m, raw, user, row, who, mode, policy_name, samples, now_dt):
                 f'(apply_tuning_suggestion).' + (f' {notes}.' if notes else ''))
         return _agent_result(m, raw, 'suggested', current, text, decision_id=decision.pk if decision else None)
     if direction == 'more':
-        if calm_change_unverified():
-            return _agent_result(m, raw, 'refused', current, f'{m.label} stays {current}: an earlier change is still being verified (one calm change at a time). Ask again in half an hour.')
         hold = _hold_until(row, m.key)
         if hold and now < hold:
             return _agent_result(m, raw, 'refused', current, f'{m.label} stays {current}: its last change was taken back, so it is not raised for a day.')
@@ -967,6 +965,8 @@ def _agent_one(m, raw, user, row, who, mode, policy_name, samples, now_dt):
         wait = _cooldowns()[1]
         if recent is not None and now - recent < wait:
             return _agent_result(m, raw, 'refused', current, f'{m.label} stays {current}: it changed {int((now - recent) // 60)} minutes ago, a raise waits {int(wait // 60)}.')
+        if calm_change_unverified():
+            return _agent_result(m, raw, 'refused', current, f'{m.label} stays {current}: an earlier change is still being verified (one calm change at a time). Ask again in half an hour.')
     decision = apply_tuned(m, current, number, mode='auto', source='agent', reason=reason, signals=used, actor=user,
                            verify=_verification(m, current, number, samples, now_dt))
     if decision is None:
