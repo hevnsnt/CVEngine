@@ -935,7 +935,7 @@ def _agent_limit(m, current, number, samples, history, now_dt):
     return limit, why
 
 
-def _agent_one(m, raw, user, row, who, mode, policy_name, samples, now_dt):
+def _agent_one(m, raw, user, row, who, mode, policy_name, samples, now_dt, source='agent', reason_text=None, signals_extra=None):
     """One key of an agent's write. Returns the result dict (``status``: applied, suggested, refused or unchanged); nothing is raised for a refusal."""
     from cveFeed import autotune_policy as policy
     setting = m.setting
@@ -966,11 +966,12 @@ def _agent_one(m, raw, user, row, who, mode, policy_name, samples, now_dt):
     elif direction == 'hold':
         return _agent_result(m, raw, 'unchanged', current, f'{m.label} is already {current}; nothing changed.' + (f' ({clamp})' if clamp else ''))
     notes = '; '.join(x for x in (clamp, held) if x)
-    reason = f'an agent ({who}) asked for {raw}' + (f'; {notes}' if notes else '')
-    used = {'agent': who, 'requested': raw, 'summary': signals_summary(samples[-6:]) if samples else {}}
+    reason = (reason_text or f'an agent ({who}) asked for {raw}') + (f'; {notes}' if notes else '')
+    used = {'agent': who, 'requested': raw, 'summary': signals_summary(samples[-6:]) if samples else {}} if source == 'agent' else {
+        'requested': raw, 'summary': signals_summary(samples[-6:]) if samples else {}, **(signals_extra or {})}
     if policy_name == 'suggest' or mode == 'suggest':
         why_text = 'the agent policy is Suggest' if policy_name == 'suggest' else 'auto-tuning is in Suggest mode'
-        decision = recommend(m, current, number, mode=mode, source='agent', reason=reason, signals=used)
+        decision = recommend(m, current, number, mode=mode, source=source, reason=reason, signals=used)
         text = (f'Recorded as a recommendation, {m.label} {current} -> {number} ({why_text}): a person applies it with one click '
                 f'(apply_tuning_suggestion).' + (f' {notes}.' if notes else ''))
         return _agent_result(m, raw, 'suggested', current, text, decision_id=decision.pk if decision else None)
@@ -984,12 +985,188 @@ def _agent_one(m, raw, user, row, who, mode, policy_name, samples, now_dt):
             return _agent_result(m, raw, 'refused', current, f'{m.label} stays {current}: it changed {int((now - recent) // 60)} minutes ago, a raise waits {int(wait // 60)}.')
         if calm_change_unverified():
             return _agent_result(m, raw, 'refused', current, f'{m.label} stays {current}: an earlier change is still being verified (one calm change at a time). Ask again in half an hour.')
-    decision = apply_tuned(m, current, number, mode='auto', source='agent', reason=reason, signals=used, actor=user,
+    decision = apply_tuned(m, current, number, mode='auto', source=source, reason=reason, signals=used, actor=user if source == 'agent' else None,
                            verify=_verification(m, current, number, samples, now_dt))
     if decision is None:
         return _agent_result(m, raw, 'refused', current, f'{m.label} stays {current}: auto-tuning changed mode or the setting was pinned meanwhile.')
     text = (f'Applied: {m.label} {current} -> {number}' + (f' ({notes})' if notes else '') + '. It is checked after 30 minutes and undone if it made things worse.')
     return _agent_result(m, raw, 'applied', number, text, decision_id=decision.pk, clamped=bool(clamp or held))
+
+
+# --- the health-check AI's proposals (cveFeed.reviewer ``apply_ops_report``, ``snapshot``) --------------------------------------------------
+# The operations job may propose at most MAX_AI_PROPOSALS numbers in a report, for settings the server offered in the snapshot it read, through the same
+# gates as an agent's request (``_agent_one``) and a decision of ``source='ai'``. It never gets a cost-bearing number, a switch, the scan policy, a
+# credential, an update, the allowlist, the mode or the agent policy: only ``managed()`` can be offered, and anything else is dropped.
+MAX_AI_PROPOSALS = 2           # per report
+MAX_AI_CHANGES_PER_DAY = 6     # AI decisions that were applied or recommended in 24 hours: a confused model cannot thrash the settings
+AI_HOLD_HOURS = 24             # after a change of the AI was taken back, no proposal for that setting from it for this long
+AI_GATE_TEXT = {'advisor': 'the AI advisor switch is off (it covers the health-check AI\'s proposals too)', 'off': 'auto-tuning is off'}
+
+
+def ai_gate(row=None):
+    """Why the health-check AI's proposals are not taken, or '' when they may be: auto-tuning off (the mode, or the kill switch) or the AI advisor
+    switch off (only a person switches it on, ``raises_autonomy``)."""
+    row = row or settings_row()
+    if effective_mode(row) == 'off':
+        return AI_GATE_TEXT['off'] + (f' ({KILL_ENV}=0)' if killed() else '')
+    if not row.advisor:
+        return AI_GATE_TEXT['advisor']
+    return ''
+
+
+def ai_changes_today(now_dt):
+    """How many decisions of the AI (applied, or recommended in Suggest mode) the last 24 hours hold; a refused or held proposal is not one."""
+    from cveFeed.models import TuningDecision
+    return TuningDecision.objects.filter(source='ai', action__in=('raise', 'lower'), created_at__gte=now_dt - timedelta(hours=24)).exclude(
+        resolution__in=('refused', 'held')).count()
+
+
+def _ai_held(key, now_dt):
+    """Whether a change the AI made to ``key`` was taken back (by the verification or by a person) in the last ``AI_HOLD_HOURS``."""
+    from cveFeed.models import TuningDecision
+    return TuningDecision.objects.filter(setting=key, source='ai', resolution='reverted', resolved_at__gte=now_dt - timedelta(hours=AI_HOLD_HOURS)).exists()
+
+
+def ai_offer(now_dt=None):
+    """What the health-check AI may propose NOW. Returns ``{'gate': why it may not, or '', 'left_today': proposals still allowed today, 'offered': {key: {'setting',
+    'label', 'value', 'range': (lowest, highest), 'higher': text}}, 'not_offered': {key: why}}``. For each setting that is not pinned and not held from the AI: the
+    auto-tuning range, but a number that asks for more work stops at the controller's own ceiling (the target for this machine, the level that caused trouble,
+    a scanner kind's memory budget) and at the current number while a raise is not allowed (trouble for the setting, a hold, the raise cooldown, another calm
+    change not yet verified); a lower number is always allowed. A setting with no number left to choose is listed in ``not_offered`` with the reason."""
+    from cveFeed import autotune_policy as policy
+    now_dt = now_dt or _now()
+    row = settings_row()
+    out = {'gate': ai_gate(row), 'left_today': max(0, MAX_AI_CHANGES_PER_DAY - ai_changes_today(now_dt)), 'offered': {}, 'not_offered': {}}
+    if out['gate']:
+        return out
+    if not out['left_today']:
+        out['gate'] = f'the AI has made {MAX_AI_CHANGES_PER_DAY} changes in the last 24 hours, which is the most it may'
+        return out
+    samples, rows, tuned = recent_samples(now_dt), _saved_rows(), applied_values(row)
+    unverified, now = calm_change_unverified(), now_dt.timestamp()
+    for m in managed():
+        setting = m.setting
+        pin = pin_of(m, rows)
+        if pin is not None:
+            out['not_offered'][m.key] = f'pinned by {pin[0]}'
+            continue
+        current = _effective(m, {}, tuned)
+        if current == 0 and setting.kind in ('depth', 'refresh_gap'):
+            out['not_offered'][m.key] = 'turned off (0) by its environment value'
+            continue
+        if _ai_held(m.key, now_dt):
+            out['not_offered'][m.key] = f'a change of the AI was taken back in the last {AI_HOLD_HOURS} hours'
+            continue
+        history = _history(m.key, now_dt)
+        if setting.sense == 'more':
+            limit, why = _agent_limit(m, current, current, samples, history, now_dt)
+            blocker = ''
+            if samples and policy.trouble(setting, samples):
+                blocker = 'trouble shows for it right now'
+            elif (_hold_until(row, m.key) or 0) > now:
+                blocker = 'its last change was taken back, so it is not raised for a day'
+            elif history and now - max(h['at'] for h in history) < _cooldowns()[1]:
+                blocker = 'it changed recently, a raise waits'
+            elif unverified:
+                blocker = 'an earlier change is still being verified'
+            up = current if blocker or not policy._beyond(setting, limit, current) else limit  # the most work it may be asked for
+            lowest, highest = setting.low, max(up, current)
+        else:  # a wait between runs: the AI may only lengthen it (less work); shortening it is the controller's call
+            lowest, highest, why, blocker = current, setting.high, '', 'for this setting the AI may only lengthen the wait'
+        if lowest == highest:
+            out['not_offered'][m.key] = f'at {current}, the end of its range, and a raise is not allowed: {blocker or why}'
+            continue
+        out['offered'][m.key] = {'setting': setting, 'label': m.label, 'value': current, 'range': (lowest, highest),
+                                 'higher': 'more work at once' if setting.sense == 'more' else 'a longer wait between runs',
+                                 'raise_stops': blocker or why}
+    return out
+
+
+def ai_apply(proposals, offer, now_dt=None):
+    """Judge and apply the health-check AI's proposals. ``proposals``: ``[{'setting', 'value', 'reason', 'alert'}]`` (the report's own, at most
+    ``MAX_AI_PROPOSALS`` are read), ``offer``: ``ai_offer()`` read now. ``validate_advice`` keeps what the offered ranges allow; each kept number goes
+    through the gates of an agent's request (mode Auto applies it with ``verify=``, Suggest records a recommendation) and a refusal is recorded as a
+    decision of its own (``resolution='refused'``), so the History shows it. Returns one dict per proposal: ``{'setting', 'status', 'text'}``, ``status`` one of
+    applied, suggested, refused, unchanged."""
+    from cveFeed import autotune_policy as policy
+    now_dt = now_dt or _now()
+    results, items = [], []
+    for raw in (proposals if isinstance(proposals, list) else [])[:MAX_AI_PROPOSALS]:
+        if isinstance(raw, dict) and isinstance(raw.get('setting'), str):
+            items.append({'setting': raw['setting'], 'value': raw.get('value'), 'reason': raw.get('reason'), 'alert': raw.get('alert')})
+        else:
+            results.append({'setting': '', 'status': 'refused', 'text': 'a proposal that was not {setting, value, reason} was ignored'})
+    if len(proposals if isinstance(proposals, list) else []) > MAX_AI_PROPOSALS:
+        results.append({'setting': '', 'status': 'refused', 'text': f'only the first {MAX_AI_PROPOSALS} proposals of a report are read'})
+    if not items:
+        return results
+    if offer['gate']:
+        return results + [{'setting': i['setting'][:64], 'status': 'refused', 'text': f'ignored: {offer["gate"]}'} for i in items]
+    from reNgine.ai_providers import clean_text
+    offered = {k: {'setting': o['setting'], 'value': o['value'], 'range': o['range']} for k, o in offer['offered'].items()}
+    keys, row, mode, samples = by_key(), settings_row(), effective_mode(), recent_samples(now_dt)
+    seen = set()
+    for item in items:
+        key = item['setting']
+        if key in seen:
+            results.append({'setting': key[:64], 'status': 'refused', 'text': f'{key[:64]} was named twice: only the first is read'})
+            continue
+        seen.add(key)
+        if key not in offered:  # an unknown setting, a setting this report was not offered, or one that no number is left for: dropped, never recorded as a change
+            why = offer['not_offered'].get(key)
+            results.append({'setting': key[:64], 'status': 'refused',
+                            'text': f'{key[:64]} was not offered to the AI' + (f': {why}' if why else ' (it is not a setting the AI may change)')})
+            continue
+        accepted, refused, error = policy.validate_advice(json.dumps({'recommendations': [{k: item[k] for k in ('setting', 'value', 'reason')}]}), offered, clean=clean_text)
+        m, current = keys[key], offered[key]['value']
+        if key not in accepted:
+            why = refused[0][1] if refused else (error or 'refused')
+            results.append({'setting': key, 'status': 'refused', 'text': _ai_record_refused(m, current, item, why, now_dt)})
+            continue
+        if ai_changes_today(now_dt) >= MAX_AI_CHANGES_PER_DAY:
+            results.append({'setting': key, 'status': 'refused', 'text': _ai_record_refused(m, current, item, f'the AI already made {MAX_AI_CHANGES_PER_DAY} changes in 24 hours', now_dt)})
+            continue
+        alert = item['alert'] if isinstance(item['alert'], str) and len(item['alert']) <= 40 else None
+        extra = {'alerts': [alert]} if alert else {}
+        result = _agent_one(m, accepted[key]['value'], None, row, 'AI', mode, 'auto', samples, now_dt, source='ai', reason_text=accepted[key]['reason'], signals_extra=extra)
+        if result['status'] == 'refused':
+            result['text'] = _ai_record_refused(m, current, item, result['text'], now_dt)
+        results.append({'setting': key, 'status': result['status'], 'text': result['text'], 'decision_id': result.get('decision_id')})
+        if result['status'] == 'applied':
+            row = settings_row()
+    return results
+
+
+def _ai_record_refused(m, current, item, why, now_dt, resolution='refused'):
+    """A proposal that was not taken, as a decision of its own so the History says so (``resolution`` refused or held; the reason is in ``outcome_detail``).
+    Returns the sentence for the reply."""
+    value = item.get('value')
+    number = value if isinstance(value, int) and not isinstance(value, bool) else None
+    try:
+        from reNgine.ai_providers import clean_text
+        reason = clean_text(item.get('reason') or '', 200) or 'AI proposal'
+        alert = item.get('alert') if isinstance(item.get('alert'), str) and len(item['alert']) <= 40 else None
+        direction = 'raise' if number is not None and current is not None and number > current else 'lower'
+        _record(setting=m.key, old_value=current, new_value=number, mode=effective_mode(), source='ai', action=direction, applied=False, reason=reason,
+                signals={'alerts': [alert]} if alert else {}, resolution=resolution, resolved_at=now_dt, resolved_by='auto-tune', outcome_detail=str(why)[:300])
+    except Exception:  # noqa: BLE001 - the History line is a convenience: the refusal itself stands
+        logger.debug('auto-tune: a refused proposal could not be recorded', exc_info=False)
+    return f'{m.label}: not changed ({str(why)[:200]})'
+
+
+def ai_hold_all(proposals, why, now_dt=None):
+    """Record every proposal of a report as held (the text the model read was flagged, ``cveFeed.reviewer``): nothing is applied. Returns the results."""
+    now_dt = now_dt or _now()
+    keys, out = by_key(), []
+    for raw in (proposals if isinstance(proposals, list) else [])[:MAX_AI_PROPOSALS]:
+        key = raw.get('setting') if isinstance(raw, dict) else None
+        if not isinstance(key, str) or key not in keys:
+            out.append({'setting': str(key)[:64] if key else '', 'status': 'refused', 'text': 'ignored: not a setting the AI may change'})
+            continue
+        m = keys[key]
+        current = _effective(m, {}, applied_values())
+        out.append({'setting': key, 'status': 'held', 'text': _ai_record_refused(m, current, raw, why, now_dt, resolution='held')})
+    return out
 
 
 def agent_change(user, values, who='an agent'):

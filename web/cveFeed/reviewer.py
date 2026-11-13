@@ -1219,7 +1219,49 @@ def snapshot(now=None, templates_release=None):
             'fleet': fleet.fleet_facts(now), 'actions': {name: f'at most once every {int(gap.total_seconds() // 60)} minutes' for name, gap in ACTIONS.items()}}
     if isinstance(signals, dict) or tuning:
         snap.update(maintainer_checks.brief(signals, tuning))
+    snap.update(_tuning_offer(snap, now))
     return snap
+
+
+OPS_FLAG_KEY = 'cvengine:reviewer:ops-flagged'
+OPS_FLAG_SECONDS = 3 * 3600  # how long what the last snapshot's scan found is remembered: the report that answers it comes within minutes
+
+
+def snapshot_flags(snap):
+    """The families of text aimed at an AI (``injection_guard.families``) in the strings of this snapshot a Sentinel, a scanner, an agent, a person or an
+    earlier model could have written: the checks (titles, descriptions and facts quote Sentinel names, error text, task failures and host names), the
+    signals (a Sentinel's name among the refused claims) and the tuning block (who pinned what, and the reasons of earlier decisions, an agent's and the AI's
+    own among them). All of it is already inside fenced blocks for the model; the scan decides whether its tuning proposals may be applied."""
+    from cveFeed import injection_guard
+    return sorted(injection_guard.families({k: v for k, v in snap.items() if k in ('checks', 'signals', 'tuning', 'fleet', 'watchdog')}))
+
+
+def _tuning_offer(snap, now):
+    """What the health-check AI may propose now (``autotune.ai_offer``), added to the snapshot as ``tuning.proposals`` and ``tuning_settings`` (the keys the
+    answer's ``tuning`` may name), and the scan of the snapshot's text remembered for the report that answers it. Never raises."""
+    try:
+        from cveFeed import autotune
+        offer = autotune.ai_offer(now)
+        by = autotune.by_key()
+        proposals = {'allowed': not offer['gate'], 'why_not': offer['gate'] or None, 'left_today': offer['left_today'], 'at_most_per_report': autotune.MAX_AI_PROPOSALS,
+                     'offered': [{'setting': k, 'label': o['label'], 'value': o['value'], 'lowest': o['range'][0], 'highest': o['range'][1],
+                                  'higher_number_means': o['higher'], 'a_raise_stops': str(o['raise_stops'])[:120]} for k, o in offer['offered'].items()],
+                     'not_offered': [{'setting': k, 'label': by[k].label if k in by else k, 'why': str(why)[:120]} for k, why in list(offer['not_offered'].items())[:20]]}
+        tuning = dict(snap.get('tuning') or {})
+        tuning['proposals'] = proposals
+        out = {'tuning': tuning, 'tuning_settings': list(offer['offered'])}
+        probe = {**snap, **out}
+        while len(json.dumps(probe['tuning'], default=str)) > 9000 and probe['tuning']['proposals']['not_offered']:
+            probe['tuning']['proposals']['not_offered'].pop()
+        out['tuning'] = probe['tuning']
+        try:
+            cache.set(OPS_FLAG_KEY, snapshot_flags(probe), OPS_FLAG_SECONDS)
+        except Exception:  # noqa: BLE001
+            pass
+        return out
+    except Exception:  # noqa: BLE001 - the checks and diagnoses do not depend on it
+        logger.warning('operations snapshot: the tuning offer could not be built', exc_info=True)
+        return {}
 
 
 def _run_action(name):
@@ -1322,7 +1364,44 @@ def apply_ops_report(body, now=None):
     row = settings_row()
     row.last_ops_at = now
     row.save(update_fields=['last_ops_at', 'updated_at'])
-    return {'alerts_updated': updated, 'actions_run': ran, 'actions_refused': refused}
+    out = {'alerts_updated': updated, 'actions_run': ran, 'actions_refused': refused}
+    if body.get('tuning'):
+        out['tuning'] = apply_ops_tuning(body.get('tuning'), checks, now)
+    return out
+
+
+def apply_ops_tuning(proposals, checks, now):
+    """The health-check AI's ``tuning`` proposals (at most two are read): judged against what may be proposed NOW (``autotune.ai_offer``, not the snapshot's
+    older numbers) and applied through the engine as ``source='ai'``. Held, recorded and not applied, when anything the AI read was flagged as text aimed at an
+    AI (the snapshot's own scan, remembered for this report, or the checks as they are now), or when the proposal's own reason is. Returns one result per
+    proposal, ``{setting, status (applied, suggested, refused, held), text}``: the reply the container logs."""
+    from cveFeed import autotune, injection_guard
+    if not isinstance(proposals, list):
+        return [{'setting': '', 'status': 'refused', 'text': 'tuning must be a list of proposals'}]
+    from cveFeed.models import AdminAlert
+    open_codes = set(AdminAlert.objects.filter(resolved_at__isnull=True).values_list('code', flat=True))
+    proposals = [{**p, 'alert': p.get('alert') if p.get('alert') in open_codes and p.get('alert') in OPS_CODES else None} if isinstance(p, dict) else p for p in proposals]  # only the code of an alert that is open now
+    offer = autotune.ai_offer(now)
+    if offer['gate']:
+        return autotune.ai_apply(proposals, offer, now)  # every proposal answered "ignored: <why>"
+    try:
+        flagged = list(cache.get(OPS_FLAG_KEY) or [])
+    except Exception:  # noqa: BLE001
+        flagged = []
+    from cveFeed.models import TuningDecision
+    recent = [{'reason': d.reason, 'actor': d.actor.username if d.actor_id else ''} for d in TuningDecision.objects.select_related('actor').order_by('-created_at', '-pk')[:5]]
+    flagged = sorted(set(flagged) | set(injection_guard.families({'checks': checks, 'decisions': recent})))
+    if flagged:
+        return autotune.ai_hold_all(proposals, 'held: text that may come from a Sentinel, a scanned host, an agent or an earlier model was flagged as aimed at an AI ('
+                                    + ', '.join(flagged) + ') in what the AI read, so no proposal is applied; the alerts are not affected', now)
+    clean, held = [], []
+    for item in proposals[:autotune.MAX_AI_PROPOSALS]:
+        if isinstance(item, dict) and injection_guard.families(item.get('reason') or ''):
+            held.append(item)
+        else:
+            clean.append(item)
+    results = autotune.ai_hold_all(held, 'held: the reason itself reads as text aimed at an AI', now) if held else []
+    return results + autotune.ai_apply(clean + list(proposals[autotune.MAX_AI_PROPOSALS:]), offer, now)
 
 
 ALERT_STALE_AFTER = timedelta(hours=1)  # the checks run every 30 minutes (the watchdog tick, or the beat task): an alert not refreshed for this long was not re-checked
@@ -1332,7 +1411,7 @@ def answering_decision(alert):
     """The id of the newest auto-tuning decision made while this alert was open that answered it (its ``signals['alerts']`` holds the alert's code,
     ``autotune.open_alert_codes``), or None: the alert strip links to that decision's line in Settings, configMaxxing, Auto-tuning."""
     from cveFeed import autotune
-    if alert.code not in autotune.ALERT_CODES:
+    if alert.code not in OPS_CODES:
         return None
     from cveFeed.models import TuningDecision
     return TuningDecision.objects.filter(created_at__gte=alert.first_seen, signals__alerts__contains=[alert.code]).order_by('-created_at', '-pk').values_list('pk', flat=True).first()
