@@ -527,6 +527,9 @@ class HostReviewRefused(Exception):
         self.status = status
 
 
+MODE_RANK = {'off': 0, 'recommend': 1, 'auto': 2}  # an agent may only move a project down this order
+
+
 def mode_of(project):
     """The project's host review mode: ``auto``, ``recommend`` or ``off``."""
     from cveFeed.models import ProjectSettings
@@ -890,12 +893,14 @@ def state_sub(state):
     return _load_sub(state)
 
 
-def start_step(review, by):
+def start_step(review, by, agent=False):
     """A person's Start: run the proposed step through the same ``host_actions.run`` with ``by`` (the normal write permission is the caller's check).
     Raises ``HostReviewRefused`` 409 when the step is not proposed any more. Returns the result of ``run``; a step that is no longer offered is stored
     as refused with the reason."""
     from cveFeed.models import HostReview, HostState
     now = timezone.now()
+    if agent and review.injection:  # the model read text on this host that tells AI what to do: only a person, looking at the page, starts what it chose
+        raise HostReviewRefused('this step is held because text on the host tells AI what to do: a person starts it, in the web interface', 409)
     if review.status != 'applied' or not HostReview.objects.filter(pk=review.pk, step_state='proposed').update(step_state='started', decided_at=now):
         raise HostReviewRefused('there is no proposed step to start', 409)  # claimed first: two clicks start one step
     state = HostState.objects.filter(project=review.project, host=review.host).first()
@@ -905,7 +910,7 @@ def start_step(review, by):
     else:
         from cveFeed import host_actions
         result = host_actions.run(review.step_action, review.step_target, review.project, state_sub(state), by=by,
-                                  rows=pairs_from_refs(review.project, review.refs))
+                                  rows=pairs_from_refs(review.project, review.refs), agent=agent)
     HostReview.objects.filter(pk=review.pk).update(step_state=result['state'], step_detail=result['detail'][:300], step_mode='recommend')
     if result['state'] in ('started', 'done'):
         review.refresh_from_db()

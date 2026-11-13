@@ -57,10 +57,10 @@ class Refused(Exception):
 class _Ctx:
     """What ``offered`` and ``run`` read, once: the project, the host, the findings (loaded with what the checks read), the person (or None)."""
 
-    def __init__(self, project, sub, rows, by=None, unattended=None):
+    def __init__(self, project, sub, rows, by=None, unattended=None, agent=False):
         from cveFeed.models import Triage
-        self.project, self.sub, self.by = project, sub, by
-        self.unattended = (by is None) if unattended is None else unattended
+        self.project, self.sub, self.by, self.agent = project, sub, by, agent  # agent: an API key or an agent started it (HS-5): it keeps the requester for the record but gets no person's authority
+        self.unattended = ((by is None) or agent) if unattended is None else unattended
         self.now = timezone.now()
         self.host = sub.name.lower().rstrip('.') if sub is not None else ''
         wanted = [(ref, t) for ref, t in (rows or []) if getattr(t, 'project_id', None) == project.pk]
@@ -316,7 +316,7 @@ def _start_screenshot(ctx, target):
     why = web_shot.unavailable_reason()
     if why:
         raise Refused(why)
-    summary = web_shot.queue_host(ctx.project, ctx.sub, by_person=ctx.by is not None)
+    summary = web_shot.queue_host(ctx.project, ctx.sub, by_person=ctx.by is not None and not ctx.agent)
     if summary['blocked'] and not summary['queued']:
         raise Refused('this host cannot be photographed')
     return ('started', f'{summary["queued"]} page(s) queued') if summary['queued'] or summary['kept'] else ('done', 'there is no page to capture')
@@ -352,7 +352,7 @@ def _start_none(ctx, target):
 def _start_rescan(ctx, target):
     from cveFeed.tasks import host_pipeline
     domain, host = ctx.gate()
-    host_pipeline.delay(domain.id, [host], by_person=ctx.by is not None)
+    host_pipeline.delay(domain.id, [host], by_person=ctx.by is not None and not ctx.agent)
     return 'started', 'a rescan of the host is queued'
 
 
@@ -360,7 +360,7 @@ def _start_assess(ctx, target):
     from cveFeed import host_assessment
     ctx.gate()
     try:
-        job, created = host_assessment.enqueue(ctx.project, ctx.sub, source=SOURCE, user=ctx.by)
+        job, created = host_assessment.enqueue(ctx.project, ctx.sub, source=SOURCE, user=ctx.by, unattended=True if ctx.unattended else None)
     except ValueError as exc:
         raise Refused(str(exc)) from exc
     except RuntimeError as exc:
@@ -383,11 +383,12 @@ _RUN = {'none': _start_none, 'validate_match': _start_validate, 'revalidate_find
         'draft_check': _start_draft, 'ask_person': _start_ask, 'rescan_host': _start_rescan, 'assess_host': _start_assess, 'run_hygiene': _start_hygiene}
 
 
-def run(action, target, project, sub, by=None, rows=None):
+def run(action, target, project, sub, by=None, rows=None, agent=False):
     """Start one action for one host and say what happened: ``{'action', 'target', 'state', 'detail'}`` with ``state`` ``started`` (queued, running on
     its own), ``done`` (finished at once) or ``refused`` (and why: nothing was started). Never raises. Anything that is not a registered action is
     refused; so is a registered one that is not in ``offered`` now for this host, or a target that is not one of its refs. Each action then passes
-    its own function's gates. ``by`` is the person who started it (None: the review itself). ``rows`` is ``[(ref, Triage)]``, the findings the
+    its own function's gates. ``by`` is the person who started it (None: the review itself); ``agent`` says an API key or an agent pressed Start for that user: the user is kept
+    for the record, but every gate is the unattended one (a bug bounty project that has not confirmed automated testing, a manual-only target). ``rows`` is ``[(ref, Triage)]``, the findings the
     refs name (``host_review.pairs_from_refs`` for a stored review); without it the host's open findings are read in packet order."""
     result = {'action': str(action)[:24], 'target': str(target or '')[:12], 'state': 'refused', 'detail': ''}
     try:
@@ -397,8 +398,8 @@ def run(action, target, project, sub, by=None, rows=None):
         if rows is None:
             from cveFeed import host_review
             rows = host_review.pairs(project, sub.name.lower()) if sub is not None else []
-        ctx = _Ctx(project, sub, rows, by=by)
-        found = offered(project, sub, ctx.pairs, by=by).get(action)
+        ctx = _Ctx(project, sub, rows, by=by, agent=agent)
+        found = offered(project, sub, ctx.pairs, by=by, unattended=ctx.unattended).get(action)
         if found is None:
             result['detail'] = 'not offered for this host now'
             return result

@@ -108,8 +108,11 @@ class TurningItOnTests(DefaultOffFixture):
         self.assertIn('only a person', data['error'])
         self.assertTrue(tool_call(self.token, 'set_project_settings', {'project': self.proj.slug, 'host_review_mode': 'auto'})[0])
         self.assertEqual(host_review.mode_of(self.proj), 'recommend')
-        for mode in ('off', 'recommend'):
-            self.assertEqual(call(self.token, 'PUT', url, {'host_review_mode': mode})[0], 200)
+        self.assertEqual(call(self.token, 'PUT', url, {'host_review_mode': 'recommend'})[0], 200)  # the same mode again is not a raise
+        self.assertEqual(call(self.token, 'PUT', url, {'host_review_mode': 'off'})[0], 200)
+        status, data = call(self.token, 'PUT', url, {'host_review_mode': 'recommend'})  # off to recommend would start sending the project's hosts to the provider
+        self.assertEqual(status, 403, data)
+        self.assertEqual(host_review.mode_of(self.proj), 'off')
         response = self.client.put(url, data=json.dumps({'host_review_mode': 'auto'}), content_type='application/json')  # a person in the web interface
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(host_review.mode_of(self.proj), 'auto')
@@ -132,4 +135,7 @@ class PerProjectModeTests(DefaultOffFixture):
         self.assertEqual(host_review.mode_of(self.proj), 'recommend')
         err, data = tool_call(self.token, 'change_setting', {'name': 'reviewer', 'values': {'host_review_modes': {self.proj.slug: 'off'}}})
         self.assertFalse(err, data)
+        self.assertEqual(host_review.mode_of(self.proj), 'off')
+        err, text = tool_call(self.token, 'change_setting', {'name': 'reviewer', 'values': {'host_review_modes': {self.proj.slug: 'recommend'}}})
+        self.assertTrue(err)  # off to recommend is a person's
         self.assertEqual(host_review.mode_of(self.proj), 'off')

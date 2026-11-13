@@ -5002,8 +5002,10 @@ def set_project_settings(ctx, slug, body):
         mode = body['host_review_mode']
         if mode not in ProjectSettings.HOST_REVIEW_MODES:
             raise ApiError(400, f'host_review_mode must be one of: {", ".join(ProjectSettings.HOST_REVIEW_MODES)}')
-        if mode == 'auto' and ctx.token is not None:  # an API key or an agent: the AI starting scans and checks by itself is a person's decision, in the web interface
-            raise ApiError(403, 'only a person sets the host review to automatic, in the web interface; an API key may set recommend or off')
+        if ctx.token is not None:  # an API key or an agent may only turn the host review DOWN (auto, then recommend, then off): a person sets it up, in the web interface
+            from cveFeed import host_review
+            if host_review.MODE_RANK[mode] > host_review.MODE_RANK[host_review.mode_of(project)]:
+                raise ApiError(403, 'only a person raises the host review (off to recommend, anything to automatic), in the web interface; an API key may only lower it')
         row, _created = ProjectSettings.objects.get_or_create(project=project)
         row.host_review_mode, row.updated_by = mode, ctx.user
         row.save(update_fields=['host_review_mode', 'updated_by', 'updated_at'])

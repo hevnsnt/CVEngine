@@ -175,7 +175,7 @@ def start_host_review_step(ctx, slug, host_id):
     from cveFeed import host_review
     project, row = _newest_for_write(ctx, slug, host_id)
     try:
-        result = host_review.start_step(row, ctx.user)
+        result = host_review.start_step(row, ctx.user, agent=ctx.token is not None)  # an API key or an agent: the user is kept for the record, the gates are the unattended ones
     except host_review.HostReviewRefused as exc:
         raise ApiError(exc.status, str(exc)) from exc
     row.refresh_from_db()

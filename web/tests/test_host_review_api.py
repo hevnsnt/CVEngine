@@ -342,3 +342,45 @@ class McpTests(ApiFixture):
         self.assertEqual((status, data['sla_days']['critical'], data['host_review_mode']), (200, 3, 'off'))
         status, data = call(self.tok, 'PUT', url, {'sla_days': {'critical': None}})
         self.assertEqual((status, data['sla_days']['critical'], data['host_review_mode']), (200, 7, 'off'))
+
+
+class AgentStartTests(ApiFixture):
+    """HS-5: an API key or an agent starting a proposed step has no person's authority: a step held for planted text is refused, and the action runs under
+    the unattended gates (the requester stays on the record). A session user (a person in the web interface) is unchanged."""
+
+    def test_a_token_cannot_start_a_step_held_for_planted_text_and_a_person_can(self):
+        from cveFeed.models import ProjectSettings
+        review = self.applied(action='assess_host')
+        HostReview.objects.filter(pk=review.pk).update(injection=['ai_directive'])
+        with mock.patch.object(host_actions, 'run') as run:
+            status, data = self.post('/step')
+        self.assertEqual(status, 409, data)
+        self.assertIn('a person starts it, in the web interface', data['error'])
+        run.assert_not_called()
+        self.assertEqual(HostReview.objects.get().step_state, 'proposed')
+        from django.test import Client
+        person = Client()
+        person.force_login(self.member)
+        with mock.patch.object(host_actions, 'run', return_value={'action': 'assess_host', 'target': '', 'state': 'started', 'detail': 'queued'}) as run:
+            response = person.post(self.base + '/step', data='{}', content_type='application/json')
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertFalse(run.call_args.kwargs['agent'])
+
+    def test_a_token_start_runs_under_the_unattended_gates_with_the_user_on_the_record(self):
+        review = self.applied(action='assess_host')
+        with mock.patch('cveFeed.host_assessment._admit', wraps=__import__('cveFeed.host_assessment', fromlist=['_admit'])._admit) as admit, \
+                mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, project=None: list(hosts)):
+            status, data = self.post('/step')
+        self.assertEqual(status, 200, data)
+        self.assertTrue(admit.called)
+        self.assertTrue(all(call.kwargs.get('unattended') for call in admit.call_args_list), admit.call_args_list)
+        from cveFeed.models import HostAssessment
+        self.assertEqual(HostAssessment.objects.get().requested_by, self.member)
+
+    def test_a_manual_only_target_refuses_an_agents_start(self):
+        self.applied(action='assess_host')
+        from targetApp.models import Domain
+        Domain.objects.filter(pk=self.domain.pk).update(discovery_mode='manual')
+        status, data = self.post('/step')
+        self.assertEqual(status, 409, data)
+        self.assertEqual(HostReview.objects.get().step_state, 'refused')

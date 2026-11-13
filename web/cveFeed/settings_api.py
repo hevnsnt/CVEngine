@@ -1249,11 +1249,12 @@ def reviewer_put(request):
         from dashboard.models import Project
         if not isinstance(modes, dict) or len(modes) > 500 or not all(isinstance(k, str) and v in ProjectSettings.HOST_REVIEW_MODES for k, v in modes.items()):
             raise SettingsError(400, 'host_review_modes is {project slug: auto, recommend or off}')
-        if via_agent and 'auto' in modes.values():
-            raise SettingsError(403, 'only a person sets a project to automatic, in Settings in the web interface')
         projects = {p.slug: p for p in Project.objects.filter(slug__in=list(modes))}
         if set(modes) - set(projects):
             raise SettingsError(404, 'no such project: ' + ', '.join(sorted(set(modes) - set(projects))[:5]))
+        from cveFeed import host_review
+        if via_agent and any(host_review.MODE_RANK[mode] > host_review.MODE_RANK[host_review.mode_of(projects[slug])] for slug, mode in modes.items()):
+            raise SettingsError(403, 'only a person raises the host review of a project, in Settings in the web interface; an agent may only lower it')
         for slug, mode in modes.items():
             ProjectSettings.objects.update_or_create(project=projects[slug], defaults={'host_review_mode': mode, 'updated_by': request.user})
         from cveFeed.admin_api import audit

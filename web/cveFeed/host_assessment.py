@@ -257,9 +257,9 @@ def capacity_message(held, global_cap, mine, project_cap, scans):
     return text
 
 
-def enqueue(project, sub, *, source='manual', user=None):
+def enqueue(project, sub, *, source='manual', user=None, unattended=None):
     """Accept only a stored host owned by this project; a model cannot supply a new target."""
-    domain, host = _admit(project, sub, unattended=user is None)
+    domain, host = _admit(project, sub, unattended=(user is None) if unattended is None else unattended)
     existing = HostAssessment.objects.filter(project=project, host=host, status__in=ACTIVE).order_by('id').first()
     if existing:
         return existing, False
