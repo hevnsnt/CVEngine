@@ -166,7 +166,7 @@ export function stepHelp(step) {
   if (/last 24 hours/.test(d)) return "Not started by itself: a step on this host ran or was dismissed in the last day.";
   if (/limit of automatic steps/.test(d)) return "Not started by itself: this project's limit of automatic steps for today is reached.";
   if (/paused/.test(d)) return "Not started by itself: scanning is paused.";
-  return d ? `Not started by itself: ${d}.`.replace("..", ".") : "";
+  return d ? `Not started by itself: ${d.replace(/\.+$/, "")}.` : "";
 }
 
 // The next step: its title, why, the chip, and which buttons it has.
