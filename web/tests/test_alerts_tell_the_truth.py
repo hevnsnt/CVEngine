@@ -190,6 +190,9 @@ class TemplateAlertTextTests(Base):
 
     def stuck(self):
         from cveFeed import templatevalidate
+        from cveFeed.models import ReviewerSettings
+        ReviewerSettings.current()
+        ReviewerSettings.objects.update(template_validation_enabled=True)  # the validator ships off; these texts are about it running
         for _ in range(20):
             GeneratedTemplate.objects.create(cve_entry=self.cve, yaml='x', status=GeneratedTemplate.STATUS_DRAFT,
                                              validation_started_at=now() - templatevalidate.STUCK_AFTER - timedelta(hours=1))

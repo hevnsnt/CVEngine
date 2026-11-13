@@ -53,6 +53,13 @@ CRITIQUE_SYSTEM_BODY = (
     'disagree and say why in plain words.')
 
 
+def enabled():
+    """Whether the automatic validation may run (``ReviewerSettings.template_validation_enabled``): off until a person switches it on in Settings or answers the AI
+    question. Off, no draft is looked at, asked about or expired (it waits, as in 1.3.6), and no AI call is spent. Checks already validated keep working."""
+    from cveFeed import reviewer
+    return bool(reviewer.settings_row().template_validation_enabled)
+
+
 def expiry_days():
     try:
         return max(1, int(os.environ.get('CVENGINE_TEMPLATE_DRAFT_EXPIRY_DAYS', '')))
@@ -247,6 +254,8 @@ def run_pending(now=None, limit=BATCH):
     from cveFeed.models import GeneratedTemplate
     now = now or timezone.now()
     out = {'stamped': 0, 'expired': 0, 'valid': 0, 'invalid': 0, 'asked': 0, 'waiting': 0, 'retry': 0, 'busy': 0}
+    if not enabled():
+        return {**out, 'skipped': 'automatic validation of AI-written checks is off until an administrator turns it on'}
     if not cache.add(LOCK, 1, timeout=600):
         return {**out, 'skipped': 'another run is in progress'}
     try:
@@ -276,7 +285,7 @@ def _template(job):
 
 def job_answer(job, text):
     tmpl = _template(job)
-    if tmpl is None:
+    if tmpl is None or not enabled():  # switched off while the question was out: the answer is dropped and the draft waits, nothing is promoted
         return None
     phase = (job.context or {}).get('phase')
     now = timezone.now()
@@ -363,6 +372,8 @@ def problem(now=None):
     from cveFeed import ai_jobs
     from cveFeed.models import GeneratedTemplate as G
     now = now or timezone.now()
+    if not enabled():  # off: the drafts wait for a person to switch it on, which is not a fault
+        return None
     old = G.objects.filter(status=G.STATUS_DRAFT).filter(validation_started_at__lte=now - STUCK_AFTER).count()
     if old:
         from agentapi import sentinel_dispatch
