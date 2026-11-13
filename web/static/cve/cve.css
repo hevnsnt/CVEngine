@@ -2851,8 +2851,27 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 @media (pointer:coarse){
   .tiles.slim .tile,button.tile,a.tile{min-height:var(--hit)}
   .scope-row .scope{min-height:var(--hit);height:var(--hit)}
-  /* a trend row's label link answers the whole 44px row (its number is not a button, so a tap on it reaches the link), and the rows do not move */
-  .mx-lead{position:relative}
-  .mx-lead a.eyebrow::after{content:"";position:absolute;inset:0}
-  .mx-lead a.eyebrow~.mx-total{pointer-events:none}
+}
+/* a trend row's label link is 44px high on a phone or tablet, where the rows stack and have room (the desktop grid keeps its 44px rows) */
+@media (pointer:coarse) and (max-width:999px){
+  .mx-lead a.eyebrow{display:flex;align-items:center;min-height:var(--hit)}
+}
+
+/* ---- Hygiene on a phone: the host and the time share a line, so a fourth issue fits on the first screen (the 44px touch sizes stay) ---- */
+@media (max-width:639px){
+  #section[data-kind="hygiene"] .table-page .table tr{column-gap:var(--s-2)}
+  #section[data-kind="hygiene"] .table-page .table td[data-label="Host"]::before{display:none}
+}
+
+/* ---- Changes: a host name is one line (cut with an ellipsis when it cannot fit, the whole name is the tooltip) and the detail is two lines at most ---- */
+@media (min-width:640px){
+  #section[data-kind="changes"] td.change-host{white-space:nowrap;max-width:30ch;overflow:hidden;text-overflow:ellipsis;overflow-wrap:normal}
+  #section[data-kind="changes"] td.change-host a{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}
+  #section[data-kind="changes"] .change-detail{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2;overflow:hidden}
+}
+@media (min-width:640px){
+  /* tighter rows and a tighter head, so five changes fit under the chart's line on a 720px screen */
+  #section[data-kind="changes"] .changes-trend{margin-bottom:0}
+  #section[data-kind="changes"] .chart-slot:not(:empty){margin-bottom:0}
+  #section[data-kind="changes"] .table td{padding:var(--s-2) var(--s-3)}
 }
