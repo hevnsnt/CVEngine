@@ -119,6 +119,28 @@ class ResultAndTaskShowTheCut(TestCase):
         sb._note_cuts(task, agent, {'outcome': 'done', 'findings': []})
         self.assertEqual(AgentActivity.objects.filter(detail__sentinel_task_id=task.pk).count(), 1)
 
+    def test_checks_left_out_on_purpose_are_one_plain_sentence_per_scan_not_a_warning(self):
+        from django.core.cache import cache
+        from cveFeed.models import AgentActivity
+        cache.delete_many([f'cvengine:cut-info:{self.scan.pk}:templates_with_credentials', f'cvengine:cut-info:{self.scan.pk}:templates_unreadable'])
+        cuts = [{'what': 'templates_with_credentials', 'kind': 'items', 'limit': 0, 'dropped': 377}, {'what': 'templates_unreadable', 'kind': 'items', 'limit': 0, 'dropped': 1}]
+        first, agent = self.task({'outcome': 'done', 'cuts': cuts})
+        second, _ = self.task({'outcome': 'done', 'cuts': cuts})
+        sb._note_cuts(first, agent, {'outcome': 'done', 'findings': [], 'cuts': cuts})
+        sb._note_cuts(second, agent, {'outcome': 'done', 'findings': [], 'cuts': cuts})  # another chunk of the same scan: not said again
+        lines = list(AgentActivity.objects.filter(detail__scan_id=self.scan.pk).values_list('message', 'status'))
+        self.assertEqual(len(lines), 2, lines)
+        text = ' '.join(m for m, _s in lines)
+        self.assertIn("377 checks that send a fixed credential were left out; turn on 'Allow checks that send credentials' to run them", text)
+        self.assertIn('1 installed check that could not be read or parsed was left out', text)
+        self.assertNotIn('cut its', text)  # not the "cut its result" line of a loss
+        self.assertEqual({st for _m, st in lines}, {'done'})
+        self.assertFalse(result_cuts.partial({'cuts': cuts}))  # not a partly checked result
+        brief = sb.task_brief(first)
+        self.assertEqual(brief['cut_notes'][0], "377 checks that send a fixed credential were left out; turn on 'Allow checks that send credentials' to run them")
+        self.assertFalse(brief['partly_checked'])
+        self.assertEqual(result_cuts.summary({'cuts': cuts}, losses_only=True), [])
+
     def test_the_sentinels_page_row_of_a_finished_task_has_the_notes(self):
         task, _ = self.task({'outcome': 'done', 'templates_release': 'v10.5.2', 'cuts': [{'what': 'time_limit', 'kind': 'time', 'limit': 900}]})
         row = sb._live_task(task, None)

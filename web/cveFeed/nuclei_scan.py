@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 NUCLEI_CHUNK = 100  # targets handed to a stream per call: the ledger is written after each call, so a failure part way marks only the later ones
 # A run's flags and the ports a bare host is probed on are the scanner library's (cvengine_scanner.flags), shared with every Sentinel.
-TEMPLATE_POLICY_REV = 'readonly-2'
-ALL_TEMPLATES_REV = 'all-2'  # all-1 ran default-login and bruteforce templates; all-2 leaves them out unless a person allowed them (``all-2-cred``)
+TEMPLATE_POLICY_REV = 'readonly-3'  # readonly-3 also refuses a template that sends a credential of its own (a fixed Authorization or Cookie header, a user name in a URL)
+ALL_TEMPLATES_REV = 'all-3'  # all-1 ran default-login and bruteforce templates; all-2 leaves them out unless a person allowed them (``all-2-cred``); all-3 also leaves out a template with a fixed credential header or a user name in a URL (``all-3-cred`` lifts both)
 _APPROVED = {'root': None, 'at': 0, 'value': None}
 _APPROVED_LOCK = threading.Lock()
 
@@ -97,7 +97,7 @@ def _approved_templates_locked():
     """Snapshot only installed templates passing the same destination/read-only gate as targeted checks."""
     from cveFeed import templategen, validation
     root = os.path.realpath(templategen.TEMPLATES_ROOT)
-    rev, everything = policy_rev(), validation.all_templates_allowed()
+    rev = policy_rev()
     if (_APPROVED['root'] == root and _APPROVED.get('rev') == rev and _APPROVED['value'] and os.path.isdir(_APPROVED['value'][0])
             and time.monotonic() - _APPROVED['at'] < 3600):
         return _APPROVED['value']
@@ -122,7 +122,7 @@ def _approved_templates_locked():
                     continue
                 relative = os.path.relpath(path, root)
                 problem = ('larger than the template size limit' if len(content) > validation.MAX_INSTALLED_TEMPLATE_BYTES
-                           else '' if everything else validation.readonly_problem(content.decode('utf-8', 'replace')))
+                           else validation.installed_template_problem(content.decode('utf-8', 'replace')))
                 if problem:
                     reason = _policy_reason(problem)
                     skipped[reason] = skipped.get(reason, 0) + 1

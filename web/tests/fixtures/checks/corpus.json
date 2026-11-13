@@ -620,8 +620,8 @@
     {
       "name": "raw_cookie",
       "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        GET /x HTTP/1.1\n        Host: {{Hostname}}\n        Cookie: session=abc\n",
-      "read_only": true,
-      "own_target": true,
+      "read_only": false,
+      "own_target": false,
       "sentinel": false
     },
     {
@@ -641,22 +641,22 @@
     {
       "name": "authorization_header",
       "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      Authorization: \"Basic YWRtaW46YWRtaW4=\"\n",
-      "read_only": true,
-      "own_target": true,
+      "read_only": false,
+      "own_target": false,
       "sentinel": false
     },
     {
       "name": "cookie_header",
       "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      Cookie: \"sid=1\"\n",
-      "read_only": true,
-      "own_target": true,
+      "read_only": false,
+      "own_target": false,
       "sentinel": false
     },
     {
       "name": "api_key_header_name",
       "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-Api-Key: \"abc\"\n",
-      "read_only": true,
-      "own_target": true,
+      "read_only": false,
+      "own_target": false,
       "sentinel": false
     },
     {
@@ -910,6 +910,83 @@
       "read_only": false,
       "own_target": false,
       "sentinel": false
+    },
+    {
+      "name": "credential_basic_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      Authorization: \"Basic YWRtaW46YWRtaW4=\"\n    matchers:\n      - type: word\n        words: [\"ok\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "credential_bearer_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      Authorization: \"Bearer abc123def456\"\n    matchers:\n      - type: word\n        words: [\"ok\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "credential_fixed_cookie",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      Cookie: \"PHPSESSID=0123456789abcdef\"\n    matchers:\n      - type: word\n        words: [\"ok\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "credential_api_key_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      X-Api-Key: \"letmein\"\n    matchers:\n      - type: word\n        words: [\"ok\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "credential_base64_function_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      Authorization: \"Basic {{base64('admin:admin')}}\"\n    matchers:\n      - type: word\n        words: [\"ok\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "credential_userinfo_url",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"http://admin:admin@{{Hostname}}/\"\n    matchers:\n      - type: word\n        words: [\"ok\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "credential_in_raw_request_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - raw:\n      - |\n        GET /status HTTP/1.1\n        Host: {{Hostname}}\n        Authorization: Basic YWRtaW46YWRtaW4=\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "credential_fixed_variable_in_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nvariables:\n  tok: \"s3cret-value\"\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      Authorization: \"Bearer {{tok}}\"\n    matchers:\n      - type: word\n        words: [\"ok\"]\n",
+      "read_only": false,
+      "own_target": false,
+      "sentinel": false
+    },
+    {
+      "name": "authorization_from_a_placeholder_only",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      Authorization: \"Bearer {{token}}\"\n    matchers:\n      - type: word\n        words: [\"ok\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "cookie_echoing_an_extracted_value",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/a\"\n    extractors:\n      - type: regex\n        name: sid\n        internal: true\n        group: 1\n        regex: [\"sid=([a-z0-9]+)\"]\n  - method: GET\n    path:\n      - \"{{BaseURL}}/b\"\n    headers:\n      Cookie: \"PHPSESSID={{sid}}\"\n    matchers:\n      - type: word\n        words: [\"ok\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": false
+    },
+    {
+      "name": "plain_user_agent_header",
+      "template": "id: c\ninfo:\n  name: c\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/x\"\n    headers:\n      User-Agent: \"cvengine-check/1.0\"\n    matchers:\n      - type: word\n        words: [\"ok\"]\n",
+      "read_only": true,
+      "own_target": true,
+      "sentinel": true
     }
   ]
 }

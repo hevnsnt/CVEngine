@@ -56,6 +56,45 @@ def ago(**delta):
 	return NOW - timedelta(**delta)
 
 
+class NoCheckPortTests(SimpleTestCase):
+	"""TL-4 display: a port no check exists for is its own plain state on the host, not failed, not checked, not counted against the host. It is due again when the
+	allowlist gains a class (a check may now exist), and never later than the ledger window."""
+
+	def host(self):
+		return facts(ports=[port(80, 'http'), port(9200, 'unknown'), port(5432, 'postgresql'), port(53, 'domain', 'udp')])
+
+	def evidence(self, when, release=None, asset='www.example.test:9200'):
+		ev = cc.Evidence(NOW)
+		ev.add_ledger(ledger.nocheck_service('nuclei', release), 1, asset, when)
+		return ev
+
+	def test_a_port_with_a_no_check_answer_is_named_and_not_counted(self):
+		host = self.host()
+		plain = cc.coverage(host, cc.Evidence(NOW))
+		out = cc.coverage(host, self.evidence(ago(hours=2)))
+		self.assertEqual(plain['no_check'], [])
+		self.assertEqual(out['no_check'], [{'port': 9200, 'target': 'www.example.test:9200', 'state': 'no_check', 'last_run': ago(hours=2).isoformat(),
+											'detail': 'Port 9200: no check exists for this service'}])
+		self.assertEqual((out['done'], out['applicable']), (plain['done'], plain['applicable']))  # neither a pass nor a gap
+		self.assertEqual({c['id']: c['state'] for c in out['checks']}, {c['id']: c['state'] for c in plain['checks']})
+
+	def test_the_address_spelling_of_the_target_counts_too(self):
+		out = cc.coverage(self.host(), self.evidence(ago(hours=2), asset='203.0.113.10:9200'))
+		self.assertEqual([r['port'] for r in out['no_check']], [9200])
+
+	def test_an_old_answer_or_one_from_an_earlier_allowlist_is_not_shown(self):
+		host = self.host()
+		self.assertEqual(cc.coverage(host, self.evidence(ago(days=8)))['no_check'], [])  # past the 7 day window: the port is asked again
+		self.assertEqual(cc.coverage(host, self.evidence(ago(hours=2), release='00000000'))['no_check'], [])  # the allowlist changed since: asked again
+
+	def test_a_port_that_is_not_open_tcp_is_not_shown(self):
+		host = facts(ports=[port(53, 'domain', 'udp')])
+		self.assertEqual(cc.coverage(host, self.evidence(ago(hours=2), asset='www.example.test:53'))['no_check'], [])
+
+	def test_a_paused_host_shows_none(self):
+		self.assertEqual(cc.coverage(self.host(), self.evidence(ago(hours=2)), paused='excluded')['no_check'], [])
+
+
 class RegistryTests(SimpleTestCase):
 	def test_every_check_has_a_unique_id_a_label_and_a_known_window(self):
 		ids = [c.id for c in cc.CHECKS]
@@ -584,10 +623,13 @@ class StoredHostTests(TestCase):
 			auth_state='open', checked_at=now - timedelta(days=1))
 		TlsCertificate.objects.create(domain=self.da, host='www.alpha.example.test', port=443)
 		ScanActivity.objects.create(scan_of=self.scan_a, title='cve', name='cve_correlation', time=now, status=2)
+		ServiceRun.objects.create(service=ledger.nocheck_service('nuclei'), asset='www.alpha.example.test:22', project=self.pa, status='done', finished_at=now)
 		rows = self.rows()
 		www = rows['www.alpha.example.test']
 		coverage = www['check_coverage']
-		self.assertEqual(set(coverage), {'done', 'applicable', 'paused', 'internal', 'checks'})
+		self.assertEqual(set(coverage), {'done', 'applicable', 'paused', 'internal', 'checks', 'no_check'})
+		self.assertEqual([(r['port'], r['detail']) for r in coverage['no_check']], [(22, 'Port 22: no check exists for this service')])  # over REST, as stored
+		self.assertEqual(rows['alpha.example.test']['check_coverage']['no_check'], [])
 		self.assertEqual(coverage['paused'], '')
 		self.assertEqual(coverage['done'], sum(c['state'] == 'done' for c in coverage['checks']))
 		self.assertEqual(coverage['applicable'], sum(c['state'] != 'not_applicable' for c in coverage['checks']))
