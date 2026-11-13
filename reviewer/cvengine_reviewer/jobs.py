@@ -117,7 +117,7 @@ def ops_message(snapshot):
     for key, label in (('signals', 'SIGNALS'), ('tuning', 'TUNING')):
         if isinstance(snapshot.get(key), dict) and snapshot[key]:
             extra += '\n\n' + guard.fence(label, snapshot[key])[0]  # the server's measurements (names of Sentinels among them): fenced like the checks, and bounded by the server
-    return f'{head}\n\n{fenced}{extra}\n\nDiagnose every check that is not ok and choose actions, then answer with the JSON object.'
+    return f'{head}\n\n{fenced}{extra}\n\nDiagnose every check that is not ok and choose actions (and, only if settings you may change are listed and the measurements show a problem one addresses, at most two proposals), then answer with the JSON object.'
 
 
 def parse_ops_reply(text, schema):
@@ -126,11 +126,20 @@ def parse_ops_reply(text, schema):
     allowed = schema['properties']['alerts']['items']['properties']['code']['enum']
     lenient = json.loads(json.dumps(schema))
     del lenient['properties']['alerts']['items']['properties']['code']['enum']
+    wanted = lenient['properties'].get('tuning')
+    offered = wanted['items']['properties']['setting']['enum'] if wanted else []
+    if wanted:  # a proposal naming a setting that was not offered, or a check that does not exist, is dropped on its own: the rest of the reply stands
+        del wanted['items']['properties']['setting']['enum']
+        del wanted['items']['properties']['alert']['enum']
+        lenient['required'] = [k for k in lenient['required'] if k != 'tuning']
     answer = guard.parse_reply(text, lenient)
     kept = [a for a in answer['alerts'] if a['code'] in allowed]
     if len(kept) < len(answer['alerts']):
         logger.warning('operations: dropped %d alert(s) naming a check the server does not have', len(answer['alerts']) - len(kept))
-    return {**answer, 'alerts': kept}
+    proposals = [t for t in answer.get('tuning', []) if t['setting'] in offered]
+    if len(proposals) < len(answer.get('tuning', [])):
+        logger.warning('operations: dropped %d tuning proposal(s) naming a setting that was not offered', len(answer['tuning']) - len(proposals))
+    return {**answer, 'alerts': kept, 'tuning': proposals}
 
 
 def run_ops(server, provider, release=None):
@@ -138,17 +147,22 @@ def run_ops(server, provider, release=None):
     snapshot = server.ops_snapshot(release)
     if all((c.get('state') == 'ok') for c in snapshot.get('checks') or []):
         return server.ops_report({'alerts': [], 'actions': [], 'model': '', 'templates_release': release})
-    schema = prompts.ops_schema(snapshot.get('codes'))  # the server's own list of its checks: the model is offered every one, and the list cannot drift from the server
+    schema = prompts.ops_schema(snapshot.get('codes'), snapshot.get('tuning_settings'))  # the server's own list of its checks: the model is offered every one, and the list cannot drift from the server
     text, _usage, model = measured_call(server, 'operations_check', provider, prompts.OPS_SYSTEM, ops_message(snapshot), schema,
                                         OPS_MAX_TOKENS, effort='low')
     try:
         answer = parse_ops_reply(text, schema)
     except guard.ReplyError as exc:
         logger.warning('operations: unusable answer (%s)', exc)
-        answer = {'alerts': [], 'actions': []}
+        answer = {'alerts': [], 'actions': [], 'tuning': []}
     alerts = [{'code': a['code'], 'severity': a['severity'], 'diagnosis': guard.scrub(a['diagnosis'], NOTE_LIMIT)} for a in answer['alerts']
               if not guard.is_filler(guard.scrub(a['diagnosis'], NOTE_LIMIT))]  # a diagnosis that is filler ("Placeholder") is not sent: the alert shows no reviewer line
-    return server.ops_report({'alerts': alerts, 'actions': answer['actions'], 'model': str(model)[:100], 'templates_release': release})
+    report = {'alerts': alerts, 'actions': answer['actions'], 'model': str(model)[:100], 'templates_release': release}
+    tuning = [{'setting': t['setting'], 'value': t['value'], 'reason': guard.scrub(t['reason'], 300), 'alert': None if t['alert'] == 'none' else t['alert']}
+              for t in answer.get('tuning', [])[:2] if not guard.is_filler(guard.scrub(t['reason'], 300))]
+    if tuning:
+        report['tuning'] = tuning  # the server judges each against what may be proposed at that moment; nothing here decides
+    return server.ops_report(report)
 
 
 JOB_REPLY_LIMIT = 200_000  # characters of one pipeline answer sent back (the server refuses more)

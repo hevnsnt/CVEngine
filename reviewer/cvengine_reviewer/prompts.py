@@ -13,7 +13,7 @@ REVIEW_TASK = (
     'with a strong justification: answer false_positive and, in the note, name the specific evidence you read and why it does not '
     'support the finding. If the evidence is not enough to decide, say so and answer uncertain, which leaves the finding open.')
 OPS_TASK = (
-    'Your task: diagnose the product\'s own health checks that are not ok, for the operator who administers this server, using the measurements and the auto-tuner\'s recent decisions sent with them.')
+    'Your task: diagnose the product\'s own health checks that are not ok, for the operator who administers this server, using the measurements and the auto-tuner\'s recent decisions sent with them. When the TUNING block lists settings you may change, you may also propose at most two changes to them.')
 
 REVIEW_SYSTEM = PREAMBLE + '\n\n' + REVIEW_TASK + """
 
@@ -77,6 +77,13 @@ The message may also hold SIGNALS (memory of lanes and containers, oom kills, re
 "unknown" lists what could not be read) and TUNING (the auto-tuner's recent decisions). Use them to name the cause, never to invent numbers. \
 Refused claims are the server's limiter, not a lack of Sentinels: never advise adding capacity for them.
 
+TUNING also holds proposals: the settings you may change now, each with its label, the number in effect, and the lowest and highest number you may choose \
+(a setting that is not listed cannot be changed, and "not_offered" says why). The answer has a "tuning" list for them, at most two items, each \
+{setting, value, reason, alert}: setting is one of the listed keys, value a whole number inside that setting's range, reason one short sentence that cites \
+numbers from SIGNALS or the checks, and alert the code of the check it answers (or "none"). Propose a change only when the measurements show a problem \
+that a listed setting addresses; prefer lowering a number under trouble; propose nothing when nothing is wrong, and never name a setting that is not \
+listed. A person set how these proposals are used: they may be applied, kept as recommendations, or ignored. Do not mention that in a diagnosis.
+
 Never say no Sentinel is online if live_sentinels > 0, nor to start a built-in one if builtin_scanner is false.
 
 Then choose actions, only from the actions a check offers: feed_sentinels gives idle Sentinels due hosts now, refresh_nuclei_templates \
@@ -87,12 +94,24 @@ Answer with the JSON object the schema describes and nothing else."""
 
 OPS_CODES = ['sentinels_idle', 'sentinels_offline', 'nuclei_templates', 'sentinel_errors', 'scan_errors', 'system', 'generated_templates', 'ai_errors', 'workers_down', 'sentinel_waiting', 'memory', 'queue_starvation', 'sentinel_claims_refused']  # the fallback for a server that sends no list of its own (``codes`` in the snapshot); a test holds it equal to the checks the server can return
 
-def ops_schema(codes=None):
-    """The answer schema with the check codes the server named (a list of short names) in place of the fallback list."""
-    if not isinstance(codes, list) or not 0 < len(codes) <= 40 or not all(isinstance(c, str) and 0 < len(c) <= 40 for c in codes):
-        return OPS_SCHEMA
+def _names(values, limit):
+    return isinstance(values, list) and 0 < len(values) <= limit and all(isinstance(c, str) and 0 < len(c) <= 64 for c in values)
+
+
+def ops_schema(codes=None, tuning=None):
+    """The answer schema with the check codes the server named (a list of short names) in place of the fallback list. ``tuning``: the setting keys the server
+    offered in this snapshot (``tuning_settings``); when there are some the answer also has a ``tuning`` list (at most two proposals) whose ``setting`` can
+    name only those, built per request like the check codes. With none, the field is not in the schema at all."""
     schema = copy.deepcopy(OPS_SCHEMA)
-    schema['properties']['alerts']['items']['properties']['code']['enum'] = list(codes)
+    known = codes if _names(codes, 40) else None
+    if known:
+        schema['properties']['alerts']['items']['properties']['code']['enum'] = list(known)
+    if _names(tuning, 40):
+        schema['required'] = ['alerts', 'actions', 'tuning']
+        schema['properties']['tuning'] = {'type': 'array', 'maxItems': 2, 'items': {
+            'type': 'object', 'additionalProperties': False, 'required': ['setting', 'value', 'reason', 'alert'],
+            'properties': {'setting': {'type': 'string', 'enum': list(tuning)}, 'value': {'type': 'integer'}, 'reason': {'type': 'string', 'maxLength': 300},
+                           'alert': {'type': 'string', 'enum': list(known or OPS_CODES) + ['none']}}}}
     return schema
 
 

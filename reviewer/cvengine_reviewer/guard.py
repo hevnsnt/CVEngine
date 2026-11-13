@@ -114,6 +114,10 @@ def _check(value, schema, where):
         if 'enum' in schema and value not in schema['enum']:
             raise ReplyError(f'{where} is not one of the allowed values')
         return value[:schema.get('maxLength', 2000)]
+    if kind == 'integer':
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ReplyError(f'{where} must be a whole number')
+        return value
     if kind == 'boolean':
         if not isinstance(value, bool):
             raise ReplyError(f'{where} must be true or false')
