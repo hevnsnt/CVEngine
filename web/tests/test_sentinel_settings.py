@@ -6,6 +6,7 @@ from django.utils import timezone
 
 from agentapi import sentinel_settings as ss
 from agentapi.models import Agent
+from cveFeed import software
 from tests.test_agentapi import call
 from tests.test_sentinels import build_world, register_sentinel, reset_rates
 
@@ -149,7 +150,7 @@ class UpdateTests(Base):
         status, beat = call(self.tokens['alice'], 'POST', '/api/v1/sentinel/heartbeat',
                             {'info': {'version': 'abc1234', 'update': {'status': 'waiting', 'phase': 'drain', 'detail': '2 tasks running'}}})
         self.assertEqual(status, 200, beat)
-        self.assertEqual(beat['update'], {'mode': 'auto', 'setting': 'automatic', 'requested': False})
+        self.assertEqual(beat['update'], {'mode': 'auto', 'setting': 'automatic', 'requested': False, 'target': software.SENTINEL_PINS_COMMIT, 'reason': 'pinned'})  # Automatic is always told where to go (FB-7)
         status, detail = call(self.tokens['root'], 'GET', f'/api/v1/agents/{agent.pk}')
         self.assertEqual(detail['version'], 'abc1234')
         self.assertEqual(detail['update']['status'], 'waiting')
@@ -248,7 +249,7 @@ class SelfUpdateSettingTests(Base):
         agent, _ = self.sentinel()
         self.manage(agent, {'self_update': 'automatic'})
         beat = call(self.tokens['alice'], 'POST', '/api/v1/sentinel/heartbeat')[1]
-        self.assertEqual(beat['update'], {'setting': 'automatic', 'mode': 'auto', 'requested': False})
+        self.assertEqual(beat['update'], {'setting': 'automatic', 'mode': 'auto', 'requested': False, 'target': software.SENTINEL_PINS_COMMIT, 'reason': 'pinned'})  # (FB-7)
         self.assertEqual(beat['settings']['values']['self_update'], 'automatic')
         self.assertEqual(call(self.tokens['root'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'update': 'now'})[0], 200)
         self.manage(agent, {'self_update': 'off'})
