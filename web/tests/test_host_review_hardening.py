@@ -616,3 +616,56 @@ class ChangingBannerTests(Base):
         self.dismissed()
         Triage.objects.update(evidence_key='changed-evidence-key')
         self.assertEqual(self.again().step_state, 'proposed')
+
+
+class HostOpinionNeverDemotesTests(Base):
+    """HW-1: while ``host_review_auto_close`` is off, a host review's false positive moves nothing in Situations, whatever the finding review's own closing switch
+    says and whoever worked the finding. With the switch on, the existing rule applies unchanged."""
+
+    def setUp(self):
+        super().setUp()
+        from cveFeed.models import ReviewerSettings
+        ReviewerSettings.objects.update(host_review_auto_close=False)
+
+    def run_case(self, auto_close, worked=False):
+        from cveFeed.models import FindingComment, ReviewerSettings
+        ReviewerSettings.objects.update(auto_close=auto_close)
+        match = self.kev_match(in_range=None)
+        if worked:
+            FindingComment.objects.create(project=self.proj, finding_kind='match', finding_id=match.pk, author=self.user, text='looking at it')
+        self.assertEqual(self.tier_of(match), (situations.LIKELY, False))
+        review, _ = self.reply(self.queue(), self.fp())
+        return match, FindingReview.objects.get(host_review=review)
+
+    def test_with_the_finding_reviews_closing_switched_off_the_finding_stays_likely(self):
+        match, row = self.run_case(auto_close=False)
+        self.assertEqual((row.outcome, row.held_reason), ('held', 'closing false positives is turned off in Settings'))  # the reviewer's own hold, not the host review's
+        self.assertEqual(self.tier_of(match), (situations.LIKELY, False))
+
+    def test_a_finding_a_person_has_worked_stays_likely(self):
+        match, row = self.run_case(auto_close=True, worked=True)
+        self.assertEqual((row.outcome, row.held_reason), ('held', 'a person has worked this finding'))
+        self.assertEqual(self.tier_of(match), (situations.LIKELY, False))
+
+    def test_both_switches_at_their_defaults_stay_likely(self):
+        match, row = self.run_case(auto_close=True)
+        self.assertEqual(row.held_reason[:30], 'the host review does not close')
+        self.assertEqual(self.tier_of(match), (situations.LIKELY, False))
+
+    def test_with_the_switch_on_the_explicit_rule_of_the_finding_review_applies_unchanged(self):
+        from cveFeed.models import ReviewerSettings
+        ReviewerSettings.objects.update(host_review_auto_close=True)
+        match, row = self.run_case(auto_close=False)
+        self.assertEqual(self.tier_of(match), (situations.MINOR, True))
+
+    def test_the_finding_reviews_own_verdict_is_still_ranked_by_its_own_rule(self):
+        """A single-finding review (no host review behind it) is unaffected: the same hold demotes as before."""
+        from cveFeed import reviewer
+        from cveFeed.models import HostState, ReviewerSettings
+        ReviewerSettings.objects.update(auto_close=False)
+        match = self.kev_match(in_range=None)
+        row = Triage.objects.get(match=match)
+        key = reviewer.review_key(row, HostState.objects.get(project=self.proj, host=HOST).fingerprint)
+        reviewer.apply_verdict(f't{row.pk}', {'verdict': 'false_positive', 'confidence': 'high', 'reason_code': 'version_not_affected', 'review_key': key,
+                                              'note': 'The version shown is outside the range.', 'model': 'm'})
+        self.assertEqual(self.tier_of(match), (situations.MINOR, True))
