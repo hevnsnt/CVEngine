@@ -567,6 +567,20 @@ if [ -f scripts/update-disk.sh ] && ! git merge-base --is-ancestor "$SHA" HEAD; 
     exit 1
   fi
 fi
+# An approval of a commit that is already built, deployed and migrated changes nothing, so it is answered BEFORE scanning is paused: pausing first made it wait
+# for jobs to settle (exit 3) and hold new work for nothing. The same test is made again below, after a branch switch or a fast-forward.
+if [ "$SWITCH" = 0 ] && git merge-base --is-ancestor "$SHA" HEAD; then
+  PREV=$(git rev-parse HEAD)
+  if [ "$(python3 "$STATE_HELPER" built 2>/dev/null || true)" = "$PREV" ] && [ "$(deployed_commit)" = "$PREV" ] && schema_current; then
+    log "already at $SHA"
+    python3 "$STATE_HELPER" commit "$PREV"
+    refresh_upstream
+    clear_approval
+    rm -f "$STATE/last-wait" "$STATE/last-refusal" "$STATE/draining-since"
+    phase done
+    exit 0
+  fi
+fi
 pause_scanning
 RUNNING=$(running_scans)
 if ! [[ $RUNNING =~ ^[0-9]+$ ]]; then
