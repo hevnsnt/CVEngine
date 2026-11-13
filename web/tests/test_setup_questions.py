@@ -77,6 +77,31 @@ class MigrationTests(Base):
         row.refresh_from_db()
         self.assertEqual((row.enabled, row.auto_close), (False, False))
 
+    def row_of_a_deleted_user(self, **fields):
+        """A row a person saved (through the Settings handler, which audits it), whose account was deleted since: ``updated_by`` is emptied (SET_NULL)."""
+        gone = User.objects.create_superuser('gone-admin', 'g@x.io', 'x')
+        row = ReviewerSettings.objects.create(updated_by=gone, **fields)
+        if True:
+            AuditLog.objects.create(actor=gone, actor_name='gone-admin', action='settings.reviewer', target='AI reviewer settings', detail={})
+        gone.delete()
+        row.refresh_from_db()
+        self.assertIsNone(row.updated_by_id)
+        ReviewerSettings.objects.filter(pk=row.pk).update(enabled=True, auto_close=True)
+        return row
+
+    def test_a_choice_of_a_person_whose_account_was_deleted_is_not_undone(self):
+        row = self.row_of_a_deleted_user()  # on, closing on, and the audit record of the save
+        importlib.import_module('cveFeed.migrations.0163_reviewer_off_until_asked').off_until_asked(apps, None)
+        row.refresh_from_db()
+        self.assertEqual((row.enabled, row.auto_close), (True, True))
+
+    def test_a_row_that_is_not_what_the_builds_made_is_not_touched_either(self):
+        row = ReviewerSettings.objects.create(review_daily_max=500)  # no audit record and no user, but a person chose 500
+        ReviewerSettings.objects.filter(pk=row.pk).update(enabled=True, auto_close=True)
+        importlib.import_module('cveFeed.migrations.0163_reviewer_off_until_asked').off_until_asked(apps, None)
+        row.refresh_from_db()
+        self.assertEqual((row.enabled, row.auto_close), (True, True))
+
     def test_a_persons_earlier_choice_survives(self):
         row = ReviewerSettings.objects.create(enabled=True, auto_close=True, updated_by=self.admin)
         importlib.import_module('cveFeed.migrations.0163_reviewer_off_until_asked').off_until_asked(apps, None)
