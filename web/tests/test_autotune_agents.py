@@ -428,3 +428,49 @@ class UpdateQuestionTests(AgentBase):
         with self.assertRaises(ApiError):
             bridge.change_setting(self.ctx, 'setup_questions', {'answers': {'agent_policy': 'auto'}})
         self.assertEqual(AutoTuneSettings.current().agent_policy, 'suggest')
+
+
+class ModeOnlyLowerTests(AgentBase):
+    """An agent may lower auto-tuning's autonomy (auto, then suggest, then off) and never raise it, nor switch the AI advisor on: REST, MCP and the bridge alike."""
+
+    def set_mode(self, how, mode=None, advisor=None):
+        body = {k: v for k, v in (('mode', mode), ('advisor', advisor)) if v is not None}
+        if how == 'rest':
+            status, data = call(self.raw, 'PUT', '/api/v1/tuning/mode', body)
+            return status
+        if how == 'mcp':
+            error, _ = tool_call(self.raw, 'set_tuning_mode', body)
+            return 403 if error else 200
+        try:
+            bridge.change_setting(self.ctx, 'autotune', body)
+            return 200
+        except ApiError as exc:
+            return exc.status
+
+    def test_a_token_can_lower_in_steps_and_never_raise_through_any_door(self):
+        for how in ('rest', 'mcp', 'bridge'):
+            AutoTuneSettings.objects.update(mode='auto', advisor=True)
+            self.assertEqual(self.set_mode(how, 'suggest'), 200, how)
+            self.assertEqual(AutoTuneSettings.current().mode, 'suggest')
+            self.assertEqual(self.set_mode(how, 'auto'), 403, how)  # suggest -> auto: refused
+            self.assertEqual(AutoTuneSettings.current().mode, 'suggest')
+            self.assertEqual(self.set_mode(how, 'off'), 200, how)
+            for raised in ('suggest', 'auto'):
+                self.assertEqual(self.set_mode(how, raised), 403, (how, raised))  # off -> anything: refused
+            self.assertEqual(AutoTuneSettings.current().mode, 'off')
+            self.assertEqual(self.set_mode(how, 'off'), 200, how)  # staying where it is is not a raise
+            AutoTuneSettings.objects.update(mode='auto')
+            self.assertEqual(self.set_mode(how, 'off'), 200, how)  # auto -> off in one step is lowering too
+
+    def test_the_ai_advisor_can_be_switched_off_by_a_token_and_not_on(self):
+        for how in ('rest', 'mcp', 'bridge'):
+            AutoTuneSettings.objects.update(mode='auto', advisor=True)
+            self.assertEqual(self.set_mode(how, advisor=False), 200, how)
+            self.assertFalse(AutoTuneSettings.current().advisor)
+            self.assertEqual(self.set_mode(how, advisor=True), 403, how)
+            self.assertFalse(AutoTuneSettings.current().advisor)
+
+    def test_a_person_in_the_web_interface_raises_as_before(self):
+        AutoTuneSettings.objects.update(mode='off', advisor=False)
+        status, data = send(client_for(self.root), 'PUT', 'autotune', {'mode': 'auto', 'advisor': True})
+        self.assertEqual((status, data['mode'], data['advisor']['enabled']), (200, 'auto', True))
