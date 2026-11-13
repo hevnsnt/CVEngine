@@ -66,9 +66,12 @@ def clear_egress_state():
         client = resources.redis_client()
         if client is None:
             return
-        keys = list(client.scan_iter('cvengine:egress:*', count=1000))
-        if keys:
-            client.delete(*keys)
+        # the egress ledger, and the hourly hash of the rate limiter's refusals (agentapi.claim_refusals): a test that drives a 429 (the secret reads, the claim
+        # flood) leaves a refusal in Redis that is a real number in another module's system status, so it is cleared before every test, not by one module's setUp
+        for pattern in ('cvengine:egress:*', 'cvengine:claim_refused:*'):
+            keys = list(client.scan_iter(pattern, count=1000))
+            if keys:
+                client.delete(*keys)
     except Exception:  # noqa: BLE001 - a test without Redis has no egress state to clear
         pass
 

@@ -114,7 +114,9 @@ function pressureText(d) {
 }
 
 // The server's own sentence without its "so it was not judged" tail, which the line says up front.
-const plainDetail = (text) => clean(text).replace(/^undid decision \d+:\s*/i, "").replace(/,?\s+so (?:it|the change) (?:was|is) not judged\.?$/i, "").replace(/\.$/, "");
+// "2 memory kill(s)" (what an older server wrote) reads "2 memory kills"; "1 memory kill(s)" reads "1 memory kill".
+const plainCount = (text) => text.replace(/\b(\d+)\s([^,;]*)/g, (all, n, rest) => (rest.includes("(s)") ? `${n} ${rest.replace(/\(s\)/g, n === "1" ? "" : "s")}` : all));
+const plainDetail = (text) => plainCount(clean(text)).replace(/^undid decision \d+:\s*/i, "").replace(/,?\s+so (?:it|the change) (?:was|is) not judged\.?$/i, "").replace(/\.$/, "");
 
 // What happened after the change: {text, tone}. tone: good | bad | neutral | wait.
 export function happenedText(d, now = Date.now()) {

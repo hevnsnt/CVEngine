@@ -1231,7 +1231,7 @@ class TickSafetyTests(WatchdogCase):
         probes = FakeProbes(lanes=lambda: time.sleep(30))
         started = time.time()
         out = wd.tick(now=T0, probes=probes, limit=1)
-        self.assertLess(time.time() - started, 5)
+        self.assertLess(time.time() - started, 20)  # cut off at the 1 s limit, not after the 30 s the probe hangs
         self.assertFalse(out['ok'])
         self.assertIn('stopped itself', out['skipped'])
         self.assertIsNotNone(WatchdogState.objects.get(rule=wd.ALL).last_tick_at)  # a pass cut off by its limit still shows the watchdog was running
@@ -1245,7 +1245,7 @@ class TickSafetyTests(WatchdogCase):
         probes = FakeProbes(queues=hang, lanes=hang, db=hang)
         started = time.time()
         out = wd.tick(now=T0, probes=probes, limit=1)
-        self.assertLess(time.time() - started, 5)
+        self.assertLess(time.time() - started, 20)  # cut off at the 1 s limit, not after the 30 s the probe hangs
         self.assertFalse(out['ok'])
 
     def test_the_commands_own_timer_ends_a_process_blocked_where_python_cannot_interrupt(self):

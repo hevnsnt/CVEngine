@@ -5,11 +5,11 @@ import fcntl
 import io
 import os
 import re
+import tempfile
 from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
-from django.conf import settings
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
@@ -38,13 +38,12 @@ def open_window(started_ago=timedelta(minutes=8), ended_ago=None, grace=600):
         'update_grace_until': (now - ended_ago + timedelta(seconds=grace)) if ended_ago is not None else None})
 
 
-SHARED_HOME = settings.RENGINE_HOME  # what every parallel test process would use
-
-
 class UpdateWindowTests(OwnUpdateLock, TestCase):
     def test_another_process_holding_the_shared_lock_file_does_not_stop_this_one(self):
-        with open(os.path.join(SHARED_HOME, '.update-lock'), 'a+') as other:
-            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)  # a parallel test process in the middle of its own pause
+        # the "other process" holds the lock of another home that is the test's own (never the shared RENGINE_HOME, which a parallel test process or a
+        # developer's own stack may hold: taking that one made this test fail with BlockingIOError at random)
+        with tempfile.TemporaryDirectory() as other_home, open(os.path.join(other_home, '.update-lock'), 'a+') as other:
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
             try:
                 scan_control.request_drain_pause()
                 scan_control.release_update_pause()

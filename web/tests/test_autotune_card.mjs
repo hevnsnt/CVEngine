@@ -290,3 +290,14 @@ test('a link can name one History line after the card: #configmaxxing/autotune/1
   assert.equal(logic.hashItem(undefined), '');
   assert.deepEqual(logic.parseHash('#configmaxxing/autotune/12'), {section: 'configmaxxing', card: 'autotune'});
 });
+
+test('the advisor note says in words when today\'s count is not known', async () => {
+  const unknown = status();
+  unknown.advisor = {...unknown.advisor, used_today: null};
+  reply = {status: unknown, concurrency: concurrency()};
+  const host = new Node('div');
+  await maxxing.cards()[0].build(host);
+  assert.match(host.textContent, /Used today: not known yet, limit 8/);
+  assert.doesNotMatch(host.textContent, /\?/);
+  reply = {status: status(), concurrency: concurrency()};
+});

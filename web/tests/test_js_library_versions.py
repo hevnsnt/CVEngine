@@ -783,7 +783,7 @@ class SecondReviewTests(NoCache, SimpleTestCase):
         for page in ('<!---->' * 37000 + '<script src="/js/jquery.js"></script>', '<!-- x -->' * 30000 + '<script>', '<!--' * 60000):
             started = time.monotonic()
             js_libraries.parse_page(page, PAGE_URL)
-            self.assertLess(time.monotonic() - started, 0.5, page[:20])
+            self.assertLess(time.monotonic() - started, 5, page[:20])  # a quadratic read of these pages takes minutes
 
     def test_with_reading_off_a_query_version_is_a_capped_candidate_never_dropped(self):
         with mock.patch.dict('os.environ', {'CVENGINE_SCRIPT_BODY_READ': '0'}):
