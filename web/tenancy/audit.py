@@ -28,7 +28,9 @@ def token_detail():
     """``{'via_token': {...}}`` for the token being served (its name and, when a registered agent holds it, the agent's id and name), else ``{}``. Never raises:
     an audit row is written whether or not the agent can be looked up."""
     token = _token.get()
-    return {} if token is None else {'via_token': describe_token(token)}
+    if token is None or getattr(token, 'scope', 'full') == 'sentinel':  # a Sentinel's own routine rows already name it (``agent_id``); the mark is for an agent acting as a user
+        return {}
+    return {'via_token': describe_token(token)}
 
 
 def describe_token(token):
