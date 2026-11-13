@@ -177,7 +177,8 @@ export const AGENT_POLICIES = [
 ];
 export const AGENT_POLICY_HELP =
   "Whether AI agents may change performance settings by themselves. Only the settings auto-tuning manages, and never a number a person saved. Agents can never raise a spend cap, " +
-  "approve an update or switch on a paid or wider-scanning feature, whatever this says.";
+  "approve an update or switch on a paid or wider-scanning feature, whatever this says. This includes cvENGINE's own health-check AI when the AI reviewer is on: " +
+  "its proposals are only suggestions unless this is Automatic (and auto-tuning is in Auto mode).";
 export const AUTOTUNE_INTRO =
   "Auto-tuning is on by default. It aims high: about ten minutes after each restart or update it sets the throughput settings below to the most this machine sensibly " +
   "carries (sized from its CPU cores, memory budget, database connections and Sentinel slots), backs off at once when it sees trouble (memory kills, " +
@@ -195,6 +196,7 @@ export const SOURCE_LABEL = { controller: "controller", ai: "AI advisor", person
 export function autoTuneLine(field, mode, formatDate = (x) => x) {
   const at = field && field.autotune;
   const none = { text: "", kind: "", release: false, suggestion: null };
+  if (at && !at.managed && at.why_not_managed && mode && mode !== "off") return { text: `Not auto-tuned: ${String(at.why_not_managed)}`, kind: "floor", release: false, suggestion: null };
   if (!at || !at.managed || !mode || mode === "off") return none;
   if (at.pinned && at.pinned_env && !at.pinned_by) {
     return { text: "Fixed by the server's own settings: save a value here to take it over", kind: "pinned", release: false, suggestion: null, detail: `Server setting: ${at.pinned_env}. Remove it from the server's .env file to let auto-tuning manage this number.` };

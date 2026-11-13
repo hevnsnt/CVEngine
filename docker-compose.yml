@@ -295,12 +295,20 @@ services:
     # measured 500-730 MB, the screenshot browser 224+ MB, nmap 70 MB), so a lower limit makes it run fewer things at once, not die. 2 GB is enough to run two
     # nuclei and a browser together; 3 GB runs three nuclei and a browser at once, the mix that was once killed at 2 GB. Lower it on a small host (docs/DEPLOYMENT.md, Memory).
     mem_limit: "${SCANNER_MEM_LIMIT:-3g}"
-    # nmap's SYN scan and OS detection, naabu's SYN scan and the UDP sweep send raw packets. Only nmap and naabu hold these (file capabilities in the
-    # image); the daemon runs as an unprivileged user with none, and the kernel refuses to start a binary whose file capabilities it cannot grant.
+    # The same reduced set as the Sentinel's own compose file (SN-8): every capability dropped, then NET_RAW (nmap's SYN scan, OS detection and UDP sweep,
+    # naabu's SYN scan, which reach the unprivileged daemon's tools through file capabilities on nmap and naabu alone) and SYS_CHROOT (Chromium's sandbox).
+    # NET_ADMIN is gone: in this container's shared network namespace (celery's, the host's with the hostnet overlay) it would let a compromised tool change
+    # the routes, firewall and interfaces. The third entry is empty in effect (it repeats SYS_CHROOT) unless scripts/scanner.sh finds an image from before the
+    # reduction: its nmap and naabu carry `cap_net_raw,cap_net_admin+eip`, and the kernel refuses to start a binary whose file capabilities it cannot grant
+    # (execve fails with EPERM), so the script writes CVENGINE_SCANNER_EXTRA_CAP=NET_ADMIN for exactly such an image and removes it again for a newer one
+    # (docs/BUILTIN-SCANNER.md, "Capabilities"). Not set here: read_only (bbot's discovery needs a writable ~/.bbot/tools) and no-new-privileges (it makes the
+    # kernel ignore file capabilities, so raw sockets would depend on the container engine's version).
+    cap_drop:
+      - ALL
     cap_add:
       - NET_RAW
-      - NET_ADMIN
-    # (no `no-new-privileges`: it would stop the kernel granting those file capabilities)
+      - SYS_CHROOT
+      - "${CVENGINE_SCANNER_EXTRA_CAP:-SYS_CHROOT}"
     # Chromium's sandbox for the web screenshots (kind web_screenshot, docs/PIPELINE.md, "Web screenshots") needs user namespaces, which Docker's default
     # seccomp profile refuses. This is Playwright's own profile for running Chromium with its sandbox in Docker (Docker's default plus clone, setns and
     # unshare), vendored unchanged from microsoft/playwright v1.64.1 (see THIRD-PARTY.md). The browser runs in this container and nowhere else; without

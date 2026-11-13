@@ -552,7 +552,7 @@ ROUTES = [
      lambda r, c, ref, **k: reviewer_api.refusal(r, c, ref, _body(r) if len(r.body or b'') <= reviewer_api.MAX_REFUSAL_BODY else None)),
     ('GET', r'reviewer/ops/snapshot', 'AI reviewer token only: the operations checks {checks: [{code, state, severity, title, detail, facts, actions}], actions}; ?templates_release= and templates_published_at= pass the newest nuclei-templates release',
      lambda r, c, **k: reviewer_api.ops_snapshot(r, c)),
-    ('POST', r'reviewer/ops/report', 'AI reviewer token only: the operations job\'s report {alerts: [{code, severity, diagnosis}], actions: [feed_sentinels|refresh_nuclei_templates], model, templates_release}; an action runs only when a current check offers it',
+    ('POST', r'reviewer/ops/report', 'AI reviewer token only: the operations job\'s report {alerts: [{code, severity, diagnosis}], actions: [feed_sentinels|refresh_nuclei_templates], tuning: [{setting, value, reason, alert}] (optional, at most two, judged against what may be proposed now) with snapshot_id (the id the snapshot carried; proposals of a report without one the server made are held), model, templates_release}; an action runs only when a current check offers it',
      lambda r, c, **k: reviewer_api.ops_report(r, c, _body(r))),
     ('POST', r'reviewer/usage', 'AI reviewer token only: one report of a model call the container made for its own two jobs {stage: finding_review|operations_check, provider, model, status: succeeded|failed, category, stop_reason, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, duration_ms}; recorded as AI usage under that stage, counts and outcome only',
      lambda r, c, **k: reviewer_api.usage(r, c, _body(r))),

@@ -65,6 +65,19 @@ _cvengine_scanner_set_rollback() {  # FILE VALUE: write (or with an empty VALUE 
   rm -f -- "$tmp"
 }
 
+_cvengine_scanner_set_var() {  # FILE KEY VALUE: write (or with an empty VALUE remove) KEY in the env file, in place
+  local file=$1 key=$2 value=$3 tmp
+  [ -f "$file" ] || return 0
+  tmp=$(mktemp "${TMPDIR:-/tmp}/cvengine-env.XXXXXX") || return 1
+  grep -v "^${key}=" "$file" > "$tmp" || true
+  if [ -n "$value" ]; then
+    [ -z "$(tail -c 1 "$tmp")" ] || echo >> "$tmp"
+    echo "${key}=${value}" >> "$tmp"
+  fi
+  cat "$tmp" > "$file"  # keeps the file's owner and mode
+  rm -f -- "$tmp"
+}
+
 _cvengine_scanner_rollback() {  # ENV_FILE VALUE (never fails the caller: a pin that cannot be written is said and left)
   _cvengine_scanner_set_rollback "$1" "$2" || _cvengine_scanner_log "could not write CVENGINE_SCANNER_ROLLBACK_IMAGE to $1"
   [ "$1" = .env ] || _cvengine_scanner_set_rollback .env "$2" || _cvengine_scanner_log "could not write CVENGINE_SCANNER_ROLLBACK_IMAGE to .env"
@@ -177,6 +190,48 @@ _cvengine_scanner_ready() {  # docker compose [ARGS...]: wait until the running 
   return 1
 }
 
+# The scanner service drops every capability but NET_RAW and SYS_CHROOT (docker-compose.yml). An image from before that reduction (held with
+# CVENGINE_SCANNER_IMAGE, the rollback image, a floor built from an older commit) has nmap and naabu with the file capabilities `cap_net_raw,cap_net_admin+eip`:
+# the kernel refuses to start a binary whose file capabilities exceed the container's bounding set (execve fails with EPERM), so every raw-socket scan would
+# fail while the scanner looks healthy. This looks at the image that is running and, for such an image only, gives the service NET_ADMIN back through
+# CVENGINE_SCANNER_EXTRA_CAP (written to the env file Compose reads, and .env, so a plain `docker compose up` keeps it); a newer image has it removed again.
+_cvengine_scanner_needs_net_admin() {  # docker compose [ARGS...]: 0 when the running image's nmap or naabu need NET_ADMIN (or cannot be started), 1 when not, 2 when unknown
+  local i=0 caps
+  until _cvengine_scanner_exec "$@" -- true >/dev/null 2>&1; do
+    i=$((i + 1)); [ "$i" -le "${CVENGINE_SCANNER_EXEC_WAIT:-30}" ] || return 2
+    sleep 1
+  done
+  caps=$(_cvengine_scanner_exec "$@" -- getcap /usr/local/bin/nmap /usr/local/bin/naabu 2>/dev/null) || caps=''
+  case "$caps" in *cap_net_admin*) return 0 ;; esac
+  if [ -n "$caps" ]; then return 1; fi
+  # no getcap in the image: the answer is whether the tools start
+  _cvengine_scanner_exec "$@" -- sh -c 'nmap --version >/dev/null 2>&1 && naabu -version >/dev/null 2>&1' >/dev/null 2>&1 && return 1
+  return 0
+}
+
+_cvengine_scanner_fit_capabilities() {  # docker compose [ARGS...]: after `up`, recreate the scanner once if its capability set must change; never fails the caller
+  local file have want rc=0
+  file=$(_cvengine_scanner_env_file "$@")
+  have=$(_cvengine_scanner_value CVENGINE_SCANNER_EXTRA_CAP "$file")
+  _cvengine_scanner_needs_net_admin "$@" || rc=$?
+  case "$rc" in
+    0) want=NET_ADMIN ;;
+    1) want='' ;;
+    *) return 0 ;;
+  esac
+  [ "$have" != "$want" ] || return 0
+  if [ -n "$want" ]; then
+    _cvengine_scanner_log "the built-in scanner image has nmap and naabu from before the reduced capability set (they need NET_ADMIN to start); giving this image NET_ADMIN (CVENGINE_SCANNER_EXTRA_CAP=NET_ADMIN in .env) until it is replaced by a newer one"
+  else
+    _cvengine_scanner_log "the built-in scanner image runs with the reduced capability set (NET_RAW, SYS_CHROOT): removing CVENGINE_SCANNER_EXTRA_CAP"
+  fi
+  _cvengine_scanner_set_var "$file" CVENGINE_SCANNER_EXTRA_CAP "$want" || _cvengine_scanner_log "could not write CVENGINE_SCANNER_EXTRA_CAP to $file"
+  [ "$file" = .env ] || _cvengine_scanner_set_var .env CVENGINE_SCANNER_EXTRA_CAP "$want" || _cvengine_scanner_log "could not write CVENGINE_SCANNER_EXTRA_CAP to .env"
+  if [ -n "$want" ]; then export CVENGINE_SCANNER_EXTRA_CAP=$want; else unset CVENGINE_SCANNER_EXTRA_CAP; fi
+  "$@" up -d --no-deps --force-recreate --pull never scanner || _cvengine_scanner_log "could not recreate the built-in scanner with its capabilities adjusted; see docker compose logs scanner"
+  return 0
+}
+
 cvengine_scanner_start() {
   local file wanted previous_id previous_ref previous_release wanted_id own wait=1 up_args=() now_ref release_now
   if [ "${1:-}" = --no-wait ]; then wait=0; shift; fi
@@ -208,6 +263,7 @@ cvengine_scanner_start() {
     _cvengine_scanner_log "could not start the built-in scanner (docker compose up -d scanner); scans that need it wait until it runs"
     return 0
   fi
+  _cvengine_scanner_fit_capabilities "$@"
   [ "$wait" = 1 ] || return 0
   if _cvengine_scanner_ready "$@"; then
     release_now=$(_cvengine_scanner_release "$@")
@@ -221,6 +277,7 @@ cvengine_scanner_start() {
     _cvengine_scanner_log "the new built-in scanner image ($wanted) was not kept: $_cv_scanner_why. Putting the previous image back (build ${previous_release:-unknown}, image ${previous_id#sha256:}); the next update tries the newest again"
     _cvengine_scanner_rollback "$file" "$_cv_scanner_rollback_tag"
     if "$@" up -d --no-deps --force-recreate --pull never scanner; then
+      _cvengine_scanner_fit_capabilities "$@"
       # the restored scanner tells the server why, through its next heartbeat (the Sentinels page shows a failed update with its reason)
       _cvengine_scanner_exec "$@" -- python3 -m client.control report failed --phase scanner-update --detail "kept the previous image: $_cv_scanner_why" --from "${previous_release:-unknown}" --to "${wanted##*/}" >/dev/null 2>&1 || true
     else

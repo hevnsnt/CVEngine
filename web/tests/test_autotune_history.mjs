@@ -60,6 +60,14 @@ const SHAPES = {
   html_reason: base({reason: 'queued <b>scans</b> waited & "grew"'}),
   no_reason: base({reason: '', phase: 'cap'}),
   no_numbers: base({old_value: null, new_value: null, label: undefined, setting: 'work_depth'}),
+  ai_applied: base({source: 'ai', reason: 'The oldest assessment waited 52 minutes with memory free', verify_at: iso(18), alerts: ['queue_starvation']}),
+  ai_helped: base({source: 'ai', outcome: 'helped', baseline: measured('discovery_queue', 12, 3), alerts: ['queue_starvation']}),
+  ai_suggested: base({source: 'ai', applied: false, mode: 'suggest', layer: '', can_apply: true}),
+  ai_refused: base({source: 'ai', applied: false, layer: '', resolution: 'refused', new_value: 40, outcome_detail: 'outside what the controller allows now (4 to 20)'}),
+  ai_held: base({source: 'ai', applied: false, layer: '', resolution: 'held', outcome_detail: 'text aimed at an AI may be in what it read (ai_directive), so nothing was applied'}),
+  ai_refused_bare: base({source: 'ai', applied: false, resolution: 'refused', outcome_detail: null}),
+  ai_lowering_backlog: base({source: 'ai', action: 'lower', old_value: 8, new_value: 7, outcome: 'regressed', resolution: 'reverted', outcome_detail: 'the backlog got worse after the lowering: x',
+    baseline: {metric: 'trouble', value: 0, backlog: {metric: 'discovery_queue', value: 4}, after: {metric: 'trouble', value: 0}, backlog_after: {metric: 'discovery_queue', value: 60, trouble: 0}}}),
   empty: {},
   nothing_but_id: {id: 3},
   garbage: {id: 'x', at: 'never', label: 5, old_value: 'a', new_value: {}, reason: ['x'], baseline: 'text', outcome: 'helped', source: 3, actor: {}, verify_at: 'soon'},
@@ -127,6 +135,7 @@ test('a recommendation, a revert row and a release say what they are', () => {
   const auto = h.historyLine(SHAPES.auto_revert, NOW);
   assert.equal(auto.why, 'Undone because the change before it made things worse');
   assert.equal(auto.happened, 'put back: trouble for this setting appeared after the change');  // not "undid decision 6: ..."
+  assert.equal(h.historyLine({action: 'pause', setting: 'sentinel_pause:nmap', label: 'nmap on sentinel-1', new_value: 2, at: NOW}, NOW).what, 'nmap on sentinel-1 paused for 2 hours');
   assert.equal(h.historyLine(SHAPES.release, NOW).what, 'Hosts assessed at once handed back to auto-tune at 12');
 });
 
@@ -160,4 +169,27 @@ test('a count in the server\'s sentence reads as singular or plural', () => {
   assert.match(said('1 memory kill(s) after the change, 0 before'), /1 memory kill after the change, 0 before/);
   assert.match(said('1 kernel oom kill(s) and Celery lane restart(s) in the last day after the change, 0 before'), /1 kernel oom kill and Celery lane restart in the last day/);
   assert.doesNotMatch(said('3 memory kill(s) after the change, 0 before'), /\(s\)/);
+});
+
+test('a proposal of the AI: applied, suggested, refused and held each say what happened', () => {
+  assert.equal(h.historyLine(SHAPES.ai_applied, NOW).who, 'the AI');
+  assert.equal(h.historyLine(SHAPES.ai_applied, NOW).happened, 'being checked, result at 14:18');
+  assert.match(h.historyLine(SHAPES.ai_helped, NOW).happened, /; kept$/);
+  assert.equal(h.historyLine(SHAPES.ai_suggested, NOW).happened, 'nothing has changed yet: apply it to make the change');
+  assert.equal(h.historyLine(SHAPES.ai_suggested, NOW).apply, true);
+  const refused = h.historyLine(SHAPES.ai_refused, NOW);
+  assert.equal(refused.happened, 'proposed by the AI, not applied: outside what the controller allows now (4 to 20)');
+  assert.equal(refused.apply, false);
+  assert.equal(refused.revert, false);
+  const held = h.historyLine(SHAPES.ai_held, NOW);
+  assert.match(held.happened, /^proposed by the AI, held back: text aimed at an AI may be in what it read/);
+  assert.equal(held.tone, 'wait');
+  assert.equal(h.historyLine(SHAPES.ai_refused_bare, NOW).happened, 'proposed by the AI, not applied: no reason given');
+});
+
+test('an AI lowering that let the backlog grow says so, with the backlog numbers, and is undone', () => {
+  const line = h.historyLine(SHAPES.ai_lowering_backlog, NOW);
+  assert.equal(line.happened, 'made it worse: scans waiting in the queue 4 → 60; undone');
+  assert.equal(line.tone, 'bad');
+  assert.equal(line.revert, false);
 });

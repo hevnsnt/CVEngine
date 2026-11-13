@@ -1230,6 +1230,8 @@ def update_agent(ctx, agent_id, body):
         raise ApiError(400, 'update must be "now"')
     before = {'status': agent.status, 'limits': agent.limits}
     if ctx.token is not None:  # an API token or MCP call (FB-5): it may narrow what an agent does, never widen it
+        if body.get('status') == 'active' and agent.status != 'active':
+            raise ApiError(403, 'approving an agent or Sentinel, or reinstating a suspended or revoked one, is a person\'s decision, in the web interface; a token may suspend or revoke')
         if 'limits' in body:
             _refuse_wider_limits(agent.limits or {}, _clean_limits(body['limits']))
         if 'settings' in body:

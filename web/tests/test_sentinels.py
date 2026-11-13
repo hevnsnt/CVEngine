@@ -590,7 +590,7 @@ class SentinelHoldBackTests(SentinelBase):
         self.assertEqual((status, [h['id'] for h in out['still_held']]), (200, [held['id']]))
         row = {r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[1]['results']}['new-alice']
         self.assertEqual((row['state'], row['held_by']), ('suspended', {'id': None, 'deleted': True}))
-        call(self.t['dana'], 'PATCH', f'/api/v1/agents/{held["id"]}', {'status': 'active'})
+        call(self.dana, 'PATCH', f'/api/v1/agents/{held["id"]}', {'status': 'active'})
         row = {r['name']: r for r in call(self.t['dana'], 'GET', '/api/v1/sentinels/live')[1]['results']}['new-alice']
         self.assertEqual((row['state'], row['status_note'], row['held_by']), ('idle', '', None))
 
@@ -634,7 +634,7 @@ class McpToolTests(SentinelBase):
         self.assertEqual(out['status'], 'suspended')
 
     def test_setup_lines_follow_the_network_and_size_chosen(self):
-        err, out = tool_call(self.t['dana'], 'generate_sentinel_enrollment', {'project': 'sen-a', 'network': 'internal', 'profile': 'light'})
+        err, out = tool_call(self.dana, 'generate_sentinel_enrollment', {'project': 'sen-a', 'network': 'internal', 'profile': 'light'})
         self.assertFalse(err, out)
         setup = out['setup']
         self.assertEqual((setup['network'], setup['profile']), ('internal', 'light'))
@@ -657,7 +657,7 @@ class McpToolTests(SentinelBase):
 
     def test_rest_takes_the_same_choices_and_refuses_a_bad_one_before_creating_a_secret(self):
         from agentapi.models import SentinelEnrollment
-        status, out = call(self.t['dana'], 'POST', '/api/v1/projects/sen-a/sentinels/enroll?format=blob&network=internal&profile=light')
+        status, out = call(self.dana, 'POST', '/api/v1/projects/sen-a/sentinels/enroll?format=blob&network=internal&profile=light')
         self.assertEqual(status, 201, out)
         self.assertEqual((out['setup']['network'], out['setup']['profile']), ('internal', 'light'))
         before = SentinelEnrollment.objects.count()

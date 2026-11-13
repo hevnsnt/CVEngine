@@ -54,7 +54,7 @@ def _review_line_facts():
     from cveFeed.models import ReviewerSettings
     row = _reviewer_row() or ReviewerSettings()
     return [f'Finding review: at most {row.review_daily_max:,} findings a day, one provider call each.',
-            f'Server health check: {len(reviewer.ops_hours(row))} calls a day.']
+            f'Server health check: {len(reviewer.ops_hours(row))} calls a day; it may also propose performance changes, which are only suggestions a person applies unless you allow agents to act automatically (Settings > Auto-tuning).']
 
 
 def _apply_reviewer(user, mode):
@@ -355,8 +355,8 @@ QUESTIONS = (
              'This update turned them off, and they stay off until you say yes.',
              _cred_choices, lambda: 'off', _cred_applies, _cred_decided, _cred_apply, _cred_current, '/cve/settings/#scan_policy', 'Settings > Scan policy'),
     Question('agent_policy', '1.4.0', 'May AI agents change performance settings by themselves?',
-             'AI agents that work on this instance over MCP or the API can ask for changes to the throughput settings that auto-tuning manages. This spends nothing. '
-             'A number you saved yourself is never touched.',
+             'AI agents that work on this instance over MCP or the API can ask for changes to the throughput settings that auto-tuning manages, and this includes '
+             'cvENGINE\'s own health-check AI when the AI reviewer is on. This spends nothing. A number you saved yourself is never touched.',
              _agent_choices, 'suggest', _agent_applies, _agent_decided, _agent_apply, _agent_current, '/cve/settings/#autotune', 'Settings > configMaxxing > Auto-tuning'),
 )
 BY_KEY = {q.key: q for q in QUESTIONS}

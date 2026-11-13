@@ -3228,6 +3228,8 @@ def set_api_credential(ctx, slug, service, values):
     from cveFeed.api_credentials import RETIRED, SERVICES
     from dashboard.models import ApiCredential
     project, _ = _api_key_project(ctx, slug)
+    if ctx.token is not None:  # an API token or MCP call: a stored key switches a paid outside service on and sends target names to it, so only a person stores one (removing one stays open)
+        raise ApiError(403, 'storing a service key switches an outside service on and sends your target names to it, so only a person does it, in the web interface (project settings, API keys); a token may remove a key')
     if service not in SERVICES:
         raise ApiError(404, f'unknown service {service!r}')
     if service in RETIRED:

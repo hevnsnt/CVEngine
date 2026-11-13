@@ -591,7 +591,7 @@ class ReadTests(Base):
 	def test_project_settings_carry_the_inventory_policy(self):
 		_, data = call(self.t_alice, 'GET', '/api/v1/projects/proj-a/settings')
 		self.assertEqual(data['inventory'], {'create_hosts': False, 'stale_days': 14})
-		status, data = call(self.t_alice, 'PUT', '/api/v1/projects/proj-a/settings', {'inventory': {'create_hosts': True, 'stale_days': 30}})
+		status, data = call(self.alice, 'PUT', '/api/v1/projects/proj-a/settings', {'inventory': {'create_hosts': True, 'stale_days': 30}})  # a person: a token may not switch create_hosts on
 		self.assertEqual((status, data['inventory']), (200, {'create_hosts': True, 'stale_days': 30}))
 		for bad in ({'create_hosts': 'yes'}, {'stale_days': 0}, {'stale_days': 400}, {'stale_days': True}, {'other': 1}, {}):
 			self.assertEqual(call(self.t_alice, 'PUT', '/api/v1/projects/proj-a/settings', {'inventory': bad})[0], 400, bad)

@@ -42,6 +42,7 @@ export function whatText(d) {
   const label = clean(d && d.label) || clean(d && d.setting) || "A setting";
   const [from, to] = [number(d && d.old_value), number(d && d.new_value)];
   if (d && d.action === "release") return `${label} handed back to auto-tune${to ? ` at ${to}` : ""}`;
+  if (d && d.action === "pause") return `${label} paused for ${to || "a few"} hours`;
   if (d && d.action === "revert") return from && to ? `${label} put back ${from} → ${to}` : `${label} put back`;
   if (from && to) return `${label} ${from} → ${to}`;
   return to ? `${label} set to ${to}` : label;
@@ -89,7 +90,9 @@ const amount = (m, v) => {
 
 // "oldest waiting assessment 52 → 9 min", or "" when the numbers are not there (the server's own sentence is used then).
 export function measurementText(d) {
-  const base = d && d.baseline && typeof d.baseline === "object" ? d.baseline : null;
+  let base = d && d.baseline && typeof d.baseline === "object" ? d.baseline : null;
+  // a lowering that made the backlog grow is judged by the backlog (what the AI's lowering also watches), not by the trouble it was meant to end
+  if (base && d.outcome === "regressed" && base.backlog && base.backlog_after && typeof base.backlog === "object") base = { ...base.backlog, after: base.backlog_after };
   const after = base && base.after && typeof base.after === "object" ? base.after : null;
   const m = base && METRIC[base.metric];
   if (base && base.metric === "trouble" && after && after.metric === "trouble" && isNum(base.value) && isNum(after.value)) {  // a back-off: judged by whether the trouble stopped
@@ -125,6 +128,9 @@ export function happenedText(d, now = Date.now()) {
   const detail = plainDetail(d.outcome_detail);
   const facts = [numbers || detail, numbers ? pressureText(d) : ""].filter(Boolean).join(", ");
   if (d.applied === false) {
+    const why = detail || "no reason given";  // a proposal of the AI that was not taken: the server wrote why in outcome_detail
+    if (d.resolution === "refused") return { text: `proposed by ${d.source === "ai" ? "the AI" : whoText(d)}, not applied: ${why}`, tone: "neutral" };
+    if (d.resolution === "held") return { text: `proposed by ${d.source === "ai" ? "the AI" : whoText(d)}, held back: ${why}`, tone: "wait" };
     if (d.resolution === "applied") return { text: "applied by a person", tone: "neutral" };
     if (d.resolution === "superseded") return { text: "replaced by a newer recommendation", tone: "neutral" };
     return { text: "nothing has changed yet: apply it to make the change", tone: "wait" };

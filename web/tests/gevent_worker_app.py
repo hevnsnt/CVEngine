@@ -62,3 +62,5 @@ if os.environ.get('E2E_DROP_ONE_ACK') == '1':
         return out
 
     kombu_redis.QoS._remove_from_indices = _remove_dropping_the_first
+
+

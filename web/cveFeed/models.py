@@ -2082,7 +2082,7 @@ class TuningDecision(models.Model):
     actor = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     resolved_at = models.DateTimeField(null=True, blank=True)  # a recommendation applied or replaced, or a change reverted
     resolved_by = models.CharField(max_length=150, blank=True, default="")
-    resolution = models.CharField(max_length=12, blank=True, default="")  # applied | superseded | reverted
+    resolution = models.CharField(max_length=12, blank=True, default="")  # applied | superseded | reverted | refused | held (a proposal of the AI that was not taken)
     # Verification (cveFeed.autotune ``verify_pending``, judged by cveFeed.autotune_policy ``verdict``): what the change expected to improve and the
     # measurements before it; after ``verify_at`` the same measurements are taken again and the outcome stored. Every column has a database default
     # so the code of the previous release can still insert a row during an update.

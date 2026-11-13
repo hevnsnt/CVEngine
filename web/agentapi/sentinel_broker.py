@@ -550,6 +550,8 @@ def _create_enrollment(ctx, project=None, org=None, network='external'):
     entry points below: each does its own role check first, then hands this the row (or rows) it is scoped to, or
     neither for an instance-wide one."""
     svc.require_write_token(ctx)  # the secret buys a token that is not read only, so a read only token (the routes also answer GET) may not mint it
+    if ctx.token is not None and network != 'external':  # an API token or MCP call: an internal Sentinel reaches private networks, so only a person provisions one
+        raise ApiError(403, 'an enrollment for a Sentinel inside your network (network internal) is a person\'s decision, in the web interface; a token may create an external one')
     raw = ENROLLMENT_PREFIX + secrets.token_urlsafe(32)
     expires_at = timezone.now() + ENROLLMENT_TTL
     enrollment = SentinelEnrollment.objects.create(token_hash=_hash_enrollment(raw), prefix=raw[:10], project=project, org=org,
