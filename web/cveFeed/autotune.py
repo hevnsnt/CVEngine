@@ -810,7 +810,7 @@ def take_advice(now):
         return None
 
 
-def _verification(m, value, new, samples, now_dt):
+def _verification(m, value, new, samples, now_dt, watch_backlog=False):
     """What ``apply_tuned`` stores for a change of ``m`` from ``value`` to ``new``: the measurement it expects to improve and the measurements before
     it (the last ``VERIFY_BEFORE_SAMPLES``, the newest taken at the change: ``t`` says when)."""
     from cveFeed import autotune_policy as policy
@@ -820,6 +820,8 @@ def _verification(m, value, new, samples, now_dt):
     before = policy.measure(m.setting, samples[-policy.VERIFY_BEFORE_SAMPLES:], direction)
     before['t'] = float(samples[-1].get('t', now_dt.timestamp()))
     before['direction'] = direction
+    if watch_backlog and direction == 'less':  # a lowering that is judged only by "no trouble" can starve scanning unseen: the backlog it serves is watched too
+        before['backlog'] = policy.measure(m.setting, samples[-policy.VERIFY_BEFORE_SAMPLES:], 'more')
     return {'expected': before['metric'], 'baseline': before, 'at': now_dt}
 
 
@@ -859,6 +861,12 @@ def verify_pending(now_dt, samples):
             after_m = policy.measure(m.setting, after, direction)
             outcome, detail = policy.verdict(base, after_m)
             base['after'] = after_m
+            if isinstance(base.get('backlog'), dict) and outcome != 'regressed':  # an AI lowering: the backlog must not have grown beyond the verdict's tolerance
+                after_b = policy.measure(m.setting, after, 'more')
+                base['backlog_after'] = after_b
+                worse = policy.verdict(base['backlog'], after_b)
+                if worse.outcome == 'regressed':
+                    outcome, detail = 'regressed', f'the backlog got worse after the lowering: {worse.detail}'
         TuningDecision.objects.filter(pk=d.pk).update(outcome=outcome, outcome_detail=detail[:300], verified_at=now_dt, baseline=base)
         reverted = False
         if m is not None and policy.revert_wanted(outcome, d.phase, d.pressure):
@@ -986,7 +994,7 @@ def _agent_one(m, raw, user, row, who, mode, policy_name, samples, now_dt, sourc
         if calm_change_unverified():
             return _agent_result(m, raw, 'refused', current, f'{m.label} stays {current}: an earlier change is still being verified (one calm change at a time). Ask again in half an hour.')
     decision = apply_tuned(m, current, number, mode='auto', source=source, reason=reason, signals=used, actor=user if source == 'agent' else None,
-                           verify=_verification(m, current, number, samples, now_dt))
+                           verify=_verification(m, current, number, samples, now_dt, watch_backlog=source == 'ai'))
     if decision is None:
         return _agent_result(m, raw, 'refused', current, f'{m.label} stays {current}: auto-tuning changed mode or the setting was pinned meanwhile.')
     text = (f'Applied: {m.label} {current} -> {number}' + (f' ({notes})' if notes else '') + '. It is checked after 30 minutes and undone if it made things worse.')
@@ -1032,6 +1040,36 @@ def _ai_held(key, now_dt):
     return TuningDecision.objects.filter(setting=key, source='ai', resolution='reverted', resolved_at__gte=now_dt - timedelta(hours=AI_HOLD_HOURS)).exists()
 
 
+# The alerts whose resource a setting uses: a lowering of the AI needs trouble for that setting, or one of these alerts open (and cited). ``None``: every setting.
+ALERT_RESOURCES = {'memory': None, 'workers_down': ('discovery', 'batch', 'depth', 'stage'), 'scan_errors': ('heavy:',), 'sentinel_errors': ('stage',),
+                   'sentinel_waiting': ('stage',)}
+
+
+def _alert_covers(code, setting):
+    if code not in ALERT_RESOURCES:
+        return False
+    kinds = ALERT_RESOURCES[code]
+    return kinds is None or any(setting.kind.startswith(k) for k in kinds)
+
+
+def _lowering_block(m, samples, history, now_dt, unverified, cited, open_codes):
+    """Why the AI may not lower (or lengthen) ``m`` now, or '': it needs trouble for the setting, or an open alert about its resource (the one it cites, when it cites
+    one), and then the lowering cooldown and the one-calm-change-at-a-time gate apply; with trouble showing neither does (a back-off under trouble is never held up)."""
+    from cveFeed import autotune_policy as policy
+    if samples and policy.trouble(m.setting, samples):
+        return ''
+    covering = {c for c in open_codes if _alert_covers(c, m.setting)}
+    if cited is not None:
+        covering &= {cited}
+    if not covering:
+        return 'no trouble shows for it and no open alert is about its resource'
+    if history and now_dt.timestamp() - max(h['at'] for h in history) < _cooldowns()[0]:
+        return 'it changed recently, a lowering waits'
+    if unverified:
+        return 'an earlier change is still being verified'
+    return ''
+
+
 def ai_offer(now_dt=None):
     """What the health-check AI may propose NOW. Returns ``{'gate': why it may not, or '', 'left_today': proposals still allowed today, 'offered': {key: {'setting',
     'label', 'value', 'range': (lowest, highest), 'higher': text}}, 'not_offered': {key: why}}``. For each setting that is not pinned and not held from the AI: the
@@ -1049,6 +1087,8 @@ def ai_offer(now_dt=None):
         return out
     samples, rows, tuned = recent_samples(now_dt), _saved_rows(), applied_values(row)
     unverified, now = calm_change_unverified(), now_dt.timestamp()
+    from cveFeed.models import AdminAlert
+    open_codes = set(AdminAlert.objects.filter(resolved_at__isnull=True).values_list('code', flat=True))
     for m in managed():
         setting = m.setting
         pin = pin_of(m, rows)
@@ -1063,6 +1103,8 @@ def ai_offer(now_dt=None):
             out['not_offered'][m.key] = f'a change of the AI was taken back in the last {AI_HOLD_HOURS} hours'
             continue
         history = _history(m.key, now_dt)
+        lower_block = _lowering_block(m, samples, history, now_dt, unverified, None, open_codes)
+        one_down = policy.towards(setting, current, 'less')  # one step to less work, as the advisor may go: never to the floor in one report
         if setting.sense == 'more':
             limit, why = _agent_limit(m, current, current, samples, history, now_dt)
             blocker = ''
@@ -1075,15 +1117,15 @@ def ai_offer(now_dt=None):
             elif unverified:
                 blocker = 'an earlier change is still being verified'
             up = current if blocker or not policy._beyond(setting, limit, current) else limit  # the most work it may be asked for
-            lowest, highest = setting.low, max(up, current)
-        else:  # a wait between runs: the AI may only lengthen it (less work); shortening it is the controller's call
-            lowest, highest, why, blocker = current, setting.high, '', 'for this setting the AI may only lengthen the wait'
+            lowest, highest = (current if lower_block else one_down), max(up, current)
+        else:  # a wait between runs: the AI may only lengthen it (less work), one step; shortening it is the controller's call
+            lowest, highest, why, blocker = current, (current if lower_block else one_down), '', 'for this setting the AI may only lengthen the wait'
         if lowest == highest:
-            out['not_offered'][m.key] = f'at {current}, the end of its range, and a raise is not allowed: {blocker or why}'
+            out['not_offered'][m.key] = f'no change is allowed: {lower_block or "it is at the end of its range"}; a raise: {blocker or why}'[:160]
             continue
         out['offered'][m.key] = {'setting': setting, 'label': m.label, 'value': current, 'range': (lowest, highest),
                                  'higher': 'more work at once' if setting.sense == 'more' else 'a longer wait between runs',
-                                 'raise_stops': blocker or why}
+                                 'raise_stops': blocker or why, 'lowering_stops': lower_block}
     return out
 
 
@@ -1132,6 +1174,16 @@ def ai_apply(proposals, offer, now_dt=None):
             results.append({'setting': key, 'status': 'refused', 'text': _ai_record_refused(m, current, item, f'the AI already made {MAX_AI_CHANGES_PER_DAY} changes in 24 hours', now_dt)})
             continue
         alert = item['alert'] if isinstance(item['alert'], str) and len(item['alert']) <= 40 else None
+        if _ai_held(key, now_dt):  # judged again now: a change of the AI taken back after the offer was read still holds the setting
+            results.append({'setting': key, 'status': 'refused', 'text': _ai_record_refused(m, current, item, f'a change of the AI was taken back in the last {AI_HOLD_HOURS} hours', now_dt)})
+            continue
+        if policy.direction_of(m.setting, current, accepted[key]['value']) == 'less':  # judged again now, with the alert the AI cited
+            from cveFeed.models import AdminAlert
+            block = _lowering_block(m, samples, _history(key, now_dt), now_dt, calm_change_unverified(), alert,
+                                    set(AdminAlert.objects.filter(resolved_at__isnull=True).values_list('code', flat=True)))
+            if block:
+                results.append({'setting': key, 'status': 'refused', 'text': _ai_record_refused(m, current, item, block, now_dt)})
+                continue
         extra = {'alerts': [alert]} if alert else {}
         result = _agent_one(m, accepted[key]['value'], None, row, 'AI', mode, agent_policy(row), samples, now_dt, source='ai', reason_text=accepted[key]['reason'], signals_extra=extra)
         if result['status'] == 'refused':

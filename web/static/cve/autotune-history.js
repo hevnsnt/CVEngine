@@ -89,7 +89,9 @@ const amount = (m, v) => {
 
 // "oldest waiting assessment 52 → 9 min", or "" when the numbers are not there (the server's own sentence is used then).
 export function measurementText(d) {
-  const base = d && d.baseline && typeof d.baseline === "object" ? d.baseline : null;
+  let base = d && d.baseline && typeof d.baseline === "object" ? d.baseline : null;
+  // a lowering that made the backlog grow is judged by the backlog (what the AI's lowering also watches), not by the trouble it was meant to end
+  if (base && d.outcome === "regressed" && base.backlog && base.backlog_after && typeof base.backlog === "object") base = { ...base.backlog, after: base.backlog_after };
   const after = base && base.after && typeof base.after === "object" ? base.after : null;
   const m = base && METRIC[base.metric];
   if (base && base.metric === "trouble" && after && after.metric === "trouble" && isNum(base.value) && isNum(after.value)) {  // a back-off: judged by whether the trouble stopped

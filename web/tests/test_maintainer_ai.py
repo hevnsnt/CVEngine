@@ -35,10 +35,13 @@ class Base(Isolated, TestCase):
     def mode(self, mode='auto', advisor=True):
         AutoTuneSettings.objects.update_or_create(pk=autotune.settings_row().pk, defaults={'mode': mode, 'advisor': advisor})
 
+    def alert(self, code='memory'):
+        return AdminAlert.objects.create(code=code, severity='warning', title='t', detail='d', first_seen=self.now - timedelta(hours=1), last_seen=self.now)
+
     def offer(self):
         return autotune.ai_offer(self.now)
 
-    def proposal(self, value, setting=KEY, reason='the discovery queue held 12 scans for 30 minutes with memory free', alert=None):
+    def proposal(self, value, setting=KEY, reason='the discovery queue held 12 scans for 30 minutes with memory free', alert='memory'):
         return {'setting': setting, 'value': value, 'reason': reason, 'alert': alert}
 
     def apply(self, *proposals):
@@ -50,13 +53,17 @@ class OfferTests(Base):
         self.samples()
         offer = self.offer()
         self.assertEqual(offer['gate'], '')
-        entry = offer['offered'][KEY]
-        self.assertEqual(set(entry), {'setting', 'label', 'value', 'range', 'higher', 'raise_stops'})
-        low, high = entry['range']
-        self.assertEqual(low, entry['setting'].low)
-        self.assertGreaterEqual(high, entry['value'])
+        self.assertTrue(offer['offered'])
+        for key, entry in offer['offered'].items():
+            self.assertEqual(set(entry), {'setting', 'label', 'value', 'range', 'higher', 'raise_stops', 'lowering_stops'})
+            low, high = entry['range']
+            self.assertEqual(low, entry['value'], key)  # no trouble and no open alert: nothing may be lowered
+            self.assertGreater(high, entry['value'], key)
         self.assertTrue(set(offer['offered']) <= set(autotune.by_key()))  # only settings the engine manages: never a spend cap, a switch or the scan policy
         self.assertEqual(offer['left_today'], autotune.MAX_AI_CHANGES_PER_DAY)
+        self.alert()  # an open alert about the resource: one step down, no further
+        entry = self.offer()['offered'][KEY]
+        self.assertEqual(entry['range'][0], entry['value'] - entry['setting'].step)  # one step, never the floor
 
     def test_a_pinned_setting_is_not_offered_and_says_why(self):
         from cveFeed import scan_concurrency
@@ -86,20 +93,22 @@ class OfferTests(Base):
 
     def test_a_raise_waits_for_an_unverified_calm_change(self):
         self.samples()
-        TuningDecision.objects.create(setting='assess_batch', old_value=8, new_value=12, mode='auto', source='controller', action='raise', layer='auto', applied=True,
+        self.assertGreater(self.offer()['offered']['assess_batch']['range'][1], 8)
+        TuningDecision.objects.create(setting=KEY, old_value=8, new_value=12, mode='auto', source='controller', action='raise', layer='auto', applied=True,
                                       phase='probe', verify_at=self.now + timedelta(minutes=20))
-        entry = self.offer()['offered'][KEY]
-        self.assertEqual(entry['range'][1], entry['value'])
-        self.assertIn('verified', entry['raise_stops'])
+        offer = self.offer()
+        self.assertNotIn('assess_batch', offer['offered'])  # nothing may be raised and nothing lowered (no trouble, no alert)
+        self.assertIn('verified', offer['not_offered']['assess_batch'])
 
     def test_a_setting_whose_ai_change_was_taken_back_is_held_from_the_ai_for_a_day(self):
         self.samples()
+        self.alert()
         TuningDecision.objects.create(setting=KEY, old_value=8, new_value=12, mode='auto', source='ai', action='raise', layer='auto', applied=True,
                                       resolution='reverted', resolved_at=self.now - timedelta(hours=3), outcome='regressed')
         offer = self.offer()
         self.assertNotIn(KEY, offer['offered'])
         self.assertIn('taken back', offer['not_offered'][KEY])
-        TuningDecision.objects.filter(setting=KEY).update(resolved_at=self.now - timedelta(hours=25))
+        TuningDecision.objects.filter(setting=KEY).update(resolved_at=self.now - timedelta(hours=25), created_at=self.now - timedelta(hours=26))
         self.assertIn(KEY, self.offer()['offered'])
 
 
@@ -107,6 +116,7 @@ class ApplyTests(Base):
     def setUp(self):
         super().setUp()
         self.samples()
+        self.alert()
         entry = self.offer()['offered'][KEY]
         self.current, (self.low, self.high) = entry['value'], entry['range']
 
@@ -174,10 +184,13 @@ class ApplyTests(Base):
         self.assertFalse(TuningDecision.objects.filter(source='ai', applied=True).exists())
 
     def test_at_most_two_are_read_per_report(self):
-        out = self.apply(self.proposal(self.low), self.proposal(self.low, setting='assess_batch'), self.proposal(self.low, setting='work_depth'))
-        self.assertEqual(sum(1 for o in out if o['status'] in ('applied', 'suggested')), 2)
+        offered = self.offer()['offered']
+        keys = [k for k in offered if offered[k]['range'][0] < offered[k]['value']][:3]
+        self.assertEqual(len(keys), 3)
+        out = self.apply(*[self.proposal(offered[k]['range'][0], setting=k) for k in keys])
         self.assertTrue(any('only the first 2' in o['text'] for o in out))
-        self.assertFalse(TuningDecision.objects.filter(setting='work_depth', source='ai').exists())
+        self.assertFalse(TuningDecision.objects.filter(setting=keys[2], source='ai').exists())
+        self.assertLessEqual(TuningDecision.objects.filter(source='ai', applied=True).count(), 2)
 
     def test_at_most_the_daily_limit_of_ai_changes(self):
         for i in range(autotune.MAX_AI_CHANGES_PER_DAY):
@@ -225,6 +238,7 @@ class OpsReportTests(Base):
     def setUp(self):
         super().setUp()
         self.samples()
+        self.alert()
         entry = self.offer()['offered'][KEY]
         self.number = entry['range'][0] if entry['range'][0] < entry['value'] else entry['range'][1]
 
@@ -335,6 +349,7 @@ class PolicyTests(Base):
     def setUp(self):
         super().setUp()
         self.samples()
+        self.alert()
         entry = self.offer()['offered'][KEY]
         self.number = entry['range'][0] if entry['range'][0] < entry['value'] else entry['range'][1]
 
@@ -391,3 +406,114 @@ class PolicyTests(Base):
         with self.assertRaises(ApiError):
             bridge.change_setting(ctx(self.root), 'autotune', {'agent_policy': 'off'})  # even lowering it is a person's decision
         self.assertEqual(autotune.agent_policy(), 'auto')
+
+
+class LoweringTests(Base):
+    """WS-1: a lowering by the AI is bounded like the advisor's: one step, only with trouble for the setting or an open alert about its resource that it cites,
+    after the cooldown, not while another change is unverified, and a lowering that lets the backlog grow is taken back."""
+
+    def setUp(self):
+        super().setUp()
+        self.samples(discovery={'replying': True, 'ceiling': 8, 'active': 4, 'queued': 4})
+        self.pool = autotune.by_key()[KEY]
+        self.step = self.pool.setting.step
+
+    def test_the_reviewers_run_to_the_floor_without_trouble_is_refused(self):
+        offered = self.offer()['offered']
+        for key in ('discovery_concurrency', 'work_depth'):
+            self.assertTrue(key not in offered or offered[key]['range'][0] == offered[key]['value'], key)  # nothing may be lowered
+        value = autotune._effective(self.pool, {}, autotune.applied_values())
+        out = self.apply(self.proposal(self.pool.setting.low), self.proposal(1, setting='work_depth'))
+        self.assertEqual([o['status'] for o in out], ['refused', 'refused'])
+        self.assertEqual(autotune.applied_values().get(KEY, value), value)
+        self.assertFalse(TuningDecision.objects.filter(source='ai', applied=True).exists())
+
+    def test_with_an_open_alert_it_cites_one_step_down_is_all_it_gets_and_one_per_change_at_a_time(self):
+        self.alert()
+        entry = self.offer()['offered'][KEY]
+        self.assertEqual(entry['range'][0], entry['value'] - self.step)
+        far = self.apply(self.proposal(entry['value'] - 3 * self.step))
+        self.assertEqual(far[0]['status'], 'refused')
+        self.assertIn('outside what the controller allows now', far[0]['text'])
+        out = self.apply(self.proposal(entry['value'] - self.step), self.proposal(1, setting='work_depth'))
+        self.assertEqual(out[0]['status'], 'applied')
+        self.assertEqual(out[1]['status'], 'refused')  # the second lowering of the same report: the first is still unverified
+        self.assertEqual(TuningDecision.objects.filter(source='ai', applied=True).count(), 1)
+
+    def test_a_lowering_that_cites_no_open_alert_about_its_resource_is_refused(self):
+        self.alert('sentinel_errors')  # a Sentinel problem is not about the discovery pool
+        self.assertNotIn(KEY, {k for k, o in self.offer()['offered'].items() if o['range'][0] < o['value']})
+        out = self.apply(self.proposal(self.pool.setting.low, alert='sentinel_errors'))
+        self.assertEqual(out[0]['status'], 'refused')
+        self.alert('memory')
+        entry = self.offer()['offered'][KEY]
+        cited = self.apply(self.proposal(entry['value'] - self.step, alert='sentinel_errors'))  # the alert it cites must be the one about the resource
+        self.assertEqual(cited[0]['status'], 'refused')
+        self.assertIn('no open alert is about its resource', cited[0]['text'])
+
+    def test_trouble_for_the_setting_allows_a_lowering_without_an_alert_and_through_the_cooldown(self):
+        self.samples(db={'used': 290, 'max': 300})
+        TuningDecision.objects.create(setting=KEY, old_value=8, new_value=10, mode='auto', source='controller', action='raise', layer='auto', applied=True,
+                                      created_at=self.now - timedelta(minutes=5))
+        entry = self.offer()['offered'][KEY]
+        self.assertEqual(entry['range'][0], entry['value'] - self.step)
+        self.assertEqual(self.apply(self.proposal(entry['value'] - self.step, alert=None))[0]['status'], 'applied')
+
+    def test_the_lowering_cooldown_applies_without_trouble(self):
+        self.alert()
+        TuningDecision.objects.create(setting=KEY, old_value=8, new_value=10, mode='auto', source='controller', action='raise', layer='auto', applied=True,
+                                      created_at=self.now - timedelta(minutes=5))
+        offer = self.offer()
+        self.assertTrue(KEY not in offer['offered'] or offer['offered'][KEY]['range'][0] == offer['offered'][KEY]['value'])
+        self.assertIn('recently', offer['offered'].get(KEY, {}).get('lowering_stops', '') or offer['not_offered'].get(KEY, 'recently'))
+        out = autotune.ai_apply([self.proposal(autotune._effective(self.pool, {}, autotune.applied_values()) - self.step)], offer, self.now)
+        self.assertEqual(out[0]['status'], 'refused')
+
+    def test_a_raise_inside_the_cooldown_and_a_stale_offer_are_refused_at_apply_time(self):
+        stale = self.offer()
+        entry = stale['offered']['assess_batch']
+        self.assertGreater(entry['range'][1], entry['value'])
+        TuningDecision.objects.create(setting='assess_batch', old_value=4, new_value=8, mode='auto', source='controller', action='raise', layer='auto', applied=True,
+                                      created_at=self.now - timedelta(minutes=5))
+        out = autotune.ai_apply([self.proposal(entry['range'][1], setting='assess_batch')], stale, self.now)
+        self.assertEqual(out[0]['status'], 'refused')
+        self.assertIn('waits', out[0]['text'])
+
+    def test_a_setting_whose_ai_change_was_taken_back_after_the_offer_is_refused_at_apply_time(self):
+        self.alert()
+        stale = self.offer()
+        value = stale['offered'][KEY]['value']
+        TuningDecision.objects.create(setting=KEY, old_value=value + 1, new_value=value, mode='auto', source='ai', action='lower', layer='auto', applied=True,
+                                      resolution='reverted', resolved_at=self.now - timedelta(minutes=2), created_at=self.now - timedelta(hours=3), outcome='regressed')
+        out = autotune.ai_apply([self.proposal(value - self.step)], stale, self.now)
+        self.assertEqual(out[0]['status'], 'refused')
+        self.assertIn('taken back', out[0]['text'])
+
+    def test_a_lowering_followed_by_a_growing_backlog_is_reverted_and_held_from_the_ai(self):
+        self.alert()
+        entry = self.offer()['offered'][KEY]
+        out = self.apply(self.proposal(entry['value'] - self.step))
+        decision = TuningDecision.objects.get(pk=out[0]['decision_id'])
+        self.assertIn('backlog', decision.baseline)
+        later = self.now + timedelta(minutes=35)
+        grown = history(3, end=later.timestamp(), discovery={'replying': True, 'ceiling': 8, 'active': 4, 'queued': 60})
+        judged = autotune.verify_pending(later, grown)
+        self.assertEqual([(j['id'], j['outcome'], j['reverted']) for j in judged], [(decision.pk, 'regressed', True)])
+        decision.refresh_from_db()
+        self.assertIn('the backlog got worse', decision.outcome_detail)
+        self.assertEqual(decision.resolution, 'reverted')
+        self.assertEqual(autotune._effective(self.pool, {}, autotune.applied_values()), entry['value'])
+        self.assertTrue(autotune._ai_held(KEY, later))
+
+    def test_a_lowering_that_left_the_backlog_alone_is_not_reverted(self):
+        self.alert()
+        entry = self.offer()['offered'][KEY]
+        decision = TuningDecision.objects.get(pk=self.apply(self.proposal(entry['value'] - self.step))[0]['decision_id'])
+        later = self.now + timedelta(minutes=35)
+        steady = history(3, end=later.timestamp(), discovery={'replying': True, 'ceiling': 8, 'active': 4, 'queued': 4})
+        judged = autotune.verify_pending(later, steady)
+        self.assertEqual([(j['outcome'], j['reverted']) for j in judged], [('no_effect', False)])
+
+    def test_the_agents_own_lowerings_are_not_given_the_backlog_watch(self):
+        base = autotune._verification(self.pool, 10, 8, history(3, end=self.now.timestamp()), self.now)
+        self.assertNotIn('backlog', base['baseline'])
