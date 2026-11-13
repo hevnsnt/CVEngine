@@ -163,32 +163,6 @@ def _fit(value, limit):
     return value if len(json.dumps(value)) <= limit else {}
 
 
-def _raw_host(sub):
-    """Everything the host itself said that reaches the packet, as stored: the page title and server names, the technologies, each open port's banner,
-    service strings, HTTP, TLS and script output, the host's reverse names. ``host_context`` cleans these (the instruction sentences are removed), so the
-    planted text must be looked for here, before that."""
-    if sub is None:
-        return []
-    out = [[sub.page_title, sub.webserver, sub.cname, sub.cdn_name, sub.http_url], [t.name for t in sub.technologies.all()[:200]]]
-    for ip in sub.ip_addresses.all():
-        out.append(ip.reverse_pointer)
-        for port in ip.ports.all()[:200]:
-            out.append([port.service_name, port.description, port.product, port.version, port.service_extra, port.cpe, port.os_guess, port.banner,
-                        port.http, port.tls, port.extra])
-    return out
-
-
-def _raw_text(project, host, sub=None):
-    """What the host said in the places the packet quotes besides its findings, as stored (for the injection scan only, never sent): its page, banners
-    and certificates (``_raw_host``), its stored web routes, certificates, screenshots and hygiene rows."""
-    from cveFeed.models import HostScreenshot, HygieneFinding, RouteAuth, TlsCertificate
-    return [_raw_host(sub),
-            list(RouteAuth.objects.filter(project=project, host=host).values_list('url', 'title', 'evidence')[:MAX_LISTED]),
-            list(TlsCertificate.objects.filter(domain__project=project, host=host).values_list('subject', 'issuer', 'sans', 'chain_error')[:MAX_LISTED]),
-            list(HostScreenshot.objects.filter(project=project, host=host).values_list('title', 'reason', 'final_url')[:MAX_LISTED]),
-            list(HygieneFinding.objects.filter(domain__project=project, host=host).values_list('title', 'detail', 'evidence')[:MAX_LISTED])]
-
-
 def _described(finding):
     """``triage.describe`` of one finding with the pieces the packet re-clips: the CVE description and the CVE guidance at most 600 characters,
     the affected list at most three products, and no host context (the host's own is sent once, for all findings)."""
@@ -308,6 +282,15 @@ def pairs_from_refs(project, refs):
 # ---------------------------------------------------------------------------------------------------------------------------- the packet
 
 def build(project, host, offered=None, now=None):
+    """The packet of one host, built while every host-controlled string that is cleaned for it is also recorded as it was before cleaning
+    (``triage.collecting``): ``Built.scanned`` is that list, and the injection scan reads exactly it. ``_build`` has the rest of the contract."""
+    from cveFeed import triage as triage_lib
+    with triage_lib.collecting() as raw:
+        built = _build(project, host, offered, now, raw)
+    return built
+
+
+def _build(project, host, offered, now, raw):
     """The packet of one host: ``(parts, refs, offered)``, a ``Built`` that also carries ``state_key``, ``injection``, ``rows``, ``domain``, ``sub``
     and ``counts``. ``parts`` is what ``ai_jobs.enqueue`` takes, ``refs`` maps ``f1`` ... to triage ids (server side only), and ``offered`` is
     what the model may choose as its next step now (``cveFeed.host_actions.offered``; pass a precomputed one to use that instead). Raises
@@ -333,8 +316,6 @@ def build(project, host, offered=None, now=None):
         from cveFeed import host_actions
         offered = host_actions.offered(project, sub, pairs)
     context = host_context.host_context(sub, project.pk) if sub is not None else {}
-    injection = injection_guard.families(context, _raw_text(project, host, sub))
-    injection = sorted(set(injection) | {name for e in shown for name in e['injection']})
     ids = [e['row'].pk for e in shown]
     latest, retests = _latest_reviews(ids), _retests(ids)
 
@@ -358,6 +339,8 @@ def build(project, host, offered=None, now=None):
         if row.reason:
             earlier.append({'ref': ref, 'written_by_a_model': triage_lib.strip_instructions(str(row.reason)[:REASON_CHARS])})
     counts = Counter(e['row'].kind for e in rest)
+    secrets, hygiene, screenshots = _secrets(project, host), _hygiene(project, host), _screenshots(project, host)
+    injection = sorted(set(injection_guard.families(raw)) | {name for e in shown for name in e['injection']})  # raw: every string cleaned for this packet, before cleaning
     key = state_key(services_digest(sub), rows)  # every open finding, not only the ones shown: the sweep reads the same key without building a packet
     header = {
         'host': _host_facts(project, state, sub), 'findings': trusted_findings,
@@ -369,8 +352,7 @@ def build(project, host, offered=None, now=None):
              {'fence': 'COMPUTED_TEXT', 'data': computed},
              {'fence': 'UNTRUSTED', 'data': {'host_context': host_context.clipped(context, limit=CONTEXT_LIMIT, stable=True) if context else {},
                                               'findings': described,
-                                              'secrets_by_kind_and_status': _secrets(project, host), 'hygiene': _hygiene(project, host),
-                                              'screenshots': _screenshots(project, host)}},
+                                              'secrets_by_kind_and_status': secrets, 'hygiene': hygiene, 'screenshots': screenshots}},
              {'fence': 'EARLIER_REASONS', 'data': earlier}]
     size = sum(len(json.dumps(p, default=str)) for p in parts)
     if size > PACKET_CHARS:
@@ -379,7 +361,7 @@ def build(project, host, offered=None, now=None):
     if size > PACKET_CHARS:
         raise HostReviewError(f'the packet is too large ({size} characters)')
     return Built(parts, refs, offered, state_key=key, injection=injection, rows=pairs, domain=state.domain, sub=sub, counts=dict(counts),
-                 size=size, state=state)
+                 size=size, state=state, scanned=raw)
 
 
 def _offered_view(offered):
@@ -690,13 +672,15 @@ def job_answer(job, text):
 # ---------------------------------------------------------------------------------------------------------------------------- applying
 
 def _evidence(project, state):
-    """``(families, markers)`` of the host's own evidence now: the families of AI-directed text in its context, pages and screenshots, and the
-    identifiers planted there, which no note may repeat."""
+    """``(families, markers)`` of the host's own evidence now: the families of AI-directed text in everything cleaned for a packet of this host (read
+    again now, as ``build`` reads it), and the identifiers planted there, which no note may repeat."""
     from cveFeed import host_context, injection_guard
+    from cveFeed import triage as triage_lib
     sub = _load_sub(state)
-    context = host_context.host_context(sub, project.pk) if sub is not None else {}
-    raw = _raw_text(project, state.host, sub)
-    return injection_guard.families(context, raw), injection_guard.planted_markers(context, raw)
+    with triage_lib.collecting() as raw:
+        context = host_context.host_context(sub, project.pk) if sub is not None else {}
+        _secrets(project, state.host), _hygiene(project, state.host), _screenshots(project, state.host)
+    return injection_guard.families(raw), injection_guard.planted_markers(context, raw)
 
 
 def _tied(findings, rows):

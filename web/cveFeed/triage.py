@@ -387,14 +387,42 @@ def _strip_deep(value, depth=0):
     return value
 
 
+# Every string a host said that is cleaned for a prompt passes through ``_s`` or ``_prose`` (or ``note_raw``, for the few that go in as they are). While
+# ``collecting()`` is active each one is also recorded as it was BEFORE cleaning, so a scan for planted instructions (the AI host review's) reads exactly
+# what the packet was made from: a field added to a packet later is scanned without anyone remembering to list it.
+_RAW_STRINGS = contextvars.ContextVar('triage_raw_strings', default=None)
+
+
+class collecting:
+    """``with triage.collecting() as raw:`` ``raw`` is the list of every host-controlled string cleaned (``_s``, ``_prose``, ``note_raw``) inside the block."""
+
+    def __enter__(self):
+        self.raw = []
+        self.token = _RAW_STRINGS.set(self.raw)
+        return self.raw
+
+    def __exit__(self, *exc):
+        _RAW_STRINGS.reset(self.token)
+
+
+def note_raw(value):
+    """Record a host-controlled value that is used as it is (not cleaned) so that ``collecting()`` sees it. Returns ``value``."""
+    raw = _RAW_STRINGS.get()
+    if raw is not None and value not in (None, ''):
+        raw.append(value)
+    return value
+
+
 def _s(value, limit=120, names=()):
     """Target-controlled text (a banner, a product, a version, a title, a path): the host's names redacted, then strictly cleaned,
     and any sentence of instructions dropped."""
+    note_raw(value)
     return strip_instructions(clean_text(_redact(value, names), limit, strict=True))
 
 
 def _prose(value, limit, names=()):
     """Feed or template prose: redacted and cleaned, but sentences stay sentences."""
+    note_raw(value)
     return clean_text(_redact(value, names), limit)
 
 
