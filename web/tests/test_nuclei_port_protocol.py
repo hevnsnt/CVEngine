@@ -362,6 +362,15 @@ class NoCheckExistsTests(DispatchBase):
         self.assertNotIn('did not fully check', text)
         self.assertEqual(stream.not_checked, [])
 
+    def test_a_no_check_answer_is_asked_again_when_the_allowlist_gains_a_class(self):
+        from cveFeed import ledger
+        chunk = [f'{HOST}:5432']
+        stream = mock.Mock(unreached=set(), refused=set(), not_checked=[{'target': f'{HOST}:5432', 'reason': self.REASON}])
+        nuclei_scan.record_reached('nuclei', chunk, self.project, self.scan, stream)
+        self.assertEqual(nuclei_scan.no_check_held('nuclei', chunk, self.project), set(chunk))
+        with mock.patch.object(ledger, 'allowlist_release', return_value='0123abcd'):  # a library whose allowlist covers another class
+            self.assertEqual(nuclei_scan.no_check_held('nuclei', chunk, self.project), set())
+
     def test_the_older_library_names_the_port_unreachable_too_and_it_is_still_no_check(self):
         """A pinned Sentinel library that lists the port in ``unreachable`` as well as ``not_checked`` is read the same way."""
         from cveFeed import ledger
