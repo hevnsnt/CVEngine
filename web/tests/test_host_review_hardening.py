@@ -269,6 +269,7 @@ class StableStateTests(Base):
     def test_a_changed_state_is_queued_again_by_the_sweep(self):
         self.assertEqual(host_review.sweep()['queued'], 0)
         Port.objects.filter(pk=self.port.pk).update(version='9.9')
+        HostReview.objects.filter(pk=self.first.pk).update(created_at=timezone.now() - timedelta(days=2))  # a day has passed since the last automatic review
         self.assertEqual(host_review.sweep()['queued'], 1)
 
 
@@ -351,7 +352,8 @@ class EarlierRealVerdictAnywhereTests(EarlierVerdictTests):
         match = self.match()
         self.earlier(match)  # the finding reviewer: true_open / high
         first, _ = self.reply(self.queue(), self.fp(confidence='low'))  # a held opinion on the same state
-        second, _ = self.reply(self.queue(), self.fp())  # "Review again" on the same state
+        Port.objects.filter(pk=self.port.pk).update(version='9.9')  # a banner moved: a new host state (Review now is not refused as unchanged), the same evidence key of the finding
+        second, _ = self.reply(self.queue(), self.fp())  # "Review again"
         rows = list(FindingReview.objects.filter(triage__match=match).order_by('id').values_list('verdict', 'outcome'))
         self.assertEqual(rows, [('true_open', 'recorded'), ('false_positive', 'held'), ('false_positive', 'held')])
         self.assertIn('contradicts the earlier verdict', FindingReview.objects.filter(host_review=second).get().held_reason)
