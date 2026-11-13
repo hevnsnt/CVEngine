@@ -28,6 +28,7 @@ import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation, pa
 import { inventoryBadge, openInventoryDialog, renderHostInventory } from "/staticfiles/cve/inventory.js";
 import { loadSignIns, signInButton } from "/staticfiles/cve/authcheck.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
+import { hostReviewCard } from "/staticfiles/cve/host-review-card.js";
 import { STORED, canDiscover, defaultChoice, discoverBody, discoverHint, discoverOptions, modeAfter, modeText, startedText } from "/staticfiles/cve/discover-mode-logic.js";
 import { suppliersPage } from "/staticfiles/cve/suppliers.js";
 import { situationsPage } from "/staticfiles/cve/situations.js";
@@ -3892,6 +3893,7 @@ const pages = {
         tile("CVE matches", h.cve_matches, { hot: "fire", href: h.cve_matches ? `/cve/${encodeURIComponent(projectOf(h))}/matches/?host=${encodeURIComponent(h.host)}` : "" }),
       );
       pane.append(stats);
+      OV.main.append(hostReviewCard({ base: baseOf(projectOf(h)), hostId: h.id, hostName: h.host, isCurrent: () => current === h.id, openFindings: () => openTab("findings") }));
       OV.side.append(hostOverview(h));
       // why the host has its colour, so the rating can be checked rather than trusted
       const why = el("div", "why");

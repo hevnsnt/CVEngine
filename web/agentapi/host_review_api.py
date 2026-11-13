@@ -12,8 +12,6 @@ from the scanned host: they are cleaned on the server but a client still treats 
 """
 from agentapi.services import ApiError, _int_param, _iso, _user_brief, get_one_project
 
-KINDS = {'cve_match': 'match', 'nuclei': 'vulnerability', 'db_exposure': 'vulnerability', 'bbot': 'vulnerability', 'route_auth': 'route',
-         'hygiene': 'hygiene'}
 REAL = ('true_open', 'true_in_progress', 'true_fixed', 'true_accepted_risk')
 RUNNING = ('queued', 'answered')
 NO_START = ('none', 'ask_person')  # steps with nothing for a person to start: "nothing more" and the notification
@@ -68,7 +66,7 @@ def _titles(project, triage_ids):
         finding = t.finding
         if finding is None:
             continue
-        kind = KINDS.get(t.kind, t.kind)
+        kind = 'match' if t.match_id else 'vulnerability' if t.vulnerability_id else 'route' if t.route_id else 'hygiene'
         title = (finding.cve_entry.cve_id if kind == 'match' else finding.name if kind == 'vulnerability'
                  else finding.url if kind == 'route' else finding.title)
         out[t.pk] = (kind, finding.pk, str(title or '')[:200])
