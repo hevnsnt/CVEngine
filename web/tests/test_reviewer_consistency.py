@@ -117,7 +117,8 @@ class Consistency(Fixture):
         import sys
         sys.path.insert(0, os.path.abspath(REVIEWER_DIR))
         self.addCleanup(sys.path.remove, os.path.abspath(REVIEWER_DIR))
-        from cvengine_reviewer import jobs
+        from tests.ai_queue import container  # puts reviewer/ on the path: this test must not depend on another module of its shard having done it
+        jobs = container()
         message = jobs.review_message(packet)
         self.assertIn('judged real on 2 other hosts', message.split('<<<UNTRUSTED')[0])
 
