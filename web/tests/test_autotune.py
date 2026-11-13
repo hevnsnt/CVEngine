@@ -789,7 +789,7 @@ class ReviewFixTests(Isolated, TestCase):
     def test_a_decision_id_out_of_range_is_404(self):
         _, token = create_token(self.root, 'rw')
         for bad in ('99999999999999999999', '9223372036854775808'):
-            self.assertEqual(call(token, 'POST', f'/api/v1/tuning/decisions/{bad}/apply', {})[0], 404, bad)
+            self.assertEqual(send(client_for(self.root), 'POST', f'autotune/decisions/{bad}/apply', {})[0], 404, bad)
             self.assertEqual(send(client_for(self.root), 'POST', f'autotune/decisions/{bad}/revert', {})[0], 404, bad)
         error, text = tool_call(token, 'revert_tuning_decision', {'decision_id': 10 ** 30})
         self.assertTrue(error)
@@ -1122,9 +1122,11 @@ class ApiTests(Isolated, TestCase):
         self.assertEqual(call(root_token, 'PUT', '/api/v1/tuning/mode', {'mode': 'off', 'other': 1})[0], 400)
         status, data = call(root_token, 'PUT', '/api/v1/tuning/mode', {'mode': 'off'})
         self.assertEqual((status, data['effective_mode']), (200, 'off'))
-        self.assertEqual(call(root_token, 'POST', f'/api/v1/tuning/decisions/{self.decision.pk}/revert', {})[0], 409)
-        self.assertEqual(call(root_token, 'POST', '/api/v1/tuning/decisions/999999/apply', {})[0], 404)
-        self.assertEqual(call(root_token, 'POST', '/api/v1/tuning/release', {'setting': 'heavy.nmap'})[0], 409)  # off: nothing to hand over
+        # FB-3: apply, revert and release are a person's (the web page); a token is refused before anything else is looked at (tests.test_agent_rules_b)
+        self.assertEqual(call(root_token, 'POST', f'/api/v1/tuning/decisions/{self.decision.pk}/revert', {})[0], 403)
+        self.assertEqual(call(root_token, 'POST', '/api/v1/tuning/decisions/999999/apply', {})[0], 403)
+        self.assertEqual(call(root_token, 'POST', '/api/v1/tuning/release', {'setting': 'heavy.nmap'})[0], 403)
+        self.assertEqual(send(client_for(self.root), 'POST', 'autotune/release', {'setting': 'heavy.nmap'})[0], 409)  # off: nothing to hand over
         entry = AuditLog.objects.get(action='autotune.mode')
         self.assertEqual(entry.actor_name, 'api_root')
 
@@ -1139,10 +1141,14 @@ class ApiTests(Isolated, TestCase):
         error, _ = tool_call(member, 'get_tuning_status')
         self.assertTrue(error)
         error, data = tool_call(root_token, 'apply_tuning_suggestion', {'decision_id': self.decision.pk})
-        self.assertFalse(error, data)
+        self.assertTrue(error, data)  # FB-3: a token does not apply a recommendation; the person's route does
+        status, data = send(client_for(self.root), 'POST', f'autotune/decisions/{self.decision.pk}/apply', {})
+        self.assertEqual(status, 200, data)
         self.assertEqual((data['new_value'], data['source'], data['layer']), (3, 'person', 'auto'))  # auto mode: the tuned layer, not a pin
-        error, data = tool_call(root_token, 'revert_tuning_decision', {'decision_id': data['id']})
-        self.assertFalse(error, data)
+        error, _ = tool_call(root_token, 'revert_tuning_decision', {'decision_id': data['id']})
+        self.assertTrue(error)
+        status, data = send(client_for(self.root), 'POST', f'autotune/decisions/{data["id"]}/revert', {})
+        self.assertEqual(status, 200, data)
         error, data = tool_call(root_token, 'set_tuning_mode', {'mode': 'suggest'})
         self.assertEqual((error, data['mode']), (False, 'suggest'))
 
