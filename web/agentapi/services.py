@@ -3673,7 +3673,7 @@ def _finding_sources(project, params):
     if wanted in ('all', 'scanner'):
         qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project') \
             .select_related('subdomain', 'triage__verdict', 'triage__heat_override_by', 'remediation_by', 'assignee',
-                            *(['target_domain__project'] if everywhere else [])) \
+                            'target_domain__project' if everywhere else 'target_domain') \
             .annotate(heat_rank=finding_heat_rank_expr(), sev=F('severity'), when=F('discovered_date'),
                       comment_count=_comment_count_annotation('vulnerability'))
         if status == 'actionable':
@@ -3840,11 +3840,18 @@ def list_findings(ctx, slug, params):
             'page_size': size, 'counts': {key: counts.get(key, 0) for key in FINDING_TYPES}, 'retest': _retest_counts(project), 'results': results}
 
 
+RETEST_COUNTS_SECONDS = 30  # how long one scope's retest counts are shared; a finding marked fixed or reopened drops them at once (the revision bump)
+
+
 def _retest_counts(project):
-    """The retest states of the project's findings, from ``cveFeed.counts.retest_counts``: {verified_fixed, unverified_fixed, reopened}. A few counting
-    queries, the same however many rows the page has."""
+    """The retest states of the project's findings, from ``cveFeed.counts.retest_counts``: {verified_fixed, unverified_fixed, reopened}. Three whole-project
+    aggregates, so they are a shared snapshot (``cveFeed.snapshot_cache``, keyed by the project ids and the caller's allowed projects) and not part of every
+    Findings request: the count-only polls and the page loads read the same copy, and a finding marked fixed or reopened (``bump_stats_revision``) drops it."""
     from cveFeed import counts as counts_lib
-    return counts_lib.retest_counts(list(project.ids) if _is_all(project) else [project.pk])
+    from cveFeed import snapshot_cache
+    ids = sorted(project.ids) if _is_all(project) else [project.pk]
+    scope = snapshot_cache.scope_hash('retest-counts', ids)
+    return snapshot_cache.snapshot('retest-counts', scope, lambda: counts_lib.retest_counts(ids), RETEST_COUNTS_SECONDS)['payload']
 
 
 def _grouped_findings(project, sources, counts, page, size):
