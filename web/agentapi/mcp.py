@@ -29,6 +29,7 @@ from agentapi import host_review_api as hostreview
 from agentapi import tuning
 from agentapi import authcheck
 from agentapi import tailscale
+from tenancy import audit
 from agentapi.models import SentinelTask
 from agentapi.services import ApiError, Ctx
 
@@ -549,7 +550,7 @@ TOOLS = [
     ('get_setting', 'App Admin (administrator for audit, activity, health, org keys and excluded addresses). Read one setting by name (see list_settings). id is for the entries that name one object, for example "3/shodan". query is for paged ones (page, page_size).',
      _schema({'name': {'type': 'string'}, 'id': {'type': 'string'}, 'query': {'type': 'object'}}, ['name']),
      lambda c, a: settings_bridge.get_setting(c, a['name'], a.get('id'), a.get('query')), False),
-    ('change_setting', 'App Admin (administrator for the admin ones). Change one setting, or run one action, by name (see list_settings): values is what the page would send, and the same limits, checks and audit entry apply. remove=true deletes the object an entry names. Needs a token that is not read only. Send only the keys to change.',
+    ('change_setting', 'App Admin (administrator for the admin ones). Change one setting, or run one action, by name (see list_settings): values is what the page would send, and the same limits, checks and audit entry apply. remove=true deletes the object an entry names. Needs a token that is not read only. Send only the keys to change. For the throughput settings auto-tuning manages the write is an auto-tuning decision under the agent policy a person set (off, suggest, auto): see the reply\'s agent_changes. Spend caps can only be lowered, an update cannot be approved, and nothing paid or wider-scanning can be switched on by an agent.',
      _schema({'name': {'type': 'string'}, 'values': {'type': 'object'}, 'id': {'type': 'string'}, 'remove': {'type': 'boolean'}}, ['name']),
      lambda c, a: settings_bridge.change_setting(c, a['name'], a.get('values'), a.get('id'), bool(a.get('remove'))), True),
     ('get_sentinel_defaults', 'The instance-wide Sentinel defaults: self_update (off, manual, automatic or null to follow the instance\'s own Automatic or Manual update choice) and what is effective now, and the capability policy defaults builtin_kinds (for the built-in scanner; OpenVAS denied until changed) and external_kinds (every other Sentinel; empty allows every declared kind), each {kind: {mode: allow|deny|prefer, max_concurrent}}. They apply to every Sentinel with no value of its own.',
@@ -673,7 +674,8 @@ def call_tool(ctx, name, arguments):
         svc.require_write_token(ctx)
     arguments = storage_safe.clean(arguments or {})  # NUL bytes and lone surrogates would be a 500 at the database or the encoder (review 2 F3)
     check_arguments(schema, arguments)
-    return handler(ctx, arguments)  # a bug in a handler is not the caller's mistake: it surfaces as an internal error, traceback logged
+    with audit.acting_as(ctx):  # an audit row written meanwhile names the token (and the agent) next to its owner
+        return handler(ctx, arguments)  # a bug in a handler is not the caller's mistake: it surfaces as an internal error, traceback logged
 
 
 def handle_message(ctx, msg):

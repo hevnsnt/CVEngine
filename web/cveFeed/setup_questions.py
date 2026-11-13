@@ -292,6 +292,43 @@ def _cred_apply(user, value):
 NOTES = ('Every host is checked once more with nuclei after this update, because the check set changed. Nothing needs to be done.',)
 
 
+# --- the agent policy question ---------------------------------------------------------------------------------------------------------------------
+
+def _agent_current():
+    from cveFeed import autotune
+    return autotune.agent_policy()
+
+
+def _agent_applies():
+    """Asked only where an agent could use it: an API key that can act (not revoked, full scope) exists. An instance with none has nothing to decide, and the safe default, Suggest, holds when one is made."""
+    try:
+        from dashboard.models import ApiToken
+        if ApiToken.objects.filter(revoked=False, scope='full').exists():
+            return True, ''
+    except Exception:  # noqa: BLE001 - a question that cannot be worked out is not asked
+        pass
+    return False, 'No API key for an AI agent exists, so there is nothing to decide. If one is made later, agents may only recommend changes until you choose otherwise in Settings > configMaxxing > Auto-tuning.'
+
+
+def _agent_decided():
+    return _agent_current() != 'suggest'  # a person already chose another policy: the safe default is not the answer to confirm
+
+
+def _agent_choices():
+    return [
+        {'value': 'off', 'label': 'Off', 'effect': 'AI agents may not change performance settings.'},
+        {'value': 'suggest', 'label': 'Suggest, a person applies', 'effect': 'An agent\'s change is recorded as a recommendation, and a person applies it with one click.'},
+        {'value': 'auto', 'label': 'Automatic within the safe ranges',
+         'effect': 'An agent\'s change is applied inside the safe ranges, every change is checked after 30 minutes and undone if it hurt. Agents can never raise a spend cap, '
+                   'approve an update or switch on a paid or wider-scanning feature, whatever you choose.'},
+    ]
+
+
+def _agent_apply(user, value):
+    from cveFeed import settings_api
+    _call(settings_api.autotune_put, user, {'agent_policy': value})
+
+
 class Question:
     def __init__(self, key, since, title, text, choices, safe_default, applies, decided, apply, current, link, link_text, facts=None, version=1):
         self.key, self.since, self.title, self.text, self.choices, self.facts, self.version = key, since, title, text, choices, facts, version
@@ -312,6 +349,10 @@ QUESTIONS = (
              'Some checks try vendor default logins and send fixed credentials (a default password, an API key) to your hosts to see whether they are accepted. '
              'This update turned them off, and they stay off until you say yes.',
              _cred_choices, lambda: 'off', _cred_applies, _cred_decided, _cred_apply, _cred_current, '/cve/settings/#scan_policy', 'Settings > Scan policy'),
+    Question('agent_policy', '1.4.0', 'May AI agents change performance settings by themselves?',
+             'AI agents that work on this instance over MCP or the API can ask for changes to the throughput settings that auto-tuning manages. This spends nothing. '
+             'A number you saved yourself is never touched.',
+             _agent_choices, 'suggest', _agent_applies, _agent_decided, _agent_apply, _agent_current, '/cve/settings/#autotune', 'Settings > configMaxxing > Auto-tuning'),
 )
 BY_KEY = {q.key: q for q in QUESTIONS}
 

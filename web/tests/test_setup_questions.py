@@ -413,7 +413,7 @@ class AnswerTests(Base):
 
     def test_the_questions_list_every_question_with_its_state(self):
         data = self.c.get(API).json()
-        self.assertEqual([q['key'] for q in data['questions']], ['scan_from', 'ai_validation', 'credential_checks'])
+        self.assertEqual([q['key'] for q in data['questions']], ['scan_from', 'ai_validation', 'credential_checks', 'agent_policy'])
         self.assertEqual((data['pending'], data['later'], data['open']), (1, 0, 1))  # the AI one does not apply: no model, nor the credential one: nothing has run
         for q in data['questions']:
             self.assertEqual(q['since'], '1.4.0')

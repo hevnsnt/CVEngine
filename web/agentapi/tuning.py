@@ -57,9 +57,15 @@ def set_mode(ctx, body):
     from cveFeed import autotune
     _admin(ctx)
     require_write_token(ctx)
-    if not isinstance(body, dict) or not body or set(body) - {'mode', 'advisor'}:
+    if isinstance(body, dict) and 'agent_policy' in body and ctx.token is not None:
+        raise ApiError(403, 'what agents may do to the throughput settings is a person\'s decision: change it in Settings, Auto-tuning')
+    if not isinstance(body, dict) or not body or set(body) - {'mode', 'advisor', 'agent_policy'}:
         raise ApiError(400, 'send {"mode": "off" | "suggest" | "auto"} and/or {"advisor": true | false}')
-    return _call(autotune.set_mode, ctx.user, body.get('mode'), body.get('advisor'))
+    if ctx.token is not None:  # a token (an agent, or a person's key) may only lower autonomy
+        why = autotune.raises_autonomy(body.get('mode'), body.get('advisor'))
+        if why:
+            raise ApiError(403, why)
+    return _call(autotune.set_mode, ctx.user, body.get('mode'), body.get('advisor'), body.get('agent_policy'))
 
 
 def apply_decision(ctx, decision_id):
