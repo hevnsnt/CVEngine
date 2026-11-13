@@ -1016,7 +1016,7 @@ def cancel_task(ctx, slug, task_id):
 _UNKNOWN = object()
 
 
-def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOWN):
+def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOWN, credential_needed=None):
     """``builtin_id`` is the id of the built-in scanner's Agent (or ``None``), which a caller building many rows reads once; left out, a Sentinel
     looks it up (one query)."""
     now = timezone.now()
@@ -1046,7 +1046,7 @@ def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOW
         out['contract'] = {'version': reported, 'state': sentinel_contract.state(reported), 'note': sentinel_contract.note(reported)}
         from agentapi import sentinel_broker
         declared = sentinel_broker.CREDENTIAL_FEATURE in ((agent.info or {}).get('features') or [])
-        needed = sentinel_broker.credential_work('nuclei_deep')
+        needed = sentinel_broker.credential_work('nuclei_deep') if credential_needed is None else credential_needed  # a list reads the setting once for the page
         out['credential_filter'] = {'declared': declared, 'needed': needed, 'note': sentinel_broker.CREDENTIAL_NOTE if needed and not declared else ''}  # old client: web checks wait
         out['version_since'] = (agent.info or {}).get('version_since')  # when it last changed the version it runs
         from agentapi import sentinel_autoupdate
@@ -1166,7 +1166,9 @@ def list_agents(ctx, params):
     builtin_id = _sentinel().builtin_pk() if any(a.kind == 'scanner' for a in page['results']) else None  # once for the page, not per row
     from agentapi import sentinel_policy
     with sentinel_policy.shared_lookups():  # the instance defaults are read once for the page, not once per Sentinel (four times each)
-        page['results'] = [agent_dict(a, counts=counts.get(a.pk), viewer=ctx.user, builtin_id=builtin_id) for a in page['results']]
+        from agentapi import sentinel_broker
+        needed = sentinel_broker.credential_work('nuclei_deep') if any(a.kind == 'scanner' for a in page['results']) else False
+        page['results'] = [agent_dict(a, counts=counts.get(a.pk), viewer=ctx.user, builtin_id=builtin_id, credential_needed=needed) for a in page['results']]
     return page
 
 

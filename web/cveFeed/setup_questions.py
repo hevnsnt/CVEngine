@@ -234,6 +234,17 @@ def settle(user=None):
 
 # --- the credential checks question ---------------------------------------------------------------------------------------------------------------------
 
+def _cred_applies():
+    """Asked only where checks have run before: a brand-new install never relied on default-login findings, and its default is the same safe one."""
+    try:
+        from cveFeed.models import ServiceRun
+        if ServiceRun.objects.filter(service__startswith='nuclei').exists():
+            return True, ''
+    except Exception:  # noqa: BLE001 - a question that cannot be worked out is not asked
+        pass
+    return False, 'No checks have run on this install yet, so nothing relied on them. They stay off until you turn them on in Settings > Scan policy.'
+
+
 def _cred_current():
     from cveFeed import validation
     return 'on' if validation.credential_checks_allowed() else 'off'
@@ -281,7 +292,7 @@ QUESTIONS = (
     Question('credential_checks', '1.4.0', 'Run checks that send credentials?',
              'Some checks try vendor default logins and send fixed credentials (a default password, an API key) to your hosts to see whether they are accepted. '
              'This update turned them off, and they stay off until you say yes.',
-             _cred_choices, lambda: 'off', lambda: (True, ''), _cred_decided, _cred_apply, _cred_current, '/cve/settings/#scan_policy', 'Settings > Scan policy'),
+             _cred_choices, lambda: 'off', _cred_applies, _cred_decided, _cred_apply, _cred_current, '/cve/settings/#scan_policy', 'Settings > Scan policy'),
 )
 BY_KEY = {q.key: q for q in QUESTIONS}
 
