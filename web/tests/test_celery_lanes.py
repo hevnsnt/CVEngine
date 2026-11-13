@@ -23,6 +23,33 @@ SCRIPT = WEB / 'celery-entrypoint.sh'
 SCRIPTS = WEB.parent / 'scripts'
 
 
+def wait_until(condition, what, ceiling=30.0):
+    """Wait for a condition, not for a time: ``ceiling`` is only how long a stuck test takes to fail, never how long a good one takes."""
+    end = time.monotonic() + ceiling
+    while not condition():
+        if time.monotonic() > end:
+            raise AssertionError(f'{what} did not happen within {ceiling:.0f}s')
+        time.sleep(0.02)
+
+
+def catches_term(pid):
+    """Whether the process has a SIGTERM handler installed (a shell's ``trap``): the signal is then handled, not fatal."""
+    try:
+        for line in Path(f'/proc/{pid}/status').read_text().splitlines():
+            if line.startswith('SigCgt:'):
+                return bool(int(line.split()[1], 16) & (1 << (signal.SIGTERM - 1)))
+    except OSError:
+        pass
+    return False
+
+
+def comm(pid):
+    try:
+        return Path(f'/proc/{pid}/comm').read_text().strip()
+    except OSError:
+        return ''
+
+
 def alive(pid):
     try:
         os.kill(pid, 0)
@@ -39,6 +66,7 @@ class Entrypoint:
 
     def __init__(self, tmp, workers, **env):
         self.tmp = Path(tmp)
+        self.workers = workers
         text = SCRIPT.read_text()
         tail = text[text.index('# --- start_lanes'):]
         commands = ''.join(f'sh -c \'echo $$ > "{tmp}/{name}.pid"; {body}\' -n {name} &\n' for name, body in workers)
@@ -64,6 +92,17 @@ class Entrypoint:
             time.sleep(0.05)
         raise AssertionError(f'worker {name} did not start')
 
+    def settle(self):
+        """Return when every stand-in is in the state its test needs (a busy one has its trap, a plain one has become its ``sleep``) and the entrypoint
+        has its own stop trap: a signal sent earlier would kill a shell that has not yet set up what the test is about (what a fixed pause only hoped for)."""
+        for name, body in self.workers:
+            pid = self.pid(name)
+            if body == BUSY:
+                wait_until(lambda: catches_term(pid), f'{name} installing its trap')
+            elif body.startswith('exec sleep'):
+                wait_until(lambda: comm(pid) == 'sleep', f'{name} becoming its sleep')
+        wait_until(lambda: catches_term(self.process.pid), 'the entrypoint installing its stop trap')
+
     def finish(self, timeout):
         try:
             self.process.wait(timeout=timeout)
@@ -83,13 +122,13 @@ class LaneSupervisionTests(SimpleTestCase):
             ep = Entrypoint(tmp, [('discovery_worker', BUSY), ('cve_feed_worker', 'exec sleep 300'), ('validation_priority_worker', 'exec sleep 300'),
                                   ('classic_worker', 'exec sleep 300')], CELERY_STOP_GRACE='2')
             pids = {n: ep.pid(n) for n in ('discovery_worker', 'cve_feed_worker', 'validation_priority_worker', 'classic_worker')}
-            time.sleep(0.4)
+            ep.settle()
             os.kill(pids['cve_feed_worker'], signal.SIGKILL)  # an out-of-memory kill, say
             code, out = ep.finish(timeout=30)
             self.assertEqual(code, 137, out)  # the status of the lane that died: not 0, so restart: always acts
             self.assertIn("'cve_feed_worker'", out)  # the log says which lane
             self.assertIn('did not stop within 2s; killing it', out)
-            time.sleep(0.3)
+            wait_until(lambda: not [n for n, pid in pids.items() if alive(pid)], 'every worker being gone', ceiling=10)
             ep.cleanup()
             self.assertFalse([n for n, pid in pids.items() if alive(pid)], 'no worker may outlive the container')
 
@@ -98,12 +137,12 @@ class LaneSupervisionTests(SimpleTestCase):
             ep = Entrypoint(tmp, [('discovery_worker', BUSY), ('cve_feed_worker', 'exec sleep 300'), ('validation_priority_worker', 'exec sleep 300'),
                                   ('classic_worker', 'exec sleep 300')], CELERY_STOP_GRACE='2')
             pids = {n: ep.pid(n) for n in ('discovery_worker', 'cve_feed_worker', 'validation_priority_worker', 'classic_worker')}
-            time.sleep(0.4)
+            ep.settle()
             for name in ('cve_feed_worker', 'validation_priority_worker', 'classic_worker'):
                 os.kill(pids[name], signal.SIGKILL)
             code, out = ep.finish(timeout=30)
             self.assertNotEqual(code, 0, out)
-            time.sleep(0.3)
+            wait_until(lambda: not alive(pids['discovery_worker']), 'the surviving lane being gone', ceiling=10)
             self.assertFalse(alive(pids['discovery_worker']), 'the surviving lane must not be left running alone')
 
     def test_a_worker_that_fails_at_start_ends_the_container(self):
@@ -134,11 +173,11 @@ class LaneSupervisionTests(SimpleTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ep = Entrypoint(tmp, [('one', 'exec sleep 300'), ('two', 'exec sleep 300')], CELERY_STOP_GRACE='5')
             pids = [ep.pid('one'), ep.pid('two')]
-            time.sleep(0.4)
+            ep.settle()
             ep.process.send_signal(signal.SIGTERM)
             code, out = ep.finish(timeout=30)
             self.assertEqual(code, 143, out)
-            time.sleep(0.3)
+            wait_until(lambda: not [p for p in pids if alive(p)], 'every worker being gone', ceiling=10)
             self.assertFalse([p for p in pids if alive(p)])
 
     def test_every_lane_line_names_its_node_so_the_log_and_the_check_can(self):
