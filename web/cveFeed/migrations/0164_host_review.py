@@ -54,6 +54,11 @@ class Migration(migrations.Migration):
         ),
         migrations.AddField(
             model_name="reviewersettings",
+            name="host_review_auto_close",
+            field=models.BooleanField(db_default=False, default=False),
+        ),
+        migrations.AddField(
+            model_name="reviewersettings",
             name="host_review_daily_max",
             field=models.PositiveIntegerField(db_default=100, default=100),
         ),

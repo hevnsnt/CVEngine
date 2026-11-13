@@ -39,7 +39,7 @@ class Fixture(TestCase):
         self.user = User.objects.create_user('hj-user', password='x')
         self.counter = 0
         ai_queue.configure('vllm', model='m')
-        ReviewerSettings.objects.filter(pk=ReviewerSettings.current().pk).update(enabled=True, auto_close=True, host_review_enabled=True)  # all three are off until a person turns them on (test_host_review_default_off)
+        ReviewerSettings.objects.filter(pk=ReviewerSettings.current().pk).update(enabled=True, auto_close=True, host_review_enabled=True, host_review_auto_close=True)  # all four are off until a person turns them on (test_host_review_default_off)
         for project in (self.proj, self.other):  # and a project starts on recommend: these tests are about the automatic mode unless one says otherwise
             ProjectSettings.objects.update_or_create(project=project, defaults={'host_review_mode': 'auto'})
         for patcher in (mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, project=None: list(hosts)),):

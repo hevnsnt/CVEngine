@@ -528,6 +528,7 @@ def apply_verdict(ref, body, now=None):
     return apply_finding_verdict(triage, parsed, key, now=now)
 
 
+HOST_DECIDES = 'the host review does not close findings by itself: a person decides'  # held reason: a host review's false positive while ReviewerSettings.host_review_auto_close is off
 CONTRADICTS = 'contradicts the earlier verdict on this state'  # held reason: a host review would close what an earlier review called real
 
 
@@ -582,6 +583,10 @@ def apply_finding_verdict(triage, parsed, key, host_review=None, extra_injection
             # ANY earlier real verdict on this evidence holds it, not only the newest: an opinion recorded in between must not hide it
             if FindingReview.objects.filter(triage=triage, review_key=key, verdict__startswith='true_').exclude(outcome=REFUSED).exclude(host_review=host_review).exists():
                 outcome, held = 'held', CONTRADICTS
+        if outcome == 'closed' and host_review is not None and not settings_row().host_review_auto_close:
+            # persuasion cannot be fully detected: in 1.4.0 a host review's false positive is a recorded opinion, and a person closes it (one click on the host card),
+            # unless an administrator switched this on
+            outcome, held = 'held', HOST_DECIDES
         review = FindingReview.objects.create(
             triage=triage, project_id=triage.project_id, review_key=key, verdict=parsed['verdict'], confidence=parsed['confidence'],
             reason_code=parsed['reason_code'], note=note, model=model, outcome=outcome, held_reason=held[:200], injection=injection,

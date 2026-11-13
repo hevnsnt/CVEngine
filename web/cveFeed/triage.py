@@ -393,11 +393,20 @@ def _strip_deep(value, depth=0):
 _RAW_STRINGS = contextvars.ContextVar('triage_raw_strings', default=None)
 
 
+class RawStrings(list):
+    """Every string cleaned inside ``collecting()``; ``host`` is the part a scanned host controls (``_s``, ``note_raw``), without a feed's prose (``_prose``) and
+    without a model's own earlier words (``note_raw(..., host=False)``)."""
+
+    def __init__(self):
+        super().__init__()
+        self.host = []
+
+
 class collecting:
-    """``with triage.collecting() as raw:`` ``raw`` is the list of every host-controlled string cleaned (``_s``, ``_prose``, ``note_raw``) inside the block."""
+    """``with triage.collecting() as raw:`` ``raw`` is the list of every string cleaned (``_s``, ``_prose``, ``note_raw``) inside the block, ``raw.host`` the ones a host controls."""
 
     def __enter__(self):
-        self.raw = []
+        self.raw = RawStrings()
         self.token = _RAW_STRINGS.set(self.raw)
         return self.raw
 
@@ -405,11 +414,14 @@ class collecting:
         _RAW_STRINGS.reset(self.token)
 
 
-def note_raw(value):
-    """Record a host-controlled value that is used as it is (not cleaned) so that ``collecting()`` sees it. Returns ``value``."""
+def note_raw(value, host=True):
+    """Record a value that is used as it is (not cleaned) so that ``collecting()`` sees it; ``host=False`` for text a host does not control (a model's earlier
+    reason: it is scanned for instructions, not for claims). Returns ``value``."""
     raw = _RAW_STRINGS.get()
     if raw is not None and value not in (None, ''):
         raw.append(value)
+        if host:
+            raw.host.append(value)
     return value
 
 
@@ -422,7 +434,7 @@ def _s(value, limit=120, names=()):
 
 def _prose(value, limit, names=()):
     """Feed or template prose: redacted and cleaned, but sentences stay sentences."""
-    note_raw(value)
+    note_raw(value, host=False)  # a feed's or a template's prose: scanned for instructions, but it is not a host's claim
     return clean_text(_redact(value, names), limit)
 
 

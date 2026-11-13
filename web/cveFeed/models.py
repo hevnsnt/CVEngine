@@ -2323,6 +2323,7 @@ class ReviewerSettings(models.Model):
     last_ops_at = models.DateTimeField(null=True, blank=True)  # when the operations job last reported
     # the host review (cveFeed.host_review): one call per host state instead of one per finding. db_default: old code still inserting rows during an update
     host_review_enabled = models.BooleanField(default=False, db_default=False)  # OFF until a person switches it on in Settings: every review is a billed AI call
+    host_review_auto_close = models.BooleanField(default=False, db_default=False)  # a host review's false positive closes the finding by itself: off, a person decides (HV-1)
     host_review_daily_max = models.PositiveIntegerField(default=100, db_default=100)  # hosts reviewed a day, for the whole install
     host_review_auto_per_project_day = models.PositiveIntegerField(default=50, db_default=50)  # next steps a project's reviews start by themselves a day
     updated_at = models.DateTimeField(auto_now=True)

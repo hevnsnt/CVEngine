@@ -1184,7 +1184,7 @@ def reviewer_get(request):
     row, provider = reviewer.settings_row(), reviewer.provider_row()
     out = {'enabled': row.enabled, 'env_enabled': reviewer.env_enabled(), 'review_model': row.review_model, 'ops_model': row.ops_model,
            'auto_close': row.auto_close, 'review_daily_max': row.review_daily_max, 'ops_hours': reviewer.ops_hours(row),
-           'host_review_enabled': row.host_review_enabled, 'host_review_daily_max': row.host_review_daily_max,
+           'host_review_enabled': row.host_review_enabled, 'host_review_auto_close': row.host_review_auto_close, 'host_review_daily_max': row.host_review_daily_max,
            'host_review_auto_per_project_day': row.host_review_auto_per_project_day, 'host_reviews_today': host_review.reviews_today(),
            'host_review_projects': [{'slug': p.slug, 'name': p.name, 'mode': host_review.mode_of(p)} for p in Project.objects.order_by('name')[:500]],
            'default_ops_hours': list(reviewer.DEFAULT_OPS_HOURS), 'default_models': reviewer.DEFAULT_MODELS,
@@ -1234,6 +1234,13 @@ def reviewer_put(request):
             raise SettingsError(403, 'the AI host review is billed by the AI provider: only a person switches it on, in Settings in the web interface')
         row.host_review_enabled = data['host_review_enabled']
         fields.append('host_review_enabled')
+    if 'host_review_auto_close' in data:
+        if not isinstance(data['host_review_auto_close'], bool):
+            raise SettingsError(400, 'host_review_auto_close must be true or false')
+        if data['host_review_auto_close'] and via_agent:
+            raise SettingsError(403, 'only a person lets the AI host review close findings by itself, in Settings in the web interface')
+        row.host_review_auto_close = data['host_review_auto_close']
+        fields.append('host_review_auto_close')
     for name, top in (('host_review_daily_max', 20000), ('host_review_auto_per_project_day', 20000)):
         if name in data:
             value = data[name]

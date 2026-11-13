@@ -337,10 +337,11 @@ def _build(project, host, offered, now, raw):
                          'hard_evidence': [str(x)[:COMPUTED_CHARS] for x in (row.hard_evidence or [])][:8],
                          'server_will_not_close_because': str(e['why'] or '')[:COMPUTED_CHARS]})
         if row.reason:
+            triage_lib.note_raw(row.reason, host=False)  # an earlier model's words, written after it read the host: scanned, so steering that came back through them is found
             earlier.append({'ref': ref, 'written_by_a_model': triage_lib.strip_instructions(str(row.reason)[:REASON_CHARS])})
     counts = Counter(e['row'].kind for e in rest)
     secrets, hygiene, screenshots = _secrets(project, host), _hygiene(project, host), _screenshots(project, host)
-    injection = sorted(set(injection_guard.families(raw)) | {name for e in shown for name in e['injection']})  # raw: every string cleaned for this packet, before cleaning
+    injection = sorted(set(injection_guard.families(raw)) | set(injection_guard.verdict_claims(raw.host)) | {name for e in shown for name in e['injection']})  # raw: every string cleaned for this packet, before cleaning
     key = state_key(services_digest(sub), rows)  # every open finding, not only the ones shown: the sweep reads the same key without building a packet
     header = {
         'host': _host_facts(project, state, sub), 'findings': trusted_findings,
@@ -692,7 +693,7 @@ def _evidence(project, state):
     with triage_lib.collecting() as raw:
         context = host_context.host_context(sub, project.pk) if sub is not None else {}
         _secrets(project, state.host), _hygiene(project, state.host), _screenshots(project, state.host)
-    return injection_guard.families(raw), injection_guard.planted_markers(context, raw)
+    return sorted(set(injection_guard.families(raw)) | set(injection_guard.verdict_claims(raw.host))), injection_guard.planted_markers(context, raw)
 
 
 def _tied(findings, rows):
@@ -827,6 +828,11 @@ def auto_steps_since(since, project=None, host=None):
     return rows.count()
 
 
+def hard_flags(injection):
+    """The flags of ``injection`` that are instructions aimed at AI. ``verdict_claim`` (host text that claims how its findings should be judged) is not one: it holds closures, not steps."""
+    return [f for f in (injection or []) if f != 'verdict_claim']
+
+
 def auto_blockers(review, action, injection, now=None):
     """Why this step may not start on its own (every condition of D6, a list of plain reasons), or ``[]`` when it may: its class is auto, the project's
     mode is auto, the host's evidence carries no planted instructions, no person started or dismissed a step of this host in the last 24 hours, at
@@ -839,7 +845,7 @@ def auto_blockers(review, action, injection, now=None):
         out.append('this step touches the host: a person starts it')
     if mode_of(review.project) != 'auto':
         out.append('the project is set to recommend only')
-    if injection:
+    if hard_flags(injection):
         out.append('the evidence of the host carries text aimed at AI agents')
     if person_acted(review.project, review.host, now - timedelta(hours=AUTO_HOST_HOURS)):
         out.append('a person started or dismissed a step of this host in the last 24 hours')
@@ -917,7 +923,7 @@ def start_step(review, by, agent=False):
     as refused with the reason."""
     from cveFeed.models import HostReview, HostState
     now = timezone.now()
-    if agent and review.injection:  # the model read text on this host that tells AI what to do: only a person, looking at the page, starts what it chose
+    if agent and hard_flags(review.injection):  # the model read text on this host that tells AI what to do: only a person, looking at the page, starts what it chose
         raise HostReviewRefused('this step is held because text on the host tells AI what to do: a person starts it, in the web interface', 409)
     if review.status != 'applied' or not HostReview.objects.filter(pk=review.pk, step_state='proposed').update(step_state='started', decided_at=now):
         raise HostReviewRefused('there is no proposed step to start', 409)  # claimed first: two clicks start one step

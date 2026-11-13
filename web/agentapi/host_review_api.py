@@ -17,6 +17,11 @@ RUNNING = ('queued', 'answered')
 NO_START = ('none', 'ask_person')  # steps with nothing for a person to start: "nothing more" and the notification
 
 
+def reviewer_settings():
+    from cveFeed import reviewer
+    return reviewer.settings_row()
+
+
 def _host_row(ctx, slug, host_id, write=False):
     """``(project, subdomain, host name)`` of an inventory row of this project; a missing field is a 400, a foreign or unknown id a 404."""
     from cveFeed import web_shot
@@ -76,7 +81,7 @@ def _titles(project, triage_ids):
         kind = 'match' if t.match_id else 'vulnerability' if t.vulnerability_id else 'route' if t.route_id else 'hygiene'
         title = (finding.cve_entry.cve_id if kind == 'match' else finding.name if kind == 'vulnerability'
                  else finding.url if kind == 'route' else finding.title)
-        out[t.pk] = (kind, finding.pk, str(title or '')[:200])
+        out[t.pk] = (kind, finding.pk, str(title or '')[:200], finding.remediation_status)
     return out
 
 
@@ -93,10 +98,12 @@ def _findings(review, project):
         row = verdicts.get(int(pk))
         if row is None or int(pk) not in found:
             continue
-        kind, finding_id, title = found[int(pk)]
+        kind, finding_id, title, status = found[int(pk)]
         out.append({'finding': {'type': kind, 'id': finding_id}, 'link': _link(project, kind, finding_id), 'title': title, 'verdict': row.verdict,
                     'summary': 'real' if row.verdict in REAL else 'false_positive' if row.verdict == 'false_positive' else 'uncertain',
-                    'confidence': row.confidence, 'reason_code': row.reason_code, 'note': row.note, 'outcome': row.outcome, 'held_reason': row.held_reason})
+                    'confidence': row.confidence, 'reason_code': row.reason_code, 'note': row.note, 'outcome': row.outcome, 'held_reason': row.held_reason,
+                    # a false positive the AI would have closed but the host review may not close by itself: a person with write permission closes it in one click
+                    'can_close': kind != 'route' and status == 'open' and row.held_reason.startswith('the host review does not close')})
     return out
 
 
@@ -125,6 +132,7 @@ def _step(review, project):
 
 def describe(review, project):
     """One review as the API shows it."""
+    from cveFeed import host_review
     findings = _findings(review, project) if review.status == 'applied' else []
     counts = {'real': 0, 'false_positive': 0, 'uncertain': 0, 'closed': 0, 'held': 0}
     for f in findings:
@@ -133,7 +141,8 @@ def describe(review, project):
         counts['held'] += f['outcome'] in ('held', 'disputed')
     return {'id': review.pk, 'status': review.status, 'running': review.status in RUNNING, 'created': _iso(review.created_at), 'decided': _iso(review.decided_at),
             'model': review.model, 'failure': (review.step_detail or None) if review.status in ('failed', 'stale') else None,
-            'host_note': review.host_note if review.status == 'applied' else '', 'held_for_instructions': bool(review.injection),
+            'host_note': review.host_note if review.status == 'applied' else '', 'held_for_instructions': bool(host_review.hard_flags(review.injection)),
+            'claims_about_findings': 'verdict_claim' in (review.injection or []),
             'injection': list(review.injection or []), 'counts': counts, 'findings': findings,
             'step': _step(review, project) if review.status == 'applied' else None}
 
@@ -145,6 +154,7 @@ def get_host_review(ctx, slug, host_id):
     project, sub, host = _host_row(ctx, slug, host_id)
     row = _newest(project, host)
     return {'host_id': sub.pk, 'host': host, 'mode': host_review.mode_of(project), 'readiness': readiness(project, host),
+            'auto_close': reviewer_settings().host_review_auto_close,
             'status': row.status if row else 'none', 'review': describe(row, project) if row else None}
 
 
