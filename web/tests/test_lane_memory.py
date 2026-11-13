@@ -174,3 +174,31 @@ class LivenessTests(SimpleTestCase):
         with mock.patch.object(lm, 'lane_name', return_value='cve_feed'):
             lm.reset()
         self.assertEqual(lm.in_flight(now=1001.0), {})
+
+
+class HeartbeatThreadTests(SimpleTestCase):
+    """The heartbeat thread must not touch ``time.sleep`` (tests patch it globally, and a call from this thread landed in their mock: it advanced a fake clock
+    and tripped the "a test slept for real" guard), and must not run at all outside a Celery worker (an eager task in a test process fires the same hook)."""
+    def setUp(self):
+        lm._state.update(lane=None, running={}, beat_thread=None)
+        self.addCleanup(lm.stop)
+        self.addCleanup(lm._state.update, beat_thread=None)
+
+    def test_the_loop_never_calls_time_sleep_while_it_beats(self):
+        import time
+        beats = []
+        lm._state['running']['t'] = {'name': 'x', 'since': 0}
+        with mock.patch.object(time, 'sleep') as slept, mock.patch.object(lm, 'HEARTBEAT_SECONDS', 0.01), mock.patch.object(lm, 'lane_name', return_value='classic'), \
+                mock.patch.object(lm, 'heartbeat_once', side_effect=lambda *a: beats.append(1)):
+            lm._ensure_heartbeat()
+            deadline = time.monotonic() + 5
+            while len(beats) < 3 and time.monotonic() < deadline:
+                lm._stop.wait(0.01)
+            lm.stop()
+        self.assertGreaterEqual(len(beats), 3)
+        slept.assert_not_called()
+
+    def test_outside_a_worker_no_thread_is_started(self):
+        with mock.patch.object(lm, 'lane_name', return_value=''):
+            lm.before('eager-task', 'some.task')
+        self.assertIsNone(lm._state['beat_thread'])

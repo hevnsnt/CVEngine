@@ -542,6 +542,19 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertFalse([c for c in self.calls() if ' build ' in c])
         self.assertFalse(self.approved())
 
+    def test_approving_an_already_applied_commit_does_not_pause_scanning_or_wait_for_jobs(self):
+        self.git('pull', '--ff-only', 'origin', 'master', cwd=self.work)
+        (self.work / 'web' / '.commit').write_text(self.new + '\n')
+        self.mark_deployed(self.new)
+        (self.stub / 'running_count').write_text('2\n')  # jobs running on this server: a real update would pause, settle and exit 3 here
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse([c for c in self.calls() if 'update_scan_pause' in c or ' build ' in c], self.calls())  # nothing was paused, so nothing needs releasing
+        self.assertNotIn('settling', (self.work / 'web' / '.update-log').read_text())
+        self.assertIn('already at', (self.work / 'web' / '.update-log').read_text())
+        self.assertFalse(self.approved())
+
     def test_an_interrupted_deploy_is_not_reported_as_already_done(self):
         # the files and web/.commit are at the new commit (the deploy writes the marker before it builds) but the run stopped before
         # the migration: nothing on record says the deploy finished, so the approval deploys it instead of answering "already at"
