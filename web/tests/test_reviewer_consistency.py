@@ -11,7 +11,7 @@ from cveFeed.models import CVEMatch, FindingReview, HostState, Triage
 from dashboard.models import Org, Project
 from startScan.models import ScanHistory, Subdomain
 from targetApp.models import Domain
-from tests.test_reviewer import Fixture
+from tests.test_reviewer import REVIEWER_DIR, Fixture
 
 
 class Consistency(Fixture):
@@ -113,7 +113,12 @@ class Consistency(Fixture):
         line = packet['trusted']['same_evidence_on_other_hosts']
         self.assertIn('the same evidence was judged real on 2 other hosts, false positive on 0', line)
         self.assertNotIn('example.com', json.dumps(packet))
-        from cvengine_reviewer import jobs
+        import os
+        import sys
+        sys.path.insert(0, os.path.abspath(REVIEWER_DIR))
+        self.addCleanup(sys.path.remove, os.path.abspath(REVIEWER_DIR))
+        from tests.ai_queue import container  # puts reviewer/ on the path: this test must not depend on another module of its shard having done it
+        jobs = container()
         message = jobs.review_message(packet)
         self.assertIn('judged real on 2 other hosts', message.split('<<<UNTRUSTED')[0])
 

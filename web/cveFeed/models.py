@@ -2330,6 +2330,9 @@ class ReviewerSettings(models.Model):
     host_review_auto_close = models.BooleanField(default=False, db_default=False)  # a host review's false positive closes the finding by itself: off, a person decides (HV-1)
     host_review_daily_max = models.PositiveIntegerField(default=100, db_default=100)  # hosts reviewed a day, for the whole install
     host_review_auto_per_project_day = models.PositiveIntegerField(default=50, db_default=50)  # next steps a project's reviews start by themselves a day
+    # the automatic validation of AI-written checks (cveFeed.templatevalidate): two AI calls a draft, and a draft that passes becomes a check that runs on hosts. In 1.3.6 a draft
+    # waited for a maintainer and nothing ran it, so this is OFF until a person switches it on in Settings or answers the AI question (FA-5)
+    template_validation_enabled = models.BooleanField(default=False, db_default=False)
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
 

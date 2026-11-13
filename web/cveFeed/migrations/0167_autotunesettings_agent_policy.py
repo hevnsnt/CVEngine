@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('cveFeed', '0165_triage_kind_evidence_idx'),
+        ('cveFeed', '0166_reviewersettings_template_validation'),
     ]
 
     operations = [
