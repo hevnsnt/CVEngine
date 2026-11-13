@@ -53,8 +53,14 @@ class OffUntilAnswered(Gate):
         GeneratedTemplate.objects.filter(pk=self.draft.pk).update(validation_started_at=timezone.now() - timezone.timedelta(days=1))
         self.assertIsNone(templatevalidate.problem())
 
+    def test_recommend_only_does_not_start_it_and_act_does(self):  # FB-11: a check that passes runs on hosts, so only "Act on safe steps" switches it on
+        post(self.c, {'key': 'ai_validation', 'answer': 'recommend'})
+        self.assertFalse(ReviewerSettings.current().template_validation_enabled)
+        self.run_validator()
+        self.assertEqual(self.jobs(), 0)
+
     def test_answering_on_starts_it(self):
-        out = post(self.c, {'key': 'ai_validation', 'answer': 'recommend'})
+        out = post(self.c, {'key': 'ai_validation', 'answer': 'act'})
         self.assertEqual(out.status_code, 200, out.content)
         self.assertTrue(ReviewerSettings.current().template_validation_enabled)
         self.run_validator()
