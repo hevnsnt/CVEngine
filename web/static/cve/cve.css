@@ -2856,3 +2856,9 @@ a.score-label:hover{text-decoration-color:var(--ink)}
 @media (pointer:coarse) and (max-width:999px){
   .mx-lead a.eyebrow{display:flex;align-items:center;min-height:var(--hit)}
 }
+
+/* ---- Hygiene on a phone: the host and the time share a line, so a fourth issue fits on the first screen (the 44px touch sizes stay) ---- */
+@media (max-width:639px){
+  #section[data-kind="hygiene"] .table-page .table tr{column-gap:var(--s-2)}
+  #section[data-kind="hygiene"] .table-page .table td[data-label="Host"]::before{display:none}
+}

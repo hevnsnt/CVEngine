@@ -8,6 +8,7 @@ Sentinels (one with a `status_note` such as "Update failed: could not pull image
     BASE=http://127.0.0.1:8141 PROJECT=acme-corp EMPTY_PROJECT=harbor-foods USER_NAME=admin PASSWORD=... python scripts/ui_first_screen.py [--json out.json] [--shots dir]
 
 At 1366x768, 1280x720, 1440x900, 1920x1080 and 390x844 (a touch screen) it asserts, per page:
+  - none of "[object", "undefined", "null", "NaN" or a bare "?" in the text of any of these pages (a value the server did not send is said in words);
   - no sideways scroll on any page that has rows (Suppliers used to push its Remove button off the right edge);
   - Overview: no button, label or sentence sits on the title, and the purpose sentence is whole or "About this page" shows it;
   - the purpose sentence of Overview, Situations, Hygiene, Sentinels, Suppliers, Secrets and Scans is whole, or an "About this page" button is on screen and
@@ -50,7 +51,12 @@ PAGES = {
     'scans': (f'{PROJECT}/scans/', 'main tbody tr'),
     'findings': (f'{PROJECT}/vulns/', '.host-rows .host-row'),
     'matches': (f'{PROJECT}/matches/', '.host-rows .host-row'),
+    'hosts': (f'{PROJECT}/hosts/', '.host-rows .host-row'),
+    'targets': (f'{PROJECT}/targets/', 'main tbody tr'),
+    'activity': (f'{PROJECT}/activity/', 'main tbody tr'),
 }
+# text a person must never read on a page: an object printed as text, a missing value, a bare question mark standing for "unknown"
+BAD_TEXT = re.compile(r'\[object|\bundefined\b|\bnull\b|\bNaN\b|(?:^|[\s(:>])\?(?:$|[\s),.:])', re.M)
 PURPOSE_PAGES = ('overview', 'situations', 'hygiene', 'sentinels', 'suppliers', 'secrets', 'scans')
 MEASURE = r"""(sel) => {
   const vis = (e) => { const cs = getComputedStyle(e); return cs.display !== 'none' && cs.visibility !== 'hidden' && e.getClientRects().length > 0; };
@@ -168,6 +174,9 @@ def measure_all(b, shots):
             out[f'{name}@{tag}'] = m
             if shots:
                 pg.screenshot(path=os.path.join(shots, f'{name}-{tag}.png'))
+            text = pg.inner_text('main')
+            bad = sorted({text[max(0, x.start() - 25):x.end() + 15].replace('\n', ' ') for x in BAD_TEXT.finditer(text)})[:3]
+            check(not bad, f'{name} {tag}: no "[object", "undefined", "null", "NaN" or bare "?" in the page text ({bad})')
             if name == 'overview':
                 check(m['alert'], f'{tag}: the alert strip is showing (seed an AdminAlert: the first screen is measured with it)')
             if name != 'project-sentinels':

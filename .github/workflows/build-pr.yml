@@ -136,9 +136,81 @@ jobs:
           CVENGINE_TEST_BLOCK_NETWORK: '1'  # a test that resolves a name or connects outside loopback, Postgres and Redis fails (reNgine/test_runner.py)
         # one worker per core (at most 7: reNgine/test_runner.py gives each worker its own Redis databases)
         run: python manage.py test --noinput --parallel auto $(python ../scripts/ci_shard.py ${{ matrix.shard }} 3) --durations 15
-      - name: Graph cluster regression gate
+      - name: Front-end node tests (every file in web/tests)
+        # was a hand-kept list of 29 files that left 19 of the 50 out (retest, Situations, list failure states, nav fold, ...): a new test file now runs without anyone adding it here
         if: matrix.shard == 1
-        run: node --test web/tests/test_graph_cluster.mjs web/tests/test_admin_legacy_logic.mjs web/tests/test_connect_card.mjs web/tests/test_links.mjs web/tests/test_inventory_snippets.mjs web/tests/test_frontend_static.mjs web/tests/test_poll.mjs web/tests/test_config_maxxing.mjs web/tests/test_config_maxxing_page.mjs web/tests/test_ai_settings_logic.mjs web/tests/test_tunables_card.mjs web/tests/test_autotune_card.mjs web/tests/test_sentinel_live.mjs web/tests/test_discover_mode_logic.mjs web/tests/test_finding_groups_logic.mjs web/tests/test_addtargets_logic.mjs web/tests/test_closure_logic.mjs web/tests/test_cve_explorer.mjs web/tests/test_score_detail.mjs web/tests/test_secret_detail.mjs web/tests/test_loadmore_logic.mjs web/tests/test_provision_form.mjs web/tests/test_seed_card.mjs web/tests/test_update_disk_screen.mjs web/tests/test_glance_logic.mjs web/tests/test_maintenance_status_page.mjs web/tests/test_keep_state.mjs web/tests/test_keep_state_contract.mjs web/tests/test_scanner_plan_dialog.mjs web/tests/test_api_keys_list.mjs
+        run: node --test web/tests/*.mjs
+
+
+  ui-gates:
+    name: 🖥️ UI gates (headless Chromium on the seeded demo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: cvengine_ci
+          POSTGRES_USER: cvengine_ci
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cvengine_ci -d cvengine_ci"
+          --health-interval 5s --health-timeout 3s --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 12
+    env:
+      POSTGRES_DB: cvengine_ci
+      POSTGRES_USER: cvengine_ci
+      POSTGRES_PASSWORD: ci-only-password
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: 5432
+      CELERY_BROKER: redis://127.0.0.1:6379/0
+      CELERY_BACKEND: redis://127.0.0.1:6379/0
+      CACHE_URL: redis://127.0.0.1:6379/1
+      RENGINE_HOME: ${{ github.workspace }}/web
+      DOMAIN_NAME: localhost
+      DEBUG: '0'
+    steps:
+      - name: Set cache directory
+        run: printf 'XDG_CACHE_HOME=%s/cvengine-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Resolver fallback (only when the runner cannot find the Ubuntu package servers)
+        uses: ./.github/actions/resolver-fallback
+        with:
+          docker: "false"
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: web/requirements.txt
+      - name: Native rendering libraries
+        run: sudo apt-get update && sudo apt-get install -y libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0
+      - name: Install application dependencies and the browser
+        run: |
+          sed '/^psycopg2==/d' web/requirements.txt > "$RUNNER_TEMP/cvengine-ci-requirements.txt"
+          python -m pip install -r "$RUNNER_TEMP/cvengine-ci-requirements.txt" psycopg2-binary==2.9.11 tblib==3.2.2 jsonschema==4.26.0 playwright==1.64.1
+          python -m playwright install --with-deps chromium
+      - name: Migrate
+        working-directory: web
+        run: python manage.py migrate --noinput
+      - name: "UI gates (scripts/ci_ui_gates.sh: seed, start the app, run every ui_* gate)"
+        run: scripts/ci_ui_gates.sh
+      - name: Gate logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-gate-logs
+          path: /tmp/ui-gates
+          if-no-files-found: ignore
 
   build:
     name: 🐳 Build Docker image (${{ matrix.platform }})
