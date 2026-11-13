@@ -48,7 +48,7 @@ class PinnedCacheSecondsTests(TestCase):
         for module, name in ((internal_view, 'CACHE_SECONDS'), (tunables, 'CACHE_SECONDS'), (scan_concurrency, 'CACHE_SECONDS'), (tailscale_scope, 'CACHE_SECONDS'),
                              (egress_proxy, 'CACHE_SECONDS'), (resources, 'SAVED_CACHE_SECONDS')):
             source = Path(module.__file__).read_text(encoding='utf-8')
-            match = re.search(rf'^{name}\s*=\s*(.+?)\s*(#.*)?$', source, re.M)
+            match = re.search(rf'^{name}\s*=\s*(.+?)\s*(#.*)?$', source, re.MULTILINE)
             self.assertIsNotNone(match, f'{module.__name__}.{name} is not defined in its source')
             expression = match.group(1)
             if re.fullmatch(r'[\d.]+', expression):

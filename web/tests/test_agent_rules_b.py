@@ -33,12 +33,14 @@ class ResetAndActionsTests(Base):
     """FB-1: ``config_maxxing_reset`` put auto-tuning on Auto with the advisor on, raised every AI spend cap a person lowered and removed every person's pin."""
 
     def state(self):
-        from cveFeed import autotune, scan_concurrency as sc, tunables
+        from cveFeed import autotune, tunables
+        from cveFeed import scan_concurrency as sc
         row = autotune.settings_row()
         return (tunables.value('triage_max_per_day'), row.mode, row.advisor, row.agent_policy, dict(sc.ScanConcurrency.current().values or {}) if hasattr(sc, 'ScanConcurrency') else None)
 
     def seed(self):
-        from cveFeed import autotune, scan_concurrency as sc, tunables
+        from cveFeed import autotune, tunables
+        from cveFeed import scan_concurrency as sc
         from cveFeed.models import AutoTuneSettings
         tunables.update({'triage_max_per_day': 10}, self.root)  # a person lowered an AI spend cap
         autotune.settings_row()
@@ -94,8 +96,8 @@ class ResetAndActionsTests(Base):
             self.assertNotIn(name, bridge.READ_ONLY_FOR_AGENTS)
 
     def test_an_agent_cannot_remove_an_exclusion_but_can_add_one(self):
-        from dashboard.models import Org
         from cveFeed.models import ExcludedAddress
+        from dashboard.models import Org
         org = Org.objects.create(name='X', slug='x')
         entry = ExcludedAddress.objects.create(org=org, cidr='10.0.0.9/32', note='keep out', created_by=self.root)
         self.refused('org_excluded_address', None, f'{org.pk}/{entry.pk}', remove=True)
@@ -160,6 +162,7 @@ class TuningTokenTests(AgentBase):
     def test_a_token_cannot_apply_its_own_recommendation_by_rest_or_mcp_and_nothing_changes(self):
         from cveFeed import scan_concurrency as sc
         from cveFeed.models import TuningDecision
+
         from tests.test_agentapi import call, tool_call
         b = self
         b.policy('suggest', mode='auto')
@@ -179,6 +182,7 @@ class TuningTokenTests(AgentBase):
 
     def test_in_suggest_mode_a_token_cannot_turn_its_recommendation_into_a_pin(self):
         from cveFeed.models import TuningDecision
+
         from tests.test_agentapi import call
         b = self
         b.policy('auto', mode='suggest')
@@ -188,8 +192,10 @@ class TuningTokenTests(AgentBase):
         self.assertEqual(b.saved(), {})
 
     def test_a_token_cannot_release_a_persons_pin_or_revert_a_persons_change(self):
-        from cveFeed import autotune, scan_concurrency as sc
+        from cveFeed import autotune
+        from cveFeed import scan_concurrency as sc
         from cveFeed.models import AutoTuneSettings, TuningDecision
+
         from tests.test_agentapi import call, tool_call
         b = self
         AutoTuneSettings.objects.update(mode='auto')
@@ -213,6 +219,7 @@ class TuningTokenTests(AgentBase):
 
     def test_a_token_cannot_revert_even_its_own_change(self):
         from cveFeed.models import TuningDecision
+
         from tests.test_agentapi import call
         b = self
         b.policy('auto', mode='auto')
@@ -223,8 +230,10 @@ class TuningTokenTests(AgentBase):
         self.assertEqual(call(b.raw, 'POST', f'/api/v1/tuning/decisions/{mine.pk}/revert', {})[0], 403)
 
     def test_a_person_signed_in_still_applies_reverts_and_releases(self):
-        from cveFeed import autotune, scan_concurrency as sc
+        from cveFeed import autotune
+        from cveFeed import scan_concurrency as sc
         from cveFeed.models import AutoTuneSettings
+
         from tests.test_settings import send
         from tests.test_tenancy import client_for
         b = self
@@ -240,9 +249,9 @@ class WidenOutsideTheBridgeTests(Base):
     """FB-5, the doors of the settings bridge: a switch or a number sent as text, a filter list emptied, Tailscale routing and the heavy scanner limits."""
 
     def link(self):
-        from django.utils import timezone
         from cveFeed.models import TailscaleLink
         from dashboard.models import Org, Project
+        from django.utils import timezone
         org = Org.objects.create(name='O', slug='o')
         project = Project.objects.create(name='P', slug='p', insert_date=timezone.now(), org=org)
         link = TailscaleLink.objects.create(project=project, credentials={'client_id': 'c', 'client_secret': 's'}, use_local=False, auto_scan=True, max_devices=10, routing='auto',
@@ -293,6 +302,7 @@ class WidenThroughSentinelAndTargetToolsTests(TestCase):
 
     def sentinel(self):
         from agentapi.models import Agent
+
         from tests.test_sentinels import register_sentinel
         status, out = register_sentinel(self.tokens['alice'])
         self.assertIn(status, (200, 201), out)
@@ -300,12 +310,13 @@ class WidenThroughSentinelAndTargetToolsTests(TestCase):
 
     def test_sentinel_defaults_by_token_can_be_narrowed_never_widened(self):
         from agentapi import sentinel_settings as ss
+
         from tests.test_agentapi import call, tool_call
         root = self.tokens['root']
         ss.set_defaults(self.root, {'external_kinds': {'nuclei_deep': {'mode': 'deny'}}, 'self_update': 'manual', 'keep_newest': False})
         for args in ({'external_kinds': {}}, {'builtin_kinds': {}}, {'external_kinds': {'nuclei_deep': {'mode': 'allow'}}}, {'external_kinds': {'nuclei_deep': {'mode': 'prefer'}}},
                      {'self_update': 'automatic'}, {'self_update': None}, {'external_kinds': None, 'self_update': 'automatic'}):
-            error, text = tool_call(root, 'set_sentinel_defaults', args)
+            error, _text = tool_call(root, 'set_sentinel_defaults', args)
             self.assertTrue(error, args)
             self.assertEqual(call(root, 'PUT', '/api/v1/sentinels/defaults', args)[0], 403, args)
         self.assertEqual(call(root, 'PUT', '/api/v1/sentinels/defaults', {'keep_newest': True})[0], 403)
@@ -318,11 +329,12 @@ class WidenThroughSentinelAndTargetToolsTests(TestCase):
 
     def test_one_sentinels_settings_and_limits_by_token_can_be_narrowed_never_widened(self):
         from agentapi import agent_broker as broker
+
         from tests.test_agentapi import call
         agent = self.sentinel()
         root = self.tokens['root']
         patch = lambda body: call(root, 'PATCH', f'/api/v1/agents/{agent.pk}', body)
-        for settings in ({'network': 'internal'}, {'network': None}, {'discovery_keys': True}, {'self_update': 'automatic'}, {'self_update': None}, {'max_concurrent': 9}):
+        for settings in ({'network': 'internal'}, {'discovery_keys': True}, {'self_update': 'automatic'}, {'self_update': None}, {'max_concurrent': 9}):
             self.assertEqual(patch({'settings': settings})[0], 403, settings)
         self.assertEqual(patch({'settings': {'network': 'external', 'profile': 'light', 'discovery_keys': False, 'self_update': 'manual', 'kinds': {'nmap': {'mode': 'deny'}}}})[0], 200)
         self.assertEqual(patch({'settings': {'profile': 'full'}})[0], 403)  # light was chosen: full is wider
@@ -345,6 +357,7 @@ class WidenThroughSentinelAndTargetToolsTests(TestCase):
     def test_runzero_import_scope_and_discovery_mode_by_token_can_be_narrowed_never_widened(self):
         from agentapi import services as svc
         from cveFeed import runzero_sync
+
         from tests.test_agentapi import tool_call
         root = self.tokens['root']
         error, _ = tool_call(root, 'set_runzero_sync', {'project': 'sen-a', 'import_enabled': True})
@@ -409,6 +422,7 @@ class AnswerWordsTests(TestCase):
 
     def test_asked_again_for_the_new_lines_switch_it_on_still_switches_the_checks_on(self):
         from cveFeed.models import ReviewerSettings, SetupAnswer
+
         from tests.test_setup_questions import post
         q = self.q
         ReviewerSettings.objects.create(enabled=True, auto_close=False, updated_by=q.admin)
@@ -419,6 +433,7 @@ class AnswerWordsTests(TestCase):
 
     def test_an_old_decide_later_asks_the_whole_question_again_finding_review_included(self):
         from cveFeed.models import ReviewerSettings, SetupAnswer
+
         from tests.test_setup_questions import post
         q = self.q
         ReviewerSettings.objects.create(enabled=True, auto_close=False, updated_by=q.admin)  # the development default the old build left

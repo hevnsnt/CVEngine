@@ -270,8 +270,15 @@ def refuse_wider_settings(agent, values, kinds_before, kinds_after):
     """FB-5: what an agent may not do to one Sentinel's managed settings: allow a kind more, reach private networks, run the full profile, send discovery keys, raise its
     concurrency or switch its self-update to automatic. ``values`` are the cleaned settings, ``kinds_after`` the policy they leave."""
     refuse_wider_policy(kinds_before, kinds_after, 'kinds')
-    if 'network' in values and values['network'] not in ('external',) and values['network'] != agent.network:
-        raise ApiError(403, 'network: reaching private networks (or going back to the enrollment grant) widens what this Sentinel scans; an agent may only choose external')
+    if 'network' in values:
+        if values['network'] is None:  # back to the enrollment grant, which is what ``set_managed`` restores
+            from agentapi import sentinel_broker as sb
+            enrolled = SentinelEnrollment.objects.filter(used_by_agent=agent, token_id=agent.token_id).values_list('network', flat=True).first()
+            target = enrolled if enrolled in sb.NETWORKS else 'external'
+        else:
+            target = values['network']
+        if target != 'external' and target != agent.network:
+            raise ApiError(403, 'network: reaching private networks widens what this Sentinel scans; an agent may only choose external (or hand the setting back where the enrollment grant is external)')
     if values.get('profile', 'light') != 'light' and values.get('profile') != (explicit(agent).get('profile') or 'full'):
         raise ApiError(403, 'profile: only a person chooses the full profile; an agent may choose light')
     if 'discovery_keys' in values and values['discovery_keys'] is not False:
