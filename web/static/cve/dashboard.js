@@ -352,16 +352,18 @@ function hostsHref(name, project) {
 }
 
 const MAP_POOL = 400; // tiles built; the layout below shows as many of the highest-scoring hosts as fill the card in whole rows
-const MAP_GAP = 6;
+let MAP_GAP = 6;
 const MAP_SCORE_OVER = 40; // only hosts that score more than this are on the map (the rest are still on the Hosts page)
 // Tile tiers, richest first: the minimum size each needs. The layout picks the richest tier that holds every host, then stretches the
 // tiles to fill the card exactly. A tier with room to spare shows more about each host; when even the smallest tier cannot hold them
 // all, the map keeps only whole rows (never a ragged last row) and the tiles grow to fill the freed space.
+// a finger needs 44px: on a touch screen the two smallest tiers are never smaller than that (the card shows fewer hosts, the Hosts page lists them all)
+const TOUCH = typeof matchMedia === "function" && matchMedia("(pointer:coarse)").matches;
 const MAP_TIERS = [
   { name: "rich", size: "xl", w: 116, h: 92 },
   { name: "card", size: "xl", w: 92, h: 78 }, // room for the name, its domain and its "Org / Project" line
-  { name: "chip", size: "l", w: 50, h: 40 },
-  { name: "dot", size: "s", w: 34, h: 32 },
+  { name: "chip", size: "l", w: 50, h: TOUCH ? 44 : 40 },
+  { name: "dot", size: "s", w: TOUCH ? 44 : 34, h: TOUCH ? 44 : 32 },
 ];
 function fitTier(W, H, n, t) {
   let best = null;
@@ -392,8 +394,16 @@ function planMap(W, H, n) {
 let mapOrdered = [];
 function layoutMap() {
   const map = $("map");
-  const W = map.clientWidth;
-  const H = map.clientHeight;
+  let W = map.clientWidth;
+  let H = map.clientHeight;
+  if (TOUCH) {
+    // on a touch screen the plan counts what the tiles really get: the card's padding is not theirs and the grid's own gap is the one between them,
+    // so a tile planned at 44px is 44px (planned on the whole box, it came out 42px wide)
+    const cs = getComputedStyle(map);
+    W -= (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    H -= (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    MAP_GAP = parseFloat(cs.columnGap) || MAP_GAP;
+  }
   if (!W || !H || !mapOrdered.length) return;
   const plan = planMap(W, H, mapOrdered.length);
   map.dataset.size = plan.tier.size;

@@ -632,6 +632,22 @@ function emptyNode(empty, data) {
   const v = typeof empty === "function" ? empty(data) : empty;  // a function may read the answer that came back (Situations: the server's state)
   return typeof v === "string" ? el("p", "empty", v) : emptyState(v);
 }
+// A project with no scan at all has nothing to report "fine" about: the Findings and Hygiene lists say so, and what to do, instead of "everything is fixed" or
+// "looks healthy". The answer is asked for only when a list came back empty (an all-projects view has no single project to ask about).
+async function neverScanned() {
+  if (ALL) return false;
+  try {
+    return (await api("GET", `${base}/scans?${query({ page_size: 0 })}`)).count === 0;
+  } catch (_) {
+    return false;
+  }
+}
+const nothingScanned = (what) => ({
+  icon: "target",
+  title: "Nothing has been scanned yet",
+  body: `${what} appear once a scan has looked at your hosts. Add a target to start one.`,
+  actions: addTargetsAction(),
+});
 // The empty Targets page's next step: the shell's own Add targets button, when this page has one
 function addTargetsAction() {
   const add = document.querySelector("[data-add-targets]");
@@ -2465,7 +2481,10 @@ function findingPage(mount, cfg) {
       lh.refresh();
       if (cfg.onLoaded) cfg.onLoaded(data, reset, quiet);
     },
-    prepare: (items) => Promise.all([...new Set(items.map(projectOf))].map(loadSla)),
+    prepare: async (items) => {
+      await Promise.all([...new Set(items.map(projectOf))].map(loadSla));
+      if (!items.length && cfg.askScanned) cfg.askScanned(await neverScanned());
+    },
     // quiet: a refresh nobody asked for. The rows are drawn aside and handed to renderKeepingState, so a disclosure the reader opened in a row (the hosts of a
     // finding group) and the scroll of the list survive it (static/cve/keep-state.js)
     render: (_, items, reset, quiet) => {
@@ -2481,7 +2500,13 @@ function findingPage(mount, cfg) {
         const title = el("span", "cve-id");
         if (r.title instanceof Node) title.append(r.title);
         else title.textContent = r.title;
-        row.append(title);
+        // the chip that says how bad it is (r.lead) sits on the title's line, after the title, so it is never at the end of a long second line
+        const lead = (r.lead || []).filter(Boolean);
+        if (lead.length) {
+          const top = el("span", "row-head");
+          top.append(title, ...lead);
+          row.append(top);
+        } else row.append(title);
         // a row is two lines: the title, then one line of meta that opens with the host (and product) and carries the badges; what does not fit
         // on that line (the description, the badges past the edge) is in the pane, and the row's tooltip says all of it
         const meta = el("span", "host-meta");
@@ -2498,7 +2523,7 @@ function findingPage(mount, cfg) {
         if (aging) meta.append(...ageTags(item));
         if (aging && aging.overdueBy) row.dataset.overdue = "1";
         row.append(meta);
-        row.title = [title.textContent, ...[...meta.children].map((c) => c.textContent.trim()), ...lines.filter((n) => typeof n === "string")].filter(Boolean).join("\n");
+        row.title = [title.textContent, ...lead.map((c) => c.textContent.trim()), ...[...meta.children].map((c) => c.textContent.trim()), ...lines.filter((n) => typeof n === "string")].filter(Boolean).join("\n");
         const rowName = item.title || (item.cve && item.cve.id) || `finding ${item.id}`;
         attachRowMenu(row, rowName, () => {
           const was = item.status ?? item.remediation_status;
@@ -4363,6 +4388,7 @@ const pages = {
       box.append(list);
       return box;
     };
+    let unscanned = false; // the project has no scan at all (asked for when the list is empty): the empty state says so
     const list = findingPage(mount, {
       bulk: true,
       seenPage: "findings",
@@ -4393,6 +4419,7 @@ const pages = {
       filters: [views.node, q, scope, kev, ai, type.node, sev.node, status.node, everyHost],
       params,
       exportParams: filtersNow, // the CSV is one line per host finding whatever the list shows
+      askScanned: (none) => (unscanned = none),
       empty: () => {
         const narrowed = type.value !== "all" || sev.value !== "all" || q.value.trim() || scope.value || kev.value;
         if (narrowed)
@@ -4413,6 +4440,7 @@ const pages = {
               },
             ],
           };
+        if (unscanned) return nothingScanned("Findings");
         if (status.value === "actionable")
           return {
             icon: "shield",
@@ -4430,7 +4458,8 @@ const pages = {
       row: (f) => ({
         heat: f.heat,
         title: f.type === "cve" && projectOf(f) ? cveAnchor(projectOf(f), f.title, f.id) : f.title,
-        meta: [badge(TYPE_LABEL[f.type] || f.type), FG.isGroup(f) ? badge(`${f.group.hosts} hosts`, "info") : null, f.internal ? internalBadge() : null, badge(f.severity, f.severity), f.kev ? kevBadge(f.heat_capped) : null, f.type === "cve" ? heatWhy(f.heat_reason) : null, aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
+        lead: [badge(f.severity, f.severity)],
+        meta: [badge(TYPE_LABEL[f.type] || f.type), FG.isGroup(f) ? badge(`${f.group.hosts} hosts`, "info") : null, f.internal ? internalBadge() : null, f.kev ? kevBadge(f.heat_capped) : null, f.type === "cve" ? heatWhy(f.heat_reason) : null, aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
                !FG.isGroup(f) ? statusBadge(f) : null, agentTag(f.agent_task), projChip(f)],
         notes: FG.isGroup(f)
           ? [rowLine(`${f.group.registrable_domain}`, f.note ? ` · ${f.note}` : ""), groupHosts(f), f.description || ""]
@@ -4477,7 +4506,7 @@ const pages = {
     );
     const status = picker(
       "Remediation status",
-      [["", "All"], ...CL.STATUS_OPTIONS, ["closed", "Any closed"]],
+      [["", "All"], ...CL.STATUS_OPTIONS, ["closed", "Any closed"], ...RT.FILTERS],
       async (key) => (await api("GET", `${base}/matches?${query({ status: key, host: q.value, classification: cls.value, verdict: verdict.value, cve: cveOnly, kev: kev.value, page_size: 0 })}`)).count,
       () => list.reload(),
     );
@@ -4515,7 +4544,8 @@ const pages = {
       row: (m) => ({
         heat: m.cve.tier,
         title: projectOf(m) ? cveAnchor(projectOf(m), m.cve.cve_id, m.id) : m.cve.cve_id,
-        meta: [heatBadge(m.cve.tier, m.heat_reason), m.cve.kev ? kevBadge(m.cve.heat_capped) : null, heatWhy(m.heat_reason), m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), statusBadge({ ...m, status: m.remediation_status }), agentTag(m.agent_task), projChip(m)],
+        lead: [heatBadge(m.cve.tier, m.heat_reason)],
+        meta: [m.cve.kev ? kevBadge(m.cve.heat_capped) : null, heatWhy(m.heat_reason), m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), statusBadge({ ...m, status: m.remediation_status }), agentTag(m.agent_task), projChip(m)],
         notes: [rowLine(m.host ? hostLink(m.host, projectOf(m)) : "-", ` · ${[m.product, m.version].filter(Boolean).join(" ") || "-"}`), m.cve.short_description || "Description unavailable in the CVE feed."],
       }),
     });
@@ -4571,9 +4601,12 @@ pages.hygiene = function hygiene(mount) {
       countOf("hygiene", {}),
     ]);
     tiles.textContent = "";
+    // a phone has one tile for both certificate numbers (one 44px button instead of two), a screen with room keeps the two
+    const narrow = typeof matchMedia === "function" && matchMedia("(max-width:639px)").matches;
     tiles.append(
-      tile("Certificates tracked", tracked, { onClick: openCerts }),
-      tile("Expiring in 30 days", expiring, { hot: "smoke", onClick: openCerts }),
+      ...(narrow
+        ? [tile(`Certificates tracked, ${expiring == null ? "-" : expiring} expiring in 30 days`, tracked, { hot: expiring ? "smoke" : "", onClick: openCerts })]
+        : [tile("Certificates tracked", tracked, { onClick: openCerts }), tile("Expiring in 30 days", expiring, { hot: "smoke", onClick: openCerts })]),
       tile("Critical or high issues", crit == null ? null : crit + (high || 0), { hot: "fire" }),
       tile("Open issues", open, { hot: "ice" }),
     );
@@ -4636,14 +4669,20 @@ pages.hygiene = function hygiene(mount) {
   const metaRow = el("div", "list-meta");
   metaRow.append(countLine, tools);
   const lh = listHead({ page: "hygiene", lead: [q], panelNodes: [sev.node, kind], meta: metaRow });
+  let unscanned = false; // the project has no scan at all (asked for when the list is empty): the empty state says so
   root.append(lh.head);
   const list = createList({
     mount: root,
     path: `${base}/hygiene`,
     params: () => ({ severity: sev.value, check: kind.value, q: q.value }),
+    prepare: async (items) => {
+      unscanned = !items.length && (await neverScanned());
+    },
     empty: () =>
       sev.value || kind.value || q.value.trim()
         ? { icon: "search", title: "No issue matches these filters" }
+        : unscanned
+        ? nothingScanned("Hygiene checks (certificates, TLS, email settings, cleartext services)")
         : {
             icon: "shield",
             tone: "calm",
@@ -4756,12 +4795,19 @@ pages.changes = function changes(mount) {
     count,
     () => list.reload(),
   );
-  const trend = el("div", "chart-slot");
+  // the daily chart is closed under its own line (the changes come first on the screen) and opens on the same 7 days the list starts on
+  const trend = el("details", "chart-slot changes-trend", null, { "data-keep-key": "changes-chart" });
+  trend.hidden = true;
+  const trendSum = el("summary", "", "Changes per day");
+  trend.append(trendSum);
   mount.append(trend, tools, kinds.node);
   // counted by the server, exactly: the newest 200 changes are a page, and the chart's total is the sum of what it is given
   api("GET", `${base}/activity-days?${query({ days: 60, series: "changes", tz: displayZone() })}`)
     .then((r) => {
-      if (r.changes.total) trend.append(areaChart({ title: "Changes per day", unit: "changes", ranges: [["7D", 7], ["30D", 30]], perDay: r.changes.days, compare: false }));
+      if (!r.changes.total) return;
+      trendSum.textContent = `Changes per day, chart (${r.changes.total} in the last 60 days)`;
+      trend.append(areaChart({ title: "Changes per day", unit: "changes", ranges: [["7D", 7], ["30D", 30]], perDay: r.changes.days, compare: false, defaultRange: "7D" }));
+      trend.hidden = false;
     })
     .catch(() => {});
   const list = createList({
