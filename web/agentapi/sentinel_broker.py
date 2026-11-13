@@ -3204,16 +3204,35 @@ def report_result(ctx, task_id, body):
     return {'task': task_brief(task), 'duplicate': False}
 
 
+def _note_left_out_on_purpose(task, agent, result):
+    """The installed checks a nuclei run left out because of a setting (fixed credentials while "Allow checks that send credentials" is off, files it could not
+    read): one plain sentence per scan, not per task and not as a warning (``result_cuts.INFORMATIONAL``)."""
+    from django.core.cache import cache
+    from cveFeed import activity
+    for cut in result_cuts.merged(result_cuts.clean(result.get('cuts'))):
+        sentence = result_cuts.informational(cut)
+        if not sentence:
+            continue
+        try:
+            if not cache.add(f'cvengine:cut-info:{task.scan_id}:{cut["what"]}', 1, timeout=6 * 3600):
+                continue
+        except Exception:  # noqa: BLE001 - without the cache a scan says it once per task, which is still true
+            pass
+        activity.log('run_check', f'{sentence[0].upper()}{sentence[1:]} (nuclei, {agent.name}).', project=task.project, status='done', scan_id=task.scan_id,
+                     sentinel_task_id=task.pk)
+
+
 def _note_cuts(task, agent, result):
     """Say in the scan's activity feed (and so on the scan page) that a result was cut: what, and how many were dropped (``cveFeed.result_cuts``). One line per task,
     written when the result is filed, so a capped list or a stopped tool is never silent. The words come from the cleaned cuts only."""
     if result.get('outcome') != 'done':
         return
-    notes = result_cuts.summary(result)
-    if not notes:
-        return
     from agentapi import sentinel_dispatch
     from cveFeed import activity
+    _note_left_out_on_purpose(task, agent, result)
+    notes = result_cuts.summary(result, losses_only=True)
+    if not notes:
+        return
     more = f' and {len(notes) - 4} more' if len(notes) > 4 else ''
     activity.log('run_check', f'{agent.name} cut its {task.kind} result for {sentinel_dispatch._label(task.host, task.ips)}: {"; ".join(notes[:4])}{more}',
                  project=task.project, status='done', scan_id=task.scan_id, sentinel_task_id=task.pk, cuts=True)

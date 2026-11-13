@@ -110,10 +110,79 @@ def all_templates_allowed():
         return False
 
 
-def readonly_problem(yaml_text):
+# A literal credential a template sends (TL-2, item 3). The same rule as ``cvengine_scanner.checks.credential_problem`` on the Sentinel (both are tested against
+# ``tests/fixtures/checks/corpus.json``): a header whose name authenticates with a value the template fixes, or a URL with a user name in it. A value made only
+# of placeholders (what a signed-in run's secrets file or an extractor supplies) is not fixed.
+_CRED_HEADER = re.compile(r'(?i)^(?:proxy-)?authorization$|^cookie2?$|auth|token|secret|passw|api[-_]?key|session|credential|jwt|csrf|xsrf|signature|bearer')
+_AUTH_SCHEME = re.compile(r'(?i)\b(?:bearer|basic|digest|negotiate|ntlm|token|apikey)\b')
+_USERINFO = re.compile(r'(?i)[a-z0-9+.-]://[^/\s?#]*@')  # one scheme character before ://, so a long run of letters is not rescanned from every position
+_PLACEHOLDER = re.compile(r'\{\{\s*([^}]*?)\s*\}\}')
+
+
+def _fixed_text(value, literal_names):
+    def one(match):
+        name = match.group(1)
+        return 'x' if ("'" in name or '"' in name or name in literal_names) else ''
+    return _PLACEHOLDER.sub(one, str(value))
+
+
+def _literal_credential_header(name, value, literal_names):
+    if not _CRED_HEADER.search(str(name).strip()):
+        return False
+    text = _fixed_text(value, literal_names)
+    if str(name).strip().lower().startswith('cookie'):
+        return any(re.search(r'[A-Za-z0-9]', part.partition('=')[2] if '=' in part else part) for part in text.split(';'))
+    return bool(re.search(r'[A-Za-z0-9]', _AUTH_SCHEME.sub('', text)))
+
+
+def credential_problem(yaml_text):
+    """Why a template sends a credential of its own, or "": a header that authenticates (Authorization, Cookie, an API key, a token...) with a fixed value in
+    the ``headers`` of a block or in a raw request, or a URL with a user name in it (``http://admin:admin@{{Hostname}}``). Pure. ``readonly_problem`` includes it
+    unless told a person allowed credential checks (installed templates only: an AI-written template is never given that)."""
+    try:
+        doc = load_template(yaml_text) if yaml_text else None
+    except (yaml.YAMLError, RecursionError):
+        return 'template not validated: not valid YAML, or nested too deeply'
+    if not isinstance(doc, dict):
+        return 'template not validated: not a template'
+    variables = doc.get('variables') if isinstance(doc.get('variables'), dict) else {}
+    literal_names = {str(k) for k, v in variables.items() if re.search(r'[A-Za-z0-9]', _PLACEHOLDER.sub('', str(v)))}
+    refuse = 'template not validated: it sends a credential of its own'
+
+    def walk(node, key=''):
+        if isinstance(node, dict):
+            if str(key).lower() == 'headers':
+                for name, value in node.items():
+                    if _literal_credential_header(name, value, literal_names):
+                        return f'{refuse} (the {str(name)[:40]} header has a fixed value)'
+            for k, value in node.items():
+                found = walk(value, k)
+                if found:
+                    return found
+        elif isinstance(node, list):
+            for value in node:
+                found = walk(value, key)
+                if found:
+                    return found
+        elif isinstance(node, str):
+            if str(key).lower() in ('path', 'raw', 'host', 'address', 'url') and _USERINFO.search(node):
+                return f'{refuse} (a URL with a user name in it)'
+            if str(key).lower() == 'raw':
+                for line in node.strip().splitlines()[1:]:
+                    if not line.strip():
+                        break
+                    name, sep, value = line.partition(':')
+                    if sep and _literal_credential_header(name, value, literal_names):
+                        return f'{refuse} (the {name.strip()[:40]} header has a fixed value)'
+        return ''
+    return walk({k: v for k, v in doc.items() if k not in ('info', 'variables')})
+
+
+def readonly_problem(yaml_text, allow_credentials=False):
     """Why a template may not be run by validation, or "" when its text is read-only: plain GET, HEAD or OPTIONS requests (a ``method``
-    or the first line of each ``raw`` request), none of the keys in READONLY_FORBIDDEN_KEYS, no out-of-band protocol, and no data sent
-    over a raw network connection. Pure."""
+    or the first line of each ``raw`` request), none of the keys in READONLY_FORBIDDEN_KEYS, no out-of-band protocol, no data sent
+    over a raw network connection, and no credential of its own (``credential_problem``, unless ``allow_credentials``: only for an
+    installed template, when an App Admin turned on "Allow checks that send credentials"). Pure."""
     if not yaml_text or len(yaml_text.encode()) > MAX_INSTALLED_TEMPLATE_BYTES:
         return 'template not validated: empty or too large'
     try:
@@ -175,7 +244,20 @@ def readonly_problem(yaml_text):
                 return 'template not validated: malformed network section'
             if any(not isinstance(i, dict) or i.get('data') for i in block.get('inputs') or []):
                 return 'template not validated: it sends data over a raw connection'
-    return ''
+    return '' if allow_credentials else credential_problem(yaml_text)
+
+
+def installed_template_problem(yaml_text):
+    """Why an INSTALLED template (never an AI-written one) may not run under the policy in force, or "": with every template allowed, only a credential of its
+    own refuses it (and only while "Allow checks that send credentials" is off); under the read-only policy it is ``readonly_problem``, which also refuses
+    a credential of its own unless that switch is on. A document PyYAML cannot read is left to nuclei when every template is allowed, as it always was."""
+    allow = credential_checks_allowed()
+    if not all_templates_allowed():
+        return readonly_problem(yaml_text, allow_credentials=allow)
+    if allow:
+        return ''
+    problem = credential_problem(yaml_text)
+    return '' if problem.endswith(('nested too deeply', 'not a template')) else problem
 
 
 _OWN_HOST = re.compile(r'^\{\{(?:Hostname|Host)\}\}(?::\{\{Port\}\})?$')
@@ -243,7 +325,7 @@ def approved_template(path, cve_id=None):
         ok, why = templategen.static_check(text, expected_cve_id=row.cve_entry.cve_id)
         problem = '' if ok else f'template not validated: {why}'
     else:
-        problem = '' if all_templates_allowed() else readonly_problem(text)
+        problem = installed_template_problem(text)
     return ('', problem) if problem else (text, '')
 
 

@@ -113,8 +113,8 @@ def approval_problem(mode, text, builtin=True, project=None, targets=None):
     if _approved_generated(text):
         return ''
     problem = validation.readonly_problem(text)
-    if problem and builtin and validation.all_templates_allowed():
-        return ''
+    if problem and builtin and validation.all_templates_allowed() and (validation.credential_checks_allowed() or not validation.credential_problem(text)):
+        return ''  # every template is allowed, but one that sends a credential of its own still needs "Allow checks that send credentials"
     return problem
 
 

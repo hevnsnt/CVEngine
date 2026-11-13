@@ -1037,7 +1037,9 @@ const coverageLine = (c) => {
   if (!c.applicable) return "no check applies yet";
   const due = (c.checks || []).filter((x) => x.state === "due").map((x) => x.label);
   const shown = due.slice(0, 4).join(", ") + (due.length > 4 ? ` and ${due.length - 4} more` : "");
-  return `${c.done} of ${c.applicable} applicable checks done` + (due.length ? `; due: ${shown}` : "");
+  const none = (c.no_check || []).map((x) => x.port);
+  const noCheck = none.length ? `; no check exists for the service on port${none.length > 1 ? "s" : ""} ${none.slice(0, 6).join(", ")}${none.length > 6 ? ` and ${none.length - 6} more` : ""}` : "";
+  return `${c.done} of ${c.applicable} applicable checks done` + (due.length ? `; due: ${shown}` : "") + noCheck;
 };
 const hostOverview = (h) => {
   const http = h.http || {};

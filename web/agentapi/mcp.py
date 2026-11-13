@@ -206,7 +206,7 @@ TOOLS = [
      lambda c, a: svc.stop_scan(c, a.get('project'), int(a['scan_id'])), True),
     ('stop_all_scans', 'Stop every running and queued scan of a project.', _schema({'project': SLUG}, ['project']),
      lambda c, a: svc.stop_scans(c, a.get('project')), True),
-    ('list_hosts', 'Inventory: hosts with IPs, open ports, product/version per service and a 0-100 score with its reasons, highest score first. Each host carries check_coverage: {done, applicable, checks: [{id, label, state done|due|not_applicable, last_run}]}, which of the checks that apply to it have run.',
+    ('list_hosts', 'Inventory: hosts with IPs, open ports, product/version per service and a 0-100 score with its reasons, highest score first. Each host carries check_coverage: {done, applicable, checks: [{id, label, state done|due|not_applicable, last_run}], no_check: [{port, detail}]}, which of the checks that apply to it have run, and the ports no check exists for (not counted).',
      _schema(_page_props({'project': SLUG_OR_ALL, 'q': {'type': 'string'}, 'target_id': {'type': 'integer'}, 'sort': {'type': 'string', 'enum': ['score', 'name']}}), ['project']),
      lambda c, a: svc.list_hosts(c, a.get('project'), a), False),
     ('set_host_profile', 'Set the asset information of a host: owner, purpose, criticality (unknown, low, medium, high, critical), alias (a short display name shown beside the address in lists, search, reports and the graph; the address and discovered names never change) and note (free text). Only the fields given change; an empty alias or note clears it.', _schema(
