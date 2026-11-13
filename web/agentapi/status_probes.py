@@ -98,9 +98,6 @@ class Run:
                 'not_finished': [name for name, r in self.results.items() if r.state in ('timeout', 'skipped', 'busy')]}
 
 
-from reNgine import gevent_db
-
-
 def _bound_database(limit):
     """The thread's own connection: no statement or lock wait longer than the probe's deadline, so a thread left behind ends by itself."""
     from django.db import connection

@@ -52,7 +52,7 @@ class DispatchTests(TransactionTestCase):
             started = time.monotonic()
             system_status._warm_rows([1, 2, 3])
             took = time.monotonic() - started
-        self.assertLess(took, system_status.WARM_DISPATCH_TIMEOUT * 3 + 2)
+        self.assertLess(took, 3.5)  # connect and each reply wait at most WARM_DISPATCH_TIMEOUT (1 s), no retries; the status budget is 8 s
         self.assertIsNone(client.get(system_status.WARM_LOCK))  # nothing was sent, so nothing holds the lock: the next call asks again
 
     def test_a_second_dispatch_while_one_is_held_sends_nothing(self):
@@ -63,6 +63,56 @@ class DispatchTests(TransactionTestCase):
             system_status._warm_rows([1])
         send.assert_not_called()
         self.assertEqual(client.get(system_status.WARM_LOCK), 'someone-else')
+
+
+class TimeoutTests(TransactionTestCase):
+    """A statement cancelled by the warm-up's timeout must not take the other rows with it, and no transaction may be left open (the run was one transaction: one
+    cancelled statement aborted it and 0 of N rows were kept, and it could stay open for the task's whole time limit)."""
+
+    def setUp(self):
+        cache.clear()
+        self.addCleanup(cache.clear)
+        org = Org.objects.create(name='T', slug='t-org')
+        self.projects = [Project.objects.create(name=f'T{i}', slug=f't-{i}', insert_date=timezone.now(), org=org) for i in range(3)]
+        self.client_ = resources.redis_client()
+        self.addCleanup(self.client_.delete, system_status.WARM_LOCK)
+        self.client_.set(system_status.WARM_LOCK, 'mine', ex=60)
+
+    def slow(self):
+        from django.db import connection
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT pg_sleep(2)')
+
+    def assert_clean(self):
+        from django.db import connection
+        self.assertFalse(connection.in_atomic_block)
+        self.assertIsNone(self.client_.get(system_status.WARM_LOCK))  # released
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND state LIKE 'idle in transaction%%' AND pid <> pg_backend_pid()")
+            self.assertEqual(cursor.fetchone()[0], 0)
+
+    def kept(self, project):
+        return cache.get(f'sysstatus:project:last:{project.id}')
+
+    def test_the_shared_read_cancelled_by_its_timeout_leaves_every_row_counted_for_itself(self):
+        with mock.patch.object(system_status, 'WARM_STATEMENT_MS', 100), mock.patch.object(system_status, '_shared_inputs', lambda ids: self.slow()):
+            system_status.warm_project_rows([p.id for p in self.projects], 'mine')
+        self.assertTrue(all(self.kept(p) is not None for p in self.projects))
+        self.assert_clean()
+
+    def test_one_row_cancelled_by_its_timeout_keeps_the_others(self):
+        original = system_status._project_row
+        bad = self.projects[1]
+
+        def row(project, shared=None):
+            if project.id == bad.id:
+                self.slow()
+            return original(project, shared)
+        with mock.patch.object(system_status, 'WARM_STATEMENT_MS', 100), mock.patch.object(system_status, '_project_row', row), self.assertLogs('agentapi.system_status', 'WARNING') as logged:
+            system_status.warm_project_rows([p.id for p in self.projects], 'mine')
+        self.assertEqual([self.kept(p) is not None for p in self.projects], [True, False, True])
+        self.assertTrue(any(bad.slug in line for line in logged.output))  # named once in the log
+        self.assert_clean()
 
 
 class RunTests(TestCase):

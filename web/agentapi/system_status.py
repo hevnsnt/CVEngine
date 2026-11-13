@@ -264,7 +264,7 @@ def _projects(ctx):
 
 
 WARM_STATEMENT_MS = 30000  # no statement of the warm-up runs longer than this (the thread it replaced had the same limit)
-WARM_DISPATCH_TIMEOUT = 3  # seconds the broker may take to accept the warm-up task: the status never waits longer
+WARM_DISPATCH_TIMEOUT = 1  # seconds each step of handing the task to the broker may take (connect, each reply): about three steps, so the status waits about three seconds at most
 
 
 def _warm_lock_client():
@@ -272,29 +272,44 @@ def _warm_lock_client():
     return resources.redis_client()
 
 
-def warm_project_rows(project_ids, token=None):
-    """Count the rows of these projects (the shared counts once, then each row) and keep them, so the next status call finds them cached. Runs as the
-    ``status_warm_rows`` Celery task (``cveFeed.tasks``), never in the web process or in the status call: a cold start that does not fit the status's
-    time is finished there. One transaction with a 30 second statement timeout (``SET LOCAL``: nothing outlives the task on its connection). The
-    single-flight lock (``token``) is released only if this run still holds it."""
-    from django.core.cache import cache
+def _short_transaction(fn):
+    """``fn()`` in a transaction of its own with a 30 second ``SET LOCAL statement_timeout``: it is open for one unit of work at most and its timeout ends it."""
     from django.db import connection, transaction
+    with transaction.atomic():
+        if connection.vendor == 'postgresql':
+            with connection.cursor() as cursor:
+                cursor.execute('SET LOCAL statement_timeout = %s', [WARM_STATEMENT_MS])
+        return fn()
+
+
+def warm_project_rows(project_ids, token=None):
+    """Count the rows of these projects and keep them, so the next status call finds them cached. Runs as the ``status_warm_rows`` Celery task
+    (``cveFeed.tasks``), never in the web process or in the status call. No transaction is held across the task: the shared counts and each project's row run in
+    a transaction of their own (``_short_transaction``, a 30 second statement timeout each). A row that fails (a statement cancelled by its timeout) is logged
+    by name and the others are still kept; if the shared counts fail, each row counts for itself (slower, but a row that counts alone does not depend on
+    them) instead of stopping, so a server on which the shared read does not fit in 30 s still warms. The single-flight lock (``token``) is released only if
+    this run still holds it."""
+    from django.core.cache import cache
 
     from dashboard.models import Project
     from reNgine import resources
     seconds = _cache_seconds()
     try:
-        with transaction.atomic():
-            if connection.vendor == 'postgresql':
-                with connection.cursor() as cursor:
-                    cursor.execute('SET LOCAL statement_timeout = %s', [WARM_STATEMENT_MS])
-            shared = _shared_inputs(list(project_ids))
-            for project in Project.objects.filter(id__in=project_ids).order_by('name'):
-                key, last_key = _row_keys(project)
-                row = _project_row(project, shared)
-                cache.set(last_key, row, LAST_ROW_SECONDS)
-                if seconds:
-                    cache.set(key, row, seconds)
+        try:
+            shared = _short_transaction(lambda: _shared_inputs(list(project_ids)))
+        except Exception:  # noqa: BLE001
+            logger.warning('status: the shared counts could not be read in the warm-up; each project counts for itself', exc_info=True)
+            shared = None
+        for project in list(Project.objects.filter(id__in=project_ids).order_by('name')):
+            try:
+                row = _short_transaction(lambda: _project_row(project, shared))
+            except Exception:  # noqa: BLE001 - one row failing keeps the others
+                logger.warning('status: the warm-up could not count project %s', project.slug, exc_info=True)
+                continue
+            key, last_key = _row_keys(project)
+            cache.set(last_key, row, LAST_ROW_SECONDS)
+            if seconds:
+                cache.set(key, row, seconds)
     finally:
         try:
             client = _warm_lock_client()
