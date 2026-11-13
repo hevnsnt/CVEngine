@@ -380,3 +380,67 @@ class FlaggedReviewNeverDemotesTests(Base):
         review, _ = self.reply(self.queue(), self.fp())
         self.assertFalse(FindingReview.objects.get(host_review=review).injection)
         self.assertEqual(self.tier_of(match), (situations.MINOR, True))
+
+
+class CapsAreAtomicTests(Base):
+    """HS-6 and HS-7: the daily cap and the per-project automatic-step cap are used under a lock (the count and the use are one step), and a refusal the
+    sweep recorded does not count against the paid cap."""
+
+    def test_a_refusal_recorded_by_the_sweep_is_not_a_paid_review_but_the_host_still_waits_its_day(self):
+        self.match()
+        host_review._record_refusal(self.proj, HOST, 'the packet is too large', timezone.now())
+        row = HostReview.objects.get()
+        self.assertEqual((row.status, row.ai_job_id), ('failed', None))
+        self.assertEqual(host_review.reviews_today(), 0)
+        self.assertEqual(host_review.due_hosts(5), [])  # it waits its day
+        self.queue()  # a real review still counts
+        self.assertEqual(host_review.reviews_today(), 1)
+
+    def test_the_daily_cap_is_checked_again_under_the_lock_so_a_caller_that_lost_the_race_is_refused(self):
+        from cveFeed.models import ReviewerSettings
+        other = self.host_of(self.domain, self.scan, 'b.example.com', self.proj, '192.0.2.80')
+        self.match(sub=other)
+        self.match()
+        ReviewerSettings.objects.update(host_review_daily_max=1)
+        real = host_review.build
+        raced = []
+
+        def build(project, host, **kw):
+            built = real(project, host, **kw)
+            if host == HOST and not raced:  # between this caller's check and its insert, another caller takes the last place
+                raced.append(host_review.request(project, 'b.example.com'))
+            return built
+        with mock.patch.object(host_review, 'build', side_effect=build), self.assertRaises(host_review.HostReviewRefused) as caught:
+            host_review.request(self.proj, HOST)
+        self.assertEqual((caught.exception.status, len(raced)), (429, 1))
+        self.assertEqual(list(HostReview.objects.values_list('host', flat=True)), ['b.example.com'])
+
+    def test_a_step_is_claimed_before_it_runs_so_a_second_review_of_the_project_sees_it(self):
+        from cveFeed.models import ReviewerSettings
+        other = self.host_of(self.domain, self.scan, 'c.example.com', self.proj, '192.0.2.81')
+        self.match(sub=other)
+        self.match()
+        ReviewerSettings.objects.update(host_review_auto_per_project_day=1)
+        first, second = self.queue(), self.queue(host='c.example.com')
+        seen = []
+
+        def run(*args, **kw):
+            seen.append(host_review.auto_steps_since(timezone.now() - timedelta(hours=1), project=self.proj))  # while the first step runs, it already counts
+            if len(seen) == 1:  # and a second review of the project, applied at this moment, is held by the cap
+                self.deliver(second, self.body({}, action='validate_match', target='f1', reason='needs_check'))
+            return {'action': 'validate_match', 'target': 'f1', 'state': 'started', 'detail': 'queued'}
+        with mock.patch.object(host_actions, 'run', side_effect=run):
+            self.deliver(first, self.body({}, action='validate_match', target='f1', reason='needs_check'))
+        second.refresh_from_db()
+        self.assertEqual(seen, [1])
+        self.assertEqual((second.step_mode, second.step_state), ('recommend', 'proposed'))
+        self.assertIn("limit of automatic steps", second.step_detail)
+
+    def test_the_automatic_step_takes_the_projects_advisory_lock(self):
+        self.match()
+        review = self.queue()
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        with CaptureQueriesContext(connection) as queries, mock.patch.object(host_actions, 'run', return_value={'action': 'validate_match', 'target': 'f1', 'state': 'started', 'detail': 'ok'}):
+            self.deliver(review, self.body({}, action='validate_match', target='f1', reason='needs_check'))
+        self.assertTrue(any('pg_advisory_xact_lock' in q['sql'] for q in queries.captured_queries))

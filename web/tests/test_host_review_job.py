@@ -417,7 +417,7 @@ class AdmitTests(Fixture):
         HostReview.objects.filter(pk=review.pk).update(created_at=timezone.now() - timedelta(days=1))
         ReviewerSettings.current()
         ReviewerSettings.objects.update(host_review_daily_max=1)
-        HostReview.objects.create(project=self.other, domain=self.other_domain, host='x.example.org', state_key='a' * 40, status='failed')
+        HostReview.objects.create(project=self.other, domain=self.other_domain, host='x.example.org', state_key='a' * 40, status='failed', ai_job=job)  # a failed review that made its AI call counts
         self.assertFalse(host_review.job_admit(job))
         ReviewerSettings.objects.update(host_review_daily_max=5)
         self.assertTrue(host_review.job_admit(job))

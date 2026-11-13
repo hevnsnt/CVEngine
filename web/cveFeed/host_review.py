@@ -408,6 +408,7 @@ OUTAGE = ('provider_rate_limit', 'provider_timeout', 'provider_connect_timeout',
 OPEN_STALE_AFTER = timedelta(days=8)       # an open review whose job is long gone is closed by the sweep (a job lives at most ai_jobs.TTL)
 PROPOSAL_LIFE = timedelta(days=7)          # a proposed step nobody started or dismissed expires
 AUTO_HOST_HOURS = 24
+AUTO_LOCK = 7140                           # the first key of the advisory lock that serialises one project's automatic steps
 SWEEP_BATCH = 20                           # reviews one sweep run may queue
 SWEEP_WINDOW = 500                         # hosts one sweep run looks at
 SWEEP_LOCK = 'cvengine:host-review-sweep'
@@ -542,9 +543,10 @@ def _day_start(now):
 
 
 def reviews_today(now=None):
-    """Host reviews queued today for the whole install, failed ones included: what ``host_review_daily_max`` counts."""
+    """Host reviews queued today for the whole install, failed ones included: what ``host_review_daily_max`` counts. A refusal the sweep recorded (a packet
+    that cannot be built: no AI call was made) is not one, though that host still waits its day."""
     from cveFeed.models import HostReview
-    return HostReview.objects.filter(created_at__gte=_day_start(now or timezone.now())).count()
+    return HostReview.objects.filter(created_at__gte=_day_start(now or timezone.now())).exclude(status='failed', ai_job__isnull=True).count()
 
 
 def available(now=None):
@@ -585,8 +587,15 @@ def request(project, host, priority=5, now=None):
     except HostReviewError as exc:
         raise HostReviewRefused(str(exc), 409) from exc
     offered = {action: {'class': offer.get('class', ''), 'targets': list(offer.get('targets') or [])} for action, offer in built[2].items()}
+    from cveFeed import reviewer
+    from cveFeed.models import ReviewerSettings
     try:
         with transaction.atomic():
+            # the daily cap is counted and used under one lock, so callers at the same moment (an agent looping over hosts, two workers) cannot all see room
+            ReviewerSettings.objects.select_for_update().filter(pk=reviewer.settings_row().pk).first()
+            ok, why = available(now)
+            if not ok:
+                raise HostReviewRefused(why, 429 if 'limit' in why else 503)
             review = HostReview.objects.create(project=project, domain=built.domain, host=host, state_key=built.state_key, refs=built[1],
                                                injection=built.injection)
     except IntegrityError as exc:  # another review of this host was queued at the same moment
@@ -876,7 +885,16 @@ def store_step(review, step, offered, injection, state, now=None):
     elif action == 'none':
         fields.update(step_mode='auto', step_state='done', step_detail='nothing more is needed')
     else:
-        blockers = auto_blockers(review, action, injection, now)
+        from django.db import connection, transaction
+        with transaction.atomic():
+            # the project's automatic-step cap is counted and used under one lock: the step is CLAIMED (stored as started, which the count reads) before
+            # it runs, so another review of the same project that is applied at the same moment sees it
+            with connection.cursor() as cursor:
+                cursor.execute('SELECT pg_advisory_xact_lock(%s, %s)', [AUTO_LOCK, review.project_id % 2_147_483_647])
+            blockers = auto_blockers(review, action, injection, now)
+            if not blockers:
+                HostReview.objects.filter(pk=review.pk).update(step_action=action, step_target=target, step_reason_code=step['reason_code'], step_mode='auto',
+                                                               step_state='started', step_detail='starting', decided_at=now)
         if blockers:
             fields.update(step_mode='recommend', step_state='proposed', step_detail=('not started on its own: ' + '; '.join(blockers))[:300])
         else:
