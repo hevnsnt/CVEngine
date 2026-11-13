@@ -3,7 +3,7 @@
 A new table (HostReview) and a few columns on existing ones: FindingReview points back to the host review that gave a verdict,
 ProjectSettings has the review mode and ReviewerSettings the daily limits. Every NOT NULL column added to a table that
 exists has a database default, so the previous release's code, which keeps running until the workers restart and inserts rows without them, can
-still insert. Catalog-only on PostgreSQL 11 and later: no rewrite, nothing backfilled (a project reads as mode auto, the default).
+still insert. Catalog-only on PostgreSQL 11 and later: no rewrite, nothing backfilled (a project reads as mode recommend, the default, and the review itself is off until a person turns it on).
 """
 import django.db.models.deletion
 from django.conf import settings
