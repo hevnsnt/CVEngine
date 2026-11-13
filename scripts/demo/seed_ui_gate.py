@@ -143,6 +143,14 @@ tuning(260, setting='work_depth', old_value=6, new_value=7, phase='probe', reaso
 tuning(600, setting='discovery_concurrency', old_value=20, new_value=12, action='lower', pressure=True, phase='back_off', reason='the scanning container has 6% memory free: backed off 20 to 12',
        verify_at=NOW - timedelta(hours=9), verified_at=NOW - timedelta(hours=9), outcome='helped', outcome_detail='x', baseline={'metric': 'trouble', 'value': 1.0, 'after': after('trouble', 0.0)},
        signals={'alerts': ['memory']})
+# proposals of the health-check AI (WP6): applied (being checked), suggested, held for flagged text, refused as out of range
+tuning(14, setting='assess_batch', old_value=16, new_value=12, action='lower', source='ai', reason='The worker lane is at 93 percent of its memory limit', verify_at=NOW + timedelta(minutes=16),
+       expected='trouble', baseline={'metric': 'trouble', 'value': 1.0}, signals={'alerts': ['memory']})
+tuning(30, setting='stage_parallel', old_value=6, new_value=4, action='lower', source='ai', mode='suggest', applied=False, layer='', reason='Sentinel tasks of one kind wait 40 minutes')
+tuning(70, setting='heavy.testssl', old_value=3, new_value=2, action='lower', source='ai', applied=False, layer='', resolution='held', resolved_by='auto-tune', resolved_at=NOW - timedelta(minutes=70),
+       reason='Memory is at 94 percent', outcome_detail='text aimed at an AI may be in what it read (instructions to an AI), so nothing was applied')
+tuning(85, setting='discovery_concurrency', old_value=12, new_value=40, source='ai', applied=False, layer='', resolution='refused', resolved_by='auto-tuning', resolved_at=NOW - timedelta(minutes=85),
+       reason='The discovery queue holds 30 scans', outcome_detail='outside what the controller allows now (4 to 12)')
 tuning(1500, setting='heavy.nuclei', old_value=2, new_value=3, source='person', action='apply', actor=admin_user, reason='admin applied the recommendation')
 AdminAlert.objects.create(code='memory', severity='warning', title='A worker lane is close to its memory limit', detail='The cve_feed lane uses 91% of its limit.',
                           first_seen=NOW - timedelta(hours=11), last_seen=NOW - timedelta(minutes=3))

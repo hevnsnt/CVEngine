@@ -66,6 +66,8 @@ const SHAPES = {
   ai_refused: base({source: 'ai', applied: false, layer: '', resolution: 'refused', new_value: 40, outcome_detail: 'outside what the controller allows now (4 to 20)'}),
   ai_held: base({source: 'ai', applied: false, layer: '', resolution: 'held', outcome_detail: 'text aimed at an AI may be in what it read (ai_directive), so nothing was applied'}),
   ai_refused_bare: base({source: 'ai', applied: false, resolution: 'refused', outcome_detail: null}),
+  ai_lowering_backlog: base({source: 'ai', action: 'lower', old_value: 8, new_value: 7, outcome: 'regressed', resolution: 'reverted', outcome_detail: 'the backlog got worse after the lowering: x',
+    baseline: {metric: 'trouble', value: 0, backlog: {metric: 'discovery_queue', value: 4}, after: {metric: 'trouble', value: 0}, backlog_after: {metric: 'discovery_queue', value: 60, trouble: 0}}}),
   empty: {},
   nothing_but_id: {id: 3},
   garbage: {id: 'x', at: 'never', label: 5, old_value: 'a', new_value: {}, reason: ['x'], baseline: 'text', outcome: 'helped', source: 3, actor: {}, verify_at: 'soon'},
@@ -182,4 +184,11 @@ test('a proposal of the AI: applied, suggested, refused and held each say what h
   assert.match(held.happened, /^proposed by the AI, held back: text aimed at an AI may be in what it read/);
   assert.equal(held.tone, 'wait');
   assert.equal(h.historyLine(SHAPES.ai_refused_bare, NOW).happened, 'proposed by the AI, not applied: no reason given');
+});
+
+test('an AI lowering that let the backlog grow says so, with the backlog numbers, and is undone', () => {
+  const line = h.historyLine(SHAPES.ai_lowering_backlog, NOW);
+  assert.equal(line.happened, 'made it worse: scans waiting in the queue 4 → 60; undone');
+  assert.equal(line.tone, 'bad');
+  assert.equal(line.revert, false);
 });
