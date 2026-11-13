@@ -970,7 +970,8 @@ def ops_checks(now=None, templates_release=None, _out=None):
         refusals = signals.get('claim_refusals')
         refused_2h = sum((r.get('this_hour') or 0) + (r.get('previous_hour') or 0) for r in (refusals.get('by') or []) if isinstance(r, dict) and r.get('action') == 'claim') \
             if isinstance(refusals, dict) and refusals.get('state') == 'known' else 0
-        not_claiming, why = maintainer_checks.not_claiming(slots, slots_in_use, claimed_2h, refused_2h) if fleet['live_sentinels'] else (False, '')
+        not_claiming, why = (maintainer_checks.not_claiming(slots, slots_in_use, claimed_2h, refused_2h) if fleet['live_sentinels'] and (refused_2h or waited / (waited + completed) >= WAIT_SATURATED_SHARE)
+                             else (False, ''))  # a few tasks that expired unclaimed beside plenty that completed are noise, not an outage
         if not fleet['live_sentinels']:
             advice = 'No Sentinel is live, so none of this work is being done: bring a Sentinel online on the Sentinels page.'
         elif not_claiming:

@@ -252,7 +252,7 @@ def brief(signals, tuning=None):
     signals = signals if isinstance(signals, dict) else {}
 
     def pick(d, keys):
-        return {k: d.get(k) for k in keys if isinstance(d, dict) and d.get(k) is not None}
+        return {k: (d[k][:160] if isinstance(d[k], str) else d[k]) for k in keys if isinstance(d, dict) and d.get(k) is not None}
 
     out = {'unknown': [], 'lanes': [], 'containers': [], 'queues': {}, 'claim_refusals': {}, 'database': {}, 'redis': {}, 'ai_spend': []}
     for name, signal in signals.items():
@@ -287,7 +287,9 @@ def brief(signals, tuning=None):
         result['tuning'] = {'mode': tuning.get('effective_mode') or tuning.get('mode'), 'pinned': (tuning.get('pinned') or [])[:15],
                             'last_decisions': [pick(d, ('at', 'setting', 'old_value', 'new_value', 'source', 'action', 'applied', 'reason')) for d in (tuning.get('last_decisions') or [])[:5]
                                                if isinstance(d, dict)]}
-    for _ in range(12):
+    for key in ('lanes', 'containers', 'ai_spend'):
+        out[key] = out[key][:8]
+    for _ in range(40):
         if len(json.dumps(result, default=str)) <= BRIEF_MAX_CHARS:
             break
         for key in ('ai_spend', 'containers', 'lanes'):

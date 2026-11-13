@@ -33,6 +33,10 @@ class Base(Fixture):
         for index in range(count):
             self.fakes.append(FakeScanner(external=True, name=f'sentinel-{index + 1}', kinds=['hygiene_check', 'nmap'], max_concurrent=slots).start_for(self))
 
+    def busy(self, count=8):
+        """``count`` tasks the Sentinels hold right now: their slots are in use (with none, tasks that expire unclaimed mean the Sentinels are not claiming, see test_maintainer_checks)."""
+        SentinelTask.objects.bulk_create([SentinelTask(project=self.proj, kind='nmap', target={}, status='running', claimed_at=now()) for _ in range(count)])
+
     def tasks(self, count, status, error='', kind='hygiene_check', ago=timedelta(hours=1), agent=None, claimed_ago=None):
         """``agent``: a Sentinel's name; the task was claimed ``claimed_ago`` before now when that is given. A task that ends as expired loses its agent"""
         who = Agent.objects.get(name=agent) if agent else None
@@ -122,6 +126,7 @@ class SentinelWaitingSaysWhereItStandsTests(Base):
 
     def test_a_growing_backlog_that_the_queue_confirms_advises_capacity(self):
         self.live(2, slots=4)
+        self.busy()
         self.tasks(300, 'done')
         self.waits(100, 400)
         SentinelTask.objects.bulk_create([SentinelTask(project=self.proj, kind='nmap', target={}, status='queued') for _ in range(20)])
@@ -492,6 +497,7 @@ class NoLiveSentinelIsAProblemTests(Base):
 
     def test_with_live_sentinels_it_stays_a_note(self):
         self.live()
+        self.busy()
         self.tasks(7, 'expired', WAIT, kind='nmap', ago=timedelta(hours=1))
         found = self.check('sentinel_waiting')
         self.assertEqual((found['state'], found['severity']), ('warning', 'info'))
@@ -515,6 +521,7 @@ class WaitingAlertSaysWhenTheSentinelsAreSaturatedTests(Base):
 
     def test_the_owners_flat_numbers_do_not_say_no_action_is_needed(self):
         self.live(2, slots=4)
+        self.busy()
         self.tasks(2951, 'done')
         self.tasks(361, 'expired', WAIT, kind='nmap', ago=timedelta(hours=5))
         self.tasks(361, 'expired', WAIT, kind='nmap', ago=timedelta(hours=1))
