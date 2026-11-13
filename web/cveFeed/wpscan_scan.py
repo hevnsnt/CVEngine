@@ -581,17 +581,10 @@ def record_signals(project_id, domain_id, host, signals):
                   'evidence': {'signals': signals[:10]}, 'observed_at': timezone.now()})
 
 
-def status_counts(project_ids=None):
-    """``{'hosts', 'scanned', 'never_scanned', 'reasons': {state: n}}`` over the hosts with any WordPress state: the system status line."""
-    from cveFeed.models import ProbeObservation
-    qs = ProbeObservation.objects.filter(kind='wordpress', probe__in=('wpscan', 'wordpress-detect', 'wordpress-signals', THOROUGH_PROBE))
-    if project_ids is not None:
-        qs = qs.filter(project_id__in=project_ids)
-    by_host = {}
-    for row in qs.order_by('project_id', 'host'):
-        by_host.setdefault((row.project_id, row.host), []).append(row)
+def _fold_counts(host_rows):
+    """The ``status_counts`` answer over ``host_rows``: one list of probe rows per host."""
     reasons, scanned, hosts, thorough = {}, 0, 0, {}
-    for rows in by_host.values():
+    for rows in host_rows:
         state = state_of(rows)
         if state is None or state['state'] == 'not_wordpress':
             continue
@@ -603,6 +596,30 @@ def status_counts(project_ids=None):
         if state['thorough']:
             thorough[state['thorough']['state']] = thorough.get(state['thorough']['state'], 0) + 1
     return {'hosts': hosts, 'scanned': scanned, 'never_scanned': hosts - scanned, 'reasons': reasons, 'thorough': thorough}
+
+
+def _wordpress_rows(project_ids=None):
+    from cveFeed.models import ProbeObservation
+    qs = ProbeObservation.objects.filter(kind='wordpress', probe__in=('wpscan', 'wordpress-detect', 'wordpress-signals', THOROUGH_PROBE))
+    if project_ids is not None:
+        qs = qs.filter(project_id__in=project_ids)
+    by_host = {}
+    for row in qs.order_by('project_id', 'host', 'id'):  # the id as the last key: two rows of one probe on a host are read in the same order whatever the filter
+        by_host.setdefault((row.project_id, row.host), []).append(row)
+    return by_host
+
+
+def status_counts(project_ids=None):
+    """``{'hosts', 'scanned', 'never_scanned', 'reasons': {state: n}}`` over the hosts with any WordPress state: the system status line."""
+    return _fold_counts(_wordpress_rows(project_ids).values())
+
+
+def status_counts_by_project(project_ids):
+    """``{project_id: status_counts([project_id])}`` for each of ``project_ids`` from one read of the probe rows."""
+    grouped = {pid: [] for pid in project_ids}
+    for (project_id, _host), rows in _wordpress_rows(list(project_ids)).items():
+        grouped[project_id].append(rows)
+    return {pid: _fold_counts(hosts) for pid, hosts in grouped.items()}
 
 
 # ----------------------------------------------------------------------------- the stage

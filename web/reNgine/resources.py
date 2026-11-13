@@ -33,6 +33,8 @@ from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
+
+
 # Estimated peak resident memory per job kind, in MB. Deliberately a little pessimistic.
 BASE_COSTS_MB = {
     'bbot-deep': 2400,      # kitchen-sink preset: dozens of modules and a spider (raised to what real runs reach, see effective_cost)

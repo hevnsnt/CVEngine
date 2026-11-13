@@ -13,6 +13,8 @@ import time
 logger = logging.getLogger(__name__)
 
 
+
+
 def cached_probe(key, compute, fresh=30, keep=1800, first=None):
     """``(value, taken_at)``: ``compute()``'s last answer. ``fresh``: seconds an answer is served without asking again; ``keep``: how long an older one may still
     be served (and refreshed in the background). A ``compute`` that raises is never cached; in the background the old answer stays. ``first``: a quicker

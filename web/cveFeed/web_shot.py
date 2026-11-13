@@ -28,6 +28,7 @@ import base64
 import hashlib
 import logging
 import os
+from collections import defaultdict
 import re
 import time
 from collections import namedtuple
@@ -382,12 +383,18 @@ def kick(delay=0):
 
 # ----------------------------------------------------------------------------- the backfill
 
+def web_port_q(prefix='ip_addresses__ports__'):
+    """A Q on one open TCP port that carries a web service, by number, by service name or by a name that starts with ``http``; ``prefix`` reaches the
+    port from the model queried."""
+    from django.db.models import Q
+    return (Q(**{prefix + 'state': 'open', prefix + 'protocol__in': ('', 'tcp')})
+            & (Q(**{prefix + 'number__in': list(KNOWN_WEB_PORTS)}) | Q(**{prefix + 'service_name__in': list(HTTP_SERVICE_NAMES)})
+               | Q(**{prefix + 'service_name__startswith': 'http'})))
+
+
 def _web_evidence_q():
     from django.db.models import Q
-    ports = Q(ip_addresses__ports__state='open', ip_addresses__ports__protocol__in=('', 'tcp')) & (
-        Q(ip_addresses__ports__number__in=list(KNOWN_WEB_PORTS)) | Q(ip_addresses__ports__service_name__in=list(HTTP_SERVICE_NAMES))
-        | Q(ip_addresses__ports__service_name__startswith='http'))
-    return ports | Q(http_url__gt='')
+    return web_port_q() | Q(http_url__gt='')
 
 
 SCAN_CAP = 1000  # candidate names one project's backfill looks at before it gives up for this run
@@ -925,12 +932,21 @@ def _reasons(rows):
 
 
 def web_hosts_by_project():
-    """``{project_id: hosts with a web page}`` for every project in one statement (what ``status_counts`` counts for one)."""
-    from startScan.models import Subdomain
-    found = {}
-    for project_id, _name in Subdomain.objects.filter(_web_evidence_q()).values_list('target_domain__project_id', 'name').distinct():
-        found[project_id] = found.get(project_id, 0) + 1
-    return found
+    """``{project_id: hosts with a web page}`` for every project (what ``status_counts`` counts for one): ``cveFeed.inventory_counts``."""
+    from cveFeed import inventory_counts
+    return inventory_counts.web_hosts_by_project()
+
+
+def _last_error(last):
+    return ({'page': f'{last["scheme"]}://{last["host"]}:{last["port"]}', 'outcome': last['outcome'], 'reason': last['reason'],
+             'at': last['attempted_at'].isoformat()} if last else None)
+
+
+def _counts_row(by_outcome, shot_hosts, web_hosts, nla, last):
+    return {'enabled': enabled(), 'available': available(), 'unavailable_reason': unavailable_reason() or None, 'sandbox': sandbox_status(),
+            'hosts_with_web': web_hosts, 'hosts_with_screenshot': shot_hosts, 'pages': by_outcome,
+            'queued': by_outcome.get(QUEUED, 0), 'failed': sum(by_outcome.get(k, 0) for k in FAILURES), 'blocked': by_outcome.get(BLOCKED, 0),
+            'nla_required': nla, 'last_error': _last_error(last)}
 
 
 def status_counts(project_ids, web_hosts=None):
@@ -945,9 +961,24 @@ def status_counts(project_ids, web_hosts=None):
         web_hosts = (Subdomain.objects.filter(target_domain__project_id__in=list(project_ids)).filter(_web_evidence_q())
                      .values('target_domain__project_id', 'name').distinct().count())
     last = rows.filter(outcome__in=FAILURES).exclude(attempted_at=None).order_by('-attempted_at').values('host', 'scheme', 'port', 'outcome', 'reason', 'attempted_at').first()
-    return {'enabled': enabled(), 'available': available(), 'unavailable_reason': unavailable_reason() or None, 'sandbox': sandbox_status(),
-            'hosts_with_web': web_hosts, 'hosts_with_screenshot': shot_hosts, 'pages': by_outcome,
-            'queued': by_outcome.get(QUEUED, 0), 'failed': sum(by_outcome.get(k, 0) for k in FAILURES), 'blocked': by_outcome.get(BLOCKED, 0),
-            'nla_required': HostScreenshot.objects.filter(project_id__in=list(project_ids), outcome=NLA).count(),
-            'last_error': ({'page': f'{last["scheme"]}://{last["host"]}:{last["port"]}', 'outcome': last['outcome'], 'reason': last['reason'],
-                            'at': last['attempted_at'].isoformat()} if last else None)}
+    return _counts_row(by_outcome, shot_hosts, web_hosts, HostScreenshot.objects.filter(project_id__in=list(project_ids), outcome=NLA).count(), last)
+
+
+def status_counts_by_project(project_ids, web_hosts):
+    """``{project_id: status_counts([project_id], web_hosts[project_id])}`` for each of ``project_ids`` from four grouped reads instead of four per project."""
+    from django.db.models import Count
+    from cveFeed.models import HostScreenshot
+    ids = list(project_ids)
+    rows = HostScreenshot.objects.filter(project_id__in=ids).exclude(scheme='rdp')
+    by_outcome = defaultdict(dict)
+    for row in rows.values('project_id', 'outcome').annotate(n=Count('id')).order_by():
+        by_outcome[row['project_id']][row['outcome']] = row['n']
+    shot_hosts = defaultdict(int)
+    for project_id, _host in rows.exclude(image_path='').values_list('project_id', 'host').distinct():
+        shot_hosts[project_id] += 1
+    nla = {row['project_id']: row['n'] for row in HostScreenshot.objects.filter(project_id__in=ids, outcome=NLA).values('project_id').annotate(n=Count('id')).order_by()}
+    last = {}
+    for row in (rows.filter(outcome__in=FAILURES).exclude(attempted_at=None).order_by('project_id', '-attempted_at')
+                .distinct('project_id').values('project_id', 'host', 'scheme', 'port', 'outcome', 'reason', 'attempted_at')):
+        last[row['project_id']] = row
+    return {pid: _counts_row(by_outcome.get(pid, {}), shot_hosts.get(pid, 0), web_hosts.get(pid, 0), nla.get(pid, 0), last.get(pid)) for pid in ids}

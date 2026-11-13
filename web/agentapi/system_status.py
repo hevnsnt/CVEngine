@@ -13,7 +13,6 @@ import logging
 import os
 import re
 import shutil
-import threading
 import time
 from datetime import datetime, timedelta, timezone as dt_timezone
 
@@ -104,12 +103,29 @@ def _cache_seconds():
 
 
 def _shared_inputs(project_ids):
-    """What every project's row needs that is the same work for all of them, read once: the host and exposed-host counts of every project (one collapse
-    of the instance's hosts) and each project's number of hosts with a web page. ``None`` when it cannot be read: each row then counts for itself."""
-    from cveFeed import stats_history, web_shot
+    """What every project's row needs that has the same shape for all of them, read once for all projects as grouped reads: the host and exposed-host counts
+    (one read of the instance's hosts, ``cveFeed.inventory_counts``), the web hosts, the finding counts, the targets, the scans running, queued and stalled, the WordPress,
+    subdirectory and screenshot counts. ``None`` when it cannot be read: each row then counts for itself (``_project_row`` without ``shared``)."""
+    from django.db.models import Count
+
+    from cveFeed import counts, inventory_counts, stats_history, subdir_apps, web_shot, wpscan_scan
+    from targetApp.models import Domain
     try:
-        return {**stats_history.shared_host_counts(), 'web_hosts': web_shot.web_hosts_by_project(),
-                'findings': stats_history.shared_finding_counts(project_ids)}
+        ids = list(project_ids)
+        current = inventory_counts.current_rows()  # the current inventory, worked out once and used by the host counts and the CVE match counts
+        shared = {**stats_history.shared_host_counts(current), 'web_hosts': web_shot.web_hosts_by_project(),
+                  'findings': stats_history.shared_finding_counts(ids, [row[0] for row in current])}
+        shared['targets'] = {row['project_id']: row['n'] for row in Domain.objects.filter(project_id__in=ids).values('project_id').annotate(n=Count('id')).order_by()}
+        window = counts.running_window()
+        for name, scans in (('running', counts.running_scans(window=window)), ('queued', counts.queued_scans()), ('stalled', counts.stalled_scans())):
+            shared['scans_' + name] = {row['domain__project_id']: row['n'] for row in scans.filter(domain__project_id__in=ids).values('domain__project_id').annotate(n=Count('id')).order_by()}
+        shared['wordpress'] = wpscan_scan.status_counts_by_project(ids)
+        shared['web_discovery'] = subdir_apps.status_counts_by_project(ids)
+        try:
+            shared['screenshots'] = web_shot.status_counts_by_project(ids, shared['web_hosts'])
+        except Exception as exc:  # noqa: BLE001 - counts only: a row is shown without them rather than not at all
+            shared['screenshots'] = {pid: {'error': type(exc).__name__} for pid in ids}
+        return shared
     except Exception:  # noqa: BLE001
         logger.info('status: the shared counts could not be read, each project counts for itself', exc_info=True)
         return None
@@ -121,21 +137,29 @@ def _project_row(project, shared=None):
     from startScan.models import ScanHistory
     from targetApp.models import Domain
     snap = compute_snapshot(project, with_fixed=False, shared=shared)  # the live counts only; never stored
-    scans = ScanHistory.objects.filter(domain__project=project)
+    if shared is not None and 'scans_running' in shared:
+        pid = project.id
+        targets = shared['targets'].get(pid, 0)
+        scans = {'running': shared['scans_running'].get(pid, 0), 'queued': shared['scans_queued'].get(pid, 0), 'stalled': shared['scans_stalled'].get(pid, 0)}
+        wordpress, web_discovery, screenshots = shared['wordpress'][pid], shared['web_discovery'][pid], shared['screenshots'][pid]
+    else:
+        scan_rows = ScanHistory.objects.filter(domain__project=project)
+        targets = Domain.objects.filter(project=project).count()
+        scans = {'running': counts.running_scans(scan_rows).count(), 'queued': counts.queued_scans(scan_rows).count(), 'stalled': counts.stalled_scans(scan_rows).count()}
+        wordpress, web_discovery, screenshots = wpscan_scan.status_counts([project.id]), subdir_apps.status_counts([project.id]), _screenshots_of(project, shared)
     return {
         'slug': project.slug, 'name': project.name,
-        'targets': Domain.objects.filter(project=project).count(),
+        'targets': targets,
         'hosts': snap['hosts'], 'exposed_hosts': snap['exposed_hosts'],
-        'scans': {'running': counts.running_scans(scans).count(), 'queued': counts.queued_scans(scans).count(),
-                  'stalled': counts.stalled_scans(scans).count()},
+        'scans': scans,
         'open_findings': snap['open_findings'], 'open_findings_total': sum(snap['open_findings'].values()),
         'cve_matches': snap['cve_matches'],
         # WordPress hosts: how many, how many the WordPress scan has covered, and why the rest were not (blocked by an edge, failed, waiting)
-        'wordpress': wpscan_scan.status_counts([project.id]),
+        'wordpress': wordpress,
         # other sites on shared addresses and applications under subdirectories (the slow vhost_queue sweeps)
-        'web_discovery': subdir_apps.status_counts([project.id]),
+        'web_discovery': web_discovery,
         # web screenshots (cveFeed.web_shot): hosts with a picture of how many have a web page, what waits, what failed, and the last capture error
-        'screenshots': _screenshots_of(project, shared),
+        'screenshots': screenshots,
     }
 
 
@@ -166,7 +190,7 @@ INVENTORY_SECONDS = 6  # the inventory's own deadline inside the status budget; 
 INVENTORY_MARGIN = 1.0  # the inventory stops starting rows this long before its deadline, so it answers with what it has
 LAST_ROW_SECONDS = 24 * 3600  # the last row worked out per project is kept this long, to be shown (marked stale) while a new one is being counted
 WARM_LOCK = 'sysstatus:warming'
-WARM_MAX_SECONDS = 600
+WARM_MAX_SECONDS = 600  # the task's own time limit, and how long the lock holds if it dies
 
 
 def _row_keys(project):
@@ -179,7 +203,7 @@ def _projects_partial(ctx, deadline=None):
     old. The row is the project's, the same for everyone who may see it (which projects are listed is still decided per caller), so every caller shares
     one. Cold, after a restart or a cache that is off, a row is counted here only while ``deadline`` (a ``time.monotonic`` time) has not passed and each
     of its statements may take only the time that is left; a project that does not fit gets its last known row (``stale: True``) or none, and is
-    counted by ONE background thread (``_warm_rows``, a statement timeout of its own) so the next call finds it cached, instead of fifteen rows in
+    counted by the ``status_warm_rows`` Celery task (``_warm_rows``) so the next call finds it cached, instead of fifteen rows in
     a row inside one request."""
     from django.core.cache import cache
     from django.db import connection
@@ -239,47 +263,91 @@ def _projects(ctx):
     return _projects_partial(ctx)[0]
 
 
-def _warm_rows(project_ids):
-    """Count the rows of these projects in ONE background thread (a cache lock keeps it to one) and keep them, so a call right after a restart does not
-    count fifteen projects in a row inside the request. Bounded: a statement timeout of 30 s on the thread's own connection, ``WARM_MAX_SECONDS``
-    for the whole walk, and the connection is closed when the thread ends. Not started inside a transaction (the thread would not see its rows)."""
+WARM_STATEMENT_MS = 30000  # no statement of the warm-up runs longer than this (the thread it replaced had the same limit)
+WARM_DISPATCH_TIMEOUT = 1  # seconds each step of handing the task to the broker may take (connect, each reply): about three steps, so the status waits about three seconds at most
+
+
+def _warm_lock_client():
+    from reNgine import resources
+    return resources.redis_client()
+
+
+def _short_transaction(fn):
+    """``fn()`` in a transaction of its own with a 30 second ``SET LOCAL statement_timeout``: it is open for one unit of work at most and its timeout ends it."""
+    from django.db import connection, transaction
+    with transaction.atomic():
+        if connection.vendor == 'postgresql':
+            with connection.cursor() as cursor:
+                cursor.execute('SET LOCAL statement_timeout = %s', [WARM_STATEMENT_MS])
+        return fn()
+
+
+def warm_project_rows(project_ids, token=None):
+    """Count the rows of these projects and keep them, so the next status call finds them cached. Runs as the ``status_warm_rows`` Celery task
+    (``cveFeed.tasks``), never in the web process or in the status call. No transaction is held across the task: the shared counts and each project's row run in
+    a transaction of their own (``_short_transaction``, a 30 second statement timeout each). A row that fails (a statement cancelled by its timeout) is logged
+    by name and the others are still kept; if the shared counts fail, each row counts for itself (slower, but a row that counts alone does not depend on
+    them) instead of stopping, so a server on which the shared read does not fit in 30 s still warms. The single-flight lock (``token``) is released only if
+    this run still holds it."""
     from django.core.cache import cache
+
+    from dashboard.models import Project
+    from reNgine import resources
+    seconds = _cache_seconds()
+    try:
+        try:
+            shared = _short_transaction(lambda: _shared_inputs(list(project_ids)))
+        except Exception:  # noqa: BLE001
+            logger.warning('status: the shared counts could not be read in the warm-up; each project counts for itself', exc_info=True)
+            shared = None
+        for project in list(Project.objects.filter(id__in=project_ids).order_by('name')):
+            try:
+                row = _short_transaction(lambda: _project_row(project, shared))
+            except Exception:  # noqa: BLE001 - one row failing keeps the others
+                logger.warning('status: the warm-up could not count project %s', project.slug, exc_info=True)
+                continue
+            key, last_key = _row_keys(project)
+            cache.set(last_key, row, LAST_ROW_SECONDS)
+            if seconds:
+                cache.set(key, row, seconds)
+    finally:
+        try:
+            client = _warm_lock_client()
+            if client is not None and token:
+                resources.claim_release(client, WARM_LOCK, token)
+        except Exception:  # noqa: BLE001 - the lock expires by itself
+            pass
+
+
+def _warm_rows(project_ids):
+    """Hand the projects that did not fit the status's time to the ``status_warm_rows`` task, one run at a time (a Redis lock the run releases only while it
+    still holds it); not inside a transaction, where a task could not see the rows either. It was a background thread of the calling process, which in a
+    Celery lane is a greenlet that held the lane for minutes and in a web worker took the interpreter's lock from requests. The broker gets
+    ``WARM_DISPATCH_TIMEOUT`` seconds to take the message (no retries), so a broker that does not answer costs the status that much at most and the message is
+    simply not sent: the next call asks again."""
+    import uuid
+
     from django.db import connection
     if connection.in_atomic_block:
         return
+    client, token = None, uuid.uuid4().hex
     try:
-        if not cache.add(WARM_LOCK, 1, WARM_MAX_SECONDS + 60):
+        client = _warm_lock_client()
+        if client is not None and not client.set(WARM_LOCK, token, nx=True, ex=WARM_MAX_SECONDS + 60):
             return
-    except Exception:  # noqa: BLE001
-        return
-
-    def run():
-        from django.db import connections
-
-        from agentapi import status_probes
-        from dashboard.models import Project
-        started, seconds = time.monotonic(), _cache_seconds()
+        from cveFeed.tasks import status_warm_rows
+        from reNgine.celery import app
+        options = {'socket_timeout': WARM_DISPATCH_TIMEOUT, 'socket_connect_timeout': WARM_DISPATCH_TIMEOUT}
+        with app.connection_for_write(transport_options=options, connect_timeout=WARM_DISPATCH_TIMEOUT) as broker:
+            status_warm_rows.apply_async(args=[list(project_ids), token], queue='cve_feed_queue', expires=WARM_MAX_SECONDS, connection=broker, retry=False)
+    except Exception:  # noqa: BLE001 - the next call asks again
+        logger.info('status: could not queue the counting of the projects', exc_info=True)
         try:
-            status_probes._bound_database(30)
-            shared = _shared_inputs(list(project_ids))
-            for project in Project.objects.filter(id__in=project_ids).order_by('name'):
-                if time.monotonic() - started > WARM_MAX_SECONDS:
-                    break
-                key, last_key = _row_keys(project)
-                row = _project_row(project, shared)
-                cache.set(last_key, row, LAST_ROW_SECONDS)
-                if seconds:
-                    cache.set(key, row, seconds)
-        except Exception:  # noqa: BLE001 - the next call asks again
-            logger.info('status: counting the projects in the background failed', exc_info=True)
-        finally:
-            try:
-                connections.close_all()
-                cache.delete(WARM_LOCK)
-            except Exception:  # noqa: BLE001
-                pass
-
-    threading.Thread(target=run, name='status-warm-rows', daemon=True).start()
+            if client is not None:
+                from reNgine import resources
+                resources.claim_release(client, WARM_LOCK, token)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _inventory(ctx, problems):

@@ -52,6 +52,36 @@ def computers():
     }
 
 
+# What each fingerprinted snapshot reads, and how long it may be renewed without being recomputed (its worst-case staleness when nothing is written):
+# ``stats`` shows a Sentinel as online or offline from its last-seen time (``internal_view``) and counts certificates and open days against the clock, so
+# it is recomputed at least every minute; ``discovery-counts`` is only counts of stored hosts, addresses and ports, so five minutes. A write to any listed table
+# is seen within about ten seconds either way. ``tests/test_refresh_unchanged.py`` fails when a snapshot's computation reads a table that is not listed.
+RENEWAL_SECONDS = {'stats': 60, 'discovery-counts': 300}
+NOT_AN_INPUT = {'cveFeed_agentactivity'}  # the running-work counts of the stats are read again on every poll (``views.live_scan_counts``): a table that is written all the time
+
+
+def fingerprint_tables(name):
+    """The database tables the snapshot ``name`` is computed from."""
+    from agentapi.models import Agent
+    from django.contrib.auth.models import User
+
+    from cveFeed.models import AutoFireRun, CVEEntry, CVEMatch, GeneratedTemplate, HygieneFinding, InternalRange, TlsCertificate, Triage, TunableSettings
+    from dashboard.models import ApiToken, Org, Project, SystemTimings
+    from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Vulnerability
+    from targetApp.models import Domain
+    hosts = (IpAddress, Port, ScanHistory, Subdomain, Domain, Project, Subdomain.ip_addresses.through, IpAddress.ports.through)
+    if name == 'discovery-counts':
+        return sorted({m._meta.db_table for m in hosts})
+    return sorted({m._meta.db_table for m in hosts + (AutoFireRun, CVEEntry, CVEMatch, GeneratedTemplate, HygieneFinding, InternalRange, TlsCertificate, Triage,
+                                                      Vulnerability, Org, SystemTimings, TunableSettings, Agent, ApiToken, User)})
+
+
+def fingerprints():
+    """``name -> (function, renewal seconds)`` for the snapshots worth not recomputing when none of the tables they read changed (the headline counts and the
+    ticker; the others cost milliseconds). The function returns ``snapshot_cache.table_fingerprint`` of those tables."""
+    return {name: ((lambda tables: lambda: snapshot_cache.table_fingerprint(*tables))(fingerprint_tables(name)), seconds) for name, seconds in RENEWAL_SECONDS.items()}
+
+
 def _prebuild_graph(recipe, entry, previous):
     """A graph whose version moved is built here, once, so the viewers' ``?v=`` polls that find it changed are served from the cache instead of
     each walking the inventory (a request that finds the payload missing still builds it, as before). Kept as long as a payload a request builds
@@ -110,7 +140,7 @@ def refresh_hot_scopes(budget=None):
         return {'enabled': True, 'skipped': 'the cache is not answering'}
     started = time.monotonic()
     ran = False
-    summary = {'enabled': True, 'hot': 0, 'refreshed': 0, 'fresh': 0, 'busy': 0, 'dropped': 0, 'errors': 0, 'out_of_time': 0, 'idle': 0}
+    summary = {'enabled': True, 'hot': 0, 'refreshed': 0, 'fresh': 0, 'busy': 0, 'unchanged': 0, 'dropped': 0, 'errors': 0, 'out_of_time': 0, 'idle': 0}
     try:
         last = snapshot_cache.last_beat() or {}
         own, classic = backlog()
@@ -123,7 +153,7 @@ def refresh_hot_scopes(budget=None):
             return {**summary, 'skipped': reason}
         ran = True
         snapshot_cache.beat({'state': 'running'})
-        known = computers()
+        known, prints = computers(), fingerprints()
         recipes = snapshot_cache.hot_recipes()
         summary['hot'] = len(recipes)
         keys = {f"cve:snap:{r['name']}:{r['scope']}": r for r in recipes}
@@ -159,7 +189,8 @@ def refresh_hot_scopes(budget=None):
                     summary['dropped'] += 1  # the scope's projects changed since the request: that key is no one's now
                     continue
                 status, entry, previous = snapshot_cache.refresh(rec['name'], rec['scope'], lambda: compute(rec['args']), fresh, etag_of,
-                                                                 due_age=max(0, fresh - interval))
+                                                                 due_age=max(0, fresh - interval), fingerprint=(prints.get(rec['name']) or (None, None))[0],
+                                                                 unchanged_keep=(prints.get(rec['name']) or (None, None))[1])
                 summary[status] += 1
                 if after and status == 'refreshed':
                     after(rec, entry, previous)

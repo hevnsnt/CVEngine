@@ -35,16 +35,16 @@ def _open_findings_and_cve_matches(project):
 FINDING_PROJECT_FIELD = {'cve': 'subdomain__target_domain__project_id', 'scanner': 'target_domain__project_id', 'hygiene': 'domain__project_id'}
 
 
-def shared_finding_counts(project_ids):
+def shared_finding_counts(project_ids, current_ids=None):
     """``{project_id: (open_findings, cve_matches)}`` for these projects, the numbers ``_open_findings_and_cve_matches`` gets for each one alone, from one
     pass over each kind of finding grouped by project (the all-projects form of the same ``_finding_sources`` query, so the set is the Findings list's)
-    instead of one pass per project."""
+    instead of one pass per project. ``current_ids``: the ids of the current inventory's hosts, when the caller has them."""
     from cveFeed.threat import HEAT_RANK
 
     from agentapi.services import SEVERITY_NAMES, AllProjects, _finding_sources
     heat_names = {rank: name for name, rank in HEAT_RANK.items()}
     out = {pid: ({band: 0 for band in OPEN_FINDING_BANDS}, {heat: 0 for heat in CVE_MATCH_HEATS}) for pid in project_ids}
-    for kind, qs in _finding_sources(AllProjects(project_ids), {'status': 'actionable'}).items():
+    for kind, qs in _finding_sources(AllProjects(project_ids), {'status': 'actionable'}, current_ids).items():
         field = FINDING_PROJECT_FIELD[kind]
         for row in (qs.values(field, 'sev', 'heat_rank') if kind == 'cve' else qs.values(field, 'sev')).annotate(n=Count('id')).order_by():
             open_findings, cve_matches = out.get(row[field], (None, None))
@@ -88,26 +88,11 @@ def _fixed_stats(project):
     return len(rows), (round(sum(deltas) / len(deltas), 2) if deltas else None)
 
 
-def shared_host_counts():
-    """``{'hosts': {project_id: n}, 'exposed': {project_id: n}}`` for EVERY project from one collapse of the instance's hosts and one read of the exposed
-    ones, so a caller that needs the numbers of many projects (the system status's cold rows) does not collapse the hosts once per project. The host key
-    and the name key both carry the project, so a project's numbers here are those ``compute_snapshot`` gets for it alone (a test compares them).
-    The exposed set is read into Python once (one statement that embeds the current-scan filter once) and each host is looked up in it."""
-    from cveFeed import counts
-    from cveFeed.correlation import latest_scan_q
-    from startScan.models import Subdomain
-    reps = list(counts.with_host_key(counts.reps_of(counts.rep_ids())).values_list('target_domain__project_id', 'host_key', 'name'))
-    exposed = Subdomain.objects.filter(latest_scan_q()).filter(counts.exposure_filter())
-    keys, named = set(), set()
-    for host_key, project_id, name in counts.with_host_key(exposed).values_list('host_key', 'target_domain__project_id', 'name'):
-        keys.add(host_key)
-        named.add((project_id, name))
-    hosts, exposed_hosts = {}, {}
-    for project_id, host_key, name in reps:
-        hosts[project_id] = hosts.get(project_id, 0) + 1
-        if host_key in keys or (project_id, name) in named:
-            exposed_hosts[project_id] = exposed_hosts.get(project_id, 0) + 1
-    return {'hosts': hosts, 'exposed': exposed_hosts}
+def shared_host_counts(rows=None):
+    """``{'hosts': {project_id: n}, 'exposed': {project_id: n}}`` for every project, the numbers ``compute_snapshot`` gets for each alone, from one read of
+    the instance's hosts (``cveFeed.inventory_counts``) instead of one SQL collapse per project."""
+    from cveFeed import inventory_counts
+    return inventory_counts.shared_host_counts(rows)
 
 
 def compute_snapshot(project, date=None, with_fixed=True, shared=None):

@@ -809,7 +809,8 @@ class PoliteRefresherTests(Fresh):
         with Counting() as computed:
             self.assertIn('overran', live_refresh.refresh_hot_scopes()['skipped'])
             self.assertEqual(computed.calls()['stats'], 0)
-            self.assertEqual(live_refresh.refresh_hot_scopes()['refreshed'], 1)  # the skip cleared it
+            summary = live_refresh.refresh_hot_scopes()
+            self.assertEqual(summary['refreshed'] + summary['unchanged'], 1)  # the skip cleared it (nothing changed in the data, so the headline counts are renewed, not recomputed)
 
     def test_the_worker_is_yielded_to_between_scopes(self):
         client_for(self.a1).get(STATS)

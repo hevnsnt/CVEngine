@@ -2039,6 +2039,13 @@ def ensure_reviewer_token():
     return builtin_reviewer.ensure()
 
 
+@app.task(name="status_warm_rows", bind=False, queue="cve_feed_queue", time_limit=600, soft_time_limit=540)
+def status_warm_rows(project_ids, token=None):
+    """Count the system status's project rows that did not fit its time budget (right after a restart) and keep them: ``agentapi.system_status.warm_project_rows``."""
+    from agentapi import system_status
+    return system_status.warm_project_rows(project_ids, token)
+
+
 @app.task(name="reviewer_ops_checks", bind=False, queue="cve_feed_queue", time_limit=600, soft_time_limit=540)
 def reviewer_ops_checks():
     """Every half hour: the operations checks of docs/AI-REVIEWER.md, raising and resolving the admin alerts (``cveFeed.reviewer``). No AI is

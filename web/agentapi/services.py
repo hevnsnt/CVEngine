@@ -1983,7 +1983,7 @@ def _one_per_host(qs, per_project=False):
     queryset, so search joins cannot inflate the counts. ``per_project`` (the all-projects view) keeps one row per (project,
     hostname): the same name in two projects is two hosts."""
     from django.db.models import Case, Count, F, IntegerField, OuterRef, Subquery, Value, Window, When
-    from django.db.models.functions import Coalesce, Length, RowNumber
+    from django.db.models.functions import Coalesce, Collate, Length, RowNumber
     from cveFeed.counts import with_host_key
     from startScan.models import OPEN_PORT_STATES, Port, Subdomain
     ports = Port.objects.filter(state__in=OPEN_PORT_STATES, ports__ip_addresses=OuterRef('pk')).order_by() \
@@ -1995,10 +1995,12 @@ def _one_per_host(qs, per_project=False):
         *keys, Coalesce(Subquery(ports), Value(0)).desc(), Coalesce(Subquery(ips), Value(0)).desc(),
         F('scan_history_id').desc(nulls_last=True), '-id').distinct(*keys).values('id')
     own_target = Case(When(name=F('target_domain__name'), then=Value(0)), default=Value(1), output_field=IntegerField())
+    # names that tie on length are ordered by their bytes (COLLATE "C"), not by the database's locale: the same order on every database, and the one
+    # ``cveFeed.inventory_counts`` takes in Python, so the host that stands for a group does not depend on how the database sorts text
     # a window rather than DISTINCT ON: the key is an annotation, which DISTINCT ON cannot keep once the query is cut to ids
     rep = with_host_key(Subdomain.objects.filter(id__in=by_name)).annotate(_rank=Window(
         RowNumber(), partition_by=[F('host_key')],
-        order_by=[own_target.asc(), Length('name').asc(), F('name').asc(), Coalesce(Subquery(ports), Value(0)).desc(), F('id').desc()])
+        order_by=[own_target.asc(), Length('name').asc(), Collate('name', 'C').asc(), Coalesce(Subquery(ports), Value(0)).desc(), F('id').desc()])
     ).filter(_rank=1).values('id')
     # the ids are gathered into an array once and looked up in it (``id = ANY(ARRAY(...))``). ``id IN (subquery)`` let Postgres guess one row for the
     # window query and rescan its 8,000 rows for each of 10,000 hosts: 4.8 s at that size, 0.1 s with the array
@@ -3565,10 +3567,15 @@ def _agent_task_annotations():
             'agent_task_agent': Subquery(active.values('agent__name')[:1])}
 
 
-def _matches_qs(project):
+def _matches_qs(project, current_ids=None):
+    """``current_ids``: the ids of the current inventory's hosts when the caller has them already (``cveFeed.inventory_counts``), so the current-scans filter is not
+    evaluated again inside the statement."""
+    from django.db.models import Q
+
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch
-    qs = _scoped(CVEMatch.objects.all(), project, 'subdomain__target_domain__project').filter(latest_scan_q('subdomain__')) \
+    qs = _scoped(CVEMatch.objects.all(), project, 'subdomain__target_domain__project').filter(
+        latest_scan_q('subdomain__') if current_ids is None else Q(subdomain_id__in=current_ids)) \
         .select_related('cve_entry', 'subdomain', 'triage__verdict', 'triage__heat_override_by', 'remediation_by', 'assignee') \
         .annotate(comment_count=_comment_count_annotation('match'), **_agent_task_annotations()).order_by('-confidence', '-id')
     # the host's target joined in either case: a list row reads its project (``_finding_row``) and must not ask for it row by row
@@ -3634,7 +3641,7 @@ def _kev_only(params):
     return str(params.get('kev') or '').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
-def _finding_sources(project, params):
+def _finding_sources(project, params, current_ids=None):
     """The querysets the facets allow, keyed by type, each annotated with ``heat_rank`` (3 fire, 2 smoke, 1 ice, 0 none: the
     host card's rules, threat.match_temperature and SEVERITY_HEAT) and ``sev`` (0 info .. 4 critical; a CVE by its CVSS band,
     an unscored one as low), and filtered by heat, severity, status and host.
@@ -3675,7 +3682,7 @@ def _finding_sources(project, params):
                     When(cve_entry__cvss__gte=4.0, then=Value(2)), default=Value(1), output_field=IntegerField())
     sources = {}
     if wanted in ('all', 'cve'):
-        qs = _matches_qs(project).annotate(heat_rank=match_heat_rank_expr(), sev=cve_band, when=F('created_at'))
+        qs = _matches_qs(project, current_ids).annotate(heat_rank=match_heat_rank_expr(), sev=cve_band, when=F('created_at'))
         if kev:
             qs = qs.filter(cve_entry__kev=True)
         if status == 'actionable':
