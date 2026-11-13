@@ -33,6 +33,11 @@ function render(alerts) {
       ai.append(el("span", "ab-label", `AI reviewer${a.ai_model ? ` (${a.ai_model})` : ""}: `), document.createTextNode(a.ai_detail));
       text.append(ai);
     }
+    if (a.decision_id != null) {  // auto-tune answered this alert: the link opens its line in Settings, configMaxxing, Auto-tuning
+      const link = el("a", "ab-decision", "See what auto-tune did about this");
+      link.setAttribute("href", `/cve/settings/#configmaxxing/autotune/${encodeURIComponent(a.decision_id)}`);
+      text.append(link);
+    }
     const dismiss = el("button", "btn sm ab-dismiss", "Dismiss");
     dismiss.type = "button";
     dismiss.addEventListener("click", async () => {
