@@ -197,6 +197,35 @@ class RunTests(Isolated, TestCase):
         d.refresh_from_db()
         self.assertEqual(d.outcome, 'helped')
 
+    def test_simulated_day_a_lane_that_stays_at_its_limit_is_lowered_to_the_floor_and_held_there_without_flapping(self):
+        # the worst case for a memory rule: lowering the concurrency does not lower the lane's resident memory (a gevent process keeps what it grew to until it is
+        # recycled), so the trouble never clears. Fifty hours of ten-minute rounds: the lane goes 4, 2, 1 and stays, nothing goes above the configured 4 or below 1,
+        # and nothing is raised while the trouble lasts or inside the remembered-trouble ceiling after it
+        values = []
+        for step in range(0, 6 * 50):
+            self.run_at(step * 10, LANE_AT_LIMIT)
+            values.append(AutoTuneSettings.current().values.get('lane.cve_feed', 4))
+        self.assertEqual(values[-1], 1)
+        self.assertTrue(all(1 <= v <= 4 for v in values))
+        self.assertEqual(sorted(set(values), reverse=True), [4, 2, 1])
+        changes = TuningDecision.objects.filter(setting='lane.cve_feed', applied=True)
+        self.assertLessEqual(changes.count(), 3)  # two back-offs and the verification judgements that never revert a forced back-off upwards
+        self.assertFalse(changes.exclude(action='lower').exists())
+
+    def test_simulated_day_after_the_trouble_clears_the_lane_climbs_back_one_step_at_a_time_and_never_past_the_configured_number(self):
+        for step in range(0, 12):
+            self.run_at(step * 10, LANE_AT_LIMIT)
+        self.assertLessEqual(AutoTuneSettings.current().values.get('lane.cve_feed', 4), 2)
+        seen = []
+        for step in range(12, 6 * 60):
+            self.run_at(step * 10, LANE_CALM)
+            seen.append(AutoTuneSettings.current().values.get('lane.cve_feed', 4))
+        raises = [b - a for a, b in zip(seen, seen[1:]) if b != a]
+        self.assertTrue(all(r == 1 for r in raises), raises)  # one step at a time
+        self.assertLessEqual(max(seen), 4)
+        first_raise = next(i for i, (a, b) in enumerate(zip(seen, seen[1:])) if b > a)
+        self.assertGreaterEqual((first_raise + 12) * 10, 2 * 60 + 100)  # not before two healthy hours
+
     def test_a_pinned_lane_is_never_moved_by_the_tuner(self):
         sc.update({'lane.cve_feed': 3}, SimpleNamespace(username='root', pk=None, is_authenticated=True, is_superuser=True))
         for minutes in (0, 10, 20):
