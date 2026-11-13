@@ -55,6 +55,37 @@ def previous_oldest_open(now):
     return {'days': max(0, (now - best['at']).days), 'kind': best['kind'], 'id': best['id']}
 
 
+class OldestOpenTests(TestCase):
+    def test_a_finding_on_a_host_with_no_target_is_not_the_oldest_open_one(self):
+        """develop gives 3 days here; 30 days was the finding on the host that has no target (its earliest discovery was never found: NULL is not equal to NULL)."""
+        now = timezone.now()
+        org = Org.objects.create(name='o', slug='o')
+        project = Project.objects.create(name='p', slug='p', insert_date=now, org=org)
+        domain = Domain.objects.create(name='d.t', project=project, insert_date=now)
+        host = Subdomain.objects.create(name='a.d.t', target_domain=domain)
+        orphan = Subdomain.objects.create(name='orphan', target_domain=None)
+        Vulnerability.objects.create(name='v', severity=4, subdomain=host, target_domain=domain, open_status=True, discovered_date=now - timedelta(days=3), http_url='x')
+        Vulnerability.objects.create(name='v', severity=4, subdomain=orphan, target_domain=None, open_status=True, discovered_date=now - timedelta(days=30), http_url='x')
+        self.assertEqual(counts.oldest_open(now), previous_oldest_open(now))
+        self.assertEqual(counts.oldest_open(now)['days'], 3)
+
+
+class YieldTests(TestCase):
+    def test_the_python_pass_yields_to_a_gevent_workers_other_greenlets(self):
+        from unittest import mock
+        rows = [(i, f'h{i}.d.t', None, None, 'd.t') for i in range(5 * inventory_counts.YIELD_EVERY + 1)]
+        with mock.patch('reNgine.gevent_db.gevent_patched', return_value=True), mock.patch('gevent.sleep') as sleeping:
+            inventory_counts._collapse(rows)
+        self.assertGreaterEqual(sleeping.call_count, 5)
+
+    def test_it_does_not_touch_gevent_outside_a_gevent_worker(self):
+        from unittest import mock
+        rows = [(i, f'h{i}.d.t', None, None, 'd.t') for i in range(3 * inventory_counts.YIELD_EVERY)]
+        with mock.patch('reNgine.gevent_db.gevent_patched', return_value=False), mock.patch('gevent.sleep') as sleeping:
+            inventory_counts._collapse(rows)
+        self.assertEqual(sleeping.call_count, 0)
+
+
 class RandomInventories(TestCase):
     def build(self, rnd, now):
         engine = EngineType.objects.create(engine_name='ic')
@@ -74,14 +105,14 @@ class RandomInventories(TestCase):
             by_dom.setdefault(s.domain_id, []).append(s)
         subs = []
         for d in domains:
-            pool = [f'h{k}.{d.name}' for k in range(5)] + [d.name]
+            pool = [f'h{k}.{d.name}' for k in range(5)] + [d.name, f'B.{d.name}', f'a.{d.name}', f'web-1.{d.name}', f'Web1.{d.name}', f'ñ1.{d.name}', f'n1.{d.name}']  # names whose order depends on the collation
             for _ in range(rnd.randint(0, 25)):
                 r = rnd.random()
                 scan = None
                 if r > 0.08 and scans:
                     scan = rnd.choice(by_dom.get(d.id) or scans) if r < 0.97 else rnd.choice(scans)
                 subs.append(Subdomain(name=rnd.choice(pool), target_domain=d, scan_history=scan, http_url=rnd.choice(['', '', 'https://x.invalid/'])))
-        if rnd.random() < 0.3:
+        if rnd.random() < 0.5:
             subs.append(Subdomain(name='orphan', target_domain=None, scan_history=rnd.choice(scans) if scans else None))
         Subdomain.objects.bulk_create(subs)
         subs = list(Subdomain.objects.order_by('id'))
@@ -100,6 +131,8 @@ class RandomInventories(TestCase):
         Vulnerability.objects.bulk_create([Vulnerability(name='v', severity=rnd.randint(1, 4), subdomain=s, target_domain=s.target_domain, open_status=rnd.choice([True, True, False]),
                                                          remediation_status=rnd.choice(['', '', 'fixed']), discovered_date=now, http_url='http://x/')
                                            for s in subs if s.target_domain_id and rnd.random() < 0.2])
+        orphans = [s for s in subs if not s.target_domain_id]  # findings on hosts with no target: the oldest open finding never counted them
+        Vulnerability.objects.bulk_create([Vulnerability(name='v', severity=4, subdomain=s, target_domain=None, open_status=True, discovered_date=now - timedelta(days=400), http_url='x') for s in orphans])
         observations = []
         for d in domains:
             for k in range(rnd.randint(0, 6)):
@@ -146,6 +179,8 @@ class RandomInventories(TestCase):
                     if sql_web != web.get(project.id, 0):
                         bad.append(('web', w, project.id, sql_web, web.get(project.id, 0)))
                     row_alone, row_shared = system_status._project_row(project), system_status._project_row(project, shared)
+                    if (row_shared['hosts'], row_shared['exposed_hosts']) != (own['hosts'], own['exposed_hosts']):
+                        bad.append(('status row vs per-project', w, project.id, (row_shared['hosts'], row_shared['exposed_hosts']), (own['hosts'], own['exposed_hosts'])))
                     if row_alone != row_shared:
                         bad.append(('row', w, project.id, {k: (row_alone[k], row_shared[k]) for k in row_alone if row_alone[k] != row_shared[k]}))
                     for name, single, grouped in (('wordpress', wpscan_scan.status_counts([project.id]), shared['wordpress'][project.id]),

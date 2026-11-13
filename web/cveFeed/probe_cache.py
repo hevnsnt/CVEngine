@@ -13,10 +13,6 @@ import time
 logger = logging.getLogger(__name__)
 
 
-def _thread_name(name):
-    from reNgine.gevent_db import thread_name  # None in a gevent worker, where naming a greenlet renames the process
-    return thread_name(name)
-
 
 
 def cached_probe(key, compute, fresh=30, keep=1800, first=None):
@@ -60,4 +56,4 @@ def _refresh_behind(key, compute, keep):
                 cache.delete(f'{key}:refreshing')
             except Exception:  # noqa: BLE001
                 pass
-    threading.Thread(target=run, name=_thread_name(f'probe-{key}'), daemon=True).start()
+    threading.Thread(target=run, name=f'probe-{key}', daemon=True).start()

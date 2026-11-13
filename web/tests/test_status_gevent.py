@@ -35,4 +35,31 @@ class GeventDeadlineTests(SimpleTestCase):
         state_hangs, state_fine, seconds = line.split()[1:4]
         self.assertEqual((state_hangs, state_fine), ('timeout', 'ok'), line)
         self.assertLess(float(seconds), 2.5)
-        self.assertNotIn('status-probe', line)  # the probe's greenlet carries no name of its own
+
+    def test_starting_a_thread_does_not_rename_the_process(self):
+        """The property that matters, as the OS reports it (``/proc/self/comm``, what ``ps`` shows): on Python 3.14 a thread's name became the process's name in a
+        gevent worker, with a name (``redis-claim``) and without one (``Thread-1 (keep_``). ``gevent_db.keep_process_name`` (called by ``gevent_db.install``) stops it."""
+        script = textwrap.dedent('''
+            from gevent import monkey
+            monkey.patch_all()
+            import threading, gevent
+            from reNgine import gevent_db
+            comm = lambda: open('/proc/self/comm').read().strip()
+            start = comm()
+            gevent_db.keep_process_name()
+            def keep_alive():
+                gevent.sleep(0.1)
+            seen = []
+            for name in ('redis-claim', None, 'status-warm-rows'):
+                t = threading.Thread(target=keep_alive, name=name, daemon=True)
+                t.start()
+                gevent.sleep(0.05)
+                seen.append(comm())
+                t.join()
+            print('COMM', start, *seen)
+        ''')
+        out = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=60, env={**os.environ, 'PYTHONPATH': os.pathsep.join(sys.path)},
+                             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        line = next((l for l in out.stdout.splitlines() if l.startswith('COMM')), out.stderr[-800:])
+        names = line.split()[1:]
+        self.assertEqual(len(set(names)), 1, line)  # the name the process started with, after every thread

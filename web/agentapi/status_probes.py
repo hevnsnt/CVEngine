@@ -195,7 +195,7 @@ def run(probes, budget=None, concurrency=CONCURRENCY, clock=time.monotonic):
                     finished.add(probe.name)
                     done[probe.name] = {'error': 'busy'}
                     continue
-                thread = threading.Thread(target=_body, args=(result, probe, done, lock, wake, clock), name=gevent_db.thread_name(f'status-probe-{probe.name}'), daemon=True)
+                thread = threading.Thread(target=_body, args=(result, probe, done, lock, wake, clock), name=f'status-probe-{probe.name}', daemon=True)
                 thread.status_started = now
                 _inflight[probe.name] = thread
             result.state, result.started = 'running', now

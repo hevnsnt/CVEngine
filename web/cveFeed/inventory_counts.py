@@ -7,10 +7,26 @@ Here each fact is read once for all projects: the current rows (the filter evalu
 ids of the hosts that are exposed; the same rules then run in Python over them. ``tests/test_inventory_counts.py`` compares the answer with the SQL one
 on random inventories.
 
-One difference in how ties are broken: among names that share an address set and have the same length, the SQL ranking took the one the database's
-collation sorts first and this takes the lowest code point. For lower-case host names the two agree, and the counts never depend on it.
+Ties are broken the same way here and in the SQL (``_one_per_host``): among names that share an address set and have the same length, the lowest by
+byte order (``COLLATE "C"`` there, code point here), whatever locale the database sorts text in; the exposed count depends on which name stands for a
+host (it also matches on the name), so the two must agree.
+
+The pass is Python work (about 3 s of CPU at 100,000 hosts), and the Celery lanes that run it (``status_warm_rows``, the live refresher) are gevent workers:
+it yields to the worker's other greenlets every ``YIELD_EVERY`` rows (``_breathe``), and does nothing of the kind outside gevent.
 """
 from collections import defaultdict
+
+YIELD_EVERY = 2000
+
+
+def _breathe(i):
+    """Let a gevent worker's other greenlets run every ``YIELD_EVERY`` rows of a loop; a no-op outside gevent."""
+    if i % YIELD_EVERY:
+        return
+    from reNgine import gevent_db
+    if gevent_db.gevent_patched():
+        import gevent
+        gevent.sleep(0)
 
 
 def _key_project(project_id):
@@ -36,7 +52,8 @@ def current_rows():
     after = {scan_id for scan_id, domain_id in pipeline if scan_id > latest_full.get(domain_id, 0)}
     subs = list(Subdomain.objects.values_list('id', 'name', 'scan_history_id', 'target_domain_id'))
     newest_after, newest_scanned = {}, {}
-    for sub_id, name, scan_id, domain_id in subs:
+    for i, (sub_id, name, scan_id, domain_id) in enumerate(subs):
+        _breathe(i)
         if scan_id is None or domain_id is None:
             continue
         if scan_id in after and scan_id > newest_after.get((domain_id, name), 0):
@@ -45,7 +62,8 @@ def current_rows():
             newest_scanned[(domain_id, name)] = sub_id
     targets = {domain_id: (project_id, name) for domain_id, project_id, name in Domain.objects.values_list('id', 'project_id', 'name')}
     out = []
-    for sub_id, name, scan_id, domain_id in subs:
+    for i, (sub_id, name, scan_id, domain_id) in enumerate(subs):
+        _breathe(i)
         if domain_id is not None:
             if not (scan_id is None or scan_id in full_ids or scan_id in after or domain_id not in latest_full):
                 continue
@@ -62,7 +80,8 @@ def _links(ids):
     """``{subdomain id: [(ip id, is_cdn), ...]}``, one read of the address links of these hosts."""
     from startScan.models import Subdomain
     out = defaultdict(list)
-    for sub_id, ip_id, cdn in Subdomain.ip_addresses.through.objects.filter(subdomain_id__in=ids).values_list('subdomain_id', 'ipaddress_id', 'ipaddress__is_cdn'):
+    for i, (sub_id, ip_id, cdn) in enumerate(Subdomain.ip_addresses.through.objects.filter(subdomain_id__in=ids).values_list('subdomain_id', 'ipaddress_id', 'ipaddress__is_cdn')):
+        _breathe(i)
         out[sub_id].append((ip_id, bool(cdn)))
     return out
 
@@ -71,7 +90,8 @@ def _open_ports(ip_ids):
     """``{ip id: {port id, ...}}`` for the open ports of these addresses, one read."""
     from startScan.models import OPEN_PORT_STATES, IpAddress
     out = defaultdict(set)
-    for ip_id, port_id in IpAddress.ports.through.objects.filter(ipaddress_id__in=ip_ids, port__state__in=OPEN_PORT_STATES).values_list('ipaddress_id', 'port_id'):
+    for i, (ip_id, port_id) in enumerate(IpAddress.ports.through.objects.filter(ipaddress_id__in=ip_ids, port__state__in=OPEN_PORT_STATES).values_list('ipaddress_id', 'port_id')):
+        _breathe(i)
         out[ip_id].add(port_id)
     return out
 
@@ -99,7 +119,8 @@ def _collapse(rows):
 
     # one row per (project, name): the one with the most open ports, then the most addresses, then the newest scan (a scan-less row last), then the newest id
     by_name = {}
-    for sub_id, name, scan_id, project_id, domain_name in rows:
+    for i, (sub_id, name, scan_id, project_id, domain_name) in enumerate(rows):
+        _breathe(i)
         rank = (-open_ports(sub_id), -len(links.get(sub_id, ())), scan_id is None, -(scan_id or 0), -sub_id)
         held = by_name.get((project_id, name))
         if held is None or rank < held[0]:
@@ -113,7 +134,8 @@ def _collapse(rows):
 
     # names that point at the same addresses are one host: the project's own target name first, else the shortest name
     best = {}
-    for _rank, sub_id, name, project_id, domain_name, open_count in by_name.values():
+    for i, (_rank, sub_id, name, project_id, domain_name, open_count) in enumerate(by_name.values()):
+        _breathe(i)
         key = host_key(sub_id, name, project_id)
         rank = (0 if name == domain_name else 1, len(name), name, -open_count, -sub_id)
         if key not in best or rank < best[key][0]:
@@ -135,7 +157,8 @@ def shared_host_counts(rows=None):
     best, host_key = _collapse(rows)
     exposed_ids = _exposed_ids([r[0] for r in rows])
     exposed_keys, exposed_names = set(), set()
-    for sub_id, name, _scan, project_id, _domain in rows:
+    for i, (sub_id, name, _scan, project_id, _domain) in enumerate(rows):
+        _breathe(i)
         if sub_id in exposed_ids:
             exposed_keys.add(host_key(sub_id, name, project_id))
             exposed_names.add((project_id, name))

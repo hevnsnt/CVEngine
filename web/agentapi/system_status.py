@@ -263,46 +263,74 @@ def _projects(ctx):
     return _projects_partial(ctx)[0]
 
 
-def warm_project_rows(project_ids):
+WARM_STATEMENT_MS = 30000  # no statement of the warm-up runs longer than this (the thread it replaced had the same limit)
+WARM_DISPATCH_TIMEOUT = 3  # seconds the broker may take to accept the warm-up task: the status never waits longer
+
+
+def _warm_lock_client():
+    from reNgine import resources
+    return resources.redis_client()
+
+
+def warm_project_rows(project_ids, token=None):
     """Count the rows of these projects (the shared counts once, then each row) and keep them, so the next status call finds them cached. Runs as the
     ``status_warm_rows`` Celery task (``cveFeed.tasks``), never in the web process or in the status call: a cold start that does not fit the status's
-    time is finished there, with the worker's own time limit and no statement timeout of the web server's kind."""
+    time is finished there. One transaction with a 30 second statement timeout (``SET LOCAL``: nothing outlives the task on its connection). The
+    single-flight lock (``token``) is released only if this run still holds it."""
     from django.core.cache import cache
+    from django.db import connection, transaction
 
     from dashboard.models import Project
+    from reNgine import resources
     seconds = _cache_seconds()
     try:
-        shared = _shared_inputs(list(project_ids))
-        for project in Project.objects.filter(id__in=project_ids).order_by('name'):
-            key, last_key = _row_keys(project)
-            row = _project_row(project, shared)
-            cache.set(last_key, row, LAST_ROW_SECONDS)
-            if seconds:
-                cache.set(key, row, seconds)
+        with transaction.atomic():
+            if connection.vendor == 'postgresql':
+                with connection.cursor() as cursor:
+                    cursor.execute('SET LOCAL statement_timeout = %s', [WARM_STATEMENT_MS])
+            shared = _shared_inputs(list(project_ids))
+            for project in Project.objects.filter(id__in=project_ids).order_by('name'):
+                key, last_key = _row_keys(project)
+                row = _project_row(project, shared)
+                cache.set(last_key, row, LAST_ROW_SECONDS)
+                if seconds:
+                    cache.set(key, row, seconds)
     finally:
         try:
-            cache.delete(WARM_LOCK)
-        except Exception:  # noqa: BLE001
+            client = _warm_lock_client()
+            if client is not None and token:
+                resources.claim_release(client, WARM_LOCK, token)
+        except Exception:  # noqa: BLE001 - the lock expires by itself
             pass
 
 
 def _warm_rows(project_ids):
-    """Hand the projects that did not fit the status's time to the ``status_warm_rows`` task (one at a time: a cache lock; not inside a transaction, where
-    a task could not see the rows either). It was a background thread of the calling process, which in a Celery lane is a greenlet that held the lane
-    for minutes and in a web worker took the interpreter's lock from requests."""
-    from django.core.cache import cache
+    """Hand the projects that did not fit the status's time to the ``status_warm_rows`` task, one run at a time (a Redis lock the run releases only while it
+    still holds it); not inside a transaction, where a task could not see the rows either. It was a background thread of the calling process, which in a
+    Celery lane is a greenlet that held the lane for minutes and in a web worker took the interpreter's lock from requests. The broker gets
+    ``WARM_DISPATCH_TIMEOUT`` seconds to take the message (no retries), so a broker that does not answer costs the status that much at most and the message is
+    simply not sent: the next call asks again."""
+    import uuid
+
     from django.db import connection
     if connection.in_atomic_block:
         return
+    client, token = None, uuid.uuid4().hex
     try:
-        if not cache.add(WARM_LOCK, 1, WARM_MAX_SECONDS + 60):
+        client = _warm_lock_client()
+        if client is not None and not client.set(WARM_LOCK, token, nx=True, ex=WARM_MAX_SECONDS + 60):
             return
         from cveFeed.tasks import status_warm_rows
-        status_warm_rows.apply_async(args=[list(project_ids)], queue='cve_feed_queue', expires=WARM_MAX_SECONDS)
+        from reNgine.celery import app
+        options = {'socket_timeout': WARM_DISPATCH_TIMEOUT, 'socket_connect_timeout': WARM_DISPATCH_TIMEOUT}
+        with app.connection_for_write(transport_options=options, connect_timeout=WARM_DISPATCH_TIMEOUT) as broker:
+            status_warm_rows.apply_async(args=[list(project_ids), token], queue='cve_feed_queue', expires=WARM_MAX_SECONDS, connection=broker, retry=False)
     except Exception:  # noqa: BLE001 - the next call asks again
         logger.info('status: could not queue the counting of the projects', exc_info=True)
         try:
-            cache.delete(WARM_LOCK)
+            if client is not None:
+                from reNgine import resources
+                resources.claim_release(client, WARM_LOCK, token)
         except Exception:  # noqa: BLE001
             pass
 

@@ -278,21 +278,36 @@ def _build(compute, etag_of, rev, by='request', fingerprint=None):
     finally:
         _building.reset(flag)
     entry = {'payload': payload, 'etag': (etag_of or token_of)(payload), 'at': _now(), 'rev': rev, 'by': by, 'took': round(_elapsed() - started, 3)}
+    entry['computed_at'] = entry['at']  # a renewal moves ``at`` (how fresh the entry is) but never this (when its payload was worked out)
     if seen is not None:
         entry['fp'] = seen
     return entry
 
 
-UNCHANGED_KEEP_SECONDS = 300  # a snapshot whose inputs did not change is renewed instead of recomputed, for at most this long (clock-dependent numbers move slowly)
+UNCHANGED_KEEP_SECONDS = 300  # a snapshot whose inputs did not change is renewed instead of recomputed, for at most this long since it was last COMPUTED (a snapshot may give its own, shorter)
+
+
+_track_counts = {}
+
+
+def _counts_are_tracked(connection):
+    """Whether PostgreSQL keeps the row counters (``track_counts``), read once per process: with it off they never move and every table would look unchanged."""
+    if 'on' not in _track_counts:
+        with connection.cursor() as cursor:
+            cursor.execute('SHOW track_counts')
+            _track_counts['on'] = cursor.fetchone()[0] == 'on'
+    return _track_counts['on']
 
 
 def table_fingerprint(*tables):
     """A string that changes whenever a row of any of these tables (database table names) is inserted, updated or deleted: PostgreSQL's own counters, one
-    cheap read, no scan of the tables. A change shows up within about ten seconds (a backend reports its counters when it goes idle). ``None`` when they
-    cannot be read, which is never "unchanged"."""
+    cheap read, no scan of the tables. A change shows up within about ten seconds (a backend reports its counters when it goes idle); a rolled-back write
+    and a statistics reset only cause an extra recomputation. ``None`` when they cannot be read (not PostgreSQL, ``track_counts`` off, a table missing),
+    which is never "unchanged". TRUNCATE moves none of the counters, so a truncated table is not seen until the snapshot's own cap (``UNCHANGED_KEEP_SECONDS``)
+    ends the renewals; nothing in the application truncates a table the snapshots read."""
     from django.db import connection
     try:
-        if connection.vendor != 'postgresql':
+        if connection.vendor != 'postgresql' or not _counts_are_tracked(connection):
             return None
         with connection.cursor() as cursor:
             cursor.execute('SELECT relname, n_tup_ins, n_tup_upd, n_tup_del FROM pg_stat_user_tables WHERE relname = ANY(%s) ORDER BY relname', [sorted(tables)])
@@ -373,7 +388,7 @@ def snapshot(name, scope, compute, fresh, etag_of=None, hot=None):
             pass
 
 
-def refresh(name, scope, compute, fresh, etag_of=None, due_age=None, fingerprint=None):
+def refresh(name, scope, compute, fresh, etag_of=None, due_age=None, fingerprint=None, unchanged_keep=None):
     """What the refresher does for one hot scope: ``(status, entry, previous)`` (``previous`` is the snapshot it replaced, or None). ``'fresh'`` when the stored snapshot is of the current revision and younger
     than ``due_age`` (default ``fresh``), ``'busy'`` when a request or another refresher holds the lock, else ``'refreshed'`` with the new
     snapshot, stored under the key a request would have written (``by: 'refresher'``, so requests know to leave it to us). Raises what
@@ -381,7 +396,9 @@ def refresh(name, scope, compute, fresh, etag_of=None, due_age=None, fingerprint
 
     ``fingerprint`` (a function returning ``table_fingerprint`` of what ``compute`` reads) lets a snapshot that is due but whose inputs have not
     changed since it was computed be renewed (``'unchanged'``: the same payload with a new time, for up to ``UNCHANGED_KEEP_SECONDS``) instead of recomputed:
-    a paused instance with a page open used to recompute its headline counts every few seconds for nothing."""
+    a paused instance with a page open used to recompute its headline counts every few seconds for nothing. The renewals stop ``unchanged_keep`` seconds
+    (default ``UNCHANGED_KEEP_SECONDS``) after the payload was last computed (``computed_at``), whatever the fingerprint says: a number that comes from the clock
+    (a certificate's days left, a Sentinel's last-seen) moves without any write."""
     key = f'cve:snap:{name}:{scope}'
     lock = f'{key}:lock'
     entry, rev = cache.get(key), revision()
@@ -394,7 +411,8 @@ def refresh(name, scope, compute, fresh, etag_of=None, due_age=None, fingerprint
         return 'busy', previous, previous
     try:
         if (fingerprint is not None and previous is not None and previous['rev'] == rev and previous.get('fp') is not None
-                and _now() - previous['at'] < UNCHANGED_KEEP_SECONDS and fingerprint() == previous['fp']):
+                and _now() - previous.get('computed_at', previous['at']) < (UNCHANGED_KEEP_SECONDS if unchanged_keep is None else unchanged_keep)
+                and fingerprint() == previous['fp']):
             renewed = {**previous, 'at': _now(), 'by': 'refresher'}
             cache.set(key, renewed, store_seconds(fresh))
             count(name, 'unchanged')

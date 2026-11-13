@@ -319,7 +319,8 @@ def oldest_open(now=None):
     # correlated subquery per candidate (0.4 s for 20,000 findings); now the candidates and the earliest discoveries of their names are two reads and the
     # comparison is made here. Ties are broken by id (the SQL left them to the database).
     from django.db.models import Min
-    candidates = list(actionable_findings(Vulnerability.objects.filter(severity__gte=3, subdomain__isnull=False)).values_list('id', 'name', 'subdomain__target_domain', 'subdomain__name'))
+    candidates = list(actionable_findings(Vulnerability.objects.filter(severity__gte=3, subdomain__isnull=False, subdomain__target_domain__isnull=False))
+                      .values_list('id', 'name', 'subdomain__target_domain', 'subdomain__name'))  # a host with no target never had its earliest discovery found (NULL is not equal to NULL)
     if candidates:
         earliest = {(name, domain, host): first for name, domain, host, first in
                     Vulnerability.objects.filter(name__in={c[1] for c in candidates}, discovered_date__isnull=False)

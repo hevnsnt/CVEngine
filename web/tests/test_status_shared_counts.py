@@ -87,8 +87,15 @@ class StatementCountTests(World):
         return [q['sql'] for q in captured.captured_queries]
 
     def test_cold_rows_collapse_the_hosts_and_group_the_findings_once_for_all_projects(self):
+        from unittest import mock
+
+        from cveFeed import inventory_counts
+        python_runs = []
+        original = inventory_counts._collapse
         ctx = Ctx(user=self.root)
-        shared_run = self.statements(lambda: system_status._projects_partial(ctx))
+        with mock.patch.object(inventory_counts, '_collapse', lambda *a, **k: python_runs.append(1) or original(*a, **k)):
+            shared_run = self.statements(lambda: system_status._projects_partial(ctx))
+        self.assertEqual(len(python_runs), 1)  # the hosts of every project are collapsed exactly once, however many projects there are
         cache.clear()
         own_run = self.statements(lambda: [system_status._project_row(p) for p in self.projects])
         collapses = lambda run: [q for q in run if 'ROW_NUMBER() OVER' in q]

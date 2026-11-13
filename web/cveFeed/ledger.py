@@ -20,10 +20,6 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
-def _thread_name(name):
-    from reNgine.gevent_db import thread_name  # None in a gevent worker, where naming a greenlet renames the process
-    return thread_name(name)
-
 
 DEFAULT_TTL_HOURS = {'wafw00f': 7 * 24, 'nmap-fast': 7 * 24, 'nmap-full': 14 * 24, 'naabu': 7 * 24, 'nuclei': 24,
                      'nuclei-deep-target': 7 * 24, 'nuclei-deep-host': 7 * 24, 'bbot': 7 * 24,
@@ -259,7 +255,7 @@ def claim_many(service, assets):
             except Exception:  # noqa: BLE001
                 pass
     if won:
-        threading.Thread(target=keep_alive, name=_thread_name('ledger-claim'), daemon=True).start()
+        threading.Thread(target=keep_alive, name='ledger-claim', daemon=True).start()
     suspending = False
     try:
         yield won

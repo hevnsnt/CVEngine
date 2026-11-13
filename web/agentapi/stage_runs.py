@@ -46,10 +46,6 @@ from django.utils import timezone
 logger = logging.getLogger(__name__)
 
 
-def _thread_name(name):
-    from reNgine.gevent_db import thread_name  # None in a gevent worker, where naming a greenlet renames the process
-    return thread_name(name)
-
 
 ENV = 'CVENGINE_ASYNC_STAGES'
 LEASE = timedelta(minutes=5)  # a pass in progress keeps this lease alive; a run whose lease ran out lost its worker
@@ -412,7 +408,7 @@ class _LeaseKeeper:
 
     def __enter__(self):
         if self.pk:
-            threading.Thread(target=self._loop, name=_thread_name('stagerun-lease'), daemon=True).start()
+            threading.Thread(target=self._loop, name='stagerun-lease', daemon=True).start()
         return self
 
     def _loop(self):
