@@ -116,8 +116,8 @@ if dc config --services 2>/dev/null | grep -qx scanner; then
   caps=$(docker inspect -f '{{json .HostConfig.CapDrop}} {{json .HostConfig.CapAdd}}' "$cid")
   echo "scanner capabilities (drop, add): $caps"
   grep -q '"ALL"' <<<"${caps%% *}" || bad "the built-in scanner does not drop every capability"
-  for cap in NET_RAW SYS_CHROOT; do grep -q "\"$cap\"" <<<"${caps#* }" || bad "the built-in scanner lacks $cap"; done
-  if grep -q '"NET_ADMIN"' <<<"${caps#* }"; then
+  for cap in NET_RAW SYS_CHROOT; do grep -Eq "\"(CAP_)?$cap\"" <<<"${caps#* }" || bad "the built-in scanner lacks $cap"; done
+  if grep -Eq '"(CAP_)?NET_ADMIN"' <<<"${caps#* }"; then
     dc exec -T scanner getcap /usr/local/bin/nmap | grep -q cap_net_admin || bad "the built-in scanner keeps NET_ADMIN although its image no longer needs it"
     echo "(this scanner image is from before the reduction, so it keeps NET_ADMIN)"
   fi
