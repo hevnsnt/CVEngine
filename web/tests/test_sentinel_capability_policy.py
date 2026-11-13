@@ -26,6 +26,7 @@ from tests.test_agentapi import call, tool_call
 from tests.test_openvas import Fixture as OpenvasFixture
 from tests.test_sentinel_dispatch import DispatchBase
 from tests.test_sentinels import SentinelBase, register_sentinel
+from tests.steady import steady_caches
 
 
 def ctx_of(agent):
@@ -473,6 +474,7 @@ class ClaimOrderTests(PolicyBase):
         Agent.objects.filter(pk=preferred.pk).update(last_seen=created - timedelta(hours=1))  # offline: not a candidate
         self.assertEqual(self.claim(other, ['nmap'], created + timedelta(seconds=1))[0].pk, task2.pk)
 
+    @steady_caches()
     def test_a_pass_over_many_queued_tasks_of_several_projects_does_not_query_per_task(self):
         from django.db import connection
         from django.test.utils import CaptureQueriesContext

@@ -22,6 +22,7 @@ from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
+from tests.steady import steady_caches
 from tests.test_agentapi import call, tool_call
 from tests.test_tenancy import client_for
 
@@ -363,7 +364,9 @@ class QueryCountTests(Seeded):
 		# the first request of a process reads its caches (the token) and the internal ranges are cached for a minute: neither is the page's own work
 		# and the token middleware writes last_used_at when it is over a minute old (agentapi.auth.LAST_USED_RESOLUTION): one more UPDATE for a request that
 		# lands on the wrong side of the minute, so the test never lets it write (the count is then the same whatever the clock says)
-		with mock.patch('cveFeed.internal_view.table', return_value={}), mock.patch('agentapi.auth.LAST_USED_RESOLUTION', timedelta(days=3650)):
+		# and the allowlist, ban and saved-settings caches of the process expire on the clock (10 and 5 seconds) and cost the request that lands after the expiry
+		# one to two queries each: steady_caches() pins them, so the count is the page's own whatever the machine's speed or the tests that ran before
+		with steady_caches(), mock.patch('cveFeed.internal_view.table', return_value={}), mock.patch('agentapi.auth.LAST_USED_RESOLUTION', timedelta(days=3650)):
 			self.api('projects/sa/situations')
 			with CaptureQueriesContext(connection) as ctx, mock.patch('agentapi.auth.timezone.now', return_value=timezone.now() + timedelta(seconds=125)):
 				self.assertEqual(self.api('projects/sa/situations', **params)[0], 200)  # a clock two minutes on: last_used_at would be stale, and is still not written
@@ -385,8 +388,8 @@ class QueryCountTests(Seeded):
 		# the snapshot is fresh for 10 seconds by the entries' clock: it is frozen here, so a slow runner that takes ten seconds between two requests cannot make
 		# the second one rank again (nor the copy served after the close below go stale before the assertion that it is still served)
 		from cveFeed import snapshot_cache
-		with mock.patch('cveFeed.internal_view.table', return_value={}), mock.patch('agentapi.auth.LAST_USED_RESOLUTION', timedelta(days=3650)), \
-				mock.patch.object(snapshot_cache, '_now', return_value=time.time()):
+		with steady_caches(), mock.patch('cveFeed.internal_view.table', return_value={}), mock.patch('agentapi.auth.LAST_USED_RESOLUTION', timedelta(days=3650)), \
+				mock.patch.object(snapshot_cache, '_now', return_value=time.time()):  # the other caches that expire on the clock are pinned by steady_caches()
 			self.api('projects/sa/situations')  # warms the token
 			cache.clear()
 			snapshot_cache.reset_hot()
