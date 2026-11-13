@@ -619,3 +619,57 @@ class GapAndHoursTests(Base):
         bridge.change_setting(ctx(self.root), 'reviewer', {'ops_hours': [3]})
         row.refresh_from_db()
         self.assertEqual(row.ops_hours, [3])
+
+
+class KnobsOf651Tests(Base):
+    """PR 651's knobs (the two worker lanes, the assessment share) reach the health-check AI through ``autotune.managed()`` under the one-step rule; a lane at or
+    below its floor is not managed and the snapshot says why; the Sentinel kind pause is not a number and the AI cannot propose it."""
+
+    def setUp(self):
+        super().setUp()
+        self.samples()
+        self.alert()  # memory: concerns every setting's resource
+
+    def test_the_three_knobs_are_offered_one_step_down_at_most_and_never_below_their_floor(self):
+        from cveFeed import scan_concurrency
+        offered = self.offer()['offered']
+        for key in ('lane.cve_feed', 'lane.classic', 'assess_share_percent'):
+            self.assertIn(key, offered, key)
+            entry = offered[key]
+            low, high = entry['range']
+            self.assertEqual(low, entry['value'] - entry['setting'].step, key)  # one step, never the floor in one report
+            self.assertGreaterEqual(low, entry['setting'].low, key)
+            self.assertEqual(entry['setting'].sense, 'more', key)
+        for key, floor in scan_concurrency.LANE_FLOORS.items():
+            self.assertGreaterEqual(offered[key]['range'][0], floor, key)
+        out = self.apply(self.proposal(offered['lane.classic']['value'] - 3, setting='lane.classic'))
+        self.assertEqual(out[0]['status'], 'refused')  # three steps in one report: outside what is allowed now
+        self.assertIn('outside what the controller allows now', out[0]['text'])
+        one = self.apply(self.proposal(offered['assess_share_percent']['range'][0], setting='assess_share_percent'))
+        self.assertIn(one[0]['status'], ('applied', 'suggested'))
+
+    def test_a_lane_at_or_below_its_floor_is_not_offered_and_the_snapshot_says_why(self):
+        keep = [m for m in autotune.managed() if m.key != 'lane.classic']  # configured at or below its floor of 6: left out of managed()
+        with mock.patch.object(autotune, 'managed', return_value=keep):
+            offer = self.offer()
+            self.assertNotIn('lane.classic', offer['offered'])
+            self.assertIn('floor of 6', offer['not_offered']['lane.classic'])
+            with mock.patch('cveFeed.reviewer.ops_checks', return_value=[reviewer._check(c, 'ok', 't', 'd') for c in reviewer.OPS_CODES]):
+                snap = reviewer.snapshot(self.now)
+        self.assertNotIn('lane.classic', snap['tuning_settings'])
+        why = {n['setting']: n['why'] for n in snap['tuning']['proposals']['not_offered']}
+        self.assertIn('floor of 6', why['lane.classic'])
+        out = autotune.ai_apply([self.proposal(3, setting='lane.classic')], offer, self.now)
+        self.assertEqual(out[0]['status'], 'refused')
+        self.assertFalse(TuningDecision.objects.filter(setting='lane.classic').exists())
+
+    def test_the_sentinel_kind_pause_is_not_a_number_and_the_ai_cannot_propose_it(self):
+        keys = set(autotune.by_key())
+        self.assertFalse([k for k in keys if 'pause' in k])
+        offer = self.offer()
+        for name in ('sentinel_kind_pause', 'kind_pause', 'pause_kind', 'nmap'):
+            out = autotune.ai_apply([self.proposal(2, setting=name)], offer, self.now)
+            self.assertEqual(out[0]['status'], 'refused', name)
+            self.assertIn('not a setting the AI may change', out[0]['text'], name)
+        from agentapi import sentinel_policy
+        self.assertNotIn('autotune.ai_apply', repr(sentinel_policy.pause.__doc__))  # the pause is a Sentinel policy call the controller makes, not a setting

@@ -1045,7 +1045,7 @@ def _ai_held(key, now_dt):
 
 # The alerts whose resource a setting uses: a lowering of the AI needs trouble for that setting, or one of these alerts open (and cited). ``None``: every setting.
 ALERT_RESOURCES = {'memory': None, 'workers_down': ('discovery', 'batch', 'depth', 'stage'), 'scan_errors': ('heavy:',), 'sentinel_errors': ('stage',),
-                   'sentinel_waiting': ('stage',)}
+                   'sentinel_waiting': ('stage',), 'queue_starvation': ('assess_share',)}
 
 
 def _alert_covers(code, setting):
@@ -1129,6 +1129,13 @@ def ai_offer(now_dt=None):
         out['offered'][m.key] = {'setting': setting, 'label': m.label, 'value': current, 'range': (lowest, highest),
                                  'higher': 'more work at once' if setting.sense == 'more' else 'a longer wait between runs',
                                  'raise_stops': blocker or why, 'lowering_stops': lower_block}
+    try:  # a worker lane at or below its floor is not managed at all (no room to lower it): say so, so the model and the History know it was left alone on purpose
+        from cveFeed import scan_concurrency
+        for key, floor in getattr(scan_concurrency, 'LANE_FLOORS', {}).items():
+            if key not in by_key():
+                out['not_offered'][key] = f'the lane is set at or below its floor of {floor}: auto-tuning never lowers it'
+    except Exception:  # noqa: BLE001
+        pass
     return out
 
 
