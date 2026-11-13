@@ -65,7 +65,8 @@ def login(ctx):
     pg.fill('input[name=username]', USER)
     pg.fill('input[name=password]', PASSWORD)
     pg.click('button[type=submit], input[type=submit]')
-    pg.wait_for_load_state('networkidle')
+    pg.wait_for_selector('main', timeout=15000)  # not networkidle: a page that polls never reaches it
+    pg.wait_for_timeout(1500)
     return pg
 
 
@@ -128,7 +129,9 @@ def filters_and_load_more(b):
     pg.click('.host-row:nth-child(3)')
     pg.wait_for_timeout(600)
     top = pg.evaluate("document.querySelector('.split-pane').getBoundingClientRect().top")
-    check(0 <= top < 200, f'a picked row opens its detail at the top of the screen (pane top {top:.0f}px)')
+    # the pane sits under the page head and the summary line; an App Admin's status strip (40px, above the page) moves all of that down by its own height
+    strip = pg.evaluate("(() => { const s = document.querySelector('.scannerbar'); return s ? s.getBoundingClientRect().height : 0; })()")
+    check(0 <= top < 200 + strip, f'a picked row opens its detail at the top of the screen (pane top {top:.0f}px, status strip {strip:.0f}px)')
     pg.evaluate(PIN)
     # Load more
     n = pg.locator('.host-row').count()
