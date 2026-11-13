@@ -559,3 +559,63 @@ class LoweringTests(Base):
     def test_the_agents_own_lowerings_are_not_given_the_backlog_watch(self):
         base = autotune._verification(self.pool, 10, 8, history(3, end=self.now.timestamp()), self.now)
         self.assertNotIn('backlog', base['baseline'])
+
+
+class GapAndHoursTests(Base):
+    def test_ws5_an_agents_request_for_a_shorter_gap_is_judged_against_the_real_ceiling(self):
+        m = autotune.by_key()['work_min_gap_hours']
+        self.assertEqual(m.setting.sense, 'gap')
+        limit, why = autotune._agent_limit(m, 6, 4, [], [], self.now)
+        self.assertEqual(limit, m.setting.low)  # the shortest wait auto-tuning allows: the ceiling for more work
+        self.assertIn('shortest wait', why)
+        self.assertNotIn('maximum', why)
+        pool = autotune.by_key()[KEY]
+        self.assertEqual(autotune._agent_limit(pool, 8, 12, [], [], self.now)[0], pool.setting.high)  # a "more" setting still starts from its maximum
+        with mock.patch.object(policy, 'size_for', return_value=(5, 'sized', True)):
+            limit, why = autotune._agent_limit(m, 8, 3, history(3, end=self.now.timestamp()), [], self.now)
+        self.assertEqual(limit, 5)  # the target for this machine caps how short it may go
+        self.assertIn('target for this machine is 5', why)
+
+    def test_ws5_the_request_is_applied_inside_the_ceiling_and_held_at_it_beyond(self):
+        self.policy('auto')
+        out = autotune.agent_change(self.root, {'work_min_gap_hours': 1}, 'bot')['work_min_gap_hours']
+        self.assertEqual(out['status'], 'applied', out)
+        self.assertEqual(out['value'], 1)
+
+    def test_ws6_an_agent_may_shorten_but_never_lengthen_the_ops_hours_over_the_settings_api_and_mcp(self):
+        import json as _json
+        from django.test import RequestFactory
+        from agentapi import settings_bridge as bridge
+        from agentapi.services import ApiError
+        from cveFeed import settings_api
+        from tests.test_settings_bridge import ctx
+        row = reviewer.settings_row()
+        row.ops_hours = [3, 9, 15]
+        row.save()
+
+        def put(hours, agent):
+            request = RequestFactory().generic('PUT', '/cve/api/settings/reviewer', _json.dumps({'ops_hours': hours}), content_type='application/json')
+            request.user = self.root
+            request.via_agent = agent
+            return settings_api.reviewer_put(request)
+        with self.assertRaises(settings_api.SettingsError) as caught:
+            put([3, 9, 15, 21], True)  # one more hour is one more billed call
+        self.assertEqual(caught.exception.status, 403)
+        with self.assertRaises(settings_api.SettingsError):
+            put(list(range(24)), True)
+        row.refresh_from_db()
+        self.assertEqual(row.ops_hours, [3, 9, 15])
+        put([9], True)  # taking hours away is allowed
+        row.refresh_from_db()
+        self.assertEqual(row.ops_hours, [9])
+        put([3, 9, 15, 21], False)  # a person's own request, in the web interface, is not limited
+        row.refresh_from_db()
+        self.assertEqual(row.ops_hours, [3, 9, 15, 21])
+        with self.assertRaises(ApiError) as mcp:  # the MCP tool refuses the same before the handler runs
+            bridge.change_setting(ctx(self.root), 'reviewer', {'ops_hours': [3, 9, 15, 21, 22]})
+        self.assertEqual(mcp.exception.status, 403)
+        row.refresh_from_db()
+        self.assertEqual(row.ops_hours, [3, 9, 15, 21])
+        bridge.change_setting(ctx(self.root), 'reviewer', {'ops_hours': [3]})
+        row.refresh_from_db()
+        self.assertEqual(row.ops_hours, [3])

@@ -1278,6 +1278,8 @@ def reviewer_put(request):
         hours = data['ops_hours']
         if not isinstance(hours, list) or len(hours) > 24 or not all(isinstance(h, int) and not isinstance(h, bool) and 0 <= h <= 23 for h in hours):
             raise SettingsError(400, 'operations hours are a list of UTC hours from 0 to 23')
+        if via_agent and not set(hours) <= set(reviewer.ops_hours(row)):  # each extra hour is a billed call: an agent may take hours away, never add one
+            raise SettingsError(403, f'ops_hours: every hour is a paid call to the AI provider, so an agent may only take hours away (now {sorted(reviewer.ops_hours(row))}); a person adds them in the web interface')
         row.ops_hours = sorted(set(hours))
         fields.append('ops_hours')
     if fields:

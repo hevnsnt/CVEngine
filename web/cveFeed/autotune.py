@@ -927,7 +927,10 @@ def _agent_limit(m, current, number, samples, history, now_dt):
     memory budget, so that the next round does not simply lower the number again."""
     from cveFeed import autotune_policy as policy
     setting, now = m.setting, now_dt.timestamp()
-    limit, why = setting.high, f'the auto-tuning maximum is {setting.high}'
+    if setting.sense == 'gap':  # a wait between runs: more work is a SHORTER wait, so the ceiling for more work starts at the shortest the range allows
+        limit, why = setting.low, f'the shortest wait auto-tuning allows is {setting.low}'
+    else:
+        limit, why = setting.high, f'the auto-tuning maximum is {setting.high}'
     if samples:
         facts = policy.steady_facts(samples)
         target, reason, known = policy.size_for(setting, facts, current=current)
