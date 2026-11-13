@@ -103,12 +103,24 @@ def _cache_seconds():
         return STATUS_CACHE_SECONDS
 
 
-def _project_row(project):
+def _shared_inputs(project_ids):
+    """What every project's row needs that is the same work for all of them, read once: the host and exposed-host counts of every project (one collapse
+    of the instance's hosts) and each project's number of hosts with a web page. ``None`` when it cannot be read: each row then counts for itself."""
+    from cveFeed import stats_history, web_shot
+    try:
+        return {**stats_history.shared_host_counts(), 'web_hosts': web_shot.web_hosts_by_project(),
+                'findings': stats_history.shared_finding_counts(project_ids)}
+    except Exception:  # noqa: BLE001
+        logger.info('status: the shared counts could not be read, each project counts for itself', exc_info=True)
+        return None
+
+
+def _project_row(project, shared=None):
     from cveFeed import counts, subdir_apps, wpscan_scan
     from cveFeed.stats_history import compute_snapshot
     from startScan.models import ScanHistory
     from targetApp.models import Domain
-    snap = compute_snapshot(project, with_fixed=False)  # the live counts only; never stored
+    snap = compute_snapshot(project, with_fixed=False, shared=shared)  # the live counts only; never stored
     scans = ScanHistory.objects.filter(domain__project=project)
     return {
         'slug': project.slug, 'name': project.name,
@@ -123,14 +135,14 @@ def _project_row(project):
         # other sites on shared addresses and applications under subdirectories (the slow vhost_queue sweeps)
         'web_discovery': subdir_apps.status_counts([project.id]),
         # web screenshots (cveFeed.web_shot): hosts with a picture of how many have a web page, what waits, what failed, and the last capture error
-        'screenshots': _screenshots_of(project),
+        'screenshots': _screenshots_of(project, shared),
     }
 
 
-def _screenshots_of(project):
+def _screenshots_of(project, shared=None):
     from cveFeed import web_shot
     try:
-        return web_shot.status_counts([project.id])
+        return web_shot.status_counts([project.id], web_hosts=None if shared is None else shared['web_hosts'].get(project.id, 0))
     except Exception as exc:  # noqa: BLE001 - counts only: the row is shown without them rather than not at all
         return {'error': type(exc).__name__}
 
@@ -175,8 +187,9 @@ def _projects_partial(ctx, deadline=None):
     from agentapi.services import _allowed_ids
     from dashboard.models import Project
 
-    seconds, rows, waiting = _cache_seconds(), [], []
-    for project in Project.objects.filter(id__in=list(_allowed_ids(ctx.user))).order_by('name')[:MAX_PROJECTS]:
+    seconds, rows, waiting, shared = _cache_seconds(), [], [], False
+    projects = list(Project.objects.filter(id__in=list(_allowed_ids(ctx.user))).order_by('name')[:MAX_PROJECTS])
+    for project in projects:
         key, last_key = _row_keys(project)
         row = None
         if seconds:
@@ -193,7 +206,9 @@ def _projects_partial(ctx, deadline=None):
                 if left is not None and not connection.in_atomic_block:
                     from agentapi import status_probes
                     status_probes._bound_database(left)
-                row = _project_row(project)
+                if shared is False:  # the first project that is not cached: the numbers every project shares are read once, for all of them
+                    shared = _shared_inputs([p.id for p in projects])
+                row = _project_row(project, shared)
             except Exception:  # noqa: BLE001 - a row that does not fit the time left is counted in the background, the rest still answer
                 if deadline is None:
                     raise
@@ -246,11 +261,12 @@ def _warm_rows(project_ids):
         started, seconds = time.monotonic(), _cache_seconds()
         try:
             status_probes._bound_database(30)
+            shared = _shared_inputs(list(project_ids))
             for project in Project.objects.filter(id__in=project_ids).order_by('name'):
                 if time.monotonic() - started > WARM_MAX_SECONDS:
                     break
                 key, last_key = _row_keys(project)
-                row = _project_row(project)
+                row = _project_row(project, shared)
                 cache.set(last_key, row, LAST_ROW_SECONDS)
                 if seconds:
                     cache.set(key, row, seconds)
