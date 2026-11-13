@@ -490,7 +490,7 @@ class NetworkAuthorityTests(SentinelBase):
     """Whether a Sentinel sits inside a private network is the server's decision (its enrollment, or an administrator), never the Sentinel's claim."""
 
     def boot(self, network, caps=('nmap', 'nuclei_light', 'wpscan', 'network:internal')):
-        status, out = call(self.t['dana'], 'POST', f'/api/v1/projects/sen-a/sentinels/enroll?format=blob&network={network}&profile=light')
+        status, out = call(self.dana, 'POST', f'/api/v1/projects/sen-a/sentinels/enroll?format=blob&network={network}&profile=light')  # a person: a token may not make an internal enrollment
         self.assertEqual(status, 201, out)
         self.assertEqual(SentinelEnrollment.objects.get(prefix=out['enrollment_token'][:10]).network, network)
         status, boot = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': out['enrollment_token'], 'name': f'net-{network}',
