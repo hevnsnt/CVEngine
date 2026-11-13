@@ -29,6 +29,12 @@ The server (`agentapi/builtin_scanner.py`, at celery's start and then every five
 
 When the server stops accepting the scanner's token (it expired, or was revoked), the scanner forgets it and enrols again with the next blob the server writes, which it does as soon as it sees the scanner lost: no person is involved and the container does not restart. A blob the scanner already redeemed, or one the server refused, is never tried twice.
 
+## Capabilities
+
+The scanner container drops every capability and keeps two: `NET_RAW` (nmap's SYN scan, OS detection and UDP sweep, and naabu's SYN scan, which run through file capabilities on nmap and naabu alone; the daemon itself has none) and `SYS_CHROOT` (Chromium's sandbox for screenshots). `NET_ADMIN` is not kept: no scan needs it, and in this container's shared network namespace (the host's, with the host-network overlay) it would let a compromised tool change the routes, firewall and interfaces. This is the set the Sentinel's own CI proves by running nmap -sS, -O and -sU, naabu and the other tools under it. The root filesystem is not read-only and `no-new-privileges` is not set; the Sentinel's `docker-compose.yml` says why.
+
+An image from before this reduction has nmap and naabu with the file capabilities `cap_net_raw,cap_net_admin`, and the kernel refuses to start a program whose file capabilities exceed what the container may hold, so every raw-socket scan would fail while the scanner looked healthy. `scripts/scanner.sh` (every update, `make up` and the scheduled scanner update) therefore looks at the image it just started and, for such an image only (one you hold with `CVENGINE_SCANNER_IMAGE`, or a rollback to the previous one), writes `CVENGINE_SCANNER_EXTRA_CAP=NET_ADMIN` into `.env` and recreates the scanner with it. When a newer image replaces it, the line is removed again. Nothing to do by hand; if you start an old held image with a plain `docker compose up` before any script has run, set that line yourself.
+
 ## Health and restarts
 
 The container's health check passes while the scanner's heartbeats reach the server; it fails after three minutes without one (`docker compose ps` shows `unhealthy`). Docker itself never restarts a container for being unhealthy, so the scanner watches its own heartbeats too: after three minutes without one it exits, and `restart: unless-stopped` starts a fresh process. While it waits for its first enrollment it counts as healthy.

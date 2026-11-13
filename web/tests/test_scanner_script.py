@@ -76,6 +76,60 @@ class ScannerScriptBase(unittest.TestCase):
         return container['image_id'] if container else None
 
 
+class ScannerCapabilityTests(ScannerScriptBase):
+    """The scanner service drops every capability but NET_RAW and SYS_CHROOT; an image from before that (nmap and naabu with cap_net_admin as a file
+    capability cannot start without NET_ADMIN) gets NET_ADMIN back for itself only, and loses it again when a newer image replaces it."""
+
+    def extra(self):
+        return [l for l in self.env_file().splitlines() if l.startswith('CVENGINE_SCANNER_EXTRA_CAP=')]
+
+    def test_a_current_image_runs_with_the_reduced_set_and_nothing_is_written(self):
+        self.running_old()
+        result = self.run_fn('cvengine_scanner_update')
+        self.assertEqual(self.running_image(), NEW, result.stderr)
+        self.assertEqual(self.extra(), [])
+        self.assertEqual(len([c for c in self.calls() if ' up -d ' in c]), 1)  # no second recreate
+
+    def test_an_image_from_before_the_reduction_gets_net_admin_for_itself_and_the_scanner_is_recreated(self):
+        self.state['net_admin_images'] = [NEW]
+        self.running_old()
+        self.save()
+        result = self.run_fn('cvengine_scanner_update')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.running_image(), NEW)
+        self.assertEqual(self.extra(), ['CVENGINE_SCANNER_EXTRA_CAP=NET_ADMIN'])
+        self.assertIn('NET_ADMIN', result.stderr)
+        self.assertEqual(len([c for c in self.calls() if ' up -d ' in c]), 2)  # started, then recreated with the capability
+
+    def test_a_held_old_image_gets_it_too_and_a_second_run_changes_nothing(self):
+        self.state['net_admin_images'] = [OLD]
+        self.state['images']['my/own:1'] = OLD
+        self.save()
+        (self.work / '.env').write_text('POSTGRES_DB=x\nCVENGINE_SCANNER_IMAGE=my/own:1\n')
+        self.assertEqual(self.run_fn('cvengine_scanner_start').returncode, 0)
+        self.assertEqual(self.extra(), ['CVENGINE_SCANNER_EXTRA_CAP=NET_ADMIN'])
+        ups = len([c for c in self.calls() if ' up -d ' in c])
+        self.assertEqual(self.run_fn('cvengine_scanner_start').returncode, 0)
+        self.assertEqual(self.extra(), ['CVENGINE_SCANNER_EXTRA_CAP=NET_ADMIN'])
+        self.assertEqual(len([c for c in self.calls() if ' up -d ' in c]), ups + 1)  # the restart itself, not another recreate
+
+    def test_a_newer_image_takes_the_capability_away_again(self):
+        (self.work / '.env').write_text('POSTGRES_DB=x\nCVENGINE_SCANNER_EXTRA_CAP=NET_ADMIN\n')
+        self.running_old()
+        result = self.run_fn('cvengine_scanner_update')
+        self.assertEqual(self.running_image(), NEW, result.stderr)
+        self.assertEqual(self.extra(), [])
+        self.assertIn('POSTGRES_DB=x', self.env_file())
+
+    def test_a_scanner_that_cannot_be_reached_is_left_as_it_is(self):
+        self.state['container'] = None
+        self.state['up_fails'] = True
+        self.save()
+        result = self.run_fn('cvengine_scanner_start --no-wait')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.extra(), [])
+
+
 class ScannerUpdateTests(ScannerScriptBase):
     def test_a_newer_image_is_pulled_started_and_kept_when_it_is_healthy_and_checked_in(self):
         self.running_old()
@@ -224,7 +278,7 @@ class ScannerUpdateTests(ScannerScriptBase):
         self.save()
         result = self.run_fn('cvengine_scanner_fetch', 'cvengine_scanner_start --no-wait')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse([c for c in self.calls() if 'exec -T scanner' in c])
+        self.assertFalse([c for c in self.calls() if 'exec -T scanner' in c and 'client.control' in c])  # no heartbeat wait (the capability look at the image is not one)
 
     def test_when_the_new_image_is_not_on_the_host_the_scanner_keeps_the_one_that_ran(self):
         self.running_old()

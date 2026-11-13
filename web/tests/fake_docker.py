@@ -90,6 +90,9 @@ if sub and sub[0] == 'compose':
             sys.exit(1)
         image_id = container['image_id']
         command = ' '.join(rest[3:])
+        if command.startswith('getcap'):  # an image from before the reduced capability set has cap_net_admin on nmap and naabu
+            out('/usr/local/bin/nmap cap_net_admin,cap_net_raw=eip' if image_id in state.get('net_admin_images', []) else '/usr/local/bin/nmap cap_net_raw=eip')
+            sys.exit(0)
         if 'client.control heartbeat' in command:
             sys.exit(0 if state['healthy'].get(image_id) else 1)
         if 'CONTRACT_VERSION' in command:
