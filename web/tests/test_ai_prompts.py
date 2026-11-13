@@ -61,7 +61,7 @@ def system_prompts():
 # change plus a little room. A job whose prompt grows past its budget fails here, so a longer prompt is a decision, not an accident.
 SYSTEM_BUDGET = {
     'finding_triage': 4720, 'local_check_suggestion': 2190, 'validation_plan': 2950, 'cve_detection': 7600,
-    'template_generation': 3400, 'template_validation': 1550, 'autotune_advisor': 1360, 'rdp_screenshot': 680, 'finding_review': 3780, 'operations_check': 2130,
+    'template_generation': 3400, 'template_validation': 1550, 'autotune_advisor': 1360, 'rdp_screenshot': 680, 'finding_review': 3780, 'operations_check': 2850,
 }
 
 

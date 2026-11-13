@@ -54,7 +54,7 @@ def _review_line_facts():
     from cveFeed.models import ReviewerSettings
     row = _reviewer_row() or ReviewerSettings()
     return [f'Finding review: at most {row.review_daily_max:,} findings a day, one provider call each.',
-            f'Server health check: {len(reviewer.ops_hours(row))} calls a day.']
+            f'Server health check: {len(reviewer.ops_hours(row))} calls a day; it may also propose performance changes, which follow your auto-tuning mode.']
 
 
 def _apply_reviewer(user, mode):

@@ -77,12 +77,10 @@ The message may also hold SIGNALS (memory of lanes and containers, oom kills, re
 "unknown" lists what could not be read) and TUNING (the auto-tuner's recent decisions). Use them to name the cause, never to invent numbers. \
 Refused claims are the server's limiter, not a lack of Sentinels: never advise adding capacity for them.
 
-TUNING also holds proposals: the settings you may change now, each with its label, the number in effect, and the lowest and highest number you may choose \
-(a setting that is not listed cannot be changed, and "not_offered" says why). The answer has a "tuning" list for them, at most two items, each \
-{setting, value, reason, alert}: setting is one of the listed keys, value a whole number inside that setting's range, reason one short sentence that cites \
-numbers from SIGNALS or the checks, and alert the code of the check it answers (or "none"). Propose a change only when the measurements show a problem \
-that a listed setting addresses; prefer lowering a number under trouble; propose nothing when nothing is wrong, and never name a setting that is not \
-listed. A person set how these proposals are used: they may be applied, kept as recommendations, or ignored. Do not mention that in a diagnosis.
+TUNING also lists the settings you may change now, each with its number in effect and the lowest and highest number you may choose; "not_offered" \
+says why the others are not. Put at most two proposals in the "tuning" list, each {setting, value, reason, alert}: a listed key, a whole number in its \
+range, one short sentence citing numbers from SIGNALS or the checks, and the code of the check it answers (or "none"). Propose only when the \
+measurements show a problem a listed setting addresses, prefer lowering under trouble, and never name a setting that is not listed.
 
 Never say no Sentinel is online if live_sentinels > 0, nor to start a built-in one if builtin_scanner is false.
 

@@ -290,3 +290,35 @@ class OpsReportTests(Base):
         with mock.patch('cveFeed.reviewer.ops_checks', return_value=self.checks()):
             out = reviewer.apply_ops_report({'alerts': [], 'actions': [], 'model': 'm'})
         self.assertEqual(set(out), {'alerts_updated', 'actions_run', 'actions_refused'})
+
+
+class ParityTests(Base):
+    """The container's answer schema and the server's snapshot and limits agree (the container is a separate image: it cannot import the server)."""
+
+    def test_the_schema_the_container_builds_from_a_snapshot_names_exactly_what_the_server_offered(self):
+        from tests.test_ai_prompts import _reviewer_prompts
+        prompts = _reviewer_prompts()
+        self.samples()
+        with mock.patch('cveFeed.reviewer.ops_checks', return_value=[reviewer._check(c, 'ok', 't', 'd') for c in reviewer.OPS_CODES]):
+            snap = reviewer.snapshot(self.now)
+        schema = prompts.ops_schema(snap['codes'], snap['tuning_settings'])
+        item = schema['properties']['tuning']['items']['properties']
+        self.assertEqual(item['setting']['enum'], snap['tuning_settings'])
+        self.assertEqual(item['alert']['enum'], list(reviewer.OPS_CODES) + ['none'])
+        self.assertEqual(schema['properties']['tuning']['maxItems'], autotune.MAX_AI_PROPOSALS)
+        self.assertEqual(item['reason']['maxLength'], 300)
+        for forbidden in ('review_daily_max', 'triage_max_per_day', 'autotune_ai_max_per_day'):
+            self.assertNotIn(forbidden, item['setting']['enum'])
+
+    def test_both_copies_of_the_task_line_say_what_the_field_is_for(self):
+        from reNgine import ai_prompts
+        from tests.test_ai_prompts import _reviewer_prompts
+        for text in (ai_prompts.TASKS['operations_check'], _reviewer_prompts().OPS_TASK):
+            self.assertIn('propose at most two changes', text)
+
+    def test_the_report_counts_a_refused_or_held_proposal_apart_from_a_recommendation(self):
+        from cveFeed import maintainer_report
+        TuningDecision.objects.create(setting=KEY, old_value=8, new_value=40, mode='auto', source='ai', action='raise', applied=False, resolution='refused', outcome_detail='x')
+        TuningDecision.objects.create(setting=KEY, old_value=8, new_value=9, mode='suggest', source='ai', action='raise', applied=False)
+        counts = maintainer_report.report(self.now)['counts']
+        self.assertEqual((counts['refused'], counts['recommended']), (1, 1))

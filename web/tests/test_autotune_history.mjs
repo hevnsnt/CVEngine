@@ -60,6 +60,12 @@ const SHAPES = {
   html_reason: base({reason: 'queued <b>scans</b> waited & "grew"'}),
   no_reason: base({reason: '', phase: 'cap'}),
   no_numbers: base({old_value: null, new_value: null, label: undefined, setting: 'work_depth'}),
+  ai_applied: base({source: 'ai', reason: 'The oldest assessment waited 52 minutes with memory free', verify_at: iso(18), alerts: ['queue_starvation']}),
+  ai_helped: base({source: 'ai', outcome: 'helped', baseline: measured('discovery_queue', 12, 3), alerts: ['queue_starvation']}),
+  ai_suggested: base({source: 'ai', applied: false, mode: 'suggest', layer: '', can_apply: true}),
+  ai_refused: base({source: 'ai', applied: false, layer: '', resolution: 'refused', new_value: 40, outcome_detail: 'outside what the controller allows now (4 to 20)'}),
+  ai_held: base({source: 'ai', applied: false, layer: '', resolution: 'held', outcome_detail: 'held: text that may come from a Sentinel was flagged as aimed at an AI (ai_directive)'}),
+  ai_refused_bare: base({source: 'ai', applied: false, resolution: 'refused', outcome_detail: null}),
   empty: {},
   nothing_but_id: {id: 3},
   garbage: {id: 'x', at: 'never', label: 5, old_value: 'a', new_value: {}, reason: ['x'], baseline: 'text', outcome: 'helped', source: 3, actor: {}, verify_at: 'soon'},
@@ -160,4 +166,20 @@ test('a count in the server\'s sentence reads as singular or plural', () => {
   assert.match(said('1 memory kill(s) after the change, 0 before'), /1 memory kill after the change, 0 before/);
   assert.match(said('1 kernel oom kill(s) and Celery lane restart(s) in the last day after the change, 0 before'), /1 kernel oom kill and Celery lane restart in the last day/);
   assert.doesNotMatch(said('3 memory kill(s) after the change, 0 before'), /\(s\)/);
+});
+
+test('a proposal of the AI: applied, suggested, refused and held each say what happened', () => {
+  assert.equal(h.historyLine(SHAPES.ai_applied, NOW).who, 'the AI');
+  assert.equal(h.historyLine(SHAPES.ai_applied, NOW).happened, 'being checked, result at 14:18');
+  assert.match(h.historyLine(SHAPES.ai_helped, NOW).happened, /; kept$/);
+  assert.equal(h.historyLine(SHAPES.ai_suggested, NOW).happened, 'nothing has changed yet: apply it to make the change');
+  assert.equal(h.historyLine(SHAPES.ai_suggested, NOW).apply, true);
+  const refused = h.historyLine(SHAPES.ai_refused, NOW);
+  assert.equal(refused.happened, 'proposed by the AI, not applied: outside what the controller allows now (4 to 20)');
+  assert.equal(refused.apply, false);
+  assert.equal(refused.revert, false);
+  const held = h.historyLine(SHAPES.ai_held, NOW);
+  assert.match(held.happened, /^proposed by the AI, held back: held: text that may come from a Sentinel/);
+  assert.equal(held.tone, 'wait');
+  assert.equal(h.historyLine(SHAPES.ai_refused_bare, NOW).happened, 'proposed by the AI, not applied: no reason given');
 });

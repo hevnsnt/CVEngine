@@ -125,6 +125,9 @@ export function happenedText(d, now = Date.now()) {
   const detail = plainDetail(d.outcome_detail);
   const facts = [numbers || detail, numbers ? pressureText(d) : ""].filter(Boolean).join(", ");
   if (d.applied === false) {
+    const why = detail || "no reason given";  // a proposal of the AI that was not taken: the server wrote why in outcome_detail
+    if (d.resolution === "refused") return { text: `proposed by ${d.source === "ai" ? "the AI" : whoText(d)}, not applied: ${why}`, tone: "neutral" };
+    if (d.resolution === "held") return { text: `proposed by ${d.source === "ai" ? "the AI" : whoText(d)}, held back: ${why}`, tone: "wait" };
     if (d.resolution === "applied") return { text: "applied by a person", tone: "neutral" };
     if (d.resolution === "superseded") return { text: "replaced by a newer recommendation", tone: "neutral" };
     return { text: "nothing has changed yet: apply it to make the change", tone: "wait" };
