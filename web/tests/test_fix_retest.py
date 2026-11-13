@@ -8,6 +8,7 @@ from datetime import timedelta
 from unittest import mock
 
 from django.contrib.auth.models import User
+from django.core.cache import cache
 from django.db import connection
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
@@ -63,6 +64,7 @@ class Base(TestCase):
     base = '/api/v1/projects/rt-proj'
 
     def setUp(self):
+        cache.clear()  # the retest counts of a project are a shared snapshot: a test must not read another one's
         self.match = CVEMatch.objects.create(cve_entry=self.cve, subdomain=self.sub, source='tech', matched_product='panel', matched_version='1.2',
                                              version_in_range=True, confidence=0.8, ai_verdict='uncertain', scan_history=self.scan,
                                              evidence={'ip': '192.0.2.10', 'port': 443}, template_result='vulnerable')
@@ -535,6 +537,27 @@ class ListTests(Base):
         body = call(self.t_alice, 'GET', f'{self.base}/findings/match/{self.match.pk}')[1]
         self.assertEqual(body['retest']['state'], 'verifying')
         self.assertEqual(body['retest']['history'][0]['status'], 'queued')
+
+    def test_the_retest_counts_are_paid_once_and_follow_a_person_marking_fixed(self):
+        # DB-1: three whole-project aggregates ran on every Findings request, the count-only polls too; now one snapshot per scope (cveFeed.snapshot_cache)
+        def poll():
+            with CaptureQueriesContext(connection) as ctx:
+                status, body = self.listing(page_size=0)
+            self.assertEqual(status, 200)
+            return body['retest'], len(ctx)
+        aggregates = lambda: counts.retest_counts([self.proj.pk])  # noqa: E731
+        self.assertEqual(aggregates(), {'verified_fixed': 0, 'unverified_fixed': 0, 'reopened': 0})
+        poll()  # the first request reads the token and the caches: not the page's own work
+        cache.clear()
+        first, cost = poll()
+        self.assertEqual(first, {'verified_fixed': 0, 'unverified_fixed': 0, 'reopened': 0})
+        again, cheaper = poll()
+        self.assertEqual(again, first)
+        self.assertEqual(cost - cheaper, 3, 'the second poll must not run the three retest aggregates')
+        with self.captureOnCommitCallbacks(execute=True):  # what a person marking a finding fixed does: the revision moves on commit
+            self.assertEqual(self.mark()[0], 200)
+        after, _ = poll()
+        self.assertEqual(after, {'verified_fixed': 0, 'unverified_fixed': 1, 'reopened': 0})
 
 
 class GuardTests(Base):
