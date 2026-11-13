@@ -482,6 +482,6 @@ class OpsTuningProposals(unittest.TestCase):
         self.assertNotIn('tuning', call.call_args[0][3]['properties'])
 
     def test_the_prompt_says_what_the_field_is_for_and_what_it_may_not_do(self):
-        for words in ('"tuning" list', 'at most two', 'prefer lowering a number under trouble', 'never name a setting that is not listed', 'not_offered'):
+        for words in ('"tuning" list', 'at most two proposals', 'prefer lowering under trouble', 'never name a setting that is not listed', 'not_offered'):
             self.assertIn(words, prompts.OPS_SYSTEM)
         self.assertNotIn('review_daily_max', prompts.OPS_SYSTEM)
