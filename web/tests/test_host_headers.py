@@ -41,7 +41,9 @@ class ComposeServiceHostTests(TestCase):
         environ.update(env)
         out = subprocess.run([sys.executable, '-c', 'import json, django; django.setup(); from django.conf import settings; '
                               'print(json.dumps(settings.ALLOWED_HOSTS))'],
-                             env=environ, cwd=settings.BASE_DIR, capture_output=True, text=True, timeout=120, check=True)
+                             env=environ, cwd=settings.BASE_DIR, capture_output=True, text=True, timeout=120)
+        # check=True hid the reason: a failed start of the settings says why (its stderr) in the test's own failure, not just "exit status 1"
+        self.assertEqual(out.returncode, 0, f'settings did not load in a fresh process (exit {out.returncode}):\n{out.stderr[-3000:]}')
         return json.loads(out.stdout.strip().splitlines()[-1])
 
     def test_web_is_trusted_while_the_reviewer_is_on_which_is_the_default(self):
