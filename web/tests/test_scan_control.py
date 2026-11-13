@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from django.contrib.auth.models import User
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from cveFeed.models import ScanControl
@@ -20,8 +20,21 @@ from tests.test_admin import api
 from tests.test_tenancy import client_for
 
 
-class ScanControlTests(TestCase):
+class OwnUpdateLock:
+    """Mixin: a test that takes the updater's lock (``scan_control.updater_idle``: a pause, a release, an operator's resume) takes it in a directory of its own. Parallel test
+    processes share one ``RENGINE_HOME`` and so one ``.update-lock``, and one process's lock made another's ``flock(LOCK_NB)`` fail ("An update is running")."""
     def setUp(self):
+        super().setUp()
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        patch = override_settings(RENGINE_HOME=home.name)
+        patch.enable()
+        self.addCleanup(patch.disable)
+
+
+class ScanControlTests(OwnUpdateLock, TestCase):
+    def setUp(self):
+        super().setUp()
         self.root = User.objects.create_superuser('stop-root', 'stop@example.test', 'pw')
         self.admin = User.objects.create_user('stop-org', password='pw')
         org = Org.objects.create(name='Stop Org', slug='stop-org')
