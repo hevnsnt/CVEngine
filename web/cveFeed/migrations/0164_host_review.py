@@ -38,6 +38,11 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.AddField(
+            model_name="setupanswer",
+            name="version",
+            field=models.PositiveSmallIntegerField(db_default=1, default=1),
+        ),
+        migrations.AddField(
             model_name="projectsettings",
             name="host_review_mode",
             field=models.CharField(db_default="recommend", default="recommend", max_length=10),

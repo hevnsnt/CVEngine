@@ -2345,6 +2345,7 @@ class SetupAnswer(models.Model):
     answer = models.CharField(max_length=60)
     answered_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     answered_at = models.DateTimeField(default=timezone.now)
+    version = models.PositiveSmallIntegerField(default=1, db_default=1)  # the version of the question when it was answered: a question that gained a line is asked again
 
     def __str__(self):
         return f"{self.key}: {self.answer}"

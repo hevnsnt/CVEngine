@@ -62,10 +62,27 @@ def _apply_reviewer(user, mode):
     _call(settings_api.reviewer_put, user, {'enabled': mode != 'off', 'auto_close': mode == 'act'})
 
 
-# (title, the cost facts of the line as a list of sentences, apply(user, mode)): a later release adds its AI feature here (the host review), and the three choices cover it.
+def _host_review_facts():
+    from cveFeed import reviewer
+    from cveFeed.models import ReviewerSettings
+    row = _reviewer_row() or ReviewerSettings()
+    return [f'Host review: the AI reads every open finding of a host that changed, one provider call per host, at most {row.host_review_daily_max:,} a day, and suggests one '
+            f'next step. It may start at most {row.host_review_auto_per_project_day:,} safe read-only steps per project a day, and only in a project a person set to automatic.']
+
+
+def _apply_host_review(user, mode):
+    """Off leaves it off; Recommend only and Act on safe steps switch it on with every project on recommend: only a person sets a project to automatic (the host
+    card, or Settings > AI model), never an answer on this page."""
+    from cveFeed import settings_api
+    _call(settings_api.reviewer_put, user, {'host_review_enabled': mode != 'off'})
+
+
+# (title, the cost facts of the line as a list of sentences, apply(user, mode)): a later release adds its AI feature here, and the three choices cover it.
 AI_LINES = (
     ('AI finding review and server health check', _review_line_facts, _apply_reviewer),
+    ('AI host review', _host_review_facts, _apply_host_review),
 )
+NEW_LINES = {2: ('AI host review',)}  # the lines each version of the AI question added: an answer given before is asked again for them
 
 
 def _ai_applies():
@@ -80,7 +97,11 @@ def _ai_applies():
 
 def _ai_decided():
     row = _reviewer_row()
-    return bool(row is not None and row.updated_by_id)  # every save of the reviewer settings records who made it
+    if not (row is not None and row.updated_by_id):  # every save of the reviewer settings records who made it
+        return False
+    from cveFeed.models import SetupAnswer
+    # the host review line is new: a person who saved the AI settings before it existed has not decided it, and an update never switches it on for them
+    return bool(row.host_review_enabled or SetupAnswer.objects.filter(key='ai_validation', version__gte=2).exists())
 
 
 def _ai_current():
@@ -97,9 +118,11 @@ def _ai_facts():
 def _ai_choices():
     return [
         {'value': 'off', 'label': 'Off', 'tag': 'Nothing is billed', 'effect': 'No AI review. You can turn it on later.'},
-        {'value': 'recommend', 'label': 'Recommend only', 'effect': 'The AI gives a verdict on each finding and a person decides. It never closes or changes a finding.'},
+        {'value': 'recommend', 'label': 'Recommend only',
+         'effect': 'The AI gives a verdict on each finding and each host and a person decides. It never closes or changes a finding, and every host review waits for you to press Start.'},
         {'value': 'act', 'label': 'Act on safe steps',
-         'effect': 'As Recommend, and the AI may also close a finding as a false positive when it is sure and the evidence is not hard proof.'},
+         'effect': 'As Recommend, and the AI may also close a finding as a false positive when it is sure and the evidence is not hard proof. Host reviews stay on recommend in every project: '
+                   'only a person sets a project to automatic, on the host card or in Settings > AI model.'},
     ]
 
 
@@ -206,8 +229,8 @@ def settle(user=None):
 
 
 class Question:
-    def __init__(self, key, since, title, text, choices, safe_default, applies, decided, apply, current, link, link_text, facts=None):
-        self.key, self.since, self.title, self.text, self.choices, self.facts = key, since, title, text, choices, facts
+    def __init__(self, key, since, title, text, choices, safe_default, applies, decided, apply, current, link, link_text, facts=None, version=1):
+        self.key, self.since, self.title, self.text, self.choices, self.facts, self.version = key, since, title, text, choices, facts, version
         self.safe_default, self.applies, self.decided, self.apply, self.current = safe_default, applies, decided, apply, current
         self.link, self.link_text = link, link_text
 
@@ -220,7 +243,7 @@ QUESTIONS = (
     Question('ai_validation', '1.4.0', 'Do you want AI validation?',
              'An AI model can double-check your findings and watch the health of the server. It stays off until you say otherwise. Features you already turned '
              'on in an earlier release are not touched.',
-             _ai_choices, lambda: 'off', _ai_applies, _ai_decided, _ai_apply, _ai_current, '/cve/settings/#ai', 'Settings > AI model', facts=_ai_facts),
+             _ai_choices, lambda: 'off', _ai_applies, _ai_decided, _ai_apply, _ai_current, '/cve/settings/#ai', 'Settings > AI model', facts=_ai_facts, version=2),
 )
 BY_KEY = {q.key: q for q in QUESTIONS}
 
@@ -233,6 +256,10 @@ def _answers():
 def _describe(q, answers):
     applies, why = q.applies()
     row = answers.get(q.key)
+    new_lines = []
+    if row is not None and row.version < q.version:  # answered before the question gained a line: it is asked again, for the new line only
+        new_lines = [line for version, lines in NEW_LINES.items() if q.key == 'ai_validation' and version > row.version for line in lines]
+        row = None
     if not applies:
         state = 'not_applicable'
     elif q.decided() and not (row and row.answer != LATER):
@@ -250,6 +277,7 @@ def _describe(q, answers):
            'answered_at': row.answered_at.isoformat() if row else None}
     out['choices'] = [{**c, 'safe': c['value'] == safe} for c in q.choices()] if applies else []
     out['facts'] = q.facts() if applies and q.facts else []
+    out['new_lines'] = new_lines if applies else []
     if q.key == 'scan_from':
         out['next'] = _scan_next(row)
     return out
@@ -294,7 +322,7 @@ def should_redirect(request):
 
 def _record(user, key, answer):
     from cveFeed.models import SetupAnswer
-    SetupAnswer.objects.update_or_create(key=key, defaults={'answer': answer, 'answered_by': user, 'answered_at': timezone.now()})
+    SetupAnswer.objects.update_or_create(key=key, defaults={'answer': answer, 'answered_by': user, 'answered_at': timezone.now(), 'version': BY_KEY[key].version})
 
 
 def answer(user, key, value):
