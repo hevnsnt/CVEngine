@@ -725,6 +725,7 @@ def apply_reply(review, parsed, job, offered):
     """Apply a valid reply to the review. Re-reads the host: a state that changed since the packet was built makes the answer ``stale`` and nothing is
     applied. Each verdict goes through ``reviewer.apply_finding_verdict`` (a person's work, hard evidence and planted instructions hold a closure
     as for one finding; the host's own planted text holds every closure of the host), linked to this review. Then the step (``store_step``)."""
+    from django.db import transaction
     from cveFeed import injection_guard, reviewer
     from cveFeed.models import HostReview, HostState
     now = timezone.now()
@@ -748,16 +749,17 @@ def apply_reply(review, parsed, job, offered):
     findings, _ = make_consistent(findings, rows)
     model = f'{job.provider}:{job.model}' if job.provider else (job.model or '')
     results = []
-    for f in findings:
-        triage = rows[f['ref']]
-        key = reviewer.review_key(triage, state.fingerprint)
-        code = 'duplicate' if f['reason_code'] == SAME_AS else f['reason_code']
-        body = {'verdict': f['verdict'], 'confidence': f['confidence'], 'reason_code': code, 'review_key': key, 'note': f['note'], 'model': model[:100],
-                'input_tokens': 0, 'output_tokens': 0}
-        try:
-            results.append((f['ref'], reviewer.apply_finding_verdict(triage, body, key, host_review=review, extra_injection=injection, extra_markers=markers, now=now)))
-        except reviewer.VerdictError as exc:
-            results.append((f['ref'], {'outcome': 'skipped', 'reason': str(exc)}))
+    with transaction.atomic():  # all or nothing: a crash half way leaves no closure behind a review that says it failed
+        for f in findings:
+            triage = rows[f['ref']]
+            key = reviewer.review_key(triage, state.fingerprint)
+            code = 'duplicate' if f['reason_code'] == SAME_AS else f['reason_code']
+            body = {'verdict': f['verdict'], 'confidence': f['confidence'], 'reason_code': code, 'review_key': key, 'note': f['note'], 'model': model[:100],
+                    'input_tokens': 0, 'output_tokens': 0}
+            try:
+                results.append((f['ref'], reviewer.apply_finding_verdict(triage, body, key, host_review=review, extra_injection=injection, extra_markers=markers, now=now)))
+            except reviewer.VerdictError as exc:
+                results.append((f['ref'], {'outcome': 'skipped', 'reason': str(exc)}))
     host_note = reviewer.usable_note(parsed['host_note'], min_words=2)
     step = parsed['next_step']
     step_note = reviewer.usable_note(step['note'], min_words=2)

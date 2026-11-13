@@ -190,3 +190,28 @@ class EchoTests(Base):
         self.assertEqual((review.step_mode, review.step_state), ('recommend', 'proposed'))
         self.assertIn('echo_marker', review.injection)
         self.assertEqual(CVEMatch.objects.get(pk=match.pk).remediation_status, NOT_CLOSED)
+
+
+class AllOrNothingTests(Base):
+    """HR-7: a crash while the verdicts are applied leaves none of them behind."""
+
+    def test_a_crash_after_the_first_closure_rolls_it_back_and_the_review_is_failed(self):
+        first, second = self.match(), self.match()
+        review = self.queue()
+        from cveFeed import reviewer
+        real = reviewer.apply_finding_verdict
+        calls = []
+
+        def apply(*args, **kw):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError('the database went away')
+            return real(*args, **kw)
+        with mock.patch.object(reviewer, 'apply_finding_verdict', side_effect=apply), mock.patch.object(host_actions, 'run') as run:
+            review = self.deliver(review, self.body({**self.fp('f1'), **self.fp('f2')}))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(review.status, 'failed')
+        self.assertIn('could not be applied', review.step_detail)
+        self.assertEqual((CVEMatch.objects.get(pk=first.pk).remediation_status, CVEMatch.objects.get(pk=second.pk).remediation_status), (NOT_CLOSED, NOT_CLOSED))
+        self.assertFalse(FindingReview.objects.filter(host_review=review).exists())
+        run.assert_not_called()
