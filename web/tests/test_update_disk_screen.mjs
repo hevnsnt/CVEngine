@@ -41,6 +41,7 @@ globalThis.document = {
   getElementById: (id) => (id === 'settings' ? settings : null),
   querySelector: () => null,
   querySelectorAll: () => [],
+  addEventListener() {}, // settings.js and the sitewatch.js it imports listen on the document
   cookie: '',
   body: new Node('body'),
 };
