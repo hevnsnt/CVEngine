@@ -54,6 +54,6 @@ pypdf==6.21.4  # reads text back out of the generated report PDFs in the tests; 
 wafw00f==2.4.2
 xmltodict==1.0.4
 django-environ==0.14.0
-dnspython==2.9.0
+dnspython==2.9.2
 cryptography==50.0.2
 packaging==26.3
