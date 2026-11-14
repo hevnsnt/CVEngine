@@ -15,10 +15,10 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/cvengine-tour-1.3.gif" alt="A 35-second tour of cvENGINE on a fictional demo company: the Overview, the Hosts page, the Sentinels that scan from inside a network, and the Settings tabs" width="880">
+  <img src="docs/images/cvengine-tour-1.4.gif" alt="A 48-second tour of cvENGINE on fictional demo companies: the Overview and its Live discovery card, the All-projects graph where every project is a constellation (click one for its hottest hosts), one constellation per domain inside a project and a dive in host by host, Shodan-style search typed on the Hosts page, CVE matches landing on the constellations while a scan runs (smoke turning to fire), and the Sentinels" width="880">
 </p>
 
-<p align="center"><sub>Tour recorded on 1.3 with demo data. 1.4 has a simpler left rail.</sub></p>
+<p align="center"><sub>cvENGINE 1.4.1 on demo data.</sub></p>
 
 ---
 
