@@ -326,7 +326,9 @@ export function clusterGraph(data, {columns: requestedColumns} = {}) {
       return;
     }
     const projectId = `__project:${project.slug}`;
-    added.push({id: projectId, kind: 'project', label: project.name, seed_x: x, seed_y: y, anchored: true});
+    // a dive into one constellation of a single project (byTarget): the root anchor carries the name, so there is no project anchor above it
+    const solo = [...project.roots.values()].some(members => members.some(domain => domain.slug));
+    if (!solo) added.push({id: projectId, kind: 'project', label: project.name, seed_x: x, seed_y: y, anchored: true});
     const roots = [...project.roots.entries()].sort((a, b) => a[0].localeCompare(b[0]));
     roots.forEach(([root, members], rootIndex) => {
       const angle = 2 * Math.PI * rootIndex / roots.length - Math.PI / 2;
@@ -335,7 +337,7 @@ export function clusterGraph(data, {columns: requestedColumns} = {}) {
       const ry = y + Math.sin(angle) * distance;
       const rootId = `__root:${project.slug}:${root}`;
       added.push({id: rootId, kind: 'root', label: root, seed_x: rx, seed_y: ry, anchored: true});
-      links.push({from: projectId, to: rootId});
+      if (!solo) links.push({from: projectId, to: rootId});
       members.sort((a, b) => a.id.localeCompare(b.id)).forEach((domain, domainIndex) => {
         const direction = 2 * Math.PI * domainIndex / members.length + stableAngle(domain.id) / 8;
         const dx = rx + Math.cos(direction) * (members.length === 1 ? 95 : 115);
@@ -1433,9 +1435,9 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       y2 = -Infinity;
     // A clustered picture is measured by its project and root anchors. With every project a cloud there are none (the clouds are
     // packed, not clustered), and measuring nothing left the view where it started, on the first cloud alone: measure them all.
-    let anchors = false;
-    if (clustered) graph.forEachNode((n) => { if (['project', 'root'].includes(n.data?.kind)) anchors = true; });
-    const grid = clustered && anchors;
+    let anchors = false, anchorCount = 0;
+    if (clustered) graph.forEachNode((n) => { if (['project', 'root'].includes(n.data?.kind)) { anchors = true; anchorCount += 1; } });
+    const grid = clustered && anchors && anchorCount > 1; // one root alone (a dive into a constellation) is measured by every node, as a host-by-host dive is
     graph.forEachNode((n) => {
       if (grid && !['project', 'root'].includes(n.data?.kind)) return;
       const p = layout.getNodePosition(n.id);

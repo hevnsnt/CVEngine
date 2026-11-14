@@ -296,3 +296,17 @@ test('no synthetic key reaches a link, a request or an event the details build',
   assert.ok(opened.length && opened.every(k => view.nodes.some(n => n.kind === 'cloud' && n.project === k))); // Open dives into a drawn constellation
   delete globalThis.document; delete globalThis.fetch; delete globalThis.CustomEvent;
 });
+
+test('a dive into one root of a single project has one anchor, named once; a project\'s own dive keeps its project anchor', () => {
+  const data = byTarget(oneProject());
+  for (const label of ['a.example', 'IP assets']) {
+    const group = cloudsOf(cloudProjects(data)).find(c => c.label === label);
+    const view = clusterGraph(focusProject(data, group.project), {columns: 1});
+    assert.equal(view.nodes.filter(n => n.kind === 'project').length, 0);
+    assert.deepEqual(view.nodes.filter(n => n.kind === 'root').map(n => n.label), [label]);
+    assert.ok(view.edges.every(e => !String(e.from).startsWith('__project:')));
+  }
+  const dive = clusterGraph(focusProject(bigProject(CLOUD_HOSTS + 1, 3), 'big'), {columns: 1});
+  assert.deepEqual(dive.nodes.filter(n => n.kind === 'project').map(n => n.label), ['Big']);
+  assert.ok(dive.nodes.some(n => n.kind === 'root'));
+});
