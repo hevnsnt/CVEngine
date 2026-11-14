@@ -4,6 +4,10 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The 
 
 ## Unreleased
 
+### Changed
+- **One project on the graph is drawn as constellations too, one for each of its targets.** With a single project on the picture the graph used to fall back to the old host-by-host drawing. Now each target (registered domain or address) is a constellation of its own, packed side by side as with several projects: its name, host count, flares and tier bubbles from its own hosts. Double-click one, or press Open in its card, to dive into that target host by host; the back button returns to the constellations. A project with one target is one constellation. The Graph page's "Domain" choice still draws one domain host by host. Hygiene is known per project, so target constellations carry no hygiene bubble. If the page holds only some of a big project's hosts, the project stays one constellation with its true total. A constellation also pulses while a scan works on one of its hosts.
+- **The Overview's Live discovery card is laid out for the constellations.** The graph now takes the full width of the card, with the counts in one row under it and the scan feed under the counts. The status badge in the card head is gone: the line under the title already says "Last discovery: ... (failed)", and it now links to the scan ("View the scan").
+
 ### Fixed
 - **The Graph page shows every project when All projects is chosen.** With more than one project each is drawn as a constellation, and the page then gave every constellation a slot in the grid it uses for host-by-host clusters, about a thousand units apart, and measured the picture by anchors that a constellation does not have. So the view stayed on the first project alone and Fit graph did nothing. The constellations now keep the places they are packed into, side by side as on the Overview, and the page fits all of them, on load and from Fit graph. One project drawn host by host is unchanged.
 

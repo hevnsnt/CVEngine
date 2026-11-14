@@ -5,7 +5,7 @@ import {test} from 'node:test';
 // Load the browser module without a DOM; clusterGraph is deliberately a pure
 // transform so shared asset relationships and project boundaries can be tested.
 const source = readFileSync(new URL('../static/cve/graph.js', import.meta.url), 'utf8');
-const {clusterGraph, cloudProjects, cloudRadius, cloudShape, focusProject, CLOUD_HOSTS} = await import(`data:text/javascript,${encodeURIComponent(source)}`);
+const {clusterGraph, cloudProjects, cloudRadius, cloudShape, focusProject, byTarget, showNodeDetails, CLOUD_HOSTS} = await import(`data:text/javascript,${encodeURIComponent(source)}`);
 
 test('groups original bubbles by project and root, with scoped copies of shared IPs', () => {
   const data = {
@@ -193,4 +193,94 @@ test('opening a cloud draws only that project, host by host, with shared address
   assert.ok(!ids.has('ip:shared')); // only one of this project's hosts uses it
   assert.ok(!ids.has('dom:2') && !ids.has('sub:small')); // another project is not drawn
   assert.ok(view.edges.every(e => ids.has(e.from) && ids.has(e.to)));
+});
+
+// One project on the picture: a constellation for each of its targets. acme has three targets (30, 10 and 4 hosts) and two hosts with no target.
+function oneProject({targets = [['a.example', 30, 3], ['b.example', 10, 1], ['c.example', 4, 0]], loose = 2} = {}) {
+  const nodes = [], edges = [];
+  targets.forEach(([name, hosts, hot], t) => {
+    nodes.push({id: `dom:${t}`, kind: 'domain', label: name, project: 'acme', project_name: 'Acme', root: name});
+    for (let i = 0; i < hosts; i++) {
+      nodes.push({id: `sub:${t}:${i}`, kind: 'subdomain', label: `h${i}.${name}`, project: 'acme', target: name, heat: i < hot ? HEAT[i % 3] : 'clean'});
+      edges.push({from: `dom:${t}`, to: `sub:${t}:${i}`});
+    }
+  });
+  for (let i = 0; i < loose; i++) nodes.push({id: `sub:x:${i}`, kind: 'subdomain', label: `loose${i}.example`, project: 'acme', target: '', heat: i ? 'clean' : 'fire'});
+  return {nodes, edges, projects: {acme: {name: 'Acme', hygiene: 4}, other: {name: 'Other', hygiene: 1}}};
+}
+const cloudsOf = (view) => view.nodes.filter(n => n.kind === 'cloud');
+
+test('a single project is one constellation per target, with the targets\' own hosts and heat', () => {
+  const data = oneProject();
+  const view = cloudProjects(byTarget(data));
+  assert.deepEqual(cloudsOf(view).map(c => [c.label, c.hosts, c.findings, c.slug, c.target]),
+    [['a.example', 30, 3, 'acme', 'a.example'], ['b.example', 10, 1, 'acme', 'b.example'], ['Acme', 2, 1, 'acme', 'Acme'], ['c.example', 4, 0, 'acme', 'c.example']].sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0])));
+  const a = cloudsOf(view).find(c => c.label === 'a.example');
+  assert.deepEqual(tiersOf(view, a.project), {fire: 1, smoke: 1, ice: 1}); // a's own hosts only, and no hygiene (that is known per project)
+  assert.ok(cloudsOf(view).every(c => c.hygiene === 0));
+  assert.ok(!view.nodes.some(n => ['subdomain', 'domain'].includes(n.kind)));
+  assert.ok(cloudsOf(view).every(c => c.parts.length === 1 && c.parts[0].hosts === c.hosts));
+  assert.equal(data.nodes.length, 30 + 10 + 4 + 3 + 2); // the payload is left alone
+  assert.ok(data.nodes.every(n => n.project === 'acme'));
+});
+
+test('a project with one target is one constellation', () => {
+  const view = cloudProjects(byTarget(oneProject({targets: [['only.example', 12, 2]], loose: 0})));
+  assert.deepEqual(cloudsOf(view).map(c => [c.label, c.hosts, c.findings]), [['only.example', 12, 2]]);
+  const few = cloudProjects(byTarget(oneProject({targets: [['tiny.example', 3, 0]], loose: 0})));
+  assert.equal(cloudsOf(few).length, 1); // however few hosts: it is a constellation, not a handful of dots
+});
+
+test('two projects stay one constellation per project', () => {
+  const data = bigProject(40, 7);
+  assert.equal(byTarget(data), data);
+  assert.deepEqual(cloudsOf(cloudProjects(byTarget(data))).map(c => c.id), ['__cloud:big', '__cloud:small']);
+});
+
+test('a capped payload is one constellation for the project with the true total', () => {
+  const data = oneProject();
+  data.hosts = {drawn: 46, total: 9000, projects: {acme: 9000}};
+  const view = cloudProjects(byTarget(data));
+  assert.deepEqual(cloudsOf(view).map(c => [c.id, c.hosts, c.project, c.slug]), [['__cloud:acme', 9000, 'acme', 'acme']]);
+});
+
+test('diving into a target draws only that target\'s hosts', () => {
+  const data = byTarget(oneProject());
+  const b = cloudsOf(cloudProjects(data)).find(c => c.label === 'b.example');
+  const view = focusProject(data, b.project);
+  assert.equal(view.nodes.filter(n => n.kind === 'subdomain').length, 10);
+  assert.ok(view.nodes.filter(n => n.kind === 'subdomain').every(n => n.target === 'b.example'));
+  assert.deepEqual(view.nodes.filter(n => n.kind === 'domain').map(n => n.label), ['b.example']);
+  assert.ok(view.nodes.every(n => n.project === undefined || n.project === b.project));
+});
+
+test('a constellation knows its hosts and targets so a scan on them can light it', () => {
+  const view = cloudProjects(byTarget(oneProject()));
+  const b = cloudsOf(view).find(c => c.label === 'b.example');
+  assert.equal(b.host_names.length, 10);
+  assert.ok(b.host_names.includes('h0.b.example'));
+  assert.deepEqual(b.domain_ids, ['1']);
+});
+
+test('no synthetic key reaches a link, a request or an event the details build', async () => {
+  const hrefs = [], urls = [], opened = [];
+  const make = (tag) => ({tag, kids: [], attrs: {}, className: '', textContent: '',
+    append(...k) { this.kids.push(...k); }, setAttribute(k, v) { this.attrs[k] = v; if (k === 'href') hrefs.push(v); },
+    addEventListener(type, fn) { if (type === 'click') this.click = fn; }});
+  const walk = (n, out = []) => { out.push(n); (n.kids || []).forEach(k => walk(k, out)); return out; };
+  globalThis.document = {createElement: make, createTextNode: (t) => ({text: t}), dispatchEvent: (e) => opened.push(e.detail)};
+  globalThis.CustomEvent = class { constructor(type, init) { this.detail = init.detail; } };
+  const rows = ['h0.b.example', 'h5.zzz'].map(host => ({host, heat: 'fire', score: 9, heat_reasons: []}));
+  globalThis.fetch = async (url) => { urls.push(String(url)); return {ok: true, json: async () => ({count: 2, results: rows})}; };
+  const view = cloudProjects(byTarget(oneProject()));
+  for (const node of view.nodes.filter(n => ['cloud', 'tier'].includes(n.kind))) {
+    const box = make('div');
+    await showNodeDetails(box, node);
+    walk(box).filter(n => n.click).forEach(n => n.click());
+  }
+  assert.ok(hrefs.length && urls.length);
+  assert.ok([...hrefs, ...urls].every(u => !u.includes('acme%7C') && !u.includes('acme|')), [...hrefs, ...urls].join('\n'));
+  assert.ok([...hrefs, ...urls].every(u => u.startsWith('/cve/acme/') || u.startsWith('/api/v1/projects/acme/')));
+  assert.ok(opened.length && opened.every(k => view.nodes.some(n => n.kind === 'cloud' && n.project === k))); // Open dives into a drawn constellation
+  delete globalThis.document; delete globalThis.fetch; delete globalThis.CustomEvent;
 });
