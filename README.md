@@ -22,21 +22,37 @@
 
 ---
 
-**cvENGINE is a self-hosted external attack surface and vulnerability assessment platform.** It reads the CVE and exploitation feeds all day and works out, with proof, which new CVEs actually reach your hosts.
+**cvENGINE watches the CVE feeds around the clock and shows you, with proof, which new CVEs actually reach your hosts.**
 
 ### Every new CVE, checked against your hosts
 
-1. **Watch the feeds.** The [cve.now](https://cve.now) feed is read every 30 minutes, and CISA KEV, ENISA EUVD, FIRST EPSS, Exploit-DB, Metasploit and (with a key) VulnCheck KEV every hour, so a CVE that becomes exploited turns hot within the hour.
-2. **Find who is exposed.** A CVE becomes a match only when a host in your inventory runs the same product at a version inside the affected range.
-3. **Write the check.** With your AI key, cvENGINE reads the advisories of hot CVEs (within a daily budget) and records how to detect each one. When no vetted Nuclei template exists, the AI can draft a read-only one, which runs on a host only after the system validated it: syntax and a harmless control run on a Sentinel, an offline test against an affected and a fixed response, and a second AI pass.
-4. **Prove it on a Sentinel.** Every five minutes, matches (fire first) are reproduced with one of six read-only checks, and the exact command and result are kept as evidence.
-5. **Cut the noise.** AI triage rates CVE matches, scanner findings, open databases and admin routes, and medium-or-worse hygiene findings within daily caps, and the [AI reviewer](docs/AI-REVIEWER.md) reads each open finding once and can close false positives when you allow it. Fixed rules set a floor the model cannot go below, so the AI never closes a finding a check proved.
+1. **Watch the feeds.** New CVEs and fresh exploitation news arrive all day from the sources that matter.
+2. **Find who is exposed.** Each CVE is matched to the hosts that run the affected product and version.
+3. **Write the check.** When no vetted check exists, your AI drafts a read-only one that cvENGINE validates first.
+4. **Prove it on your hosts.** A Sentinel reproduces each match with a read-only check and keeps the evidence.
+5. **Cut the noise.** AI reviews the evidence, so what is real rises and likely false positives sink.
 
-**Bring your own AI.** Use Anthropic, OpenAI or OpenRouter with your own key, or stay fully local with Ollama, LM Studio or vLLM. Daily caps on the AI jobs and a usage page with cost estimates keep spend in your hands. For triage and review the model sees structured evidence with host names redacted, it has no tools, and the server checks every answer before it counts. Nothing AI runs until an administrator connects a provider, and the AI reviewer, AI-written checks and auto-fire (AI confirmation and tests the moment a new hot CVE lands) each ship switched off. Without a model, cvENGINE still discovers, scans, matches and validates.
+**Bring your own AI:** Anthropic, OpenAI or OpenRouter on your own key, or fully local with Ollama, LM Studio or vLLM. It is off until you switch it on, and it never closes a finding a check proved. Without a model, cvENGINE still discovers, scans, matches and validates.
+
+<details>
+<summary><b>How it works, exactly</b></summary>
+
+- **Feeds.** The [cve.now](https://cve.now) feed is read every 30 minutes. CISA KEV, ENISA EUVD, FIRST EPSS, Exploit-DB, Metasploit and, with a key, VulnCheck KEV are read every hour, so a CVE that becomes exploited turns hot within the hour.
+- **Matching.** A CVE becomes a match only when a host runs the same product at a version inside a bounded affected range. A product seen with no version never makes a match.
+- **Checks the AI writes.** For hot CVEs, within a daily budget, the AI reads the advisory and records how to detect it. When no vetted Nuclei template exists it can draft a read-only one, which runs on a host only after the system validated it: syntax and a harmless loopback control on a Sentinel, an offline test against an affected and a fixed response, and a second AI pass. This ships off: an administrator switches on **Validate AI-written checks automatically**.
+- **Proof.** Every five minutes up to 20 matches, fire first, are reproduced on a Sentinel with one of six read-only checks: a vetted Nuclei template, `nmap -sV` on the one port, a version banner request, the credential-less database check, a version and identity probe, or a JavaScript library read. The exact command and result are kept. A check that does not reproduce a finding never lowers it.
+- **Triage.** CVE matches, scanner findings, open databases, open admin routes, routes exposing credentials and hygiene findings of medium severity or worse are rated confirmed, likely, needs validation, likely false positive or not applicable, within daily caps (by default 500 per project and 2,000 in all).
+- **AI reviewer.** Reads each open finding once, up to 300 a day by default, and records whether it is real. It closes a false positive only when you allow it and only when the finding has no hard evidence and no person has worked it.
+- **Floors.** Hard evidence sets a floor the model cannot go below: a template hit, a database that answered or a validation hit is confirmed, and a version inside the affected range is at least needs validation. The model alone can never confirm a finding.
+- **Your AI, your controls.** For triage and review the model sees structured evidence with host names redacted, it has no tools, and the server checks every answer before it counts. The AI jobs have daily caps, and the usage page shows calls, tokens and cost estimates. The AI reviewer, AI-written checks and auto-fire (AI confirmation and tests as soon as a new hot CVE lands) each ship switched off.
+
+More in [Pipeline](docs/PIPELINE.md#triage-and-validation), [CVE intelligence](docs/PIPELINE.md#cve-intelligence) and [AI reviewer](docs/AI-REVIEWER.md).
+
+</details>
 
 ### Know everything you expose
 
-Give cvENGINE your domains and it keeps discovering the subdomains, addresses and certificates you expose, in a searchable, Shodan-style inventory of every host, port, service, technology and certificate. Forgotten and shadow assets come to light, and new hosts, opened ports and version changes land on a timeline as soon as a scan sees them. Every host is assessed with industry-standard open-source scanners, and [Situations](docs/SITUATIONS.md) ranks what to fix first: proof before likelihood, known exploited before severity alone.
+cvENGINE is a self-hosted external attack surface and vulnerability assessment platform. Give it your domains and it keeps discovering the subdomains, addresses and certificates you expose, in a searchable, Shodan-style inventory of every host, port, service, technology and certificate. Forgotten and shadow assets come to light, and new hosts, opened ports and version changes land on a timeline as soon as a scan sees them. Every host is assessed with industry-standard open-source scanners, and [Situations](docs/SITUATIONS.md) ranks what to fix first: proof before likelihood, known exploited before severity alone.
 
 ## cvENGINE 1.4.0 is here
 
