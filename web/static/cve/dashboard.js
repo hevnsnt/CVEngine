@@ -746,7 +746,6 @@ async function pollDiscovery() {
     setOnline(true);
     if (d === null) return; // 304: no new events
     if (!d.scan) {
-      $("d-status").style.display = "none";
       $("d-target").textContent = "Nothing has run yet. Add a target to start a first look.";
       $("d-target").hidden = false;
       return;
@@ -763,18 +762,7 @@ async function pollDiscovery() {
         return pollDiscovery();
       }
     }
-    // a badge for a scan that is queued, running or went wrong; a finished one is already said by the line below
-    const badge = $("d-status");
-    badge.style.display = d.scan.status === 2 ? "none" : "";
-    badge.textContent =
-      d.scan.status === -1 && d.scan.queue_position != null
-        ? `queued, ${d.scan.queue_position} ahead`
-        : STATUS[d.scan.status] || d.scan.status;
-    badge.className = `badge ${d.scan.status === 1 ? "running" : d.scan.status === 2 ? "success" : d.scan.status === 0 ? "failed" : ""}`;
     followedProject = d.scan.project || slug || "";
-    badge.title = d.scan.error || "";
-    if (followedProject) badge.href = `/cve/${encodeURIComponent(followedProject)}/scans/${d.scan.id}/`;
-    else badge.removeAttribute("href");
     const target = $("d-target");
     target.hidden = false;
     target.textContent = "";
@@ -783,11 +771,18 @@ async function pollDiscovery() {
       d.scan.status === 1
         ? `Discovering ${d.scan.target} now`
         : d.scan.status === -1
-          ? `Waiting to discover ${d.scan.target}`
+          ? `Waiting to discover ${d.scan.target}${d.scan.queue_position != null ? ` (${d.scan.queue_position} ahead)` : ""}`
           : `Last discovery: ${d.scan.target} (${STATUS[d.scan.status] || ""})`,
       followedProject,
       { kinds: ["host"] },
     );
+    if (followedProject) { // the scan's own page, where the badge used to lead
+      const scan = document.createElement("a");
+      scan.href = `/cve/${encodeURIComponent(followedProject)}/scans/${d.scan.id}/`;
+      scan.textContent = "View the scan";
+      scan.title = d.scan.error || "";
+      target.append(" · ", scan);
+    }
     drawCounts(d.counts);
     const list = $("d-ticker");
     keepPlace(list, () =>
