@@ -71,6 +71,60 @@ class WorkflowTests(SimpleTestCase):
 		self.assertIn('not a plain branch name', cleanup)
 
 
+class ReleaseNotesLimitTests(SimpleTestCase):
+	"""GitHub refuses a release body over 125000 characters (v1.4.0: HTTP 422, the section was 202577). The workflow cuts a longer body at a whole bullet."""
+	TAG, REPO = 'v1.4.0', 'hevnsnt/CVEngine'
+
+	def run_cut(self, text):
+		import subprocess
+		import sys
+		import tempfile
+		workflow = read('.github', 'workflows', 'release.yml')
+		start = workflow.index("python3 - <<'PY'\n") + len("python3 - <<'PY'\n")
+		code = '\n'.join(line[10:] for line in workflow[start:workflow.index('\n          PY\n', start)].split('\n'))
+		with tempfile.TemporaryDirectory() as folder:
+			path = os.path.join(folder, 'notes.md')
+			with open(path, 'w', encoding='utf-8', newline='') as handle:
+				handle.write(text)
+			subprocess.run([sys.executable, '-I', '-c', code], check=True, env={'NOTES': path, 'TAG': self.TAG, 'REPO': self.REPO})
+			with open(path, encoding='utf-8', newline='') as handle:
+				return handle.read()
+
+	def check_cut(self, text):
+		out = self.run_cut(text)
+		self.assertLess(len(out), 125000)
+		self.assertLessEqual(len(out), 120000)
+		self.assertTrue(out.endswith(f'The full notes for {self.TAG} are in [CHANGELOG.md](https://github.com/{self.REPO}/blob/{self.TAG}/CHANGELOG.md).\n'))
+		self.assertEqual(len(re.findall(r'(?m)^\s*```', out)) % 2, 0)
+		self.assertEqual(out.count('<details'), out.count('</details>'))
+		return out
+
+	def test_the_real_1_4_0_section_is_cut_to_fit(self):
+		changelog = read('CHANGELOG.md')
+		start = changelog.index('## v1.4.0 (')
+		section = changelog[changelog.index('\n', start) + 1:changelog.index('\n## ', start + 5)]
+		if len(section) <= 120000:
+			self.skipTest('the section fits')
+		out = self.check_cut(section)
+		self.assertIn('### Added', out)
+		body = out[:out.index('\n\nThe full notes')]
+		self.assertTrue(section.startswith(body[body.index('\n\n') + 2:]) or section.lstrip().startswith(body[body.index('\n\n') + 2:]))
+
+	def test_a_section_that_fits_is_not_touched(self):
+		text = '### Fixed\n- A bullet with [a link](docs/X.md).\n\n```\ncode\n```\n'
+		self.assertEqual(self.run_cut(text), text)
+		self.assertEqual(self.run_cut('x' * 120000), 'x' * 120000)
+
+	def test_a_huge_section_is_cut_outside_fences_and_details(self):
+		text = '### Added\n' + ''.join(f'- Bullet {n} ' + 'é' * 300 + '\n  continued\n' for n in range(2000)) + '\n<details>\n<summary>s</summary>\n\n```\n' + '- inside a fence\n' * 50000 + '```\n\n</details>\n'
+		out = self.check_cut(text)
+		self.assertNotIn('inside a fence', out)
+		self.assertNotIn('<details', out)
+		self.assertTrue(out.split('\n\n')[-2].endswith('continued'))
+		fenced = '- a\n```\n' + 'x\n' * 130000 + '```\n'
+		self.assertNotIn('```', self.check_cut(fenced))
+
+
 class ComposeTests(SimpleTestCase):
 	def test_the_proxy_reads_scan_results_but_cannot_write_them(self):
 		compose = read('docker-compose.yml')
