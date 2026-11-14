@@ -9,6 +9,7 @@ whole server, not a project, so for anyone else it is left out and ``system_note
 Every probe runs under a deadline of its own and the whole answer under a budget (``agentapi.status_probes``), so one that fails or times out
 turns into ``{"error": ...}`` and a line in ``problems`` (``<probe>: timed out after 5 s``) instead of holding the whole answer; an App Admin gets
 ``system.timings``, the seconds each probe took. Nothing here returns an address, credential, command line or task argument."""
+import json
 import logging
 import os
 import re
@@ -197,6 +198,71 @@ def _row_keys(project):
     return f'sysstatus:project:{project.id}', f'sysstatus:project:last:{project.id}'
 
 
+# A counted row that has expired is renewed, not counted again, when nothing it reads has been written since it was counted. What it reads is the tables of
+# ``row_fingerprint_tables`` (PostgreSQL's own insert/update/delete counters, ``snapshot_cache.table_fingerprint``: one cheap read, no scan) and the browser sandbox's
+# last result (kept in the cache, not a table) and the switches a row shows. A renewal gives the same row another ``CVENGINE_STATUS_CACHE_SECONDS`` and never moves when it was counted
+# (``computed_at``): after ``ROW_RENEWAL_SECONDS`` the row is counted again whatever the counters say, . The only numbers that come from the clock are the scans (a scan marked running
+# for longer than the running window moves to ``stalled`` with no write): a row with any running, queued or stalled scan is never renewed, so those are never older than
+# ``CVENGINE_STATUS_CACHE_SECONDS`` (a row with none cannot change that way). Without the counters (``track_counts`` off, not PostgreSQL) a row is
+# counted each time it expires, as before. ``tests/test_status_row_renewal.py`` fails when the counts read a table that is not listed.
+ROW_RENEWAL_SECONDS = 300
+
+
+def row_fingerprint_tables():
+    """The database tables the project rows (``_shared_inputs`` and ``_project_row``) are counted from."""
+    from cveFeed.models import CVEEntry, CVEMatch, HostScreenshot, HygieneFinding, ProbeObservation, Triage, TunableSettings
+    from dashboard.models import Project, SystemTimings
+    from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Vulnerability
+    from targetApp.models import Domain
+    models = (CVEEntry, CVEMatch, Domain, HostScreenshot, HygieneFinding, IpAddress, IpAddress.ports.through, Port, ProbeObservation, Project, ScanHistory, Subdomain,
+              Subdomain.ip_addresses.through, SystemTimings, Triage, TunableSettings, Vulnerability)
+    return sorted({m._meta.db_table for m in models})
+
+
+def _row_fingerprint():
+    """What the rows are counted from, as one string that changes when any of it does, or None when it cannot be read (never "unchanged")."""
+    from cveFeed import snapshot_cache, subdir_apps, vhost_scan, web_shot
+    fp = snapshot_cache.table_fingerprint(*row_fingerprint_tables())
+    if fp is None:
+        return None
+    # not tables: the browser sandbox's last result (kept in the cache) and the three switches a row shows (read from the environment, which a restart can change
+    # while a row the earlier process counted is still held)
+    return fp + '|' + json.dumps([web_shot.sandbox_state(), web_shot.enabled(), vhost_scan.enabled(), subdir_apps.enabled()], sort_keys=True, default=str)
+
+
+def _fingerprint_key(project):
+    return f'sysstatus:project:fp:{project.id}'
+
+
+def _renewed_row(project, now_fp, seconds):
+    """The last counted row of ``project`` stored again for ``seconds`` when its inputs are those it was counted from (and it was counted less than
+    ``ROW_RENEWAL_SECONDS`` ago), else None. ``now_fp`` returns the inputs' fingerprint (read once per call by the caller)."""
+    from django.core.cache import cache
+    try:
+        held = cache.get(_fingerprint_key(project))
+        last = cache.get(_row_keys(project)[1])
+        if not (seconds and isinstance(held, dict) and held.get('fp') is not None and isinstance(last, dict)):
+            return None
+        if any((last.get('scans') or {}).get(k) for k in ('running', 'queued', 'stalled')):
+            return None  # a scan marked running passes the running window with no write: such a row is counted each time it expires
+        if time.time() - held['computed_at'] >= ROW_RENEWAL_SECONDS or now_fp() != held['fp']:
+            return None
+        cache.set(_row_keys(project)[0], last, seconds)
+        return last
+    except Exception:  # noqa: BLE001 - a cache or counters that do not answer only mean counting it
+        return None
+
+
+def _keep_row(project, row, seconds, fp):
+    """Store a row just counted (``fp``: the inputs' fingerprint read before the count started, so a write during it makes the next look find a change)."""
+    from django.core.cache import cache
+    key, last_key = _row_keys(project)
+    cache.set(last_key, row, LAST_ROW_SECONDS)
+    if seconds:
+        cache.set(key, row, seconds)
+        cache.set(_fingerprint_key(project), {'fp': fp, 'computed_at': time.time()}, LAST_ROW_SECONDS)
+
+
 def _projects_partial(ctx, deadline=None):
     """``(rows, waiting)``: one row per project the caller may see, and the slugs of the projects whose row is not counted yet. A row costs several
     whole-project counts and agents poll this, so a row is kept for ``CVENGINE_STATUS_CACHE_SECONDS`` (60) per project: the counts may be up to that
@@ -213,6 +279,12 @@ def _projects_partial(ctx, deadline=None):
 
     seconds, rows, waiting, shared = _cache_seconds(), [], [], False
     projects = list(Project.objects.filter(id__in=list(_allowed_ids(ctx.user))).order_by('name')[:MAX_PROJECTS])
+    fingerprint = []  # read at most once per call, and before the first count of it
+
+    def now_fp():
+        if not fingerprint:
+            fingerprint.append(_row_fingerprint())
+        return fingerprint[0]
     for project in projects:
         key, last_key = _row_keys(project)
         row = None
@@ -221,6 +293,8 @@ def _projects_partial(ctx, deadline=None):
                 row = cache.get(key)
             except Exception:  # noqa: BLE001 - a cache outage only means computing it
                 row = None
+            if row is None:
+                row = _renewed_row(project, now_fp, seconds)
         if row is None:
             left = None if deadline is None else deadline - time.monotonic()
             if left is not None and left <= 0:
@@ -230,6 +304,7 @@ def _projects_partial(ctx, deadline=None):
                 if left is not None and not connection.in_atomic_block:
                     from agentapi import status_probes
                     status_probes._bound_database(left)
+                before = now_fp() if seconds else None  # the inputs as they are before this count starts
                 if shared is False:  # the first project that is not cached: the numbers every project shares are read once, for all of them
                     shared = _shared_inputs([p.id for p in projects])
                 row = _project_row(project, shared)
@@ -240,9 +315,7 @@ def _projects_partial(ctx, deadline=None):
                 waiting.append(project)
                 continue
             try:
-                cache.set(last_key, row, LAST_ROW_SECONDS)
-                if seconds:
-                    cache.set(key, row, seconds)
+                _keep_row(project, row, seconds, before)
             except Exception:  # noqa: BLE001
                 pass
         rows.append(row)
@@ -289,12 +362,12 @@ def warm_project_rows(project_ids, token=None):
     by name and the others are still kept; if the shared counts fail, each row counts for itself (slower, but a row that counts alone does not depend on
     them) instead of stopping, so a server on which the shared read does not fit in 30 s still warms. The single-flight lock (``token``) is released only if
     this run still holds it."""
-    from django.core.cache import cache
 
     from dashboard.models import Project
     from reNgine import resources
     seconds = _cache_seconds()
     try:
+        before = _row_fingerprint() if seconds else None  # the inputs as they are before the counts start
         try:
             shared = _short_transaction(lambda: _shared_inputs(list(project_ids)))
         except Exception:  # noqa: BLE001
@@ -306,10 +379,7 @@ def warm_project_rows(project_ids, token=None):
             except Exception:  # noqa: BLE001 - one row failing keeps the others
                 logger.warning('status: the warm-up could not count project %s', project.slug, exc_info=True)
                 continue
-            key, last_key = _row_keys(project)
-            cache.set(last_key, row, LAST_ROW_SECONDS)
-            if seconds:
-                cache.set(key, row, seconds)
+            _keep_row(project, row, seconds, before)
     finally:
         try:
             client = _warm_lock_client()
@@ -408,7 +478,14 @@ def _broker():
 def _queues():
     """Messages waiting in each Celery queue, plus those a worker has taken but not yet acknowledged."""
     client = _broker_client()
-    waiting = {name: sum(client.llen(name + suffix) for suffix in PRIORITY_SUFFIXES) for name in QUEUES}
+    pipe = client.pipeline(transaction=False)  # 17 queues x 4 priority steps and the unacked count: 69 reads in ONE round trip (it was 69 round trips in a row)
+    for name in QUEUES:
+        for suffix in PRIORITY_SUFFIXES:
+            pipe.llen(name + suffix)
+    pipe.hlen('unacked')
+    lengths = pipe.execute()
+    step = len(PRIORITY_SUFFIXES)
+    waiting = {name: sum(lengths[i * step:(i + 1) * step]) for i, name in enumerate(QUEUES)}
     from cveFeed import ct_queue
     from cveFeed.broker_recovery import MAX_QUEUE_SCAN
     ct = waiting.get('ctwatch_queue', 0)
@@ -417,7 +494,7 @@ def _queues():
         batch = max(1, SystemTimings.current().ct_watch_minutes * 60 // 3)
     except Exception:  # noqa: BLE001
         batch = 0
-    return {'waiting': waiting, 'waiting_total': sum(waiting.values()), 'unacknowledged': client.hlen('unacked'),
+    return {'waiting': waiting, 'waiting_total': sum(waiting.values()), 'unacknowledged': lengths[-1],
             'ct_backlog': {'waiting': ct, 'cap': ct_queue.backlog_max(batch), 'warn_at': CT_BACKLOG_WARN, 'scan_limit': MAX_QUEUE_SCAN}}
 
 
@@ -499,7 +576,8 @@ def _feeds():
         watermark = feed_watermark.status()  # the feed is complete through this time; `behind` when it has not been read to its head in a day
     except Exception:  # noqa: BLE001 - status must not fail on a counting problem
         watermark = None
-    return {'cve_entries': CVEEntry.objects.count(), 'newest_cve_published': _iso(newest), 'last_feed_dispatch': _iso(last),
+    cve_entries = guidance['cves'] if guidance else CVEEntry.objects.count()  # the guidance progress has just counted them (a second pass over the whole catalogue otherwise)
+    return {'cve_entries': cve_entries, 'newest_cve_published': _iso(newest), 'last_feed_dispatch': _iso(last),
             'cve_feed_watermark': watermark, 'cve_guidance': guidance}
 
 

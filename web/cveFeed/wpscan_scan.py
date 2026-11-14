@@ -614,10 +614,27 @@ def status_counts(project_ids=None):
     return _fold_counts(_wordpress_rows(project_ids).values())
 
 
+def _counting_rows(project_ids):
+    """``_wordpress_rows`` for a count: each row carries only what ``state_of`` reads to name a state (the probe, its outcome, source, version and time, and the ``state`` key
+    of the evidence, which the database picks out of the JSON). The scan's findings and the probe's other evidence are never decoded, only to be thrown away."""
+    from types import SimpleNamespace
+
+    from django.db.models.fields.json import KeyTransform
+
+    from cveFeed.models import ProbeObservation
+    qs = ProbeObservation.objects.filter(kind='wordpress', probe__in=('wpscan', 'wordpress-detect', 'wordpress-signals', THOROUGH_PROBE), project_id__in=project_ids)
+    by_host = {}
+    for project_id, host, probe, outcome, source, version, observed_at, state in qs.annotate(evidence_state=KeyTransform('state', 'evidence')).order_by(
+            'project_id', 'host', 'id').values_list('project_id', 'host', 'probe', 'outcome', 'source', 'version', 'observed_at', 'evidence_state'):
+        by_host.setdefault((project_id, host), []).append(SimpleNamespace(probe=probe, outcome=outcome, source=source, version=version, observed_at=observed_at,
+                                                                          evidence={} if state is None else {'state': state}))
+    return by_host
+
+
 def status_counts_by_project(project_ids):
     """``{project_id: status_counts([project_id])}`` for each of ``project_ids`` from one read of the probe rows."""
     grouped = {pid: [] for pid in project_ids}
-    for (project_id, _host), rows in _wordpress_rows(list(project_ids)).items():
+    for (project_id, _host), rows in _counting_rows(list(project_ids)).items():
         grouped[project_id].append(rows)
     return {pid: _fold_counts(hosts) for pid, hosts in grouped.items()}
 

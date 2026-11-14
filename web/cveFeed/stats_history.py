@@ -12,14 +12,14 @@ CVE_MATCH_HEATS = ('fire', 'smoke', 'ice')
 def _open_findings_and_cve_matches(project):
     """{severity band: count} over every currently-actionable finding (CVE matches not ruled out, open scanner and
     hygiene findings, none of them closed: fixed, accepted_risk or false_positive), and {heat: count} over the CVE matches alone:
-    the exact same set agentapi.services.list_findings shows as ``status=actionable``."""
+    the exact same set agentapi.services.list_findings shows as ``status=actionable`` (``counting=True`` leaves out only what a list row shows)."""
     from cveFeed.threat import HEAT_RANK
 
     from agentapi.services import SEVERITY_NAMES, _finding_sources
     heat_names = {rank: name for name, rank in HEAT_RANK.items()}
     open_findings = {band: 0 for band in OPEN_FINDING_BANDS}
     cve_matches = {heat: 0 for heat in CVE_MATCH_HEATS}
-    for kind, qs in _finding_sources(project, {'status': 'actionable'}).items():
+    for kind, qs in _finding_sources(project, {'status': 'actionable'}, counting=True).items():
         # the CVE matches are grouped by severity band and heat in ONE pass (they were two passes over the same set, each a CASE over every match)
         for row in qs.values('sev', 'heat_rank').annotate(n=Count('id')) if kind == 'cve' else qs.values('sev').annotate(n=Count('id')):
             band = SEVERITY_NAMES.get(row['sev'])
@@ -44,7 +44,7 @@ def shared_finding_counts(project_ids, current_ids=None):
     from agentapi.services import SEVERITY_NAMES, AllProjects, _finding_sources
     heat_names = {rank: name for name, rank in HEAT_RANK.items()}
     out = {pid: ({band: 0 for band in OPEN_FINDING_BANDS}, {heat: 0 for heat in CVE_MATCH_HEATS}) for pid in project_ids}
-    for kind, qs in _finding_sources(AllProjects(project_ids), {'status': 'actionable'}, current_ids).items():
+    for kind, qs in _finding_sources(AllProjects(project_ids), {'status': 'actionable'}, current_ids, counting=True).items():
         field = FINDING_PROJECT_FIELD[kind]
         for row in (qs.values(field, 'sev', 'heat_rank') if kind == 'cve' else qs.values(field, 'sev')).annotate(n=Count('id')).order_by():
             open_findings, cve_matches = out.get(row[field], (None, None))

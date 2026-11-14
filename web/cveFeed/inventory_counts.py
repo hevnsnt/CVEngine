@@ -29,6 +29,28 @@ def _breathe(i):
         gevent.sleep(0)
 
 
+def _fetch(qs):
+    """Every row of a ``values_list`` queryset in one fetch. Django reads a result a hundred rows at a time (a call, and a wrapper that watches for database errors,
+    for each hundred: 400 of them for the inventory's rows); these reads are integers, names and flags, which need no
+    conversion on the way."""
+    from django.core.exceptions import EmptyResultSet
+    from django.db import connections
+    try:
+        sql, params = qs.query.sql_with_params()
+    except EmptyResultSet:
+        return []
+    with connections[qs.db].cursor() as cursor:
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+
+
+def _chunks(rows):
+    """``rows`` in slices of ``YIELD_EVERY``, a gevent worker's other greenlets let run before each (``_breathe``), so a loop over them needs no call per row."""
+    for start in range(0, len(rows), YIELD_EVERY):
+        _breathe(start)
+        yield rows[start:start + YIELD_EVERY]
+
+
 def _key_project(project_id):
     return '' if project_id is None else str(project_id)  # what the SQL host key makes of a NULL project
 
@@ -39,40 +61,63 @@ def current_rows():
     statement. A row is current when its scan is a domain's latest full scan, or a finished host-pipeline scan after it, or it has no scan, or its domain has
     no full scan at all; and no newer copy of the same name (same domain) is in a host-pipeline scan after the full scan, and, for a scanned row of a domain
     with no full scan, no newer scanned copy of the name exists."""
+    from django.db import connection
+
     from cveFeed.discovery import HOST_PIPELINE_TASK
     from startScan.models import ScanHistory, Subdomain
     from targetApp.models import Domain
     latest_full, pipeline = {}, []
-    for scan_id, domain_id, tasks in ScanHistory.objects.filter(scan_status=2).values_list('id', 'domain_id', 'tasks'):
+    for scan_id, domain_id, tasks in _fetch(ScanHistory.objects.filter(scan_status=2).values_list('id', 'domain_id', 'tasks')):
         if HOST_PIPELINE_TASK in (tasks or ()):
             pipeline.append((scan_id, domain_id))
         elif scan_id > latest_full.get(domain_id, 0):
             latest_full[domain_id] = scan_id
     full_ids = set(latest_full.values())
     after = {scan_id for scan_id, domain_id in pipeline if scan_id > latest_full.get(domain_id, 0)}
-    subs = list(Subdomain.objects.values_list('id', 'name', 'scan_history_id', 'target_domain_id'))
+    targets = {domain_id: (project_id, name) for domain_id, project_id, name in _fetch(Domain.objects.values_list('id', 'project_id', 'name'))}
+    # Only the rows the rules below can keep or that a kept row can be compared with are read (a fifth of the stored hosts on the reported install): a row with no scan
+    # or no target, a row of a scan that is a latest full scan or a host-pipeline scan after it, and every row of a domain that has no full scan. Any other row is dropped
+    # by the first test of the second pass, and takes no part in ``newest_after`` (it needs a scan in ``after``) or ``newest_scanned`` (it needs a domain with no full scan).
+    wanted_scans = sorted(full_ids | after)
+    unscanned_domains = sorted(set(targets) - set(latest_full))
+    table = Subdomain._meta.db_table
+    from tenancy import scope as tenancy_scope
+    scoped = tenancy_scope.current_allowed() is not None  # the raw read skips the tenancy manager: a scoped call reads only the rows of the domains it may see (``targets`` is already scoped)
+    with connection.cursor() as cursor:
+        cursor.execute(f'SELECT id, name, scan_history_id, target_domain_id FROM "{table}" WHERE (scan_history_id IS NULL OR target_domain_id IS NULL '
+                       'OR scan_history_id = ANY(%s) OR target_domain_id = ANY(%s))' + (' AND target_domain_id = ANY(%s)' if scoped else ''),
+                       [wanted_scans, unscanned_domains] + ([sorted(targets)] if scoped else []))
+        subs = cursor.fetchall()
     newest_after, newest_scanned = {}, {}
-    for i, (sub_id, name, scan_id, domain_id) in enumerate(subs):
-        _breathe(i)
-        if scan_id is None or domain_id is None:
-            continue
-        if scan_id in after and scan_id > newest_after.get((domain_id, name), 0):
-            newest_after[(domain_id, name)] = scan_id
-        if sub_id > newest_scanned.get((domain_id, name), 0):
-            newest_scanned[(domain_id, name)] = sub_id
-    targets = {domain_id: (project_id, name) for domain_id, project_id, name in Domain.objects.values_list('id', 'project_id', 'name')}
+    for start in range(0, len(subs), YIELD_EVERY):
+        _breathe(start)
+        for sub_id, name, scan_id, domain_id in subs[start:start + YIELD_EVERY]:
+            if scan_id is None or domain_id is None:
+                continue
+            if scan_id in after:  # only a row of a host-pipeline scan after the full scan can supersede an older copy of its name
+                key = (domain_id, name)
+                if scan_id > newest_after.get(key, 0):
+                    newest_after[key] = scan_id
+            if domain_id not in latest_full:  # and the newest scanned copy only matters for a domain with no full scan
+                key = (domain_id, name)
+                if sub_id > newest_scanned.get(key, 0):
+                    newest_scanned[key] = sub_id
+    no_target = (None, None)
     out = []
-    for i, (sub_id, name, scan_id, domain_id) in enumerate(subs):
-        _breathe(i)
-        if domain_id is not None:
-            if not (scan_id is None or scan_id in full_ids or scan_id in after or domain_id not in latest_full):
-                continue
-            if scan_id is not None and newest_after.get((domain_id, name), 0) > scan_id:
-                continue
-            if scan_id is not None and domain_id not in latest_full and newest_scanned.get((domain_id, name), 0) > sub_id:
-                continue
-        project_id, target = targets.get(domain_id, (None, None))
-        out.append((sub_id, name, scan_id, project_id, target))
+    keep = out.append
+    for start in range(0, len(subs), YIELD_EVERY):
+        _breathe(start)
+        for sub_id, name, scan_id, domain_id in subs[start:start + YIELD_EVERY]:
+            if domain_id is not None and scan_id is not None:
+                unscanned_domain = domain_id not in latest_full
+                if not (scan_id in full_ids or scan_id in after or unscanned_domain):
+                    continue
+                if newest_after and newest_after.get((domain_id, name), 0) > scan_id:
+                    continue
+                if unscanned_domain and newest_scanned.get((domain_id, name), 0) > sub_id:
+                    continue
+            project_id, target = targets.get(domain_id, no_target)
+            keep((sub_id, name, scan_id, project_id, target))
     return out
 
 
@@ -80,9 +125,9 @@ def _links(ids):
     """``{subdomain id: [(ip id, is_cdn), ...]}``, one read of the address links of these hosts."""
     from startScan.models import Subdomain
     out = defaultdict(list)
-    for i, (sub_id, ip_id, cdn) in enumerate(Subdomain.ip_addresses.through.objects.filter(subdomain_id__in=ids).values_list('subdomain_id', 'ipaddress_id', 'ipaddress__is_cdn')):
-        _breathe(i)
-        out[sub_id].append((ip_id, bool(cdn)))
+    for chunk in _chunks(_fetch(Subdomain.ip_addresses.through.objects.filter(subdomain_id__in=ids).values_list('subdomain_id', 'ipaddress_id', 'ipaddress__is_cdn'))):
+        for sub_id, ip_id, cdn in chunk:
+            out[sub_id].append((ip_id, bool(cdn)))
     return out
 
 
@@ -90,9 +135,9 @@ def _open_ports(ip_ids):
     """``{ip id: {port id, ...}}`` for the open ports of these addresses, one read."""
     from startScan.models import OPEN_PORT_STATES, IpAddress
     out = defaultdict(set)
-    for i, (ip_id, port_id) in enumerate(IpAddress.ports.through.objects.filter(ipaddress_id__in=ip_ids, port__state__in=OPEN_PORT_STATES).values_list('ipaddress_id', 'port_id')):
-        _breathe(i)
-        out[ip_id].add(port_id)
+    for chunk in _chunks(_fetch(IpAddress.ports.through.objects.filter(ipaddress_id__in=ip_ids, port__state__in=OPEN_PORT_STATES).values_list('ipaddress_id', 'port_id'))):
+        for ip_id, port_id in chunk:
+            out[ip_id].add(port_id)
     return out
 
 
@@ -178,9 +223,8 @@ def web_hosts_by_project():
     from startScan.models import IpAddress, Subdomain
     found = set(Subdomain.objects.filter(http_url__gt='').values_list('target_domain__project_id', 'name').distinct())
     web = web_shot.web_port_q('port__')
-    ips = set(IpAddress.ports.through.objects.filter(web).values_list('ipaddress_id', flat=True).distinct())
-    if ips:
-        found |= set(Subdomain.ip_addresses.through.objects.filter(ipaddress_id__in=ips).values_list('subdomain__target_domain__project_id', 'subdomain__name').distinct())
+    ips = IpAddress.ports.through.objects.filter(web).values('ipaddress_id')  # a subquery, not a list of every such address sent back to the database
+    found |= set(Subdomain.ip_addresses.through.objects.filter(ipaddress_id__in=ips).values_list('subdomain__target_domain__project_id', 'subdomain__name').distinct())
     out = defaultdict(int)
     for project_id, _name in found:
         out[project_id] += 1

@@ -3567,16 +3567,19 @@ def _agent_task_annotations():
             'agent_task_agent': Subquery(active.values('agent__name')[:1])}
 
 
-def _matches_qs(project, current_ids=None):
+def _matches_qs(project, current_ids=None, counting=False):
     """``current_ids``: the ids of the current inventory's hosts when the caller has them already (``cveFeed.inventory_counts``), so the current-scans filter is not
-    evaluated again inside the statement."""
+    evaluated again inside the statement. ``counting``: only the rows that count (scope and current inventory), none of what a list row shows (related rows, comment
+    and agent task subqueries, order): a caller that groups and counts never reads them, and building them is most of what such a count costs in Python."""
     from django.db.models import Q
 
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch
     qs = _scoped(CVEMatch.objects.all(), project, 'subdomain__target_domain__project').filter(
-        latest_scan_q('subdomain__') if current_ids is None else Q(subdomain_id__in=current_ids)) \
-        .select_related('cve_entry', 'subdomain', 'triage__verdict', 'triage__heat_override_by', 'remediation_by', 'assignee') \
+        latest_scan_q('subdomain__') if current_ids is None else Q(subdomain_id__in=current_ids))
+    if counting:
+        return qs
+    qs = qs.select_related('cve_entry', 'subdomain', 'triage__verdict', 'triage__heat_override_by', 'remediation_by', 'assignee') \
         .annotate(comment_count=_comment_count_annotation('match'), **_agent_task_annotations()).order_by('-confidence', '-id')
     # the host's target joined in either case: a list row reads its project (``_finding_row``) and must not ask for it row by row
     return qs.select_related('subdomain__target_domain__project') if _is_all(project) else qs.select_related('subdomain__target_domain')
@@ -3641,7 +3644,7 @@ def _kev_only(params):
     return str(params.get('kev') or '').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
-def _finding_sources(project, params, current_ids=None):
+def _finding_sources(project, params, current_ids=None, counting=False):
     """The querysets the facets allow, keyed by type, each annotated with ``heat_rank`` (3 fire, 2 smoke, 1 ice, 0 none: the
     host card's rules, threat.match_temperature and SEVERITY_HEAT) and ``sev`` (0 info .. 4 critical; a CVE by its CVSS band,
     an unscored one as low), and filtered by heat, severity, status and host.
@@ -3649,7 +3652,8 @@ def _finding_sources(project, params, current_ids=None):
     "Actionable" (the default) is what heats a host on its card: a CVE match the AI did not rule out, an open scanner finding
     above info, an open hygiene finding above info. ``status=all`` adds the rest (informational, closed, ruled out). ``status=closed``
     is the findings a person closed (fixed, accepted_risk or false_positive), and one of those three exactly that one, whatever the scan
-    or the AI says about them."""
+    or the AI says about them. ``counting``: the same filters but none of what a list row shows (related rows, comment counts, the review, the order, the
+    ``when`` column, and ``heat_rank`` on the kinds that have no heat of their own to group by), for a caller that only groups and counts (``cveFeed.stats_history``)."""
     from django.db.models import Case, F, IntegerField, Q, Value, When
 
     from cveFeed.models import HygieneFinding
@@ -3682,7 +3686,7 @@ def _finding_sources(project, params, current_ids=None):
                     When(cve_entry__cvss__gte=4.0, then=Value(2)), default=Value(1), output_field=IntegerField())
     sources = {}
     if wanted in ('all', 'cve'):
-        qs = _matches_qs(project, current_ids).annotate(heat_rank=match_heat_rank_expr(), sev=cve_band, when=F('created_at'))
+        qs = _matches_qs(project, current_ids, counting).annotate(heat_rank=match_heat_rank_expr(), sev=cve_band, **({} if counting else {'when': F('created_at')}))
         if kev:
             qs = qs.filter(cve_entry__kev=True)
         if status == 'actionable':
@@ -3695,11 +3699,14 @@ def _finding_sources(project, params, current_ids=None):
             qs = qs.filter(subdomain__name__icontains=params['host'])
         sources['cve'] = qs
     if wanted in ('all', 'scanner'):
-        qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project') \
-            .select_related('subdomain', 'triage__verdict', 'triage__heat_override_by', 'remediation_by', 'assignee',
-                            'target_domain__project' if everywhere else 'target_domain') \
-            .annotate(heat_rank=finding_heat_rank_expr(), sev=F('severity'), when=F('discovered_date'),
-                      comment_count=_comment_count_annotation('vulnerability'))
+        qs = _scoped(Vulnerability.objects.all(), project, 'target_domain__project')
+        if counting:
+            qs = qs.annotate(sev=F('severity'), **({'heat_rank': finding_heat_rank_expr()} if heat != 'all' else {}))
+        else:
+            qs = qs.select_related('subdomain', 'triage__verdict', 'triage__heat_override_by', 'remediation_by', 'assignee',
+                                   'target_domain__project' if everywhere else 'target_domain') \
+                .annotate(heat_rank=finding_heat_rank_expr(), sev=F('severity'), when=F('discovered_date'),
+                          comment_count=_comment_count_annotation('vulnerability'))
         if status == 'actionable':
             qs = qs.filter(open_status=True, severity__gte=1).exclude(remediation_status__in=CLOSED)
         elif by_status is not None:
@@ -3710,10 +3717,13 @@ def _finding_sources(project, params, current_ids=None):
             qs = qs.filter(subdomain__name__icontains=params['host'])
         sources['scanner'] = qs
     if wanted in ('all', 'hygiene'):
-        qs = _scoped(HygieneFinding.objects.all(), project, 'domain__project') \
-            .select_related('domain__project' if everywhere else 'domain', 'triage__verdict', 'remediation_by', 'assignee') \
-            .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('first_seen'),
-                      comment_count=_comment_count_annotation('hygiene'))
+        qs = _scoped(HygieneFinding.objects.all(), project, 'domain__project')
+        if counting:
+            qs = qs.annotate(sev=F('severity'), **({'heat_rank': severity_heat_rank_expr()} if heat != 'all' else {}))
+        else:
+            qs = qs.select_related('domain__project' if everywhere else 'domain', 'triage__verdict', 'remediation_by', 'assignee') \
+                .annotate(heat_rank=severity_heat_rank_expr(), sev=F('severity'), when=F('first_seen'),
+                          comment_count=_comment_count_annotation('hygiene'))
         if status == 'actionable':
             qs = qs.filter(status='open', severity__gte=1).exclude(remediation_status__in=CLOSED)
         elif by_status is not None:
@@ -3739,7 +3749,7 @@ def _finding_sources(project, params, current_ids=None):
         if severity != 'all':
             qs = qs.filter(sev=inverse[severity])
         from cveFeed import reviewer
-        sources[key] = qs.annotate(**reviewer.newest_review_row_q('triage__')).order_by('-heat_rank', '-sev', F('when').desc(nulls_last=True), '-id')
+        sources[key] = qs if counting else qs.annotate(**reviewer.newest_review_row_q('triage__')).order_by('-heat_rank', '-sev', F('when').desc(nulls_last=True), '-id')
     return sources
 
 
