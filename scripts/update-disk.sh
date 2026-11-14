@@ -3,7 +3,7 @@
 # scripts/update-watch.sh (so Settings > Updates can say it before an administrator approves): is there room for this update?
 #
 #   Where: the file system under Docker's data directory (docker info: Docker Root Dir; /var/lib/docker when it cannot be read).
-#   How much is needed (cvengine_disk_need_mb), an ESTIMATE made of what the first 1.4 update measured (docs/UPDATES.md#disk-space):
+#   How much is needed (cvengine_disk_need_mb), an ESTIMATE made of what the first 1.4 update measured (docs/UPDATES.md, "Small hosts: disk, memory and stuck scans"):
 #       8900 MB  the new server image (1.6 GB, celery and beat share it), the AI reviewer (0.25 GB), a cold build cache (4.7 GB; the nuclei compile layer
 #                alone is 3.2 GB) and about 2 GB to work in (the database dump, logs, the old image that is only removed after a verified update)
 #     + 5100 MB  the built-in scanner's image, when the scanner is on and that image is not on this host yet
