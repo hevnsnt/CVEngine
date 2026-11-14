@@ -1,6 +1,6 @@
 # One scanner for cvENGINE: the plan for 1.4
 
-Status: built on the `1.4-develop` branch (every phase below is done). Built: the result contract (`cvengine_scanner/contract/sentinel_contract.json` in the scanner library), the Sentinel image
+Status: built and released in 1.4.0 (every phase below is done; the text below is the plan as it was written, with the built notes added). Built: the result contract (`cvengine_scanner/contract/sentinel_contract.json` in the scanner library), the Sentinel image
 published (the built-in scanner follows its newest build), the built-in scanner as a default compose service that enrols, re-enrols, updates and rolls back with nobody running
 anything, no local path for any kind (`CVENGINE_LOCAL_FALLBACK` is ignored since 1.4) with the derived
 "scanner offline" state and non-fatal waiting, signed-in nuclei through the secure read, and the server's vantage point delivered to the

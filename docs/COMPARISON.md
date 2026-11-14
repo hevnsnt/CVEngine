@@ -19,7 +19,7 @@
 | Your data | Stays on your server. Nothing is sent to the authors. | Managed service. It states SOC 2 Type II and zero data retention. | Different |
 | AI models | Bring your own: Anthropic, OpenAI, OpenRouter, or a local Ollama, vLLM or LM Studio, on every install | Standard and frontier models. Bring your own key is enterprise only. | cvENGINE |
 | Support | Community, through GitHub | Vendor support | ProjectDiscovery |
-| Maturity | New: v1.3, written in days and tested far less | Years in production | ProjectDiscovery |
+| Maturity | New: v1.4, written in days and tested far less | Years in production | ProjectDiscovery |
 
 ## Discovery
 
@@ -42,7 +42,7 @@
 
 | Area | cvENGINE | ProjectDiscovery | Edge |
 | --- | --- | --- | --- |
-| Template library | The whole installed Nuclei library by default (denial-of-service templates stay excluded). An App Admin can limit scans to templates that pass a read-only check, about half the community set at last count. | The full Nuclei library, stated as over 9,000 community templates | Even |
+| Template library | The whole installed Nuclei library by default, except the default-login and brute-force checks, which send vendor passwords and run only after an App Admin allows them (904 of the 14,225 community templates are left out while that is off); denial-of-service templates stay excluded. An App Admin can also limit scans to templates that pass a read-only check, about half the community set at last count. | The full Nuclei library, stated as over 9,000 community templates | Even |
 | Custom templates | The AI drafts one when none exists. It never runs until a person approves it with reviewed fixtures. | Private custom checks and AI-assisted generation | Even |
 | Protocols | HTTP, plus network service checks through nmap and the exposure checks, and, with the optional off-by-default [OpenVAS (Greenbone) add-on](OPENVAS.md), its network-level vulnerability tests for the hosts you list (slow, version-based results are not treated as confirmed) | HTTP(S), TCP, DNS, SMB, and more | ProjectDiscovery |
 | Extra scanners | wafw00f to name the firewall in front of a host, WPScan, testssl.sh for the TLS configuration and the named TLS vulnerabilities, cloud storage bucket exposure checks (public and dangling S3, GCS and Azure Blob storage), a read-only node2shell check (off by default), unauthenticated-database checks (Redis, Memcached, PostgreSQL, MySQL, MongoDB, Elasticsearch, CouchDB), web route auth and sensitive-data checks, and email and DNS hygiene | Not stated | cvENGINE |
