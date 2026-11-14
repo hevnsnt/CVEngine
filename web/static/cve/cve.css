@@ -2755,14 +2755,14 @@ a.score-label:hover{text-decoration-color:var(--ink)}
   .strip.in-cell a,.strip.in-cell a.wide{flex:1 1 30%;border-right:0;border-left:1px solid var(--line);margin-left:-1px}
   .strip.in-cell a.wide{flex:2 1 60%}
   .strip.in-cell #n-matches,.strip.in-cell #n-coverage,.strip.in-cell #n-oldest{border-right:0}
-  .hero>.card.discovery{height:auto;display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);grid-template-areas:"head head" "target target" "scan scan" "graph counts" "graph ticker";grid-template-rows:auto auto auto auto 1fr;column-gap:var(--s-4);align-content:start}
+  .hero>.card.discovery{height:auto;display:grid;grid-template-columns:minmax(0,1fr);grid-template-areas:"head" "target" "scan" "graph" "counts" "ticker";grid-template-rows:auto auto auto auto auto auto;align-content:start}
   .discovery>.card-head{grid-area:head}
   .discovery>#d-target{grid-area:target}
   .discovery>#d-scanning{grid-area:scan}
   .discovery>.graph-box{grid-area:graph;flex:none;min-height:0;display:flex}
   .discovery>.counts{grid-area:counts;margin-top:var(--s-2)}
   .discovery>.ticker{grid-area:ticker;height:auto;min-height:0;max-height:96px;padding-bottom:var(--s-4)}
-  .hero #d-graph{flex:1;height:auto;min-height:clamp(144px,calc(100dvh - 620px),440px)}
+  .hero #d-graph{flex:1;height:auto;min-height:clamp(180px,calc(100dvh - 520px),420px)}
 }
 
 /* ---- questions about an update (static/cve/update-questions.js) ---- */

@@ -2,6 +2,17 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## v1.4.1 (2026-11-14)
+
+### Changed
+- **One project on the graph is drawn as constellations too, one for each registered domain.** With a single project on the picture the graph used to fall back to the old host-by-host drawing. Now each registered domain is a constellation of its own (all address targets together are one, "IP assets", as in the host-by-host view), packed side by side as with several projects: its name, host count, flares and tier bubbles from its own hosts. Double-click one, or press Open in its card, to dive into those hosts one by one; the back button returns to the constellations. A project with one domain is one constellation. The count reads "1 host", not "1 hosts". The Graph page's "Domain" choice still draws one domain host by host. Hygiene is known per project, so target constellations carry no hygiene bubble. If the page holds only some of a big project's hosts, the project stays one constellation with its true total. A constellation also pulses while a scan works on one of its hosts.
+- **The Overview's Live discovery card is laid out for the constellations.** The graph now takes the full width of the card, with the counts in one row under it and the scan feed under the counts. The status badge in the card head is gone: the line under the title already says "Last discovery: ... (failed)", and it now links to the scan ("View the scan").
+- **An update that changes only documentation restarts nothing.** When the commit being applied differs from the one running only in documentation (`README.md`, `CHANGELOG.md`, `CONTRIBUTORS.md`, and Markdown and image files under `docs/`), the host moves to it with no maintenance page, no scan pause, no build and no container recreated, and the log says `updated to <sha> (documentation only, nothing restarted)`. One changed path outside that list, a path that is not a plain file, or any doubt means the full update as before ([UPDATES.md](docs/UPDATES.md)).
+
+### Fixed
+- **The Graph page shows every project when All projects is chosen.** With more than one project each is drawn as a constellation, and the page then gave every constellation a slot in the grid it uses for host-by-host clusters, about a thousand units apart, and measured the picture by anchors that a constellation does not have. So the view stayed on the first project alone and Fit graph did nothing. The constellations now keep the places they are packed into, side by side as on the Overview, and the page fits all of them, on load and from Fit graph. One project drawn host by host is unchanged.
+- **A celery-beat that waits for migrations says why.** While it waited, the container logged only "Waiting for web to apply migrations" and threw away what `migrate --check` printed, so a restart loop gave no reason. Each attempt now logs the check's exit status and its last lines (a pending migration, a database that cannot be reached, a settings error).
+
 ## v1.4.0 (2026-11-13)
 
 ### Added

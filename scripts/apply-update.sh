@@ -555,6 +555,40 @@ if (( TRIES >= MAX_ATTEMPTS )); then
   clear_approval
   exit 1
 fi
+# A documentation-only update (scripts/update-docs-only.sh holds the allowlist and the reasons) changes nothing any container reads: the files move
+# to the approved commit and the record advances, with no maintenance page, no scan pause, no build and no container recreated. Only when this checkout
+# is a finished, migrated deploy of exactly the commit it is on (so nothing else was owed), the approved commit is a plain fast-forward of it, and the
+# whole range is on the allowlist. Anything else, a doubt, a missing helper, a failed merge: the full deploy below, as before.
+docs_only_update() {
+  local prev
+  [ "$SWITCH" = 0 ] || return 1
+  [ -f scripts/update-docs-only.sh ] || return 1
+  prev=$(git rev-parse HEAD) || return 1
+  [ "$prev" != "$SHA" ] && git merge-base --is-ancestor "$prev" "$SHA" || return 1
+  [ "$(python3 "$STATE_HELPER" built 2>/dev/null || true)" = "$prev" ] && [ "$(deployed_commit)" = "$prev" ] && schema_current || return 1
+  # shellcheck source=update-docs-only.sh
+  . scripts/update-docs-only.sh
+  cvengine_docs_only_update "$prev" "$SHA" || { log "full deploy: $cvengine_docs_only_reason"; return 1; }
+  log "documentation only ($cvengine_docs_only_reason): updating $prev -> $SHA with no maintenance page, no scan pause and no container restarted"
+  backup_env
+  if ! git merge --ff-only "$SHA" >>"$LOG" 2>&1; then
+    restore_env
+    log "the documentation-only fast-forward failed; doing the full deploy instead"
+    return 1
+  fi
+  restore_env
+  return 0
+}
+if docs_only_update; then
+  python3 "$STATE_HELPER" commit "$SHA"
+  refresh_upstream
+  mark_deployed "$SHA"
+  rm -f "$ATTEMPTS_FILE" "$STATE/last-wait" "$STATE/last-refusal" "$STATE/draining-since"
+  clear_approval
+  phase done
+  log "updated to $SHA (documentation only, nothing restarted)"
+  exit 0
+fi
 # Room for the update, before anything is paused or stopped (scripts/update-disk.sh; the same sentence the Update screen shows). Only for an update that moves the
 # files: a rebuild of what is already here is checked by the deploy itself. A host that does not have the script yet (the first update to this version)
 # is checked by scripts/update-deploy.sh once the new files are in.

@@ -9,7 +9,7 @@
 <p align="center">Assess each host with industry-standard scanners and fix what matters first.</p>
 
 <p align="center">
-  <a href="CHANGELOG.md"><img alt="Release 1.4.0" src="https://img.shields.io/badge/release-1.4.0-2ea44f"></a>
+  <a href="CHANGELOG.md"><img alt="Release 1.4.1" src="https://img.shields.io/badge/release-1.4.1-2ea44f"></a>
   <a href="LICENSE"><img alt="License GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
   <img alt="Self-hosted with Docker Compose" src="https://img.shields.io/badge/self--hosted-Docker%20Compose-blue">
 </p>

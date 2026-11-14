@@ -84,6 +84,7 @@
         last = key;
       }
       graph.setClustered(!key);
+      graph.setConstellations(!key); // All domains: a constellation for each project, or for each target of one project; one domain: host by host
       const rendered = graph.sync(data);
       if (reset) graph.fit();
       const hostsInfo = data.hosts || {};
