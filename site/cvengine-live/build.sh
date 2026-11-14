@@ -9,6 +9,7 @@ cd "$(dirname "$0")"
   cat src/page.html
   printf '\n</body>\n</html>\n'
 } > public/index.html
+cp assets/* public/
 cat > public/404.html <<'HTML'
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Not found · cvengine.live</title>
 <style>body{margin:0;min-height:100vh;display:grid;place-items:center;font:16px/1.6 system-ui,sans-serif;background:#f3f4f6;color:#0b0c0e}@media (prefers-color-scheme:dark){body{background:#0d0e10;color:#f1f2f4}}a{color:inherit}</style></head>
