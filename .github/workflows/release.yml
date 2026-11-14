@@ -151,6 +151,34 @@ jobs:
             echo "::error::CHANGELOG.md has no '## $TAG (' section"
             exit 1
           fi
+          # GitHub refuses a release body of more than 125000 characters (HTTP 422). A longer one is cut at a whole bullet, outside any code fence or <details> block, and ends with a link to the full changelog.
+          NOTES="$RUNNER_TEMP/notes.md" python3 - <<'PY'
+          import os
+          path, tag, repo, limit = os.environ['NOTES'], os.environ['TAG'], os.environ['REPO'], 120000
+          with open(path, encoding='utf-8', newline='') as handle:
+              text = handle.read()
+          if len(text) > limit:
+              lead = f'The notes for {tag} are longer than a GitHub release can hold. This is the first part of them.\n\n'
+              tail = f'\n\nThe full notes for {tag} are in [CHANGELOG.md](https://github.com/{repo}/blob/{tag}/CHANGELOG.md).\n'
+              budget = limit - len(lead) - len(tail)
+              lines, used, fence, depth, cut = text.splitlines(keepends=True), 0, False, 0, 0
+              for number, line in enumerate(lines):
+                  bare = line.strip()
+                  if not fence and depth == 0 and used <= budget and (not bare or bare[0] in '-*#<'):
+                      cut = number
+                  if used + len(line) > budget:
+                      break
+                  used += len(line)
+                  if bare.startswith(('```', '~~~')):
+                      fence = not fence
+                  elif not fence:
+                      depth += line.count('<details') - line.count('</details>')
+              else:
+                  cut = len(lines) if not fence and depth == 0 else cut
+              body = ''.join(lines[:cut]).strip()
+              with open(path, 'w', encoding='utf-8', newline='') as handle:
+                  handle.write(lead + body + tail if body else lead.rstrip() + tail)
+          PY
 
       - name: 🚀 Publish
         env:
