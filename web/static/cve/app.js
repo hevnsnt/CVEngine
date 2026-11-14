@@ -2630,6 +2630,71 @@ function allTargets(mount) {
 }
 
 // --- pages ----------------------------------------------------------------------
+// Stop all scanning / Resume all scanning: the instance-wide pause (App Admins only), at the top of the Scans page so it is one click away.
+// Stopping holds scheduled and queued work in every project and stops what is running; resuming lets queued work start again
+// (scans that were stopped are not restarted). Returns null for anyone who is not an App Admin: the server allows only them.
+function globalScanControl() {
+  if (root.dataset.appAdmin !== "1") return null;
+  const control = el("section", "scan-control");
+  const button = el("button", "btn lg", "Stop all scanning", { type: "button" });
+  const state = el("div", "note", null, { role: "status" });
+  state.append(waiting("Loading the global scanning state", { live: false })); // state is already a status region
+  control.append(button, state);
+  let paused = null;
+  let busy = false;
+  function show(data) {
+    paused = data.paused;
+    button.textContent = paused ? "Resume all scanning" : "Stop all scanning";
+    button.className = paused ? "btn lg" : "btn lg danger";
+    button.disabled = busy;
+    const tasks = data.active_worker_tasks;
+    if (data.last_error) state.textContent = data.last_error;
+    else if (!paused) state.textContent = "Scanning is running in every project.";
+    else if (data.state === "stopping") state.textContent = `All scanning is stopped. ${tasks} task${tasks === 1 ? " is" : "s are"} still finishing.`;
+    else state.textContent = `All scanning is stopped${data.reason ? ` (${data.reason})` : ""}. Queued work waits until you resume.`;
+  }
+  async function refresh() {
+    try {
+      const data = await api("GET", "/cve/api/admin/scan-control");
+      if (control.isConnected) show(data);
+    } catch (err) {
+      state.textContent = `Could not read the scanning state: ${err.message}`;
+      button.disabled = true;
+    }
+  }
+  button.onclick = async () => {
+    if (paused === null) return;
+    const stopping = !paused;
+    const sure = await ask(
+      stopping
+        ? "Every running scan in every project stops now, and nothing new starts until you press Resume all scanning. Findings already made are kept, and queued work waits."
+        : "Scheduled and queued scans start again in every project. Scans that were stopped are not restarted.",
+      { title: stopping ? "Stop all scanning?" : "Resume all scanning?", ok: stopping ? "Stop all scanning" : "Resume all scanning" },
+    );
+    if (!sure) return;
+    busy = true;
+    button.disabled = true;
+    try {
+      // the server asks for these exact words, so a stray request cannot pause or resume every project
+      show(await api("POST", "/cve/api/admin/scan-control", stopping
+        ? { action: "pause", confirm: "Pause all scanning" }
+        : { action: "resume", confirm: "Resume scanning" }));
+      toast(stopping ? "All scanning stopped" : "Scanning resumed");
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      busy = false;
+      await refresh();
+    }
+  };
+  refresh();
+  const timer = setInterval(() => {
+    if (!control.isConnected) clearInterval(timer);
+    else if (!document.hidden) refresh();
+  }, 5000);
+  return control;
+}
+
 const pages = {
   async targets(mount) {
     if (ALL) return allTargets(mount);
@@ -2957,7 +3022,7 @@ const pages = {
       () => list.reload(),
     );
     // Stop all: every running and queued scan of this project, after a confirmation
-    const stopAll = el("button", "btn sm", "Stop all", { type: "button" });
+    const stopAll = el("button", "btn sm", "Stop project scans", { type: "button" });
     stopAll.title = "Stop every running and queued scan in this project";
     stopAll.onclick = async () => {
       const sure = await ask("Every running and queued scan in this project will be stopped. Scanner processes are killed; what they already found is kept.", {
@@ -2975,6 +3040,9 @@ const pages = {
       }
       stopAll.disabled = false;
     };
+    // Stop all scanning / Resume all scanning (App Admins), first thing on the page
+    const control = globalScanControl();
+    if (control) mount.append(control);
     // the same head as Findings and Hosts: the status chips are the Filters panel, Stop all and the activity chart open from the count line
     const root = el("div", "table-page");
     mount.append(root);
@@ -4796,49 +4864,9 @@ const ACTIVITY_BADGE = { target: "fire", validate: "success", hygiene: "success"
 
 pages.activity = function activity(mount) {
   const tools = el("div", "tools");
-  if (ALL && root.dataset.appAdmin === "1") {
-    const control = el("section", "card");
-    const state = el("div", "note", null, { role: "status" });
-    state.append(waiting("Loading the global scanning state", { live: false })); // state is already a status region
-    const actions = el("div", "tools");
-    const pause = el("button", "btn", "Pause all scanning", { type: "button" });
-    const resume = el("button", "btn ghost", "Resume scanning", { type: "button" });
-    let busy = false;
-    async function refresh() {
-      try {
-        const data = await api("GET", "/cve/api/admin/scan-control");
-        if (!control.isConnected) return;
-        const active = data.active_worker_tasks === null ? "unknown" : String(data.active_worker_tasks);
-        const changed = data.changed_at ? ` Changed ${shortDate(data.changed_at)} by ${data.actor || "system"}.` : "";
-        state.textContent = `Global state: ${data.state.replaceAll("_", " ")}. Active worker tasks: ${active}.${changed} ${data.last_error || data.note}`;
-        pause.disabled = busy || data.paused;
-        resume.disabled = busy || !data.paused;
-      } catch (err) {
-        state.textContent = `Global scanning state unavailable: ${err.message}`;
-        pause.disabled = resume.disabled = true;
-      }
-    }
-    async function change(action, confirmation) {
-      if (!window.confirm(`${confirmation}? This affects every project. Active scans will be stopped; queued work is kept.`)) return;
-      busy = true;
-      pause.disabled = resume.disabled = true;
-      try {
-        await api("POST", "/cve/api/admin/scan-control", { action, confirm: confirmation });
-      } catch (err) {
-        toast(err.message, true);
-      } finally {
-        busy = false;
-        await refresh();
-      }
-    }
-    pause.onclick = () => change("pause", "Pause all scanning");
-    resume.onclick = () => change("resume", "Resume scanning");
-    actions.append(pause, resume);
-    control.append(el("h2", "", "Global scanning control"), state, actions,
-      el("p", "note", "The pause holds new scheduled and queued work. Active scanner processes stop cooperatively; a status of pause requested means shutdown is not yet confirmed. Resume does not restart stopped scans."));
-    mount.append(control);
-    refresh();
-    setInterval(() => { if (control.isConnected && !document.hidden) refresh(); }, 5000);
+  if (ALL) {
+    const control = globalScanControl();
+    if (control) mount.append(control);
   }
   const kinds = select("Kind", [["", "All kinds"], ...Object.entries(ACTIVITY_KIND)], () => list.reload());
   tools.append(kinds);
