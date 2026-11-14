@@ -164,7 +164,17 @@ test('a cloud is made of its targets, and its shape follows them: no two project
   assert.deepEqual(shape(clouds.p1), many);
 });
 
-test('every cloud takes a slot in the clustered project grid, anchored, with its bubbles around it', () => {
+test('with every project a cloud nothing is clustered: the clouds keep their packed places, side by side', () => {
+  const packed = cloudProjects(manyProjects([810, 46, 32, 26, 22, 9]), {aspect: 1.6});
+  const view = clusterGraph(packed, {columns: 3});
+  const at = (v) => Object.fromEntries(v.nodes.filter(n => ['cloud', 'tier'].includes(n.kind)).map(n => [n.id, [n.seed_x, n.seed_y]]));
+  assert.equal(view.nodes.filter(n => n.kind === 'cloud').length, 6);
+  assert.deepEqual(at(view), at(packed)); // where cloudProjects packed them, not a slot each in the cluster grid (1100 apart)
+  const xs = view.nodes.filter(n => n.kind === 'cloud').map(c => c.seed_x);
+  assert.ok(Math.max(...xs) - Math.min(...xs) < 1100);
+});
+
+test('every cloud is anchored in the clustered view, with its bubbles around it', () => {
   const view = clusterGraph(cloudProjects(bigProject(30, 2)), {columns: 2});
   const clouds = view.nodes.filter(n => n.kind === 'cloud');
   assert.equal(clouds.length, 2);
