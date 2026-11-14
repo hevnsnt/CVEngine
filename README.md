@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/cvengine-tour-1.4.gif" alt="A 40-second tour of cvENGINE 1.4 on a fictional demo company: the Overview, the asset graph of every domain, host and address, Shodan-style search typed on the Hosts page, CVE matches arriving on the live graph while a scan runs (smoke turning to fire), Situations, and the Sentinels" width="880">
+  <img src="docs/images/cvengine-tour-1.4.gif" alt="A 50-second tour of cvENGINE 1.4 on a fictional demo company: the Overview, the asset graph of every domain, host and address, Shodan-style search typed on the Hosts page, CVE matches arriving on the live graph while a scan runs (smoke turning to fire), Situations, and the Sentinels" width="880">
 </p>
 
 <p align="center"><sub>cvENGINE 1.4 on demo data.</sub></p>
