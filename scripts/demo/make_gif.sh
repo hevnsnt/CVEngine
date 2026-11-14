@@ -5,14 +5,15 @@
 #
 #     scripts/demo/make_gif.sh                      # seed, start the app, record the tour, write docs/images/cvengine-tour-1.4.gif
 #     scripts/demo/make_gif.sh OUT.gif              # the same, to another file
-#     scripts/demo/make_gif.sh IN.webm OUT.gif      # only turn a recording into a GIF (env: START seconds to skip, SPEED play-back factor (1.4), WIDTH, FPS, COLORS)
+#     scripts/demo/make_gif.sh IN.webm OUT.gif      # only turn a recording into a GIF (env: START seconds to skip, SPEED play-back factor (1.6), WIDTH, FPS, COLORS)
 #
-# The seed is scripts/demo/seed_demo.py (the fictional company Acme Corp: made-up domains, documentation-range and private addresses), the recording is
+# The seed is scripts/demo/seed_demo.py (the fictional company Acme Corp: made-up domains, documentation-range and private addresses) plus scripts/demo/seed_tour_projects.py
+# (five more made-up companies, so the All projects graph has six constellations; the CI UI gates do not run it), the recording is
 # scripts/demo/record_tour.js, and the live CVE moment is scripts/demo/stage_live.py, which the recording starts while it films. Never run it against a real install:
-# the seed creates an App Admin with a known password. The GIF is WIDTH wide (880) at FPS frames a second (10), 48-colour palette-optimised, and loops. Waiting-for-page stretches of the recording are cut (cuts.json).
+# the seed creates an App Admin with a known password. The GIF is WIDTH wide (880) at FPS frames a second (10), 36-colour palette-optimised, and loops. Waiting-for-page stretches of the recording are cut (cuts.json).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-WIDTH=${WIDTH:-880}; COLORS=${COLORS:-48}; FPS=${FPS:-10}; START=${START:-0}; SPEED=${SPEED:-1.4}
+WIDTH=${WIDTH:-880}; COLORS=${COLORS:-36}; FPS=${FPS:-10}; START=${START:-0}; SPEED=${SPEED:-1.6}
 
 to_gif() {  # to_gif IN.webm OUT.gif: the stretches the recording marked as waiting for a page (cuts.json beside it) are left out, nothing else is touched
   local cuts="$(dirname "$1")/cuts.json" keep=""
@@ -36,7 +37,7 @@ export BASE="http://127.0.0.1:$PORT" PROJECT=acme-corp OUT="$WORK/rec" STAGE_CWD
 export STAGE='python3 manage.py shell < ../scripts/demo/stage_live.py'
 export NODE_PATH=${NODE_PATH:-$(npm root -g)}
 
-(cd web && python3 manage.py shell < ../scripts/demo/seed_demo.py)
+(cd web && python3 manage.py shell < ../scripts/demo/seed_demo.py && python3 manage.py shell < ../scripts/demo/seed_tour_projects.py)
 (cd web && exec python3 manage.py runserver "127.0.0.1:$PORT" --insecure --noreload > "$WORK/server.log" 2>&1) &
 SERVER=$!
 trap 'kill $SERVER 2>/dev/null || true' EXIT
