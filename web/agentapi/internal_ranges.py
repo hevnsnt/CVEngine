@@ -37,6 +37,8 @@ def add_range(ctx, slug, body):
     from cveFeed.models import InternalRange
     from targetApp.target_types import clean_internal_cidr
     project = _admin(ctx, slug, write=True)
+    if ctx.token is not None:  # an API token or MCP call: a declared range opens private addresses to scanning, so only a person declares one (removing one stays open to a token)
+        raise ApiError(403, 'declaring an internal range opens private addresses to scanning, so only a person does it, in the web interface; a token may remove a range')
     if not isinstance(body, dict) or set(body) - {'cidr', 'description'}:
         raise ApiError(400, 'send {cidr, description}')
     try:

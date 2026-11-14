@@ -1,0 +1,22 @@
+{
+  "hosts": [
+    {
+      "host": "www.example.com",
+      "urls": [
+        "https://www.example.com/",
+        "https://www.example.com/account"
+      ]
+    }
+  ],
+  "scope": {
+    "hosts": [
+      "www.example.com"
+    ],
+    "domains": [],
+    "excluded": [],
+    "excluded_trees": [],
+    "private": false,
+    "addresses": [],
+    "blocked": []
+  }
+}

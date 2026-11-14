@@ -72,6 +72,9 @@ class Command(BaseCommand):
 
     def _announce(self, username, generated, reset):
         domain = os.environ.get('DOMAIN_NAME') or 'your server'
+        port = (os.environ.get('CVENGINE_HTTPS_PORT') or '').strip()
+        if port.isdigit() and port != '443' and ':' not in domain:  # the host port was moved (another program holds 443): the address must carry it
+            domain = f'{domain}:{port}'
         line = '=' * 66
         out = [line, f'  CVEngine admin account{" (password reset)" if reset else ""}', '',
                f'    Address   : https://{domain}/', f'    Username  : {username}']

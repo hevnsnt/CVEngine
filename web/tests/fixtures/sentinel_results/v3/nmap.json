@@ -1,0 +1,20 @@
+{
+  "outcome": "done",
+  "os_reliable": true,
+  "hosts": [
+    {
+      "ip": "192.0.2.10",
+      "os_guess": "Linux 5.x",
+      "ports": [
+        {
+          "number": 22,
+          "protocol": "tcp",
+          "state": "open",
+          "service_name": "ssh",
+          "product": "OpenSSH",
+          "version": "9.6"
+        }
+      ]
+    }
+  ]
+}

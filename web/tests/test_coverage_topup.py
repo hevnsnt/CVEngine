@@ -5,7 +5,6 @@ from unittest import mock
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import assessment_review as ar
 from cveFeed import coverage_topup
 from cveFeed import host_assessment
 from cveFeed.models import HostAssessment
@@ -34,7 +33,7 @@ class CoverageTopupTests(TestCase):
              mock.patch('cveFeed.tasks.assess_host.apply_async') as sender:
             sender.return_value.id = 'topup-task'
             result = coverage_topup.top_up(now=self.now)
-        # the per-project cap (5) is reached before the backlog (7) is drained, but far more than the three-hour
+        # the per-project cap (5) is reached before the backlog (7) is drained, but far more than the retired three-hour
         # review's one-due-host-per-project-per-window pace
         self.assertEqual(result['hosts_queued'], 5)
         self.assertEqual(HostAssessment.objects.filter(project=self.project, status='queued').count(), 5)
@@ -84,13 +83,14 @@ class CoverageTopupTests(TestCase):
         self.assertEqual(result['hosts_queued'], 0)
         sender.assert_not_called()
 
-    def test_the_ai_review_and_the_topup_never_double_queue_the_same_host(self):
+    def test_a_host_already_queued_elsewhere_is_never_queued_twice(self):
         [sub] = self.hosts(1)
         with mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
              mock.patch('cveFeed.tasks.assess_host.apply_async') as sender:
-            sender.return_value.id = 'review-task'
-            status, job_id, _ = ar.dispatch(self.project, {'due_host_id': sub.pk}, 'assess_host')
-            self.assertEqual(status, 'queued')
+            sender.return_value.id = 'manual-task'
+            first, created = host_assessment.enqueue(self.project, sub, source='manual')
+            self.assertTrue(created)
+            job_id = first.pk
             # The host just got an assessment, so it falls out of host_coverage_due's own population (a recent
             # attempt is deferred, not re-offered) before the top-up sweep ever sees it.
             sender.return_value.id = 'topup-task'

@@ -1,0 +1,9 @@
+{
+  "checks": [
+    {"id": "old.example.com|93.184.215.14:443", "host": "old.example.com", "ip": "93.184.215.14", "port": 443, "scheme": "https"},
+    {"id": "old.example.com|93.184.215.14:80", "host": "old.example.com", "ip": "93.184.215.14", "port": 80, "scheme": "http"},
+    {"id": "gone.example.com|198.51.100.7:22", "host": "gone.example.com", "ip": "198.51.100.7", "port": 22, "scheme": "tcp"}
+  ],
+  "scope": {"hosts": ["93.184.215.14", "198.51.100.7"], "domains": [], "excluded": [], "excluded_trees": [], "private": false, "addresses": [],
+            "blocked": []}
+}

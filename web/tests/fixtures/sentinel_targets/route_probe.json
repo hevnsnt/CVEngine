@@ -1,0 +1,32 @@
+{
+  "hosts": [
+    {
+      "host": "www.example.com",
+      "urls": [
+        "https://www.example.com/",
+        "https://www.example.com/login",
+        "https://www.example.com/admin"
+      ]
+    },
+    {
+      "host": "api.example.com",
+      "urls": [
+        "https://api.example.com/",
+        "https://api.example.com/api/"
+      ]
+    }
+  ],
+  "scope": {
+    "hosts": [
+      "api.example.com",
+      "www.example.com",
+      "code.jquery.com"
+    ],
+    "domains": [],
+    "excluded": [],
+    "excluded_trees": [],
+    "private": false,
+    "addresses": [],
+    "blocked": []
+  }
+}

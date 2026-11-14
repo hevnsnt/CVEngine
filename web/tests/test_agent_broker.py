@@ -9,7 +9,7 @@ from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 
 from agentapi import agent_broker as broker
-from agentapi import agent_tasks, mcp
+from agentapi import agent_tasks
 from agentapi.auth import create_token
 from agentapi.models import Agent, AgentTask
 from agentapi.services import Ctx
@@ -597,7 +597,7 @@ class LeaseTests(AgentBrokerTestCase):
 		self.assertEqual(call(self.t['alice'], 'POST', f'/api/v1/agent/tasks/{task_id}/result', {'outcome': 'confirmed'})[0], 404)
 		heartbeat = call(self.t['alice'], 'POST', '/api/v1/agent/heartbeat', {})[1]
 		self.assertEqual(heartbeat['agent']['status'], 'suspended')
-		call(self.t['dana'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'status': 'active'})
+		call(self.dana, 'PATCH', f'/api/v1/agents/{agent.pk}', {'status': 'active'})
 		AgentTask.objects.update(not_before=None)
 		self.assertIsNotNone(next_task(self.t['alice'])[1]['task'])
 
@@ -1034,7 +1034,7 @@ class ApprovalTests(AgentBrokerTestCase):
 		self.assertEqual(status, 403)
 		self.assertIn('approve', message['error'])
 		self.assertEqual(AgentTask.objects.get().status, 'queued')
-		call(self.t['dana'], 'PATCH', f'/api/v1/agents/{body["id"]}', {'status': 'active'})
+		call(self.dana, 'PATCH', f'/api/v1/agents/{body["id"]}', {'status': 'active'})
 		self.assertIsNotNone(next_task(self.t['alice'])[1]['task'])
 
 	def test_an_administrators_agent_is_active_at_once(self):
@@ -1056,12 +1056,12 @@ class ApprovalTests(AgentBrokerTestCase):
 		_, fresh = register(self.t['alice2'], approve=False)
 		url = f'/api/v1/agents/{fresh["id"]}'
 		self.assertEqual(fresh['status_note'], broker.hold_note(Agent.objects.get(pk=body['id'])))
-		status, out = call(self.t['dana'], 'PATCH', url, {'status': 'active'})  # the Sentinels page's Reinstate button
+		status, out = call(self.dana, 'PATCH', url, {'status': 'active'})  # the Sentinels page's Reinstate button
 		self.assertEqual((status, out['status'], out['status_note']), (200, 'active', ''))
 		call(self.t['dana'], 'PATCH', url, {'status': 'suspended', 'note': 'looping on one host'})
 		self.assertEqual(Agent.objects.get(pk=fresh['id']).status_note, 'looping on one host')
 		# the admin dialog sends the note field back unchanged with every action: that is no new note, so it is cleared too
-		status, out = call(self.t['dana'], 'PATCH', url, {'status': 'active', 'note': 'looping on one host'})
+		status, out = call(self.dana, 'PATCH', url, {'status': 'active', 'note': 'looping on one host'})
 		self.assertEqual((out['status'], out['status_note']), ('active', ''))
 
 	def test_an_administrators_reason_survives_suspend_and_revoke(self):
@@ -1085,7 +1085,7 @@ class ApprovalTests(AgentBrokerTestCase):
 		_, body = register(self.t['alice'])
 		url = f'/api/v1/agents/{body["id"]}'
 		call(self.t['dana'], 'PATCH', url, {'status': 'suspended', 'note': 'first'})
-		self.assertEqual(call(self.t['dana'], 'PATCH', url, {'status': 'active', 'note': 'back, watch it'})[1]['status_note'], 'back, watch it')
+		self.assertEqual(call(self.dana, 'PATCH', url, {'status': 'active', 'note': 'back, watch it'})[1]['status_note'], 'back, watch it')
 		self.assertEqual(call(self.t['dana'], 'PATCH', url, {'limits': {'max_concurrent': 1}})[1]['status_note'], 'back, watch it')  # no status change: kept
 		self.assertEqual(call(self.t['dana'], 'PATCH', url, {'note': ''})[1]['status_note'], '')
 
@@ -1119,9 +1119,9 @@ class ApprovalTests(AgentBrokerTestCase):
 		url = f'/api/v1/agents/{body["id"]}'
 		self.assertEqual(call(self.t['dana'], 'PATCH', url, {'limits': {'max_concurrent': 1}})[0], 403)
 		self.assertEqual(call(self.t['root'], 'PATCH', url, {'status': 'revoked'})[0], 200)
-		self.assertEqual(call(self.t['dana'], 'PATCH', url, {'status': 'active'})[0], 403)
+		self.assertEqual(call(self.dana, 'PATCH', url, {'status': 'active'})[0], 403)
 		self.assertEqual(Agent.objects.get().status, 'revoked')
-		self.assertEqual(call(self.t['root'], 'PATCH', url, {'status': 'active'})[0], 200)
+		self.assertEqual(call(self.root, 'PATCH', url, {'status': 'active'})[0], 200)
 
 
 class HoldBackTests(AgentBrokerTestCase):
@@ -1219,7 +1219,7 @@ class HoldBackTests(AgentBrokerTestCase):
 		_, old = register(self.t['alice'])
 		self.revoke(old['id'])
 		held = register(self.t['alice2'], approve=False)[1]
-		status, out = call(self.t['dana'], 'PATCH', f'/api/v1/agents/{held["id"]}', {'status': 'active'})
+		status, out = call(self.dana, 'PATCH', f'/api/v1/agents/{held["id"]}', {'status': 'active'})
 		self.assertEqual((status, out['status'], out['status_note'], out['held_by']), (200, 'active', '', None))
 		agent = Agent.objects.get(pk=held['id'])
 		self.assertEqual((agent.status_inherited, agent.held_by_id), (False, None))
@@ -1240,7 +1240,7 @@ class HoldBackTests(AgentBrokerTestCase):
 		self.assertIn('Approve this one to use it', fresh['status_note'])
 		self.assertEqual(fresh['held_by']['id'], mine['id'])
 		self.assertEqual(AuditLog.objects.get(action='agent.hold').detail['status'], 'pending')
-		status, out = call(self.t['root'], 'PATCH', f'/api/v1/agents/{fresh["id"]}', {'status': 'active'})
+		status, out = call(self.root, 'PATCH', f'/api/v1/agents/{fresh["id"]}', {'status': 'active'})
 		self.assertEqual((status, out['status'], out['status_note'], out['held_by']), (200, 'active', '', None))
 		call(self.t['root'], 'DELETE', f'/api/v1/agents/{mine["id"]}')
 		self.assertEqual(register(create_token(self.dana, 'last')[1], approve=False, scope={'orgs': ['one']}, name='danas-third')[1]['status'], 'active')

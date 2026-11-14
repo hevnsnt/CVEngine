@@ -24,6 +24,15 @@ def _call(fn, *args):
         raise ApiError(403, str(exc))
 
 
+def _person_only(ctx, what):
+    """FB-3: applying a recommendation, handing a pinned setting back and reverting a change are a person's decisions. An agent (any API token or MCP call) that applied
+    its own recommendation made it a person's change (no 30-minute check, no automatic revert, and a pin in Suggest mode); one that released or reverted undid what a
+    person chose. An agent changes a setting with ``change_setting``, which goes through the engine and its rules. (An agent may not even revert its own change: the
+    decision does not record which token made it, and taking back a lowered cap would raise that cap.)"""
+    if ctx.token is not None:
+        raise ApiError(403, f'{what} is a person\'s decision: an agent cannot do it. Use change_setting to ask for a change (it goes through the auto-tuning rules and the agent policy a person set); a person applies, releases or reverts in Settings, Auto-tuning')
+
+
 def _int(value, name, default):
     if value in (None, ''):
         return default
@@ -43,22 +52,36 @@ def list_decisions(ctx, params):
     from cveFeed import autotune
     _admin(ctx)
     params = params or {}
-    return autotune.list_decisions(params.get('setting') or None, _int(params.get('limit'), 'limit', 50), _int(params.get('offset'), 'offset', 0))
+    return _call(autotune.list_decisions, params.get('setting') or None, _int(params.get('limit'), 'limit', 50), _int(params.get('offset'), 'offset', 0),
+                 params.get('outcome') or None, params.get('source') or None)
+
+
+def get_maintainer_report(ctx):
+    from cveFeed import maintainer_report
+    _admin(ctx)
+    return maintainer_report.report()
 
 
 def set_mode(ctx, body):
     from cveFeed import autotune
     _admin(ctx)
     require_write_token(ctx)
-    if not isinstance(body, dict) or not body or set(body) - {'mode', 'advisor'}:
+    if isinstance(body, dict) and 'agent_policy' in body and ctx.token is not None:
+        raise ApiError(403, 'what agents may do to the throughput settings is a person\'s decision: change it in Settings, Auto-tuning')
+    if not isinstance(body, dict) or not body or set(body) - {'mode', 'advisor', 'agent_policy'}:
         raise ApiError(400, 'send {"mode": "off" | "suggest" | "auto"} and/or {"advisor": true | false}')
-    return _call(autotune.set_mode, ctx.user, body.get('mode'), body.get('advisor'))
+    if ctx.token is not None:  # a token (an agent, or a person's key) may only lower autonomy
+        why = autotune.raises_autonomy(body.get('mode'), body.get('advisor'))
+        if why:
+            raise ApiError(403, why)
+    return _call(autotune.set_mode, ctx.user, body.get('mode'), body.get('advisor'), body.get('agent_policy'))
 
 
 def apply_decision(ctx, decision_id):
     from cveFeed import autotune
     _admin(ctx)
     require_write_token(ctx)
+    _person_only(ctx, 'applying a recommendation')
     return _call(autotune.apply_decision, ctx.user, _int(decision_id, 'decision_id', None))
 
 
@@ -66,6 +89,7 @@ def revert_decision(ctx, decision_id):
     from cveFeed import autotune
     _admin(ctx)
     require_write_token(ctx)
+    _person_only(ctx, 'reverting a decision')
     return _call(autotune.revert, ctx.user, _int(decision_id, 'decision_id', None))
 
 
@@ -73,6 +97,7 @@ def release(ctx, setting):
     from cveFeed import autotune
     _admin(ctx)
     require_write_token(ctx)
+    _person_only(ctx, 'handing a pinned setting back to auto-tuning')
     if not isinstance(setting, str) or not setting:
         raise ApiError(400, 'setting is required (a key from get_tuning_status managed[].setting)')
     return _call(autotune.release, ctx.user, setting)

@@ -1,0 +1,20 @@
+{% extends 'cveFeed/base.html' %}
+{% load assets %}
+{% block title %}CVEngine · Scanners{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+<h1>Scanners</h1>
+<p class="sub">When no Sentinel is online, this server runs the external stages itself, and this page shows whether scanning is working through the Sentinels that take scan work{% if is_app_admin %}, the workers and scheduler on this server and the scanning pause{% endif %} in one place.</p>
+</div></div>
+<div id="health" aria-live="polite" data-app-admin="{% if is_app_admin %}1{% endif %}">
+  <div class="wait"><p class="note wait-line">Checking the scanners. Be back shortly...</p><span class="sk-bar wait-bar" aria-hidden="true"></span><span class="sk-bar wait-bar" aria-hidden="true"></span></div>
+</div>
+<div class="health-links">
+  <a class="btn sm" href="{% url 'cve_sentinels' %}">Sentinels and Provision</a>
+  {% if is_app_admin %}<a class="btn ghost sm" href="{% url 'cve_admin' %}#health">Scheduler detail</a><a class="btn ghost sm" href="{% url 'cve_admin' %}#watchdog">Watchdog</a>{% endif %}
+  <a class="btn ghost sm" href="{% url 'cve_agents' %}">API keys</a>
+</div>
+{% endblock %}
+{% block scripts %}
+<script type="module" src="{% asset 'cve/scanners.js' %}"></script>
+{% endblock %}

@@ -13,11 +13,16 @@ from django.utils import timezone
 
 from cveFeed import detection
 from cveFeed.models import CVEDetection, CVEEntry
+from reNgine import ai_prompts
 
 logger = logging.getLogger(__name__)
 
 DEFAULTS = {'DETECTION_RULES_BATCH': 500, 'DETECTION_AI_PER_DAY': 25}
-AI_RETRY_AFTER = datetime.timedelta(days=7)
+AI_RETRY_AFTER = datetime.timedelta(days=7)  # a record written before the back-off existed (no ``ai_retry_at``) is asked again after this
+# A failed ask is retried with a growing wait and then not at all: 6 hours, 1 day, 3 days, 7 days after the 1st to the 4th failure; the 5th
+# stops (the record keeps its rules-written checks and says so; an administrator's guidance asks again, and a changed CVE resets the count).
+AI_BACKOFF = (datetime.timedelta(hours=6), datetime.timedelta(days=1), datetime.timedelta(days=3), datetime.timedelta(days=7))
+AI_MAX_FAILURES = len(AI_BACKOFF) + 1
 RULES_LOOP_BATCH = 5000  # rules records are free and instant: a run writes them in rounds this size until none are left or time is up
 RULES_LOOP_SECONDS = 240
 AI_ID_PREFIX = 'ai-'
@@ -227,9 +232,8 @@ INTAKE_POLICY = (
     'person logged in to the host needs, and no remote checks. THEN write the guidance for people and the checks, as below. '
 )
 
-SYSTEM_PROMPT = (
-    'You write the detection record for ONE CVE: how to tell, from outside the host and from on the host, whether a product is '
-    'affected. ' + INTAKE_POLICY + 'Respond with ONLY a JSON object: {"scope": "...", "scope_reason": "...", '
+SYSTEM_PROMPT = ai_prompts.compose('cve_detection',
+    INTAKE_POLICY + 'Respond with ONLY a JSON object: {"scope": "...", "scope_reason": "...", '
     '"summary": "<what the flaw is and what an attacker gains, at most 400 characters>", '
     '"identify": "<how to tell the host runs the affected component and version, at most 320 characters>", '
     '"remote_checks": [...], "local_checks": [...], "prerequisites": ["<short condition>"], '
@@ -238,7 +242,7 @@ SYSTEM_PROMPT = (
     '"false_positive_signs": ["<what shows the match is wrong, e.g. a backported fix, a different product, a disabled feature, at most 180 '
     'characters each, at most 4>"], "false_positive_notes": "<when a match is wrong, at most 400 characters>", '
     '"remediation": "<the fix, at most 600 characters>", "exploit_precondition": "<optional, see below>", "revision_note": "<only when CURRENT_RECORD is given: what you changed and why, at most 200 characters>", '
-    '"safety": "read_only"}. When CURRENT_RECORD is given you are REVISING it because the CVE changed or someone gave new guidance: keep what is still '
+    '"safety": "read_only"}. Write the JSON compactly (no indentation, no blank lines, no text outside it). When CURRENT_RECORD is given you are REVISING it because the CVE changed or someone gave new guidance: keep what is still '
     'correct, change only what the new facts contradict or add, and do not make the record longer than it needs to be. The guidance fields '
     '(summary, identify, confirm_steps, true_positive_signs, false_positive_signs, remediation) are read by a person deciding what to do: be '
     'concise, specific and correct, give enough detail to act on, state only what the CVE data supports, and say what to look at (a file, a '
@@ -283,8 +287,10 @@ def input_hash(cve):
     return hashlib.sha1(json.dumps(parts, default=str).encode()).hexdigest()[:16]
 
 
-def build_user_prompt(cve, current=None, guidance=''):
-    from reNgine.ai_providers import clean_text, untrusted_block
+def user_parts(cve, current=None, guidance=''):
+    """The user message of one detection question, as the parts of an AI job (cveFeed.ai_jobs): what cvENGINE says itself as text, the
+    CVE feed's data, the current record and an administrator's guidance fenced by the AI reviewer container."""
+    from reNgine.ai_providers import clean_text
     from cveFeed.correlation import clean_affected, prepared_ranges
     affected = []
     for item in clean_affected(cve.affected)[:10]:
@@ -298,16 +304,16 @@ def build_user_prompt(cve, current=None, guidance=''):
             'cvss_vector': clean_text(cve.cvss_vector, 80, strict=True), 'known_exploited': bool(cve.kev),
             'public_exploit': bool(cve.exploit_db), 'affected': affected, 'references': [r for r in refs if r]}
     if not current and not guidance:
-        return 'Write the detection record for this CVE.\n' + untrusted_block('cve', info)
+        return [{'text': 'Write the detection record for this CVE.'}, {'fence': 'CVE', 'data': info}]
     held = {k: v for k, v in (current or {}).items() if k not in ('validation', 'safety')}
     for key in ('remote_checks', 'local_checks'):  # the rendered commands are the app's, not part of what the model revises
         held[key] = [{k: v for k, v in c.items() if k not in detection.RENDERED_KEYS} for c in held.get(key, [])]
-    text = 'Revise the detection record for this CVE.\n' + untrusted_block('cve', info) + '\n' + untrusted_block('CURRENT_RECORD', held)
+    parts = [{'text': 'Revise the detection record for this CVE.'}, {'fence': 'CVE', 'data': info}, {'fence': 'CURRENT_RECORD', 'data': held}]
     if guidance:
-        text += '\n' + untrusted_block('NEW_GUIDANCE', clean_text(guidance, 3000)) + (
-            '\nNEW_GUIDANCE was written by an administrator who read the CVE: take its facts into the record where the CVE data does not '
-            'contradict them, and say in revision_note what you changed.')
-    return text
+        parts += [{'fence': 'NEW_GUIDANCE', 'data': clean_text(guidance, 3000)},
+                  {'text': 'NEW_GUIDANCE was written by an administrator who read the CVE: take its facts into the record where the CVE data does '
+                           'not contradict them, and say in revision_note what you changed.'}]
+    return parts
 
 
 def daily_limit():
@@ -349,10 +355,18 @@ def progress():
             'daily_budget': daily, 'days_left': (-(-pending // daily) if daily else None)}
 
 
+def due_q(now, prefix=''):
+    """The records the model may be asked about now: never asked, or asked and failed (no answer kept) whose back-off has passed and whose
+    failures are under ``AI_MAX_FAILURES``. ``prefix`` is the lookup path to the record (``detection__`` from a CVE)."""
+    p = prefix
+    retry = Q(**{p + 'ai_model': ''}) & Q(**{p + 'ai_failures__lt': AI_MAX_FAILURES}) & (
+        Q(**{p + 'ai_retry_at__lte': now}) | (Q(**{p + 'ai_retry_at__isnull': True}) & Q(**{p + 'ai_attempted_at__lt': now - AI_RETRY_AFTER})))
+    return Q(**{p + 'ai_attempted_at__isnull': True}) | retry
+
+
 def _claim_ai(row, now):
     """Mark this record's one AI attempt as taken, atomically; False when another worker has it or it is not due."""
-    due = Q(ai_attempted_at__isnull=True) | (Q(ai_attempted_at__lt=now - AI_RETRY_AFTER) & Q(ai_model=''))
-    return CVEDetection.objects.filter(due, pk=row.pk).exclude(source='manual').update(ai_attempted_at=now) == 1
+    return CVEDetection.objects.filter(due_q(now), pk=row.pk).exclude(source='manual').update(ai_attempted_at=now) == 1
 
 
 def _prefix_ids(strategy):
@@ -373,7 +387,7 @@ def _without_ai_checks(strategy):
     return out
 
 
-def _apply_answer(row, strategy, problems, provider, hash_):
+def _apply_answer(row, strategy, problems, model, hash_):
     """Store a validated model answer on the record: merged over the rules' checks, the CVE's scope applied, the input remembered."""
     from cveFeed import locality
     cve = row.cve_entry
@@ -381,92 +395,103 @@ def _apply_answer(row, strategy, problems, provider, hash_):
     merged = detection.finalize(detection.merge_strategies(base if base and (base['remote_checks'] or base['local_checks']
                                                                              or base.get('summary')) else None, _prefix_ids(strategy)), cve.cvss_vector)
     CVEDetection.objects.filter(pk=row.pk).exclude(source='manual').update(
-        strategy=merged, source='ai', ai_model=f'{provider.name}:{provider.model}'[:128], ai_problems=problems[:10],
+        strategy=merged, source='ai', ai_model=model[:128], ai_problems=problems[:10], ai_failures=0, ai_retry_at=None,
         ai_input_hash=hash_, schema_version=detection.SCHEMA_VERSION, updated_at=timezone.now())
     locality.apply_scope(cve, merged.get('scope', ''), source='ai')
     return merged
 
 
-def enrich_with_ai(row, provider):
+def _ask(row, parts, purpose, priority):
+    from cveFeed import ai_jobs
+    return ai_jobs.enqueue('cve_detection', 'cve_detection', system=SYSTEM_PROMPT, parts=parts, project=None, priority=priority,
+                           context={'record': row.pk, 'purpose': purpose, 'input_hash': input_hash(row.cve_entry)},
+                           dedupe=f'cve_detection:{row.pk}:{purpose}')
+
+
+def enrich_with_ai(row, ai=True):
     """Ask the model for this record, once per version of the CVE: a first answer, or a revision of its own earlier answer when the CVE
-    changed. The answer is validated; what passes is merged after the rules' checks, and its scope decision is applied when it widens
-    matching (external); a local_only answer stays on the record as a suggestion. Returns True when the model's answer was stored."""
-    from reNgine.ai_providers import AIProviderError, usage_stage
+    changed. The question is queued for the AI reviewer container (cveFeed.ai_jobs); ``job_answer`` validates the answer, merges what
+    passes after the rules' checks, and applies its scope decision when it widens matching (external); a local_only answer stays on the
+    record as a suggestion. ``ai`` false means no AI. Returns True when the question was queued."""
+    if not ai:
+        return False
     now = timezone.now()
     if not _claim_ai(row, now):
         return False
-    cve = row.cve_entry
-    try:
-        with usage_stage('cve_detection'):
-            reply = provider.complete(SYSTEM_PROMPT, build_user_prompt(cve, row.strategy if row.ai_model else None))
-    except AIProviderError:
-        CVEDetection.objects.filter(pk=row.pk).update(ai_problems=['the model call failed'])
-        return False
-    strategy, problems = detection.parse_ai_strategy(reply)
-    if strategy is None:
-        CVEDetection.objects.filter(pk=row.pk).update(ai_problems=problems[:10], ai_model=f'{provider.name}:{provider.model}'[:128])
-        return False
-    _apply_answer(row, strategy, problems, provider, input_hash(cve))
+    _ask(row, user_parts(row.cve_entry, row.strategy if row.ai_model else None), 'author', priority=8)
     return True
 
 
-def revise_with_guidance(row, provider, guidance):
-    """An administrator's new guidance for one CVE: the model revises the record with it (the same validation as any answer). Not counted
-    against the daily budget. Returns the stored strategy, or None with the reasons it was not usable."""
-    from reNgine.ai_providers import AIProviderError, usage_stage
-    cve = row.cve_entry
-    try:
-        with usage_stage('cve_detection'):
-            reply = provider.complete(SYSTEM_PROMPT, build_user_prompt(cve, row.strategy or {}, guidance))
-    except AIProviderError as e:
-        return None, [f'the model call failed: {str(e)[:120]}']
-    strategy, problems = detection.parse_ai_strategy(reply)
+def revise_with_guidance(row, guidance):
+    """An administrator's new guidance for one CVE: the model revises the record with it (the same validation as any answer), when the AI
+    reviewer container answers. Not counted against the daily budget. Returns the queued job."""
+    return _ask(row, user_parts(row.cve_entry, row.strategy or {}, guidance), 'guidance', priority=4)
+
+
+def _job_model(job):
+    return f'{job.provider}:{job.model}' if job.provider else (job.model or 'unknown')
+
+
+def job_answer(job, text):
+    """The model's detection record arrived: validated with ``detection.parse_ai_strategy`` and stored as before."""
+    row = CVEDetection.objects.select_related('cve_entry').filter(pk=job.context.get('record')).first()
+    if row is None or row.source == 'manual':
+        return None
+    strategy, problems = detection.parse_ai_strategy(text)
     if strategy is None:
-        return None, problems
-    CVEDetection.objects.filter(pk=row.pk).update(ai_attempted_at=timezone.now())
-    return _apply_answer(row, strategy, problems, provider, input_hash(cve)), problems
+        update = {'ai_problems': problems[:10]}
+        if job.context.get('purpose') == 'author':
+            update['ai_model'] = _job_model(job)[:128]
+        CVEDetection.objects.filter(pk=row.pk).update(**update)
+        return None
+    if job.context.get('purpose') == 'guidance':
+        CVEDetection.objects.filter(pk=row.pk).update(ai_attempted_at=timezone.now())
+    # its scope is applied now (_apply_answer); the matches a local-only answer rules out are closed by the next authoring run
+    _apply_answer(row, strategy, problems, _job_model(job), job.context.get('input_hash') or input_hash(row.cve_entry))
+    return None
 
 
-def _enrich_in_thread(row_id, provider):
-    from django.db import connection
-    try:
-        row = CVEDetection.objects.select_related('cve_entry').get(pk=row_id)
-        return bool(enrich_with_ai(row, provider))
-    except Exception:  # noqa: BLE001 - one CVE must not stop the rest
-        logger.exception('detection authoring failed for record %s', row_id)
-        return False
-    finally:
-        connection.close()  # a worker thread owns its own database connection
+def job_failure(job, category, detail):
+    """A failed ask (the container already made its one retry of a cut-off reply): counted on the record, which is asked again only after a
+    growing wait and gives up after ``AI_MAX_FAILURES``, so a CVE the model cannot write stops costing calls. The record says when."""
+    row = CVEDetection.objects.filter(pk=job.context.get('record')).first()
+    if row is None:
+        return
+    failures = row.ai_failures + 1
+    now = timezone.now()
+    if failures >= AI_MAX_FAILURES:
+        retry_at, note = None, (f'could not author this record with the model ({category}) after {failures} attempts; it keeps its rules-written '
+                                'checks and is asked again only after new guidance or a change to the CVE')
+    else:
+        wait = AI_BACKOFF[failures - 1]
+        retry_at, note = now + wait, f'the model call failed ({category}); will retry after {int(wait.total_seconds() // 3600)} hours (attempt {failures} of {AI_MAX_FAILURES - 1})'
+    CVEDetection.objects.filter(pk=row.pk).update(ai_problems=[note], ai_failures=failures, ai_retry_at=retry_at)
 
 
-def author_with_ai(provider, per_run=None, workers=1, within_budget=True):
+def author_with_ai(ai=True, per_run=None, within_budget=True):
     """Spend the AI budget: first the CVEs a scan can match (attackers' favourites first: known exploited, public exploit, exploit
-    probability, score), then the ones only usable from the host itself. Every tier is covered; the daily budget is the only limit.
-    ``workers`` asks the model for several CVEs at once. Returns how many records gained the model's answer."""
+    probability, score), then the ones only usable from the host itself. Every tier is covered; the daily budget is the only limit. Each
+    question is queued for the AI reviewer container. Returns how many were queued."""
+    if not ai:
+        return 0
     per_run = per_run_for(daily_limit()) if per_run is None else per_run
     allowed = min(per_run, ai_budget_left()) if within_budget else per_run  # an administrator's explicit "write N now" is not held to the day's budget
     if allowed <= 0:
         return 0
     now = timezone.now()
-    due = Q(ai_attempted_at__isnull=True) | (Q(ai_attempted_at__lt=now - AI_RETRY_AFTER) & Q(ai_model=''))
-    pool = CVEEntry.objects.filter(detection__isnull=False).filter(
-        Q(detection__ai_attempted_at__isnull=True) | (Q(detection__ai_attempted_at__lt=now - AI_RETRY_AFTER) & Q(detection__ai_model=''))
-    ).exclude(detection__source='manual')
-    ids = _priority(pool).order_by('local_only', F('kev').desc(nulls_last=True), F('exploit_db').desc(nulls_last=True),
-                                   F('epss_reached').desc(nulls_last=True), F('cvss').desc(nulls_last=True), '-published_at', '-id'
-                                   ).values_list('detection__id', flat=True)[:allowed]
-    ids = list(ids)
-    if workers > 1 and len(ids) > 1:
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=workers) as pool_:
-            return sum(pool_.map(lambda i: _enrich_in_thread(i, provider), ids))
-    added = 0
-    for row in CVEDetection.objects.filter(due, pk__in=ids).select_related('cve_entry'):
+    due = due_q(now)
+    pool = CVEEntry.objects.filter(detection__isnull=False).filter(due_q(now, 'detection__')).exclude(detection__source='manual')
+    ids = list(_priority(pool).order_by('local_only', F('kev').desc(nulls_last=True), F('exploit_db').desc(nulls_last=True),
+                                        F('epss_reached').desc(nulls_last=True), F('cvss').desc(nulls_last=True), '-published_at', '-id'
+                                        ).values_list('detection__id', flat=True)[:allowed])
+    queued = 0
+    rows = {row.pk: row for row in CVEDetection.objects.filter(due, pk__in=ids).select_related('cve_entry')}
+    for row in (rows[pk] for pk in ids if pk in rows):  # in priority order, so the queue answers the hottest first
         try:
-            added += bool(enrich_with_ai(row, provider))
+            queued += bool(enrich_with_ai(row))
         except Exception:  # noqa: BLE001 - one CVE must not stop the rest
             logger.exception('detection authoring failed for %s', row.cve_entry.cve_id)
-    return added
+    return queued
 
 
 def mark_changed_for_revision(limit=200):
@@ -476,16 +501,17 @@ def mark_changed_for_revision(limit=200):
             .filter(cve_entry__in=CVEEntry.objects.filter(hot_q())).select_related('cve_entry').order_by('ai_attempted_at')[:limit])
     changed = [row.pk for row in rows if input_hash(row.cve_entry) != row.ai_input_hash]
     if changed:
-        CVEDetection.objects.filter(pk__in=changed).update(ai_attempted_at=None)
+        CVEDetection.objects.filter(pk__in=changed).update(ai_attempted_at=None, ai_failures=0, ai_retry_at=None)
     return len(changed)
 
 
-def author_pending(provider=None):
+def author_pending(ai=False):
+    """The periodic authoring pass: the rules' records first, then (``ai``) the day's share of model questions, queued."""
     out = {'rules': author_rules(), 'refreshed': refresh_rules(), 'regenerated': regenerate_rules_records(),
            'libraries': refresh_client_library_records(), 'ai': 0, 'revisions_queued': 0}
-    if provider is not None:
+    if ai:
         out['revisions_queued'] = mark_changed_for_revision()
-        out['ai'] = author_with_ai(provider, workers=4)
+        out['ai'] = author_with_ai()
     return out
 
 

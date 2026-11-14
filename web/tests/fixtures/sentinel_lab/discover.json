@@ -1,0 +1,80 @@
+{
+ "kind": "discover",
+ "name": "discover",
+ "payload": {
+  "hosts": [
+   {
+    "hostnames": [
+     "gateway.lab.test"
+    ],
+    "ip": "192.0.2.1"
+   },
+   {
+    "hostnames": [
+     "sentinel-lab-container.lab.test"
+    ],
+    "ip": "192.0.2.2"
+   },
+   {
+    "hostnames": [
+     "sentinel-lab-container.lab.test"
+    ],
+    "ip": "192.0.2.3"
+   },
+   {
+    "hostnames": [
+     "sentinel-lab-container.lab.test"
+    ],
+    "ip": "192.0.2.4"
+   },
+   {
+    "hostnames": [
+     "sentinel-lab-container.lab.test"
+    ],
+    "ip": "192.0.2.6"
+   },
+   {
+    "hostnames": [
+     "cvtv-web-1.cvtv_lab"
+    ],
+    "ip": "192.0.2.10"
+   },
+   {
+    "hostnames": [
+     "cvtv-tls-1.cvtv_lab"
+    ],
+    "ip": "192.0.2.11"
+   },
+   {
+    "hostnames": [
+     "cvtv-ssh-1.cvtv_lab"
+    ],
+    "ip": "192.0.2.12"
+   },
+   {
+    "hostnames": [
+     "cvtv-redis-1.cvtv_lab"
+    ],
+    "ip": "192.0.2.13"
+   },
+   {
+    "hostnames": [
+     "cvtv-db-1.cvtv_lab"
+    ],
+    "ip": "192.0.2.14"
+   },
+   {
+    "hostnames": [
+     "266045663ebd"
+    ],
+    "ip": "192.0.2.5"
+   }
+  ],
+  "outcome": "done"
+ },
+ "sentinel_seconds": 1.3,
+ "target": {
+  "cidr": "192.0.2.0/28"
+ },
+ "tool_rows": null
+}

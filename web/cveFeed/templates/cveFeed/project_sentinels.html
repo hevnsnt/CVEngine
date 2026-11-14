@@ -3,7 +3,7 @@
 {% block content %}
 <div class="page-head"><div>
 <h1>Sentinels</h1>
-<p class="sub">{{ project.name }} · scanners that have registered for this project, directly, through its organization or instance-wide. They pull scan work off this project's queue and report back; a scan with no live Sentinel runs locally.</p>
+<p class="sub">{{ project.name }} · scanners that have registered for this project, directly, through its organization or instance-wide, pulling scan work off this project's queue and reporting back, while a scan with no live Sentinel runs locally.</p>
 </div></div>
 
 <div id="section" data-slug="{{ project.slug }}">
@@ -57,7 +57,7 @@
       top.style.display = 'flex'; top.style.justifyContent = 'space-between'; top.style.alignItems = 'center'; top.style.gap = '12px';
       var left = el('div');
       left.appendChild(el('span', 'cve-id', a.name));
-      left.appendChild(el('div', 'meta', a.status + (a.status === 'active' ? (a.live ? ' · live' : ' · offline') : '') + ' · seen ' + when(a.last_seen) +
+      left.appendChild(el('div', 'meta', (a.status === 'active' ? (a.live ? 'Online' : 'Offline') : a.status.charAt(0).toUpperCase() + a.status.slice(1)) + ', last seen ' + when(a.last_seen) +
         ' · covers ' + (LEVEL[a.scope_level] || a.scope_level)));
       // why it is suspended, on its own line, for the people who can act on it (the Sentinels page shows the same "Suspended: <reason>")
       if (a.status === 'suspended' && a.manageable && a.status_note) left.appendChild(el('div', 'meta', 'Suspended: ' + a.status_note));
@@ -90,9 +90,25 @@
       tasks.appendChild(li);
     });
   }
+  // A list that could not be read says so and offers the same read again; it never falls back to "none yet".
+  function unreadable(box, emptyNote, what, again, why) {
+    box.textContent = ''; emptyNote.style.display = 'none';
+    var li = el('li'), err = el('div', 'load-error'); err.setAttribute('role', 'alert');
+    err.appendChild(el('b', '', what + ' could not be read'));
+    if (why) err.appendChild(el('span', 'note', why));
+    err.appendChild(button('Retry', 'btn ghost sm', again));
+    li.appendChild(err); box.appendChild(li);
+  }
+  function read(url, draw, box, emptyNote, what) {
+    function go() {
+      api('GET', url).then(function (x) { if (x.ok) draw(x.d.results || []); else unreadable(box, emptyNote, what, go, x.d && x.d.error); })
+        .catch(function () { unreadable(box, emptyNote, what, go, 'The server did not answer.'); });
+    }
+    go();
+  }
   function load() {
-    api('GET', '/api/v1/projects/' + encodeURIComponent(slug) + '/sentinels').then(function (x) { if (x.ok) renderList(x.d.results || []); });
-    api('GET', '/api/v1/projects/' + encodeURIComponent(slug) + '/sentinel-tasks?page_size=20').then(function (x) { if (x.ok) renderTasks(x.d.results || []); });
+    read('/api/v1/projects/' + encodeURIComponent(slug) + '/sentinels', renderList, list, none, 'The Sentinel list');
+    read('/api/v1/projects/' + encodeURIComponent(slug) + '/sentinel-tasks?page_size=20', renderTasks, tasks, noTasks, 'The task list');
   }
   var rangesCard = document.getElementById('ranges-card'), ranges = document.getElementById('ranges'), noRanges = document.getElementById('no-ranges'),
     rangeMsg = document.getElementById('range-msg'), rangesUrl = '/api/v1/projects/' + encodeURIComponent(slug) + '/internal-ranges';

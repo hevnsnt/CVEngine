@@ -13,7 +13,7 @@ from agentapi.auth import create_token
 from cveFeed import changes, discovery, ledger, nuclei_scan, retest
 from cveFeed.models import AssetChange, CVEEntry, CVEMatch, DeferredRetest, HostState, ServiceRun
 from dashboard.models import ProjectMembership
-from startScan.models import ScanActivity, ScanHistory, Subdomain
+from startScan.models import ScanHistory, Subdomain
 from tests.test_agentapi import call
 from tests.test_changes import ChangeFixture
 from tests.test_perf_hostpipeline import _stages

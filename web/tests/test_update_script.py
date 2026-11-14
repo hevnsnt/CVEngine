@@ -12,6 +12,11 @@ from pathlib import Path
 SCRIPT = Path(__file__).resolve().parents[2] / 'scripts' / 'update.sh'
 DOCKER = '''#!/usr/bin/env bash
 echo "docker $*" >> "$STUB_DIR/calls"
+# The running containers of an update read the NEW code on their OLD image (the checkout is bind-mounted and was fast-forwarded before the build):
+# anything that loads the application in them dies on what the old image lacks. old_image makes the stub behave so.
+if [ -e "$STUB_DIR/old_image" ]; then case " $* " in
+  *" exec -T celery celery "*|*" exec -T web python3 manage.py shell "*) echo "ModuleNotFoundError: No module named 'cvengine_scanner'" >&2; exit 2;;
+esac; fi
 case " $* " in
   *" ps --format "*) cat "$STUB_DIR/docker_ps_ports" 2>/dev/null; exit 0;;
   *" ps -a --filter "*) if [ -f "$STUB_DIR/running_config_files" ]; then echo abc123; fi; exit 0;;
@@ -21,7 +26,7 @@ case " $* " in
       *'.compose.project"'*) cat "$STUB_DIR/running_project" 2>/dev/null;;
     esac; echo; exit 0;;
   *" ps -q --status running web "*) if [ -e "$STUB_DIR/web_up" ]; then echo web-container; fi; exit 0;;
-  *" web python3 manage.py shell "*) case "$*" in
+  *" web python3 manage.py shell "*|*" web manage.py shell "*) case "$*" in
       *_abort_scan*) cat "$STUB_DIR/stop_json" 2>/dev/null;;
       *start_discoveries*) prev=''; for a in "$@"; do [ "$prev" = -e ] && echo "$a" >> "$STUB_DIR/requeue_env"; prev=$a; done
         echo "REQUEUED 1";;
@@ -77,7 +82,7 @@ case " $* " in
       printf '[X]  app.0001_initial\\n[X]  app.0002_first_of_the_batch\\n' > "$STUB_DIR/migrations_state"; exit 1; fi
     test ! -e "$STUB_DIR/migrate_fail"; exit $?;;
   *" collectstatic --noinput "*) test ! -e "$STUB_DIR/collectstatic_fail"; exit $?;;
-  *" up -d --no-deps --force-recreate "*) rm -f "$STUB_DIR/paused" "$STUB_DIR/container_down" "$STUB_DIR/inspect_fail";
+  *" up -d --no-deps --force-recreate "*) rm -f "$STUB_DIR/paused" "$STUB_DIR/container_down" "$STUB_DIR/inspect_fail" "$STUB_DIR/old_image";
     if [ ! -e "$STUB_DIR/post_missing" ]; then cp "$STUB_DIR/healthy_queues" "$STUB_DIR/queues"; fi; exit 0;;
 esac
 exit 0
@@ -538,6 +543,30 @@ class ManualUpdateTests(UpdateScriptCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
     def test_uninspectable_running_container_aborts_before_stopping_beat(self):
+        (self.stub / 'inspect_fail').touch()
+        result = self.run_update()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('worker state is unknown', result.stderr)
+        self.assertFalse(any(' stop -t 30 celery-beat' in c for c in self.calls()))
+
+    def test_workers_are_inspected_in_the_new_image_not_in_the_old_containers_that_read_the_new_code(self):
+        # 1.3.x to 1.4: the old image has no cvengine_scanner, the bind-mounted checkout already needs it, so `celery -A reNgine.tasks` run
+        # inside the running old container fails and every inspection reads as "worker state unknown" (the Upgrade rehearsal failure).
+        (self.stub / 'old_image').touch()
+        (self.stub / 'web_up').touch()
+        result = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertNotIn('worker state is unknown', result.stderr)
+        calls = self.calls()
+        before_recreate = calls[:next(i for i, c in enumerate(calls) if ' up -d ' in c and 'force-recreate' in c)]
+        self.assertFalse(any('exec -T celery celery ' in c or 'exec -T web python3 manage.py shell' in c for c in before_recreate), before_recreate)
+        self.assertTrue(any('run --rm --no-deps -T --entrypoint celery celery -A reNgine.tasks inspect' in c and 'active_queues' in c for c in calls))
+        # the scans are counted in the new image too
+        self.assertIn('Scans: 1 running, 2 queued.', result.stdout)
+
+    def test_a_worker_that_cannot_be_inspected_in_the_new_image_still_stops_the_update(self):
+        (self.stub / 'old_image').touch()
+        (self.stub / 'web_up').touch()
         (self.stub / 'inspect_fail').touch()
         result = self.run_update()
         self.assertNotEqual(result.returncode, 0)

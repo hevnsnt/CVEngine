@@ -2,6 +2,7 @@
 keep-alive) through the API behind the page: what is stored, what is refused, that an empty value clears one, that it reaches the provider,
 that the secret handling and the superuser-only rule are unchanged, and what the audit log keeps."""
 import json
+import socket
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -31,6 +32,10 @@ class AiRequestSettingsApiTests(TestCase):
 		patcher = mock.patch.dict('os.environ', {name: '' for name in ENV_NAMES})
 		patcher.start()
 		self.addCleanup(patcher.stop)
+		# the Base URL check resolves the host (settings_api.ai_url_blocked): a name that does not resolve is not blocked, and no test touches the network
+		lookup = mock.patch('socket.getaddrinfo', side_effect=socket.gaierror)
+		lookup.start()
+		self.addCleanup(lookup.stop)
 
 	def put(self, **body):
 		return send(self.c, 'PUT', 'ai', body)
@@ -324,6 +329,6 @@ class AiRequestSettingsApiTests(TestCase):
 	def test_every_hint_is_a_sentence_for_a_category_the_provider_layer_raises(self):
 		from cveFeed.settings_api import AI_ERROR_HINTS
 		raised = {'provider_auth', 'provider_rate_limit', 'provider_timeout', 'provider_connect_timeout', 'provider_network', 'provider_http', 'provider_json', 'provider_shape',
-			'output_truncated', 'empty_response'}
+			'output_truncated', 'empty_response', 'refused', 'provider_redirect'}
 		self.assertEqual(set(AI_ERROR_HINTS), raised)
 		self.assertEqual(ai.AIProviderError('x', category='provider_timeout').category, 'provider_timeout')

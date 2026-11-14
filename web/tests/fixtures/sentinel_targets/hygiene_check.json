@@ -1,0 +1,36 @@
+{
+  "tls": [
+    {
+      "host": "www.example.com",
+      "port": 443
+    },
+    {
+      "host": "mail.example.com",
+      "port": 993
+    }
+  ],
+  "mail": [
+    {
+      "name": "example.com",
+      "always": true
+    },
+    {
+      "name": "mail.example.com"
+    }
+  ],
+  "confirm_resolvers": [],
+  "rdap": true,
+  "scope": {
+    "hosts": [
+      "www.example.com",
+      "mail.example.com",
+      "mta-sts.example.com"
+    ],
+    "domains": [],
+    "excluded": [],
+    "excluded_trees": [],
+    "private": false,
+    "addresses": [],
+    "blocked": []
+  }
+}

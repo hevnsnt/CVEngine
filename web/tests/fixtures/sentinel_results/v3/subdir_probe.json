@@ -1,0 +1,59 @@
+{
+  "outcome": "done",
+  "hosts": [
+    {
+      "id": "h0",
+      "state": "done",
+      "requests": 7,
+      "baseline": {
+        "status": 404,
+        "title": "Not Found",
+        "length": 150,
+        "location": "",
+        "server": "nginx"
+      },
+      "probed": [
+        "/jira/",
+        "/grafana/",
+        "/phpmyadmin/",
+        "/portal/"
+      ],
+      "answers": [
+        {
+          "path": "/jira/",
+          "source": "curated",
+          "fingerprint": {
+            "status": 200,
+            "title": "Dashboard - Jira",
+            "length": 9000,
+            "location": "",
+            "server": "nginx"
+          },
+          "found": {
+            "product": "Jira",
+            "confidence": 0.8,
+            "source": "body:data-name",
+            "version": "9.4.1",
+            "indicated": "/jira/"
+          }
+        },
+        {
+          "path": "/portal/",
+          "source": "crawled",
+          "fingerprint": {
+            "status": 200,
+            "title": "Staff portal",
+            "length": 900,
+            "location": "",
+            "server": "nginx"
+          },
+          "found": null
+        }
+      ]
+    }
+  ],
+  "touched": [
+    "www.example.com"
+  ],
+  "refused": []
+}

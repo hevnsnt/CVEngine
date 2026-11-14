@@ -9,6 +9,46 @@
 
 export const JITTER_LOW = 0.85;
 export const JITTER_HIGH = 1.15;
+
+// How long a page waits for one read before it gives up and shows "could not be read" with Retry. The slowest answer that is still a real answer
+// is the Sentinels list on a cold cache, which has taken up to 55 seconds on the server (the worker inspection behind the Scanners page waits at
+// most 5 seconds, so it is far inside this). A limit under 55 seconds would cut off a good answer and show a false failure; 75 seconds leaves
+// room above it. The page says "taking longer than usual" after 4 seconds, so nobody waits in silence meanwhile.
+export const REQUEST_MS = 75000;
+
+/**
+ * Runs ``work(signal)`` with a real time limit that covers all of it: the limit stays armed until the promise ``work`` returns settles, so a
+ * server that sends its headers and then stalls the body is cut off too. After ``ms`` the signal aborts and the promise rejects with an Error
+ * named TimeoutError (it rejects at once, even when ``work`` ignores the signal and never settles). A signal the caller passes is honoured too.
+ */
+export function within(work, ms = REQUEST_MS, outer = null) {
+  const control = new AbortController();
+  let timer = null;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      control.abort();
+      const slow = new Error("The server did not answer in time.");
+      slow.name = "TimeoutError";
+      reject(slow);
+    }, ms);
+    if (timer && timer.unref) timer.unref(); // a pending limit never keeps a script or a test alive
+  });
+  if (outer) outer.addEventListener("abort", () => control.abort(), { once: true });
+  const job = Promise.resolve().then(() => work(control.signal));
+  job.catch(() => {}); // when the limit wins, a later failure of the abandoned work is not an unhandled rejection
+  return Promise.race([job, late]).finally(() => clearTimeout(timer));
+}
+
+/** fetch with a time limit on the response headers only: use ``readWithin`` when the body is read too. */
+export function fetchWithin(url, init = {}, ms = REQUEST_MS, fetchImpl = (...a) => fetch(...a)) {
+  return within((signal) => fetchImpl(url, { ...init, signal }), ms, init.signal);
+}
+
+/** fetch and read the body (``read(response)``, e.g. ``(r) => r.json()``) inside one time limit: headers, body and parsing all count. */
+export function readWithin(url, init = {}, read = (r) => r, ms = REQUEST_MS, fetchImpl = (...a) => fetch(...a)) {
+  return within(async (signal) => read(await fetchImpl(url, { ...init, signal })), ms, init.signal);
+}
+
 export const MAX_RETRY_AFTER_MS = 120000; // a server that says "come back in an hour" is waited on for two minutes, then asked again
 const MAX_FAILURE_DOUBLINGS = 4; // the wait doubles up to 16 times while requests keep failing
 
@@ -54,9 +94,10 @@ export function createPace(now = () => Date.now()) {
  * are conditional. A failure throws an Error with ``status`` and, on a 429 or 503, ``retryAfter`` (milliseconds) for ``createPace().fail``.
  * ``entries`` bounds the map: a poller whose URL carries a moving cursor would otherwise remember every cursor it ever used.
  */
-export function createGet({ fetchImpl = (...a) => fetch(...a), entries = 64, now = () => Date.now() } = {}) {
+export function createGet({ fetchImpl = (u, i) => fetch(u, i), entries = 64, now = () => Date.now(), ms = REQUEST_MS } = {}) {
   const tags = new Map();
-  return async function get(url, init = {}) {
+  return (url, init = {}) => within((signal) => read(url, { ...init, signal }), ms, init.signal);
+  async function read(url, init) {
     const headers = { ...(init.headers || {}) };
     const known = tags.get(url);
     if (known) headers["If-None-Match"] = known;
@@ -69,13 +110,14 @@ export function createGet({ fetchImpl = (...a) => fetch(...a), entries = 64, now
       throw error;
     }
     const tag = response.headers && response.headers.get ? response.headers.get("ETag") : null;
+    const body = await response.json(); // read before the tag is kept: a body that never arrives must not leave a tag for a copy never held
     tags.delete(url);
     if (tag) {
       tags.set(url, tag);
       while (tags.size > entries) tags.delete(tags.keys().next().value);
     }
-    return response.json();
-  };
+    return body;
+  }
 }
 
 /**

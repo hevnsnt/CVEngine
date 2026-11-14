@@ -25,6 +25,16 @@ TIMEOUT = (10, 90)         # connect, read
 SAMPLE = 5                 # example URLs kept per technology
 MAX_HOSTS_PER_TARGET = 5000
 
+# A failed lookup is not recorded in the ledger (so a target is tried again), which let an archive that refuses us make every hygiene run wait for it again
+# for every target: on the VPS hundreds of failing lookups per run, a connect wait each, held the CVE-feed lane (11/10). Failures now back off.
+FAILURES_TO_OPEN = 3             # this many in a row, on any targets, and the archive is treated as down...
+BREAKER_SECONDS = 30 * 60        # ...for this long
+FAILURE_WINDOW_SECONDS = 10 * 60  # failures further apart than this are not "in a row"
+TARGET_BACKOFF_SECONDS = 6 * 3600  # a target whose lookup failed is not tried again before this
+BREAKER_KEY = 'cvengine:archive:down'
+FAILS_KEY = 'cvengine:archive:fails'
+TARGET_KEY = 'cvengine:archive:failed:'
+
 EXTENSIONS = {
     'php': 'PHP', 'php3': 'PHP', 'php4': 'PHP', 'php5': 'PHP', 'php7': 'PHP', 'phtml': 'PHP',
     'asp': 'ASP', 'aspx': 'ASP.NET', 'ashx': 'ASP.NET', 'asmx': 'ASP.NET', 'axd': 'ASP.NET',
@@ -43,6 +53,39 @@ PATH_MARKERS = (
 
 def lookup_enabled():
     return os.environ.get('CVENGINE_ARCHIVE_LOOKUP', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+
+
+def backing_off(apex):
+    """Why a lookup should wait ('' when it should not): the archive just failed several times in a row, or this target's own lookup failed lately."""
+    from django.core.cache import cache
+    try:
+        if cache.get(BREAKER_KEY):
+            return 'the archive is not answering; trying again later'
+        if cache.get(TARGET_KEY + apex):
+            return 'the last lookup failed; trying again later'
+    except Exception:  # noqa: BLE001 - no cache means no back-off, as before
+        pass
+    return ''
+
+
+def note_failure(apex):
+    from django.core.cache import cache
+    try:
+        cache.set(TARGET_KEY + apex, 1, TARGET_BACKOFF_SECONDS)
+        cache.add(FAILS_KEY, 0, FAILURE_WINDOW_SECONDS)
+        if cache.incr(FAILS_KEY) >= FAILURES_TO_OPEN:
+            cache.set(BREAKER_KEY, 1, BREAKER_SECONDS)
+            logger.warning('the web archive failed %s lookups in a row; pausing lookups for %s minutes', FAILURES_TO_OPEN, BREAKER_SECONDS // 60)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def note_success(apex):
+    from django.core.cache import cache
+    try:
+        cache.delete_many([FAILS_KEY, TARGET_KEY + apex])
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def fetch_urls(domain, get=None, exact=False):
@@ -119,11 +162,16 @@ def run_for_domain(domain_id, get=None, force=False):
     apex = domain.name.lower()
     if not force and ledger.fresh('archive-urls', [apex], project=domain.project_id):
         return {'skipped': 'checked recently'}
+    wait = '' if force else backing_off(apex)
+    if wait:
+        return {'skipped': wait}
     try:
         urls = fetch_urls(apex, get=get, exact=domain.exact_host_only())
     except Exception as exc:  # noqa: BLE001 - a passive third-party lookup must never affect anything else
         logger.warning('archive lookup for %s failed: %s', apex, exc)
+        note_failure(apex)
         return {'error': str(exc)[:200]}
+    note_success(apex)
     known = set(Subdomain.objects.filter(target_domain=domain).values_list('name', flat=True).distinct()[:MAX_HOSTS_PER_TARGET])
     known = {n.lower() for n in known if domain.includes_host(n)} | {apex}  # =example.com: a name kept under it from before is not looked up
     found = classify(urls, apex, known)

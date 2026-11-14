@@ -4,10 +4,11 @@
 // GET /api/v1/sentinels/live and is set with textContent; the card ages itself every second between polls. When the server reports `orgs`,
 // the cards are grouped by the organizations each Sentinel covers (an instance-wide one under "Every organization"), each group with the
 // internal networks its projects declared.
-import { api, badge, button, el, toast } from "/staticfiles/cve/ui.js";
+import { SLOW_MS, api, badge, button, couldNotRead, el, toast, waiting } from "/staticfiles/cve/ui.js";
 import { thinkingOrb } from "/staticfiles/cve/thinking-orb.js";
-import { detailCache, versionBlock } from "/staticfiles/cve/sentinel-settings.js";
+import { detailCache, kindChips, versionBlock } from "/staticfiles/cve/sentinel-settings.js";
 import { createGet, createPace, every, staleRows } from "/staticfiles/cve/poll.js";
+import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
 
 const LIVE = "/api/v1/sentinels/live";
 const POLL_MS = 5000;
@@ -18,7 +19,7 @@ const WORDS = {
   pending: "Waiting for approval",
   suspended: "Suspended",
 };
-const KIND = { nmap: "nmap", naabu: "naabu", nuclei_light: "nuclei (light)", nuclei_targeted: "nuclei (targeted)", nuclei_deep: "nuclei (deep)", testssl: "testssl", nmap_udp: "nmap UDP", wpscan: "wpscan", openvas: "OpenVAS", discover: "internal discovery" };
+const KIND = { nmap: "nmap", naabu: "naabu", nuclei_light: "nuclei (light)", nuclei_targeted: "nuclei (targeted)", nuclei_deep: "nuclei (deep)", testssl: "testssl", nmap_udp: "nmap UDP", wpscan: "wpscan", openvas: "OpenVAS", discover: "internal discovery", waf: "WAF fingerprint", bbot_discovery: "bbot discovery", http_probe: "version probes", dns_resolve: "name resolution", nmap_full: "full port sweep", nmap_verify: "service version probe", node2shell: "node2shell check", rdp_shot: "RDP screenshot", db_probe: "database exposure probe", path_probe: "scan path check", nuclei_validate: "template check", alive_check: "retired host checks", bucket_check: "cloud storage checks", supplier_check: "supplier posture checks", vhost_probe: "virtual host checks", subdir_probe: "subdirectory application checks", hygiene_check: "TLS and email checks", dangling_dns_check: "dangling DNS checks", route_probe: "web route checks", route_probe_signed: "signed-in web route checks", page_read: "validation page reads", identity_check: "name and certificate reads", web_screenshot: "web screenshots", ssh_probe: "SSH inspection", wpscan_thorough: "thorough WordPress scan" };
 const kindName = (k) => KIND[k] || k;
 
 function span(seconds) {
@@ -41,12 +42,13 @@ function orbFor(s, group) {
   const key = `${group}:${s.id}`;
   let o = orbs.get(key);
   if (!o) {
-    o = thinkingOrb({ state: busy, size: 64 });
+    o = thinkingOrb({ state: busy, size: 32 });
     orbs.set(key, o);
   }
   o.setState(busy, `${s.name}: ${WORDS[s.state] || s.state}`);
   o.setPaused(s.state === "offline" || s.state === "suspended");
   o.node.classList.toggle("asleep", s.state === "offline" || s.state === "suspended");
+  o.node.setAttribute("data-keep-ignore", ""); // the orb animates by itself: it is not part of what "the card changed" means (static/cve/keep-state.js)
   return o.node;
 }
 
@@ -65,12 +67,28 @@ function recent(t) {
   const li = el("li", `sl-r ${t.status}`);
   li.append(el("i", "sl-dot"), el("b", "mono", kindName(t.kind)), el("span", "sl-host", t.label || t.host || (t.hidden ? "a target" : "")));
   const tail = t.status === "failed" ? t.error || "failed" : t.seconds != null ? span(t.seconds) : "";
-  li.append(el("span", "sl-tail", tail));
+  // what the result left out (a cap, a clipped text, a time limit) and the nuclei template release the run used: never silent (``cut_notes``, ``templates_release``)
+  const notes = Array.isArray(t.cut_notes) ? t.cut_notes : [];
+  const extra = [notes.length ? `cut: ${notes.slice(0, 2).join("; ")}${notes.length > 2 ? ` and ${notes.length - 2} more` : ""}` : "", t.templates_release ? `templates ${t.templates_release}` : ""].filter(Boolean);
+  li.append(el("span", "sl-tail", [tail, ...extra].filter(Boolean).join(" · "), extra.length ? { title: [...notes, t.templates_release ? `nuclei templates ${t.templates_release}` : ""].filter(Boolean).join("\n") } : {}));
   if (t.finished) li.append(el("span", "sl-when", "", { "data-ago": t.finished }));
   return li;
 }
 
 const INTERNAL = "network:internal";
+
+// How busy a Sentinel's slots were in the last hour (the server's `load`): a meter and one line, both set with textContent / attributes only.
+function utilisationBar(load) {
+  if (!load || load.utilisation_1h == null) return null;
+  const pct = Math.round(Math.min(1, Math.max(0, Number(load.utilisation_1h) || 0)) * 100);
+  const wrap = el("div", "sl-util");
+  const wait = load.wait_p50_seconds == null ? "no tasks claimed" : `queue wait ${span(load.wait_p50_seconds)} typical, ${span(load.wait_p95_seconds)} at worst`;
+  wrap.append(
+    el("meter", "sl-util-bar", `${pct}%`, { min: 0, max: 100, value: pct, "aria-label": `Slots busy in the last hour: ${pct} percent` }),
+    el("p", "sl-util-text", `Busy ${pct}% of the last hour · ${load.tasks_1h || 0} finished · ${wait}`),
+  );
+  return wrap;
+}
 
 // The state in words. A suspended Sentinel says why on the same line ("Suspended: <reason>"), so its reason never reads as a remark on a
 // working one.
@@ -94,12 +112,19 @@ export function actionsFor(s) {
 }
 
 function card(s, reload, detail, group) {
-  const c = el("article", `sl-card sl-${s.state}`, null, { "data-id": s.id });
-  const head = el("header", "sl-head");
+  // One row: the state, what it is doing, when it last checked in and what the viewer may do. Everything else opens from the row.
+  const c = el("details", `sl-card sl-${s.state}`, null, { "data-id": s.id, "data-keep-key": `card:${group}:${s.id}` });
+  const head = el("summary", "sl-head", null, { "data-orb-key": `${group}:${s.id}` });
   head.append(orbFor(s, group));
-  const title = el("div", "sl-title");
-  const state = el("p", "sl-state", stateLine(s));
+  const title = el("span", "sl-title");
+  const state = el("span", "sl-state", stateLine(s));
   if (s.capabilities.includes(INTERNAL)) state.append(" ", badge("Internal network", "internal"));
+  healthFlags(s).forEach((f) => {
+    const chip = badge(f.text, f.kind);
+    if (f.title) chip.title = f.title;
+    state.append(" ", chip);
+  });
+  if (s.builtin) state.append(" ", el("span", "chip sl-builtin", s.last_resort ? "Built-in, last resort" : "Built-in", { title: s.last_resort ? "This install's own scanner. It takes work only when no external Sentinel can." : "This install's own scanner" }));
   title.append(el("h3", "", s.name), state);
   head.append(title);
   const actions = el("div", "sl-actions");
@@ -136,21 +161,24 @@ function card(s, reload, detail, group) {
       ),
   };
   actionsFor(s).forEach((a) => actions.append(ACT[a]()));
-  head.append(actions);
+  const glance = glanceText(s);
+  head.append(el("span", "sl-glance", glance, { title: glance }));
+  const beat = el("span", "sl-beat");
+  beat.append(el("i", `sl-pulse ${s.live ? "on" : ""}`), el("span", "", "", { "data-seen": s.last_seen || "" }));
+  head.append(beat, actions);
   c.append(head);
 
-  const beat = el("p", "sl-beat");
-  beat.append(el("i", `sl-pulse ${s.live ? "on" : ""}`), el("span", "", "", { "data-seen": s.last_seen || "" }));
-  c.append(beat);
-  const version = versionBlock(detail, { onChange: reload });
-  if (version) c.append(version);
-  if (s.problem) c.append(el("p", "sl-note", s.problem));
-  else if (s.status_note && s.state !== "suspended") c.append(el("p", "sl-note", s.status_note)); // a suspension's reason is on the state line
+  const body = el("div", "sl-body");
+  const version = versionBlock(detail, { onChange: reload, builtin: s.builtin });
+  if (version) body.append(version);
+  if (s.contract_note) body.append(el("p", s.contract_state === "unsupported" ? "sl-note msg err" : "sl-note", s.contract_note));
+  if (s.problem) body.append(el("p", "sl-note", s.problem));
+  else if (s.status_note && s.state !== "suspended") body.append(el("p", "sl-note", s.status_note)); // a suspension's reason is on the state line
 
   const now = el("div", "sl-now");
   if (s.current.length) s.current.forEach((t) => now.append(task(t)));
   else now.append(el("p", "sl-quiet", s.state === "offline" ? "Not taking work until it checks in again." : s.state === "idle" ? "Checking in and ready. Nothing to do right now." : ""));
-  c.append(now);
+  body.append(now);
 
   const st = s.stats;
   const stats = el("dl", "sl-stats");
@@ -160,39 +188,144 @@ function card(s, reload, detail, group) {
     return d;
   };
   stats.append(stat("Done, last hour", st.done_1h), stat("Failed, last hour", st.failed_1h), stat("Done, 24 hours", st.done_24h), stat("Average task", st.average_seconds == null ? "none yet" : span(st.average_seconds)));
-  c.append(stats);
+  body.append(stats);
+  const util = utilisationBar(s.load);
+  if (util) body.append(util);
 
   if (s.recent.length) {
     const list = el("ul", "sl-recent", null, { "aria-label": `Recent tasks of ${s.name}` });
     s.recent.forEach((t) => list.append(recent(t)));
-    c.append(list);
+    body.append(list);
   }
+  // the capability chips (allowed, denied, withheld) come from the Sentinel's detail; the plain list is the fallback while it has not loaded or on an older server
+  const chips = detail && detail.kinds ? kindChips(detail.kinds) : null;
   const kinds = s.capabilities.filter((k) => k !== INTERNAL);
   const tools = kinds.length ? kinds.map(kindName).join(", ") : "no capabilities";
-  c.append(el("p", "sl-foot", `${tools}${s.os ? ` · ${s.os}` : ""} · up to ${s.max_concurrent} at once`));
+  if (chips) body.append(chips);
+  body.append(el("p", "sl-foot", [...(chips ? [] : [tools]), s.os, `up to ${s.max_concurrent} at once`].filter(Boolean).join(" · ")));
   Object.entries(s.withheld_kinds || {}).forEach(([k, w]) => {
     const retry = new Date(w.retry_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    c.append(el("p", "sl-foot", `${kindName(k)} failed ${w.failures} times in a row: cvENGINE runs it itself until ${retry}, then tries this Sentinel again.`));
+    body.append(el("p", "sl-foot", `${kindName(k)} failed ${w.failures} times in a row: cvENGINE runs it itself until ${retry}, then tries this Sentinel again.`));
   });
+  c.append(body);
   return c;
+}
+
+// What is wrong with a Sentinel, as chips on its closed row: a failed or stuck update, tasks that failed in the last hour, a newer version waiting. The
+// row says it without being opened; each chip's words are whole (a title carries the server's own sentence).
+export function healthFlags(s) {
+  const out = [];
+  const st = s.stats || {};
+  const au = s.auto_update || {};
+  if (au.flagged || /^update failed/i.test(s.status_note || "")) out.push({ text: "Update failed", kind: "failed", title: au.flagged && au.text ? au.text : s.status_note || "" });
+  else if (s.version_state && s.version_state.status === "behind") out.push({ text: "Update available", kind: "info", title: "A newer Sentinel version is out" });
+  if (st.failed_1h > 0) out.push({ text: `${st.failed_1h} failed in the last hour`, kind: "failed", title: "" });
+  return out;
+}
+
+// The one line a collapsed row says about what the Sentinel is doing: a problem first, then the work in hand, then how the last hour went. The note the server
+// keeps for it (why an update failed, why it is held) goes first on an offline one, because that is the thing to act on.
+export function glanceText(s) {
+  const note = s.status_note && s.state !== "suspended" && !s.problem ? s.status_note : "";
+  const base = glanceBase(s);
+  return note && !base.includes(note) ? (s.state === "offline" ? `${note} · ${base}` : `${base} · ${note}`) : base;
+}
+
+function glanceBase(s) {
+  const st = s.stats || {};
+  if (s.problem) return s.problem;
+  if (s.contract_state === "unsupported" && s.contract_note) return s.contract_note;
+  if (s.current && s.current.length) {
+    const t = s.current[0];
+    const more = s.current.length > 1 ? ` and ${s.current.length - 1} more` : "";
+    return `${kindName(t.kind)} on ${t.label || t.host || "a target"}${more}`;
+  }
+  if (s.state === "offline") return "Not taking work until it checks in again.";
+  const hour = `${st.done_1h || 0} done, ${st.failed_1h || 0} failed in the last hour`;
+  return s.state === "idle" ? `Ready, nothing to do right now. ${hour}.` : `${hour}.`;
 }
 
 function summary(data) {
   const rows = data.results;
   const live = rows.filter((r) => r.live && r.status === "active").length;
   const working = rows.filter((r) => r.state === "working").length;
-  const bar = el("div", "sl-sum");
+  const bar = el("div", "sl-sum", null, { "data-keep-key": "summary" });
   const cell = (n, label) => {
-    const d = el("div");
+    const d = el("div", "", null, { title: `${n} ${label}` }); // the strip is one line: a long wording is cut at its end and is whole in the tooltip
     d.append(el("b", "", String(n)), el("span", "", label));
     return d;
   };
-  bar.append(cell(`${live} of ${rows.length}`, "checking in"), cell(working, "working now"), cell(data.queued, "tasks waiting for a Sentinel"));
+  bar.append(cell(`${live} of ${rows.length}`, "checking in"), cell(working, "working now"), cell(data.queued, "tasks waiting for a Sentinel, planner work included"));
+  if (data.stage_runs) bar.append(cell(data.stage_runs.waiting, "stages waiting, no worker held"));
   return bar;
 }
 
+// GET sentinels/live `planner`: what the work planner (cveFeed/work_planner.py) is doing, in one plain line, with the per-kind count of what is due behind a
+// disclosure. Everything is set with textContent. Returns null when the server sent none.
+export function plannerRows(p) {
+  if (!p || !p.line) return null;
+  const head = ["Check", "Applies to", "Due", "Waiting for the route check", "Queued or running"];
+  const rows = !p.enabled ? [] : (p.kinds || []).map((k) => [k.label, k.applicable, k.due, k.awaiting, k.in_flight].map((v) => (typeof v === "number" ? v.toLocaleString("en-US") : String(v))));
+  return { line: p.line, head, rows };
+}
+
+export function plannerBlock(p) {
+  const data = plannerRows(p);
+  if (!data) return null;
+  const box = el("div", "sl-planner", null, { "data-keep-key": "planner" });
+  box.append(el("p", "note sl-planner-line", data.line));
+  if (data.rows.length) {
+    const d = el("details", "sl-planner-due", null, { "data-keep-key": "planner-due" });
+    d.append(el("summary", "", "What is due, by check"));
+    const table = el("table", "sl-planner-table");
+    const head = el("tr");
+    data.head.forEach((h) => head.append(el("th", "", h)));
+    table.append(head);
+    data.rows.forEach((cells) => {
+      const row = el("tr");
+      cells.forEach((v) => row.append(el("td", "", v)));
+      table.append(row);
+    });
+    d.append(table);
+    box.append(d);
+  }
+  return box;
+}
+
+// GET sentinels/live `routing`: what the built-in scanner is for and how the last day's work was shared. One plain text, or "" when the server sent none.
+export function routingText(r) {
+  if (!r || !r.explanation) return "";
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const done = (r.builtin_24h || 0) + (r.external_24h || 0);
+  const share = done ? `In the last 24 hours the built-in scanner handled ${plural(r.builtin_24h, "task")} and external Sentinels handled ${plural(r.external_24h, "task")}.`
+    : "No task was finished by a Sentinel in the last 24 hours.";
+  const none = r.externals ? "" : " No external Sentinel is set up, so the built-in scanner does all the scanning.";
+  return `${r.explanation} ${share}${none}`;
+}
+
+const STAGE = { nmap_scan: "nmap", nuclei_light_scan: "nuclei (light)", nuclei_targeted_scan: "nuclei (targeted)", wpscan: "WPScan",
+  "sweep.testssl": "TLS audit", "sweep.udp": "UDP sweep", "nuclei.weekly": "weekly deep nuclei", "wpscan.quick": "WPScan quick pass",
+  "internal.discover": "internal discovery", "openvas.import": "OpenVAS" };
+
+// The asynchronous stages (queue Q4): the scan stages that handed their work to Sentinels and gave their worker back while they wait, from
+// GET sentinels/live `stage_runs`. One sentence, or "" when nothing waits and nothing came back in the last hour.
+export function stageRunsText(m) {
+  if (!m || (!m.waiting && !m.resumed_1h)) return "";
+  const parts = [];
+  if (m.waiting) {
+    const kinds = Object.entries(m.waiting_by_kind || {}).map(([k, n]) => `${STAGE[k] || k} ${n}`).join(", ");
+    parts.push(`${m.waiting} stage${m.waiting === 1 ? "" : "s"} wait${m.waiting === 1 ? "s" : ""} on Sentinels without holding a worker (${kinds})` +
+      (m.oldest_wait_seconds != null ? `, the oldest for ${span(m.oldest_wait_seconds)}` : ""));
+  }
+  if (m.callback_latency_p50_seconds != null) {
+    parts.push(`a finished stage continues ${span(m.callback_latency_p50_seconds)} after its last task typically, ${span(m.callback_latency_p95_seconds)} at worst`);
+  }
+  if (m.freed_seconds_1h) parts.push(`${span(m.freed_seconds_1h)} of worker time given back in the last hour`);
+  return parts.join("; ") + ".";
+}
+
 function openvasQueue(queue) {
-  const box = el("section", "sl-openvas", null, { "aria-label": "OpenVAS queue", "aria-live": "off" });
+  const box = el("section", "sl-openvas", null, { "aria-label": "OpenVAS queue", "aria-live": "off", "data-keep-key": "openvas" });
   const head = el("div", "sl-openvas-head");
   head.append(el("h3", "", "OpenVAS queue"), el("span", "sl-openvas-count", `${queue.counts.next} due · ${queue.counts.not_due} not due`));
   box.append(head);
@@ -222,7 +355,10 @@ function openvasQueue(queue) {
   box.append(due);
 
   if (queue.counts.not_due) {
-    const deferred = el("details", "sl-openvas-deferred");
+    // the server counted every host and grouped the reasons ("33 not due: 20 not Fire or Smoke, 8 scanned this week"): shown as it came, above the list
+    if (queue.pending_projects) box.append(el("p", "note sl-openvas-pending", `Working out the queue of ${queue.pending_projects} project${queue.pending_projects === 1 ? "" : "s"}; it appears at the next refresh.`));
+  if (queue.not_due_summary) box.append(el("p", "note sl-openvas-summary", queue.not_due_summary));
+    const deferred = el("details", "sl-openvas-deferred", null, { "data-keep-key": "openvas-not-due" });
     deferred.append(el("summary", "", `Not due (${queue.counts.not_due})`));
     const list = el("ul");
     queue.not_due.forEach((row) => {
@@ -237,6 +373,21 @@ function openvasQueue(queue) {
   return box;
 }
 
+// What the planner and the router are doing, from GET sentinels/live: the planner's line is the one line shown, the routing sentence, the stage waits and the
+// table of what is due open from it.
+function engineNotes(data) {
+  const planner = plannerBlock(data.planner);
+  const route = routingText(data.routing);
+  const waits = stageRunsText(data.stage_runs);
+  if (!planner && !route && !waits) return null;
+  const box = el("details", "sl-notes", null, { "data-keep-key": "notes" });
+  box.append(el("summary", "", (data.planner && data.planner.line) || "How work is shared"));
+  if (route) box.append(el("p", "note sl-routing", route, { "data-keep-key": "routing" }));
+  if (planner) box.append(planner);
+  if (waits) box.append(el("p", "note sl-stage-runs", waits, { "data-keep-key": "stage-runs" }));
+  return box;
+}
+
 // The groups to draw: instance-wide Sentinels first, then each organization that has a Sentinel or an internal network, then any
 // Sentinel whose scope names nothing this user can see. A server too old to report `orgs` gets one group with no heading.
 function groups(data) {
@@ -248,6 +399,9 @@ function groups(data) {
     const mine = data.results.filter((s) => (s.orgs || []).includes(o.slug));
     if (mine.length || o.networks.length) out.push({ key: `org:${o.slug}`, title: o.name, slug: o.slug, sentinels: mine, networks: o.networks });
   });
+  // one organization and nothing instance-wide: its name heads nothing (every row is under it), so the Sentinels start right under the summary. Its
+  // networks and its "no Sentinel covers it" line stay, under the rows.
+  if (out.length === 1 && out[0].slug) out[0].bare = true;
   const loose = data.results.filter((s) => s.scope_level !== "instance" && !(s.orgs || []).length);
   if (loose.length) out.push({ key: "none", title: "No organization you can see", note: "Their scope names projects outside your organizations.", sentinels: loose, networks: [] });
   return out;
@@ -308,10 +462,18 @@ function remember() {
 }
 
 function section(g, reload, details) {
-  const grid = el("div", "sl-grid");
+  const grid = el("div", "sl-grid", null, { "data-keep-key": `grid:${g.key}` });
   g.sentinels.forEach((s) => grid.append(card(s, reload, details.get(s.id), g.key)));
   if (!g.title) return grid;
-  const box = el("details", "sl-org");
+  if (g.bare) {
+    const plain = el("div", "sl-org-bare", null, { "data-keep-key": `org:${g.key}` });
+    if (g.note) plain.append(el("p", "note", g.note));
+    if (g.sentinels.length) plain.append(grid);
+    else plain.append(el("p", "sl-quiet", `No Sentinel covers ${g.title}. Its internal networks are not being scanned.`));
+    if (g.networks.length) plain.append(networks(g.networks));
+    return plain;
+  }
+  const box = el("details", "sl-org", null, { "data-keep-key": `org:${g.key}` });
   box.open = !folded.has(g.key);
   box.addEventListener("toggle", () => {
     if (box.open) folded.delete(g.key);
@@ -329,9 +491,9 @@ function section(g, reload, details) {
   sum.append(chips);
   box.append(sum);
   if (g.note) box.append(el("p", "note", g.note));
-  if (g.networks.length) box.append(networks(g.networks));
   if (g.sentinels.length) box.append(grid);
   else box.append(el("p", "sl-quiet", "No Sentinel covers this organization. Its internal networks are not being scanned."));
+  if (g.networks.length) box.append(networks(g.networks)); // under the Sentinels, so the rows come first
   return box;
 }
 
@@ -342,6 +504,9 @@ const detailKey = (s) => `${s.revision || ""}|${s.version_state || ""}`;
 
 export function sentinelLive(mount) {
   let data = null;
+  let failure = null; // the words of a failed first read, shown with Retry
+  let slowed = false;
+  const waitBoxes = new Set(); // every placeholder built (a redraw may keep an older one on screen), so stop() can end their own timers
   const pace = createPace();
   const conditional = createGet();
   const details = detailCache(() => paint());
@@ -356,24 +521,52 @@ export function sentinelLive(mount) {
     const stamp = Date.now();
     if (await details.refresh(ids(), want.map((s) => s.id))) want.forEach((s) => seen.set(s.id, { key: detailKey(s), at: stamp }));
   };
-  const paint = () => {
-    mount.textContent = "";
-    if (!data) return;
+  // The blocks of the page, built from the newest data. renderKeepingState draws them without taking away what the person opened, scrolled or typed, and
+  // leaves a block whose markup did not change alone; it waits while the person is using the page (static/cve/keep-state.js).
+  const blocks = () => {
+    const built = el("div");
+    if (!data) {
+      // nothing read yet: a placeholder while waiting, and when the read failed, say so with Retry; never "No Sentinel has registered yet"
+      if (!failure) {
+        const wait = waiting("Checking the Sentinels", { slow: slowed });
+        waitBoxes.add(wait);
+        wait.setAttribute("data-keep-key", "wait");
+        return [wait];
+      }
+      const box = couldNotRead("The Sentinel list", () => { failure = null; arm(); paint(); reload(); }, failure);
+      box.setAttribute("data-keep-key", "load-error");
+      return [box];
+    }
     if (!data.results.length) {
-      mount.append(el("p", "empty", "No Sentinel has registered yet. Generate an enrollment secret for a project and give it to a Sentinel's setup."));
-      if (!(data.orgs || []).some((o) => o.networks.length) && !data.openvas) return;
-    } else mount.append(summary(data));
-    if (data.openvas) mount.append(openvasQueue(data.openvas));
-    const drawn = groups(data);
-    drawn.forEach((g) => mount.append(section(g, reload, details)));
-    const kept = new Set(drawn.flatMap((g) => g.sentinels.map((s) => `${g.key}:${s.id}`)));
+      built.append(el("p", "empty", "No Sentinel has registered yet. Generate an enrollment secret for a project and give it to a Sentinel's setup."));
+      if (!(data.orgs || []).some((o) => o.networks.length) && !data.openvas) return Array.from(built.childNodes);
+    } else {
+      built.append(summary(data));
+      const notes = engineNotes(data);
+      if (notes) built.append(notes);
+    }
+    groups(data).forEach((g) => built.append(section(g, reload, details)));
+    if (data.openvas) built.append(openvasQueue(data.openvas)); // under the Sentinels: they are what the page is for
+    return Array.from(built.childNodes);
+  };
+  // after a draw: forget the orbs of Sentinels that are gone, give each card its orb back (the card that was built and then not used took it), age the text
+  const settle = () => {
+    if (!data) return;
+    const kept = new Set(groups(data).flatMap((g) => g.sentinels.map((s) => `${g.key}:${s.id}`)));
     orbs.forEach((o, key) => {
       if (!kept.has(key)) {
         o.destroy();
         orbs.delete(key);
       }
     });
+    mount.querySelectorAll("[data-orb-key]").forEach((head) => {
+      const o = orbs.get(head.dataset.orbKey);
+      if (o && o.node.parentNode !== head) head.prepend(o.node);
+    });
     tick();
+  };
+  const paint = () => {
+    renderKeepingState(mount, blocks, { after: settle });
   };
   // ages the "seen 12s ago" and "running for 40s" text between polls without asking the server
   const tick = () => {
@@ -394,7 +587,11 @@ export function sentinelLive(mount) {
       }
     } catch (err) {
       pace.fail(err);
-      if (!data) toast(err.status ? `Request failed (${err.status})` : err.message, true);
+      // a failed refresh keeps the cards on screen; a failed first read says so where the list would be
+      if (!data) {
+        failure = err.status ? `The server answered ${err.status}.` : "The server did not answer.";
+        paint();
+      }
     }
   }
   async function reload() {
@@ -403,9 +600,24 @@ export function sentinelLive(mount) {
   }
   // One request at a time, jittered, paused while the tab is hidden; the detail of a Sentinel (settings, version, update) is asked for only when its live
   // row says it moved (``revision``), not on every round.
+  // the "taking longer than usual" mark: armed at the start and again on every Retry, so each wait has its own count
+  let slowTimer = null;
+  function arm() {
+    clearTimeout(slowTimer);
+    slowed = false;
+    slowTimer = setTimeout(() => { if (!data && !failure) { slowed = true; paint(); } }, SLOW_MS);
+    if (slowTimer.unref) slowTimer.unref();
+  }
+  arm();
+  paint();
   const live = every(reload, POLL_MS, { pace });
-  setInterval(tick, 1000);
-  return () => live.stop();
+  const ager = setInterval(tick, 1000);
+  return () => {
+    live.stop();
+    clearTimeout(slowTimer);
+    clearInterval(ager);
+    waitBoxes.forEach((w) => w.stop && w.stop()); // the placeholders' own "taking longer" timers
+  };
 }
 
 const mount = document.getElementById("live");

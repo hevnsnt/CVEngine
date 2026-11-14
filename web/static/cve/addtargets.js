@@ -57,7 +57,7 @@ function build() {
   orgField.append(el('span', 'eyebrow', 'Organization'));
   const projField = el('label', 'dlg-dest-field', null, { for: 'dlg-project' });
   projField.append(el('span', 'eyebrow', 'Add to project'));
-  const wrapSel = (sel) => { const w = el('div', 'select'); w.append(sel); const c = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); c.setAttribute('class', 'chev'); c.setAttribute('viewBox', '0 0 24 24'); c.setAttribute('aria-hidden', 'true'); c.innerHTML = '<use href="#i-chevron"/>'; w.append(c); return w; };
+  const wrapSel = (sel) => { const w = el('div', 'select'); w.append(sel); const c = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); c.setAttribute('class', 'chev'); c.setAttribute('width', '16'); c.setAttribute('height', '16'); c.setAttribute('viewBox', '0 0 24 24'); c.setAttribute('aria-hidden', 'true'); c.innerHTML = '<use href="#i-chevron"/>'; w.append(c); return w; };
   orgField.append(wrapSel(orgSel));
   projField.append(wrapSel(projSel));
   dest.append(orgField, projField);

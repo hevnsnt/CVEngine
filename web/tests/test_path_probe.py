@@ -1,6 +1,3 @@
-import os
-import socket
-import unittest
 from unittest import mock
 
 from django.test import SimpleTestCase, TestCase
@@ -34,29 +31,6 @@ class VerdictTests(SimpleTestCase):
 		self.assertEqual(path_probe.verdict([result()] * 5 + [result(odd=False)])[0], 'direct')
 
 
-class SurveyTests(SimpleTestCase):
-	def test_the_odd_probe_is_only_sent_where_the_control_was_answered(self):
-		sent = []
-
-		def probe(ip, port, flags):
-			sent.append((ip, flags))
-			return ip != '203.0.113.9'
-		got = path_probe.survey([('93.184.216.34', 81), ('203.0.113.9', 82)], probe=probe, sleep=lambda s: None)
-		self.assertEqual([(r['ip'], r['plain'], r['odd']) for r in got], [('93.184.216.34', True, True), ('203.0.113.9', False, None)])
-		self.assertEqual(sent, [('93.184.216.34', path_probe.SYN), ('93.184.216.34', path_probe.ODD_FLAGS), ('203.0.113.9', path_probe.SYN)])
-
-	def test_a_host_that_cannot_be_reached_is_skipped(self):
-		def probe(ip, port, flags):
-			raise OSError('network is unreachable')
-		self.assertEqual(path_probe.survey([('93.184.216.34', 81)], probe=probe, sleep=lambda s: None), [])
-
-	def test_raw_sockets_not_allowed_is_reported_not_swallowed(self):
-		def probe(ip, port, flags):
-			raise path_probe.RawSocketsUnavailable('no CAP_NET_RAW')
-		with self.assertRaises(path_probe.RawSocketsUnavailable):
-			path_probe.survey([('93.184.216.34', 81)], probe=probe, sleep=lambda s: None)
-
-
 class CandidateTests(TestCase):
 	def setUp(self):
 		# which project may still have an address probed is path_probe.in_scope's own test (tests/test_local_egress.py, PathProbeScopeTests)
@@ -82,48 +56,22 @@ class CandidateTests(TestCase):
 		self.assertNotIn('4.4.4.4', got)      # not fingerprinted lately
 
 	def test_check_needs_enough_hosts_and_reports_why_it_cannot_say(self):
-		self.assertEqual(path_probe.check(probe=lambda *a: True)['state'], 'unknown')
+		self.assertEqual(path_probe.check()['state'], 'unknown')
 		for address in ('8.8.8.8', '1.1.1.1', '9.9.9.9', '4.4.4.4'):
 			self.make(address, 81)
-		out = path_probe.check(probe=lambda ip, port, flags: flags == path_probe.SYN)
-		self.assertEqual((out['state'], out['lost']), ('interfering', 4))
-		out = path_probe.check(probe=lambda ip, port, flags: True)
-		self.assertEqual(out['state'], 'direct')
+		rows = lambda odd: [{'ip': a, 'port': 81, 'plain': True, 'odd': odd} for a in ('8.8.8.8', '1.1.1.1', '9.9.9.9', '4.4.4.4')]  # noqa: E731
+		with mock.patch.object(path_probe, 'holder', return_value=1), mock.patch('agentapi.sentinel_dispatch.try_path_probe', return_value=rows(False)):
+			out = path_probe.check()
+		self.assertEqual((out['state'], out['lost'], out['vantage']), ('interfering', 4, 'scanner'))
+		with mock.patch.object(path_probe, 'holder', return_value=1), mock.patch('agentapi.sentinel_dispatch.try_path_probe', return_value=rows(True)):
+			self.assertEqual(path_probe.check()['state'], 'direct')
 
-		def no_raw(*a):
-			raise path_probe.RawSocketsUnavailable('x')
-		self.assertIn('raw', path_probe.check(probe=no_raw)['why'])
-
-
-@unittest.skipUnless(hasattr(os, 'geteuid') and os.geteuid() == 0, 'raw sockets need root')
-class RealPacketTests(SimpleTestCase):
-	"""The packets themselves, against the kernel's own stack on the loopback: a closed port answers both the plain and the odd segment with a
-	reset, and a port nobody answers on (a dropped packet) answers neither."""
-
-	def closed_port(self):
-		with socket.socket() as sock:
-			sock.bind(('127.0.0.1', 0))
-			return sock.getsockname()[1]
-
-	def test_a_closed_port_resets_both(self):
-		try:
-			port = self.closed_port()
-			self.assertTrue(path_probe.send_probe('127.0.0.1', port, path_probe.SYN, timeout=1))
-			self.assertTrue(path_probe.send_probe('127.0.0.1', port, path_probe.ODD_FLAGS, timeout=1))
-		except path_probe.RawSocketsUnavailable:
-			self.skipTest('no raw sockets in this environment')
-
-	def test_a_filtered_port_answers_nothing(self):
-		import subprocess
-		port = self.closed_port()
-		rule = ['-p', 'tcp', '--dport', str(port), '-j', 'DROP']
-		try:
-			subprocess.run(['iptables', '-I', 'INPUT', *rule], check=True, capture_output=True)
-		except (OSError, subprocess.CalledProcessError):
-			self.skipTest('no iptables here')
-		try:
-			self.assertFalse(path_probe.send_probe('127.0.0.1', port, path_probe.SYN, timeout=0.5))
-		except path_probe.RawSocketsUnavailable:
-			self.skipTest('no raw sockets in this environment')
-		finally:
-			subprocess.run(['iptables', '-D', 'INPUT', *rule], capture_output=True)
+	def test_with_no_scanner_the_survey_waits_and_nothing_is_sent_from_here(self):
+		from reNgine.resources import ScannerUnavailable
+		for address in ('8.8.8.8', '1.1.1.1', '9.9.9.9', '4.4.4.4'):
+			self.make(address, 81)
+		with mock.patch.object(path_probe, 'holder', return_value=1), \
+				mock.patch('agentapi.sentinel_dispatch.try_path_probe', side_effect=ScannerUnavailable('path_probe', 'none')):
+			out = path_probe.check()
+		self.assertEqual(out['state'], 'unknown')
+		self.assertIn('no scanner could take this work', out['why'])

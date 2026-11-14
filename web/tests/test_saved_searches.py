@@ -1,20 +1,19 @@
 """Saved searches with alerts: validation at save time, the evaluator (baseline, new matches, aliases, lost access, bounds), the
 notification wiring, and tenancy on every REST and MCP entry point."""
-import json
 from datetime import timedelta
 from unittest import mock
 
 from django.contrib.auth.models import User
 from django.core.cache import cache
 from django.db import OperationalError
-from django.test import Client, TestCase
+from django.test import TestCase
 from django.utils import timezone
 
 from agentapi.auth import create_token
 from cveFeed import notify, saved_searches
 from cveFeed.models import AgentActivity, SavedSearch
 from cveFeed.tasks import evaluate_saved_searches
-from dashboard.models import Org, OrgMembership, Project, ProjectMembership
+from dashboard.models import Org, Project, ProjectMembership
 from django_celery_beat.models import PeriodicTask
 from scanEngine.models import EngineType, Notification
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain

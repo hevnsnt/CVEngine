@@ -1,0 +1,84 @@
+{
+ "kind": "supplier_check",
+ "name": "fx_supplier_check",
+ "payload": {
+  "domains": [
+   {
+    "answered": false,
+    "card": {
+     "addresses": [],
+     "evidence": {
+      "address": "unknown",
+      "dns": "unknown"
+     },
+     "state": "unreachable"
+    },
+    "distro": "",
+    "domain": "www.example.com",
+    "edges": [],
+    "fingerprints": [],
+    "partial": false,
+    "postures": [],
+    "requests": 0,
+    "resolvable": {},
+    "stopped": false,
+    "summary": {
+     "address": "unknown"
+    }
+   },
+   {
+    "answered": false,
+    "card": {
+     "addresses": [],
+     "evidence": {
+      "address": "unknown",
+      "dns": "unknown"
+     },
+     "state": "unreachable"
+    },
+    "distro": "",
+    "domain": "mail.example.org",
+    "edges": [],
+    "fingerprints": [],
+    "partial": false,
+    "postures": [],
+    "requests": 0,
+    "resolvable": {},
+    "stopped": false,
+    "summary": {
+     "address": "unknown"
+    }
+   }
+  ],
+  "outcome": "done",
+  "refused": [],
+  "touched": []
+ },
+ "sentinel_seconds": 0.0,
+ "target": {
+  "domains": [
+   "www.example.com",
+   "mail.example.org"
+  ],
+  "max_requests": 600,
+  "pace": {
+   "gap": 1.0,
+   "host_gap": 2.0
+  },
+  "scope": {
+   "addresses": [],
+   "blocked": [],
+   "domains": [],
+   "excluded": [],
+   "excluded_trees": [],
+   "hosts": [
+    "www.example.com",
+    "mta-sts.www.example.com",
+    "mail.example.org",
+    "mta-sts.mail.example.org"
+   ],
+   "private": false
+  }
+ },
+ "tool_rows": null
+}

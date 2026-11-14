@@ -1,75 +1,27 @@
 """A DNS lookup the resolver could not answer is an error, never a host with no address."""
-import socket
 from unittest import mock
 
-from django.test import SimpleTestCase, TestCase
+from django.test import TestCase
 
 from cveFeed import discovery, unresolved_archive
-
-
-def lookup(table):
-    """A ``socket.getaddrinfo`` answering from ``table``: an address list, or an exception to raise."""
-    def get(name, *a, **k):
-        answer = table[name]
-        if isinstance(answer, Exception):
-            raise answer
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (ip, 0)) for ip in answer]
-    return get
-
-
-class ResolveNamesTests(SimpleTestCase):
-    def resolve(self, table, **kw):
-        errors = {}
-        with mock.patch('socket.getaddrinfo', lookup(table)):
-            pairs = discovery.resolve_names(list(table), errors=errors, **kw)
-        return pairs, errors
-
-    def test_a_name_with_no_record_is_absent_and_not_an_error(self):
-        pairs, errors = self.resolve({'ok.rt.test': ['203.0.113.5'], 'gone.rt.test': socket.gaierror(socket.EAI_NONAME, 'Name or service not known')})
-        self.assertEqual(pairs, {('ok.rt.test', '203.0.113.5')})
-        self.assertEqual(errors, {})
-
-    def test_a_temporary_resolver_failure_is_an_error_not_a_missing_host(self):
-        pairs, errors = self.resolve({'ok.rt.test': ['203.0.113.5'], 'busy.rt.test': socket.gaierror(socket.EAI_AGAIN, 'Temporary failure in name resolution')})
-        self.assertEqual(pairs, {('ok.rt.test', '203.0.113.5')})
-        self.assertEqual(list(errors), ['busy.rt.test'])
-        self.assertIn('gaierror', errors['busy.rt.test'])
-
-    def test_a_lookup_that_does_not_answer_in_time_is_an_error(self):
-        import threading
-        release = threading.Event()
-
-        def slow(name, *a, **k):
-            release.wait(5)
-            return []
-        errors = {}
-        with mock.patch('socket.getaddrinfo', slow):
-            pairs = discovery.resolve_names(['slow.rt.test'], timeout=0.05, errors=errors)
-        release.set()
-        self.assertEqual(pairs, set())
-        self.assertIn('slow.rt.test', errors)
-        self.assertIn('no answer within', errors['slow.rt.test'])
-
-    def test_the_old_call_without_errors_still_returns_the_pairs(self):
-        with mock.patch('socket.getaddrinfo', lookup({'ok.rt.test': ['203.0.113.5'], 'busy.rt.test': socket.gaierror(socket.EAI_AGAIN, 'x')})):
-            self.assertEqual(discovery.resolve_names(['ok.rt.test', 'busy.rt.test']), {('ok.rt.test', '203.0.113.5')})
-
-    def test_a_failure_is_logged_not_swallowed(self):
-        with mock.patch('socket.getaddrinfo', lookup({'busy.rt.test': socket.gaierror(socket.EAI_AGAIN, 'x')})):
-            with self.assertLogs('cveFeed.discovery', level='WARNING') as logs:
-                discovery.resolve_names(['busy.rt.test'])
-        self.assertIn('could not be answered for 1 of 1', logs.output[0])
+from tests.fake_scanner import FakeScanner
 
 
 def busy(*answers):
-    """getaddrinfo that answers ``answers`` by name and fails every other name as a temporary resolver failure."""
+    """A fake Sentinel that answers ``answers`` by name (an address) and cannot answer any other name: a temporary resolver failure, for the
+    name lookups (``dns_resolve``) and the address reads (``identity_check``) alike."""
     table = dict(answers)
 
-    def get(name, *a, **k):
-        if name in table:
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (table[name], 0))]
-        raise socket.gaierror(socket.EAI_AGAIN, 'Temporary failure in name resolution')
-    return mock.patch('socket.getaddrinfo', get)
+    def resolve(task):
+        names = task['target']['names']
+        return {'outcome': 'done', 'resolved': {n: [table[n]] for n in names if n in table},
+                'errors': {n: 'gaierror: Temporary failure in name resolution' for n in names if n not in table}, 'refused': []}
+
+    def identity(task):
+        return {'outcome': 'done', 'touched': [], 'refused': [], 'certs': [],
+                'dns': [({'id': q['id'], 'status': 'ok', 'records': [table[q['name']]]} if q['name'] in table else
+                         {'id': q['id'], 'status': 'unknown', 'records': [], 'error': 'Timeout'}) for q in task['target'].get('dns', [])]}
+    return FakeScanner(kinds=['dns_resolve', 'identity_check'], responders={'dns_resolve': resolve, 'identity_check': identity})
 
 
 from datetime import timedelta  # noqa: E402
@@ -122,7 +74,7 @@ class HostPipelineCallerTests(ChangeFixture, TestCase):
         from startScan.models import Subdomain
         from tests.test_changes import _stages
         _, kwargs = _stages()
-        kwargs.pop('resolver', None)  # the real resolver runs, against the patched getaddrinfo
+        kwargs.pop('resolver', None)  # the fake Sentinel resolves
         with busy(('new.ct.test', '203.0.113.9')):
             out = discovery.run_host_pipeline(self.domain.id, ['new.ct.test', 'other.ct.test'], **kwargs)
         self.assertEqual(out['lookup_errors'], 1)

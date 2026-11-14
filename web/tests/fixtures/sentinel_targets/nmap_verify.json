@@ -1,0 +1,12 @@
+{
+  "address": "192.0.2.10",
+  "ports": [
+    8443
+  ],
+  "version_all": true,
+  "scripts": [
+    "http-server-header",
+    "http-title"
+  ],
+  "host_timeout": 90
+}

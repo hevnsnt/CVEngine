@@ -3,8 +3,8 @@
 Deterministic candidate generation first: match each discovered Technology (and
 its version, when reNgine captured one) against the product/package names and
 version ranges in `CVEEntry.affected`. Candidates become `CVEMatch` rows with a
-heuristic confidence; the user's chosen AI model can then confirm each one
-(`ai_confirm_match`), which is what makes exposure precise rather than noisy.
+heuristic confidence; the AI triage (cveFeed.triage) then judges each one,
+which is what makes exposure precise rather than noisy.
 
 The version/name helpers are pure Python (no Django import) so they are unit
 testable on their own.
@@ -13,12 +13,13 @@ import logging
 import re
 from functools import cmp_to_key
 
-from cveFeed import cms
+from cvengine_scanner import cms, versions
+
+from cveFeed import cms_evidence
 from cveFeed import distro as distro_lib
 from cveFeed import js_libraries
 from cveFeed import match_policy
 from cveFeed import runzero
-from cveFeed import versions
 
 logger = logging.getLogger(__name__)
 
@@ -279,11 +280,6 @@ PRODUCT_ALIASES = {
     "opensshserver": {"openssh"},
     "linuxkernel": {"linux"},
 }
-
-
-def tech_tokens(token):
-    """The tech token plus the product tokens it is an alias of."""
-    return {token} | PRODUCT_ALIASES.get(token, set())
 
 
 def parse_cpe(cpe):
@@ -1114,9 +1110,13 @@ _MATCH_FIELDS = ("matched_version", "version_in_range", "confidence", "scan_hist
 
 def _row_strength(row):
     """Orders sightings of one match: hard evidence (a template hit, a distribution tracker), then a version inside the range, then an
-    unknown range, then outside it."""
+    unknown range, then outside it. Of two sightings equal in all that, the one whose version a file of the page stated outranks one only a
+    name or a query string carried (``version_confidence``): the strongest evidence wins, never whichever row the database returned last."""
+    evidence = row.get("evidence")
+    confidence = evidence.get("version_confidence") if isinstance(evidence, dict) else None
     return (row.get("template_result") == "vulnerable" or row.get("distro_status") == "vulnerable",
-            row.get("version_in_range") is True, row.get("version_in_range") is None)
+            row.get("version_in_range") is True, row.get("version_in_range") is None,
+            confidence if isinstance(confidence, (int, float)) else 0.0)
 
 
 def _carry_remediation(fresh):
@@ -1428,12 +1428,12 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
 
     # Technology fingerprints (httpx tech-detect). A version of a one-core product the evidence disproves (jQuery's number read as
     # WordPress's) is kept on the host as evidence and not matched.
-    technologies = list(subdomain.technologies.all())
+    technologies = sorted(subdomain.technologies.all(), key=lambda t: t.id)  # a stable order: a tie between two sightings must not depend on the row order the database returns
     # a JavaScript library's version stands on what its file states (cveFeed.js_libraries): a copy a later one replaces, or a string a
     # script's query or name carried where the file says otherwise, is not matched; a file-name-only version is matched at low confidence
     libraries = js_libraries.HostLibraries.for_subdomain(subdomain) if any(js_libraries.is_library(t.name) for t in technologies) else None
     # a core version that is a number a library's own file on the host states is that library's (jQuery 3.7.1 is not WordPress 3.7.1)
-    wrong = cms.superseded(subdomain, technologies, libraries.file_versions() if libraries is not None else ())
+    wrong = cms_evidence.superseded(subdomain, technologies, libraries.file_versions() if libraries is not None else ())
     for tech in technologies:
         name, version = split_name_version(tech.name)
         if wrong and (cms.key(name), version) in wrong:
@@ -1565,8 +1565,7 @@ def latest_scan_q(prefix=""):
     these scans, the newest row wins. A domain that has never had a successful full scan keeps all its rows (newest per host),
     so a first scan in progress (or one that failed part way) does not hide the hosts it found. ``prefix`` reaches the host
     from another model ("subdomain__" for a CVEMatch)."""
-    from django.db.models import Exists, F, Max, OuterRef, Q, Subquery
-    from django.db.models.functions import Coalesce
+    from django.db.models import Case, Exists, F, Max, OuterRef, Q, Value, When, Window
 
     from cveFeed.discovery import HOST_PIPELINE_TASK
     from startScan.models import ScanHistory, Subdomain
@@ -1574,9 +1573,16 @@ def latest_scan_q(prefix=""):
     done = ScanHistory.objects.filter(scan_status=2)
     full = done.exclude(tasks__contains=[HOST_PIPELINE_TASK])
     latest_full = full.values("domain_id").annotate(last=Max("id")).values("last")
-    newest_full_of = full.filter(domain_id=OuterRef("domain_id")).order_by("-id").values("id")[:1]
-    after_full = done.filter(tasks__contains=[HOST_PIPELINE_TASK]).annotate(
-        full_id=Coalesce(Subquery(newest_full_of), 0)).filter(id__gt=F("full_id")).values("id")
+    # A host-pipeline scan is "after the full scan" when it is newer than the newest full scan of its domain (any, when the domain has none). It was
+    # ``id > COALESCE((the newest full scan of the domain), 0)``, a subquery run once per finished host-pipeline scan that walked every finished scan of
+    # the domain to find it: a domain keeps 170 or more of them, so 3,300 scans meant 590,000 row visits (1.4 s) each time the set was built, and every
+    # host statement builds it once or twice. Now ONE pass over the finished scans: a window gives each row the newest full scan id of its domain, with
+    # nothing correlated for the planner to repeat per row (a NOT EXISTS version was hashed on PostgreSQL 16 and read 6.7 million buffers on 18).
+    # Both conditions are on windows so that both are applied after them (a plain filter on the tasks would cut the rows the window sees).
+    is_full = ~Q(tasks__contains=[HOST_PIPELINE_TASK])
+    after_full = (done.annotate(_newest_full=Window(Max(Case(When(is_full, then=F("id")))), partition_by=[F("domain_id")]),
+                                _is_pipeline=Window(Max(Case(When(is_full, then=Value(0)), default=Value(1))), partition_by=[F("id")]))
+                  .filter(_is_pipeline=1).filter(Q(_newest_full__isnull=True) | Q(id__gt=F("_newest_full"))).values("id"))
     same_host = Subdomain.objects.filter(target_domain_id=OuterRef(prefix + "target_domain_id"),
                                          name=OuterRef(prefix + "name"))
     newer_row = same_host.filter(scan_history_id__in=after_full,
@@ -1623,44 +1629,3 @@ def candidate_subdomains(product_index, base=None):
     matched = CVEMatch.objects.filter(source__in=_CORRELATED_SOURCES).values("subdomain_id")  # re-checked so a stale match closes
     qs = (Subdomain.objects if base is None else base).filter(Q(id__in=by_tech) | Q(id__in=by_port) | Q(id__in=matched)).filter(latest_scan_q())
     return qs.prefetch_related("technologies", "ip_addresses__ports")
-
-
-def ai_confirm_match(match, provider=None):
-    """Triage one CVEMatch with the user's chosen AI model and store the result as the legacy ``ai_verdict``.
-
-    The model's answer goes through the same rules as every finding (cveFeed.triage.apply_rules): confirmed, likely and
-    needs_validation map to affected, affected and uncertain; likely_false_positive and not_applicable map to not_affected, but never
-    for a match with hard evidence (a version inside the affected range, a template hit, a distribution tracker listing the package as
-    affected), which stays at least uncertain. ``provider`` defaults to the one configured in AIProviderSettings; with none configured
-    (or on a provider error) the match is returned unconfirmed, so deterministic correlation still works without an API key.
-    This is the stateless single-match form; auto-fire and the pipeline use cveFeed.triage, which also shares one answer per signature.
-    """
-    from reNgine.ai_providers import AIProviderError, triage_finding
-    try:
-        if provider is None:
-            from reNgine.ai_settings import get_configured_provider
-            provider = get_configured_provider()
-        if provider is None:
-            return match
-        from cveFeed import activity, triage
-        cve = match.cve_entry
-        host = match.subdomain.name if match.subdomain else ""
-        described = triage.describe_cve_match(match)
-        domain = getattr(match.subdomain, 'target_domain', None)
-        project = getattr(domain, 'project_id', None)
-        with activity.step('confirm', f'Asking {provider.name} whether {host or "a host"} is affected by {cve.cve_id}',
-                           project=project, cve_id=cve.cve_id) as handle:
-            answer = triage_finding(provider, 'cve_match', described['payload'])
-            outcome = triage.apply_rules('cve_match', described['facts'], answer['parsed'])
-            handle.done_message = (f'{host}: {outcome["classification"].replace("_", " ")} for {cve.cve_id}'
-                                   f' ({outcome["reason"][:120]})')
-    except AIProviderError as e:
-        logger.warning("AI confirmation skipped for match %s: %s", match.pk, e)
-        return match
-    match.ai_verdict = triage.verdict_for(outcome["classification"])
-    match.ai_reason = outcome["reason"][:2000]
-    match.ai_model = answer["model"]
-    match.save(update_fields=["ai_verdict", "ai_reason", "ai_model", "updated_at"])
-    from cveFeed import scoring
-    scoring.rescore_for_matches([match])  # a verdict moves the host's score
-    return match

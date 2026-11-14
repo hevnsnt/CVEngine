@@ -6,7 +6,7 @@ export const SECTION_ID = "configmaxxing";
 export const SECTION_LABEL = "configMaxxing";
 export const STORAGE_KEY = "cve.settings.configmaxxing.open";
 export const WARNING_TEXT =
-  "Advanced settings for people who like to tune things. The defaults are safe, and auto-tuning (on by default) adjusts the throughput numbers for you. Changing these can make scans slower, use more memory or send more traffic to your targets.";
+  "configMaxxing is for advanced performance settings that cvENGINE tunes itself, so change them only if you like to tune things. The defaults are safe, and auto-tuning (on by default) adjusts the throughput numbers for you. Changing these can make scans slower, use more memory or send more traffic to your targets.";
 export const EXPLANATION_TEXT =
   "More at once scans faster but needs more CPU and memory. The memory gate still holds work back when the container is short on memory. " +
   "Scanning on a second machine (a Sentinel) is the best way to scale. Auto-tuning (the first card) moves the numbers nobody saved here; a number you save is pinned.";
@@ -33,6 +33,8 @@ export function parseHash(hash) {
   const [section, card = ""] = String(hash || "").replace(/^#/, "").split("/");
   return { section, card };
 }
+// "#configmaxxing/autotune/12": the line inside the card (the History entry of decision 12), "" when the hash names none.
+export const hashItem = (hash) => String(hash || "").replace(/^#/, "").split("/")[2] || "";
 export const isSectionHash = (hash) => parseHash(hash).section === SECTION_ID;
 
 // --- numbers -------------------------------------------------------------------------------------------------
@@ -85,7 +87,7 @@ export function softWarning(field, draft) {
   }
   const fromEnv = field.env_value != null;
   const reference = fromEnv ? field.env_value : field.default;
-  if (value > reference * 10) return `This is more than ten times ${fromEnv ? "the environment value" : "the default"} (${reference}): it raises spend above the documented default.`;
+  if (value > reference * 10) return `This is more than ten times ${fromEnv ? "the value set on the server" : "the default"} (${reference}): it raises spend above the documented default.`;
   return "";
 }
 export const usageText = (field) => (field.used_today == null || !field.used_since ? "" : `Used ${field.used_since}: ${field.used_today}`);
@@ -97,12 +99,13 @@ export const canPin = (field) =>
 // --- what a row says about where its number comes from ---------------------------------------------------------
 export function sourceLabel(field) {
   if (field.source === "admin") return "Saved here";
-  if (field.source === "environment") return `From the environment (${field.env_name}=${field.env_value})`;
+  if (field.source === "environment") return "Set on the server";
   return "Built-in default";
 }
+// The technical name behind "Set on the server": shown only behind a Details line.
+export const serverSetting = (field) => (field.env_value == null ? `${field.env_name} is not set` : `${field.env_name}=${field.env_value}`);
 export function originLines(field, formatDate = (x) => x) {
   const lines = [`Default ${field.default}`];
-  lines.push(field.env_value == null ? `${field.env_name} is not set` : `${field.env_name}=${field.env_value}`);
   if (field.source === "admin") {
     const when = field.set_at ? ` on ${formatDate(field.set_at)}` : "";
     lines.push(`Set by ${field.set_by || "an administrator"}${when}`);
@@ -141,7 +144,7 @@ export function memoryPlan(caps, costs, budget, defaults, labels = {}) {
     if (total > budget * OVERCOMMIT && total > defaultTotal) {
       warnings.push(
         `With every scanner at its limit at the same time, up to ${total} MB could be wanted, more than ${OVERCOMMIT} times the ${budget} MB budget of the scanning container. ` +
-          "The memory gate will hold runs back, so raising these further will not scan faster until the container has more memory (CELERY_MEM_LIMIT) or you scan on a second machine.",
+          "The memory gate will hold runs back, so raising these further will not scan faster until the scanning container is given more memory (the server's administrator sets that) or you scan on a second machine.",
       );
     }
   }
@@ -167,6 +170,15 @@ export const AUTOTUNE_MODES = [
   ["suggest", "Suggest: it recommends changes, with the reason and an Apply button, and changes nothing"],
   ["off", "Off: hand tuning, nothing is measured or changed"],
 ];
+export const AGENT_POLICIES = [
+  ["suggest", "Suggest: an agent's change is recorded as a recommendation, and a person applies it with one click"],
+  ["auto", "Automatic: an agent's change is applied inside the safe ranges, checked after 30 minutes and undone if it hurt"],
+  ["off", "Off: agents may not change performance settings"],
+];
+export const AGENT_POLICY_HELP =
+  "Whether AI agents may change performance settings by themselves. Only the settings auto-tuning manages, and never a number a person saved. Agents can never raise a spend cap, " +
+  "approve an update or switch on a paid or wider-scanning feature, whatever this says. This includes cvENGINE's own health-check AI when the AI reviewer is on: " +
+  "its proposals are only suggestions unless this is Automatic (and auto-tuning is in Auto mode).";
 export const AUTOTUNE_INTRO =
   "Auto-tuning is on by default. It aims high: about ten minutes after each restart or update it sets the throughput settings below to the most this machine sensibly " +
   "carries (sized from its CPU cores, memory budget, database connections and Sentinel slots), backs off at once when it sees trouble (memory kills, " +
@@ -174,8 +186,9 @@ export const AUTOTUNE_INTRO =
   "It never changes AI spend caps, never changes anything while scanning is paused or an update is applied, and every change is listed here with its reason and a Revert button.";
 export const AUTOTUNE_OFF_HELP =
   "To tune by hand, choose Off. To keep one number as it is, type it in its box and save it (even the number shown): a saved number is pinned and the tuner leaves it alone, " +
-  "and so is one set in .env to anything other than its default. " +
-  "CVENGINE_AUTOTUNE=0 in .env turns auto-tuning off for the whole instance, whatever is chosen here.";
+  "and so is one the server's administrator fixed to anything other than its default. " +
+  "The administrator can also switch auto-tuning off for the whole server, whatever is chosen here.";
+export const AUTOTUNE_OFF_DETAIL = "For the server's administrator: CVENGINE_AUTOTUNE=0 in the server's .env file turns auto-tuning off for the whole instance, and a setting there that is not its default pins that number.";
 export const SOURCE_LABEL = { controller: "controller", ai: "AI advisor", person: "a person" };
 
 // One line under a row of a configMaxxing card: pinned, auto-tuned (and from what), suggested, or what the tuner may do with it.
@@ -183,9 +196,10 @@ export const SOURCE_LABEL = { controller: "controller", ai: "AI advisor", person
 export function autoTuneLine(field, mode, formatDate = (x) => x) {
   const at = field && field.autotune;
   const none = { text: "", kind: "", release: false, suggestion: null };
+  if (at && !at.managed && at.why_not_managed && mode && mode !== "off") return { text: `Not auto-tuned: ${String(at.why_not_managed)}`, kind: "floor", release: false, suggestion: null };
   if (!at || !at.managed || !mode || mode === "off") return none;
   if (at.pinned && at.pinned_env && !at.pinned_by) {
-    return { text: `Pinned by the environment (${at.pinned_env}): remove it from .env, or save a value here`, kind: "pinned", release: false, suggestion: null };
+    return { text: "Fixed by the server's own settings: save a value here to take it over", kind: "pinned", release: false, suggestion: null, detail: `Server setting: ${at.pinned_env}. Remove it from the server's .env file to let auto-tuning manage this number.` };
   }
   if (at.pinned) {
     return { text: `Pinned by ${at.pinned_by || "an administrator"}: auto-tuning leaves this number alone`, kind: "pinned", release: mode === "auto", suggestion: null };
@@ -230,10 +244,12 @@ export function decisionText(d) {
   return `${label}: ${what}${pressure} ${numbers} by ${who}${state}${d.reason ? ` · ${d.reason}` : ""}`;
 }
 
+// The technical reason behind a notice, for a Details line; "" when there is none.
+export const modeDetail = (status) => (status && status.killed ? "For the server's administrator: CVENGINE_AUTOTUNE=0 is set in the environment. Remove it (or set it to 1) and restart to turn auto-tuning back on." : "");
 export function modeNotice(status) {
   if (!status) return "";
-  if (status.killed) return "Auto-tuning is off for this instance: CVENGINE_AUTOTUNE=0 is set in the environment. Remove it (or set it to 1) and restart to turn it back on.";
-  if (status.effective_mode === "off") return "Auto-tuning is off: every number below is what a person saved, the environment, or the default.";
+  if (status.killed) return "Auto-tuning is switched off for this whole server by its administrator. Ask them to switch it on again if you want it.";
+  if (status.effective_mode === "off") return "Auto-tuning is off: every number below is what a person saved, the server's own setting, or the default.";
   if (status.effective_mode === "suggest") return "Suggest mode: the tuner recommends changes on the rows below; nothing changes until you press Apply.";
   return "Auto mode: the tuner changes the rows below that are not pinned, one step at a time.";
 }

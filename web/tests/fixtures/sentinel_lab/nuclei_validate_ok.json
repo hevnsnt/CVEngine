@@ -1,0 +1,17 @@
+{
+ "kind": "nuclei_validate",
+ "name": "nuclei_validate_ok",
+ "payload": {
+  "fixture_note": "no match on benign local fixture; positive detection remains unverified",
+  "fixture_ok": true,
+  "outcome": "done",
+  "output": "WARNING: sonic/ast only supports (go1.17~1.26 and amd64 CPU) or (go1.20~1.26 and arm64 CPU), but your environment is not suitable and will fallback to encoding/json",
+  "valid": true
+ },
+ "sentinel_seconds": 0.6,
+ "target": {
+  "mode": "validate",
+  "template": "id: cvtv-nginx-detect\ninfo:\n  name: nginx server header\n  author: cvtv\n  severity: info\nhttp:\n  - method: GET\n    path:\n      - \"{{BaseURL}}/\"\n    matchers:\n      - type: word\n        part: header\n        words:\n          - \"nginx\"\n"
+ },
+ "tool_rows": null
+}

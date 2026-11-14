@@ -560,7 +560,7 @@ class Technology(models.Model):
 
 	def save(self, *args, **kwargs):
 		from cveFeed.correlation import split_name_version
-		from cveFeed.fingerprint import categorize
+		from cvengine_scanner.fingerprint import categorize
 		_base, self.version = split_name_version(self.name or '')
 		self.category = categorize(self.name or '')
 		fields = kwargs.get('update_fields')

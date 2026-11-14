@@ -1,0 +1,42 @@
+{
+  "hosts": [
+    {
+      "id": "h0",
+      "name": "www.example.com",
+      "scheme": "https",
+      "port": 443,
+      "root": {
+        "status": 200,
+        "title": "Home",
+        "length": 5000,
+        "location": "",
+        "server": ""
+      },
+      "leads": [
+        {
+          "path": "/portal/",
+          "count": 3,
+          "source": "crawled"
+        }
+      ]
+    }
+  ],
+  "paths": [
+    "/jira/",
+    "/grafana/",
+    "/phpmyadmin/"
+  ],
+  "max_requests": 60,
+  "gap": 2.0,
+  "scope": {
+    "hosts": [
+      "www.example.com"
+    ],
+    "domains": [],
+    "excluded": [],
+    "excluded_trees": [],
+    "private": false,
+    "addresses": [],
+    "blocked": []
+  }
+}

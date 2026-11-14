@@ -100,15 +100,8 @@ function start() {
 
   async function poll() {
     try {
-      const [running, queued] = await Promise.all([
-        get("scans?status=running&page_size=50", true),
-        get("scans?status=queued&page_size=50", true),
-      ]);
-      const now = new Set(
-        [...(running.results || []), ...(queued.results || [])].map(
-          (s) => s.id,
-        ),
-      );
+      const active = await get("scans?status=active&page_size=100", true); // running and queued in one request
+      const now = new Set((active.results || []).map((s) => s.id));
       if (previous) {
         for (const id of previous) {
           if (now.has(id)) continue;

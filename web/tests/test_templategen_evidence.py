@@ -459,8 +459,7 @@ class TemplateHitTests(Fixture):
         outcome = [{'host': HOST, 'vulnerable': vulnerable, 'output': '{}' if vulnerable else '', **({'hit': hit} if vulnerable else {})}]
         with mock.patch('cveFeed.validation.resolve_template', return_value=('/templates/x.yaml', '')), \
                 mock.patch('cveFeed.validation.approved_template', return_value=(text, '')), \
-                mock.patch.object(templategen, '_run_template_with_retry', return_value=outcome), \
-                mock.patch('cveFeed.auth_nuclei.merge_template_outcomes', side_effect=lambda path, hosts, outcomes, project: outcomes), \
+                mock.patch.object(templategen, '_test_chunk', return_value=outcome), \
                 mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, **kw: list(hosts)), \
                 mock.patch('reNgine.ai_settings.get_configured_provider', side_effect=RuntimeError('none')), \
                 mock.patch('cveFeed.notify._send', return_value=True) as send:
@@ -525,7 +524,7 @@ class TemplateHitTests(Fixture):
                  'params': {'template': '/templates/x.yaml'}}
         for text, hit, status in ((JQUERY_VERSION_REGEX, VERSION_HIT, 'reaffirmed'), (APACHE_TRAVERSAL, TRAVERSAL_HIT, 'hit')):
             with mock.patch('cveFeed.validation.approved_template', return_value=(text, '')), \
-                    mock.patch.object(templategen, '_run_template_with_retry',
+                    mock.patch.object(templategen, '_test_chunk',
                                       return_value=[{'host': HOST, 'vulnerable': True, 'output': '{}', 'hit': hit}]):
                 self.assertEqual(validation.run_nuclei_template(check)['status'], status)
 
@@ -535,7 +534,7 @@ class TemplateHitTests(Fixture):
         check = {'kind': 'nuclei_template', 'label': 'nuclei template for CVE-2020-11023', 'display': 'nuclei -t x', 'target': HOST,
                  'service': 'validate-nuclei', 'asset': HOST, 'params': {'template': '/templates/x.yaml'}}
         with mock.patch('cveFeed.validation.approved_template', return_value=(JQUERY_VERSION_REGEX, '')), \
-                mock.patch.object(templategen, '_run_template_with_retry',
+                mock.patch.object(templategen, '_test_chunk',
                                   return_value=[{'host': HOST, 'vulnerable': True, 'output': '{}', 'hit': VERSION_HIT}]), \
                 mock.patch('cveFeed.notify._send', return_value=True) as send, \
                 mock.patch.object(scoring, 'evidence_arrived', wraps=scoring.evidence_arrived) as arrived:
@@ -632,7 +631,7 @@ class TemplateHitTests(Fixture):
         check = {'kind': 'nuclei_template', 'label': 'nuclei template for CVE-2020-11023', 'display': 'nuclei -t x', 'target': HOST,
                  'service': 'validate-nuclei', 'asset': HOST, 'params': {'template': '/templates/x.yaml'}}
         with mock.patch('cveFeed.validation.approved_template', return_value=(JQUERY_VERSION_REGEX, '')), \
-                mock.patch.object(templategen, '_run_template_with_retry',
+                mock.patch.object(templategen, '_test_chunk',
                                   return_value=[{'host': HOST, 'vulnerable': True, 'output': '{}', 'hit': VERSION_HIT}]), \
                 mock.patch('cveFeed.notify._send', return_value=True) as send:
             validation.apply_validation(row, check, validation.run_nuclei_template(check))

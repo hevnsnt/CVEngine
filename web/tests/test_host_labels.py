@@ -9,7 +9,8 @@ from agentapi.services import Ctx, host_group, list_vulnerabilities
 from cveFeed.labels import record_label
 from cveFeed.models import HostLabel
 from dashboard.models import Org, Project
-from reNgine.bbot import BbotResult, is_informational, label_for, parse_event
+from reNgine.discovery_events import BbotResult, is_informational, label_for
+from tests.discovery_fixtures import fold_findings
 from reNgine.tasks import _persist_bbot_findings
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain, Vulnerability
@@ -47,7 +48,7 @@ class InformationalCutoffTests(TestCase):
 		for ev in (finding('WAF Detection', 'INFO'), finding('WAF Detection', 'INFO'), finding('Nginx version detect: 1.2', 'INFO'),
 				finding('Missing HSTS header', 'LOW'), finding(BLOB), finding('Leaked credential in page', 'INFO'),
 				finding('Admin panel exposed', 'HIGH', 'VULNERABILITY')):
-			parse_event(ev, result, {})
+			fold_findings([ev], result)
 		_persist_bbot_findings(result, {'scan_history_id': scan.id, 'domain_id': domain.id}, {'www.example.com': sub})
 		self.assertEqual(sorted(HostLabel.objects.filter(project=project).values_list('host', 'label')),
 			[('example.com', 'WAF'), ('example.com', 'nginx version')])  # deduped, host lowercased
@@ -58,7 +59,7 @@ class InformationalCutoffTests(TestCase):
 		project, domain, scan, sub = _scene('lab5')
 		result = BbotResult()
 		for ev in (finding('Open S3 bucket: http://a.s3.amazonaws.com', 'MEDIUM'), finding('Open S3 bucket: http://b.s3.amazonaws.com', 'MEDIUM')):
-			parse_event(ev, result, {})
+			fold_findings([ev], result)
 		_persist_bbot_findings(result, {'scan_history_id': scan.id, 'domain_id': domain.id}, {'www.example.com': sub})
 		_persist_bbot_findings(result, {'scan_history_id': scan.id, 'domain_id': domain.id}, {'www.example.com': sub})  # a rescan
 		self.assertEqual(Vulnerability.objects.filter(name='Open S3 bucket').count(), 2)

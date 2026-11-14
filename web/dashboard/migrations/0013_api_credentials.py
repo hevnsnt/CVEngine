@@ -25,7 +25,7 @@ class Migration(migrations.Migration):
         ),
         migrations.AddConstraint(
             model_name='apicredential',
-            constraint=models.CheckConstraint(check=models.Q(models.Q(('org__isnull', False), ('project__isnull', True)), models.Q(('org__isnull', True), ('project__isnull', False)), _connector='OR'), name='apicredential_exactly_one_scope'),
+            constraint=models.CheckConstraint(condition=models.Q(models.Q(('org__isnull', False), ('project__isnull', True)), models.Q(('org__isnull', True), ('project__isnull', False)), _connector='OR'), name='apicredential_exactly_one_scope'),
         ),
         migrations.AlterUniqueTogether(
             name='apicredential',

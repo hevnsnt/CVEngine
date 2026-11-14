@@ -1,9 +1,10 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-maint="__MAINT_STATE__">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex" />
+    <noscript><meta http-equiv="refresh" content="30" /></noscript>
     <title>Rebuilding cvENGINE</title>
     <script>
       // the same rule as the application (static/cve/theme.js): light unless the person chose dark, or auto and the system is dark
@@ -22,6 +23,10 @@
           dark ? "dark" : "light",
         );
       })();
+    </script>
+    <script>
+      // ?scene=1: only the two engineers and the status line, for the setup wizard's building screen (static/cve/welcome.js frames this page)
+      if (/[?&]scene=1(&|$)/.test(location.search)) document.documentElement.setAttribute("data-scene", "1");
     </script>
     <style>
       /* One self-contained file: the application is the thing that is down, so nothing here is fetched from it or anywhere else. */
@@ -113,10 +118,17 @@
       * {
         box-sizing: border-box;
       }
+      :root[data-scene] body { display: block; padding: 0; background: transparent; min-height: 0; }
+      :root[data-scene] main { border: 0; box-shadow: none; border-radius: 0; max-width: none; background: transparent; }
+      :root[data-scene] main::before, :root[data-scene] .head, :root[data-scene] .track { display: none; }
+      :root[data-scene] .foot { padding: 12px 18px 14px; }
       html,
       body {
-        height: 100%;
         margin: 0;
+      }
+
+      html {
+        height: 100%;
       }
       body {
         background: var(--bg);
@@ -128,14 +140,15 @@
           "Segoe UI",
           Roboto,
           sans-serif;
+        min-height: 100%;
+        box-sizing: border-box;
         display: flex;
-        align-items: center;
-        justify-content: center;
         padding: 24px 16px;
         -webkit-font-smoothing: antialiased;
       }
       main {
         position: relative;
+        margin: auto; /* centred, and never pushed above the top of a short screen (align-items would clip it) */
         width: 100%;
         max-width: 880px;
         background: var(--card);
@@ -338,6 +351,8 @@
       .say-b { right: 14%; text-align: right; transform-origin: 80% 100%; }
       .say-b::after { right: 22px; }
       .say.on { opacity: 1; transform: none; }
+      /* in the setup wizard's frame the stage is narrow: a wider bubble keeps a long line to two rows so it is not cut off at the top */
+      :root[data-scene] .say { max-width: 50%; }
       /* the scene */
       .faint { fill: none; stroke: var(--faint); stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
       .plan-line { fill: none; stroke: var(--plan-line); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
@@ -441,6 +456,46 @@
           width: 100%;
         }
       }
+
+      /* The live status panel: filled from /maintenance-status.json (written by the updater), hidden when there is none. Text never uses the brand orange. */
+      .progress { padding: 18px 34px 0; }
+      .steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 14px; }
+      .steps li { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); min-width: 0; }
+      .steps li::before { content: ""; flex: none; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--faint); box-sizing: border-box; }
+      .steps li.done { color: var(--ink); }
+      .steps li.done::before { background: var(--plan); border-color: var(--plan); }
+      .steps li.now { color: var(--ink); font-weight: 700; }
+      .steps li.now::before { background: var(--brand); border-color: var(--brand); box-shadow: 0 0 0 4px rgba(255, 90, 0, 0.18); }
+      .steps li.bad { color: var(--ink); font-weight: 700; }
+      .steps li.bad::before { background: var(--box); border-color: var(--box); }
+      .step-detail { margin: 14px 0 0; color: var(--ink); font-size: 15px; max-width: none; }
+      .warn { margin: 12px 0 0; padding: 10px 12px; border: 1px solid var(--line); border-left: 4px solid var(--brand); border-radius: 8px; background: var(--stage); color: var(--ink); font-size: 14px; max-width: none; }
+      .warn.caution { border-left-color: #b45309; background: #fff7ed; }
+      html[data-theme="dark"] .warn.caution { background: #2a2118; }
+      .warn.err { border-left-color: var(--box); border-color: var(--box); }
+      .meta { display: flex; flex-wrap: wrap; gap: 6px 26px; margin: 14px 0 0; }
+      .meta div { min-width: 0; }
+      .meta dt { font: 600 11px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+      .meta dd { margin: 0; font-size: 15px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
+      .fail { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--box); border-radius: 10px; background: var(--stage); }
+      .fail p { max-width: none; color: var(--ink); margin: 0 0 8px; }
+      .fail-next b { font-weight: 800; }
+      .fail-log summary { cursor: pointer; color: var(--ink); font-weight: 700; }
+      .fail-log pre { margin: 10px 0 0; padding: 10px; max-height: 240px; overflow: auto; background: var(--card); border: 1px solid var(--line); border-radius: 8px; font: 12px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; color: var(--ink); }
+      .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+      html[data-state="failed"] .banter { display: none; } /* the jokes are for a wait, not for a failure */
+      html[data-state="failed"] main::before { background: var(--box); }
+      html[data-state="failed"] .pulse { background: var(--box); }
+      html[data-state="failed"] .track i { background: var(--box); animation: none; width: 100%; }
+      @media (max-width: 620px) {
+        .head { padding: 24px 20px 16px; grid-template-columns: 1fr; }
+        .eta { text-align: left; }
+        .progress { padding: 16px 20px 0; }
+        .steps { grid-template-columns: repeat(2, 1fr); }
+        .foot { padding: 16px 20px 22px; flex-wrap: wrap; }
+        .track { flex: 1 0 100%; }
+      }
+      html[data-scene="1"] .progress { display: none; }
     </style>
   </head>
   <body>
@@ -448,17 +503,20 @@
       <div class="head">
         <div>
           <div class="brand"><b>cv</b>ENGINE</div>
-          <h1>We are rebuilding cvENGINE.</h1>
-          <p>
-            A new version is going in right now. This page comes back by itself
-            the moment the site answers, and scans pick up where they left off.
+          <h1 id="maint-h1">We are rebuilding cvENGINE.</h1>
+          <p id="maint-p">
+            A new version is going in right now. The site is paused so that
+            nothing runs on a half-updated build. This page comes back by itself
+            the moment the site answers, however long that takes. Your Sentinels
+            keep running what they have and hand their results over when cvENGINE
+            is back, so nothing they finish meanwhile is lost.
           </p>
         </div>
-        <div class="eta">Usually<b>2 to 5 min</b></div>
+        <div class="eta" id="maint-eta">Usually<b>2 to 5 min</b></div>
       </div>
 
       <div class="stage">
-<svg viewBox="0 0 960 390" role="img" aria-label="Two engineers in hard hats hold up a blueprint between them and talk it over while a crane lifts the next piece into place">
+<svg width="960" height="390" viewBox="0 0 960 390" role="img" aria-label="Two engineers in hard hats hold up a blueprint between them and talk it over while a crane lifts the next piece into place">
   <defs>
     <linearGradient id="board" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--plan)"/><stop offset="1" stop-color="var(--plan-deep)"/></linearGradient>
     <linearGradient id="sheen" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.16"/><stop offset="0.45" stop-color="#fff" stop-opacity="0"/></linearGradient>
@@ -542,6 +600,26 @@
         <div class="banter" aria-hidden="true"><p class="say say-a" id="say-a"></p><p class="say say-b" id="say-b"></p></div>
       </div>
 
+      <section class="progress" id="progress" aria-label="Update progress" hidden>
+        <ol class="steps" id="steps"></ol>
+        <p class="step-detail" id="step-detail"></p>
+        <p class="warn" id="warn" hidden></p>
+        <dl class="meta">
+          <div><dt>Elapsed</dt><dd id="m-elapsed">&nbsp;</dd></div>
+          <div><dt>Started</dt><dd id="m-started">&nbsp;</dd></div>
+          <div><dt>Installing</dt><dd id="m-sha">&nbsp;</dd></div>
+        </dl>
+        <div class="fail" id="fail" hidden>
+          <p class="fail-restored" id="fail-restored"></p>
+          <p class="fail-next"><b>What to do:</b> <span id="fail-next"></span></p>
+          <details class="fail-log" id="fail-log-wrap">
+            <summary>Details</summary>
+            <pre id="fail-log"></pre>
+          </details>
+        </div>
+        <p class="sr-only" id="live" role="status" aria-live="polite"></p>
+      </section>
+
       <div class="foot">
         <div class="status">
           <span class="pulse" aria-hidden="true"></span
@@ -556,7 +634,13 @@
       // The engineers talk it over while the update runs: a random exchange, one line every 2 seconds, alternating between the two of
       // them, then another exchange (none repeats until most of the others have had their turn). Text is set with textContent.
       (function () {
-        var EXCHANGES = [["But the user said no mistakes."], ["I don't know what they want. That button has NEVER worked."], ["If the user is so smart, why aren't THEY doing the coding?"], ["Who approved this on a Friday?"], ["It worked on my machine.", "Then we'll ship your machine."], ["Did you back up the database?", "Define \"back up\"."], ["Relax. It's only production."], ["The blueprint says \"TODO: figure this out later\"."], ["Which one of us wrote this?", "Don't answer that."], ["Just turn it off and on again.", "Again?"], ["I see the problem. It's load-bearing spaghetti."], ["This line says \"do not touch\".", "So you touched it.", "So I touched it."], ["The ticket said \"small change\".", "It's never a small change."], ["Who named a variable \"final_final_v2\"?"], ["I'm not saying it's broken. I'm saying it has character."], ["Is that a feature or a bug?", "It's a feature now. Write it down."], ["We should have used a framework.", "We did. That's the problem."], ["The tests are green.", "Do they test anything?", "They're green."], ["I commented it out. Problem solved."], ["Who keeps putting semicolons in the YAML?"], ["Ship it, we'll fix it in the next update.", "This IS the next update."], ["The docs say this is impossible.", "We wrote the docs."], ["Have you tried asking the AI?", "The AI asked me."], ["Hold the wall. I'm deleting the old migration."], ["We renamed the table. Now nothing can find anything."], ["Why is the cache older than me?"], ["Clear the cache.", "Which one?", "All of them. Twice."], ["DNS. It's always DNS.", "It wasn't DNS.", "Okay, it was a little DNS."], ["The comment says \"temporary fix, 2019\"."], ["Measure twice, deploy once.", "Measure never, deploy constantly."], ["Is the server supposed to make that noise?"], ["The logs just say \"oops\"."], ["More logging. Then we'll know exactly how lost we are."], ["Can we blame the intern?", "We are the intern."], ["This function is 900 lines long and called \"helper\"."], ["I found the bug. It's three bugs in a trench coat."], ["Who put a sleep(30) in here?", "That sleep is load-bearing. Leave it."], ["The user wants it faster, cheaper and yesterday.", "Pick two.", "Honestly, pick one."], ["We need a meeting about the meeting."], ["I estimated two minutes.", "In engineer minutes?", "About an hour, yes."], ["Hand me the wrench. The digital one."], ["This config file has tabs AND spaces. Per line."], ["Don't look at the git blame. I'm begging you."], ["Who force-pushed to main?", "Nobody force-pushes here. We have rules.", "The rules are a suggestion box. It's empty."], ["Let's add a feature flag for the feature flag."], ["I rewrote it from scratch. It has all-new bugs."], ["It compiles!", "Ship the party hats."], ["The migration is at 99 percent.", "It's been at 99 percent for a while.", "Percent is a state of mind."], ["Wait, which environment is this?", "If you have to ask, it's production."], ["I put the semicolon back. Nobody touch anything."], ["The scanner found a vulnerability. In the coffee machine.", "Patch that one first."], ["Is this a breaking change?", "Everything is a breaking change if you believe in yourself."], ["The blueprint is upside down.", "That explains the last three releases."], ["Can we just make the button bigger?", "Making the button bigger is how we got here."], ["I asked for requirements. I got a vibe."], ["The vibe says \"make it pop\".", "\"Pop\" is not a unit of measurement."], ["Let's rewrite it in Rust.", "After lunch.", "We're out of lunch. Rewrite it in Bash."], ["The error message just says \"no\".", "At least it's honest."], ["Who wrote a regex for this?", "Now we have two problems and a hard hat."], ["I think the database is sulking.", "Say something nice to it.", "You're doing great, database."], ["It's rebooting. That's basically a hug."], ["Should we tell the user what changed?", "It's in the changelog.", "Nobody reads the changelog.", "I do. That's how I got this job."], ["Hey, this code has tests!", "They're commented out.", "Never mind."], ["Look busy, the user is refreshing the page.", "That's their fortieth refresh."], ["Refreshing does not make me type faster.", "It kind of does. Peer pressure."], ["We need more CPUs.", "We need fewer while loops."], ["Is it plugged in? Is ANYTHING plugged in?"], ["The crane operator says the load is \"probably fine\".", "\"Probably fine\" built this whole building."], ["The new version is mostly the old version, but braver."], ["I added an index. Everything's fast. I am a god.", "You added it to the wrong table.", "I am a god of the wrong table."], ["Let's just add a retry.", "Add a retry to the retry."], ["Who left console.log(\"here\") in production?", "It says \"here\" four thousand times. At least we know where."], ["This is fine. Everything is load-tested.", "By whom?", "By the users. Live. Right now."], ["What does this button do?", "Nobody knows. That's why we're rebuilding."], ["The architect drew a door in the ceiling.", "Must be for the cloud."], ["I'm putting a hard hat on the server. For morale."], ["If it breaks, it's a learning opportunity.", "I've learned so much this week. Please make it stop."], ["Almost done. Just the last thousand bolts."], ["Is this the final version?", "There is no final version. Only the next version."], ["It's coming back up. Look natural."], ["Back soon. We pinky promise."], ["Who unplugged the cloud?"], ["The load balancer is balancing. Just not the load."], ["I fixed it!", "What did you change?", "I don't know. Don't touch it."], ["Did someone say \"quick hotfix\"?", "Those words are banned on site."], ["The backup of the backup is in a folder called \"old\"."], ["Do we have a rollback plan?", "We have a \"roll forward and pray\" plan."], ["This module was written by a man who has since moved to a farm."], ["Which way is up on this flowchart?"], ["The diagram has an arrow pointing to \"magic\"."], ["Who deleted the README?", "It was holding up the whole repo."], ["I'm 80 percent sure this is the right server."], ["Just one more migration.", "You said that four migrations ago."], ["The user says it's urgent.", "Everything is urgent. That's why nothing is."], ["The firewall blocked us.", "Good firewall."], ["Is that error new?", "It's new to me."], ["I upgraded one package and now we need forty-two others."], ["Why does this need a database to say hello?"], ["I asked the linter for help and it filed a complaint."], ["Clock-in time: now. Clock-out time: when it compiles."], ["Someone wrote \"here be dragons\" in the comments.", "They weren't wrong."], ["The ops channel is just a picture of a fire."], ["Can you hear that?", "That's the fans. They're scared."], ["Did we try reading the error?", "Bold strategy. Let's try it."], ["It's not a bug, it's undocumented behavior."], ["The code review was \"looks good to me\" with no comments."], ["Who's on call?", "You are.", "Since when?", "Since you asked."], ["Is this the scaffolding or the building?", "Yes."], ["Stand back, I'm going to try a percent sign."], ["Put it in the backlog.", "The backlog has a backlog."], ["I've seen things. Like a 3,000-line switch statement."], ["Quick, what's the password?", "It's on a sticky note. On the server. In the dark."], ["Who let the cron job run at midnight on New Year's?"], ["This patch fixes everything.", "What does it break?", "Also everything."], ["The progress bar is a vibe, not a promise."], ["We're replacing the engine while the plane is flying."], ["We're also replacing the plane."], ["Okay, who scheduled the update during a scan?", "The scan scheduled itself. It's very proactive."], ["Is the coffee ready?", "Coffee is a blocker. Escalate."], ["Remind me why we didn't just use a spreadsheet."], ["That's not tech debt. That's tech mortgage."], ["I'll refactor it later.", "Famous last words, part 900."]];
+        var EXCHANGES = [["But the user said no mistakes."], ["I don't know what they want. That button has NEVER worked."], ["If the user is so smart, why aren't THEY doing the coding?"], ["Who approved this on a Friday?"], ["It worked on my machine.", "Then we'll ship your machine."], ["Did you back up the database?", "Define \"back up\"."], ["Relax. It's only production."], ["The blueprint says \"TODO: figure this out later\"."], ["Which one of us wrote this?", "Don't answer that."], ["Just turn it off and on again.", "Again?"], ["I see the problem. It's load-bearing spaghetti."], ["This line says \"do not touch\".", "So you touched it.", "So I touched it."], ["The ticket said \"small change\".", "It's never a small change."], ["Who named a variable \"final_final_v2\"?"], ["I'm not saying it's broken. I'm saying it has character."], ["Is that a feature or a bug?", "It's a feature now. Write it down."], ["We should have used a framework.", "We did. That's the problem."], ["The tests are green.", "Do they test anything?", "They're green."], ["I commented it out. Problem solved."], ["Who keeps putting semicolons in the YAML?"], ["Ship it, we'll fix it in the next update.", "This IS the next update."], ["The docs say this is impossible.", "We wrote the docs."], ["Have you tried asking the AI?", "The AI asked me."], ["Hold the wall. I'm deleting the old migration."], ["We renamed the table. Now nothing can find anything."], ["Why is the cache older than me?"], ["Clear the cache.", "Which one?", "All of them. Twice."], ["DNS. It's always DNS.", "It wasn't DNS.", "Okay, it was a little DNS."], ["The comment says \"temporary fix, 2019\"."], ["Measure twice, deploy once.", "Measure never, deploy constantly."], ["Is the server supposed to make that noise?"], ["The logs just say \"oops\"."], ["More logging. Then we'll know exactly how lost we are."], ["Can we blame the intern?", "We are the intern."], ["This function is 900 lines long and called \"helper\"."], ["I found the bug. It's three bugs in a trench coat."], ["Who put a sleep(30) in here?", "That sleep is load-bearing. Leave it."], ["The user wants it faster, cheaper and yesterday.", "Pick two.", "Honestly, pick one."], ["We need a meeting about the meeting."], ["I estimated two minutes.", "In engineer minutes?", "About an hour, yes."], ["Hand me the wrench. The digital one."], ["This config file has tabs AND spaces. Per line."], ["Don't look at the git blame. I'm begging you."], ["Who force-pushed to main?", "Nobody force-pushes here. We have rules.", "The rules are a suggestion box. It's empty."], ["Let's add a feature flag for the feature flag."], ["I rewrote it from scratch. It has all-new bugs."], ["It compiles!", "Ship the party hats."], ["The migration is at 99 percent.", "It's been at 99 percent for a while.", "Percent is a state of mind."], ["Wait, which environment is this?", "If you have to ask, it's production."], ["I put the semicolon back. Nobody touch anything."], ["The scanner found a vulnerability. In the coffee machine.", "Patch that one first."], ["Is this a breaking change?", "Everything is a breaking change if you believe in yourself."], ["The blueprint is upside down.", "That explains the last three releases."], ["Can we just make the button bigger?", "Making the button bigger is how we got here."], ["I asked for requirements. I got a vibe."], ["The vibe says \"make it pop\".", "\"Pop\" is not a unit of measurement."], ["Let's rewrite it in Rust.", "After lunch.", "We're out of lunch. Rewrite it in Bash."], ["The error message just says \"no\".", "At least it's honest."], ["Who wrote a regex for this?", "Now we have two problems and a hard hat."], ["I think the database is sulking.", "Say something nice to it.", "You're doing great, database."], ["It's rebooting. That's basically a hug."], ["Should we tell the user what changed?", "It's in the changelog.", "Nobody reads the changelog.", "I do. That's how I got this job."], ["Hey, this code has tests!", "They're commented out.", "Never mind."], ["Look busy, the user is refreshing the page.", "That's their fortieth refresh."], ["Refreshing does not make me type faster.", "It kind of does. Peer pressure."], ["We need more CPUs.", "We need fewer while loops."], ["Is it plugged in? Is ANYTHING plugged in?"], ["The crane operator says the load is \"probably fine\".", "\"Probably fine\" built this whole building."], ["The new version is mostly the old version, but braver."], ["I added an index. Everything's fast. I am a god.", "You added it to the wrong table.", "I am a god of the wrong table."], ["Let's just add a retry.", "Add a retry to the retry."], ["Who left console.log(\"here\") in production?", "It says \"here\" four thousand times. At least we know where."], ["This is fine. Everything is load-tested.", "By whom?", "By the users. Live. Right now."], ["What does this button do?", "Nobody knows. That's why we're rebuilding."], ["The architect drew a door in the ceiling.", "Must be for the cloud."], ["I'm putting a hard hat on the server. For morale."], ["If it breaks, it's a learning opportunity.", "I've learned so much this week. Please make it stop."], ["Almost done. Just the last thousand bolts."], ["Is this the final version?", "There is no final version. Only the next version."], ["It's coming back up. Look natural."], ["Back soon. We pinky promise."], ["Who unplugged the cloud?"], ["The load balancer is balancing. Just not the load."], ["I fixed it!", "What did you change?", "I don't know. Don't touch it."], ["Did someone say \"quick hotfix\"?", "Those words are banned on site."], ["The backup of the backup is in a folder called \"old\"."], ["Do we have a rollback plan?", "We have a \"roll forward and pray\" plan."], ["This module was written by a man who has since moved to a farm."], ["Which way is up on this flowchart?"], ["The diagram has an arrow pointing to \"magic\"."], ["Who deleted the README?", "It was holding up the whole repo."], ["I'm 80 percent sure this is the right server."], ["Just one more migration.", "You said that four migrations ago."], ["The user says it's urgent.", "Everything is urgent. That's why nothing is."], ["The firewall blocked us.", "Good firewall."], ["Is that error new?", "It's new to me."], ["I upgraded one package and now we need forty-two others."], ["Why does this need a database to say hello?"], ["I asked the linter for help and it filed a complaint."], ["Clock-in time: now. Clock-out time: when it compiles."], ["Someone wrote \"here be dragons\" in the comments.", "They weren't wrong."], ["The ops channel is just a picture of a fire."], ["Can you hear that?", "That's the fans. They're scared."], ["Did we try reading the error?", "Bold strategy. Let's try it."], ["It's not a bug, it's undocumented behavior."], ["The code review was \"looks good to me\" with no comments."], ["Who's on call?", "You are.", "Since when?", "Since you asked."], ["Is this the scaffolding or the building?", "Yes."], ["Stand back, I'm going to try a percent sign."], ["Put it in the backlog.", "The backlog has a backlog."], ["I've seen things. Like a 3,000-line switch statement."], ["Quick, what's the password?", "It's on a sticky note. On the server. In the dark."], ["Who let the cron job run at midnight on New Year's?"], ["This patch fixes everything.", "What does it break?", "Also everything."], ["The progress bar is a vibe, not a promise."], ["We're replacing the engine while the plane is flying."], ["We're also replacing the plane."], ["Okay, who scheduled the update during a scan?", "The scan scheduled itself. It's very proactive."], ["Is the coffee ready?", "Coffee is a blocker. Escalate."], ["Remind me why we didn't just use a spreadsheet."], ["That's not tech debt. That's tech mortgage."], ["I'll refactor it later.", "Famous last words, part 900."], ["Didn't we just rip this feature out?", "We did. That's why we're putting it back."], ["Vibe coders, am I right?", "Careful. You're holding the AI's pull request."], ["I don't write bugs. I write surprises."], ["Who approved a merge with 14 conflicts?", "I did. I read none of them."], ["The tests passed on the second try.", "What changed?", "Nothing. Luck is a dependency."], ["I'd like to report a bug in the bug report."], ["The AI wrote 400 lines. I read three and nodded."], ["We migrated the data. Now the data has questions."], ["Migration 0156 is taken.", "So is 0157.", "Start counting from the sky."], ["That flaky test passed. Frame it."], ["The test says 43 does not equal 45.", "Rerun it once.", "Now it's 44. Ship it."], ["I wrote it overnight. It has the confidence of zero sleep."], ["Is this a feature or did the cat sit on the keyboard?"], ["We have a staging server.", "Where?", "Also production."], ["This code has been here longer than the company."], ["I named it temp_final. It will outlive us all."], ["Why is there a folder called \"misc2\"?", "Because misc was full."], ["It's not technical debt. It's early retirement for the code."], ["The code review said \"LGTM\" in four seconds.", "On 2,000 lines?", "Very trusting reviewer."], ["I fixed the typo and broke the rest of the alphabet."], ["Roll back the rollback.", "Which rollback?", "The one that rolled forward."], ["The changelog says \"misc fixes\". That's the whole release."], ["We have a design system.", "Where?", "In someone's head. They're on vacation."], ["The button is blue.", "The ticket says teal.", "The AI says periwinkle."], ["Don't panic. Panic is not in the runbook.", "Is the runbook in the runbook?"], ["We need a hotfix for the hotfix of the hotfix."], ["I added a comment. It says \"fix later\". I feel productive."], ["The cloud is just someone else's computer. They're very busy."], ["Wait, who owns this service?", "Whoever touched it last.", "That's me. Oh no."], ["It says \"deprecated, do not use\".", "Everything uses it."], ["The roadmap is a suggestion with a nicer font."], ["Did we write this or did the AI?", "Check for the comment that says \"as an AI\".", "Found three."], ["The AI hallucinated a library.", "Is it any good?", "Better than ours. We should publish it."], ["Prompt engineering is just yelling in complete sentences."], ["The model is confident and wrong. Like a junior with a keyboard."], ["Let the AI fix it.", "It fixed it.", "It also fixed the other thing.", "What other thing?"], ["I vibe coded it.", "It works?", "It has vibes."], ["We shipped the vibes. The logic is coming in v2."], ["This function does nine things and only one is its name."], ["I wrote a script to fix the script.", "Where's the script that fixes that one?", "Next sprint."], ["Who wrote this?", "Past me.", "Past you is a menace."], ["Future me will fix it. Future me has been very patient."], ["A senior engineer is just someone who has broken more things."], ["The standup lasted 45 minutes.", "Is that a sit-down at this point?"], ["We pivoted again. The hammer is now a pickaxe."], ["The requirements changed mid-wall. We just added a window."], ["The spec was a napkin. The napkin was damp."], ["Every estimate is a lie we agree to in advance."], ["Scope creep? This is scope galloping."], ["I asked for a small change and got a refactor with feelings."], ["The CSS has !important on !important."], ["Center the div.", "We've been trying since 2011."], ["Why is the footer in the middle?", "It's a mid-life crisis."], ["The logo is a screenshot of a logo."], ["Dark mode works.", "Light mode?", "We don't talk about light mode."], ["The pixel is off by one.", "Which pixel?", "The important one."], ["It looks great on my monitor.", "Which is a lunchbox."], ["Whoever put a carousel in here, I'd like a word. Several words."], ["We need a loading spinner for the loading spinner."], ["The spinner is spinning. The work is not working."], ["It's 99 percent done and the other 99 percent is a mystery."], ["Two hard problems: naming things, caches, and off-by-one errors."], ["I deleted the unused code.", "It was used.", "Only by everything."], ["I removed a dead feature and the site mourned."], ["It's not a memory leak. It's a very slow download of everything."], ["Is it a bug if it's documented?", "Is it documented?", "In a Slack thread from 2022."], ["Search the wiki.", "Which one?", "The one nobody updated."], ["The docs are up to date as of the last time we remembered."], ["I tried to read the code. The code read me back."], ["That stack trace is longer than my last relationship."], ["The error says \"unknown error\".", "Honestly, same."], ["Line 4,812: \"this should never happen\".", "It's happening."], ["Never say \"it can't get worse\" on a deploy day."], ["Careful, it's Sunday.", "Is it?", "It's always Sunday in production."], ["We don't deploy on Fridays.", "It's Saturday.", "So we're good."], ["The server fan is loud.", "That's just it thinking."], ["It's not slow, it's contemplative."], ["Cron fired at 3 AM and woke up the whole team.", "Nobody sleeps. Cron is the boss."], ["The cron job runs every minute and fixes nothing."], ["Who scheduled the weekly job for every day?", "We call it weekly in spirit."], ["Is the queue empty?", "It's pensive."], ["The queue has 1,300 messages.", "Make it 1,299 and we're a hero."], ["Restart it.", "It was restarted.", "Restart the restart."], ["Turn it off.", "I did.", "Then why is it humming?"], ["Log level: panic. Log message: hello."], ["Who set the log level to \"scream\"?"], ["I added a watchdog. Now I'm afraid of the watchdog."], ["The watchdog barked. We're not sure at what."], ["The health check is healthy. The patient is not."], ["The dashboard is green. We don't trust the dashboard."], ["The metrics look great. We stopped measuring."], ["It's not a crash. It's an unscheduled exit with feelings."], ["We have a disaster recovery plan.", "It's called hope.", "Hope is a strategy."], ["The backup works.", "Has anyone restored it?", "That's a different department."], ["My code is clean.", "It compiles.", "That's what I said."], ["The linter is angry again.", "Then give it a snack and a semicolon."], ["I'm a full stack engineer.", "Meaning?", "I can break it at every layer."], ["Pair programming is when two people argue about one keyboard."], ["Rubber duck debugging works.", "I told the duck. It quit."], ["We should write this down.", "We should write a test.", "Let's write a Slack message."], ["I found the bug.", "Great!", "It's in the fix for the bug I found yesterday."], ["The problem is between the keyboard and the chair.", "That's the CEO.", "That's me."], ["Hand me a coffee. The strong one.", "They're all the same coffee.", "Then two."], ["Quiet. The build is thinking.", "It's been thinking for an hour.", "Deep thoughts."], ["The deploy is going so well.", "Don't say that.", "I said nothing."], ["We are the engineers. We're totally in control.", "Of what?", "Of the hard hats."], ["Write that down for the post-mortem.", "Which one?", "Pick any."], ["Who needs sleep when you have a sprint retro?"], ["Rule one: don't blame the user.", "Rule two: it's the user.", "Rule one."], ["The release notes are 40 lines.", "The release is 4,000.", "We summarize."], ["If at first you don't succeed, call it a beta."], ["It's not broken. It's in alpha, indefinitely."]];
+        // In the setup wizard's scene nothing may talk about scanning (the person has not been told it has begun): those lines are left out there.
+        if (document.documentElement.hasAttribute("data-scene")) {
+          EXCHANGES = EXCHANGES.filter(function (x) {
+            return !/scan|sentinel|discover|\bhosts?\b|found|\brun|build|subdomain/i.test(x.join(" "));
+          });
+        }
         var EVERY = 2000;
         var bubbles = [document.getElementById("say-a"), document.getElementById("say-b")];
         if (!bubbles[0] || !bubbles[1]) return;
@@ -590,6 +674,204 @@
       })();
     </script>
     <script>
+      // The proxy fills data-maint (sub_filter, config/nginx/rengine.conf): "failed" when the update did not finish. Anything else, including the
+      // unreplaced placeholder of a file opened by hand, is the ordinary "we are rebuilding" text above.
+      (function () {
+        if (document.documentElement.getAttribute("data-maint") !== "failed") return;
+        document.title = "cvENGINE update did not finish";
+        document.getElementById("maint-h1").textContent = "The update did not finish.";
+        document.getElementById("maint-p").textContent =
+          "Something went wrong while cvENGINE was being updated. The administrator is fixing it. Nothing is lost, scanning is paused, and this page comes back by itself the moment the site answers again.";
+        document.getElementById("maint-eta").textContent = "";
+        var st = document.getElementById("state");
+        if (st) st.textContent = "Waiting for the administrator. Checking again every few seconds.";
+      })();
+    </script>
+    <script>
+      // The live status: the updater writes config/nginx/state/status.json, the proxy serves it as /maintenance-status.json (so it works with the web container old,
+      // stopped or restarting), and this polls it every 2 seconds. No file (an older proxy, or the updater has not written one yet) leaves the plain page above.
+      // The model below is a pure function of the file and the clock, so tests can run it without a browser (web/tests/test_maintenance_status_page.mjs).
+      // BEGIN maint-model
+      var MAINT_STEPS = [
+        ["checking", "Checking"],
+        ["stopping", "Pausing work"],
+        ["build", "Building"],
+        ["backup", "Backup"],
+        ["migrating", "Database"],
+        ["starting", "Starting"],
+        ["verifying", "Verifying"],
+        ["scanner", "Scanner"],
+      ];
+      var MAINT_SLOW_BUILD_S = 12 * 60;
+      var MAINT_STALL_BUILD_S = 5 * 60;
+      var MAINT_STALL_STEP_S = 3 * 60;
+      var MAINT_UPDATER_SILENT_S = 90;
+      function maintDuration(seconds) {
+        seconds = Math.max(0, Math.round(seconds));
+        if (seconds < 60) return seconds + (seconds === 1 ? " second" : " seconds");
+        var minutes = Math.floor(seconds / 60);
+        if (minutes < 120) return minutes + (minutes === 1 ? " minute" : " minutes");
+        var hours = Math.floor(minutes / 60);
+        return hours + (hours === 1 ? " hour " : " hours ") + (minutes % 60) + " min";
+      }
+      function maintText(value, limit) {
+        return typeof value === "string" ? value.slice(0, limit) : "";
+      }
+      function maintModel(status, nowSeconds) {
+        if (!status || typeof status !== "object" || (status.state !== "working" && status.state !== "failed" && status.state !== "done"))
+          return { mode: "plain" };
+        var keys = MAINT_STEPS.map(function (s) { return s[0]; });
+        var at = keys.indexOf(status.step);
+        var started = Number(status.started_at) || 0;
+        var stepStarted = Number(status.step_started_at) || started;
+        var model = {
+          mode: "working",
+          headline: "We are rebuilding cvENGINE.",
+          steps: MAINT_STEPS.map(function (s, i) {
+            return { key: s[0], label: s[1], state: i < at ? "done" : i === at ? "now" : "todo" };
+          }),
+          detail: maintText(status.detail, 300),
+          elapsed: started ? maintDuration(nowSeconds - started) : "",
+          startedAtMs: started ? started * 1000 : 0,
+          sha: /^[0-9a-f]{7,12}$/.test(status.sha || "") ? status.sha : "",
+          warning: "",
+          warningLevel: "",
+          error: null,
+          status: "",
+        };
+        if (status.state === "done") {
+          model.mode = "done";
+          model.headline = "The update is finished.";
+          model.steps.forEach(function (s) { s.state = "done"; });
+          model.status = "Done. Reloading.";
+          return model;
+        }
+        if (status.state === "failed") {
+          var err = status.error && typeof status.error === "object" ? status.error : {};
+          var restored = err.restored === true;
+          model.mode = restored ? "failed_restored" : "failed_not_restored";
+          model.headline = restored ? "The update did not finish. The previous version is running again." : "The update did not finish.";
+          model.steps.forEach(function (s) { if (s.state === "now") s.state = "bad"; });
+          model.error = {
+            summary: maintText(err.summary, 200) || "The update did not finish.",
+            restoredText: restored
+              ? "The previous version is running again, nothing was lost, and this page returns to the site in a moment."
+              : err.restored === false
+                ? "The previous version is not running. The administrator is fixing it. Scanning is paused and nothing is lost."
+                : "The administrator is fixing it. Scanning is paused and nothing is lost.",
+            next: maintText(err.next, 300),
+            log: Array.isArray(err.log) ? err.log.slice(-20).map(function (l) { return maintText(l, 200); }) : [],
+          };
+          model.detail = model.error.summary;
+          model.status = restored ? "The previous version is running again." : "Waiting for the administrator. Checking again every few seconds.";
+          return model;
+        }
+        var step = status.step;
+        var stepElapsed = stepStarted ? nowSeconds - stepStarted : 0;
+        var sinceOutput = Number(status.last_output_at) ? nowSeconds - Number(status.last_output_at) : 0;
+        var sinceUpdate = Number(status.updated_at) ? nowSeconds - Number(status.updated_at) : 0;
+        if (step === "build" && stepStarted) model.detail = model.detail.replace(/\.$/, "") + ". This step has run for about " + maintDuration(stepElapsed) + ".";
+        model.status = model.detail;
+        if (sinceUpdate > MAINT_UPDATER_SILENT_S) {
+          model.mode = "stalled";
+          model.warning = "The updater has not reported for " + maintDuration(sinceUpdate) + ". The administrator may need to check the server.";
+          model.warningLevel = "error";
+        } else if (sinceOutput > (step === "build" ? MAINT_STALL_BUILD_S : MAINT_STALL_STEP_S)) {
+          model.mode = "stalled";
+          model.warning = "No output for " + maintDuration(sinceOutput) + ". It may be stalled; the update log on the server shows more.";
+          model.warningLevel = "warn";
+        } else if (step === "build" && stepElapsed > MAINT_SLOW_BUILD_S) {
+          model.mode = "slow";
+          model.warning = "This build is taking longer than usual on a small server. It is still working.";
+          model.warningLevel = "info";
+        }
+        return model;
+      }
+      // END maint-model
+      (function () {
+        var panel = document.getElementById("progress");
+        if (!panel || window.top !== window || /[?&]scene=1(&|$)/.test(location.search)) return;
+        var els = {
+          h1: document.getElementById("maint-h1"),
+          steps: document.getElementById("steps"),
+          detail: document.getElementById("step-detail"),
+          warn: document.getElementById("warn"),
+          elapsed: document.getElementById("m-elapsed"),
+          started: document.getElementById("m-started"),
+          sha: document.getElementById("m-sha"),
+          fail: document.getElementById("fail"),
+          restored: document.getElementById("fail-restored"),
+          next: document.getElementById("fail-next"),
+          log: document.getElementById("fail-log"),
+          logWrap: document.getElementById("fail-log-wrap"),
+          live: document.getElementById("live"),
+          state: document.getElementById("state"),
+          p: document.getElementById("maint-p"),
+          eta: document.getElementById("maint-eta"),
+        };
+        var lastSpoken = "";
+        function render(model) {
+          if (model.mode === "plain") {
+            panel.hidden = true;
+            return;
+          }
+          panel.hidden = false;
+          document.documentElement.setAttribute("data-state", model.mode.indexOf("failed") === 0 ? "failed" : "working");
+          els.h1.textContent = model.headline;
+          if (els.eta) els.eta.textContent = "";
+          if (model.mode.indexOf("failed") === 0 && els.p) els.p.textContent = "";
+          els.steps.textContent = "";
+          model.steps.forEach(function (s) {
+            var li = document.createElement("li");
+            li.className = s.state === "todo" ? "" : s.state;
+            li.textContent = s.label;
+            if (s.state === "now") li.setAttribute("aria-current", "step");
+            els.steps.appendChild(li);
+          });
+          els.detail.textContent = model.detail;
+          els.warn.hidden = !model.warning;
+          els.warn.textContent = "";
+          if (model.warning) {
+            var label = document.createElement("b");
+            label.textContent = model.warningLevel === "error" ? "Problem: " : model.warningLevel === "warn" ? "Warning: " : "Note: ";
+            els.warn.appendChild(label);
+            els.warn.appendChild(document.createTextNode(model.warning));
+          }
+          els.warn.className = "warn" + (model.warningLevel === "error" ? " err" : model.warningLevel === "warn" ? " caution" : "");
+          els.elapsed.textContent = model.elapsed || "\u00a0";
+          els.started.textContent = model.startedAtMs
+            ? new Date(model.startedAtMs).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+            : "\u00a0";
+          els.sha.textContent = model.sha || "\u00a0";
+          els.fail.hidden = !model.error;
+          if (model.error) {
+            els.restored.textContent = model.error.restoredText;
+            els.next.textContent = model.error.next;
+            els.log.textContent = model.error.log.join("\n");
+            els.logWrap.hidden = model.error.log.length === 0;
+          }
+          if (els.state && model.mode.indexOf("failed") === 0) els.state.textContent = model.status;
+          // announce a change of step or state, not the ticking clock
+          var current = model.steps.filter(function (x) { return x.state === "now" || x.state === "bad"; })[0];
+          var spoken = model.mode + "|" + (current ? current.key : "");
+          if (spoken !== lastSpoken) {
+            lastSpoken = spoken;
+            els.live.textContent = model.headline + " " + model.detail.replace(/ This step has run for .*$/, "") + (model.warning ? " " + model.warning : "");
+          }
+        }
+        function poll() {
+          fetch("/maintenance-status.json?t=" + Date.now(), { cache: "no-store", credentials: "same-origin" })
+            .then(function (res) { return res.ok ? res.json() : null; })
+            .catch(function () { return null; })
+            .then(function (status) {
+              render(maintModel(status, Date.now() / 1000));
+              setTimeout(poll, 2000);
+            });
+        }
+        poll();
+      })();
+    </script>
+    <script>
       // Alone (nginx answers every path with this page, status 503, while an update is applied): a request for the same address tells us
       // when the real site is back; anything that is not a 5xx, a redirect to the sign-in page included, means reload.
       // Framed (any page of the application covers itself with this one when the site stops answering, static/cve/sitewatch.js, and an
@@ -600,7 +882,7 @@
         if (window.top !== window) {
           window.addEventListener("message", function (e) {
             if (
-              e.origin === location.origin &&
+              (e.origin === location.origin || e.source === window.parent) &&
               e.data &&
               typeof e.data.state === "string"
             )

@@ -13,17 +13,26 @@ SCRIPTS = Path(__file__).resolve().parents[2] / 'scripts'
 
 DOCKER_STUB = """#!/usr/bin/env bash
 echo "docker $*" >> "$STUB_DIR/calls.log"
+# what visitors would see at this very call: the maintenance flag (and the failure flag) as the updater has left them
+echo "$([ -e config/nginx/state/maintenance ] && echo on || echo off)$([ -e config/nginx/state/maintenance-failed ] && echo +failed) docker $*" >> "$STUB_DIR/flags.log"
+# the updater is stopped by a signal (a reboot, kill) at the first call that matches
+if [ -n "${STUB_TERM_ON:-}" ] && [[ " $* " == *"$STUB_TERM_ON"* ]] && [ ! -f "$STUB_DIR/termed" ]; then touch "$STUB_DIR/termed"; kill -TERM $PPID; sleep 1; exit 143; fi
 # the updater is killed (SIGKILL, as a reboot or the OOM killer would) at the first call that matches: it is the shell running the update
 if [ -n "${STUB_KILL_ON:-}" ] && [[ " $* " == *"$STUB_KILL_ON"* ]] && [ ! -f "$STUB_DIR/killed" ]; then touch "$STUB_DIR/killed"; kill -KILL $PPID; exit 137; fi
 case " $* " in
   *" migrate --check "*) if [ -f "$STUB_DIR/unmigrated_once" ]; then rm -f "$STUB_DIR/unmigrated_once"; exit 1; fi
     if [ -f "$STUB_DIR/unmigrated" ]; then exit 1; fi; exit 0;;
   *" info "*) echo "$STUB_DIR";;
+  *" ps -q web "*|*" ps -q celery "*|*" ps -q celery-beat "*) if [ -f "$STUB_DIR/old_containers" ]; then echo oldcontainer; fi; exit 0;;
+  *" image inspect "*) if [ -f "$STUB_DIR/image_moved" ]; then echo sha256:new; else echo sha256:old; fi; exit 0;;
+  *" inspect -f {{.Image}} oldcontainer"*) echo sha256:old; exit 0;;
+  *" inspect -f {{.Config.Image}} oldcontainer"*) echo cvengine/web:latest; exit 0;;
   *" ps -q --status running db "*) echo dbid; exit 0;;
   *" exec dbid "*) case "$*" in *pg_dump*) if [ -f "$STUB_DIR/dump_fails" ]; then exit 1; fi
       echo "-- a dump of the database, long enough to pass the size check of scripts/db-backup.sh";;
     esac; exit 0;;
   *" showmigrations "*) if [ -f "$STUB_DIR/migrations_state" ]; then cat "$STUB_DIR/migrations_state"; else echo "[X]  app.0001_initial"; fi; exit 0;;
+  *"celery_healthcheck.py"*) if [ -f "$STUB_DIR/workers_down" ]; then echo "classic_worker does not answer"; exit 1; fi; exit 0;;
   *"http.client"*) if [ -f "$STUB_DIR/web_not_serving" ]; then exit 1; fi; exit 0;;
   *" exec "*) if [ -f "$STUB_DIR/web_down" ]; then exit 1; fi
     echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
@@ -35,10 +44,16 @@ case " $* " in
     esac; echo; exit 0;;
   *" ps --status running --services "*) if [ -f "$STUB_DIR/service_down" ]; then printf 'web\ncelery\ncelery-beat\ndb\nredis\n'; else printf 'web\ncelery\ncelery-beat\nproxy\ndb\nredis\n'; fi; exit 0;;
   *" config --services "*) printf 'web\\ncelery\\ncelery-beat\\ndb\\nredis\\n'
-    case " $* " in *" docker-compose.dev.yml "*) ;; *) echo proxy;; esac; exit 0;;
+    if [ -f "$STUB_DIR/has_reviewer" ]; then echo reviewer; fi
+    case " $* " in *" docker-compose.dev.yml "*) ;; *) echo proxy;; esac
+    if [ -f "$STUB_DIR/has_scanner" ]; then echo scanner; fi; exit 0;;
   *" shell "*) echo "banner line"; cat "$STUB_DIR/running_count" 2>/dev/null || echo 0; exit 0;;
   *" pull "*) if [ -f "$STUB_DIR/pull_fails" ]; then exit 1; fi;;
-  *" build "*) if [ -f "$STUB_DIR/slow_build" ]; then sleep 6; fi
+  *" build reviewer "*) if [ -f "$STUB_DIR/reviewer_fails" ]; then exit 1; fi;;
+  *" --force-recreate reviewer "*) if [ -f "$STUB_DIR/reviewer_fails" ]; then exit 1; fi;;
+  *" build "*) if [ -f "$STUB_DIR/canary_output" ]; then cat "$STUB_DIR/canary_output"; fi
+    if [ -f "$STUB_DIR/slow_build" ]; then sleep 6; fi
+    if [ -f "$STUB_DIR/fail_build_always" ]; then exit 1; fi
     if [ -f "$STUB_DIR/fail_up" ]; then rm -f "$STUB_DIR/fail_up"; exit 1; fi;;
   *" migrate "*) if [ -f "$STUB_DIR/fail_migrate" ]; then rm -f "$STUB_DIR/fail_migrate"; exit 1; fi
     if [ -f "$STUB_DIR/fail_migrate_partial" ]; then rm -f "$STUB_DIR/fail_migrate_partial"
@@ -81,6 +96,14 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         (self.work / 'scripts').mkdir()
         shutil.copy(SCRIPTS / 'apply-update.sh', self.work / 'scripts' / 'apply-update.sh')
         shutil.copy(SCRIPTS / 'update-state.py', self.work / 'scripts' / 'update-state.py')
+        # the status helper, behind a wrapper that records every call (what the updater asked for, in order) and then does the real thing
+        (self.work / 'scripts' / 'update-status.py').write_text(
+            '#!/usr/bin/env python3\nimport os, subprocess, sys\n'
+            'open(os.path.join(os.environ["STUB_DIR"], "status_calls.log"), "a").write(" ".join(sys.argv[1:]) + "\\n")\n'
+            'sys.exit(subprocess.call([sys.executable, %r] + sys.argv[1:]))\n' % str(SCRIPTS / 'update-status.py'))
+        # a `sleep` that records the status the page would be showing when the updater waits for it to be read (CVENGINE_STATUS_LINGER=7)
+        (self.stub / 'sleep').write_text('#!/usr/bin/env bash\nif [ "$1" = 7 ]; then cp config/nginx/state/status.json "$STUB_DIR/status_at_settle.json" 2>/dev/null; exit 0; fi\nexec /bin/sleep "$@"\n')
+        (self.stub / 'sleep').chmod(0o755)
         # the one-time PostgreSQL move is a separate script with its own docker calls; here it only records that it ran
         (self.work / 'scripts' / 'upgrade-postgres.sh').write_text('#!/usr/bin/env bash\necho "upgrade-postgres $*" >> "$STUB_DIR/calls.log"\n')
         (self.work / 'scripts' / 'upgrade-postgres.sh').chmod(0o755)
@@ -119,6 +142,10 @@ class ApplyUpdateScriptTests(unittest.TestCase):
 
     def approved(self):
         return (self.work / 'web' / '.update-approved').exists()
+
+    def wait_for_scans(self):
+        """Settings > Updates > "Wait for scans to finish before updating" turned on: the old drain, which waits for every running scan."""
+        (self.work / 'web' / '.update-wait-scans').write_text('1\n')
 
     def test_nothing_happens_without_an_approval(self):
         self.assertEqual(self.run_script().returncode, 0)
@@ -422,7 +449,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(self.run_script().returncode, 0)
         from_file = [c for c in self.calls() if c.startswith('docker compose')]
         # the deploy file also pulls the proxy image and reads the migration count (the built-in copy, for checkouts older than the deploy file, does not)
-        verification = lambda call: any(x in call for x in ('http.client', 'migrate --check', 'image prune', ' info ', ' pull ', 'showmigrations'))
+        verification = lambda call: any(x in call for x in ('http.client', 'celery_healthcheck', 'migrate --check', 'image prune', ' info ', ' pull ', 'showmigrations'))
         self.assertEqual([c for c in from_file if not verification(c)], built_in)
 
     def test_the_dev_stack_pulls_nothing(self):
@@ -432,6 +459,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertFalse([c for c in self.calls() if ' pull ' in c])
 
     def test_waits_while_scans_are_running_and_keeps_the_approval(self):
+        self.wait_for_scans()  # these assert the old drain, which is now the opt-in; the default is tested in NoWaitForSentinelScansTests
         (self.stub / 'running_count').write_text('2\n')
         self.approve()
         result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
@@ -442,6 +470,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertIn('scan(s) running', (self.work / 'web' / '.update-log').read_text())
 
     def test_waiting_past_the_drain_limit_forces_the_update_ahead(self):
+        self.wait_for_scans()  # these assert the old drain, which is now the opt-in; the default is tested in NoWaitForSentinelScansTests
         # CVENGINE_UPDATE_DRAIN_SECONDS=0: the very first wait is already past the limit, so the update proceeds at once
         # instead of exiting 3, the same way it would after really waiting out the default five minutes.
         (self.stub / 'running_count').write_text('2\n')
@@ -455,6 +484,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertIn('2 scan(s)/job(s)', log)
 
     def test_the_drain_timer_does_not_restart_on_every_poll(self):
+        self.wait_for_scans()  # these assert the old drain, which is now the opt-in; the default is tested in NoWaitForSentinelScansTests
         # the watcher calls this script again every few seconds while waiting; the drain clock must not reset each time,
         # or a scan that never finishes would block forever no matter how low the limit is set.
         (self.stub / 'running_count').write_text('2\n')
@@ -469,6 +499,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(since_file.read_text(), recorded)  # unchanged: still counting from the first wait
 
     def test_waiting_for_scans_does_not_log_the_err_trap_line(self):
+        self.wait_for_scans()  # these assert the old drain, which is now the opt-in; the default is tested in NoWaitForSentinelScansTests
         # exit 3 is an expected, normal "still waiting" control-flow exit under `set -e`, not a command that actually
         # failed; the generic ERR-trap narration ("stopped at line N") must not fire for it on every poll.
         (self.stub / 'running_count').write_text('2\n')
@@ -509,6 +540,19 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse([c for c in self.calls() if ' build ' in c])
+        self.assertFalse(self.approved())
+
+    def test_approving_an_already_applied_commit_does_not_pause_scanning_or_wait_for_jobs(self):
+        self.git('pull', '--ff-only', 'origin', 'master', cwd=self.work)
+        (self.work / 'web' / '.commit').write_text(self.new + '\n')
+        self.mark_deployed(self.new)
+        (self.stub / 'running_count').write_text('2\n')  # jobs running on this server: a real update would pause, settle and exit 3 here
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse([c for c in self.calls() if 'update_scan_pause' in c or ' build ' in c], self.calls())  # nothing was paused, so nothing needs releasing
+        self.assertNotIn('settling', (self.work / 'web' / '.update-log').read_text())
+        self.assertIn('already at', (self.work / 'web' / '.update-log').read_text())
         self.assertFalse(self.approved())
 
     def test_an_interrupted_deploy_is_not_reported_as_already_done(self):
@@ -558,11 +602,43 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         other = self.tmp / 'other'
         (other / 'scripts').mkdir(exist_ok=True)
         shutil.copy(SCRIPTS / 'update-deploy.sh', other / 'scripts' / 'update-deploy.sh')
+        shutil.copy(SCRIPTS / 'update-disk.sh', other / 'scripts' / 'update-disk.sh')
         shutil.copy(SCRIPTS / 'db-backup.sh', other / 'scripts' / 'db-backup.sh')
         self.git('add', '-A', cwd=other)
         self.git('commit', '-m', 'the deploy file', cwd=other)
         self.git('push', 'origin', 'master', cwd=other)
         return self.git('rev-parse', 'HEAD', cwd=other)
+
+    def test_an_install_with_the_ai_reviewer_builds_and_restarts_it_and_its_failure_never_fails_the_update(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'has_reviewer').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertIn('docker compose -f docker-compose.yml build reviewer', calls)
+        recreate = 'docker compose -f docker-compose.yml up -d --no-deps --force-recreate reviewer'
+        self.assertIn(recreate, calls)
+        self.assertGreater(calls.index(recreate), next(i for i, c in enumerate(calls) if ' migrate --noinput' in c))
+        # a reviewer that cannot be built or started is logged; the update is still done
+        self.git('reset', '--hard', self.prev, cwd=self.work)
+        for path in self.work.glob('web/.update-*'):
+            path.unlink()
+        (self.stub / 'calls.log').unlink()
+        (self.stub / 'reviewer_fails').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.head(), self.new)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('could not build the AI reviewer image', log)
+        self.assertIn('could not start the AI reviewer', log)
+
+    def test_an_install_without_the_ai_reviewer_never_asks_for_it(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertFalse([c for c in self.calls() if 'reviewer' in c])
 
     def test_too_little_disk_space_stops_the_update_before_anything_is_built_and_says_so(self):
         self.new = self.publish_deploy_file()
@@ -570,10 +646,52 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         result = self.run_script(CVENGINE_UPDATE_MIN_FREE_MB='999999999')
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         log = (self.work / 'web' / '.update-log').read_text()
-        self.assertIn('MB are free where Docker keeps its images', log)
+        self.assertIn('This update needs about', log)
+        self.assertIn('(nothing was stopped or changed)', log)
         self.assertEqual(self.head(), self.prev)  # a failure before the migration returns to the previous version
         # the way back is not stopped by the same disk check: the previous version is restarted and scanning is resumed
         self.assertNotIn('could not restart the previous version', log)
+
+    def test_a_host_that_has_the_disk_check_refuses_before_it_pauses_or_stops_anything(self):
+        """From the second update on, the host's own copy of the script has the check, so it runs before scanning is paused: the screen says why."""
+        self.new = self.publish_deploy_file()  # carries scripts/update-disk.sh
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)  # the checkout now has the check
+        newest = self.publish_deploy_file_again()
+        self.approve(newest)
+        (self.stub / 'calls.log').unlink()
+        result = self.run_script(CVENGINE_UPDATE_MIN_FREE_MB='', CVENGINE_FAKE_DISK_FREE_MB='9500')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        sentence = 'This update needs about 14 GB of free disk; this server has 9 GB free. Free some space or add disk, then try again.'
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn(sentence, log)
+        phase = json.loads((self.work / 'web' / '.update-phase.json').read_text())
+        self.assertEqual((phase['phase'], phase['detail']), ('failed', sentence))
+        self.assertFalse(self.approved())  # asked again after the space is freed
+        self.assertEqual(self.head(), self.new)  # the files did not move
+        self.assertFalse([c for c in self.calls() if 'update_scan_pause' in c or ' build ' in c or ' stop ' in c or ' up ' in c], self.calls())
+        # with room, the same approval goes through
+        self.approve(newest)
+        self.assertEqual(self.run_script(CVENGINE_UPDATE_MIN_FREE_MB='', CVENGINE_FAKE_DISK_FREE_MB='20000').returncode, 0)
+        self.assertEqual(self.head(), newest)
+
+    def test_a_deploy_that_stops_for_disk_tells_the_screen_why_after_the_way_back(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_UPDATE_MIN_FREE_MB='999999999')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        phase = json.loads((self.work / 'web' / '.update-phase.json').read_text())
+        self.assertEqual(phase['phase'], 'failed')
+        self.assertIn('This update needs about', phase['detail'])
+
+    def test_ghost_scans_are_closed_before_the_drain_counts_and_a_real_one_still_waits(self):
+        self.wait_for_scans()  # these assert the old drain, which is now the opt-in; the default is tested in NoWaitForSentinelScansTests
+        self.approve()
+        (self.stub / 'running_count').write_text('2\n')
+        result = self.run_script()
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)  # a real scan: still waiting
+        self.assertIn('exec -T web python3 manage.py update_ghost_scans --idle-minutes 5', ' '.join(self.calls()))
+        self.assertTrue(self.approved())
 
     def test_a_verified_update_removes_the_image_it_replaced_and_a_failed_one_does_not(self):
         self.new = self.publish_deploy_file()
@@ -599,6 +717,54 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(self.head(), self.new)  # the schema is already the new one: the old code is not put back on it
         self.assertTrue(self.approved())  # kept: the next run retries
         self.assertFalse(self.deployed_marker())
+
+    def test_an_update_is_not_done_while_a_worker_does_not_answer(self):
+        # the web service answers, a migration is not waiting, but one of the four Celery workers is not there: not "done", the maintenance page is not
+        # taken down as if it were, and the screen says which worker and what to run (an update once ended "done" with three of four lanes missing)
+        (self.stub / 'workers_down').write_text('')
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(CVENGINE_VERIFY_WORKERS_SECONDS='0', CVENGINE_VERIFY_WORKERS_POLL='1', CVENGINE_VERIFY_POLL='0')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('not every background worker answers (classic_worker does not answer)', log)
+        self.assertIn('docker compose restart celery', log)
+        self.assertTrue(self.approved())
+        self.assertFalse(self.deployed_marker())
+        self.assertNotIn('docker image prune -f', self.calls())
+        self.assertIn('exec -T celery python3 celery_healthcheck.py', ' '.join(self.calls()))
+
+    def run_with_env_file(self, text):
+        """An update whose checkout carries the helper scripts (host-fit, redis-password) and an .env with ``text``; returns the update log."""
+        other = self.tmp / 'other'
+        (other / 'scripts').mkdir(exist_ok=True)
+        for name in ('host-fit.sh', 'redis-password.sh'):
+            shutil.copy(SCRIPTS / name, other / 'scripts' / name)
+        self.new = self.publish_deploy_file()
+        (self.work / '.env').write_text(text)
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.work / '.env').read_text().startswith(text))  # the owner's line is never edited (the update only appends the Redis password)
+        return (self.work / 'web' / '.update-log').read_text()
+
+    def test_a_discovery_concurrency_left_in_env_from_1_3_is_said_in_the_update_log(self):
+        # DISCOVERY_CONCURRENCY=1 pins "hosts assessed at once" to one for the whole instance on 1.4 (an assessment holds a slot while it waits for a Sentinel)
+        self.assertIn('Hosts assessed at once is held at 1 by DISCOVERY_CONCURRENCY', self.run_with_env_file('DISCOVERY_CONCURRENCY=1\n'))
+
+    def test_a_default_or_high_discovery_concurrency_says_nothing(self):
+        self.assertNotIn('Hosts assessed at once is held', self.run_with_env_file('DISCOVERY_CONCURRENCY=8\n'))
+
+    def test_every_worker_answering_is_checked_after_the_web_service_and_before_the_update_is_done(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+        calls = self.calls()
+        web = next(i for i, c in enumerate(calls) if 'http.client' in c)
+        workers = next(i for i, c in enumerate(calls) if 'celery_healthcheck.py' in c)
+        self.assertLess(web, workers)
+        self.assertLess(workers, next(i for i, c in enumerate(calls) if 'image prune' in c))
+        self.assertEqual(self.deployed_marker(), self.new)
 
     def test_a_migration_still_waiting_after_the_restart_is_applied_and_checked_again(self):
         (self.stub / 'unmigrated_once').write_text('')
@@ -891,18 +1057,23 @@ class ApplyUpdateScriptTests(unittest.TestCase):
 
     def test_two_watchers_do_not_run_at_once(self):
         self.install_watcher()
-        first = subprocess.Popen(['bash', 'scripts/update-watch.sh', '6'], cwd=self.work, env=self.env,
+        first = subprocess.Popen(['bash', 'scripts/update-watch.sh', '120'], cwd=self.work, env=self.env,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(first.kill)
         import time
-        time.sleep(1)
+        heartbeat = self.work / 'web' / '.updater-heartbeat'  # written after the watcher took its lock: the first one is on (a fixed pause only hoped so)
+        end = time.monotonic() + 60
+        while not heartbeat.exists() and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertTrue(heartbeat.exists(), 'the first watcher did not start')
         started = time.monotonic()
         second = self.run_watch(6)
         self.assertEqual(second.returncode, 0)
-        self.assertLess(time.monotonic() - started, 3)  # it found the lock taken and left at once
-        first.wait(timeout=30)
+        self.assertLess(time.monotonic() - started, 60)  # it found the lock taken and left at once: the first one runs for 120 s
+        self.assertIsNone(first.poll())  # and the first is still the one holding it
 
     def test_waiting_for_scans_exits_with_3_reports_once_and_keeps_the_approval(self):
+        self.wait_for_scans()  # the old drain is the opt-in now
         (self.stub / 'running_count').write_text('2\n')
         self.approve()
         first = self.run_script()
@@ -921,6 +1092,358 @@ class ApplyUpdateScriptTests(unittest.TestCase):
             self.assertEqual(self.run_script().returncode, 1)
         log = (self.work / '.git' / 'cvengine-update' / 'update.log').read_text()
         self.assertEqual(log.count('refusing: the checkout has local changes'), 1)
+
+    # --- the maintenance page goes up before anything the running containers read changes, and comes down only after a verified update ----------
+
+    def flag_lines(self):
+        log = self.stub / 'flags.log'
+        return log.read_text().splitlines() if log.exists() else []
+
+    def flag(self, name='maintenance'):
+        return (self.work / 'config' / 'nginx' / 'state' / name).exists()
+
+    def hook(self, name, body):
+        path = self.work / '.git' / 'hooks' / name
+        path.write_text('#!/usr/bin/env bash\n' + body + '\n')
+        path.chmod(0o755)
+
+    def test_the_maintenance_page_is_up_before_the_fast_forward_and_the_workers_are_stopped_first(self):
+        """./web is bind-mounted into the running containers: the moment the merge changes a file they run the new code on the old image."""
+        self.new = self.publish_deploy_file()
+        self.hook('post-merge', 'echo "$([ -e config/nginx/state/maintenance ] && echo on || echo off)" > "$STUB_DIR/flag_at_merge"\n'
+                  'grep -c "stop -t 30 celery celery-beat" "$STUB_DIR/calls.log" > "$STUB_DIR/stopped_at_merge" || true')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.stub / 'flag_at_merge').read_text().strip(), 'on')
+        self.assertEqual((self.stub / 'stopped_at_merge').read_text().strip(), '1')  # the workers read ./web too: stopped before it changed
+
+    def test_the_flag_is_readable_by_the_proxy_whatever_the_umask_of_the_updater(self):
+        """nginx checks the flag as an unprivileged user in its container: a 0750 folder or a 0640 file made `-f` false and no page showed."""
+        self.new = self.publish_deploy_file()
+        self.hook('post-merge', 'stat -c %a config/nginx/state > "$STUB_DIR/dir_mode"; stat -c %a config/nginx/state/maintenance > "$STUB_DIR/flag_mode"')
+        self.approve()
+        result = subprocess.run(['bash', '-c', 'umask 077; exec bash scripts/apply-update.sh'], cwd=self.work, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.stub / 'dir_mode').read_text().strip(), '755')
+        self.assertEqual((self.stub / 'flag_mode').read_text().strip(), '644')
+
+    def test_the_maintenance_page_is_up_before_the_checkout_switches_branch(self):
+        self.hook('post-checkout', 'echo "$([ -e config/nginx/state/maintenance ] && echo on || echo off)" >> "$STUB_DIR/flag_at_checkout"')
+        tip = self.develop_ahead()
+        self.approve(tip)
+        self.choose_branch('develop')
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        seen = (self.stub / 'flag_at_checkout').read_text().split()
+        self.assertTrue(seen and set(seen) == {'on'}, seen)
+
+    def test_the_page_stays_up_through_the_build_the_migration_and_the_swap_and_is_removed_after_verification(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = self.flag_lines()
+        for fragment in (' build web celery celery-beat', ' migrate --noinput', ' collectstatic', '--force-recreate web', 'http.client'):
+            hits = [line for line in lines if fragment in line]
+            self.assertTrue(hits, fragment)
+            self.assertTrue(all(line.startswith('on ') for line in hits), (fragment, hits))
+        self.assertFalse(self.flag())
+        self.assertFalse(self.flag('maintenance-failed'))
+        self.assertEqual(self.phase_file().get('phase'), 'done')
+
+    def scanner_checkout(self):
+        """The host already has the built-in scanner's scripts (a release from 1.4 on); a further commit is what the update brings."""
+        self.publish_deploy_file()
+        other = self.tmp / 'other'
+        for name in ('scanner.sh', 'scanner_lock.py'):
+            shutil.copy(SCRIPTS / name, other / 'scripts' / name)
+        shutil.copy(SCRIPTS.parent / 'scanner.lock.json', other / 'scanner.lock.json')
+        self.git('add', '-A', cwd=other)
+        self.git('commit', '-m', 'the scanner scripts', cwd=other)
+        self.git('push', 'origin', 'master', cwd=other)
+        self.git('pull', '--ff-only', cwd=self.work)
+        (self.stub / 'has_scanner').write_text('')
+        self.new = self.publish_deploy_file_again()
+
+    def test_the_scanner_image_is_fetched_once_with_the_site_up_before_the_page_and_before_the_merge(self):
+        """The pull (about 5 GB) changes nothing the running site reads: under the maintenance page it would only lengthen the outage."""
+        self.scanner_checkout()
+        self.hook('post-merge', 'echo "$([ -e config/nginx/state/maintenance ] && echo on || echo off)" > "$STUB_DIR/flag_at_merge"')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = self.flag_lines()
+        pulls = [i for i, line in enumerate(lines) if ' docker pull -q ' in line]
+        self.assertEqual(len(pulls), 1, lines)  # one fetch, not two
+        self.assertTrue(lines[pulls[0]].startswith('off '), lines[pulls[0]])  # the site was still up
+        first_on = next(i for i, line in enumerate(lines) if line.startswith('on '))
+        self.assertLess(pulls[0], first_on)
+        self.assertEqual((self.stub / 'flag_at_merge').read_text().strip(), 'on')  # the page is up before the merge
+        self.assertIn('the built-in scanner image', (self.work / '.git' / 'cvengine-update' / 'update.log').read_text())
+
+    def test_a_scanner_that_is_off_is_not_fetched_before_the_page(self):
+        self.scanner_checkout()
+        (self.work / '.env').write_text('CVENGINE_BUILTIN_SCANNER=0\n')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse([line for line in self.flag_lines() if ' docker pull -q ' in line])
+
+    def test_a_host_script_without_the_early_fetch_gets_the_page_first_and_fetches_under_it(self):
+        """The first update that delivers this: the host's own apply-update.sh is older, has merged already (./web is a bind mount, so the old image reads the new
+        code) and sources the new update-deploy.sh, which owns the order then: the page is its first act and the 5 GB pull happens under it, never before it
+        (a pull before it showed the visitor the site on mismatched files for the length of the pull: the upgrade rehearsal's overlay job, 35 to 46 samples)."""
+        work = self.tmp / 'old-host'
+        (work / 'scripts').mkdir(parents=True)
+        (work / 'config' / 'nginx' / 'state').mkdir(parents=True)
+        for name in ('update-deploy.sh', 'scanner.sh', 'scanner_lock.py'):
+            shutil.copy(SCRIPTS / name, work / 'scripts' / name)
+        shutil.copy(SCRIPTS.parent / 'scanner.lock.json', work / 'scanner.lock.json')
+        (self.stub / 'has_scanner').write_text('')
+        driver = (
+            'log() { echo "$*"; }; phase() { :; }; COMPOSE=(docker compose); STATE_HELPER=/bin/true; DEPLOY_STAGE=build\n'
+            '. scripts/update-deploy.sh\n'
+            'deploy_steps() { echo "$([ -e config/nginx/state/maintenance ] && echo on || echo off) deploy_steps" >> "$STUB_DIR/flags.log"; deploy_scanner_fetch once; }\n'
+            'deploy_current\n')
+        result = subprocess.run(['bash', '-c', driver], cwd=work, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = self.flag_lines()
+        pulls = [line for line in lines if ' docker pull -q ' in line]
+        self.assertEqual(len(pulls), 1, lines)
+        self.assertTrue(pulls[0].startswith('on '), pulls)  # the page was already up when the pull ran
+        self.assertEqual(lines[0].split()[0], 'on', lines)  # and nothing at all ran before it
+
+    def test_an_older_host_script_with_a_scanner_to_fetch_never_pulls_with_the_site_on_the_new_files(self):
+        """The overlay rehearsal's failure: the host's older apply-update.sh merged, then the deploy file pulled the 5 GB scanner image BEFORE putting the page up,
+        so visitors got the old image on the new files for the whole pull. Whatever docker is asked after the merge, the page must already be up."""
+        self.scanner_checkout()
+        text = (SCRIPTS / 'apply-update.sh').read_text()
+        for needle, repl in (('export UPDATE_OWNS_MAINTENANCE=1', ':'),
+                             ('cv_begin_maintenance() {\n', 'cv_begin_maintenance() {\n  return 0\n'),
+                             ('cv_maint_off() {', 'cv_maint_off() { return 0; }\n_unused() {'),
+                             ('cv_maint_failed() {', 'cv_maint_failed() { return 0; }\n_unused2() {'),
+                             ('  if cvengine_scanner_enabled "${COMPOSE[@]}"; then\n    phase applying "fetching the built-in', '  if false; then\n    phase applying "fetching the built-in')):
+            self.assertIn(needle, text)
+            text = text.replace(needle, repl, 1)
+        (self.work / 'scripts' / 'apply-update.sh').write_text(text)
+        self.git('update-index', '--assume-unchanged', 'scripts/apply-update.sh', cwd=self.work)
+        self.hook('post-merge', 'echo "$([ -e config/nginx/state/maintenance ] && echo on || echo off)" > "$STUB_DIR/flag_at_merge"')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        pulls = [line for line in self.flag_lines() if ' docker pull -q ' in line]
+        self.assertEqual(len(pulls), 1, self.flag_lines())
+        self.assertTrue(pulls[0].startswith('on '), pulls)
+        self.assertEqual((self.stub / 'flag_at_merge').read_text().strip(), 'off')  # the older script really did merge with no page: the deploy file is what covers it
+
+    def test_the_page_is_also_up_while_the_services_are_rebuilt_in_place(self):
+        """The files were pulled by hand: the running containers already read them, so there is no merge to hang the page on."""
+        self.new = self.publish_deploy_file()
+        self.git('pull', '--ff-only', cwd=self.work)
+        self.approve(self.git('rev-parse', 'HEAD', cwd=self.work))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        builds = [line for line in self.flag_lines() if ' build web celery celery-beat' in line]
+        self.assertTrue(builds and all(line.startswith('on ') for line in builds), builds)
+        self.assertFalse(self.flag())
+
+    def test_a_run_that_has_nothing_to_do_never_shows_the_page(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+        before = len(self.flag_lines())
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertFalse([line for line in self.flag_lines()[before:] if line.startswith('on')])
+
+    def test_a_flag_that_cannot_be_written_stops_the_update_before_anything_changes(self):
+        (self.work / 'config').mkdir()
+        (self.work / 'config' / 'nginx').write_text('a file where the state folder should be\n')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.head(), self.prev)
+        self.assertFalse([c for c in self.calls() if ' build ' in c or ' stop ' in c])
+        self.assertEqual(self.phase_file().get('phase'), 'failed')
+        self.assertIn('maintenance page', self.phase_file().get('detail', ''))
+        self.assertFalse(self.approved())
+
+    def test_a_failed_build_with_the_old_services_untouched_restores_the_files_and_the_old_version_keeps_serving_without_a_rebuild(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'old_containers').write_text('')
+        (self.stub / 'fail_up').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.head(), self.prev)
+        self.assertEqual((self.work / 'web' / 'README').read_text(), 'v1\n')  # the files the bind mount shows are the old ones again
+        calls = self.calls()
+        self.assertEqual(len([c for c in calls if c.endswith('build web celery celery-beat')]), 1)  # no second build
+        self.assertTrue([c for c in calls if c.endswith('start celery celery-beat') or c.endswith('start celery')])
+        self.assertFalse([c for c in calls if '--force-recreate' in c or ' migrate --noinput' in c])
+        self.assertFalse(self.flag())  # the old version is serving again: no page on it
+        self.assertEqual(self.phase_file().get('phase'), 'failed')
+        self.assertIn('Nothing was changed', self.phase_file().get('detail', ''))
+        self.assertFalse(self.approved())
+
+    def test_a_failed_build_that_moved_the_image_tag_is_put_back_by_redeploying_not_by_trusting_the_old_containers(self):
+        self.new = self.publish_deploy_file()
+        for name in ('old_containers', 'image_moved', 'fail_up'):
+            (self.stub / name).write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.head(), self.prev)
+        self.assertEqual(len([c for c in self.calls() if c.endswith('build web celery celery-beat')]), 2)
+        self.assertFalse(self.flag())
+
+    def test_a_build_that_always_fails_and_cannot_be_put_back_leaves_the_page_saying_the_update_did_not_finish(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'fail_build_always').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.head(), self.prev)
+        self.assertTrue(self.flag())
+        self.assertTrue(self.flag('maintenance-failed'))
+        self.assertEqual(self.phase_file().get('phase'), 'failed')
+        self.assertIn('did not finish', self.phase_file().get('detail', ''))
+
+    def test_a_restart_that_keeps_failing_after_the_migration_keeps_the_page_and_says_it_did_not_finish(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'fail_recreate_always').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(self.head(), self.new)
+        self.assertTrue(self.flag())
+        self.assertTrue(self.flag('maintenance-failed'))
+        self.assertIn('did not finish', self.phase_file().get('detail', ''))
+
+    def test_a_restart_that_works_on_the_retry_takes_the_page_down_only_then(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'fail_recreate').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.flag())
+        self.assertFalse(self.flag('maintenance-failed'))
+        recreates = [line for line in self.flag_lines() if '--force-recreate web' in line]
+        self.assertEqual(len(recreates), 2)
+        self.assertTrue(all(line.startswith('on') for line in recreates), recreates)
+
+    def test_an_updater_that_is_stopped_part_way_leaves_the_page_saying_the_update_did_not_finish(self):
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script(STUB_TERM_ON=' migrate --noinput')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(self.flag())
+        self.assertTrue(self.flag('maintenance-failed'))
+
+    def test_an_older_apply_script_on_the_host_still_gets_the_page_before_the_build_from_the_deploy_file(self):
+        """The first update that delivers this runs the host's OLD copy of apply-update.sh up to the merge; the deploy file it then reads is new."""
+        # an older copy knows nothing about the flag: it neither sets it, nor says it owns it, nor clears it
+        text = (SCRIPTS / 'apply-update.sh').read_text()
+        for needle, repl in (('export UPDATE_OWNS_MAINTENANCE=1', ':'),
+                             ('cv_begin_maintenance() {\n', 'cv_begin_maintenance() {\n  return 0\n'),
+                             ('cv_maint_off() {', 'cv_maint_off() { return 0; }\n_unused() {'),
+                             ('cv_maint_failed() {', 'cv_maint_failed() { return 0; }\n_unused2() {')):
+            self.assertIn(needle, text)
+            text = text.replace(needle, repl, 1)
+        (self.work / 'scripts' / 'apply-update.sh').write_text(text)
+        self.git('update-index', '--assume-unchanged', 'scripts/apply-update.sh', cwd=self.work)  # the host's copy is what it is; not a local change
+        self.new = self.publish_deploy_file()
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        builds = [line for line in self.flag_lines() if ' build web celery celery-beat' in line]
+        self.assertTrue(builds and all(line.startswith('on ') for line in builds), builds)  # from the merge on, not after the build
+        self.assertFalse(self.flag())
+
+    # --- the live status the maintenance page shows ----------------------------------------------------------------------------------------
+
+    def status_calls(self):
+        log = self.stub / 'status_calls.log'
+        return log.read_text().splitlines() if log.exists() else []
+
+    def status_json(self):
+        import json
+        path = self.work / 'config' / 'nginx' / 'state' / 'status.json'
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def test_the_status_is_written_at_each_phase_and_the_first_write_is_before_the_files_change(self):
+        self.new = self.publish_deploy_file()
+        self.hook('post-merge', 'cp config/nginx/state/status.json "$STUB_DIR/status_at_merge.json"')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [c for c in self.status_calls() if not c.startswith('tick')]
+        self.assertEqual(calls[0].split()[0], 'begin')
+        steps = [c.split()[1] for c in calls if c.startswith('step ')]
+        self.assertEqual(steps, ['stopping', 'build', 'backup', 'migrating', 'starting', 'verifying'])
+        self.assertEqual(calls[-2:], ['done', 'clear'])
+        import json
+        at_merge = json.loads((self.stub / 'status_at_merge.json').read_text())
+        self.assertEqual((at_merge['state'], at_merge['step']), ('working', 'stopping'))  # already written, and the workers already being stopped
+        self.assertIsNone(self.status_json())  # gone with the page
+
+    def test_a_slow_step_keeps_the_status_fresh_so_the_page_can_tell_working_from_stalled(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'slow_build').write_text('')
+        self.approve()
+        result = self.run_script(CVENGINE_STATUS_TICK='1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertGreaterEqual(len([c for c in self.status_calls() if c == 'tick']), 2)
+
+    def test_a_failed_build_that_is_put_back_shows_the_failure_and_that_the_old_version_runs_before_the_page_goes(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'old_containers').write_text('')
+        (self.stub / 'fail_up').write_text('')
+        self.approve()
+        result = self.run_script(CVENGINE_STATUS_LINGER='7')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('fail build_failed yes', self.status_calls())
+        import json
+        shown = json.loads((self.stub / 'status_at_settle.json').read_text())
+        self.assertEqual(shown['state'], 'failed')
+        self.assertIs(shown['error']['restored'], True)
+        self.assertEqual(shown['error']['summary'], 'The new version could not be built.')
+        self.assertFalse(self.flag())
+        self.assertIsNone(self.status_json())
+
+    def test_a_previous_version_that_cannot_be_restarted_leaves_the_failure_on_the_page(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'fail_build_always').write_text('')
+        self.approve()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1)
+        shown = self.status_json()
+        self.assertEqual(shown['state'], 'failed')
+        self.assertIs(shown['error']['restored'], False)
+        self.assertIn('make up', shown['error']['next'])
+        self.assertTrue(self.flag('maintenance-failed'))
+
+    def test_a_restart_that_keeps_failing_after_the_migration_says_so_on_the_page(self):
+        self.new = self.publish_deploy_file()
+        (self.stub / 'fail_recreate_always').write_text('')
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 1)
+        shown = self.status_json()
+        self.assertEqual((shown['state'], shown['error']['summary']), ('failed', 'The new version was installed but did not start.'))
+        self.assertIs(shown['error']['restored'], False)
+
+    def test_secrets_in_the_build_output_never_reach_the_public_status(self):
+        from tests.test_update_status import CANARIES, CANARY_LOG
+        self.new = self.publish_deploy_file()
+        (self.stub / 'canary_output').write_text(CANARY_LOG)
+        (self.stub / 'fail_build_always').write_text('')
+        self.approve()
+        self.assertEqual(self.run_script().returncode, 1)
+        text = (self.work / 'config' / 'nginx' / 'state' / 'status.json').read_text()
+        self.assertIn('"log"', text)
+        for canary in CANARIES:
+            self.assertNotIn(canary, text, canary)
 
     def test_a_failed_build_returns_to_the_previous_commit_and_redeploys_it(self):
         (self.stub / 'fail_up').write_text('')
@@ -1079,6 +1602,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertIn('no valid signature', (self.work / 'web' / '.update-log').read_text())
 
     def test_the_drain_limit_is_read_from_dot_env_where_cron_cannot_set_the_environment(self):
+        self.wait_for_scans()  # the old drain is the opt-in now
         (self.work / '.env').write_text('CVENGINE_UPDATE_DRAIN_SECONDS=0\n')
         (self.stub / 'running_count').write_text('2\n')
         self.approve()
@@ -1358,3 +1882,98 @@ class HostUpdaterInstallTests(unittest.TestCase):
         # the watcher is installed before the success exit of the readiness loop, which polls with `sleep 5` or `sleep "$poll_seconds"`
         self.assertLess(update.index('install-updater.sh'), re.search(r'exit 0\n    fi\n    sleep (5|"\$poll_seconds")', update).start())
         self.assertIn('Could not install the update watcher', update)
+
+
+@unittest.skipUnless(SCRIPTS.joinpath('apply-update.sh').is_file() and shutil.which('git') and shutil.which('flock'),
+                     'needs the repository scripts directory, git and flock')
+class NoWaitForSentinelScansTests(unittest.TestCase):
+    """An update does not wait for scans that run on Sentinels: it counts only work on this server, gives it 30 seconds to settle and 60 at most,
+    unless \"Wait for scans to finish before updating\" is on. (The docker stub answers the count; the queries themselves are run against a database in
+    tests.test_update_no_wait.)"""
+
+    # the fixture and helpers of the class above, without its tests
+    setUp, git, approve, run_script, calls, head, approved, wait_for_scans = (
+        ApplyUpdateScriptTests.setUp, ApplyUpdateScriptTests.git, ApplyUpdateScriptTests.approve, ApplyUpdateScriptTests.run_script,
+        ApplyUpdateScriptTests.calls, ApplyUpdateScriptTests.head, ApplyUpdateScriptTests.approved, ApplyUpdateScriptTests.wait_for_scans)
+
+    def drain_file(self):
+        return Path(self.git('rev-parse', '--absolute-git-dir', cwd=self.work)) / 'cvengine-update' / 'draining-since'
+
+    def test_nothing_running_on_this_server_goes_straight_ahead(self):
+        (self.stub / 'running_count').write_text('0\n')  # scans that wait on Sentinels are not in this count
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.head(), self.new)
+        self.assertNotIn('waiting', (self.work / 'web' / '.update-log').read_text())
+
+    def test_the_default_asks_for_the_server_side_count_and_the_opt_in_for_every_scan(self):
+        (self.stub / 'running_count').write_text('0\n')
+        self.approve()
+        self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        asked = ' '.join(self.calls())
+        self.assertIn('SentinelTask', asked)
+        self.assertIn('StageRun', asked)
+
+    def test_the_opt_in_asks_for_every_scan(self):
+        (self.stub / 'running_count').write_text('0\n')
+        self.wait_for_scans()
+        self.approve()
+        self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertNotIn('SentinelTask', ' '.join(self.calls()))
+
+    def test_work_on_this_server_settles_and_the_log_says_sentinel_scans_are_not_waited_for(self):
+        (self.stub / 'running_count').write_text('1\n')
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(result.returncode, 3)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('settling: 1 job(s) running on this server', log)
+        self.assertIn('scans on Sentinels are not waited for', log)
+        phase = json.loads((self.work / 'web' / '.update-phase.json').read_text())
+        self.assertEqual((phase['phase'], phase['scans_running']), ('draining', 1))
+        self.assertIn('Scans on Sentinels are not waited for', phase['detail'])
+
+    def test_the_hard_cap_is_sixty_seconds_whatever_the_drain_setting_says(self):
+        (self.stub / 'running_count').write_text('1\n')
+        self.approve()
+        first = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml', CVENGINE_UPDATE_DRAIN_SECONDS='100000')
+        self.assertEqual(first.returncode, 3)
+        import time
+        self.drain_file().write_text(str(int(time.time()) - 61))  # it has settled for 61 seconds
+        second = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml', CVENGINE_UPDATE_DRAIN_SECONDS='100000')
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(self.head(), self.new)
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('forcing ahead: 1 job(s) on this server were still running', log)
+        self.assertIn('hand them over when this server is back', log)
+
+    def test_a_lower_setting_shortens_the_settle(self):
+        (self.stub / 'running_count').write_text('1\n')
+        self.approve()
+        result = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml', CVENGINE_UPDATE_DRAIN_SECONDS='0')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_with_the_opt_in_the_same_elapsed_time_is_still_waiting(self):
+        import time
+        (self.stub / 'running_count').write_text('1\n')
+        self.wait_for_scans()
+        self.approve()
+        self.assertEqual(self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml').returncode, 3)
+        self.drain_file().write_text(str(int(time.time()) - 100))  # past the 60 seconds, inside the old five minutes
+        again = self.run_script(CVENGINE_COMPOSE_FILE='docker-compose.dev.yml')
+        self.assertEqual(again.returncode, 3, again.stdout + again.stderr)
+        self.assertEqual(self.head(), self.prev)
+
+    def test_the_state_helper_reads_the_opt_in_without_following_a_link(self):
+        def read():
+            return subprocess.run(['python3', str(SCRIPTS / 'update-state.py'), 'wait-scans'], cwd=self.work, env=self.env, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(read(), '0')
+        self.wait_for_scans()
+        self.assertEqual(read(), '1')
+        flag = self.work / 'web' / '.update-wait-scans'
+        flag.unlink()
+        victim = self.tmp / 'host-file'
+        victim.write_text('1\n')
+        flag.symlink_to(victim)
+        self.assertEqual(read(), '0')  # a link planted by the web container is not read

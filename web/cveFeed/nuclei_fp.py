@@ -16,9 +16,9 @@ Every dropped line is counted by reason, so the run's summary says what was set 
 
 ``bounded`` clips the request and response a finding keeps (the evidence a person and the triage read) to ``MAX_EVIDENCE`` characters each.
 """
+import hashlib
 import logging
 import re
-import secrets
 from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
@@ -162,48 +162,87 @@ def same_bodies(answers):
 
 
 def control_url(url):
-    """A path on the same origin that no site serves."""
+    """A path on the same origin that no site serves. The token is a function of the origin and this server's secret, not random: an asynchronous
+    stage runs the same code again after each wait, and a control read that asked a different path each time would be a new task every pass."""
+    import hashlib
+
+    from django.conf import settings
     parts = urlsplit(url)
-    return f'{parts.scheme}://{parts.netloc}/.cvengine-control-{secrets.token_hex(6)}'
+    origin = f'{parts.scheme}://{parts.netloc}'.lower()
+    token = hashlib.sha256(f'{settings.SECRET_KEY}:control:{origin}'.encode()).hexdigest()[:12]
+    return f'{parts.scheme}://{parts.netloc}/.cvengine-control-{token}'
 
 
-def control_get(url, project=None):
-    """``(status, location, body)`` of one anonymous GET of ``url`` through the same safe-address gate as every probe, or None."""
-    from cveFeed import probes, route_auth
-    host = urlsplit(url).hostname or ''
-    if not probes._permitted(host, project):
-        return None
-    got = route_auth.probe_url(url, max_bytes=CONTROL_BYTES, project=project)
-    return (int(got.get('status') or 0), got.get('location') or '', got.get('body') or '')
+def body_digest(body):
+    """The SHA-256 of ``body`` with its whitespace collapsed: what a Sentinel returns of a control answer instead of the body (``page_read`` op ``control``)."""
+    return hashlib.sha256(_norm(body).encode('utf-8', 'replace')).hexdigest()
 
 
-def answers_everything(line, project=None, control=None):
-    """True when the HTTP match's own responses are all one body, or its (error) response is what the host returns for a path no site
-    serves. A failed control request decides nothing."""
-    answers = responses(line.get('response'))
-    if not answers:
-        return False
-    if same_bodies(answers):
-        return True
-    status, location, body = answers[-1]
-    if status < 400 or not _norm(body):
-        return False
-    url = matched_at(line)
-    if '://' not in url:
-        return False
-    try:
-        got = (control or control_get)(control_url(url), project)
-    except Exception as exc:  # noqa: BLE001 - a control that cannot be asked keeps the finding
-        logger.info('nuclei control request for %s failed: %s', urlsplit(url).netloc, type(exc).__name__)
-        return False
-    return bool(got) and same_bodies([(status, location, body), (got[0], got[1], got[2])])
+def control_get(urls, project=None, scan=None):
+    """``{url: (status, location, digest) or None}`` for the control paths in ``urls``, each read once by a Sentinel (``page_read``, op ``control``: this
+    server sends nothing to the host). ``None`` is a URL that could not be read: it decides nothing (see ``Screen``). ``ScannerUnavailable`` when no
+    Sentinel can take the work: the stage waits and its targets stay due."""
+    if not urls:
+        return {}
+    from agentapi import probe_dispatch
+    from dashboard.models import Project
+    if project is None:
+        return {url: None for url in urls}
+    return probe_dispatch.control_reads(Project.objects.get(pk=project), scan, urls)
 
 
-def same_body_artefact(line, project=None, control=None):
-    """True for an HTTP match above info whose request got the answer the host gives to anything (see ``answers_everything``)."""
+def needs_control(line):
+    """The control URL a match must be compared with, or None when the match is decided without one (not HTTP above info, no recorded response, every
+    recorded response the same body, a success page or an empty body: none of them is asked of the host)."""
     severity = _text((line.get('info') or {}).get('severity')).lower()
-    return (_text(line.get('type')).lower() in ('', 'http') and severity in CONTROL_SEVERITIES
-            and answers_everything(line, project, control))
+    if _text(line.get('type')).lower() not in ('', 'http') or severity not in CONTROL_SEVERITIES:
+        return None
+    answers = responses(line.get('response'))
+    if not answers or same_bodies(answers):
+        return None
+    status, _location, body = answers[-1]
+    if status < 400 or not _norm(body):
+        return None
+    url = matched_at(line)
+    return control_url(url) if '://' in url else None
+
+
+ARTEFACT, CLEAN, UNSCREENED = 'artefact', 'clean', 'unscreened'
+UNSCREENED_TAG = 'unscreened-same-body'  # on a finding kept because the control read that would have told a catch-all page apart could not be made
+
+
+class SameBody:
+    """The same-body screen of one run: ``prefetch(lines)`` asks for the control read every line needs (one task for up to ten origins, each origin once),
+    ``judge(line)`` is ``'artefact'`` (the host gives this answer to anything: set it aside), ``'clean'`` (it does not) or ``'unscreened'`` (the control
+    read the line needed could not be made, so nothing is known: the finding is kept and marked, never taken as \"not a catch-all\"). ``control`` replaces
+    ``control_get`` (tests). ``ScannerUnavailable`` from the control read is not caught: the stage waits and the targets stay due."""
+
+    def __init__(self, project=None, scan=None, control=None):
+        self.project, self.scan, self.control = project, scan, control
+        self.controls = {}
+
+    def prefetch(self, lines):
+        wanted = [url for url in dict.fromkeys(needs_control(line) for line in lines if isinstance(line, dict)) if url and url not in self.controls]
+        if wanted:
+            got = (self.control or control_get)(wanted, self.project, self.scan) or {}
+            for url in wanted:
+                self.controls[url] = got.get(url)
+
+    def judge(self, line):
+        answers = responses(line.get('response'))
+        if not answers:
+            return CLEAN
+        if _text((line.get('info') or {}).get('severity')).lower() in CONTROL_SEVERITIES and _text(line.get('type')).lower() in ('', 'http') and same_bodies(answers):
+            return ARTEFACT
+        url = needs_control(line)
+        if url is None:
+            return CLEAN
+        got = self.controls.get(url)
+        if not got:
+            logger.info('nuclei control read for %s was not answered: the match is kept, unscreened', urlsplit(matched_at(line)).netloc)
+            return UNSCREENED
+        status, location, body = answers[-1]
+        return ARTEFACT if (status, location, body_digest(body)) == (got[0], got[1], got[2]) else CLEAN
 
 
 # ----------------------------------------------------------------------------- one run
@@ -212,12 +251,22 @@ class RunScreen:
     """Sorts the lines of one nuclei run. ``offer(line)`` is ``'keep'`` (save it now), ``'hold'`` (a protocol match: judged with the run's
     other matches on that port by ``release()``) or a drop reason. ``echo_ports`` is a set of ``(host or address, port)`` nmap named echo."""
 
-    def __init__(self, echo_ports=(), project=None, control=None):
+    def __init__(self, echo_ports=(), project=None, control=None, scan=None):
         self.echo_ports = {(str(h).lower(), int(p)) for h, p in echo_ports}
         self.project = project
-        self.control = control
+        self.same = SameBody(project, scan, control)
         self.held = {}
         self.dropped = {}
+        self.unscreened = 0  # kept matches whose control read could not be made
+        self._unscreened = set()
+
+    def prefetch(self, lines):
+        """Ask for the control reads the ``lines`` (one chunk's matches) need, before any is offered: one Sentinel task for up to ten origins."""
+        self.same.prefetch(lines)
+
+    def is_unscreened(self, line):
+        """True for a kept match that was not checked against its control (the read could not be made): it is saved, and marked."""
+        return id(line) in self._unscreened
 
     def _drop(self, reason, line):
         self.dropped[reason] = self.dropped.get(reason, 0) + 1
@@ -235,8 +284,12 @@ class RunScreen:
                 return 'keep'
             self.held.setdefault(key, []).append(line)
             return 'hold'
-        if same_body_artefact(line, self.project, self.control):
+        verdict = self.same.judge(line)
+        if verdict == ARTEFACT:
             return self._drop(SAME_BODY, line)
+        if verdict == UNSCREENED:
+            self._unscreened.add(id(line))
+            self.unscreened += 1
         return 'keep'
 
     def release(self):
@@ -254,6 +307,7 @@ class RunScreen:
     def reset(self):
         """Forget what is held (a retried run sends its lines again)."""
         self.held = {}
+        self._unscreened = set()
 
     def summary(self):
         """``'2 (the port echoed the template request: 2)'`` style text of what was set aside, or ''."""

@@ -126,7 +126,7 @@ REDISPATCH_SCAN_EVERY_HOURS = 2  # and no more often than this per scan
 
 
 def redispatch_mode(scan):
-    """The bbot mode a lost queued scan is sent again in: the one it was queued with. A scan queued before the mode was recorded takes its
+    """The discovery mode a lost queued scan is sent again in: the one it was queued with. A scan queued before the mode was recorded takes its
     target's own, and a manual only target (which no automatic start ever queues, so this is a scan someone asked for before changing it) is
     sent as passive: a recovery never widens what was asked for, and never sends traffic the target's mode does not allow."""
     from targetApp.models import Domain
@@ -142,7 +142,7 @@ def redispatch_queued_scans(now=None, live=None):
     until it starts, so the broker is asked whether any message still exists for its scan id (``broker_recovery.live_tasks``: a queue, an
     unacknowledged hold or a worker). Only a scan the broker holds nothing for, and only when that can be told, is sent again: a long queue
     after a bulk add is waiting its turn and is left alone. A second message is harmless (the domain lock answers 'duplicate', and a finished
-    scan is not run again). The bbot mode is stored on the row (``ScanHistory.discovery_mode``), so a recovered scan runs in the mode it was queued in. ``live`` is the scan ids
+    scan is not run again). The discovery mode is stored on the row (``ScanHistory.discovery_mode``), so a recovered scan runs in the mode it was queued in. ``live`` is the scan ids
     the broker holds (None: cannot be told), injectable for tests. Returns how many were queued again."""
     from cveFeed import broker_recovery, ledger
     from cveFeed.discovery import QUEUED
@@ -197,16 +197,20 @@ def expire_orphaned_running(now=None, live=None):
     cutoff = now - timedelta(seconds=STALE_RUNNING_GRACE_SECONDS)
     counts = {}
     from startScan.models import ScanHistory
+    from agentapi import stage_runs
     message = 'expired: the worker running this scan is gone (a restart or update) and no Celery task for it remains'
+    # a scan whose stages wait on Sentinels without a worker (agentapi.stage_runs) has no Celery task on purpose: its StageRun carries it, and the
+    # stage runs' own tick re-drives one a restart left behind
+    waiting = stage_runs.open_scan_ids()
     dead = [s.pk for s in ScanHistory.objects.filter(scan_status=1, start_scan_date__lt=cutoff).only('pk', 'celery_ids')
-            if not set(s.celery_ids) & live]
+            if not set(s.celery_ids) & live and s.pk not in waiting]
     if dead:
         n = ScanHistory.objects.filter(pk__in=dead, scan_status=1).update(scan_status=0, stop_scan_date=now, error_message=message[:290])
         if n:
             counts['ScanHistory'] = n
     from cveFeed.models import HostAssessment
-    dead_ha = [a.pk for a in HostAssessment._base_manager.filter(status='running', started_at__lt=cutoff).only('pk', 'celery_id')
-               if not a.celery_id or a.celery_id not in live]
+    dead_ha = [a.pk for a in HostAssessment._base_manager.filter(status='running', started_at__lt=cutoff).only('pk', 'celery_id', 'scan_id')
+               if (not a.celery_id or a.celery_id not in live) and a.scan_id not in waiting]
     if dead_ha:
         n = HostAssessment._base_manager.filter(pk__in=dead_ha, status='running').update(status='failed', finished_at=now, error=message)
         if n:

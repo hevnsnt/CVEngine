@@ -329,7 +329,8 @@ def queue_scans(link, pending, now):
     from cveFeed.discovery import start_in_stored_modes
     from cveFeed.models import TailscaleDevice
     batch = pending[:link.max_devices]
-    domains = [r.domain for r in batch if r.domain is not None]
+    from cveFeed.discovery import without_refused
+    domains = without_refused([r.domain for r in batch if r.domain is not None])
     try:
         start_in_stored_modes(domains, quiet=True)
     except RuntimeError as exc:  # no scan engine configured
@@ -369,7 +370,7 @@ def _sync(link, scan):
         tailscale_scope.invalidate()
         return {'status': 'error', 'error': link.last_error}
     link.tailnet_name = (local_state.get('tailnet') or tailscale_api.tailnet_suffix(devices) or link.tailnet_name)[:200]
-    wanted, skipped = select(link, devices, excluded_names(link.project_id))
+    wanted, skipped = select(link, devices, excluded_names(link.project_id, names_only=True))
     existing = {r.node_id: r for r in TailscaleDevice.objects.filter(link=link).select_related('domain')}
     counts = {'new': 0, 'changed': 0, 'same': 0, 'departed': 0, 'conflict': 0, 'deferred': 0}
     rows, pending, unchanged = [], [], []

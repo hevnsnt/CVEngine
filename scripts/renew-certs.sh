@@ -83,7 +83,7 @@ fi
 
 if [ "$result" = issued ]; then
   log "issued a new web interface certificate (valid until $not_after)"
-  if [ "$reload" -eq 1 ] && "${COMPOSE[@]}" ps --status running --services 2>/dev/null | grep -qx proxy; then
+  if [ "$reload" -eq 1 ] && grep -qx proxy < <("${COMPOSE[@]}" ps --status running --services 2>/dev/null); then
     if "${COMPOSE[@]}" exec -T proxy nginx -s reload >/dev/null 2>&1; then
       log "the proxy reloaded the new certificate"
     elif "${COMPOSE[@]}" up -d --no-deps --force-recreate proxy >/dev/null 2>&1; then

@@ -16,30 +16,40 @@ and limits (``agent_broker``): a setting only changes how this Sentinel presents
 """
 import hashlib
 import json
+import logging
+import re
 from datetime import datetime
 
 from django.utils import timezone
 
 from agentapi import agent_broker as broker
 from agentapi import agent_scope as scope_lib
+from agentapi import sentinel_policy as policy_lib
 from agentapi.models import Agent, SentinelDefaults, SentinelEnrollment, SentinelTask
 from agentapi.services import ApiError
 from tenancy import audit
 
-SETTINGS = ('name', 'network', 'profile', 'disabled_kinds', 'max_concurrent', 'self_update')
+logger = logging.getLogger(__name__)
+
+SETTINGS = ('name', 'network', 'profile', 'disabled_kinds', 'kinds', 'max_concurrent', 'self_update', 'discovery_keys')
+# ``kinds`` and ``discovery_keys`` are set from cvENGINE only. ``discovery_keys`` is a boolean: false is this Sentinel's opt-out from being sent the project's discovery API
+# keys (the instance setting ``sentinel_bbot_keys`` is the other switch); absent or true means it follows the instance setting. Never sent to a Sentinel.
+MANAGED_ONLY = ('kinds', 'discovery_keys')  # set from cvENGINE only: a Sentinel never reports a policy (it can only turn a kind off, with ``disabled_kinds``)
 SELF_UPDATE = ('off', 'manual', 'automatic')
 # What an administrator is told to run on the Sentinel's machine when its host updater is missing: fixed text, never something a Sentinel reported.
 INSTALL_COMMAND = 'cd <the Sentinel checkout> && sudo ./scripts/install-updater.sh'
 
 
-def clean_settings(raw):
-    """The settings in ``raw`` (any subset of ``SETTINGS``) validated, or ``ApiError``. ``None`` as a value is kept so a caller can clear one."""
+def clean_settings(raw, managed=True):
+    """The settings in ``raw`` (any subset of ``SETTINGS``) validated, or ``ApiError``. ``None`` as a value is kept so a caller can clear one. ``managed`` is
+    False for what a Sentinel reports about itself, which cannot carry ``MANAGED_ONLY`` settings."""
     from agentapi import sentinel_broker as sb
+    allowed = SETTINGS if managed else tuple(k for k in SETTINGS if k not in MANAGED_ONLY)
     if not isinstance(raw, dict) or not raw:
-        raise ApiError(400, f'send settings as an object with any of {", ".join(SETTINGS)}')
-    unknown = sorted(set(raw) - set(SETTINGS))
+        raise ApiError(400, f'send settings as an object with any of {", ".join(allowed)}')
+    unknown = sorted(set(raw) - set(allowed))
     if unknown:
-        raise ApiError(400, f'unknown setting {unknown[0]!r}; settings are {", ".join(SETTINGS)}')
+        raise ApiError(400, f'unknown setting {unknown[0]!r}; settings are {", ".join(allowed)}')
     out = {}
     for key, value in raw.items():
         if value is None:
@@ -65,11 +75,22 @@ def clean_settings(raw):
             if not isinstance(value, list) or len(value) > len(SentinelTask.KINDS) or not all(isinstance(k, str) and k in SentinelTask.KINDS for k in value):
                 raise ApiError(400, f'disabled_kinds must be a list drawn from {", ".join(SentinelTask.KINDS)}')
             out[key] = sorted(set(value))
+        elif key == 'kinds':
+            out[key] = policy_lib.clean_kinds(value)
+        elif key == 'discovery_keys':
+            if not isinstance(value, bool):
+                raise ApiError(400, 'discovery_keys must be true or false (false: this Sentinel is never sent a project\'s discovery API keys)')
+            out[key] = value
         elif key == 'max_concurrent':
             if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= broker.MAX_CONCURRENT_CAP:
                 raise ApiError(400, f'max_concurrent must be a whole number from 1 to {broker.MAX_CONCURRENT_CAP}')
             out[key] = value
     return out
+
+
+def discovery_keys_opt_out(agent):
+    """Whether an administrator turned off sending discovery API keys to this one Sentinel (Sentinel settings)."""
+    return ((agent.managed_settings or {}).get('discovery_keys') or {}).get('value') is False
 
 
 def _when(entry):
@@ -84,12 +105,15 @@ def detail(agent):
     out = {}
     managed, reported = agent.managed_settings or {}, agent.reported_settings or {}
     for key in SETTINGS:
+        if key in ('disabled_kinds', 'kinds'):
+            continue  # below: the capability policy, with the older disabled_kinds derived from it
         m, r = managed.get(key), reported.get(key)
         if m is None and r is None:
             continue
         pick = 'sentinel' if m is None else 'server' if r is None else ('sentinel' if (_when(r) and _when(m) and _when(r) > _when(m)) else 'server')
         entry = m if pick == 'server' else r
         out[key] = {'value': entry['value'], 'source': pick, 'at': entry.get('at'), 'by': entry.get('by') if pick == 'server' else None}
+    _kinds_detail(agent, out)
     if agent.kind == 'scanner':
         managed_network = managed.get('network')
         reported_network = reported.get('network')
@@ -110,6 +134,25 @@ def detail(agent):
     return out
 
 
+def _kinds_detail(agent, out):
+    """``kinds`` (the administrator's capability policy for this Sentinel) and ``disabled_kinds`` (the kinds it refuses on this Sentinel's own account: the
+    machine's and the administrator's denials; the instance defaults are not in it) into ``out``. ``disabled_kinds`` is the older name of the same
+    thing and is kept so a reader of it keeps working."""
+    reported = (agent.reported_settings or {}).get('disabled_kinds')
+    own, at, by = policy_lib.managed_envelope(agent)
+    if own or at:
+        out['kinds'] = {'value': own, 'source': 'server', 'at': at, 'by': by}
+    if not own and not at and reported is None:
+        return
+    managed_value = sorted(k for k, e in own.items() if e['mode'] == 'deny')
+    machine = sorted(policy_lib.machine_denied(agent))
+    m = {'at': at, 'by': by} if at else None
+    pick = 'sentinel' if m is None else 'server' if reported is None else ('sentinel' if (_when(reported) and _when(m) and _when(reported) > _when(m)) else 'server')
+    entry = m if pick == 'server' else reported
+    out['disabled_kinds'] = {'value': sorted(set(managed_value) | set(machine)), 'source': pick, 'at': (entry or {}).get('at'),
+                             'by': (entry or {}).get('by') if pick == 'server' else None}
+
+
 RANK = {'off': 0, 'manual': 1, 'automatic': 2}
 
 
@@ -121,14 +164,10 @@ def effective_network(agent):
     return 'external' if ((agent.reported_settings or {}).get('network') or {}).get('value') == 'external' else 'internal'
 
 
-def disabled_kinds(agent):
-    """The task kinds this Sentinel must not be offered: those its own machine disabled and those an administrator disabled (both limit it)."""
-    out = set()
-    for source in (agent.reported_settings or {}, agent.managed_settings or {}):
-        value = (source.get('disabled_kinds') or {}).get('value')
-        if isinstance(value, list):
-            out |= {k for k in value if isinstance(k, str)}
-    return out
+def disabled_kinds(agent, builtin=None):
+    """The task kinds this Sentinel must not be offered: those its own machine disabled and every kind an administrator, or the instance default for its
+    class, denies (``sentinel_policy``; all of them limit it)."""
+    return policy_lib.denied(agent, builtin)
 
 
 def _limits(agent, entries):
@@ -144,27 +183,38 @@ def _limits(agent, entries):
 
 
 def instance_self_update():
-    """The instance-wide default for Sentinels' self-update: the administrators' choice (``SentinelDefaults``), else the instance's own update
-    choice (Automatic updates mean ``automatic``, anything else ``manual``)."""
-    from cveFeed import updater
-    chosen = SentinelDefaults.current().self_update
-    if chosen in SELF_UPDATE:
-        return chosen
-    return 'automatic' if updater.read_mode() == 'auto' else 'manual'
+    """The instance-wide default for Sentinels' self-update: the administrators' choice (``SentinelDefaults.self_update``), else ``automatic`` while
+    "Keep Sentinels on the newest version" is on (the default) and ``manual`` once an administrator turned it off. A Sentinel with a value of its own,
+    and a machine's own ceiling (``CVENGINE_SENTINEL_UPDATE``), still win over this."""
+    row = policy_lib.defaults_row()
+    if row.self_update in SELF_UPDATE:
+        return row.self_update
+    return 'automatic' if row.keep_newest else 'manual'
+
+
+def keep_newest():
+    """Whether the instance keeps Sentinels on the newest version (Settings, Sentinels). On unless an administrator turned it off."""
+    return bool(policy_lib.defaults_row().keep_newest)
 
 
 def explicit(agent):
     """``{setting: value}`` for settings either side set, without the instance default. Network uses its authorized effective value."""
     has_network = 'network' in (agent.managed_settings or {}) or 'network' in (agent.reported_settings or {})
-    return {key: entry['value'] for key, entry in detail(agent).items() if key != 'network' or has_network}
+    return {key: entry['value'] for key, entry in detail(agent).items() if (key != 'network' or has_network) and key not in MANAGED_ONLY}
 
 
-def effective(agent):
-    """``{setting: value}``: what this Sentinel should run with now. ``self_update`` always has a value: its own, else the instance default."""
+def effective(agent, kinds=True):
+    """``{setting: value}``: what this Sentinel should run with now. ``self_update`` always has a value: its own, else the instance default. ``kinds``
+    leaves out the lookups of the capability policy (the instance defaults and whether this is the built-in scanner: two queries) for a caller that only
+    wants another setting, such as a page of agents."""
     out = explicit(agent)
     out.setdefault('self_update', instance_self_update())
     if agent.kind == 'scanner':
         out['network'] = effective_network(agent)
+        if kinds:
+            denied = policy_lib.wire_disabled_kinds(agent)  # the wire format of the capability policy is still the one list a client already honours
+            if denied or 'disabled_kinds' in out:
+                out['disabled_kinds'] = denied
     return out
 
 
@@ -177,7 +227,7 @@ def record_reported(agent, raw, now=None):
     """Store the Sentinel's own settings. Only a value that differs from the last one it reported moves its time forward, so a restart with an
     unchanged configuration never overrides an administrator's later edit. Returns the settings that changed."""
     now = now or timezone.now()
-    values = clean_settings({k: v for k, v in (raw or {}).items() if v is not None}) if raw else {}
+    values = clean_settings({k: v for k, v in (raw or {}).items() if v is not None}, managed=False) if raw else {}
     reported, changed = dict(agent.reported_settings or {}), []
     for key, value in values.items():
         if (reported.get(key) or {}).get('value') != value:
@@ -189,12 +239,94 @@ def record_reported(agent, raw, now=None):
     return changed
 
 
+_MODE_RANK = {'deny': 0, 'allow': 1, 'prefer': 2}
+
+
+def _kind_wider(new, old):
+    """Whether the policy entry ``new`` lets a kind run more than ``old`` does (no entry is allow with no cap)."""
+    new, old = new or {'mode': 'allow', 'max_concurrent': None}, old or {'mode': 'allow', 'max_concurrent': None}
+    if _MODE_RANK[new['mode']] > _MODE_RANK[old['mode']]:
+        return True
+    if new['mode'] == 'deny' or old.get('max_concurrent') is None:
+        return False
+    return new.get('max_concurrent') is None or new['max_concurrent'] > old['max_concurrent']
+
+
+def policy_widening(before, after):
+    """The first kind whose entry in ``after`` (a ``{kind: entry}`` policy map) lets it run more than in ``before``, or None. An agent may only narrow a policy."""
+    for kind in sorted(set(before) | set(after)):
+        if _kind_wider(after.get(kind), before.get(kind)):
+            return kind
+    return None
+
+
+def refuse_wider_policy(before, after, what):
+    kind = policy_widening(before, after)
+    if kind:
+        raise ApiError(403, f'{what}: {policy_lib.label(kind)} would be allowed more than it is now; an agent may only narrow what a Sentinel runs (deny a kind, lower its cap), a person widens it in the web interface')
+
+
+def refuse_wider_settings(agent, values, kinds_before, kinds_after):
+    """FB-5: what an agent may not do to one Sentinel's managed settings: allow a kind more, reach private networks, run the full profile, send discovery keys, raise its
+    concurrency or switch its self-update to automatic. ``values`` are the cleaned settings, ``kinds_after`` the policy they leave."""
+    refuse_wider_policy(kinds_before, kinds_after, 'kinds')
+    if 'network' in values:
+        if values['network'] is None:  # back to the enrollment grant, which is what ``set_managed`` restores
+            from agentapi import sentinel_broker as sb
+            enrolled = SentinelEnrollment.objects.filter(used_by_agent=agent, token_id=agent.token_id).values_list('network', flat=True).first()
+            target = enrolled if enrolled in sb.NETWORKS else 'external'
+        else:
+            target = values['network']
+        if target != 'external' and target != agent.network:
+            raise ApiError(403, 'network: reaching private networks widens what this Sentinel scans; an agent may only choose external (or hand the setting back where the enrollment grant is external)')
+    if values.get('profile', 'light') != 'light' and values.get('profile') != (explicit(agent).get('profile') or 'full'):
+        raise ApiError(403, 'profile: only a person chooses the full profile; an agent may choose light')
+    if 'discovery_keys' in values and values['discovery_keys'] is not False:
+        raise ApiError(403, 'discovery_keys: sending the discovery API keys to a Sentinel is a person\'s choice; an agent may only turn it off (false)')
+    if 'self_update' in values and values['self_update'] not in ('off', 'manual'):
+        raise ApiError(403, 'self_update: only a person switches a Sentinel to update by itself; an agent may choose off or manual')
+    if 'max_concurrent' in values:
+        now = explicit(agent).get('max_concurrent') or agent.max_concurrent
+        if values['max_concurrent'] is None or values['max_concurrent'] > now:
+            raise ApiError(403, f'max_concurrent: an agent may only lower it (now {now}); a person raises it in the web interface')
+
+
+def refuse_wider_raw(agent, raw):
+    """FB-5, for an API token or MCP call that changes one Sentinel's settings (``set_managed`` follows): ``ApiError`` 403 when they would widen what it does."""
+    values = clean_settings(raw)
+    kinds_before = policy_lib.managed_kinds(agent)
+    kinds_after = kinds_before
+    if 'kinds' in values:
+        kinds_after = policy_lib.apply_change(kinds_before, values.pop('kinds'))
+    elif 'disabled_kinds' in values:
+        kinds_after = policy_lib.apply_disabled_kinds(kinds_before, values.pop('disabled_kinds'))
+    refuse_wider_settings(agent, values, kinds_before, kinds_after)
+
+
 def set_managed(agent, raw, actor, now=None):
     """An administrator's change from cvENGINE. Clearing network restores its enrollment grant, never the Sentinel's claim."""
     from agentapi import sentinel_broker as sb
     now = now or timezone.now()
     values = clean_settings(raw)
+    if 'kinds' in values and 'disabled_kinds' in values:
+        raise ApiError(400, 'send kinds (the capability policy) or disabled_kinds (the older list of denied kinds), not both')
     managed, before = dict(agent.managed_settings or {}), explicit(agent)
+    kinds_before = policy_lib.managed_kinds(agent)
+    kinds_after = kinds_before
+    if 'kinds' in values or 'disabled_kinds' in values:
+        if 'kinds' in values:
+            change = values.pop('kinds')
+            if change is not None:
+                policy_lib.refuse_unavailable(agent, change)  # only what the Sentinel declares can be enabled; refused before anything is stored
+            kinds_after = policy_lib.apply_change(kinds_before, change)
+        else:
+            kinds_after = policy_lib.apply_disabled_kinds(kinds_before, values.pop('disabled_kinds'))
+    if kinds_after != kinds_before:  # the older disabled_kinds is folded into the policy, which is its one home from now on
+        managed.pop('disabled_kinds', None)
+        if kinds_after:
+            managed['kinds'] = {'value': kinds_after, 'at': now.isoformat(), 'by': actor.username}
+        else:
+            managed.pop('kinds', None)
     network_before = agent.network
     if 'network' in values:  # the Sentinel cannot grant itself access to private networks
         if values['network'] is None:
@@ -213,24 +345,79 @@ def set_managed(agent, raw, actor, now=None):
         updates['network'] = agent.network
     Agent.objects.filter(pk=agent.pk).update(**updates)
     grant_change = {'network_grant_before': network_before, 'network_grant_after': agent.network} if 'network' in values else {}
+    if kinds_after != kinds_before:
+        grant_change.update(kinds_before=kinds_before, kinds_after=kinds_after)  # who changed what in the capability policy: the map before and after
+    if 'discovery_keys' in values:
+        grant_change['discovery_keys_after'] = 'follows the instance setting' if values['discovery_keys'] is None else ('send' if values['discovery_keys'] else 'never send')
     audit.record_for_user(actor, 'agent.settings', agent.token.user, target=agent.name, agent_id=agent.pk,
                           before=before, after=explicit(agent), **grant_change)
     return effective(agent)
 
 
 def reply(agent):
-    """What a Sentinel is told about its settings: the effective values and their fingerprint."""
+    """What a Sentinel is told about its settings: the effective values and their fingerprint. The built-in scanner is also told ``vantage``
+    (``builtin_vantage``): this server's egress proxy and the private networks its own scans may reach, so it scans from where the server did. Derived
+    at every reply and stored nowhere, sent to the built-in scanner alone (its token and its enrollment make it that, never what it reports)."""
     values = effective(agent)
+    from agentapi import sentinel_broker
+    if agent.kind == 'scanner' and sentinel_broker.is_builtin(agent):
+        vantage = builtin_vantage()
+        if vantage:
+            values['vantage'] = vantage
     return {'values': values, 'rev': revision(values)}
+
+
+TAILNET_RANGES = ('100.64.0.0/10', 'fd7a:115c:a1e0::/48')  # Tailscale's addresses: the CGNAT range and its unique local IPv6 prefix
+PRIVATE_RANGES = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10', 'fc00::/7')
+
+
+def builtin_vantage():
+    """Where this server's own scans leave from, for the built-in scanner (the managed settings channel of risk 6, docs/SCANNER-ARCHITECTURE.md):
+
+    - ``proxies``, ``bypass`` and ``proxy_private``: Settings > Proxy when it is on (``cveFeed.egress_proxy``), the destinations that never go through
+      it (``CVENGINE_PROXY_BYPASS`` and ``NO_PROXY`` as this server reads them) and whether private addresses go through it too
+      (``CVENGINE_PROXY_PRIVATE``). The URLs can carry a login: this goes to the built-in scanner only, over the compose network, and is never stored
+      or logged.
+    - ``private_ranges``: the private networks it may scan although it is not internal, as this server's own scans may: all of private space with
+      ``CVENGINE_ALLOW_PRIVATE_TARGETS``, the tailnet when the Tailscale sidecar is on (the scanner shares celery's network namespace, where the
+      sidecar's route lives). The server still decides which addresses are in scope; this only lifts the scanner's own floor to match.
+
+    Empty when none of these is set."""
+    import os
+
+    from agentapi import scanner_state
+    from cveFeed import egress_proxy
+    from targetApp import target_types
+    out = {}
+    specs = egress_proxy.configured()
+    if specs:
+        out['proxies'] = [spec.url for spec in specs]
+        out['bypass'] = [e for var in ('CVENGINE_PROXY_BYPASS', 'NO_PROXY', 'no_proxy') for e in
+                         (item.strip().lower() for item in os.environ.get(var, '').split(',')) if e]
+        out['proxy_private'] = not egress_proxy.private_bypass()
+    if target_types.private_targets_allowed():
+        out['private_ranges'] = list(PRIVATE_RANGES)
+    elif scanner_state.tailscale_enabled():
+        out['private_ranges'] = list(TAILNET_RANGES)
+    return out
 
 
 # --- the Sentinel's own version and its host-side updater ---------------------------------------------------------------------------------
 
 UPDATE_STATUSES = ('idle', 'waiting', 'draining', 'updating', 'done', 'failed')
+# What a built-in scanner image can do beyond its kinds (``info.features``; the Sentinel client's ``config.BUILTIN_FEATURES``): ``secret_read``, the
+# single-use read of a stored credential for a signed-in pass, and ``vantage``, the egress proxy and private ranges of the settings reply. A name this
+# server does not know is dropped. ``info.builtin`` is what the image says it is; whether a Sentinel IS the built-in scanner is decided by its
+# enrollment (``builtin_scanner.builtin_agent``), never by this.
+# ``bbot_keys`` (any Sentinel: the Sentinel client's ``config.EXTERNAL_FEATURES``): it reads a bbot discovery task's API keys through the same single-use read, keeps
+# them in a private file for the run and masks them. A Sentinel that does not say so (every older client) is never sent them; the field is optional.
+# ``credential_filter`` (any Sentinel): it leaves default-login and bruteforce templates and every installed template that sends a fixed credential out of a nuclei web
+# run whose task does not say a person allowed credential checks. While they are off a Sentinel that does not say so is not given nuclei web work.
+FEATURES = ('secret_read', 'vantage', 'bbot_keys', 'credential_filter')
 
 
 def clean_info(raw):
-    """What a Sentinel reports about itself, validated: its client ``version``, its updater's ``update`` state and whether its own GVM stack can scan (``openvas``). Anything else is dropped."""
+    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (cvengine_scanner/contract/sentinel_contract.json), its updater's ``update`` state, whether its own GVM stack can scan (``openvas``), for the built-in scanner image ``builtin`` and its ``features``, and ``waiting`` (kinds held back for memory, tasks still stopping: ``clean_waiting``), and optionally ``spool`` (results held on disk for cvENGINE: ``clean_spool``). Anything else is dropped."""
     if not isinstance(raw, dict):
         raise ApiError(400, 'info must be an object')
     out = {}
@@ -239,6 +426,11 @@ def clean_info(raw):
         if not isinstance(version, str) or len(version) > 64 or not all(c.isalnum() or c in '.-_+' for c in version):
             raise ApiError(400, 'version must be at most 64 letters, digits and . - _ +')
         out['version'] = version
+    contract = raw.get('contract_version')
+    if contract is not None:
+        if isinstance(contract, bool) or not isinstance(contract, int) or not 1 <= contract <= 1000:
+            raise ApiError(400, 'contract_version must be a whole number from 1 to 1000')
+        out['contract_version'] = contract
     update = raw.get('update')
     if update is not None:
         if not isinstance(update, dict) or update.get('status') not in UPDATE_STATUSES:
@@ -263,6 +455,16 @@ def clean_info(raw):
                     raise ApiError(400, f'updater.{key} must be text')
                 clean[key] = ''.join(c for c in value if c.isprintable())[:limit]
         out['updater'] = clean
+    builtin = raw.get('builtin')
+    if builtin is not None:
+        if not isinstance(builtin, bool):
+            raise ApiError(400, 'builtin must be true or false')
+        out['builtin'] = builtin
+    features = raw.get('features')
+    if features is not None:
+        if not isinstance(features, list) or len(features) > 20 or not all(isinstance(f, str) for f in features):
+            raise ApiError(400, 'features must be a list of names')
+        out['features'] = sorted({f for f in features if f in FEATURES})
     gvm = raw.get('openvas')
     if gvm is not None:
         if not isinstance(gvm, dict) or not isinstance(gvm.get('ready'), bool):
@@ -271,6 +473,171 @@ def clean_info(raw):
         if reason is not None and not isinstance(reason, str):
             raise ApiError(400, 'openvas.reason must be text')
         out['openvas'] = {'ready': gvm['ready'], 'reason': ''.join(c for c in (reason or '') if c.isprintable())[:200]}
+    waiting = raw.get('waiting')
+    if waiting is not None:
+        out['waiting'] = clean_waiting(waiting)
+    spool = clean_spool(raw.get('spool'))
+    if spool:
+        out['spool'] = spool
+    versions = clean_tool_versions(raw.get('tool_versions'))
+    if versions is not None:
+        out['tool_versions'] = versions
+    watchdog = clean_watchdog(raw.get('watchdog'))
+    if watchdog is not None:
+        out['watchdog'] = watchdog
+    return out
+
+
+MAX_TOOL_VERSIONS = 16
+_TOOL_NAME = re.compile(r'[a-z0-9_-]{1,20}')
+
+
+def clean_tool_versions(raw):
+    """``{tool: version}`` a Sentinel reports in ``info.tool_versions`` (contract version 5), or ``None`` when it sends none. At most ``MAX_TOOL_VERSIONS`` entries, a
+    tool named by 1 to 20 of ``a-z 0-9 _ -`` (else 400), only the tools of ``sentinel_tools.KNOWN_TOOLS`` are kept, and a version is printable text clipped to 40
+    characters (a version string comes from a tool's own output). Anything that is not an object, or has a version that is not text, is a 400."""
+    from agentapi import sentinel_tools
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or len(raw) > MAX_TOOL_VERSIONS:
+        raise ApiError(400, f'tool_versions must be an object of at most {MAX_TOOL_VERSIONS} tools')
+    out = {}
+    for tool, version in raw.items():
+        if not isinstance(tool, str) or not _TOOL_NAME.fullmatch(tool) or not isinstance(version, str):
+            raise ApiError(400, 'tool_versions must map a tool name (a-z, 0-9, _ and -, at most 20) to its version as text')
+        text = ''.join(c for c in version if c.isprintable()).strip()[:sentinel_tools.MAX_VERSION]
+        if tool in sentinel_tools.KNOWN_TOOLS and text:
+            out[tool] = text
+    return out
+
+
+MAX_SPOOL_COUNT = 1_000_000
+
+
+def clean_spool(raw):
+    """``{count, oldest_seconds}`` of the results a Sentinel holds on disk until cvENGINE takes them (its spool), or ``None`` for none, for a field that is
+    not that, and for a count of zero. Optional and never an error: a Sentinel older than the field sends nothing, a malformed one is ignored (it is a
+    line on the Sentinels page, not something to refuse a heartbeat for)."""
+    if not isinstance(raw, dict):
+        return None
+    count, oldest = raw.get('count'), raw.get('oldest_seconds')
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= MAX_SPOOL_COUNT:
+        return None
+    out = {'count': count}
+    if not isinstance(oldest, bool) and isinstance(oldest, int) and 0 <= oldest <= 10 * 365 * 86400:
+        out['oldest_seconds'] = oldest
+    return out
+
+
+WATCHDOG_WORDS = {
+    'stopped_deadline': 'stopped a {kind} that passed its time limit after {minutes} minutes',
+    'stopped_hung': 'stopped a hung {kind}: no output or CPU for {minutes} minutes',
+    'stopped_memory': 'stopped a {kind} to keep the machine from running out of memory',
+    'overcommit': 'let a {kind} start ahead of a long scan, within the memory that was really free',
+    'orphans': 'ended tool processes that a finished task left behind',
+    'heartbeat_restart': 'restarted its own heartbeat thread, which had stopped',
+    'withheld': 'stopped taking {kind} work for a while after repeated stops',
+    'disk_clean': 'removed its own old temporary files to free disk',
+    'low_disk': 'ran low on disk and stopped taking work',
+}
+WATCHDOG_STALE_SECONDS = 180  # a Sentinel that heartbeats but whose watchdog has not ticked for this long has a stuck watchdog (it ticks every 10 seconds)
+WATCHDOG_KILL_NOTICE = 3  # watchdog stops of one Sentinel in an hour that deserve an administrator's notice (the same number the Sentinel withholds a kind at)
+# How an action line names a kind: the kind's own label read as a scan, except where the line reads better another way. Tool names are never spelled
+# out here (they come through sentinel_policy.label), so the removed-binary guard sees no new server reference.
+_WATCHDOG_KIND_WORDS = {'nmap_full': 'full port scan', 'nmap_udp': 'UDP scan', 'bbot_discovery': 'discovery run'}
+
+
+def _watchdog_kind_text(kind):
+    if kind in _WATCHDOG_KIND_WORDS:
+        return _WATCHDOG_KIND_WORDS[kind]
+    return f'{policy_lib.label(kind)} scan' if isinstance(kind, str) and kind else 'task'
+
+
+def _text(value, limit):
+    return ''.join(c for c in value if c.isprintable())[:limit] if isinstance(value, str) else ''
+
+
+def clean_watchdog(raw):
+    """``info.watchdog``, the Sentinel's own watchdog report (Sentinel ``client/watchdog.py``): ``{last_tick, actions_last_hour, kills, overcommit_active,
+    overcommit_mb, low_disk, withheld, spool, reasons, actions: [{at, code, kind, minutes}]}``. Optional and never refused: a shape this server does not
+    recognise is dropped (``None``), so a Sentinel that changes it cannot lose its heartbeat. Numbers are whole and bounded, text is clipped, lists capped."""
+    if not isinstance(raw, dict):
+        return None
+    out = {'last_tick': _count(raw.get('last_tick'), 4_102_444_800), 'actions_last_hour': _count(raw.get('actions_last_hour'), 10 ** 6),
+           'kills': _count(raw.get('kills'), 10 ** 6), 'overcommit_active': raw.get('overcommit_active') is True, 'overcommit_mb': _count(raw.get('overcommit_mb'), 10 ** 6),
+           'low_disk': raw.get('low_disk') is True}
+    out['withheld'] = [_text(k, 40) for k in (raw.get('withheld') if isinstance(raw.get('withheld'), list) else [])[:10] if isinstance(k, str)]
+    out['reasons'] = [_text(r, 160) for r in (raw.get('reasons') if isinstance(raw.get('reasons'), list) else [])[:5] if isinstance(r, str)]
+    actions = []
+    for item in (raw.get('actions') if isinstance(raw.get('actions'), list) else [])[:8]:
+        if isinstance(item, dict) and isinstance(item.get('code'), str):
+            kind = item.get('kind')
+            actions.append({'at': _count(item.get('at'), 4_102_444_800), 'code': _text(item['code'], 30), 'kind': _text(kind, 40) if isinstance(kind, str) else None,
+                            'minutes': _count(item.get('minutes'), 10 ** 6) if item.get('minutes') is not None else None})
+    out['actions'] = actions
+    spool = raw.get('spool')
+    if isinstance(spool, dict):
+        out['spool'] = {'count': _count(spool.get('count')), 'oldest_seconds': _count(spool.get('oldest_seconds'), 10 ** 9)}
+    return out
+
+
+def watchdog_view(agent, now=None):
+    """What the Sentinels page shows of a Sentinel's watchdog: its recent actions in plain words (newest first), whether its watchdog has stopped ticking, and
+    ``problem``: the sentence an administrator notice would carry (a stuck watchdog, repeated stops), or ``None``. ``None`` for a Sentinel that does not report a
+    watchdog (an older build, or one that switched it off)."""
+    raw = (agent.info or {}).get('watchdog')
+    if not isinstance(raw, dict):
+        return None
+    import time
+    now = now if now is not None else time.time()
+    actions = []
+    for a in reversed(raw.get('actions') or []):
+        word = WATCHDOG_WORDS.get(a.get('code'))
+        if word:
+            kind = _watchdog_kind_text(a.get('kind'))
+            actions.append({'at': a.get('at'), 'text': word.format(kind=kind, minutes=a.get('minutes') or 0)})
+    age = max(0, int(now - raw['last_tick'])) if raw.get('last_tick') else None
+    stale = age is not None and age > WATCHDOG_STALE_SECONDS
+    problem = None
+    if stale:
+        problem = f'its watchdog has not run for {age // 60} minutes (it should run every 10 seconds)'
+    elif (raw.get('kills') or 0) >= WATCHDOG_KILL_NOTICE:
+        problem = f'its watchdog stopped {raw["kills"]} stuck tasks in the last hour'
+    return {'actions': actions[:5], 'stale': stale, 'age_seconds': age, 'overcommit_active': bool(raw.get('overcommit_active')), 'low_disk': bool(raw.get('low_disk')),
+            'withheld': raw.get('withheld') or [], 'problem': problem}
+
+
+def watchdog_problem(agent, now=None):
+    """The administrator-notice hook: a sentence when this Sentinel's watchdog is stale or has stopped repeatedly, else ``None``. The server-side watchdog
+    (``cveFeed.watchdog.sentinel_watchdog_notice``, ``docs/WATCHDOG.md``) calls it for every live Sentinel and raises its notice."""
+    view = watchdog_view(agent, now)
+    return view['problem'] if view else None
+
+
+def _count(value, high=10 ** 7):
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= high else 0
+
+
+def clean_waiting(raw):
+    """``info.waiting``: the heavy kinds a Sentinel holds back for lack of memory (``{kind, need_mb, free_mb, budget_mb, seconds, held_by: [{task, kind, mb,
+    seconds}]}``) and the tasks it was told to stop that are still stopping (``{kind, task, seconds, stopping: true}``), so the Sentinels page can say why a kind
+    is not being taken. At most six entries and three holders each, text clipped, numbers whole; an empty list says nothing waits now."""
+    if not isinstance(raw, list) or len(raw) > 20:
+        raise ApiError(400, 'waiting must be a list of at most 20 entries')
+    out = []
+    for item in raw[:6]:
+        if not isinstance(item, dict) or not isinstance(item.get('kind'), str):
+            raise ApiError(400, 'each waiting entry must be an object with a kind')
+        row = {'kind': ''.join(c for c in item['kind'] if c.isprintable())[:40], 'seconds': _count(item.get('seconds'), 10 ** 9)}
+        if item.get('stopping') is True:
+            row.update(stopping=True, task=_count(item.get('task'), 2 ** 62))
+        else:
+            row.update(need_mb=_count(item.get('need_mb')), free_mb=_count(item.get('free_mb')), budget_mb=_count(item.get('budget_mb')), held_by=[])
+            for holder in (item.get('held_by') if isinstance(item.get('held_by'), list) else [])[:3]:
+                if isinstance(holder, dict) and isinstance(holder.get('kind'), str):
+                    row['held_by'].append({'task': _count(holder.get('task'), 2 ** 62), 'kind': ''.join(c for c in holder['kind'] if c.isprintable())[:40],
+                                           'mb': _count(holder.get('mb')), 'seconds': _count(holder.get('seconds'), 10 ** 9)})
+        out.append(row)
     return out
 
 
@@ -280,24 +647,65 @@ def record_info(agent, raw, now=None):
     if not info:
         return False
     merged = {**(agent.info or {}), **info}
+    if 'contract_version' in info and 'spool' not in info:
+        merged.pop('spool', None)  # a full report that says nothing about a spool says it holds none now
+    if 'contract_version' in info and 'tool_versions' not in info:
+        merged.pop('tool_versions', None)  # a full report without tool versions (a client that cannot read them now): the old ones are not kept as if current
+    # when the Sentinel last changed the version it runs (or first reported one): "last updated" on the Sentinels page. Only the server writes it.
+    if 'version' in info and (agent.info or {}).get('version') != info['version']:
+        from django.utils import timezone
+        merged['version_since'] = (now or timezone.now()).isoformat()
+        from agentapi import sentinel_version
+        sentinel_version.version_changed((agent.info or {}).get('version'), info['version'])  # the old verdict goes at once; the new one is made in the background
     fields = {'info': merged}
     version_changed = 'version' in info and (agent.info or {}).get('version') not in (None, info['version'])
     failed = (info.get('update') or {}).get('status') == 'failed'
     if agent.update_requested_at and (version_changed or failed):
         fields['update_requested_at'] = None
+    before = (agent.info or {}).get('tool_versions')
     for key, value in fields.items():
         setattr(agent, key, value)
     Agent.objects.filter(pk=agent.pk).update(**fields)
+    _note_tools_behind(agent, before, merged.get('tool_versions'))
     return True
+
+
+def _note_tools_behind(agent, before, now_reported):
+    """The administrator's notice for tools behind (``sentinel_tools``): one audit entry, ``sentinel.tools_behind``, each time the set of tools behind changes (never on
+    every heartbeat), like the entry the client-version check writes (``sentinel.update_flagged``). Never stops a registration or heartbeat."""
+    try:
+        from agentapi import sentinel_tools
+        from tenancy import audit
+        old, new = sentinel_tools.behind_of(before), sentinel_tools.behind_of(now_reported)
+        if new and new != old:
+            audit.record_for_user(None, 'sentinel.tools_behind', agent.token.user, target=agent.name, agent_id=agent.pk,
+                                  tools=[{k: b[k] for k in ('tool', 'running', 'current')} for b in new])
+    except Exception:  # noqa: BLE001 - a notice must never cost a heartbeat
+        logger.warning('could not record the tools-behind notice of Sentinel %s', getattr(agent, 'pk', '?'), exc_info=True)
 
 
 def update_reply(agent):
     """What a Sentinel's updater is told: ``setting`` (``off``, ``manual`` or ``automatic``, this Sentinel's effective self-update setting) and
     whether an administrator asked it to update now. ``mode`` is the same answer in the older vocabulary (``auto`` or ``manual``) for a client that
     predates ``setting``. Nothing changes a Sentinel's code unless ``setting`` is ``automatic``, or ``manual`` and ``requested``; ``off`` never."""
-    setting = effective(agent)['self_update']
-    return {'setting': setting, 'mode': 'auto' if setting == 'automatic' else 'manual',
-            'requested': bool(agent.update_requested_at) and setting != 'off'}
+    setting = effective(agent, kinds=False)['self_update']
+    out = {'setting': setting, 'mode': 'auto' if setting == 'automatic' else 'manual',
+           'requested': bool(agent.update_requested_at) and setting != 'off'}
+    if out['requested']:
+        # optional fields: the commit cvENGINE wants this Sentinel on and why ('newest': the instance keeps Sentinels on the newest version, 'admin': Update now).
+        # A client that does not know them ignores them; the contract version is unchanged. Only ever a build the Sentinel is behind (never a downgrade).
+        from agentapi import sentinel_autoupdate
+        held = sentinel_autoupdate.stored(agent)
+        if held.get('status') == 'requested' and held.get('target'):
+            out['target'], out['reason'] = held['target'], 'admin' if held.get('reason') == 'admin' else 'newest'
+    if 'target' not in out and (out['requested'] or setting == 'automatic'):
+        # A Sentinel on Automatic (or one an administrator asked) is always told where to go. With nothing newer to name (the instance keeps Sentinels on the newest
+        # version off, or GitHub cannot be read) that is the commit this server pins: no GitHub access needed, and never anything newer than what it was tested with.
+        from agentapi import sentinel_autoupdate
+        pinned = sentinel_autoupdate.pinned_target(agent)
+        if pinned:
+            out['target'], out['reason'] = pinned, 'pinned'
+    return out
 
 
 def updater_state(agent):
@@ -312,7 +720,7 @@ def updater_state(agent):
         state = 'not_installed'
     else:
         state = 'running' if reported.get('running') else 'stopped'
-    setting = effective(agent)['self_update']
+    setting = effective(agent, kinds=False)['self_update']
     warning = None
     if state in ('not_installed', 'stopped') and setting != 'off':
         warning = (f'self-update is {setting.capitalize()} here but the updater is {"not installed" if state == "not_installed" else "not running"} '
@@ -325,35 +733,80 @@ def updater_state(agent):
 def request_update(agent, actor, now=None):
     """An administrator's "update now" for one Sentinel: its updater proceeds whatever the mode says, still draining running tasks first. Refused
     while self-update is Off for it."""
-    if effective(agent)['self_update'] == 'off':
+    if effective(agent, kinds=False)['self_update'] == 'off':
         raise ApiError(409, 'self-update is Off for this Sentinel: set it to Manual or Automatic first')
     now = now or timezone.now()
     agent.update_requested_at = now
     Agent.objects.filter(pk=agent.pk).update(update_requested_at=now)
+    from agentapi import sentinel_autoupdate
+    target = sentinel_autoupdate.admin_pressed(agent, now)  # clears a flag and the rate limit; names the newest commit when this Sentinel is behind
     audit.record_for_user(actor, 'agent.update_requested', agent.token.user, target=agent.name, agent_id=agent.pk,
-                          version=(agent.info or {}).get('version'))
+                          version=(agent.info or {}).get('version'), update_to=target)
+
+
+DEFAULT_KEYS = ('self_update', 'keep_newest', 'builtin_kinds', 'external_kinds')
 
 
 def get_defaults():
-    """The instance-wide Sentinel defaults: ``{self_update, effective_self_update, follows_instance, changed_by, changed_at}``."""
+    """The instance-wide Sentinel defaults: ``{self_update, effective_self_update, follows_instance, builtin_kinds, builtin_kinds_is_shipped, external_kinds,
+    changed_by, changed_at}``. ``builtin_kinds`` and ``external_kinds`` are the capability policy a Sentinel gets for a kind it has no policy of its own for
+    (``{kind: {mode, max_concurrent}}``): the first for the install's own scanner (OpenVAS denied until an administrator changes it, which
+    ``builtin_kinds_is_shipped`` says), the second for every other Sentinel (empty: every declared kind is allowed)."""
     row = SentinelDefaults.current()
-    return {'self_update': row.self_update or None, 'effective_self_update': instance_self_update(), 'follows_instance': not row.self_update,
+    kinds = policy_lib.defaults()
+    return {'self_update': row.self_update or None, 'keep_newest': bool(row.keep_newest), 'effective_self_update': instance_self_update(), 'follows_instance': not row.self_update,
+            'builtin_kinds': kinds['builtin'], 'builtin_kinds_is_shipped': kinds['builtin_shipped'], 'external_kinds': kinds['external'],
             'changed_by': row.changed_by or None, 'changed_at': row.changed_at.isoformat() if row.changed_at else None}
 
 
-def set_defaults(actor, body):
-    """App Admin only: ``{self_update: off|manual|automatic|null}`` (``null`` goes back to following the instance's own Automatic or Manual
-    update choice). Applies to every Sentinel with no value of its own for that setting."""
+def set_defaults(actor, body, via_agent=False):
+    """App Admin only: any of ``{self_update: off|manual|automatic|null, builtin_kinds: {kind: {mode, max_concurrent}}|null, external_kinds: {...}|null}``.
+    ``self_update`` ``null`` goes back to following ``keep_newest`` (a boolean, on by default: Sentinels are Automatic and cvENGINE asks them to update to the newest build). ``builtin_kinds`` / ``external_kinds`` replace the whole map
+    (``{}``: no defaults); ``null`` for ``builtin_kinds`` restores the shipped default (OpenVAS denied on the built-in scanner), for ``external_kinds`` it is
+    the same as ``{}``. They apply to every Sentinel of the class with no policy of its own for a kind."""
     if not actor.is_superuser:
         raise ApiError(403, 'the Sentinel defaults are changed by an App Admin')
-    if not isinstance(body, dict) or set(body) != {'self_update'}:
-        raise ApiError(400, 'send {"self_update": "off" | "manual" | "automatic" | null}')
-    value = body['self_update']
-    if value is not None and value not in SELF_UPDATE:
+    if not isinstance(body, dict) or not body or set(body) - set(DEFAULT_KEYS):
+        raise ApiError(400, f'send any of {", ".join(DEFAULT_KEYS)}: {{"self_update": "off" | "manual" | "automatic" | null, "keep_newest": true | false, '
+                            '"builtin_kinds": {kind: {"mode", "max_concurrent"}} | null, "external_kinds": {kind: {"mode", "max_concurrent"}} | null}')
+    value = body.get('self_update')
+    if 'keep_newest' in body and not isinstance(body['keep_newest'], bool):
+        raise ApiError(400, 'keep_newest must be true or false')
+    if 'self_update' in body and value is not None and value not in SELF_UPDATE:
         raise ApiError(400, f'self_update must be one of {", ".join(SELF_UPDATE)}, or null')
+    cleaned = {}
+    for key in ('builtin_kinds', 'external_kinds'):
+        if key in body:
+            if body[key] is None:
+                cleaned[key] = None
+            elif body[key] == {}:
+                cleaned[key] = {}
+            else:
+                cleaned[key] = policy_lib.clean_kinds(body[key], what=key, allow_null_entries=False)
     before = get_defaults()
+    if via_agent:  # an API token or MCP call (FB-5): it may narrow what Sentinels run, never widen it or switch their updates to automatic
+        shipped = {'builtin_kinds': policy_lib.SHIPPED_BUILTIN, 'external_kinds': {}}
+        for key in ('builtin_kinds', 'external_kinds'):
+            if key in cleaned:
+                refuse_wider_policy(before[key], shipped[key] if cleaned[key] is None else cleaned[key], key)
+        if 'self_update' in body and value not in ('off', 'manual') and not (value is None and not before['self_update']):
+            raise ApiError(403, 'self_update: only a person switches the Sentinels to update by themselves (or back to following the instance); an agent may choose off or manual')
+        if body.get('keep_newest') and not before['keep_newest']:
+            raise ApiError(403, 'keep_newest: only a person asks every Sentinel to update to the newest build')
     row = SentinelDefaults.current()
-    row.self_update, row.changed_by, row.changed_at = value or '', actor.username, timezone.now()
+    if 'self_update' in body:
+        row.self_update = value or ''
+    if 'keep_newest' in body:
+        row.keep_newest = body['keep_newest']
+    if 'builtin_kinds' in cleaned:
+        row.builtin_kinds = cleaned['builtin_kinds']  # None: the shipped default again
+    if 'external_kinds' in cleaned:
+        row.external_kinds = cleaned['external_kinds'] or {}
+    row.changed_by, row.changed_at = actor.username, timezone.now()
     row.save()
-    audit.record(actor, 'sentinel.defaults', 'sentinel defaults', before=before['self_update'], after=value)
-    return get_defaults()
+    after = get_defaults()
+    extra = {key: {'before': before[key], 'after': after[key]} for key in ('builtin_kinds', 'external_kinds') if key in body}
+    if 'keep_newest' in body:
+        extra['keep_newest'] = {'before': before['keep_newest'], 'after': after['keep_newest']}
+    audit.record(actor, 'sentinel.defaults', 'sentinel defaults', before=before['self_update'], after=after['self_update'], **extra)
+    return after

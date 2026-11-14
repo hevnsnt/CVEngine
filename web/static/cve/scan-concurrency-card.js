@@ -1,9 +1,9 @@
 // The Scan concurrency card of Settings, configMaxxing: how many scanner runs of each kind, how many hosts are assessed at once and how many
 // discovery scans are kept running. Everything from the server is set with textContent or value.
-import { api, badge, button, el, shortDate, toast } from "/staticfiles/cve/ui.js";
+import { api, badge, button, details, el, shortDate, toast } from "/staticfiles/cve/ui.js";
 import { API, autoTuneRow, registerCard } from "/staticfiles/cve/config-maxxing.js";
 import {
-  EXPLANATION_TEXT, canReset, changesFrom, checkDraft, discoveryNotice, formatMb, groupFields, memoryPlan, originLines, rangeText, runningText, sourceLabel,
+  EXPLANATION_TEXT, canReset, changesFrom, checkDraft, discoveryNotice, formatMb, groupFields, memoryPlan, originLines, rangeText, runningText, serverSetting, sourceLabel,
 } from "/staticfiles/cve/config-maxxing-logic.js";
 
 const PATH = `${API}/scan_concurrency`;
@@ -36,7 +36,7 @@ function fieldRow(field, data, onInput, save, reload) {
   const facts = el("p", "note", [sourceLabel(field), `allowed ${rangeText(field)}`, ...originLines(field, shortDate), runningText(field)].join(" · "), {
     id: `${id}-note`, style: "margin:4px 0 0",
   });
-  row.append(top, el("p", "note", field.help, { style: "margin:4px 0 0" }), facts);
+  row.append(top, el("p", "note", field.help, { style: "margin:4px 0 0" }), facts, details(serverSetting(field)));
   const tuning = autoTuneRow(field, (data.autotune || {}).effective_mode, reload);
   if (tuning) row.append(tuning);
   if (field.key === "discovery_concurrency") {
@@ -58,10 +58,11 @@ async function build(host, ctx = {}) {
       "p",
       "note",
       `Memory budget of the scanning container: ${formatMb(memory.budget_mb)}` +
-        (memory.limit_mb ? ` (container limit ${formatMb(memory.limit_mb)}, set with CELERY_MEM_LIMIT)` : "") +
+        (memory.limit_mb ? ` (container limit ${formatMb(memory.limit_mb)})` : "") +
         (memory.budget_mb == null ? ". No worker has reported yet." : "."),
       { style: "margin:0 0 8px" },
     ),
+    ...(memory.limit_mb ? [details("The container limit is set by the server's administrator with CELERY_MEM_LIMIT.")] : []),
   );
   const warnings = el("div", "", null, { role: "status", "aria-live": "polite" });
   card.append(warnings);

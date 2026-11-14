@@ -13,7 +13,7 @@ def worker_commands(autoreload=''):
     """Run just the worker-generation part of celery-entrypoint.sh and return the commands it would eval."""
     text = SCRIPT.read_text()
     start = text.index("loglevel='info'")
-    end = text.index('eval "$commands"')
+    end = text.index('# --- start_lanes')
     body = text[start:end] + 'echo "$commands"\n'
     env = dict(os.environ, CELERY_AUTORELOAD=autoreload)
     out = subprocess.run(['bash', '-c', body], capture_output=True, text=True, env=env, check=True).stdout
@@ -33,7 +33,7 @@ class EntrypointTests(SimpleTestCase):
         for cmd in worker_commands():
             queues += re.search(r'-Q (\S+)', cmd).group(1).split(',')
         self.assertEqual(len(queues), len(set(queues)))
-        for required in ('discovery_queue', 'cve_feed_queue', 'send_notif_queue', 'api_queue'):
+        for required in ('discovery_queue', 'cve_feed_queue', 'send_notif_queue', 'api_queue', 'report_queue'):
             self.assertIn(required, queues)
 
     def test_the_classic_worker_defaults_to_ten_slots(self):
@@ -54,7 +54,12 @@ class EntrypointTests(SimpleTestCase):
     def test_postgres_allows_enough_connections_for_the_workers_and_updates_apply_it(self):
         root = SCRIPT.parent.parent
         for name in ('docker-compose.yml', 'docker-compose.dev.yml'):
-            self.assertIn('command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}"]', (root / name).read_text(), name)
+            text = (root / name).read_text()
+            self.assertIn('command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}"', text, name)
+            # the memory settings a 2 GB host needs (docs/DEPLOYMENT.md, Small hosts), each overridable from .env, with defaults that are safe from 1 GB up
+            for setting in ('shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}', 'effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-768MB}',
+                            'maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}', 'random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}'):
+                self.assertIn(setting, text, name)
         # an existing install gets it on update: the db container is recreated when its definition changed, before the migration runs
         for name in ('update.sh', 'apply-update.sh', 'update-deploy.sh'):
             text = (root / 'scripts' / name).read_text()
@@ -75,9 +80,11 @@ class WorkerSupervisionTests(SimpleTestCase):
 
     def start(self, tmp, workers):
         text = SCRIPT.read_text()
-        tail = text[text.index('eval "$commands"'):]
-        commands = ''.join(f'sh -c \'echo $$ > "{tmp}/{name}.pid"; {body}\' &\n' for name, body in workers)
-        return subprocess.Popen(['bash', '-c', f'commands={shlex.quote(commands)}\n{tail}'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        tail = text[text.index('# --- start_lanes'):]
+        # the real lines name the worker with `-n <node>`: the stand-ins carry it as a comment argument, so the supervisor can name the lane
+        commands = ''.join(f'sh -c \'echo $$ > "{tmp}/{name}.pid"; {body}\' -n {name} &\n' for name, body in workers)
+        return subprocess.Popen(['bash', '-c', f'commands={shlex.quote(commands)}\nCELERY_SUPERVISE_INTERVAL=0.2\n{tail}'],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
     def pid(self, tmp, name):
         import time
@@ -106,7 +113,8 @@ class WorkerSupervisionTests(SimpleTestCase):
             lasting = self.pid(tmp, 'lasting')
             out, _ = process.communicate(timeout=20)
             self.assertEqual(process.returncode, 3, out)
-            self.assertIn('A Celery worker exited', out)
+            self.assertIn("The Celery worker 'dying'", out)
+            self.assertIn('is gone (status 3)', out)
             time.sleep(0.2)
             self.assertFalse(self.alive(lasting), 'the surviving worker must be stopped, so the restart brings all of them back')
 
@@ -138,11 +146,10 @@ class WorkerSupervisionTests(SimpleTestCase):
         self.assertNotIn('manage.py loaddata', text)  # it overwrote edited engines at every start; load_default_fixtures only adds what is missing
         self.assertIn('manage.py load_default_fixtures', text)
 
-    def test_the_screenshot_sandbox_is_checked_before_the_workers_and_the_scan_results_are_closed_to_nobody(self):
+    def test_the_scan_results_are_closed_to_everyone_but_root_and_the_proxy_and_no_browser_is_started_here(self):
         text = SCRIPT.read_text()
-        check = text.index('python3 manage.py check_screenshot_sandbox ||')  # a failed check never stops the workers from starting
-        self.assertLess(check, text.index('eval "$commands"'))
         self.assertIn('chgrp 101 /usr/src/scan_results && chmod 0750 /usr/src/scan_results', text)  # root and the proxy's nginx only
+        self.assertNotIn('check_screenshot_sandbox', text)  # the screenshot browser runs on a Sentinel, which proves its sandbox itself
 
 
 WEB_SCRIPT = Path(__file__).resolve().parent.parent / 'entrypoint.sh'
@@ -187,7 +194,7 @@ class WebEntrypointTests(SimpleTestCase):
     def test_proxy_upstream_port_matches(self):
         conf = Path(__file__).resolve().parents[2] / 'config' / 'nginx' / 'rengine.conf'
         if conf.is_file():  # the config directory is not mounted inside the web container
-            self.assertIn('http://rengine:8000/', conf.read_text())
+            self.assertIn('http://rengine:8000;', conf.read_text())
 
 
 class BeatEntrypointTests(SimpleTestCase):

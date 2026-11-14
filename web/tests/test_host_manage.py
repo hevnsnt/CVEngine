@@ -11,11 +11,10 @@ from agentapi.auth import create_token
 from agentapi.services import ApiError, Ctx
 from cveFeed import ctmonitor, discovery, fullscan, route_auth as ra, tasks
 from cveFeed.exclusions import drop_excluded, excluded_names, is_excluded, normalize
-from cveFeed.models import (AssetChange, CVEEntry, CVEMatch, FindingComment, HostExclusion, HostLabel, HostProfile, HostState, RouteAuth,
-	ServiceRun)
+from cveFeed.models import (AssetChange, CVEEntry, CVEMatch, FindingComment, HostExclusion, HostLabel, HostProfile, HostState, RouteAuth)
 from cveFeed.nuclei_scan import scan_targets
 from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembership
-from reNgine import bbot as bbot_lib, resources
+from reNgine import discovery_events as bbot_lib, resources
 from reNgine.tasks import persist_bbot_result, save_subdomain
 from scanEngine.models import EngineType
 from startScan.models import EndPoint, IpAddress, Port, ScanHistory, Subdomain, Vulnerability
@@ -445,7 +444,7 @@ class EnforcementTests(Base):
 		target = Domain.objects.create(name='late.test', project=self.a1, insert_date=timezone.now())
 		scan = ScanHistory.objects.create(domain=target, scan_type=self.engine, start_scan_date=timezone.now(), scan_status=-1)
 		HostExclusion.objects.create(org=self.org_a, host='late.test')
-		with mock.patch('reNgine.bbot.stream_events', side_effect=AssertionError('bbot must not run')):
+		with mock.patch('cveFeed.discovery._discover_on_sentinel', side_effect=AssertionError('the discovery must not run')):
 			out = discovery._run_pipeline(scan.id)
 		self.assertEqual(out['status'], discovery.FAILED)
 		self.assertEqual(ScanHistory.objects.get(pk=scan.pk).scan_status, discovery.FAILED)
@@ -481,8 +480,9 @@ class RouteTests(Base):
 		status, data = call(self.token, 'POST', f'/api/v1/projects/a1/hosts/{HOST}/exclude', {'reason': 'noise'})
 		self.assertEqual((status, data['excluded'], data['hosts_removed']), (200, True, 1))
 		self.assertEqual(call(self.token, 'GET', '/api/v1/projects/a2/exclusions')[1]['results'][0]['reason'], 'noise')
-		self.assertEqual(call(self.token, 'DELETE', f'/api/v1/projects/a1/exclusions/{HOST}')[0], 200)
-		self.assertEqual(call(self.token, 'DELETE', f'/api/v1/projects/a1/exclusions/{HOST}')[0], 404)
+		self.assertEqual(call(self.token, 'DELETE', f'/api/v1/projects/a1/exclusions/{HOST}')[0], 403)  # a token may not lift an exclusion
+		self.assertEqual(call(self.admin, 'DELETE', f'/api/v1/projects/a1/exclusions/{HOST}')[0], 200)
+		self.assertEqual(call(self.admin, 'DELETE', f'/api/v1/projects/a1/exclusions/{HOST}')[0], 404)
 
 	def test_mcp_tools(self):
 		self.populate(self.a1)
@@ -498,7 +498,8 @@ class RouteTests(Base):
 		self.assertFalse(tool('exclude_host', project='a1', host=HOST, reason='r')[0])
 		self.assertEqual(HostExclusion.objects.get().host, HOST)
 		self.assertFalse(tool('list_exclusions', project='a1')[0])
-		self.assertFalse(tool('remove_exclusion', project='a1', host=HOST)[0])
+		self.assertTrue(tool('remove_exclusion', project='a1', host=HOST)[0])  # a person lifts it, not a token
+		HostExclusion.objects.all().delete()
 
 
 class MoveHostTests(Base):

@@ -6,8 +6,10 @@ far behind each reported version is, and keeps the answer in the cache. Rows and
 while a list is being built, so a slow or unreachable GitHub costs a page nothing and shows as ``unknown``.
 
 ``state(agent)`` is ``{status, version, latest, behind_by, ...}`` with ``status`` one of ``current``, ``behind`` or ``unknown`` (no version
-reported, the latest not checked yet, the check switched off or failing).
+reported, the latest not checked yet, the check switched off or failing, or no verdict for exactly this installed commit). ``behind`` means the newest
+build the server saw is a descendant of the one the Sentinel runs; a build equal to or ahead of the cached head is ``current``, never ``behind``.
 """
+import json
 import logging
 import os
 import re
@@ -21,13 +23,15 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_REPO = 'hevnsnt/cvENGINE-sentinel'
 DEFAULT_BRANCH = 'main'
-LATEST_KEY = 'sentinel-version:latest'
-BEHIND_KEY = 'sentinel-version:behind'  # {version: commits behind the latest}, for the versions the Sentinels reported at the last refresh
+LATEST_PREFIX = 'sentinel-version:latest'
+VERDICT_PREFIX = 'sentinel-version:verdict'
 ASKED_KEY = 'sentinel-version:asked'
 TTL = 24 * 3600  # the answer outlives a missed refresh; ``checked_at`` says how old it is
 ASK_EVERY = 300  # a page that finds nothing cached asks for a refresh at most this often (seconds)
 HEX_RE = re.compile(r'^[0-9a-f]{7,40}$')
 MAX_VERSIONS = 20  # distinct reported versions compared per refresh
+CONTRACT_PATH = 'cvengine_scanner/contract/sentinel_contract.json'
+MAX_CONTRACT_BYTES = 4 * 1024 * 1024
 
 
 def enabled():
@@ -42,6 +46,38 @@ def repo():
 def branch():
     value = os.environ.get('CVENGINE_SENTINEL_BRANCH', '').strip()
     return value if updater.valid_branch(value) else DEFAULT_BRANCH
+
+
+def latest_key(repo_name=None, branch_name=None):
+    """The remote head is cached per repository and branch: a changed setting never reads another branch's head."""
+    return f'{LATEST_PREFIX}:{repo_name or repo()}:{branch_name or branch()}'
+
+
+def verdict_key(version, repo_name=None, branch_name=None):
+    """A verdict (how far the newest build is ahead of one installed commit) is cached per installed commit AND remote branch, so a Sentinel that moved
+    to another commit can never read the verdict that was made for the one it ran before."""
+    return f'{VERDICT_PREFIX}:{repo_name or repo()}:{branch_name or branch()}:{str(version or "").strip().lower()}'
+
+
+def forget(version):
+    """Drop the cached verdict of one installed commit (a Sentinel stopped running it)."""
+    if version:
+        cache.delete(verdict_key(version))
+
+
+def version_changed(old, new):
+    """A Sentinel reported another version: the verdict of the commit it left is dropped at once. The verdict for the commit it runs now is made by the
+    background refresh, which ``state`` asks for (rate limited) while the cached head is older than ``version_since``; nothing is claimed meanwhile."""
+    if old and old != new:
+        forget(str(old).strip().lower())
+
+
+def _parse(value):
+    from django.utils.dateparse import parse_datetime
+    try:
+        return parse_datetime(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
 
 
 def _token():
@@ -68,35 +104,71 @@ def reported_versions():
     return seen[:MAX_VERSIONS]
 
 
+def _verdict(compared):
+    """Commits the newest build is ahead of the installed commit, from one compare answer: 0 when the installed commit is the head, behind it or equal, a
+    count only when the head is a descendant of it, and None (not known) when the compare failed, GitHub never saw the commit or the two diverged."""
+    if compared.get('compare_error') or not compared.get('reference_known', True):
+        return None
+    if compared.get('compare_status') == 'diverged':
+        return None
+    return compared.get('behind_by')
+
+
 def refresh(get=requests.get, now=None):
     """Ask GitHub for the head of the Sentinel branch and how far behind it each reported version is; store the answer. A failure keeps the last
     known head and records the reason. Returns the stored answer."""
     from django.utils import timezone
     now = now or timezone.now()
-    previous = cache.get(LATEST_KEY) or {}
+    key = latest_key()
+    previous = cache.get(key) or {}
     if not enabled():
         return previous
     try:
         found = updater.fetch_latest(repo(), branch(), _token(), installed='', get=get)
     except updater.UpdateError as exc:
         out = {**previous, 'error': str(exc)[:300], 'checked_at': now.isoformat()}
-        cache.set(LATEST_KEY, out, TTL)
+        cache.set(key, out, TTL)
         return out
-    behind = {}
     for version in reported_versions():
         if found['sha'].startswith(version):
-            behind[version] = 0
-            continue
-        try:
-            compared = updater.fetch_latest(repo(), branch(), _token(), installed=version, get=get)
-            behind[version] = compared['behind_by']
-        except updater.UpdateError:
-            behind[version] = None
+            behind = 0
+        else:
+            try:
+                behind = _verdict(updater.fetch_latest(repo(), branch(), _token(), installed=version, get=get))
+            except updater.UpdateError:
+                behind = None
+        cache.set(verdict_key(version), {'head': found['sha'], 'behind_by': behind, 'checked_at': now.isoformat()}, TTL)
     out = {'sha': found['sha'], 'message': found['message'], 'url': found['url'], 'date': found['date'], 'error': '', 'checked_at': now.isoformat(),
            'repo': repo(), 'branch': branch()}
-    cache.set(LATEST_KEY, out, TTL)
-    cache.set(BEHIND_KEY, behind, TTL)
+    # the contract the newest build speaks (kept while the head has not moved): what cvENGINE checks before it asks a Sentinel to update to it
+    held = previous.get('contract') if previous.get('sha') == found['sha'] else None
+    out['contract'] = held or fetch_contract(found['sha'], get=get)
+    cache.set(key, out, TTL)
     return out
+
+
+def fetch_contract(sha, get=None):
+    """``{version, min_supported}`` of the result contract the Sentinel repository holds at commit ``sha``, or ``None`` when it cannot be read (a failure
+    is never read as "fine": cvENGINE then does not ask any Sentinel to update to that build). One read per new head, not one per page."""
+    if not HEX_RE.match(sha or ''):
+        return None
+    headers = {**updater._headers(_token()), 'Accept': 'application/vnd.github.raw+json'}
+    get = get or requests.get  # looked up now, so a test that replaces requests.get is heard
+    try:
+        resp = get(f'{updater.API}/repos/{repo()}/contents/{CONTRACT_PATH}', params={'ref': sha}, headers=headers, timeout=20)
+        if resp.status_code != 200 or len(resp.content or b'') > MAX_CONTRACT_BYTES:
+            return None
+        doc = json.loads(resp.content)
+        version, minimum = doc.get('contract_version'), doc.get('min_supported_contract_version')
+    except Exception:  # noqa: BLE001 - a contract that cannot be read is never taken as fine; the caller asks nobody to update
+        return None
+    if not isinstance(version, int) or isinstance(version, bool) or not isinstance(minimum, int) or isinstance(minimum, bool):
+        return None
+    return {'version': version, 'min_supported': minimum}
+
+
+def _version_since(agent):
+    return _parse((agent.info or {}).get('version_since'))
 
 
 def _ask_for_refresh():
@@ -114,15 +186,17 @@ def state(agent, settings_value=None):
     """The version of ``agent`` against the latest Sentinel client. Reads the cache only."""
     version = str(((agent.info or {}).get('version')) or '').strip().lower()
     out = {'status': 'unknown', 'version': version or None, 'latest': None, 'latest_message': None, 'latest_url': None, 'latest_date': None,
-           'behind_by': None, 'checked_at': None, 'repo': repo(), 'detail': ''}
+           'behind_by': None, 'checked_at': None, 'repo': repo(), 'detail': '', 'latest_full': None, 'latest_contract': None}
     if not enabled():
         out['detail'] = 'the version check is switched off (CVENGINE_SENTINEL_VERSION_CHECK)'
         return out
-    latest = cache.get(LATEST_KEY)
+    latest = cache.get(latest_key())
     if latest is None:
         _ask_for_refresh()
         out['detail'] = 'the latest version has not been checked yet'
         return out
+    out['latest_full'] = latest.get('sha') or None  # the whole commit: what an update request names
+    out['latest_contract'] = latest.get('contract')
     out.update(latest=(latest.get('sha') or '')[:12] or None, latest_message=latest.get('message') or None, latest_url=latest.get('url') or None,
                latest_date=latest.get('date') or None, checked_at=latest.get('checked_at'))
     if not latest.get('sha'):
@@ -134,16 +208,27 @@ def state(agent, settings_value=None):
     if not HEX_RE.match(version):
         out['detail'] = 'this Sentinel reports a version that is not a commit, so it cannot be compared'
         return out
+    # the remote head is older than the last time this Sentinel changed version: the build it runs may be newer than that head, so look again (in the
+    # background, rate limited), and say nothing about it until the answer is in
+    checked, since = _parse(latest.get('checked_at')), _version_since(agent)
+    stale = bool(since and (checked is None or checked < since))
     if latest['sha'].startswith(version):
         out.update(status='current', behind_by=0, detail='this is the latest version')
         return out
-    behind = (cache.get(BEHIND_KEY) or {}).get(version)
+    verdict = cache.get(verdict_key(version))
+    if stale or not verdict or verdict.get('head') != latest['sha']:
+        _ask_for_refresh()
+        out['detail'] = 'whether this build is behind is being checked again' if stale or verdict else 'this build has not been compared with the latest yet'
+        return out
+    behind = verdict.get('behind_by')
     if behind == 0:  # at or past the head of the branch (a build from a branch that is ahead)
         out.update(status='current', behind_by=0, detail='this is the latest version, or newer')
         return out
+    if not isinstance(behind, int) or behind < 0:  # the compare failed, GitHub never saw this commit or the branches diverged: nothing is claimed
+        out['detail'] = 'could not tell whether this build is behind the latest'
+        return out
     out.update(status='behind', behind_by=behind)
-    how = f'{behind} commit{"s" if behind != 1 else ""} behind' if isinstance(behind, int) else 'behind'
-    out['detail'] = f'{how} the latest ({out["latest"]})' + ('' if settings_value is None else f'; self-update is {settings_value}')
+    out['detail'] = f'{behind} commit{"s" if behind != 1 else ""} behind the latest ({out["latest"]})' + ('' if settings_value is None else f'; self-update is {settings_value}')
     if error := latest.get('error'):
         out['detail'] += f' (the last check failed: {error})'
     return out

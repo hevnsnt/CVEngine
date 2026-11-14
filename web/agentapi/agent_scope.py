@@ -161,8 +161,9 @@ def project_slugs_in_scope(user, scope, limit_projects=None):
     projects of its organizations plus the ones it names, kept to what ``user`` can reach now, and to the administrator's project
     limit when there is one. An agent that names no organization or project and holds no instance scope covers none: a host list
     alone narrows where it may act, it does not pick a project."""
+    from agentapi import sentinel_policy
     from dashboard.models import Project
-    allowed = roles.allowed_project_ids(user)
+    allowed = sentinel_policy.shared(('allowed-project-ids', user.pk), lambda: roles.allowed_project_ids(user))  # once per user for a page of cards
     if scope.get('instance'):
         slugs = set((Project.objects.all() if allowed is None else Project.objects.filter(pk__in=allowed)).values_list('slug', flat=True))
         return slugs & set(limit_projects) if limit_projects is not None else slugs

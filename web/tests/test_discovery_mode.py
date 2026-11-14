@@ -1,6 +1,5 @@
 """The discovery mode chosen for a target is stored on it, and nothing that starts discovery on its own widens it (issue 284)."""
 import json
-from datetime import timedelta
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -264,7 +263,7 @@ class DiscoverActionTests(DiscoveryModeBase):
 		self.assertEqual(self.modes_run(), {'mp.example': 'passive'})
 
 	def test_the_mode_can_be_changed_over_rest_and_mcp(self):
-		target = self.domain('chg.example', mode='manual')
+		target = self.domain('chg.example', mode='standard')  # a token may only lower the mode (FB-5)
 		status, data = call(self.tok, 'POST', f'/api/v1/projects/p1/targets/{target.id}/discovery-mode', {'discovery_mode': 'passive'})
 		self.assertEqual((status, data['discovery_mode']), (200, 'passive'))
 		err, data = tool(self.tok, 'set_target_discovery_mode', {'project': 'p1', 'target_id': target.id, 'discovery_mode': 'manual'})
@@ -306,18 +305,6 @@ class OtherAutomaticPathsTests(DiscoveryModeBase):
 			pipeline.assert_called_once()
 		from startScan.models import Subdomain
 		self.assertTrue(Subdomain.objects.filter(target_domain=manual, name='new.manual.ct.test').exists())  # still recorded
-
-	def test_the_assessment_review_rediscovers_in_the_stored_mode_and_skips_manual_targets(self):
-		from cveFeed import assessment_review as ar
-		passive = self.domain('review.example.test', mode='passive')
-		with mock.patch('cveFeed.scan_control.pause_requested', return_value=False):
-			status, scan_id, _ = ar.dispatch(self.p1, {'due_discovery_target_id': passive.id}, 'discover')
-		self.assertEqual(status, 'queued')
-		self.assertEqual(self.modes_run(), {'review.example.test': 'passive'})
-		manual = self.domain('review-manual.example.test', self.p2, 'manual')
-		with mock.patch('cveFeed.scan_control.pause_requested', return_value=False):
-			self.assertEqual(ar.dispatch(self.p2, {'due_discovery_target_id': manual.id}, 'discover')[0], 'stale')
-		self.assertEqual(len(self.delay.call_args_list), 1)
 
 	def test_a_moved_target_is_scanned_in_its_own_mode(self):
 		from agentapi.target_move import move_target

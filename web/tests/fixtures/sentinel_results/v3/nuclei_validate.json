@@ -1,0 +1,7 @@
+{
+  "outcome": "done",
+  "valid": true,
+  "output": "[INF] All templates validated successfully",
+  "fixture_ok": true,
+  "fixture_note": "no match on benign local fixture; positive detection remains unverified"
+}

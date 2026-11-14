@@ -1,0 +1,31 @@
+{
+ "kind": "nuclei_targeted",
+ "name": "nuclei_bare_dead_wide",
+ "payload": {
+  "findings": [],
+  "outcome": "done",
+  "templates_release": "image:v10.5.1",
+  "unreachable": [
+   "192.0.2.99"
+  ]
+ },
+ "sentinel_seconds": 23.1,
+ "target": {
+  "severities": [
+   "info",
+   "low",
+   "medium",
+   "high",
+   "critical"
+  ],
+  "tags": [
+   "grafana",
+   "jira",
+   "tomcat"
+  ],
+  "targets": [
+   "192.0.2.99"
+  ]
+ },
+ "tool_rows": 0
+}

@@ -1,0 +1,43 @@
+{
+ "kind": "dns_resolve",
+ "name": "dns_resolve",
+ "payload": {
+  "errors": {},
+  "outcome": "done",
+  "refused": [],
+  "resolved": {
+   "tls.lab.test": [
+    "192.0.2.11"
+   ],
+   "web.lab.test": [
+    "192.0.2.10"
+   ]
+  }
+ },
+ "sentinel_seconds": 0.1,
+ "target": {
+  "names": [
+   "web.lab.test",
+   "tls.lab.test",
+   "nope.lab.test"
+  ],
+  "scope": {
+   "addresses": [
+    "web.lab.test",
+    "tls.lab.test",
+    "nope.lab.test"
+   ],
+   "blocked": [],
+   "domains": [],
+   "excluded": [],
+   "excluded_trees": [],
+   "hosts": [
+    "web.lab.test",
+    "tls.lab.test",
+    "nope.lab.test"
+   ],
+   "private": true
+  }
+ },
+ "tool_rows": null
+}

@@ -1,5 +1,7 @@
 from django.contrib.auth.models import User
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from agentapi.auth import create_token
@@ -132,3 +134,18 @@ class UnifiedFindingsTests(TestCase):
 			beyond = self.get(page_size=2, page=3)
 		self.assertEqual((body['count'], body['total'], body['truncated'], len(body['results'])), (3, 5, True, 1))
 		self.assertEqual(beyond['results'], [])
+
+	def test_a_page_of_scanner_findings_costs_no_query_per_row(self):
+		# DB-3: the scanner rows read their domain's project; a page of 50 used to ask for the domain 50 times
+		for i in range(60):
+			sub = Subdomain.objects.create(name=f'h{i}.acme.example', target_domain=self.da)
+			Vulnerability.objects.create(name=f'Scanner finding {i}', severity=3, subdomain=sub, target_domain=self.da, open_status=True, discovered_date=NOW,
+										 http_url=f'https://{sub.name}/')
+
+		def queries(size):
+			with CaptureQueriesContext(connection) as ctx:
+				body = self.get(type='scanner', page_size=size)
+			self.assertEqual(len(body['results']), size)
+			return len(ctx)
+		queries(5)  # the first request reads the token and the caches: not the page's own work
+		self.assertEqual(queries(5), queries(50), 'the number of queries must not grow with the rows of the page')

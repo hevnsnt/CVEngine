@@ -4,10 +4,12 @@ One row per cve.now entry, carrying the merged severity, exploitation
 (CISA KEV / EPSS / Exploit-DB) and affected-product data that the AI
 correlation engine matches against the discovered asset inventory.
 """
+from django.contrib.postgres.fields import ArrayField
 from django.db import models
 from django.db.models.signals import post_delete
 from django.dispatch import receiver
-from django.db.models.functions import Lower
+from django.db.models import Value
+from django.db.models.functions import Lower, Now
 
 from reNgine.crypto_fields import ENCRYPTED_COLUMN_LENGTH, EncryptedCharField, EncryptedJSONField
 from django.utils import timezone
@@ -395,13 +397,16 @@ class AutoFireRun(models.Model):
 class GeneratedTemplate(models.Model):
     """An AI-authored nuclei template for a CVE no installed template covers.
 
-    Lifecycle: draft -> (static check) -> (nuclei -validate) -> valid | invalid,
-    then tested against hosts: test_results holds the per-host outcome.
+    Lifecycle (``cveFeed.templatevalidate``, no person involved): draft (pending) -> static check -> nuclei -validate and the benign
+    control on a Sentinel -> a fixture the AI writes from the CVE data, matched offline -> the AI's second-pass critique -> valid |
+    invalid, or expired when it could not be validated within the window. Only valid rows are ever run on a host (test_results holds the
+    per-host outcome).
     """
 
     STATUS_DRAFT = "draft"
     STATUS_VALID = "valid"
     STATUS_INVALID = "invalid"
+    STATUS_EXPIRED = "expired"  # still a draft after the window, never validated: closed by the system, with the reason
 
     cve_entry = models.ForeignKey(CVEEntry, on_delete=models.CASCADE, related_name="generated_templates")
     template_id = models.CharField(max_length=128)
@@ -414,6 +419,14 @@ class GeneratedTemplate(models.Model):
     positive_fixture_verified_at = models.DateTimeField(null=True, blank=True)
     positive_fixture_source = models.CharField(max_length=300, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
+    # the automatic validator's bookkeeping (cveFeed.templatevalidate)
+    validation_stage = models.CharField(max_length=24, blank=True, db_default='', default='')  # the next step: '' | fixture | critique | waiting:<step>
+    validation_attempts = models.PositiveSmallIntegerField(db_default=0, default=0)  # failed tries that count (a missing Sentinel does not)
+    validation_started_at = models.DateTimeField(null=True, blank=True)  # when the validator first looked at it: the expiry clock
+    validation_next_at = models.DateTimeField(null=True, blank=True)  # not before this (back-off)
+    validation_reason = models.TextField(blank=True, db_default='', default='')  # the plain-language reason of a rejection, an expiry or a wait
+    validated_at = models.DateTimeField(null=True, blank=True)  # when it became valid, invalid or expired
+    fixture = models.JSONField(null=True, blank=True)  # {vulnerable, not_affected}: the AI-written responses the matchers were tested on
 
     class Meta:
         ordering = ["-created_at"]
@@ -513,7 +526,7 @@ class AgentActivity(models.Model):
              "remediation", "saved_search", "runzero")
     kind = models.CharField(max_length=24)
     message = models.CharField(max_length=500)
-    status = models.CharField(max_length=10, default="done")  # running | done | failed
+    status = models.CharField(max_length=10, default="done")  # running | done | failed | waiting (back-pressure) | notice (said once, nothing wrong) | skipped (refused on purpose) | deferred (put off, retried)
     project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
     cve_id = models.CharField(max_length=64, blank=True, default="")
     detail = models.JSONField(default=dict, blank=True)
@@ -644,7 +657,7 @@ class ProbeObservation(models.Model):
     url = models.CharField(max_length=500, blank=True, default="")  # the path or URL that answered, host name removed
     outcome = models.CharField(max_length=12, default="found")
     confidence = models.FloatField(default=0.0)
-    source = models.CharField(max_length=48, blank=True, default="")  # header:server, body:regex, nmap:-sV, wpscan ...
+    source = models.CharField(max_length=48, blank=True, default="")  # header:server, body:regex, nmap:-sV ...
     evidence = models.JSONField(default=dict, blank=True)
     first_seen = models.DateTimeField(default=timezone.now)
     observed_at = models.DateTimeField(default=timezone.now)
@@ -725,6 +738,28 @@ class HostExclusion(models.Model):
         return f"{self.host} (org {self.org_id})"
 
 
+class ExcludedAddress(models.Model):
+    """An address or network an organization must never have scanned (the "do not scan these addresses" list). Org-wide, like HostExclusion,
+    but matched on the ADDRESS: the entry itself, any host name whose resolved addresses (the inventory's stored ones, or the answer of a lookup
+    a task made) fall inside it, and any task that names an address inside it. ``cidr`` is stored normalised (``cveFeed.exclusions.parse_entry``:
+    a bare address is a /32 or /128, host bits are cleared, IPv6 is compressed), so the same network is one row however it was typed. Private
+    ranges are valid entries. Read and written only through cveFeed.exclusions and agentapi.excluded_addresses, which always filter by the
+    organization, so it cannot leak across orgs; scanners read it unscoped (Celery has no request scope) through the project's own org."""
+
+    org = models.ForeignKey("dashboard.Org", on_delete=models.CASCADE, related_name="excluded_addresses")
+    cidr = models.CharField(max_length=64, default="", db_default="")
+    note = models.CharField(max_length=300, blank=True, default="", db_default="")
+    created_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(default=timezone.now, db_default=Now())
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["org", "cidr"], name="uniq_excludedaddress_org_cidr")]
+        ordering = ["id"]
+
+    def __str__(self):
+        return f"{self.cidr} (org {self.org_id})"
+
+
 class HostState(models.Model):
     """What CVEngine last knew about one host of a project: the snapshot the next scan is diffed against.
     One row per (project, host); Port/IpAddress rows are shared and rewritten in place, so this is the only
@@ -766,7 +801,10 @@ class HostState(models.Model):
         indexes = [models.Index(fields=["domain", "retired_at"], name="hoststate_domain_retired_idx"),
                    models.Index(fields=["project", "zombie_since"], name="hoststate_proj_zombie_idx"),
                    models.Index(fields=['archived_at', 'retired_at', 'id'], name='hoststate_inactive_idx'),
-                   models.Index(fields=['archived_at', 'unresolved_first_at', 'id'], name='hoststate_unresolved_idx')]
+                   models.Index(fields=['archived_at', 'unresolved_first_at', 'id'], name='hoststate_unresolved_idx'),
+                   # the due-host query asks, per host, whether its name was tried and has no address (unresolved_checks >= 1): almost no row is, and
+                   # the planner, thinking so few hosts reach that check, scanned the whole table for each of 3000 hosts (0.4 s of a 0.45 s query)
+                   models.Index(fields=['project', 'host'], condition=models.Q(unresolved_checks__gte=1), name='hoststate_unresolved_host_idx')]
 
     def __str__(self):
         return self.host
@@ -1101,6 +1139,7 @@ class AIUsage(models.Model):
     stage = models.CharField(max_length=40, default='unspecified')
     status = models.CharField(max_length=12)  # succeeded | failed
     error_category = models.CharField(max_length=40, blank=True, default='')
+    stop_reason = models.CharField(max_length=24, blank=True, default='', db_default='')  # the provider's stop reason (end_turn, max_tokens, refusal, ...), never text
     input_tokens = models.PositiveIntegerField(null=True, blank=True)
     output_tokens = models.PositiveIntegerField(null=True, blank=True)
     cache_read_tokens = models.PositiveIntegerField(null=True, blank=True)
@@ -1110,6 +1149,49 @@ class AIUsage(models.Model):
 
     class Meta:
         indexes = [models.Index(fields=['started_at', 'provider', 'model'], name='aiusage_time_model_idx')]
+
+
+class AIJob(models.Model):
+    """One model call the pipeline needs, made by the AI reviewer container (docs/AI-REVIEWER.md, cveFeed.ai_jobs): the server makes no
+    model call itself. The server queues the job; the container takes it (``leased``, for a while, with a fresh ``lease`` token), calls
+    the model and posts the answer back (``answered``); a Celery task checks the answer with the stage's own validator and applies it
+    (``applied``), or queues the stage's one retry (``attempt`` 2), or gives up (``failed``). ``packet`` is what the container gets: the
+    stage's fixed system prompt, its parts (text cvENGINE wrote, and fenced data that came from a scanned host or a feed), the schema and
+    request options, and at most one bounded image. ``context`` is what the continuation needs and never leaves the server. The raw answer
+    is kept only until it is applied. ``dedupe`` keeps one open job per question."""
+
+    OPEN = ("queued", "leased", "answered", "applying")
+    kind = models.CharField(max_length=24)
+    stage = models.CharField(max_length=40, default="unspecified")  # the usage stage each call is recorded under (AIUsage.stage)
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+    dedupe = models.CharField(max_length=80, blank=True, default="")
+    priority = models.PositiveSmallIntegerField(default=5)  # lower first
+    packet = models.JSONField(default=dict, blank=True)
+    context = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=10, default="queued")  # queued | leased | answered | applying | applied | failed | expired
+    attempt = models.PositiveSmallIntegerField(default=1)
+    leases = models.PositiveSmallIntegerField(default=0)
+    lease = models.CharField(max_length=32, blank=True, default="")
+    lease_until = models.DateTimeField(null=True, blank=True)
+    result = models.JSONField(default=dict, blank=True)  # the answer {text} or the failure {error}, until it is applied
+    error_category = models.CharField(max_length=40, blank=True, default="")
+    provider = models.CharField(max_length=32, blank=True, default="")
+    model = models.CharField(max_length=200, blank=True, default="")
+    input_tokens = models.PositiveIntegerField(default=0)
+    output_tokens = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    answered_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["status", "priority", "created_at"], name="aijob_queue_idx"),
+                   models.Index(fields=["kind", "dedupe"], name="aijob_dedupe_idx")]
+        constraints = [models.UniqueConstraint(fields=["kind", "dedupe"], condition=models.Q(status__in=("queued", "leased", "answered", "applying"))
+                                               & ~models.Q(dedupe=""), name="one_open_aijob_per_question")]
+
+    def __str__(self):
+        return f"AI job {self.pk} ({self.kind}, {self.status})"
 
 
 class AIPriceRate(models.Model):
@@ -1202,6 +1284,13 @@ class Triage(models.Model):
     heat_override_reason = models.TextField(blank=True, default="", db_default="")
     heat_override_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     heat_override_at = models.DateTimeField(null=True, blank=True)
+    # The newest result of re-checking this finding after it was marked fixed (cveFeed.retest): '' (never marked fixed, or reset when the status
+    # changed by hand), verifying, verified_fixed, still_reproduces, not_verified or no_check. The columns sit on the row the lists already join, so a
+    # list shows the state with no query of its own. The full record of each try is FixRetest. db_default: old code still inserting rows during an update.
+    retest_state = models.CharField(max_length=16, blank=True, default="", db_default="")
+    retest_at = models.DateTimeField(null=True, blank=True)
+    retest_reason = models.CharField(max_length=300, blank=True, default="", db_default="")
+    retest_sentinel = models.CharField(max_length=120, blank=True, default="", db_default="")
     first_seen = models.DateTimeField(default=timezone.now)
     last_seen = models.DateTimeField(default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -1214,6 +1303,7 @@ class Triage(models.Model):
             models.Index(fields=["project", "validation_status", "next_attempt_at"], name="triage_proj_valid_idx"),
             models.Index(fields=["kind", "signature"], name="triage_kind_sig_idx"),
             models.Index(fields=["project", "host"], name="triage_proj_host_idx"),
+            models.Index(fields=["project", "kind", "evidence_key"], name="triage_proj_kind_evkey_idx"),  # the reviewer's prior: the same evidence on other hosts (reviewer.same_evidence_prior)
         ]
         constraints = [
             models.CheckConstraint(
@@ -1230,6 +1320,35 @@ class Triage(models.Model):
 
     def __str__(self):
         return f"{self.kind} {self.host} [{self.classification or self.status}]"
+
+
+class FixRetest(models.Model):
+    """One re-check of a finding that was marked fixed: the same check that produced its proof, run again on a Sentinel through the validation
+    dispatch (cveFeed.retest). ``outcome`` is verified_fixed (the check ran and no longer reproduces it), still_reproduces (it does: the finding was
+    reopened and ``evidence`` is the new exchange) or not_verified (it could not be told: no Sentinel, host not reachable, the check failed; the
+    finding stays fixed, not verified, and is tried again with back-off). Never a result without the time and the Sentinel that ran it."""
+
+    triage = models.ForeignKey('cveFeed.Triage', on_delete=models.CASCADE, related_name='fix_retests')
+    project = models.ForeignKey('dashboard.Project', on_delete=models.CASCADE, related_name='+')
+    source = models.CharField(max_length=12, default='automatic', db_default='automatic')  # automatic (marked fixed) | manual (Retest now) | retry
+    requested_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    status = models.CharField(max_length=12, default='queued', db_default='queued')  # queued | running | done | failed
+    outcome = models.CharField(max_length=16, blank=True, default='', db_default='')  # verified_fixed | still_reproduces | not_verified
+    reason = models.CharField(max_length=300, blank=True, default='', db_default='')
+    check_run = models.JSONField(default=dict, blank=True)  # {kind, label, display, target} of the check that was run again
+    sentinel = models.CharField(max_length=120, blank=True, default='', db_default='')
+    evidence = models.JSONField(default=dict, blank=True)  # summary and the request / response excerpts of the new exchange
+    attempts = models.PositiveSmallIntegerField(default=1, db_default=1)
+    next_attempt_at = models.DateTimeField(null=True, blank=True)  # a not_verified retest: when it may be tried again; None once given up
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['project', 'status', 'created_at'], name='fixretest_proj_status_idx'),
+                   models.Index(fields=['outcome', 'next_attempt_at'], name='fixretest_due_idx')]
+        constraints = [models.UniqueConstraint(fields=['triage'], condition=models.Q(status__in=['queued', 'running']),
+                                               name='one_active_fixretest_per_finding')]
 
 
 class UpdateSettings(models.Model):
@@ -1273,44 +1392,16 @@ class ScanControl(models.Model):
     actor = models.CharField(max_length=150, blank=True, default='')
     last_error = models.CharField(max_length=160, blank=True, default='')
     changed_at = models.DateTimeField(default=timezone.now)
+    # An update does not wait for scans that run on Sentinels (cveFeed.scan_control, docs/UPDATES.md). The window of the last update, written by
+    # request_drain_pause (``update_started_at``) and release_update_pause (``update_ended_at``, and ``update_grace_until``: how long after it
+    # the broker still keeps what the outage left open, so Sentinels that come back with finished work are heard before any lease is judged).
+    update_started_at = models.DateTimeField(null=True, blank=True)
+    update_ended_at = models.DateTimeField(null=True, blank=True)
+    update_grace_until = models.DateTimeField(null=True, blank=True)
 
     @classmethod
     def current(cls):
         return cls.objects.get_or_create(pk=1)[0]
-
-
-class AssessmentReview(models.Model):
-    """Checkpointed three-hour assessment review; decisions live in AssessmentReviewDecision."""
-
-    status = models.CharField(max_length=16, default='queued')
-    period_start = models.DateTimeField()
-    period_end = models.DateTimeField()
-    cursor_project_id = models.PositiveIntegerField(default=0)
-    total_projects = models.PositiveIntegerField(default=0)
-    reviewed_projects = models.PositiveIntegerField(default=0)
-    model_calls = models.PositiveIntegerField(default=0)
-    queued_actions = models.PositiveIntegerField(default=0)
-    error_count = models.PositiveIntegerField(default=0)
-    performance = models.JSONField(default=dict, blank=True)
-    error = models.CharField(max_length=200, blank=True, default='')
-    lease_until = models.DateTimeField(null=True, blank=True)
-    started_at = models.DateTimeField(null=True, blank=True)
-    finished_at = models.DateTimeField(null=True, blank=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-
-class AssessmentReviewDecision(models.Model):
-    review = models.ForeignKey(AssessmentReview, on_delete=models.CASCADE, related_name='decisions')
-    project = models.ForeignKey('dashboard.Project', on_delete=models.CASCADE)
-    action = models.CharField(max_length=32, default='none')
-    status = models.CharField(max_length=16, default='no_action')
-    reason = models.CharField(max_length=300, blank=True, default='')
-    evidence = models.JSONField(default=dict, blank=True)
-    job_id = models.PositiveIntegerField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        constraints = [models.UniqueConstraint(fields=('review', 'project'), name='one_assessment_decision_per_project')]
 
 
 # --- Bug bounty ----------------------------------------------------------------------------------
@@ -1563,7 +1654,7 @@ class FindingAuditEvent(models.Model):
     when, and (status/assignee) what changed from and to. Written alongside the action itself (agentapi.services),
     never derived after the fact."""
 
-    EVENTS = ("status", "assignee", "comment", "heat")
+    EVENTS = ("status", "assignee", "comment", "heat", "retest")
     project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
     finding_kind = models.CharField(max_length=16, choices=[(k, k) for k in FINDING_KINDS])
     finding_id = models.PositiveIntegerField()
@@ -1591,6 +1682,16 @@ class ProjectSettings(models.Model):
     # it waits for an administrator to adopt it), and how old a report may get before it stops creating findings
     inventory_create_hosts = models.BooleanField(default=False, db_default=False)
     inventory_stale_days = models.PositiveSmallIntegerField(default=14, db_default=14)
+    # opt-in secret validation (cveFeed.secrets_validation): read-only identity checks of found credentials, by the built-in scanner only, never for a
+    # project in a bug bounty engagement. Who switched it on, when, and the attestation they accepted, word for word
+    secrets_validation = models.BooleanField(default=False, db_default=False)
+    secrets_validation_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    secrets_validation_at = models.DateTimeField(null=True, blank=True)
+    secrets_validation_attestation = models.TextField(blank=True, default="", db_default="")
+    # the AI host review (cveFeed.host_review): recommend (the default: nothing starts without a person), auto (a read-only next step starts by itself;
+    # only a person sets it, never an agent token) or off
+    HOST_REVIEW_MODES = ("auto", "recommend", "off")
+    host_review_mode = models.CharField(max_length=10, default="recommend", db_default="recommend")
     updated_at = models.DateTimeField(auto_now=True)
     updated_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
 
@@ -1635,7 +1736,9 @@ class CVEDetection(models.Model):
     rules_at = models.DateTimeField(null=True, blank=True)  # when the rules author last read the CVE's affected data
     ai_model = models.CharField(max_length=128, blank=True, default="")
     ai_attempted_at = models.DateTimeField(null=True, blank=True)  # the model is asked once; a failed ask is retried after a week
-    ai_problems = models.JSONField(default=list, blank=True)  # what validation dropped from the model's answer
+    ai_problems = models.JSONField(default=list, blank=True)  # what validation dropped from the model's answer, or why the model could not be asked
+    ai_failures = models.PositiveSmallIntegerField(default=0, db_default=0)  # failed asks in a row (cveFeed.detection_author.AI_BACKOFF); 0 after an answer
+    ai_retry_at = models.DateTimeField(null=True, blank=True)  # the back-off: not asked again before this; None with failures at the limit means given up
     ai_input_hash = models.CharField(max_length=16, blank=True, default="", db_default="")  # what the CVE said when the model last read it: a change re-asks
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1643,7 +1746,9 @@ class CVEDetection(models.Model):
     class Meta:
         verbose_name = "CVE detection"
         verbose_name_plural = "CVE detections"
-        indexes = [models.Index(fields=["ai_attempted_at"], name="cvedetect_ai_idx")]
+        indexes = [models.Index(fields=["ai_attempted_at"], name="cvedetect_ai_idx"),
+                   # ``detection_author.progress``: the detections that have checks, counted by source, without reading the ``strategy`` JSON of every row
+                   models.Index(fields=["source", "id"], name="cvedetection_source_filled_idx", condition=~models.Q(strategy={}))]
 
     def __str__(self):
         return f"detection for {self.cve_entry_id}"
@@ -1874,7 +1979,7 @@ class OpenvasSettings(models.Model):
     The password is encrypted like every other stored secret and never leaves the server: the settings page says only whether it is set."""
 
     enabled = models.BooleanField(default=False)
-    sentinel_only = models.BooleanField(default=False)  # refuse the local gvmd fallback: a due batch with no eligible Sentinel stays due
+    sentinel_only = models.BooleanField(default=False)  # no longer read: OpenVAS only ever runs on a Sentinel (a due batch with no eligible Sentinel stays due)
     gmp_username = models.CharField(max_length=64, blank=True, default="")
     gmp_password = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH, blank=True, default="")
     state = models.JSONField(default=dict, blank=True)  # the worker's last check: {checked_at, connected, gmp_version, error, feed: {...}}
@@ -1937,6 +2042,9 @@ class AutoTuneSettings(models.Model):
     MODES = ("off", "suggest", "auto")
     mode = models.CharField(max_length=10, default="auto")
     advisor = models.BooleanField(default=True)  # ask the AI advisor when a provider is configured
+    # What an agent (an API token over MCP or REST) may do to a throughput setting: ``off`` (nothing), ``suggest`` (its write becomes a recommendation a
+    # person applies, the default) or ``auto`` (its write is applied through the tuner, bounded and verified). Only a person changes it.
+    agent_policy = models.CharField(max_length=10, default="suggest", db_default="suggest")
     values = models.JSONField(default=dict, blank=True)
     meta = models.JSONField(default=dict, blank=True)  # {key: {"hold_until": iso time}}
     changed_at = models.DateTimeField(null=True, blank=True)  # the last change of the mode or the advisor switch, by a person
@@ -1962,7 +2070,7 @@ class TuningDecision(models.Model):
     old_value = models.IntegerField(null=True, blank=True)
     new_value = models.IntegerField(null=True, blank=True)
     mode = models.CharField(max_length=10)
-    source = models.CharField(max_length=12)  # controller | ai | person
+    source = models.CharField(max_length=12)  # controller | ai | person | agent
     action = models.CharField(max_length=12)  # raise | lower | apply | revert | release
     layer = models.CharField(max_length=8, blank=True, default="")  # auto | saved | "" for a recommendation
     old_layer_value = models.IntegerField(null=True, blank=True)  # what that layer held before (None: nothing), so a revert restores it exactly
@@ -1974,7 +2082,16 @@ class TuningDecision(models.Model):
     actor = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     resolved_at = models.DateTimeField(null=True, blank=True)  # a recommendation applied or replaced, or a change reverted
     resolved_by = models.CharField(max_length=150, blank=True, default="")
-    resolution = models.CharField(max_length=12, blank=True, default="")  # applied | superseded | reverted
+    resolution = models.CharField(max_length=12, blank=True, default="")  # applied | superseded | reverted | refused | held (a proposal of the AI that was not taken)
+    # Verification (cveFeed.autotune ``verify_pending``, judged by cveFeed.autotune_policy ``verdict``): what the change expected to improve and the
+    # measurements before it; after ``verify_at`` the same measurements are taken again and the outcome stored. Every column has a database default
+    # so the code of the previous release can still insert a row during an update.
+    expected = models.CharField(max_length=32, blank=True, default="", db_default="")  # the measurement it expected to improve (autotune_policy.METRICS)
+    baseline = models.JSONField(default=dict, db_default=Value({}, output_field=models.JSONField()), blank=True)  # {metric, better, value, trouble, kills, n}: before
+    verify_at = models.DateTimeField(null=True, blank=True)  # when it is judged; None: nothing to verify (a recommendation, a person's change, a revert)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    outcome = models.CharField(max_length=12, blank=True, default="", db_default="")  # "" (not judged yet) | helped | no_effect | regressed | unknown | reverted
+    outcome_detail = models.CharField(max_length=300, blank=True, default="", db_default="")  # one sentence with the numbers
 
     class Meta:
         indexes = [models.Index(fields=["setting", "created_at"], name="tuning_setting_time_idx")]
@@ -2106,7 +2223,7 @@ class SupplierHostCard(models.Model):
     (supplier, domain), refreshed by each sweep. A section the last check could not read (the certificate, the web page) keeps what the
     check before it saw, and ``checked_at`` says when the card was last attempted. Everything here is what a browser or a TLS client is
     given anyway: response headers (never cookies' values), the certificate, the technologies the page and its headers state (the same
-    fingerprinting owned hosts use, ``cveFeed.fingerprint``), and the address and mail facts. ``tech_text`` is the lowercase text the
+    fingerprinting owned hosts use, ``cvengine_scanner.fingerprint``), and the address and mail facts. ``tech_text`` is the lowercase text the
     technology search reads."""
 
     STATES = ("ok", "no_address", "blocked", "unreachable", "challenged", "excluded")
@@ -2190,3 +2307,358 @@ class InternalRange(models.Model):
 
     def __str__(self):
         return f"{self.cidr} (project {self.project_id})"
+
+
+class ReviewerSettings(models.Model):
+    """Single-row settings of the AI reviewer (docs/AI-REVIEWER.md), the separate container that reviews every open finding once and checks
+    the server's operations a few times a day. The provider and its key are the ones in Settings > AI model (``AIProviderSettings``); this row
+    chooses a model per job ('' = ``claude-sonnet-5-5`` / ``claude-haiku-5-5`` on Anthropic, else the provider's own model), whether a false
+    positive is closed or only recorded, the daily review cap and the UTC hours of the operations check. Instance-wide.
+
+    Both switches ship OFF: the review and the operations check are billed by the AI provider and ``auto_close`` lets the model close findings, so an
+    update never starts them. An administrator answers "Do you want AI validation?" (``cveFeed.setup_questions``) or changes them in Settings."""
+
+    enabled = models.BooleanField(default=False)
+    review_model = models.CharField(max_length=100, blank=True, default="")
+    ops_model = models.CharField(max_length=100, blank=True, default="")
+    auto_close = models.BooleanField(default=False)
+    review_daily_max = models.PositiveIntegerField(default=300)
+    ops_hours = models.JSONField(default=list, blank=True)  # UTC hours; [] = the default (3, 9, 15, 21)
+    last_ops_at = models.DateTimeField(null=True, blank=True)  # when the operations job last reported
+    # the host review (cveFeed.host_review): one call per host state instead of one per finding. db_default: old code still inserting rows during an update
+    host_review_enabled = models.BooleanField(default=False, db_default=False)  # OFF until a person switches it on in Settings: every review is a billed AI call
+    host_review_auto_close = models.BooleanField(default=False, db_default=False)  # a host review's false positive closes the finding by itself: off, a person decides (HV-1)
+    host_review_daily_max = models.PositiveIntegerField(default=100, db_default=100)  # hosts reviewed a day, for the whole install
+    host_review_auto_per_project_day = models.PositiveIntegerField(default=50, db_default=50)  # next steps a project's reviews start by themselves a day
+    # the automatic validation of AI-written checks (cveFeed.templatevalidate): two AI calls a draft, and a draft that passes becomes a check that runs on hosts. In 1.3.6 a draft
+    # waited for a maintainer and nothing ran it, so this is OFF until a person switches it on in Settings or answers the AI question (FA-5)
+    template_validation_enabled = models.BooleanField(default=False, db_default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    @classmethod
+    def current(cls):
+        return cls.objects.order_by("pk").first() or cls.objects.create()
+
+    def __str__(self):
+        return "AI reviewer settings"
+
+
+class SetupAnswer(models.Model):
+    """What an administrator answered to one question about an update (``cveFeed.setup_questions``). One row per question ``key``, instance-wide (it
+    holds no project, so there is nothing to scope). ``answer`` is one of the question's choices, or ``later`` for "decide later": the feature stays
+    off and the question stays listed. No migration ever writes a row: only a person answers."""
+
+    key = models.CharField(max_length=60, unique=True)
+    answer = models.CharField(max_length=60)
+    answered_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    answered_at = models.DateTimeField(default=timezone.now)
+    version = models.PositiveSmallIntegerField(default=1, db_default=1)  # the version of the question when it was answered: a question that gained a line is asked again
+
+    def __str__(self):
+        return f"{self.key}: {self.answer}"
+
+
+class FindingReview(models.Model):
+    """One review of one finding by the AI reviewer (cveFeed.reviewer). ``review_key`` is the finding's evidence key and its host's state
+    fingerprint together: a finding is reviewed once per key, and a new port, version or piece of evidence is a new key. ``outcome`` is what
+    the server did with the verdict: ``closed`` (closed as a false positive), ``recorded`` (kept as the reviewer's opinion), ``disputed`` (a
+    false positive the server would not close because the finding has hard evidence) or ``held`` (a false positive it would not close for
+    another reason, in ``held_reason``). Kept as history: the newest row of a finding is its current review."""
+
+    VERDICTS = ("false_positive", "true_open", "true_in_progress", "true_fixed", "true_accepted_risk", "uncertain")
+    OUTCOMES = ("closed", "recorded", "disputed", "held")
+    triage = models.ForeignKey(Triage, on_delete=models.CASCADE, related_name="reviews")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    review_key = models.CharField(max_length=40)
+    verdict = models.CharField(max_length=20)
+    confidence = models.CharField(max_length=8, default="low")
+    reason_code = models.CharField(max_length=32, blank=True, default="")
+    note = models.TextField(blank=True, default="")
+    model = models.CharField(max_length=100, blank=True, default="")
+    outcome = models.CharField(max_length=10, default="recorded")
+    held_reason = models.CharField(max_length=200, blank=True, default="")
+    injection = models.JSONField(default=list, blank=True)  # the families of AI-directed text found in the evidence (cveFeed.injection_guard)
+    input_tokens = models.PositiveIntegerField(default=0)
+    output_tokens = models.PositiveIntegerField(default=0)
+    host_review = models.ForeignKey("cveFeed.HostReview", on_delete=models.SET_NULL, null=True, blank=True, related_name="finding_reviews")  # set when the host review gave this verdict
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["triage", "-created_at"], name="findingreview_triage_idx"),
+                   models.Index(fields=["review_key"], name="findingreview_key_idx"),
+                   models.Index(fields=["created_at"], name="findingreview_created_idx")]
+
+    def __str__(self):
+        return f"review of triage {self.triage_id}: {self.verdict} ({self.outcome})"
+
+
+class HostReview(models.Model):
+    """One review of a whole host by the AI (cveFeed.host_review): every open result of the host is read together, each open finding gets a
+    verdict through the reviewer's gates (``FindingReview`` rows that point back here), and one next step is chosen from the fixed list in
+    ``cveFeed.host_actions``. ``state_key`` is the host's state fingerprint with the open findings shown, so a changed host is reviewed again.
+    ``refs`` maps the short names the model saw (f1, f2, ...) to triage ids and never leaves the server. The model's words (``step_note``,
+    ``host_note``) are cleaned data and only ever shown as text."""
+
+    STATUSES = ("queued", "answered", "applied", "failed", "stale")
+    OPEN = ("queued", "answered")
+    STEP_MODES = ("auto", "recommend")
+    STEP_STATES = ("proposed", "started", "done", "refused", "dismissed", "expired")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500)
+    state_key = models.CharField(max_length=40)
+    findings_key = models.CharField(max_length=40, blank=True, default="", db_default="")  # the open findings alone (kind and evidence key): a Dismiss holds until it changes
+    status = models.CharField(max_length=10, default="queued", db_default="queued")
+    ai_job = models.ForeignKey("cveFeed.AIJob", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    refs = models.JSONField(default=dict, blank=True)  # {'f1': triage_id}: server side only
+    step_action = models.CharField(max_length=24, blank=True, default="", db_default="")
+    step_target = models.CharField(max_length=12, blank=True, default="", db_default="")
+    step_reason_code = models.CharField(max_length=24, blank=True, default="", db_default="")
+    step_note = models.TextField(blank=True, default="", db_default="")
+    step_mode = models.CharField(max_length=10, blank=True, default="", db_default="")
+    step_state = models.CharField(max_length=10, blank=True, default="", db_default="")
+    step_detail = models.CharField(max_length=300, blank=True, default="", db_default="")
+    host_note = models.TextField(blank=True, default="", db_default="")
+    injection = models.JSONField(default=list, blank=True)
+    model = models.CharField(max_length=100, blank=True, default="", db_default="")
+    input_tokens = models.PositiveIntegerField(default=0, db_default=0)
+    output_tokens = models.PositiveIntegerField(default=0, db_default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    decided_at = models.DateTimeField(null=True, blank=True)
+    dismissed_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    dismissed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["project", "host", "-created_at"], name="hostreview_host_idx"),
+                   models.Index(fields=["created_at"], name="hostreview_created_idx"),
+                   models.Index(fields=["step_state"], name="hostreview_step_idx")]
+        constraints = [models.UniqueConstraint(fields=["project", "host"], condition=models.Q(status__in=["queued", "answered"]),
+                                               name="one_open_hostreview_per_host")]
+
+    def __str__(self):
+        return f"host review of {self.host} ({self.status})"
+
+
+class AdminAlert(models.Model):
+    """A problem with the server itself that an App Admin should read: a banner on every page for App Admins until it is resolved or
+    dismissed (cveFeed.reviewer: the operations checks raise and resolve them, and the AI reviewer's operations job adds its diagnosis).
+    One row per ``code`` while it is open; a resolved problem that comes back opens a new row. ``detail`` is the deterministic description,
+    ``ai_detail`` the reviewer's diagnosis and next steps; both are plain text and are only ever rendered as text."""
+
+    SEVERITIES = ("info", "warning", "critical")
+    code = models.CharField(max_length=40)
+    severity = models.CharField(max_length=8, default="warning")
+    title = models.CharField(max_length=200)
+    detail = models.TextField(blank=True, default="")
+    ai_detail = models.TextField(blank=True, default="")
+    ai_model = models.CharField(max_length=100, blank=True, default="")
+    facts = models.JSONField(default=dict, blank=True)
+    digest = models.CharField(max_length=40, blank=True, default="")  # the facts that make it this problem: a dismissed alert returns when they change
+    first_seen = models.DateTimeField(default=timezone.now)
+    last_seen = models.DateTimeField(default=timezone.now)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    dismissed_at = models.DateTimeField(null=True, blank=True)
+    dismissed_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    dismissed_digest = models.CharField(max_length=40, blank=True, default="")
+
+    class Meta:
+        indexes = [models.Index(fields=["code", "resolved_at"], name="adminalert_code_open_idx")]
+        ordering = ["-last_seen", "-id"]
+
+    def __str__(self):
+        return f"{self.code}: {self.title}"
+
+
+class SecretFingerprintKey(models.Model):
+    """The install's key for fingerprinting exposed secrets (cveFeed.secrets_inventory): 32 random bytes, made once, stored encrypted with the field key.
+    It is not derived from SECRET_KEY or the field key, so rotating those (``rotate_field_key``) never splits an inventory row in two, and a database
+    dump without the field key cannot confirm a guessed secret by fingerprinting it. One row."""
+
+    key = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class SecretFinding(models.Model):
+    """One exposed secret of a project, however many hosts, URLs, scans and detectors saw it (docs/SECRETS-PLAN.md section 7). The value itself is
+    never stored: ``fingerprint`` is a keyed HMAC of it and ``masked`` its prefix and last four characters. Opt-in validation happens in the scanner
+    while it holds the value (cveFeed.secrets_validation), so nothing here needs it."""
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")  # where it was first seen
+    fingerprint = models.CharField(max_length=64)
+    fp_version = models.PositiveSmallIntegerField(default=1, db_default=1)
+    provider = models.CharField(max_length=40, blank=True, default="", db_default="")
+    kind = models.CharField(max_length=60)
+    klass = models.CharField(max_length=1)  # P publishable (browser key), S server secret, I identifier (cveFeed.secrets_catalog)
+    catalogued = models.BooleanField(default=True, db_default=True)
+    rule_ids = ArrayField(models.CharField(max_length=120), default=list, blank=True)
+    masked = models.CharField(max_length=80)
+    length = models.PositiveIntegerField(default=0, db_default=0)
+    confidence = models.CharField(max_length=10, blank=True, default="", db_default="")
+    severity = models.SmallIntegerField(default=0, db_default=0)
+    severity_basis = models.CharField(max_length=300, blank=True, default="", db_default="")
+    facts = models.JSONField(default=dict, db_default=Value({}, output_field=models.JSONField()), blank=True)  # what the value says that is not the value (a JWT's expiry)
+    status = models.CharField(max_length=20, default="unverified", db_default="unverified")
+    status_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    status_at = models.DateTimeField(null=True, blank=True)
+    status_note = models.TextField(blank=True, default="", db_default="")
+    validation_outcome = models.CharField(max_length=20, blank=True, default="", db_default="")
+    validated_at = models.DateTimeField(null=True, blank=True)
+    validation_meta = models.JSONField(default=dict, db_default=Value({}, output_field=models.JSONField()), blank=True)  # allow-listed keys only, short strings (cveFeed.secrets_inventory.clean_meta)
+    first_seen = models.DateTimeField(default=timezone.now, db_default=Now())
+    last_seen = models.DateTimeField(default=timezone.now, db_default=Now())
+    occurrence_count = models.PositiveIntegerField(default=0, db_default=0)
+    host_count = models.PositiveIntegerField(default=0, db_default=0)
+    REMEDIATION_STATUSES = CVEMatch.REMEDIATION_STATUSES
+    remediation_status = models.CharField(max_length=16, default="open", db_default="open")
+    assignee = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "fingerprint"], name="uniq_secretfinding_project_fp")]
+        indexes = [models.Index(fields=["project", "status"], name="secretfinding_proj_status_idx"),
+                   models.Index(fields=["project", "-severity"], name="secretfinding_proj_sev_idx")]
+        ordering = ["-severity", "-last_seen", "id"]
+
+    def __str__(self):
+        return f"{self.provider or self.kind} {self.masked}"
+
+
+class SecretOccurrence(models.Model):
+    """Where an inventory secret was seen: one row per URL, detector and rule. ``url`` carries no query string."""
+
+    SOURCES = ("kingfisher", "nuclei", "route", "bbot")
+    finding = models.ForeignKey(SecretFinding, on_delete=models.CASCADE, related_name="occurrences")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    scan = models.ForeignKey("startScan.ScanHistory", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    host = models.CharField(max_length=255)
+    url = models.CharField(max_length=2000)
+    source = models.CharField(max_length=20)
+    rule_id = models.CharField(max_length=120)
+    line = models.PositiveIntegerField(null=True, blank=True)
+    # the text around the value, with the value masked before it was stored (cveFeed.secrets_catalog.mask_context); empty when it was not captured
+    context = models.TextField(blank=True, default="", db_default="")
+    vulnerability = models.ForeignKey("startScan.Vulnerability", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    first_seen = models.DateTimeField(default=timezone.now, db_default=Now())
+    last_seen = models.DateTimeField(default=timezone.now, db_default=Now())
+    retired_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["finding", "url", "source", "rule_id"], name="uniq_secretocc_where")]
+        indexes = [models.Index(fields=["project", "host"], name="secretocc_proj_host_idx")]
+
+    def __str__(self):
+        return f"{self.source} {self.rule_id} at {self.url}"
+
+
+class ResourceRef(models.Model):
+    """A resource a served page or script points at: a storage bucket, a Firebase database, a container registry, or a URL on some other host.
+    Recorded for a person to look at, and (storage and Firebase) handed to the bucket sweep (cveFeed.bucket_scan); never fetched for itself."""
+
+    KINDS = ("s3", "gcs", "azure", "firebase_rtdb", "firebase_storage", "gcr", "ecr", "ghcr", "dockerhub", "url")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    host = models.CharField(max_length=255)
+    found_url = models.CharField(max_length=2000)
+    kind = models.CharField(max_length=20)
+    identifier = models.CharField(max_length=255)
+    secret = models.ForeignKey(SecretFinding, on_delete=models.SET_NULL, null=True, blank=True, related_name="resources")
+    first_seen = models.DateTimeField(default=timezone.now, db_default=Now())
+    last_seen = models.DateTimeField(default=timezone.now, db_default=Now())
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "kind", "identifier"], name="uniq_resourceref_project_kind_id")]
+
+    def __str__(self):
+        return f"{self.kind}:{self.identifier}"
+
+
+class SecretScanRules(models.Model):
+    """The instance's own Kingfisher rules and placeholder lists for the secrets scan (cveFeed.secret_rules): custom detection rules (never a
+    validator), the skip words and skip patterns passed as --skip-word and --skip-regex. One row; an App Admin changes it."""
+
+    rules_yaml = models.TextField(blank=True, default="")
+    skip_words = models.JSONField(default=list, blank=True)
+    skip_regex = models.JSONField(default=list, blank=True)
+    updated_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return "secrets scan rules"
+
+
+class PlannerBatch(models.Model):
+    """One batch of due checks the work planner (``cveFeed.work_planner``) handed to a Sentinel: up to one task's worth of units of one kind of one
+    project's target. The row is the planner's own bookkeeping: what is in flight (so a minute later it does not queue the same units again), what
+    failed (so it backs off), and the audit trail of what it did. ``units`` are the assets (``address:port`` for SSH, a host name for secrets); no
+    credential, secret or finding is ever stored here."""
+
+    STATUSES = ("queued", "running", "done", "failed", "skipped")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+    kind = models.CharField(max_length=32)  # the Sentinel task kind (ssh_probe, secrets_scan)
+    units = models.JSONField(default=list)
+    status = models.CharField(max_length=10, default="queued")
+    detail = models.CharField(max_length=300, blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now, db_default=Now())
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["status", "kind"], name="plannerbatch_status_kind_idx"),
+                   models.Index(fields=["kind", "finished_at"], name="plannerbatch_kind_fin_idx")]
+
+    def __str__(self):
+        return f"planner batch {self.pk}: {self.kind} x{len(self.units or [])} ({self.status})"
+
+
+class WatchdogEvent(models.Model):
+    """One line of what the outer watchdog saw, decided or did (cveFeed.watchdog, docs/WATCHDOG.md): when, which rule, what it observed, what
+    it did and what came of it. Append only: a row is never changed once written (old rows are pruned by age, nothing else removes one).
+    Plain text, no secrets: it is shown in the Watchdog panel of the Scanners page."""
+
+    LEVELS = ("info", "action", "fixed", "problem")
+    at = models.DateTimeField(default=timezone.now, db_index=True)
+    rule = models.CharField(max_length=24)
+    level = models.CharField(max_length=8, default="info")
+    observation = models.CharField(max_length=500, blank=True, default="")
+    action = models.CharField(max_length=80, blank=True, default="")
+    result = models.CharField(max_length=500, blank=True, default="")
+    detail = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-id"]
+        indexes = [models.Index(fields=["rule", "id"], name="wdevent_rule_id_idx")]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None and not self._state.adding:
+            raise RuntimeError("watchdog events are append only")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.at:%Y-%m-%d %H:%M:%S} {self.rule} {self.action or self.observation}"
+
+
+class WatchdogState(models.Model):
+    """The watchdog's memory, one row per rule (and one, rule ``_all``, for the watchdog itself: the global switch, the last tick and the last snapshot),
+    in the database so a decision survives a restart of the web container: how long a symptom has been seen (hysteresis), when the rule last acted
+    (rate limits), the check that follows an action, and the hold that stops it acting again for an hour when it could not fix the problem."""
+
+    rule = models.CharField(max_length=24, unique=True)
+    enabled = models.BooleanField(default=True)
+    status = models.CharField(max_length=16, default="unknown")  # ok | watching | acting | held | problem | unknown | standing_down | off
+    status_text = models.CharField(max_length=400, blank=True, default="")
+    fire_since = models.DateTimeField(null=True, blank=True)  # the symptom has been seen continuously since this moment
+    last_action_at = models.DateTimeField(null=True, blank=True)
+    actions = models.JSONField(default=list, blank=True)  # epoch seconds of the actions of the last day, for the hourly and daily caps
+    verify_due = models.DateTimeField(null=True, blank=True)  # when to check that the last action worked
+    verify = models.JSONField(default=dict, blank=True)  # {action, symptom_at, acted_at}
+    hold_until = models.DateTimeField(null=True, blank=True)  # after an action that did not work: nothing more is done for this rule until then
+    escalated_at = models.DateTimeField(null=True, blank=True)
+    data = models.JSONField(default=dict, blank=True)  # per rule memory (windows, the discovery override); the last snapshot on ``_all``
+    last_tick_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"watchdog {self.rule}: {self.status}"

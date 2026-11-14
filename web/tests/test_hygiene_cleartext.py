@@ -12,6 +12,7 @@ from dashboard.models import Org, Project, ProjectMembership
 from startScan.models import IpAddress, Port, Subdomain
 from targetApp.models import Domain
 from tests.test_agentapi import call
+from tests import hygiene_harness
 
 MEDIUM, HIGH = hygiene.MEDIUM, hygiene.HIGH
 SSL_CERT = {'scripts': {'ssl-cert': 'Subject: commonName=ftp.example.test'}}
@@ -19,7 +20,7 @@ SSL_CERT = {'scripts': {'ssl-cert': 'Subject: commonName=ftp.example.test'}}
 
 def run(domain, hosts=None):
     """The hygiene run with no network: no certificates to read and no mail domains."""
-    return hygiene.run_hygiene(domain.id, probe=lambda host, port: None, emailer=lambda name: ([], False), mx=lambda n, t: False, hosts=hosts)
+    return hygiene_harness.run_hygiene(domain.id, probe=lambda host, port: None, emailer=lambda name: ([], False), mx=lambda n, t: False, hosts=hosts)
 
 
 def open_checks(domain):
@@ -336,7 +337,7 @@ class InternalAndGateTests(Base):
     def test_a_host_in_a_declared_internal_network_is_flagged_from_the_ports_its_sentinel_stored_and_is_medium(self):
         target = self.internal_target()
         probe, mail = mock.Mock(return_value=None), mock.Mock(return_value=([], False))
-        hygiene.run_hygiene(target.id, probe=probe, emailer=mail, mx=lambda n, t: False)
+        hygiene_harness.run_hygiene(target.id, probe=probe, emailer=mail, mx=lambda n, t: False)
         probe.assert_not_called()  # an internal address is no target for this server's TLS probe, and the cleartext check sends nothing at all
         rows = open_checks(target)
         self.assertEqual({k[1]: r.severity for k, r in rows.items()}, {'cleartext_telnet': MEDIUM, 'cleartext_ftp': MEDIUM})
@@ -350,7 +351,7 @@ class InternalAndGateTests(Base):
         with mock.patch('socket.socket', side_effect=AssertionError('socket opened')), \
                 mock.patch('socket.getaddrinfo', side_effect=AssertionError('DNS lookup')), \
                 mock.patch('http.client.HTTPConnection.connect', side_effect=AssertionError('HTTP connection')), \
-                mock.patch('cveFeed.route_auth.probe_url', side_effect=AssertionError('probe')):
+                mock.patch('cveFeed.pinned_transport.resolve', side_effect=AssertionError('vetted lookup')):
             found = cleartext.findings_for(self.domain)
         self.assertEqual(sorted(f.check for f in found),
                          ['cleartext_ftp', 'cleartext_http_login', 'cleartext_telnet', 'cleartext_telnet'])

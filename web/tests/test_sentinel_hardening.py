@@ -90,7 +90,7 @@ class EnrollmentNeedsAWriteTokenTests(SentinelBase):
         for token, paths in ((ro_root, ('/api/v1/sentinels/enroll', '/api/v1/orgs/one/sentinels/enroll', '/api/v1/projects/sen-a/sentinels/enroll')),
                              (ro_dana, ('/api/v1/orgs/one/sentinels/enroll', '/api/v1/projects/sen-a/sentinels/enroll'))):
             for path in paths:
-                for suffix in ('', '?format=blob'):
+                for suffix in ('', '?format=blob&network=external&profile=light'):
                     status, out = call(token, 'GET', path + suffix)
                     self.assertEqual(status, 403, (path, suffix, out))
         self.assertFalse(SentinelEnrollment.objects.exists())
@@ -211,6 +211,27 @@ class ResultBindingTests(SimpleTestCase):
         self.assertEqual([f['template_id'] for f in clean['findings']], ['t1', 't2', 't3', 't4'])
         self.assertEqual(clean['dropped'], 3)
 
+    def test_a_nuclei_finding_on_another_port_than_the_task_asked_is_dropped(self):
+        """SN-9: a target with a port is answered by that port; a bare host target still takes any port, as before."""
+        task = self._task('nuclei_light', {'targets': ['192.0.2.50:8443', 'www.a.example']}, [])
+        findings = [{'template_id': 'ok1', 'host': '192.0.2.50', 'matched_at': 'https://192.0.2.50:8443/'},
+                    {'template_id': 'ok2', 'host': '192.0.2.50:8443', 'matched_at': ''},
+                    {'template_id': 'ok3', 'host': 'www.a.example', 'matched_at': 'https://www.a.example:8080/x'},
+                    {'template_id': 'bad1', 'host': '192.0.2.50', 'matched_at': 'https://192.0.2.50:9443/'},
+                    {'template_id': 'bad2', 'host': '192.0.2.50', 'matched_at': 'https://192.0.2.50/'},
+                    {'template_id': 'bad3', 'host': '192.0.2.50:22', 'matched_at': ''}]
+        clean = sentinels.clean_result('nuclei_light', {'outcome': 'done', 'findings': findings}, task)
+        self.assertEqual([f['template_id'] for f in clean['findings']], ['ok1', 'ok2', 'ok3'])
+        self.assertEqual(clean['dropped'], 3)
+
+    def test_a_template_test_hit_on_another_port_is_not_a_hit_for_the_host_and_port_asked(self):
+        task = self._task('nuclei_validate', {'targets': ['www.a.example:443', 'www.a.example:8443']}, [])
+        hit = {'matcher-name': 'm', 'host': 'www.a.example:8443', 'matched-at': 'https://www.a.example:8443/'}
+        outcomes = [{'host': h, 'vulnerable': True, 'output': 'x', 'hit': hit} for h in ('www.a.example:443', 'www.a.example:8443')]
+        got = [sentinels._held_to_its_host(o) for o in outcomes]
+        self.assertEqual([o['vulnerable'] for o in got], [False, True])
+        self.assertEqual(got[0]['error'], sentinels.OTHER_HOST_HIT)
+
     def test_without_a_task_nothing_is_filtered_and_nothing_is_added(self):
         clean = sentinels.clean_result('nuclei_light', {'outcome': 'done', 'findings': [{'template_id': 't', 'host': 'x.example'}]})
         self.assertEqual(len(clean['findings']), 1)
@@ -239,6 +260,7 @@ class InternalOnlyClaimTests(SentinelBase):
         self.inside_token = create_token(self.dana, 'inside')[1]
         self.inside = register_sentinel(self.inside_token, name='inside', capabilities=['nmap', 'nuclei_light', 'wpscan', 'network:internal'])[1]
         Agent.objects.filter(pk=self.inside['id']).update(network='internal')  # granted by the server, not by what the Sentinel declares
+        Agent.objects.filter(pk__in=[self.external['id'], self.inside['id']]).update(info={'features': ['credential_filter']})  # a current client: only one that leaves out credential checks is offered nuclei work while they are off
 
     def _nuclei(self, targets):
         return SentinelTask.objects.create(project=self.pa, kind='nuclei_light', target={'targets': targets, 'tags': [], 'severities': []}, ips=[])
@@ -269,6 +291,7 @@ class HostScopeNarrowingTests(SentinelBase):
     def _sentinel(self, hosts):
         status, out = register_sentinel(self.t['dana'], name='narrow', capabilities=['nuclei_light', 'wpscan'], scope={'projects': ['sen-a'], 'hosts': hosts})
         self.assertEqual(status, 201, out)
+        Agent.objects.filter(pk=out['id']).update(info={'features': ['credential_filter']})  # a current client (see InternalOnlyClaimTests)
 
     def test_a_nuclei_task_outside_the_declared_hosts_is_not_claimable(self):
         self._sentinel(['192.0.2.0/24'])
@@ -469,7 +492,7 @@ class NetworkAuthorityTests(SentinelBase):
     """Whether a Sentinel sits inside a private network is the server's decision (its enrollment, or an administrator), never the Sentinel's claim."""
 
     def boot(self, network, caps=('nmap', 'nuclei_light', 'wpscan', 'network:internal')):
-        status, out = call(self.t['dana'], 'POST', f'/api/v1/projects/sen-a/sentinels/enroll?format=blob&network={network}')
+        status, out = call(self.dana, 'POST', f'/api/v1/projects/sen-a/sentinels/enroll?format=blob&network={network}&profile=light')  # a person: a token may not make an internal enrollment
         self.assertEqual(status, 201, out)
         self.assertEqual(SentinelEnrollment.objects.get(prefix=out['enrollment_token'][:10]).network, network)
         status, boot = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': out['enrollment_token'], 'name': f'net-{network}',
@@ -503,12 +526,12 @@ class NetworkAuthorityTests(SentinelBase):
     def test_an_external_sentinel_gets_no_internal_work_and_is_not_eligible(self):
         InternalRange.objects.create(project=self.pa, cidr='10.0.0.0/24')
         boot = self.boot('external')
-        Agent.objects.filter(pk=boot['id']).update(status='active', last_seen=timezone.now())
+        Agent.objects.filter(pk=boot['id']).update(status='active', last_seen=timezone.now(), info={'features': ['credential_filter']})
         task = SentinelTask.objects.create(project=self.pa, kind='nuclei_light', target={'targets': ['10.0.0.5'], 'tags': [], 'severities': []}, ips=[])
         self.assertIsNone(call(boot['token'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})[1]['task'])
         self.assertEqual(sentinels.eligible_sentinels(self.pa, 'nuclei_light', internal=True), [])
         inside = self.boot('internal')
-        Agent.objects.filter(pk=inside['id']).update(status='active', last_seen=timezone.now())
+        Agent.objects.filter(pk=inside['id']).update(status='active', last_seen=timezone.now(), info={'features': ['credential_filter']})
         self.assertEqual(call(inside['token'], 'POST', '/api/v1/sentinel/tasks/next', {'wait': 0})[1]['task']['id'], task.pk)
 
     def test_only_an_administrator_moves_a_sentinel_across_the_boundary(self):
@@ -553,7 +576,8 @@ class NetworkAuthorityTests(SentinelBase):
         sentinels.sentinel_settings.set_managed(agent, {'network': 'external'}, self.dana)
         self.assertNotIn(sentinels.INTERNAL_CAPABILITY, sentinels.effective_capabilities(agent))
 
-        status, out = call(self.t['root'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'settings': {'network': None}})
+        self.assertEqual(call(self.t['root'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'settings': {'network': None}})[0], 403)  # a token may not widen to the internal grant (FB-5)
+        status, out = call(self.root, 'PATCH', f'/api/v1/agents/{agent.pk}', {'settings': {'network': None}})  # a person may
         self.assertEqual(status, 200, out)
         agent.refresh_from_db()
         self.assertEqual(agent.network, 'internal')

@@ -4,7 +4,9 @@ services:
     image: "postgres:18-alpine"
     # Every worker task holds a database connection while it runs (gevent greenlets, no pooling), and the discovery worker alone may run up to 32
     # at once: PostgreSQL's default of 100 connections is too few. An update recreates this container once when this line changes (scripts/update.sh).
-    command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}"]
+    command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-300}", "-c", "shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}",
+              "-c", "effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-768MB}", "-c", "maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}",
+              "-c", "random_page_cost=${POSTGRES_RANDOM_PAGE_COST:-1.1}"]
     environment:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -37,18 +39,24 @@ services:
       - "host.docker.internal:host-gateway"  # lets "localhost" in Settings > AI model mean this server (see reNgine/ai_providers.py reachable_url)
     build:
       context: ./web
+      args:  # the Sentinel library the image installs (web/Dockerfile): the newest build of SENTINEL_REF (default main), resolved to SENTINEL_SHA by scripts/sentinel-ref.sh at build time
+        SENTINEL_REF: "${SENTINEL_REF:-main}"
+        SENTINEL_SHA: "${SENTINEL_SHA:-}"
     restart: always
     # An init process (tini) as PID 1 reaps the scanners' children and passes SIGTERM on to the entrypoint, which turns it into a warm shutdown of
     # the workers and exits when any one of them dies, so `restart: always` brings back all four. 60 s matches the update scripts' stop timeout.
     init: true
     stop_grace_period: 60s
     entrypoint: /usr/src/app/celery-entrypoint.sh
-    # Chromium's sandbox for the web screenshots (cveFeed/web_shot.py) needs user namespaces, which Docker's default seccomp profile refuses. This is
-    # Playwright's own profile for running Chromium with its sandbox in Docker (Docker's default plus clone, setns and unshare), vendored unchanged
-    # from microsoft/playwright v1.64.1 (see THIRD-PARTY.md). Without it the sandbox cannot start and screenshots stay off, with the reason shown
-    # (docs/PIPELINE.md, "Web screenshots"); `make up` and the update scripts recreate this container, so an upgrade applies it with no manual step.
-    security_opt:
-      - seccomp=./config/seccomp/playwright-chromium.json
+    # Healthy while all four workers answer a ping and consume their own queue (web/celery_healthcheck.py). Docker only RESTARTS an unhealthy container under an
+    # orchestrator, so the real guard is the entrypoint, which exits when any worker process is gone; this feeds `docker ps`, the system status page and the update's
+    # last check. start_period covers the entrypoint's start work (migrations wait, collectstatic, the template and whatportis updates).
+    healthcheck:
+      test: ["CMD", "python3", "celery_healthcheck.py"]
+      interval: 60s
+      timeout: 40s
+      retries: 3
+      start_period: 10m
     volumes:
       - ./web:/usr/src/app
       - github_repos:/usr/src/github
@@ -58,6 +66,8 @@ services:
       - tool_config:/root/.config
       - static_volume:/usr/src/app/staticfiles/
       - tailscale_status:/var/run/tailscale-status:ro  # the optional tailscale profile's published node status, read-only (docs/TAILSCALE.md); empty without it
+      - scanner_bootstrap:/var/lib/cvengine-scanner  # where the server leaves the built-in scanner's one-time enrollment (agentapi/builtin_scanner.py); empty unless CVENGINE_BUILTIN_SCANNER=1
+      - reviewer_bootstrap:/var/lib/cvengine-reviewer  # where the server leaves the AI reviewer container's token (agentapi/builtin_reviewer.py)
       - openvas_gvmd_socket_vol:/run/gvmd:ro  # the optional openvas profile's gvmd (GMP) socket (docs/OPENVAS.md); an empty directory without it, and only celery mounts it
     # every variable in .env reaches the container (the explicit entries below win, so the internal
     # settings compose sets on purpose, such as the broker URLs and DEBUG, cannot be overridden from .env)
@@ -123,6 +133,9 @@ services:
       - "host.docker.internal:host-gateway"  # lets "localhost" in Settings > AI model mean this server (see reNgine/ai_providers.py reachable_url)
     build:
       context: ./web
+      args:  # the Sentinel library the image installs (web/Dockerfile): the newest build of SENTINEL_REF (default main), resolved to SENTINEL_SHA by scripts/sentinel-ref.sh at build time
+        SENTINEL_REF: "${SENTINEL_REF:-main}"
+        SENTINEL_SHA: "${SENTINEL_SHA:-}"
     entrypoint: /usr/src/app/entrypoint.sh
     # GUNICORN_WORKERS is pinned below (not read from .env): the lockout counters are in the shared Redis cache, so two workers is safe,
     # and a stray value in .env cannot change it
@@ -141,6 +154,7 @@ services:
       - DISCOVERY_CONCURRENCY=${DISCOVERY_CONCURRENCY:-8}
       - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@redis:6379/0
       - GUNICORN_WORKERS=2
+      - CVENGINE_DB_CONN_MAX_AGE=${CVENGINE_DB_CONN_MAX_AGE:-60}  # web threads keep their database connection for a minute (16 at most); workers do not (docs/DEPLOYMENT.md, Small hosts)
       - DOMAIN_NAME=${DOMAIN_NAME}
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
@@ -174,8 +188,8 @@ services:
     # keep the image on the host when the registry cannot be reached: `pull_policy: always` made the pull part of `up`, which runs after the
     # database migration, so a registry outage failed an update that was otherwise done and an offline host could never update.
     ports:
-      - 8082:8082/tcp
-      - 443:443/tcp
+      - ${CVENGINE_HTTP_PORT:-8082}:8082/tcp  # both host ports can be moved (CVENGINE_HTTPS_PORT, CVENGINE_HTTP_PORT in .env) when another program holds 443
+      - ${CVENGINE_HTTPS_PORT:-443}:443/tcp
     depends_on:
       - web
       - db
@@ -191,6 +205,7 @@ services:
       - ./config/nginx/rengine.conf:/etc/nginx/conf.d/rengine.conf:ro
       - ./web/static/cve/maintenance.html:/usr/share/nginx/maintenance/maintenance.html:ro
       - ./config/nginx/state:/etc/nginx/state:ro  # holds the maintenance flag while an update runs
+      - ./config/nginx/trusted-upstreams.conf:/etc/nginx/trusted-upstreams.conf:ro  # empty: no peer is believed to have set X-Forwarded-For (HOSTING-ONLINE.md, Cloudflare Tunnel)
       - static_volume:/usr/src/app/staticfiles/
       - scan_results:/usr/src/scan_results:ro
     networks:
@@ -209,7 +224,7 @@ services:
     profiles: ["tailscale"]
     # Pinned on purpose: this container sits inside the scanner's namespace. To update, change the tag (releases and the security
     # bulletins are at https://tailscale.com/security-bulletins) or set TAILSCALE_IMAGE in .env, then `docker compose up -d tailscale`.
-    image: "${TAILSCALE_IMAGE:-tailscale/tailscale:v1.104.4}"
+    image: "${TAILSCALE_IMAGE:-tailscale/tailscale:v1.104.7}"
     restart: always
     network_mode: "service:celery"
     depends_on:
@@ -251,6 +266,118 @@ services:
     volumes:
       - tailscale_state:/var/lib/tailscale
       - tailscale_status:/status
+
+  # The built-in scanner ("CVEngine Scanner", docs/BUILTIN-SCANNER.md): the cvENGINE Sentinel image running next to the server, enrolled by it with nobody
+  # typing a secret, and where every scan tool runs (docs/SCANNER-ARCHITECTURE.md). On by default; CVENGINE_BUILTIN_SCANNER=0 in .env turns it off (the
+  # server then writes no enrollment and revokes the scanner's token, and the container idles).
+  # No container_name: it was a fixed name that a second stack on the same host collided with. Compose names the container <project>-scanner-1; every
+  # script and doc reaches it by the service name (`make scanner-logs`, `docker compose logs scanner`).
+  # The image FOLLOWS the newest published Sentinel: the moving tag `main` of ghcr.io/hevnsnt/cvengine-sentinel (the newest build of the Sentinel's main
+  # branch, which only receives code after its checks pass; amd64 and arm64, with an SBOM and build provenance). scripts/scanner_lock.py keeps this default
+  # equal to the tag scanner.lock.json names; the lock itself is the known-good floor the release was tested with, not a pin. Every update and a
+  # schedule (scripts/scanner.sh, scripts/scanner-update.sh) pull the tag, start the new container and keep it only once it is healthy AND has checked in with
+  # a contract version the server accepts, else they put the previous image back (CVENGINE_SCANNER_ROLLBACK_IMAGE, which they write and clear).
+  # TO HOLD THE SCANNER AT ONE VERSION set CVENGINE_SCANNER_IMAGE in .env to a digest or a tag: it is used as it is and never pulled over or rolled back.
+  # pull_policy is `missing` on purpose, like the proxy's above: `always` makes the pull part of `up`, and a registry that cannot be reached would then stop
+  # the whole stack from starting. The scripts fetch the newest image before anything is stopped and tolerate a failed pull; a host that starts the stack
+  # with plain `docker compose up` and wants it to pull each time sets CVENGINE_SCANNER_PULL_POLICY=always (and accepts that an outage fails that `up`).
+  # It shares the celery container's network namespace, so its scans leave from exactly where the server's own did: the same address, the Tailscale
+  # sidecar's tailnet route (which lives in that namespace too) and the host network or macvlan overlays. Nothing connects to it; it reaches
+  # the server as http://web:8000. Every update and `make up` recreate it after celery, as they do the Tailscale sidecar.
+  scanner:
+    image: "${CVENGINE_SCANNER_IMAGE:-${CVENGINE_SCANNER_ROLLBACK_IMAGE:-ghcr.io/hevnsnt/cvengine-sentinel:main}}"
+    pull_policy: "${CVENGINE_SCANNER_PULL_POLICY:-missing}"
+    restart: unless-stopped
+    init: true
+    network_mode: "service:celery"
+    stop_grace_period: 75s
+    pids_limit: 512
+    # 3 GB. The scanner weighs every kind of work against this limit and never starts one that would not fit (the Sentinel's client/admission.py: one nuclei run
+    # measured 500-730 MB, the screenshot browser 224+ MB, nmap 70 MB), so a lower limit makes it run fewer things at once, not die. 2 GB is enough to run two
+    # nuclei and a browser together; 3 GB runs three nuclei and a browser at once, the mix that was once killed at 2 GB. Lower it on a small host (docs/DEPLOYMENT.md, Memory).
+    mem_limit: "${SCANNER_MEM_LIMIT:-3g}"
+    # The same reduced set as the Sentinel's own compose file (SN-8): every capability dropped, then NET_RAW (nmap's SYN scan, OS detection and UDP sweep,
+    # naabu's SYN scan, which reach the unprivileged daemon's tools through file capabilities on nmap and naabu alone) and SYS_CHROOT (Chromium's sandbox).
+    # NET_ADMIN is gone: in this container's shared network namespace (celery's, the host's with the hostnet overlay) it would let a compromised tool change
+    # the routes, firewall and interfaces. The third entry is empty in effect (it repeats SYS_CHROOT) unless scripts/scanner.sh finds an image from before the
+    # reduction: its nmap and naabu carry `cap_net_raw,cap_net_admin+eip`, and the kernel refuses to start a binary whose file capabilities it cannot grant
+    # (execve fails with EPERM), so the script writes CVENGINE_SCANNER_EXTRA_CAP=NET_ADMIN for exactly such an image and removes it again for a newer one
+    # (docs/BUILTIN-SCANNER.md, "Capabilities"). Not set here: read_only (bbot's discovery needs a writable ~/.bbot/tools) and no-new-privileges (it makes the
+    # kernel ignore file capabilities, so raw sockets would depend on the container engine's version).
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+      - SYS_CHROOT
+      - "${CVENGINE_SCANNER_EXTRA_CAP:-SYS_CHROOT}"
+    # Chromium's sandbox for the web screenshots (kind web_screenshot, docs/PIPELINE.md, "Web screenshots") needs user namespaces, which Docker's default
+    # seccomp profile refuses. This is Playwright's own profile for running Chromium with its sandbox in Docker (Docker's default plus clone, setns and
+    # unshare), vendored unchanged from microsoft/playwright v1.64.1 (see THIRD-PARTY.md). The browser runs in this container and nowhere else; without
+    # the profile the scanner's sandbox proof fails and it takes no picture, with the reason shown. `make up` and the update scripts recreate this
+    # container, so an upgrade applies it with no manual step.
+    # On a host whose AppArmor refuses user namespaces (Ubuntu 24.04+, recent Debian and Kali) the browser still cannot start: load
+    # config/apparmor/cvengine-scanner (`sudo apparmor_parser -r -W config/apparmor/cvengine-scanner`) and use docker-compose.apparmor.yml (or
+    # uncomment the line below, which edits a tracked file the updater then refuses to fast-forward over). `apparmor=unconfined` also works but removes the container's AppArmor confinement altogether. docs/DEPLOYMENT.md,
+    # "Screenshots and AppArmor".
+    security_opt:
+      - seccomp=./config/seccomp/playwright-chromium.json
+      # - apparmor=cvengine-scanner
+    healthcheck:
+      # Healthy while its heartbeats reach the server (python3 -m client.control health); it also restarts itself after three minutes without one.
+      test: ["CMD", "python3", "-m", "client.control", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10m  # covers the wait for the server's enrollment on a first start
+    environment:
+      CVENGINE_SENTINEL_BUILTIN: "1"
+      CVENGINE_SENTINEL_BLOB_FILE: /bootstrap/blob  # the enrollment the server writes (agentapi/builtin_scanner.py); read again whenever it re-enrols
+      CVENGINE_SENTINEL_ALLOW_INSECURE: "1"  # it talks to the server over the compose network, in plain http
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      NO_PROXY: "${NO_PROXY:-},web,localhost,127.0.0.1"  # the server is never reached through a host proxy
+    volumes:
+      - scanner_bootstrap:/bootstrap:ro
+      - scanner_state:/var/lib/cvengine-sentinel
+    depends_on:
+      - celery
+      - web
+
+  # The AI reviewer (docs/AI-REVIEWER.md): reviews every open finding once and checks the server's operations a few times a day, with the
+  # provider and models chosen in Settings > AI model. It is boxed in on purpose: its own small image (./reviewer) with no cvENGINE source,
+  # no database or Redis credentials, a read-only filesystem, no capabilities, an unprivileged user. It talks to the server only over
+  # /api/v1/reviewer/* with a reviewer-scope token the server writes to reviewer_bootstrap, and to the AI provider. It idles until an AI
+  # provider is configured; CVENGINE_REVIEWER=0 in .env turns it off.
+  reviewer:
+    build:
+      context: ./reviewer
+    image: cvengine-reviewer-local:latest
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    user: "10002:10002"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: "${REVIEWER_MEM_LIMIT:-256m}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # a local model server (LM Studio, Ollama, vLLM) on this machine, as Settings > AI model allows
+    environment:
+      CVENGINE_REVIEWER_SERVER: "http://web:8000"
+      CVENGINE_REVIEWER_TOKEN_FILE: "/bootstrap/token"
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      NO_PROXY: "${NO_PROXY:-web,localhost,127.0.0.1}"
+    volumes:
+      - reviewer_bootstrap:/bootstrap:ro
+    depends_on:
+      - web
+    networks:
+      - rengine_network
 
   # Optional: OpenVAS (Greenbone Community Edition) as a vulnerability scanner. Off unless COMPOSE_PROFILES=openvas is in .env (or
   # `docker compose --profile openvas up -d`, `make openvas-up`); without it none of these services exist, start or use memory. docs/OPENVAS.md has
@@ -421,7 +548,7 @@ services:
   # writes the scanner's configuration (notus, and where openvasd listens) into a volume, then exits
   openvas-configure:
     profiles: ["openvas"]
-    image: "registry.community.greenbone.net/community/openvas-scanner:stable@sha256:7a7c440cf675a83ca1b6d8284eb28450893a8b05f5fed1f98e997df605792632"
+    image: "registry.community.greenbone.net/community/openvas-scanner:stable@sha256:5b2043df8abed6acff7cd4c08636ea87c57f73b95cd406c88dc2adcec24426dd"
     volumes:
       - openvas_data_vol:/mnt
       - openvas_log_data_vol:/var/log/openvas
@@ -442,7 +569,7 @@ services:
   openvas-openvasd:
     profiles: ["openvas"]
     restart: always
-    image: "registry.community.greenbone.net/community/openvas-scanner:stable@sha256:7a7c440cf675a83ca1b6d8284eb28450893a8b05f5fed1f98e997df605792632"
+    image: "registry.community.greenbone.net/community/openvas-scanner:stable@sha256:5b2043df8abed6acff7cd4c08636ea87c57f73b95cd406c88dc2adcec24426dd"
     environment:
       OPENVASD_MODE: service_notus
       GNUPGHOME: /etc/openvas/gnupg
@@ -516,6 +643,9 @@ volumes:
   static_volume:
   tailscale_state:
   tailscale_status:
+  scanner_bootstrap:
+  reviewer_bootstrap:
+  scanner_state:
   openvas_gpg_data_vol:
   openvas_scap_data_vol:
   openvas_cert_data_vol:

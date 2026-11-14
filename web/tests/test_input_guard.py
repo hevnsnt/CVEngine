@@ -246,7 +246,7 @@ class SentinelMachineDataTests(TestCase):
 
 		from agentapi.models import Agent, SentinelTask
 		_, self.token = create_token(self.user, 'sentinel-token')
-		response = Client().put('/api/v1/sentinel', json.dumps({'name': 'guarded', 'scope': {'projects': ['s-g-p']}, 'capabilities': ['nuclei_light']}),
+		response = Client().put('/api/v1/sentinel', json.dumps({'name': 'guarded', 'scope': {'projects': ['s-g-p']}, 'capabilities': ['nuclei_light'], 'info': {'features': ['credential_filter']}}),
 								content_type='application/json', HTTP_AUTHORIZATION=f'Bearer {self.token}', REMOTE_ADDR='8.8.4.4')
 		self.assertIn(response.status_code, (200, 201), response.content)
 		self.agent = Agent.objects.get(name='guarded')
@@ -299,8 +299,9 @@ class SentinelMachineDataTests(TestCase):
 		self.assertEqual(response.status_code, 403)
 		self.assertTrue(AbuseStrike.objects.filter(category='command_injection').exists())
 
-	def test_the_exemption_matches_only_those_two_routes(self):
+	def test_the_exemption_matches_only_those_routes(self):
 		for path, expected in (('/api/v1/sentinel/tasks/7/result', True), ('/api/v1/sentinel/tasks/7/result/', True), ('/api/v1/sentinel/heartbeat', True),
+							   ('/api/v1/sentinel/tasks/7/partial', True), ('/api/v1/sentinel/tasks/7/partial/x', False), ('/api/v1/sentinel/tasks/7/secret', False),
 							   ('/api/v1/sentinel', False), ('/api/v1/sentinel/tasks/next', False), ('/api/v1/sentinel/tasks/7/release', False),
 							   ('/api/v1/sentinel/tasks/x/result', False), ('/api/v1/agent/tasks/7/result', False),
 							   ('/api/v1/sentinels/bootstrap', False), ('/api/v1/sentinel/tasks/7/result/extra', False)):

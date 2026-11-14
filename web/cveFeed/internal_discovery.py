@@ -98,7 +98,26 @@ def sweep():
 def discover_range(range_id, dispatch=None, scan_after=True):
     """Sweep one declared range through an internal Sentinel and add what answered as targets. ``dispatch`` replaces
     ``sentinel_dispatch.dispatch_or_none`` in tests. Returns a summary and records it on the range."""
-    from agentapi import sentinel_dispatch
+    if dispatch is not None:
+        return _discover_range(range_id, dispatch, scan_after)
+    from agentapi import stage_runs
+    # each chunk waits on a Sentinel inside the network without holding the worker (agentapi.stage_runs); the callback continues the sweep
+    project_id = _range_project(range_id)
+    return stage_runs.run('internal.discover', {'range_id': range_id, 'scan_after': scan_after},
+                          first=lambda: _discover_range(range_id, None, scan_after), project=project_id)
+
+
+def _range_project(range_id):
+    from cveFeed.models import InternalRange
+    return InternalRange.objects.filter(pk=range_id).values_list('project_id', flat=True).first()
+
+
+def _resume_discover(context):
+    return _discover_range(context['range_id'], None, context.get('scan_after', True))
+
+
+def _discover_range(range_id, dispatch, scan_after):
+    from agentapi import sentinel_dispatch, stage_runs
     from cveFeed import activity
     from cveFeed.models import InternalRange
     from reNgine.resources import redis_claim
@@ -106,7 +125,8 @@ def discover_range(range_id, dispatch=None, scan_after=True):
     row = InternalRange.objects.select_related('project__org').filter(pk=range_id).first()
     if row is None:
         return {'range': range_id, 'skipped': 'range removed'}
-    with redis_claim(f'internal-discovery:{row.pk}', 'discover', LOCK_TTL) as held:
+    claim = stage_runs.claim_kwargs('internal-discovery', 'discover')
+    with redis_claim(f'internal-discovery:{row.pk}', claim.pop('owner'), LOCK_TTL, **claim) as held:
         if held is not True:
             return {'range': row.cidr, 'skipped': 'a discovery of this range is already running'}
         return _discover(row, dispatch, activity, scan_after)
@@ -160,3 +180,11 @@ def _discover(row, dispatch, activity, scan_after):
         from cveFeed import internal_scan
         internal_scan.sweep()
     return summary
+
+
+def _register():
+    from agentapi import stage_runs
+    stage_runs.adapter('internal.discover', queue='discovery_queue')(_resume_discover)
+
+
+_register()

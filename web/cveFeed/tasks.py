@@ -16,13 +16,6 @@ from cveFeed.models import CVEEntry
 logger = logging.getLogger(__name__)
 
 
-@app.task(name='assessment_review', bind=False, queue='cve_feed_queue')
-def assessment_review_task(review_id=None):
-    """Three-hour AI coverage review, continued in bounded project pages."""
-    from cveFeed.assessment_review import run_page
-    return run_page(review_id)
-
-
 @app.task(name='rediscover_archived_hosts', bind=False, queue='cve_feed_queue')
 def rediscover_archived_hosts(run_id=None):
     from cveFeed.archive_rediscovery import run_page
@@ -45,23 +38,28 @@ def review_unresolved_hosts(run_id=None):
 
 @app.task(name='top_up_host_assessments', bind=False, queue='discovery_queue')
 def top_up_host_assessments():
-    """Every few minutes: enqueue due host assessments directly (no model call), draining a coverage backlog far
-    faster than the three-hour AI review's one-due-host-per-project-per-window pace (see cveFeed.coverage_topup)."""
+    """Every few minutes: enqueue due host assessments directly (no model call), so a coverage backlog drains in hours (see
+    cveFeed.coverage_topup)."""
     from cveFeed.coverage_topup import top_up
     return top_up()
 
 
 @app.task(name='wpscan_thorough', bind=False, queue='wpscan_queue')
-def wpscan_thorough(project_id):
-    """The thorough WPScan pass (plugins and themes in mixed mode, hours per site) for one project: see ``wpscan_scan.run_thorough``. It has a
-    queue of its own so a pass that takes hours never holds up the feed workers."""
+def wpscan_thorough(project_id, attempt=0):
+    """The thorough WordPress scan pass (plugins and themes in mixed mode, hours per site, each site one task of kind ``wpscan_thorough`` on a
+    Sentinel) for one project: see ``wpscan_scan.run_thorough``. It has a queue of its own so a pass that takes hours never holds up the feed
+    workers. When no scanner could take the work the hosts stay pending and the pass is asked again a little later, ``THOROUGH_RETRIES`` times;
+    after that the next scan's quick pass starts it again."""
     from cveFeed import wpscan_scan
-    return wpscan_scan.run_thorough(project_id)
+    result = wpscan_scan.run_thorough(project_id)
+    if result.get('unavailable') and attempt < wpscan_scan.THOROUGH_RETRIES:
+        wpscan_thorough.apply_async(args=[project_id, attempt + 1], countdown=wpscan_scan.THOROUGH_RETRY_DELAY * (attempt + 1), queue='wpscan_queue')
+    return result
 
 
 @app.task(name='wpscan_quick', bind=False, queue='wpscan_queue')
 def wpscan_quick(scan_id, hosts, attempt=1):
-    """The quick WPScan pass for WordPress sites the scan's own stage could not reach in time (over its limit, out of its time budget, no memory),
+    """The quick WordPress scan pass for WordPress sites the scan's own stage could not reach in time (over its limit, out of its time budget, no memory),
     a little later each attempt: see ``wpscan_scan.run_quick``."""
     from cveFeed import wpscan_scan
     return wpscan_scan.run_quick(scan_id, hosts, attempt)
@@ -69,10 +67,18 @@ def wpscan_quick(scan_id, hosts, attempt=1):
 
 @app.task(name='testssl_sweep', bind=False, queue='testssl_queue')
 def testssl_sweep():
-    """Daily: the TLS audit (testssl.sh) of the targets that are due, one at a time (see ``cveFeed.testssl_scan``). It has a queue of its own so
-    a minute-per-port test never holds up the feed workers."""
-    from cveFeed import testssl_scan
-    return testssl_scan.sweep_all()
+    """Daily: the TLS audit of the targets that are due, on a Sentinel, one at a time (see ``cveFeed.tls_audit``). It has a queue of its own so
+    a sweep that waits on a scanner never holds up the feed workers."""
+    from cveFeed import tls_audit
+    return tls_audit.sweep_all()
+
+
+@app.task(name='secrets_validate_hosts', bind=False, queue='vhost_queue')
+def secrets_validate_hosts(project_id, hosts, user_id=None):
+    """A person asked to validate a secret (``agentapi.secrets_api.request_validation``): the built-in scanner reads its hosts again and checks what it
+    finds with the allow-listed read-only validators (see ``cveFeed.secrets_validation``). On the slow, polite queue: it waits for the scanner."""
+    from cveFeed import secrets_scan
+    return secrets_scan.validate_hosts(project_id, hosts, user_id)
 
 
 @app.task(name='bucket_sweep', bind=False, queue='bucketscan_queue')
@@ -99,8 +105,9 @@ def subdir_apps_sweep():
 
 @app.task(name='drain_screenshots', bind=False, queue='screenshot_queue')
 def drain_screenshots():
-    """Capture the web pages waiting in the screenshot queue (``HostScreenshot`` rows with outcome ``queued``), one browser, one page at a time, one drain
-    at a time: see ``cveFeed.web_shot``. Kicked by a scan stage, the Take screenshot button and the hourly sweep; a second call while one runs returns at once."""
+    """Hand the web pages waiting in the screenshot queue (``HostScreenshot`` rows with outcome ``queued``) to Sentinels (kind ``web_screenshot``) and store the
+    pictures they send back, one drain at a time: see ``cveFeed.web_shot``. No browser runs here. Kicked by a scan stage, the Take screenshot button and the hourly
+    sweep; a second call while one runs returns at once, and with no scanner able to take the kind the pages stay queued."""
     from cveFeed import web_shot
     return web_shot.drain()
 
@@ -121,10 +128,18 @@ def refresh_live_snapshots():
     return live_refresh.refresh_hot_scopes()
 
 
+@app.task(name='refresh_openvas_queue', bind=False, queue='live_cache_queue', ignore_result=True, time_limit=300, soft_time_limit=270)
+def refresh_openvas_queue(project_id):
+    """Asked by the Sentinels page when its kept OpenVAS queue explanation for a project is over a minute old (``cveFeed.openvas_scan.queue_explained``):
+    work it out again off the request. Reads the database and writes the cache only; it never touches a target."""
+    from cveFeed import openvas_scan
+    openvas_scan.refresh_queue(int(project_id))
+
+
 @app.task(name='openvas_sweep', bind=False, queue='openvas_queue')
 def openvas_sweep():
     """Every 15 minutes while the OpenVAS add-on is switched on (the beat entry is disabled otherwise): one step of the slow GVM sweep, which
-    polls the running task or starts the next due batch (see ``cveFeed.openvas_scan``). It has a queue of its own so it never holds up the
+    imports the running Sentinel task's report or hands the next due batch to a Sentinel (see ``cveFeed.openvas_scan``). It has a queue of its own so it never holds up the
     feed workers."""
     from cveFeed import openvas_scan
     return openvas_scan.tick()
@@ -137,14 +152,6 @@ def supplier_sweep():
     scans, enumerates or assesses anything. It has a queue of its own so a slow, deliberately paced sweep never holds up the feed workers."""
     from cveFeed import supplier_scan
     return supplier_scan.sweep_all()
-
-
-@app.task(name='openvas_check', bind=False, queue='cve_feed_queue')
-def openvas_check():
-    """Settings > OpenVAS' Test connection: only a worker has the sidecar's socket (the web container has none), so the page asks here. No
-    credential travels in the message: the worker reads the saved login itself."""
-    from cveFeed import openvas_scan
-    return openvas_scan.check_now()
 
 
 @app.task(name='sync_tailscale', bind=False, queue='cve_feed_queue')
@@ -750,19 +757,14 @@ def template_test_for_cve(cve_pk, hosts, project_id=None, batch=None):
     from cveFeed import hit_batch, notify
     from cveFeed.models import CVEEntry
     from cveFeed.templategen import run_cve_tests
-    from reNgine.ai_settings import get_configured_provider
+    from cveFeed import ai_jobs
     from cveFeed.conductor import bounty_blocked_projects
 
     try:
         if project_id in bounty_blocked_projects():  # a bug bounty project that has not confirmed automated testing is not tested on its own
             return {"cve_pk": cve_pk, "skipped": "the bug bounty engagement has not confirmed automated testing"}
         cve = CVEEntry.objects.get(pk=cve_pk)
-        try:
-            provider = get_configured_provider()
-        except Exception as exc:  # misconfigured provider: still run existing templates
-            logger.warning("template_test_for_cve: no usable AI provider: %s", exc)
-            provider = None
-        outcome = run_cve_tests(cve, hosts, provider=provider, project=project_id)
+        outcome = run_cve_tests(cve, hosts, ai=ai_jobs.ai_on(), project=project_id)  # a draft, when one is needed, is written by the AI reviewer container
         logger.info("template test %s: %s on %d hosts", cve.cve_id, outcome["source"], len(hosts))
         from cveFeed.templategen import is_confirmed
         vulnerable = [r["host"] for r in outcome["results"] if is_confirmed(r)]  # a version-class template's hit is not a confirmation
@@ -777,13 +779,21 @@ def template_test_for_cve(cve_pk, hosts, project_id=None, batch=None):
             hit_batch.leave(batch)  # also when the test failed: the run's count must still reach zero
 
 
+VALIDATE_SLICE_SECONDS = 45  # how long one validate_findings task holds a worker slot before handing the rest back to the queue
+
+
 @app.task(name="validate_findings", bind=False, queue="cve_feed_queue")
 def validate_findings(project_id, triage_ids, scan_id=None):
     """Run the validation checks (cveFeed.validation) for ``triage_ids``, all of one project: one task per project, never a list
     that mixes tenants. Started by the pipeline's triage stage (``scan_id`` then carries its stop flag) and by the validation sweep."""
     from cveFeed import validation
     try:
-        return validation.run_validation(project_id, triage_ids, scan_id=scan_id)
+        result = validation.run_validation(project_id, triage_ids, scan_id=scan_id, budget_seconds=VALIDATE_SLICE_SECONDS)
+        left = result.pop('deferred_ids', None)
+        if left:  # the rest goes to the back of the queue: the lane's slot is free for the scheduler's ticks in between
+            validate_findings.apply_async((project_id, left, scan_id))
+            result['deferred'] = len(left)
+        return result
     except Exception as exc:  # noqa: BLE001 - validation is best effort and must never surface as a task failure
         logger.exception("validation failed for project %s", project_id)
         return {"error": str(exc)[:200]}
@@ -894,7 +904,7 @@ def validate_match_on_demand(request_id):
                             f'Validation request #{job.pk}: template candidate {candidate["status"]}; '
                             'not run on the host', candidate_id=candidate.get('id'))
         if not checks and template[1] == 'no template covers this CVE':
-            plan_notes.append('No permitted template covers this CVE; an AI draft requires reviewed positive fixture evidence before host execution.')
+            plan_notes.append('No permitted template covers this CVE; an AI draft runs on a host only after it passes the automatic fixture test and second-pass review.')
         if not checks:
             plan_notes.append(plan['reason'])
         if not any(check['kind'] in ('fact_probe', 'script_read') for check in available_checks):
@@ -992,6 +1002,7 @@ def validate_match_on_demand(request_id):
                   'check_notes': plan_notes, 'classification': row.classification or None,
                   'ai_status': row.status, 'validation_status': row.validation_status,
                   'assessment_status': 'unsupported_external' if no_check and not candidate else 'checked' if checks else 'inconclusive'}
+        from cveFeed import hot_validation
         from cveFeed.hot_validation import retry_after
         broken = bool(check_result.get('failed') or check_result.get('blocked') or ai_state == 'failed')
         capped_only = bool(check_result.get('capped')) and not broken
@@ -1042,8 +1053,9 @@ def validate_match_on_demand(request_id):
                 triage.track(triage.with_cves([match]))
             except Exception:  # noqa: BLE001 - the job is finished; the next sweep tracks the match
                 logger.exception('could not track match %s after validation request %s', match.pk, job.pk)
-        activity.settle(progress, 'failed' if status == 'failed' else 'done',
-                        f'Validation request #{job.pk} {status} for {cve_id}'
+        really = bool(check_result.get('failed')) or ai_state == 'failed'
+        activity.settle(progress, hot_validation.line_status(status == 'failed', really),
+                        f'Validation request #{job.pk} {hot_validation.outcome_words(status == "failed", really, capped_only)} for {cve_id}'
                         + ('; no executable check was available' if no_check else '; no check executed' if no_execution else '')
                         + f'; AI review {ai_state}', check_state=result['check_state'], ai_state=ai_state)
         return result
@@ -1212,8 +1224,32 @@ def reconcile_library_provenance(limit=LIBRARY_SWEEP_BATCH, seconds=LIBRARY_SWEE
 
 @app.task(name='queue_hot_validations', bind=False, queue='cve_feed_queue')
 def queue_hot_validations():
+    from cveFeed import fix_retest
     from cveFeed.hot_validation import sweep
-    return sweep()
+    stats = sweep()
+    try:
+        stats['retests'] = fix_retest.sweep()['queued']  # the retests that could not tell and are due (a day or more apart): queued, not run here
+    except Exception:  # noqa: BLE001 - a retest sweep never stops the validation sweep
+        logger.exception('retest sweep failed')
+    return stats
+
+
+@app.task(name='retest_fixed_finding', bind=False, queue='validation_priority_queue')
+def retest_fixed_finding(retest_id):
+    """Re-run, on a Sentinel, the check that proved a finding that was marked fixed (``cveFeed.fix_retest``). The finding and project come from the
+    stored retest, never from an argument."""
+    from cveFeed import fix_retest
+    try:
+        return fix_retest.run(retest_id)
+    except Exception as exc:  # noqa: BLE001 - never a task failure; the sweep tries a retest that could not finish again
+        logger.exception('retest %s failed', retest_id)
+        from django.utils import timezone
+
+        from cveFeed.models import FixRetest
+        job = FixRetest.objects.filter(pk=retest_id, status__in=('queued', 'running')).first()
+        if job is not None:
+            fix_retest._settle_not_verified(job, f'the retest failed ({type(exc).__name__})', None, '', timezone.now())
+        return {'error': 'retest failed'}
 
 
 def _skip_automatic_validation(job, progress, reason):
@@ -1252,6 +1288,9 @@ def automatic_validate_finding(job_id):
                             project=job.project_id, status='running', job_id=job.pk, finding_id=job.triage_id)
     stage = 'load_finding'
     try:
+        # With no AI model connected the review can only say "unavailable": that was four activity lines per finding on the dashboard feed. The run
+        # keeps its one line (the one above, settled at the end with the whole outcome) and the two progress lines are not written.
+        ai_connected = bool(triage._resolve_provider(False))
         require_authority(job)
         from cveFeed.conductor import bounty_blocked_projects
         if job.source != 'manual' and job.project_id in bounty_blocked_projects():  # only a person's own request runs in a bug bounty project that has not confirmed automated testing
@@ -1259,7 +1298,7 @@ def automatic_validate_finding(job_id):
         row = Triage.objects.get(pk=job.triage_id, project_id=job.project_id)
         fresh_row = Triage.objects.select_related(
             'match__cve_entry', 'vulnerability__target_domain', 'route', 'hygiene__domain').get(pk=row.pk)
-        if not (hot_validation.manual_eligible(fresh_row) if job.source == 'manual' else hot_validation.tier_for(fresh_row)):
+        if not (hot_validation.manual_eligible(fresh_row) if job.source in ('manual', 'host_review') else hot_validation.tier_for(fresh_row)):  # the host review may ask for a finding the sweep would not
             return _skip_automatic_validation(job, progress, 'no_longer_eligible')
         stage = f'load_{row.kind}'
         findings = triage.load_findings([row])
@@ -1286,27 +1325,30 @@ def automatic_validate_finding(job_id):
         checks = {'ran': 0, 'reused': 0, 'no_check': 1}
         stage = 'approved_checks'
         if row.kind in validation.PLANNED_KINDS:
-            activity.log('validate', f'Automatic validation #{job.pk}: running approved checks',
-                         project=job.project_id, job_id=job.pk, finding_id=row.pk)
+            if ai_connected:
+                activity.log('validate', f'Automatic validation #{job.pk}: running approved checks',
+                             project=job.project_id, job_id=job.pk, finding_id=row.pk)
             require_authority(job)
             checks = validation.run_validation(job.project_id, [row.pk], unattended=job.source != 'manual')
             row.refresh_from_db()
             check_state = ('no_check' if checks.get('no_check') and not checks.get('ran') else
                            'observed' if row.validation_status == 'observed' else
                            'checked' if checks.get('ran') or checks.get('reused') else 'not_run')
-        else:
+        elif ai_connected:
             activity.log('validate', f'Automatic validation #{job.pk}: no approved external check for {row.kind}',
                          project=job.project_id, job_id=job.pk, finding_id=row.pk, check_state='no_check')
         findings = triage.load_findings([row])
         row, described = triage.track(findings)[0]
         stage = 'ai_review'
-        activity.log('confirm', f'Automatic validation #{job.pk}: AI review started', project=job.project_id,
-                     job_id=job.pk, finding_id=row.pk)
+        if ai_connected:
+            activity.log('confirm', f'Automatic validation #{job.pk}: AI review started', project=job.project_id,
+                         job_id=job.pk, finding_id=row.pk)
         require_authority(job)
         ai = triage.run_triage([(row, described)])
         row.refresh_from_db()
         ai_state = ('failed' if ai.get('errors') or row.status == 'error' else
                     'unavailable' if ai.get('not_triaged') or row.status == 'not_triaged' else
+                    'queued' if ai.get('asked') else  # the AI reviewer container answers it; the triage applies it when it lands
                     'deferred' if ai.get('queued') or row.status == 'pending' else 'completed')
         result = {'checks': checks, 'check_state': check_state, 'ai': ai, 'ai_state': ai_state,
                   'classification': row.classification, 'validation_status': row.validation_status,
@@ -1321,8 +1363,10 @@ def automatic_validate_finding(job_id):
         AutomaticValidation.objects.filter(pk=job.pk, status='running').update(
             status=status, result=result, finished_at=timezone.now(),
             next_attempt_at=retry_at, error='a check or AI review failed or was deferred by a cap' if failed else '')
-        activity.settle(progress, 'failed' if failed else 'done',
-                        f'Automatic validation #{job.pk} {status}: checks {check_state}; AI {ai_state}',
+        line_status, outcome = hot_validation.line_outcome(checks, check_state, ai_state, capped_only)
+        activity.settle(progress, line_status,
+                        f'Automatic validation #{job.pk} {outcome}: checks {check_state}; ' +
+                        ('no AI model is connected, so no AI review' if not ai_connected and ai_state == 'unavailable' else f'AI {ai_state}'),
                         check_state=check_state, ai_state=ai_state)
         return result
     except Exception as exc:
@@ -1492,7 +1536,7 @@ DUPLICATE_RETRIES = 3  # times a discovery message that found its own scan's loc
 
 @app.task(name="run_bbot_discovery", bind=True, queue="discovery_queue", acks_late=True, reject_on_worker_lost=True)
 def run_bbot_discovery(self, scan_id, mode="standard"):
-    """Discover the scan's target with bbot, then nuclei over what was found (see cveFeed.discovery)."""
+    """Discover the scan's target (on a Sentinel), then run the scan stages over what was found (see cveFeed.discovery)."""
     from cveFeed.discovery import run_pipeline
     from startScan.models import ScanHistory
     if self.request.id:  # a stop revokes this id; a task still queued has none yet and is skipped when it starts
@@ -1563,7 +1607,7 @@ def deep_scan_apexes():
 
     from cveFeed import activity, ledger
     from cveFeed.counts import running_window
-    from cveFeed.discovery import FAILED, HOST_PIPELINE_TASK, QUEUED, RUNNING, start_discoveries
+    from cveFeed.discovery import HOST_PIPELINE_TASK, QUEUED, RUNNING, start_discoveries
     from startScan.models import ScanHistory
     from targetApp.models import Domain
     from targetApp.shared_domains import effective_apex, is_shared_apex
@@ -1642,6 +1686,8 @@ def deep_scan_apexes():
             domain = Domain.objects.create(name=apex, project_id=project_id, insert_date=timezone.now(),
                                            description="Added for the weekly deep discovery of its subdomains")
         domains.append(domain)
+    from cveFeed.discovery import without_refused
+    domains = without_refused(domains)  # a target the private-address guard refused lately is not queued again by the weekly sweep
     scans = start_discoveries(domains, "deep", quiet=True) if domains else []
     for project_id in {d.project_id for d in domains}:
         count = sum(1 for d in domains if d.project_id == project_id)
@@ -1668,26 +1714,34 @@ def host_pipeline(self, domain_id, names, by_person=False):
 @app.task(name='assess_host', bind=True, queue='discovery_queue')
 def assess_host(self, assessment_id):
     """Execute one stored, scope-checked host assessment; the broker carries no target text."""
-    from cveFeed.host_assessment import execute
-    return execute(assessment_id, celery_id=self.request.id)
+    from cveFeed import host_assessment
+    if not host_assessment.still_queued([assessment_id]):
+        return {'status': 'dropped', 'reason': 'the assessment already ended'}  # FC-4: its row is stopped, done, failed or gone: nothing to put off
+    if host_assessment.over_share() and host_assessment.deferral_count(self.request.id) <= host_assessment.SHARE_DEFER_LIMIT:  # a scan waits and assessments already hold their share of the pool: look again shortly (the row stays queued)
+        assess_host.apply_async(args=[assessment_id], task_id=self.request.id, countdown=host_assessment.SHARE_DEFER_SECONDS, queue='discovery_queue', priority=host_assessment.ASSESS_PRIORITY)
+        return {'status': 'deferred', 'reason': 'scans are waiting and host assessments hold their share of the discovery pool'}
+    return host_assessment.execute(assessment_id, celery_id=self.request.id)
 
 
 @app.task(name='assess_hosts', bind=True, queue='discovery_queue')
 def assess_hosts(self, assessment_ids):
     """Execute a batch of stored, scope-checked host assessments of one target as one pipeline run (each host keeps its own row and outcome);
     the broker carries no target text, only row ids. The time limit is the discovery queue's, as for ``assess_host``."""
-    from cveFeed.host_assessment import execute_batch
-    return execute_batch(assessment_ids, celery_id=self.request.id)
+    from cveFeed import host_assessment
+    if not host_assessment.still_queued(assessment_ids):
+        return {'status': 'dropped', 'reason': 'the assessments already ended'}
+    if host_assessment.over_share() and host_assessment.deferral_count(self.request.id) <= host_assessment.SHARE_DEFER_LIMIT:
+        assess_hosts.apply_async(args=[assessment_ids], task_id=self.request.id, countdown=host_assessment.SHARE_DEFER_SECONDS, queue='discovery_queue', priority=host_assessment.ASSESS_PRIORITY)
+        return {'status': 'deferred', 'reason': 'scans are waiting and host assessments hold their share of the discovery pool'}
+    return host_assessment.execute_batch(assessment_ids, celery_id=self.request.id)
 
 
 @app.task(name="retest_hosts", bind=True, queue="discovery_queue")
 def retest_hosts(self, domain_id, names, source_scan_id=None, deferred_ids=None):
     """Hosts that just changed, through the host pipeline again with the CVE checks forced (see cveFeed.retest)."""
-    from datetime import timedelta
     from django.utils import timezone
-    from cveFeed.discovery import SUCCESS, run_host_pipeline
+    from cveFeed.discovery import run_host_pipeline
     from cveFeed.models import DeferredRetest
-    from cveFeed import ledger, retest
     from cveFeed.bounty_gate import Gate
     from targetApp.models import Domain
     if Gate().project_blocked(Domain.objects.values_list('project_id', flat=True).filter(pk=domain_id).first()):  # a bug bounty project that has not confirmed automated testing
@@ -1700,14 +1754,37 @@ def retest_hosts(self, domain_id, names, source_scan_id=None, deferred_ids=None)
     if rows and DeferredRetest.objects.filter(pk__in=[r.pk for r in rows], status__in=['dispatching', 'queued']).update(
             status='running', updated_at=timezone.now()) != len(rows):
         return {'status': 'skipped', 'error': 'retest request was already claimed'}
+    then = ('retest.finish', {'domain_id': domain_id, 'names': list(names), 'row_ids': [r.pk for r in rows], 'deferred_ids': list(deferred_ids or [])})
     try:
-        outcome = run_host_pipeline(domain_id, names, celery_id=self.request.id, retest=True, source_scan_id=source_scan_id)
+        outcome = run_host_pipeline(domain_id, names, celery_id=self.request.id, retest=True, source_scan_id=source_scan_id, then=then)
     except Exception as exc:
         logger.exception('retest host pipeline failed')
         outcome = {'status': 'failed', 'error': str(exc)[:200]}
+    from agentapi import stage_runs
+    if stage_runs.is_waiting(outcome):  # the stages wait on Sentinels without this worker: the callback records the outcome
+        return outcome
+    return _finish_retest(outcome, **then[1])
+
+
+def _finish_retest(outcome, domain_id, names, row_ids, deferred_ids):
+    """What ``retest_hosts`` does with the pipeline's outcome (also its continuation when the stages waited on Sentinels)."""
+    from datetime import timedelta
+    from django.utils import timezone
+    from cveFeed.discovery import SUCCESS
+    from cveFeed.models import DeferredRetest
+    from cveFeed import ledger, retest
+    from cveFeed import scanner_wait as retest_scanner_wait
+    rows = list(DeferredRetest.objects.filter(pk__in=row_ids)) if row_ids else []
     if rows:
         good = outcome.get('status') == SUCCESS and not outcome.get('error')
-        if good:
+        waited = [r.pk for r in rows if r.signature == retest_scanner_wait.SIGNATURE] if outcome.get('scanner_waited') else []
+        if waited:  # hosts queued again because a scanner was missing, and it was missing again: they stay pending, without spending an attempt
+            DeferredRetest.objects.filter(pk__in=waited).update(status='pending', attempts=0, next_attempt_at=timezone.now() + retest_scanner_wait.delay(),
+                                                                updated_at=timezone.now())
+            rows = [r for r in rows if r.pk not in set(waited)]
+        if not rows:
+            pass
+        elif good:
             DeferredRetest.objects.filter(pk__in=[r.pk for r in rows]).update(status='done', updated_at=timezone.now())
             ledger.record(retest.RETEST_SERVICE, [r.host for r in rows], rows[0].project_id, outcome.get('scan_id'))
         else:
@@ -1725,6 +1802,14 @@ def retest_hosts(self, domain_id, names, source_scan_id=None, deferred_ids=None)
     return outcome
 
 
+def _register_retest():
+    from agentapi import stage_runs
+    stage_runs.continuation('retest.finish')(_finish_retest)
+
+
+_register_retest()
+
+
 @app.task(name="retest_sweep", bind=False, queue="cve_feed_queue")
 def retest_sweep():
     from cveFeed.retest import dispatch_deferred_retests
@@ -1739,7 +1824,9 @@ def weekly_deep_nuclei():
     from overlapping another. The cursor and successful-only seven-day ledger make
     progress durable without queuing thousands of deep jobs at once.
     """
-    from cveFeed import activity, ledger, nuclei_scan
+    from cvengine_scanner import flags as scan_flags
+
+    from cveFeed import ledger, nuclei_scan
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import BackgroundCursor, HostState
     from django.db.models import Exists, OuterRef
@@ -1748,6 +1835,9 @@ def weekly_deep_nuclei():
     from django.db import transaction
     from django.utils import timezone
 
+    from agentapi import stage_runs
+    if stage_runs.enabled() and stage_runs.busy('nuclei.weekly'):  # the last host still waits on Sentinels: one deep run at a time
+        return {'status': 'busy'}
     with ledger.claim('weekly-deep-nuclei', 'global') as won:
         if not won:
             return {'status': 'busy'}
@@ -1785,45 +1875,69 @@ def weekly_deep_nuclei():
             if sub.name not in hostnames:
                 continue
             targets = [sub.name] + [f'{sub.name}:{port}' for host, port in sorted(ports)
-                                    if host == sub.name and port not in nuclei_scan.DEFAULT_PORTS][:20]
+                                    if host == sub.name and port not in scan_flags.NUCLEI_DEFAULT_PORTS][:20]
             BackgroundCursor.objects.filter(lane='weekly_nuclei').update(last_pk=sub.pk, updated_at=timezone.now())
-            run = activity.log('run_check', f'Weekly deep Nuclei checking {sub.name} ({len(targets)} targets)',
-                               project=project_id, status='running', scan_id=sub.scan_history_id)
-            try:
-                from agentapi import sentinel_dispatch
-                stream = sentinel_dispatch.wrap_nuclei_stream(sub.scan_history, 'nuclei_deep')
-                outcome = nuclei_scan.run_nuclei(sub.scan_history_id, targets=targets, service_override=target_service, stream=stream)
-                if outcome.get('error'):
-                    activity.settle(run, 'failed', f'Weekly deep Nuclei failed on {sub.name}: {str(outcome["error"])[:180]}')
-                    return {'status': 'failed', 'host': sub.name, 'error': 'Nuclei execution failed'}
-                ledger.record(host_service, [sub.name], project_id, sub.scan_history)
-                activity.settle(run, 'done', f'Weekly deep Nuclei completed on {sub.name}: {outcome.get("findings", 0)} new findings')
-                return {'status': 'done', 'host': sub.name, 'targets': len(targets), 'findings': outcome.get('findings', 0)}
-            except Exception:
-                logger.exception('weekly deep Nuclei failed on host %s', sub.pk)
-                activity.settle(run, 'failed', f'Weekly deep Nuclei failed on {sub.name}; see worker diagnostics')
-                return {'status': 'failed', 'host': sub.name, 'error': 'Nuclei execution failed'}
+            from agentapi import stage_runs
+            # the host's chunks wait on Sentinels without holding this worker (agentapi.stage_runs): the callback finishes the host
+            context = {'sub_id': sub.pk, 'targets': targets, 'host_service': host_service, 'target_service': target_service}
+            return stage_runs.run('nuclei.weekly', context, first=lambda: _weekly_deep_host(context), project=project_id,
+                                  scan=sub.scan_history_id)
         BackgroundCursor.objects.filter(lane='weekly_nuclei').update(last_pk=rows[-1].pk, updated_at=timezone.now())
         return {'status': 'no_due_host', 'reviewed': len(rows)}
+
+
+def _weekly_deep_host(context):
+    """One host of the weekly deep Nuclei pass (``weekly_deep_nuclei``), and the completion callback of one that waited on Sentinels."""
+    from cveFeed import activity, ledger, nuclei_scan
+    from reNgine import resources
+    from startScan.models import Subdomain
+    sub = Subdomain.objects.select_related('scan_history', 'target_domain').filter(pk=context['sub_id']).first()
+    if sub is None:
+        return {'status': 'skipped', 'skipped': 'the host is gone'}
+    project_id, targets = sub.target_domain.project_id, context['targets']
+    host_service, target_service = context['host_service'], context['target_service']
+    run = activity.log('run_check', f'Weekly deep Nuclei checking {sub.name} ({len(targets)} targets)',
+                       project=project_id, status='running', scan_id=sub.scan_history_id)
+    try:
+        from agentapi import sentinel_dispatch
+        stream = sentinel_dispatch.wrap_nuclei_stream(sub.scan_history, 'nuclei_deep')
+        outcome = nuclei_scan.run_nuclei(sub.scan_history_id, targets=targets, service_override=target_service, stream=stream)
+        if outcome.get('skipped'):  # no scanner could take the work: the host is not marked checked, and is due again when the cursor returns to it
+            activity.settle(run, 'done', f'Weekly deep Nuclei on {sub.name} is waiting: {outcome["skipped"]}')
+            return {'status': 'skipped', 'host': sub.name, 'skipped': outcome['skipped']}
+        if outcome.get('error'):
+            activity.settle(run, 'failed', f'Weekly deep Nuclei failed on {sub.name}: {str(outcome["error"])[:180]}')
+            return {'status': 'failed', 'host': sub.name, 'error': 'Nuclei execution failed'}
+        ledger.record(host_service, [sub.name], project_id, sub.scan_history)
+        activity.settle(run, 'done', f'Weekly deep Nuclei completed on {sub.name}: {outcome.get("findings", 0)} new findings')
+        return {'status': 'done', 'host': sub.name, 'targets': len(targets), 'findings': outcome.get('findings', 0)}
+    except resources.ScannerUnavailable as exc:  # the wrap found no scanner for this kind (and it may not run here): wait, do not fail
+        logger.warning('weekly deep Nuclei on host %s is waiting for a scanner: %s', sub.pk, exc)
+        message = f'no scanner could take this work ({exc.kind}); the host stays due until one can'
+        activity.settle(run, 'done', f'Weekly deep Nuclei on {sub.name} is waiting: {message}')
+        return {'status': 'skipped', 'host': sub.name, 'skipped': message}
+    except Exception:
+        logger.exception('weekly deep Nuclei failed on host %s', sub.pk)
+        activity.settle(run, 'failed', f'Weekly deep Nuclei failed on {sub.name}; see worker diagnostics')
+        return {'status': 'failed', 'host': sub.name, 'error': 'Nuclei execution failed'}
+
+
+def _register_weekly():
+    from agentapi import stage_runs
+    stage_runs.adapter('nuclei.weekly', queue='cve_feed_queue')(_weekly_deep_host)
+
+
+_register_weekly()
 
 
 @app.task(name="background_full_scan", bind=False, queue="cve_feed_queue")
 def background_full_scan():
     """Every few minutes: sweep all 65,535 TCP ports of the one in-scope IP that was swept longest ago (never-swept first), under
     the lowest-priority heavy job, and let only one such sweep run at a time (see cveFeed.fullscan). CVENGINE_FULLSCAN=0 turns it off."""
-    from cveFeed import fullscan, local_egress, udp_scan
+    from cveFeed import fullscan, udp_scan
     result = fullscan.run()
     udp_scan.kick()  # the UDP sweep rides this firing, on a queue and a switch of its own
-    local_egress.kick_catch_up()  # and so does the paced pass over ports the egress governor held back (only when one is owed)
     return result
-
-
-@app.task(name='egress_catch_up', bind=False, queue='cve_feed_queue')
-def egress_catch_up():
-    """Queued by the background full scan's firing when a port is owed: probe the ports the egress governor held back (port 25 over its
-    hourly budget, by default), paced by the same budget (see ``cveFeed.local_egress``)."""
-    from cveFeed import local_egress
-    return local_egress.catch_up()
 
 
 @app.task(name='udp_scan_sweep', bind=False, queue='udp_queue')
@@ -1858,11 +1972,117 @@ def check_for_updates():
     return {"status": state["status"], "latest": state["latest"]}
 
 
+FEED_SENTINELS_LOCK = "cvengine:feed_sentinels:lock"
+FEED_SENTINELS_LOCK_SECONDS = 600  # a worker that dies mid-run leaves the lock for this long
+
+
 @app.task(name="feed_sentinels", bind=False, queue="cve_feed_queue")
 def feed_sentinels():
     """Every minute: keep twice the Sentinels' slots of work queued behind what they are running (see ``cveFeed.coverage_topup.feed_sentinels``)."""
+    from django.core.cache import cache
+
     from cveFeed import coverage_topup
-    return coverage_topup.feed_sentinels()
+    # One at a time: it is scheduled every minute, and a run that takes longer than a minute must not stack another behind itself. On 11/10 four of them
+    # sat in the CVE-feed lane at once, each in the same slow query, and everything else on that lane waited behind them.
+    if not cache.add(FEED_SENTINELS_LOCK, 1, FEED_SENTINELS_LOCK_SECONDS):
+        return {'skipped': 'the previous run is still going'}
+    try:
+        return coverage_topup.feed_sentinels()
+    finally:
+        cache.delete(FEED_SENTINELS_LOCK)
+
+
+@app.task(name="work_planner_tick", bind=False, queue="cve_feed_queue", time_limit=120, soft_time_limit=100)
+def work_planner_tick(kick=False):
+    """Every minute (and 3 seconds after a planned batch ends): keep the Sentinels busy with checks that are due, when slots are idle and the queue is
+    shallow (``cveFeed.work_planner``). Deterministic, cheap, no AI. A second tick while one runs returns at once."""
+    from cveFeed import work_planner
+    return work_planner.run(kick=kick)
+
+
+@app.task(name="work_planner_census", bind=False, queue="cve_feed_queue", time_limit=900, soft_time_limit=840)
+def work_planner_census():
+    """Every five minutes: count the checks that are due, per project (``cveFeed.work_planner.census``), for the planner's tick and the Scanners page.
+    Read-only."""
+    from cveFeed import work_planner
+    data = work_planner.census()
+    return {kind: sum(e['kinds'][kind]['due'] for e in data['projects'].values()) for kind in work_planner.specs()}
+
+
+@app.task(name="work_planner_batch", bind=False, queue="planner_queue", time_limit=7200, soft_time_limit=7000)
+def work_planner_batch(batch_id):
+    """One batch of due checks the planner chose, run through the same entry the scan stage uses (``cveFeed.work_planner.execute_batch``): one Sentinel task
+    at a time, waited for here. When it ends the planner is asked for the next batch."""
+    from cveFeed import work_planner
+    try:
+        return work_planner.execute_batch(batch_id)
+    finally:
+        work_planner.kick()
+
+
+@app.task(name="ensure_builtin_scanner", bind=False, queue="cve_feed_queue")
+def ensure_builtin_scanner():
+    """Every few minutes: keep the built-in scanner's enrollment ready (a no-op unless CVENGINE_BUILTIN_SCANNER is on; see ``agentapi.builtin_scanner``)."""
+    from agentapi import builtin_scanner, sentinel_autoupdate
+    try:
+        sentinel_autoupdate.sweep()  # a Sentinel asked to update that never came back is flagged here (it sends no heartbeat that would settle the request)
+    except Exception:  # noqa: BLE001 - never stops the enrollment from being kept ready
+        logger.exception('the Sentinel update sweep failed')
+    return builtin_scanner.ensure()
+
+
+@app.task(name="ensure_reviewer_token", bind=False, queue="cve_feed_queue")
+def ensure_reviewer_token():
+    """Every few minutes: keep the AI reviewer container's token written and current (``agentapi.builtin_reviewer``; CVENGINE_REVIEWER=0
+    revokes it)."""
+    from agentapi import builtin_reviewer
+    return builtin_reviewer.ensure()
+
+
+@app.task(name="status_warm_rows", bind=False, queue="cve_feed_queue", time_limit=600, soft_time_limit=540)
+def status_warm_rows(project_ids, token=None):
+    """Count the system status's project rows that did not fit its time budget (right after a restart) and keep them: ``agentapi.system_status.warm_project_rows``."""
+    from agentapi import system_status
+    return system_status.warm_project_rows(project_ids, token)
+
+
+@app.task(name="reviewer_ops_checks", bind=False, queue="cve_feed_queue", time_limit=600, soft_time_limit=540)
+def reviewer_ops_checks():
+    """Every half hour: the operations checks of docs/AI-REVIEWER.md, raising and resolving the admin alerts (``cveFeed.reviewer``). No AI is
+    involved; the reviewer container adds its diagnosis a few times a day."""
+    from cveFeed import reviewer
+    return reviewer.run_ops_checks()
+
+
+@app.task(name="apply_ai_job", bind=False, queue="cve_feed_queue", time_limit=900, soft_time_limit=840)
+def apply_ai_job(job_id):
+    """The AI reviewer container answered one of the pipeline's AI jobs: continue its stage (``cveFeed.ai_jobs.apply``)."""
+    from cveFeed import ai_jobs
+    return ai_jobs.apply(job_id)
+
+
+@app.task(name="ai_jobs_housekeeping", bind=False, queue="cve_feed_queue", time_limit=900, soft_time_limit=840)
+def ai_jobs_housekeeping():
+    """Every five minutes: leases that ran out go back to the queue, answers whose task was lost are applied, jobs never answered within
+    a week expire and their stage asks again (``cveFeed.ai_jobs.housekeeping``)."""
+    from cveFeed import ai_jobs
+    return ai_jobs.housekeeping()
+
+
+@app.task(name="host_review_sweep", bind=False, queue="cve_feed_queue", time_limit=900, soft_time_limit=840)
+def host_review_sweep():
+    """Every ten minutes: queue the AI review of the hosts whose state changed (``cveFeed.host_review.sweep``): a few hosts a run, within the daily caps,
+    nothing while scanning is paused. The reviewer container asks the model; a Celery task applies the answer."""
+    from cveFeed import host_review
+    return host_review.sweep()
+
+
+@app.task(name="validate_template_drafts", bind=False, queue="cve_feed_queue", time_limit=900, soft_time_limit=840)
+def validate_template_drafts():
+    """Every five minutes: AI-written template drafts go through the automatic gates (``cveFeed.templatevalidate``): they are validated,
+    rejected with a reason, or expired. Queues AI jobs for the reviewer container and Sentinel tasks, runs nothing itself."""
+    from cveFeed import templatevalidate
+    return templatevalidate.run_pending()
 
 
 @app.task(name="refresh_sentinel_version", bind=False, queue="cve_feed_queue")
@@ -1929,15 +2149,9 @@ def author_cve_detections():
     """Every 30 minutes: write the shared detection record of every CVE that has none (hottest first, so new CVEs and the back
     catalogue are covered the same way), refresh rules-written checks whose CVE changed, and spend the daily AI budget on the
     CVEs attackers use. See cveFeed.detection and cveFeed.detection_author."""
-    from cveFeed import detection_author
-    from reNgine.ai_settings import get_configured_provider
-    try:
-        provider = get_configured_provider()
-    except Exception:  # noqa: BLE001 - AI is optional; the rules author still runs
-        logger.warning("could not build the AI provider for detection authoring", exc_info=True)
-        provider = None
+    from cveFeed import ai_jobs, detection_author
     rules_first = detection_author.author_all_rules()  # the whole back catalogue by itself after an update, not a small batch per run
-    out = detection_author.author_pending(provider)
+    out = detection_author.author_pending(ai_jobs.ai_on())  # the model's questions are queued for the AI reviewer container
     out['rules_first'] = rules_first
     from cveFeed import locality
     locality.refresh(limit=100000)
@@ -1948,50 +2162,39 @@ def author_cve_detections():
     return out
 
 
-@app.task(name="build_cve_seed", bind=False, queue="cve_feed_queue")
-def build_cve_seed():
-    """Write the whole catalog with its shared detection records to the exports folder (Settings > CVE seed), ready to publish."""
-    import os
-    from django.core.cache import cache
-    from cveFeed import activity, detection_author, seed
-    from cveFeed.settings_api import SEED_BUILDING, SEED_NAME, seed_dir
-    handle = activity.log('inventory', 'Building the CVE seed', status='running')
-    try:
-        while detection_author.author_rules(batch=5000):
-            pass
-        detection_author.refresh_rules(batch=5000)
-        detection_author.refresh_client_library_records(seconds=600)  # an exported seed carries the corrected library records
-        os.makedirs(seed_dir(), exist_ok=True)
-        manifest = seed.export_seed(os.path.join(seed_dir(), SEED_NAME))
-        activity.settle(handle, 'done', message=f"Built the CVE seed: {manifest['count']} CVEs, {manifest['with_detection']} with a detection record")
-        return {k: manifest[k] for k in ('count', 'with_detection', 'bytes')}
-    except Exception:
-        activity.settle(handle, 'failed', message='Building the CVE seed failed; see the worker log')
-        raise
-    finally:
-        cache.delete(SEED_BUILDING)
+@app.task(name="build_cve_seed", bind=False, queue="cve_feed_queue", time_limit=3600, soft_time_limit=3300)
+def build_cve_seed(user_id=None):
+    """Settings > CVE catalog seed > Create seed file: write the whole catalog with its shared detection records to the private seed folder,
+    scrubbed of anything of this instance (cveFeed.seed_scrub). The page polls the progress this records (cveFeed.seed_admin)."""
+    from cveFeed import seed_admin
+    return {"count": seed_admin.run_export(user_id)}
+
+
+@app.task(name="import_cve_seed_file", bind=False, queue="cve_feed_queue", time_limit=3600, soft_time_limit=3300)
+def import_cve_seed_file(path, user_id=None, verified=False):
+    """Settings > CVE catalog seed > Import a seed file: the upload an App Admin made, checked and imported like the command line does."""
+    from cveFeed import seed_admin
+    return {"created": seed_admin.run_import(path, user_id, verified)}
 
 
 @app.task(name="write_cve_guidance_now", bind=False, queue="cve_feed_queue")
 def write_cve_guidance_now(count=200):
     """An administrator asked the model to write guidance for the next ``count`` CVEs now (Settings > AI model), whatever is left of the
     day's budget. Matchable CVEs first. Works in rounds of 50 so progress shows and a stop request is honoured between rounds."""
-    from cveFeed import activity, detection_author
-    from reNgine.ai_settings import get_configured_provider
-    provider = get_configured_provider()
-    if provider is None:
+    from cveFeed import activity, ai_jobs, detection_author
+    if not ai_jobs.ai_on():
         return {'written': 0, 'error': 'no AI provider is configured'}
     detection_author.author_rules(batch=5000)
     done, count = 0, max(1, min(int(count), 5000))
     handle = activity.log('inventory', f'Writing CVE guidance for up to {count} CVEs', status='running')
     try:
         while done < count:
-            wrote = detection_author.author_with_ai(provider, per_run=min(50, count - done), workers=4, within_budget=False)
+            wrote = detection_author.author_with_ai(per_run=min(50, count - done), within_budget=False)
             if not wrote:
                 break
             done += wrote
     finally:
-        activity.settle(handle, 'done', message=f'Wrote CVE guidance for {done} CVEs')
+        activity.settle(handle, 'done', message=f'Asked the AI reviewer container for CVE guidance on {done} CVEs')
     from cveFeed import locality
     locality.refresh()
     locality.close_local_matches()
@@ -2010,6 +2213,8 @@ def report_resources():
     tunables.reconcile()  # republish the other configMaxxing tunables, so a flushed Redis heals (never raises)
     from cveFeed import autotune
     autotune.reconcile()  # republish the auto-tuned numbers (empty unless the mode is Auto), so a flushed Redis heals (never raises)
+    from cveFeed import db_stats
+    db_stats.analyze_if_needed()  # table statistics lost in a crash or never refreshed (one cheap read; never raises)
     from cveFeed import scoring
     scoring.rescore_if_heat_cap_changed()  # a heat policy saved on configMaxxing reaches the stored host scores (one GETSET; never raises)
     try:  # ...and the switch pages nothing: what is fire under the new rule is marked as announced (one cheap read when nothing changed)
@@ -2033,7 +2238,12 @@ def apply_scan_concurrency():
     """After a save on Settings, configMaxxing: resize the running discovery worker to the saved value with celery's ``autoscale`` remote
     control (the other numbers are read live by the workers). report_resources does the same every 30 seconds."""
     from cveFeed import scan_concurrency
-    return scan_concurrency.apply_discovery()
+    result = scan_concurrency.apply_discovery()
+    try:
+        scan_concurrency.apply_lanes()
+    except Exception:  # noqa: BLE001 - the 30 second tick tries the lanes again
+        pass
+    return result
 
 
 PRUNE_ROUNDS, PRUNE_BATCH = 20, 5000
@@ -2065,11 +2275,17 @@ def prune_asset_changes():
 @app.task(name="reap_stuck_jobs", bind=False, queue="cve_feed_queue")
 def reap_stuck_jobs():
     """Every 15 minutes: fail host assessments, validation jobs, scans and AI activity rows a lost worker left queued or running (cveFeed.reaper)."""
+    from cveFeed import broker_recovery
+    with broker_recovery.shared_probe():  # the broker and the workers are asked once for the whole run, not once for each of its decisions
+        return _reap_stuck_jobs()
+
+
+def _reap_stuck_jobs():
     from cveFeed import activity, reaper
     counts = reaper.reap()
     if counts:
         activity.log('validate', 'Expired stuck jobs a restarted worker left behind: '
-                     + ', '.join(f'{n} {key.replace(":", " ")}' for key, n in counts.items()), status='failed', **counts)
+                     + ', '.join(f'{n} {key.replace(":", " ")}' for key, n in counts.items()), status='notice', **counts)  # clean-up after a restart, not a failure of anything
     orphaned = reaper.expire_orphaned_running()
     if orphaned:
         activity.log('discovery', 'Closed scans/assessments a restarted worker left running with no Celery task behind: '
@@ -2080,12 +2296,45 @@ def reap_stuck_jobs():
         activity.log('discovery', f'Queued {again} host assessment{"s" if again != 1 else ""} again: their worker message was lost, most likely in a restart',
                      status='done', requeued=again)
         counts['HostAssessment:requeued'] = again
+    from agentapi import stage_runs
+    again_runs = stage_runs.tick()  # the minute tick's work too, in case beat itself was down: no stage run is left behind by a restart
+    if again_runs:
+        counts.update({f'StageRun:{key}': n for key, n in again_runs.items()})
     scans = reaper.redispatch_queued_scans()
     if scans:
         activity.log('discovery', f'Queued {scans} discovery scan{"s" if scans != 1 else ""} again: their worker message was lost, most likely in a restart',
                      status='done', requeued=scans)
         counts['ScanHistory:requeued'] = scans
     return counts
+
+
+@app.task(name='stage_run_resume', bind=False, queue='discovery_queue')
+def stage_run_resume(run_id):
+    """The completion callback of a stage that waited on Sentinels without its worker: continue it (``agentapi.stage_runs.resume``). Queued on
+    the queue of the stage's own adapter (the discovery queue for a pipeline)."""
+    from agentapi import stage_runs
+    return stage_runs.resume(run_id)
+
+
+@app.task(name='stage_run_drive', bind=False, queue='cve_feed_queue')
+def stage_run_drive(run_id, guarded=False):
+    """Keep the claim, queue and completion budgets of a waiting stage, as its blocking wait did (``agentapi.stage_runs.drive``). ``guarded``: this was the
+    run's one pending delayed drive (``stage_runs._schedule_drive``); it is running now, so the next may be scheduled."""
+    from agentapi import stage_runs
+    if guarded:
+        from django.core.cache import cache
+        try:
+            cache.delete(stage_runs.drive_key(run_id))
+        except Exception:  # noqa: BLE001 - the key expires on its own
+            pass
+    return stage_runs.drive(run_id)
+
+
+@app.task(name='stage_runs_tick', bind=False, queue='cve_feed_queue')
+def stage_runs_tick():
+    """Every minute: re-drive the stage runs a restart or a lost message left behind (``agentapi.stage_runs.tick``)."""
+    from agentapi import stage_runs
+    return stage_runs.tick()
 
 
 BOOTSTRAP_LOCK = "cvengine:first-run-bootstrap"
@@ -2224,16 +2473,16 @@ def prune_scan_history():
 
 @app.task(name='check_os_path', bind=False, queue='cve_feed_queue', time_limit=300, soft_time_limit=240)
 def check_os_path():
-    """Daily: measure whether the network path this worker scans from loses nmap's malformed OS-detection probes (cveFeed.path_probe), and
-    keep the verdict where operating system detection reads it (cveFeed.os_detection). Runs in the scanning container, so it measures the
-    path the scans take. Two packets to each of at most eight hosts the scans already reach; waits while scanning is paused."""
+    """Daily: measure whether the network path the built-in scanner scans from loses a scanner's malformed OS-detection probes (cveFeed.path_probe, a
+    ``path_probe`` task on the built-in scanner), and keep the verdict where operating system detection reads it (cveFeed.os_detection). Two
+    packets to each of at most eight hosts the scans already reach; waits for the scanner when it cannot take the work."""
     from cveFeed import os_detection, path_probe
     return os_detection.record_path(path_probe.check())
 
 
-@app.task(name='generate_report', bind=True, queue='cve_feed_queue', time_limit=3600, soft_time_limit=3300)
+@app.task(name='generate_report', bind=True, queue='report_queue', time_limit=3600, soft_time_limit=3300)
 def generate_report(self, export_id):
-    """Make one queued PDF report (cveFeed.report_export): read for the project as the user who asked, rendered in a child process,
+    """Make one queued PDF report (cveFeed.report_export, on ``report_queue``): read for the project as the user who asked, rendered in a child process,
     written under the report directory with a random name. The broker carries only the row id."""
     from cveFeed import report_export
     return report_export.execute(export_id, celery_id=self.request.id)

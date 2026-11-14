@@ -54,6 +54,8 @@ def set_credential(ctx, slug, target_id, body):
     from cveFeed.admin_api import audit
     from cveFeed.models import AuthCredential
     project = _admin(ctx, slug, write=True)
+    if ctx.token is not None:  # an API token or MCP call: a stored sign-in makes the scanners send credentials to the target, so only a person stores one (deleting one stays open)
+        raise ApiError(403, 'a stored sign-in makes the scanners send credentials to the target, so only a person stores one, in the web interface (the target\'s sign-in); a token may delete one')
     domain = _target(project, target_id)
     body = body if isinstance(body, dict) else {}
     try:
@@ -63,7 +65,7 @@ def set_credential(ctx, slug, target_id, body):
         headers = auth_checks.clean_headers(body.get('headers'), stored)
         headers = [list(pair) for pair in stored] if headers is None else headers
         cookie = auth_checks.clean_cookie(body.get('cookie_secret')) or ''
-        if not cookie and not body.get('clear_cookie') is True:
+        if not cookie and body.get('clear_cookie') is not True:
             cookie = auth_checks.stored_cookie(existing) if existing else ''
         if not headers and not cookie:
             raise auth_checks.CredentialError('give at least one header or a cookie')

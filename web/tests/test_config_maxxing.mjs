@@ -69,11 +69,13 @@ test('only the boxes that differ from what is in effect are sent, and one bad bo
 
 test('each row says where its number comes from, the default, the environment value and who set it', () => {
   assert.equal(L.sourceLabel(field()), 'Built-in default');
-  assert.equal(L.sourceLabel(field({source: 'environment', env_value: 3})), 'From the environment (HEAVY_MAX_NMAP=3)');
+  assert.equal(L.sourceLabel(field({source: 'environment', env_value: 3})), 'Set on the server');
   assert.equal(L.sourceLabel(field({source: 'admin'})), 'Saved here');
   const lines = L.originLines(field({source: 'admin', value: 4, env_value: 3, set_by: 'alice', set_at: '2026-10-31T10:00:00Z'}), (d) => `<${d}>`);
-  assert.deepEqual(lines, ['Default 2', 'HEAVY_MAX_NMAP=3', 'Set by alice on <2026-10-31T10:00:00Z>']);
-  assert.deepEqual(L.originLines(field()), ['Default 2', 'HEAVY_MAX_NMAP is not set']);
+  assert.deepEqual(lines, ['Default 2', 'Set by alice on <2026-10-31T10:00:00Z>']);
+  assert.deepEqual(L.originLines(field()), ['Default 2']);
+  assert.equal(L.serverSetting(field()), 'HEAVY_MAX_NMAP is not set');
+  assert.equal(L.serverSetting(field({env_value: 3})), 'HEAVY_MAX_NMAP=3');
   assert.equal(L.rangeText(field()), '1 to 8');
 });
 
@@ -101,7 +103,8 @@ test('the memory warning follows the typed numbers like the server does', () => 
   assert.match(text, /9600 MB/);
   assert.match(text, /more than 2 times the 3072 MB/);
   assert.deepEqual(L.memoryPlan({nmap: 4, nuclei: 2, 'bbot-deep': 1}, costs, 3072, defaults).warnings, []);
-  assert.match(text, /CELERY_MEM_LIMIT/);
+  assert.match(text, /second machine/);
+  assert.doesNotMatch(text, /CELERY_MEM_LIMIT/);
   assert.match(text, /second machine/);
   const alone = L.memoryPlan({nmap: 2, nuclei: 4, 'bbot-deep': 1}, costs, 3000, defaults, {nuclei: 'nuclei'});
   assert.ok(alone.warnings.some((w) => w.startsWith('nuclei at 4') && w.includes('by itself')));

@@ -17,13 +17,14 @@ from agentapi.auth import create_token
 from cveFeed import hygiene as hy
 from cveFeed import hygiene_rating as hr
 from cveFeed import mailfail as mf
-from cveFeed import testssl_scan
+from cveFeed import tls_audit
 from cveFeed.models import HostLabel, HygieneFinding, RouteAuth
 from cveFeed.threat import host_heat
 from dashboard.models import Org, Project, ProjectMembership
 from startScan.models import Subdomain
 from targetApp.models import Domain
 from tests.test_discovery_mode import call, tool
+from tests import hygiene_harness
 
 NOW = datetime.datetime(2026, 11, 4, 12, 0, tzinfo=datetime.timezone.utc)
 
@@ -93,10 +94,10 @@ class VendorEndpointTests(Base):
 		self.host('msoid.example.com', 'clientconfig.microsoftonline-p.net')
 		HygieneFinding.objects.create(domain=self.domain, host='msoid.example.com:443', check_name='tlsa_breach', severity=hy.MEDIUM,
 									  title='msoid.example.com:443: BREACH may apply')
-		result = testssl_scan.evaluate([{'id': 'BREACH', 'severity': 'MEDIUM', 'cve': 'CVE-2013-3587',
+		result = tls_audit.evaluate([{'id': 'BREACH', 'severity': 'MEDIUM', 'cve': 'CVE-2013-3587',
 										 'finding': "potentially VULNERABLE, gzip HTTP compression detected - only supplied '/' tested"}],
 									   'msoid.example.com:443')
-		testssl_scan.store(self.domain, 'msoid.example.com', 443, result, 'msoid.example.com:443')
+		tls_audit.store(self.domain, 'msoid.example.com', 443, result, 'msoid.example.com:443')
 		row = HygieneFinding.objects.get(host='msoid.example.com:443', check_name='tlsa_breach')
 		self.assertEqual(row.status, 'resolved')  # Microsoft's sign-in service, not a client asset
 
@@ -161,7 +162,7 @@ class BreachTests(Base):
 
 	def breach(self, host):
 		where = f'{host}:443'
-		testssl_scan.store(self.domain, host, 443, testssl_scan.evaluate([self.ITEM], where), where)
+		tls_audit.store(self.domain, host, 443, tls_audit.evaluate([self.ITEM], where), where)
 		return HygieneFinding.objects.get(host=where, check_name='tlsa_breach')
 
 	def route(self, host, state='open', cookies=()):
@@ -212,12 +213,6 @@ class DmarcReportAuthorizationTests(SimpleTestCase):
 			found = mf.evaluate_report_authorization('example.com', 'reports.example.net', [], policy)
 			self.assertEqual([(f.check, f.severity) for f in found], [('dmarc_report_unauthorized', severity)], policy)
 
-	def test_review_reads_the_policy_from_the_record(self):
-		zone = {}
-		fetch = lambda n: zone.get(n, [])  # noqa: E731
-		found = mf.review('example.com', True, [], ['v=DMARC1; p=reject; rua=mailto:d@reports.example.net'], {}, fetch, lambda n, t: [])
-		self.assertEqual([f.severity for f in found if f.check == 'dmarc_report_unauthorized'], [hy.INFO])
-
 
 # ----------------------------------------------------------------------------- item 19: two resolvers or two runs
 
@@ -259,10 +254,10 @@ class DnsConsensusTests(Base):
 
 	def emailer(self, askers, zone=None):
 		zone = self.ZONE if zone is None else zone
-		return functools.partial(hy.email_findings, fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX', askers=askers)
+		return functools.partial(hygiene_harness.email_findings, fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX', askers=askers)
 
 	def sweep(self, emailer):
-		hy.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=emailer, mx=lambda n, t: False)
+		hygiene_harness.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=emailer, mx=lambda n, t: False)
 		return {r.check_name: r for r in HygieneFinding.objects.filter(domain=self.domain, check_name__in=hy.ABSENCE_CHECKS)}
 
 	def test_a_one_off_failure_never_opens_a_finding(self):
@@ -281,7 +276,7 @@ class DnsConsensusTests(Base):
 	def test_one_resolver_missing_the_record_is_outvoted_by_one_that_has_it(self):
 		stale = dict(self.ZONE)
 		del stale['_dmarc.example.com']
-		findings, _ = hy.email_findings('example.com', fetch=lambda n: self.ZONE.get(n, []), mx=lambda n, t: t == 'MX',
+		findings, _ = hygiene_harness.email_findings('example.com', fetch=lambda n: self.ZONE.get(n, []), mx=lambda n, t: t == 'MX',
 										askers=[('system', asker(stale)), ('192.0.2.53', asker(self.ZONE))])
 		self.assertNotIn('dmarc_missing', checks(findings))
 
@@ -308,41 +303,19 @@ class DnsConsensusTests(Base):
 		row = self.sweep(self.emailer(lonely, zone=zone))['dmarc_missing']
 		self.assertEqual((row.status, row.remediation_status), ('open', 'open'))
 
-	def test_ask_txt_classifies_answers_and_follows_a_cname(self):
-		class Rdata:
-			def __init__(self, text):
-				self.strings = [text.encode()]
-
-		class Answer(list):
-			canonical_name = 'mail1.example.net.'
-
-		class Resolver:
-			def __init__(self, outcome):
-				self.outcome = outcome
-
-			def resolve(self, name, rtype):
-				if isinstance(self.outcome, Exception):
-					raise self.outcome
-				return self.outcome
-		got = hy.ask_txt(Resolver(Answer([Rdata('v=spf1 include:_spf.example.net ~all')])), 'help.example.com')
-		self.assertEqual(got, {'result': 'answer', 'records': ['v=spf1 include:_spf.example.net ~all'], 'cname': 'mail1.example.net'})
-		self.assertEqual(hy.ask_txt(Resolver(dns.resolver.NXDOMAIN()), 'x.example.com')['result'], 'nxdomain')
-		self.assertEqual(hy.ask_txt(Resolver(dns.resolver.NoAnswer()), 'x.example.com')['result'], 'noanswer')
-		self.assertEqual(hy.ask_txt(Resolver(dns.exception.Timeout()), 'x.example.com')['result'], 'error')
-		self.assertEqual(hy.ask_txt(Resolver(dns.resolver.NoNameservers()), 'x.example.com')['result'], 'error')
 
 	def real_dns_emailer(self, zone):
-		"""email_findings with the resolvers ``dns_askers()`` builds (the installation's setting), over fake DNS objects."""
-		return lambda name: hy.email_findings(name, fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX', askers=hy.dns_askers())
+		"""the scanner library's email_findings with the resolvers its ``dns_askers`` builds (the installation's setting), over fake DNS objects."""
+		return lambda name: hygiene_harness.email_findings(name, fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX', askers=hygiene_harness.scanner_hygiene.dns_askers(hy.confirm_resolvers()))
 
 	def test_by_default_no_third_party_resolver_is_asked_and_a_missing_record_needs_two_runs(self):
 		zone = {'example.com': ['v=spf1 -all']}
 		system = FakeResolver(zone)
-		with mock.patch.dict('os.environ', {}), mock.patch.object(hy, '_resolver', return_value=system), \
+		with mock.patch.dict('os.environ', {}), mock.patch.object(hygiene_harness.scanner_hygiene, '_resolver', return_value=system), \
 				mock.patch('dns.resolver.Resolver', side_effect=AssertionError('no extra resolver may be built')) as extra:
 			os_environ_without('CVENGINE_HYGIENE_CONFIRM_RESOLVERS')
 			self.assertEqual(hy.confirm_resolvers(), ())
-			self.assertEqual([label for label, _ in hy.dns_askers()], ['system'])
+			self.assertEqual([label for label, _ in hygiene_harness.scanner_hygiene.dns_askers(hy.confirm_resolvers())], ['system'])
 			row = self.sweep(self.real_dns_emailer(zone))['dmarc_missing']
 			self.assertEqual((row.status, [o['resolver'] for o in row.evidence['dns']]), (hy.PENDING, ['system']))
 			row = self.sweep(self.real_dns_emailer(zone))['dmarc_missing']
@@ -358,7 +331,7 @@ class DnsConsensusTests(Base):
 			built.append(FakeResolver(zone))
 			return built[-1]
 		with mock.patch.dict('os.environ', {'CVENGINE_HYGIENE_CONFIRM_RESOLVERS': '192.0.2.53,198.51.100.53'}), \
-				mock.patch.object(hy, '_resolver', return_value=system), mock.patch('dns.resolver.Resolver', side_effect=build):
+				mock.patch.object(hygiene_harness.scanner_hygiene, '_resolver', return_value=system), mock.patch('dns.resolver.Resolver', side_effect=build):
 			row = self.sweep(self.real_dns_emailer(zone))['dmarc_missing']
 		self.assertEqual((row.status, row.evidence['dns_confirmed']), ('open', True))
 		self.assertEqual([o['resolver'] for o in row.evidence['dns']], ['system', '192.0.2.53'])
@@ -370,14 +343,14 @@ class DnsConsensusTests(Base):
 		with mock.patch.dict('os.environ', {'CVENGINE_HYGIENE_CONFIRM_RESOLVERS': ''}):
 			self.assertEqual(hy.confirm_resolvers(), ())
 		with mock.patch.dict('os.environ', {'CVENGINE_HYGIENE_CONFIRM_RESOLVERS': '192.0.2.53, 198.51.100.53'}):
-			self.assertEqual([label for label, _ in hy.dns_askers()], ['system', '192.0.2.53', '198.51.100.53'])
+			self.assertEqual([label for label, _ in hygiene_harness.scanner_hygiene.dns_askers(hy.confirm_resolvers())], ['system', '192.0.2.53', '198.51.100.53'])
 
 
 # ----------------------------------------------------------------------------- item 20: organizational domain, sp=, CNAMEs, one row
 
 class OrganizationalDomainTests(Base):
 	def findings(self, name, zone, askers=None):
-		return hy.email_findings(name, fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX', askers=askers)[0]
+		return hygiene_harness.email_findings(name, fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX', askers=askers)[0]
 
 	def test_a_subdomain_covered_by_the_parents_policy_has_no_dmarc_finding(self):
 		"""Fixture shape: a mail subdomain with no record of its own under a parent p=quarantine; sp=quarantine."""
@@ -407,14 +380,25 @@ class OrganizationalDomainTests(Base):
 		self.assertNotIn('spf_missing', checks(found))
 		self.assertIn('spf_softfail', checks(found))
 
+	def test_the_names_a_parent_finding_shows_do_not_depend_on_the_order_they_were_found_in(self):
+		from cveFeed.hygiene import Finding, merge_findings
+		names = [f'm{i}.example.com' for i in range(20)]
+		def run(order):
+			found = [Finding('dmarc_none', 2, 'DMARC policy none', 'p=none', 'example.com', {'inherited_from': 'example.com', 'covers': [n]}) for n in order]
+			return merge_findings(found)[0]
+		forward, backward = run(names), run(list(reversed(names)))
+		self.assertEqual(forward.detail, backward.detail)
+		self.assertEqual(forward.evidence['covers'], backward.evidence['covers'])
+		self.assertIn('m0.example.com', forward.detail)
+
 	def test_a_p_none_parent_is_one_finding_not_one_per_subdomain(self):
 		zone = {'_dmarc.example.com': ['v=DMARC1; p=none; rua=mailto:d@example.com'], 'example.com': ['v=spf1 -all']}
 		names = [f'm{i}.example.com' for i in range(20)]
 		for name in names:
 			self.host(name)
 			zone[name] = ['v=spf1 -all']
-		emailer = functools.partial(hy.email_findings, fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX')
-		hy.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=emailer, mx=lambda n, t: t == 'MX')
+		emailer = functools.partial(hygiene_harness.email_findings, fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX')
+		hygiene_harness.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=emailer, mx=lambda n, t: t == 'MX')
 		rows = HygieneFinding.objects.filter(domain=self.domain, status='open', check_name='dmarc_none')
 		self.assertEqual([r.host for r in rows], ['example.com'])
 		self.assertEqual(sorted(rows[0].evidence['covers']), sorted(names))

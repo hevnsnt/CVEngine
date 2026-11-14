@@ -1,0 +1,17 @@
+{
+ "kind": "nuclei_validate",
+ "name": "nuclei_validate_bad",
+ "payload": {
+  "fixture_note": "",
+  "fixture_ok": null,
+  "outcome": "done",
+  "output": "WARNING: sonic/ast only supports (go1.17~1.26 and amd64 CPU) or (go1.20~1.26 and arm64 CPU), but your environment is not suitable and will fallback to encoding/json\n[\u001b[1;31mFTL\u001b[0m] Could not validate templates: errors occurred during template validation",
+  "valid": false
+ },
+ "sentinel_seconds": 0.1,
+ "target": {
+  "mode": "validate",
+  "template": "id: x\ninfo: [\n"
+ },
+ "tool_rows": null
+}

@@ -2,7 +2,7 @@ import json
 from unittest import mock
 
 from django.contrib.auth.models import User
-from django.test import Client, TestCase
+from django.test import TestCase
 from django.utils import timezone
 
 from agentapi.auth import create_token
@@ -12,18 +12,19 @@ from scanEngine.models import EngineType
 from startScan.models import ScanActivity, ScanHistory, Subdomain
 from targetApp.models import Domain
 from tests.test_agentapi import call, rpc
+from tests.port_stage_stub import port_double
 
 
 def _stages(**over):
 	"""Stage doubles, so no scanner binary runs."""
 	nmap = []
 
-	def runner(targets, flags, timeout):
+	def runner(targets):
 		nmap.append(list(targets))
 		return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'  # an empty report is a failed scan
 	kwargs = dict(resolver=lambda names: {(n, '192.0.2.%d' % (10 + i)) for i, n in enumerate(sorted(names))},
-		light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), nmap_runner=runner,
-		db_exposure_checks={}, provider=None, route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''})
+		light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]), port_stage_run=port_double(runner),
+		db_exposure_checks={}, provider=None)
 	kwargs.update(over)
 	return nmap, kwargs
 
@@ -41,7 +42,7 @@ class HostPipelineTests(TestCase):
 
 	def test_new_hosts_are_resolved_recorded_and_taken_through_the_stages_without_bbot(self):
 		nmap, kwargs = _stages()
-		with mock.patch('reNgine.bbot.stream_events', side_effect=AssertionError('bbot must not run')):
+		with mock.patch('cveFeed.discovery._discover_on_sentinel', side_effect=AssertionError('the discovery must not run')):
 			out = discovery.run_host_pipeline(self.domain.id, ['WWW.hp.test', 'api.hp.test', 'evil.example.com', 'hp.test.evil.com'], **kwargs)
 		scan = ScanHistory.objects.get(pk=out['scan_id'])
 		self.assertEqual(scan.scan_status, discovery.SUCCESS)
@@ -72,9 +73,9 @@ class HostPipelineTests(TestCase):
 		exposure.assert_not_called()
 
 	def test_a_stage_failure_does_not_stop_the_pipeline(self):
-		def boom(targets, flags, timeout):
-			raise RuntimeError('nmap exploded')
-		_, kwargs = _stages(nmap_runner=boom)
+		def boom(targets):
+			raise RuntimeError('the port stage exploded')
+		_, kwargs = _stages(port_stage_run=port_double(boom))
 		out = discovery.run_host_pipeline(self.domain.id, ['www.hp.test'], **kwargs)
 		scan = ScanHistory.objects.get(pk=out['scan_id'])
 		self.assertEqual(scan.scan_status, discovery.SUCCESS)  # the host it found stands; the failed stage is on record

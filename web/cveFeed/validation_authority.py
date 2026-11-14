@@ -8,7 +8,7 @@ def require_authority(job):
     from dashboard.models import ApiToken, Project
     from tenancy.middleware import TenancyMiddleware
 
-    if job.source == 'automatic':
+    if job.source in ('automatic', 'host_review'):  # no person behind either: the worker's unattended gates (bug bounty, scope) apply
         return
     if job.source != 'manual':
         raise ApiError(403, 'legacy validation authority is unavailable; submit a new request')

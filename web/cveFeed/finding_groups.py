@@ -49,7 +49,7 @@ _SHA256 = re.compile(r'^[0-9a-f]{64}$')
 
 # Client-side JavaScript libraries and frameworks: code the browser downloads from the page, so the same version on sibling hosts is
 # the same file. An explicit allow-list (names normalised by ``library_key``): an unknown product never groups. Every name of
-# cveFeed.fingerprint's "javascript library" category is here; its "framework" category is NOT taken whole, it mixes React and Vue
+# cvengine_scanner.fingerprint's "javascript library" category is here; its "framework" category is NOT taken whole, it mixes React and Vue
 # with Django, Laravel, Express, Rails and Next.js, which run on the server.
 CLIENT_SIDE_LIBRARIES = frozenset({
     'jquery', 'jquery ui', 'jqueryui', 'jquery migrate', 'jquery mobile', 'jquery validation', 'jquery validate', 'jquery form',
@@ -75,7 +75,7 @@ def library_key(product):
 
 
 def is_client_side_library(product):
-    from cveFeed.fingerprint import categorize
+    from cvengine_scanner.fingerprint import categorize
     key = library_key(product)
     return bool(key) and (key in CLIENT_SIDE_LIBRARIES or categorize(str(product or '')) == 'javascript library')
 _EPOCH = datetime(1970, 1, 1, tzinfo=dt_timezone.utc)

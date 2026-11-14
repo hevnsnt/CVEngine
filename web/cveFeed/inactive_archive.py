@@ -25,7 +25,7 @@ def candidates(now=None):
 
 def check_one(row, *, resolver=None, tcp_probe=None, now=None):
     from cveFeed import activity
-    from cveFeed.archive_rediscovery import observe, resolve_one
+    from cveFeed.archive_rediscovery import observe
     from cveFeed.exclusions import is_excluded
     from cveFeed.host_assessment import enqueue
     from cveFeed.models import HostAssessment
@@ -45,7 +45,7 @@ def check_one(row, *, resolver=None, tcp_probe=None, now=None):
     if HostAssessment.objects.filter(project_id=row.project_id, host=host, status__in=('queued', 'running')).exists() or \
             ScanHistory.objects.filter(domain=domain, scan_status__in=(-1, 1), start_scan_date__gte=now - STUCK_SCAN_AGE).exists():
         return 'deferred'
-    observed = observe(row, resolver=resolver or resolve_one, tcp_probe=tcp_probe)
+    observed = observe(row, resolver=resolver, tcp_probe=tcp_probe)
     status = observed['status']
     selector = HostState.objects.filter(pk=row.pk, retired_at=row.retired_at,
                                         archived_at__isnull=True, pinned=False)
@@ -133,6 +133,17 @@ def run_page(run_id=None, *, resolver=None, tcp_probe=None):
         return {'skipped': reason}
     rows = list(candidates().filter(pk__gt=run.cursor_hoststate_id)
                 .select_related('domain', 'project').order_by('pk')[:PAGE])
+    if (resolver is None or tcp_probe is None) and rows:
+        from cveFeed.archive_rediscovery import Reads
+        from reNgine.resources import ScannerUnavailable
+        try:
+            reads = Reads(rows, dns=resolver is None, tcp=tcp_probe is None)
+        except ScannerUnavailable as exc:  # no Sentinel can take the reads and they never run here: nothing was asked, nothing is archived or reactivated
+            run.status, run.lease_until = 'partial', None
+            run.save(update_fields=['status', 'lease_until'])
+            logger.info('inactive host review waits for a scanner: %s', exc)
+            return {'run_id': run.pk, 'status': 'waiting for a scanner', 'checked': run.checked}
+        resolver, tcp_probe = resolver or reads.resolve, tcp_probe or reads.tcp_probe
     for row in rows:
         if pause_requested():
             run.status, run.lease_until = 'partial', None

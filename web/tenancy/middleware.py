@@ -1,7 +1,7 @@
 """Tenancy middleware: publish the user's project scope, enforce roles per project."""
 import re
 
-from django.http import HttpResponseForbidden, HttpResponseNotFound, JsonResponse
+from django.http import JsonResponse
 from django.shortcuts import render
 from django.shortcuts import redirect
 from django.urls import reverse

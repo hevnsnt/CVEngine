@@ -84,11 +84,11 @@ class IpPerOrganizationTests(Fixture, TestCase):
 		self.db = Domain.objects.create(name='ip.example.com', project=self.pb, insert_date=now)
 
 	def test_the_same_address_is_a_separate_row_per_organization_with_its_own_ports(self):
-		from cveFeed import nmap_scan
+		from cveFeed import port_inventory
 		inventory = lambda banner: [{'ip': '203.0.113.50', 'ports': [{'number': 22, 'protocol': 'tcp', 'state': 'open', 'service_name': 'ssh',
 									 'product': 'OpenSSH', 'version': '8.9', 'banner': banner, 'scripts': {}, 'cpes': []}]}]
-		nmap_scan.persist_inventory(inventory('SSH-2.0-A-SECRET-BANNER'), org_id=self.org_a.id)
-		nmap_scan.persist_inventory(inventory('SSH-2.0-other'), org_id=self.org_b.id)
+		port_inventory.persist_inventory(inventory('SSH-2.0-A-SECRET-BANNER'), org_id=self.org_a.id)
+		port_inventory.persist_inventory(inventory('SSH-2.0-other'), org_id=self.org_b.id)
 		rows = {ip.org_id: ip for ip in IpAddress.objects.filter(address='203.0.113.50')}
 		self.assertEqual(set(rows), {self.org_a.id, self.org_b.id})
 		self.assertEqual(rows[self.org_b.id].ports.get().banner, 'SSH-2.0-other')

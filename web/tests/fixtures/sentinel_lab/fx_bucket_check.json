@@ -1,0 +1,88 @@
+{
+ "kind": "bucket_check",
+ "name": "fx_bucket_check",
+ "payload": {
+  "buckets": [
+   {
+    "id": "s3:example-static",
+    "verdict": {
+     "code": "",
+     "object_read": null,
+     "objects": [],
+     "region": "",
+     "request_count": 0,
+     "state": "unknown",
+     "status": 0,
+     "truncated": false
+    }
+   },
+   {
+    "id": "gcs:example-assets",
+    "verdict": {
+     "code": "",
+     "object_read": null,
+     "objects": [],
+     "region": "",
+     "request_count": 0,
+     "state": "unknown",
+     "status": 0,
+     "truncated": false
+    }
+   },
+   {
+    "id": "azure:examplestore/media",
+    "verdict": {
+     "code": "",
+     "object_read": null,
+     "objects": [],
+     "region": "",
+     "request_count": 0,
+     "state": "unknown",
+     "status": 0,
+     "truncated": false
+    }
+   }
+  ],
+  "outcome": "done",
+  "refused": [],
+  "touched": []
+ },
+ "sentinel_seconds": 0.0,
+ "target": {
+  "buckets": [
+   {
+    "id": "s3:example-static",
+    "name": "example-static",
+    "provider": "s3"
+   },
+   {
+    "id": "gcs:example-assets",
+    "name": "example-assets",
+    "provider": "gcs",
+    "read_object": false
+   },
+   {
+    "container": "media",
+    "id": "azure:examplestore/media",
+    "name": "examplestore",
+    "provider": "azure"
+   }
+  ],
+  "rate": 2.0,
+  "scope": {
+   "addresses": [],
+   "blocked": [],
+   "domains": [
+    "amazonaws.com",
+    "storage.googleapis.com"
+   ],
+   "excluded": [],
+   "excluded_trees": [],
+   "hosts": [
+    "examplestore.blob.core.windows.net"
+   ],
+   "private": false
+  }
+ },
+ "tool_rows": null
+}

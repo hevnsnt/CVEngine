@@ -5,8 +5,8 @@ A product seen without a version is a *lead* (see ``leads_for``). Nothing in a b
 versions apply, so cvENGINE asks the host. The probes below are data: an id, a label, which products they help with, the requests
 they make and the patterns that read the answers. The application renders every request itself; nothing is written by a model and no
 request is built from a model's text. A probe only ever sends a GET (or an nmap service probe), never a cookie or a credential, caps its
-requests, response sizes and time, goes through the same safe-address gate as every other check (``route_auth.probe_url`` pins the
-resolved, vetted address), and logs to the activity feed.
+requests, response sizes and time, is run by a Sentinel (an ``http_probe`` task, ``agentapi.probe_dispatch.try_http_probes``: this server sends the site nothing, it
+builds the task with a scope policy and cleans what comes back), and logs to the activity feed.
 
 What a probe finds is stored as ``ProbeObservation`` rows (with the source and a confidence) and written back as the host's technologies
 (a Port row for an nmap probe), then the host is correlated again: a real version gives a real, versioned match, or none. A probe that
@@ -19,22 +19,21 @@ import logging
 import os
 import re
 import shlex
-import time
 from datetime import timedelta
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 
 from django.utils import timezone
 
-from cveFeed import cms, fingerprint, js_libraries, local_egress, versions
+from cvengine_scanner import cms, fingerprint, versions
+from cvengine_scanner.flags import probe_nmap_flags
+
+from cveFeed import js_libraries
 
 logger = logging.getLogger(__name__)
 
 SERVICE = 'probe'
 WEB = '*web'  # a probe that helps with any web product
 MAX_PROBES_PER_HOST = 5
-MAX_REDIRECTS = 2
-REQUEST_GAP = 0.2  # seconds between two requests to one host
-RETRY_DELAYS = (3.0,)  # a "try later" (429, 503) is asked again once after this pause; a challenge is not asked again at all
 NMAP_TIMEOUT = 150
 PROBE_PATH = '/.cvengine-probe/404'  # a path no site serves: the answer is the server's own error page
 EDGE_STATUSES = (202, 403, 429, 503)
@@ -129,10 +128,6 @@ PROBES = (
 )
 BY_ID = {p['id']: p for p in PROBES}
 IDENTITY_PROBES = ('error-page', 'nginx-variants')  # the probes that say which look-alike product answers, whatever the version
-# the safe scripts for a service (all are in nmap_scan.NSE_SCRIPTS, which is the reviewed list)
-NMAP_SCRIPTS = {'http': 'http-server-header,http-headers,http-generator,http-title,ssl-cert,banner', 'ssh': 'ssh2-enum-algos,ssh-hostkey,banner',
-                'mysql': 'mysql-info', 'redis': 'redis-info', 'memcached': 'memcached-info', 'mongodb': 'mongodb-info',
-                'ms-sql': 'ms-sql-info', 'smtp': 'banner', 'ftp': 'banner,ftp-anon', 'imap': 'banner', 'pop3': 'banner'}
 # products that only look like another product by name: an advisory for one of these is not an advisory for the base product
 LOOKALIKES = {'nginx': {'ingressnginx', 'nginxingress', 'nginxui', 'nginxproxymanager', 'nginxunit', 'nginxrtmpmodule'}}
 LOOKALIKE_VARIANTS = {'nginx': {'nginx-ui', 'nginx-proxy-manager', 'kubernetes-ingress'}}
@@ -260,12 +255,9 @@ def display_for(probe_id, target):
 
 
 def nmap_argv(ip, port, service=''):
-    from cveFeed import nmap_scan
-    name = re.sub(r'^(ssl/|tcp)', '', str(service or '').lower())
-    key = next((k for k in NMAP_SCRIPTS if name.startswith(k)), 'http' if name.startswith('http') or name == 'https' else '')
-    scripts = NMAP_SCRIPTS.get(key, 'banner')
-    return [nmap_scan.NMAP_BIN, '-sV', '--version-all', '-Pn', '-p', str(int(port)), '--script', scripts, '--script-timeout', '20s',
-            '--host-timeout', '90s', '-oX', '-', str(ip)]
+    """The version probe's command line for one port, for a person to repeat (it is never run here: a scanner runs the probe): the reviewed scripts
+    for ``service`` (cvengine_scanner.flags.probe_nmap_flags)."""
+    return ['nmap', *probe_nmap_flags(port, service), str(ip)]
 
 
 # ----------------------------------------------------------------------------- fetching (one bounded GET, same gates as every probe)
@@ -302,45 +294,6 @@ def _permitted(host, project):
     if not route_auth.host_allowed(host, project):
         return False
     return not (project and (is_excluded(project, host) or host.lower().rstrip('.') in archived_names(project)))
-
-
-def fetch(url, probe=None, sleep=time.sleep, allowed=None, project=None, max_bytes=None, headers=None, hop=None):
-    """One probe GET with browser-like headers, following at most MAX_REDIRECTS redirects that stay inside ``allowed`` (the names of this host's
-    group: apex and www answer for each other) and pass ``_permitted`` (safe address, exclusions) at every hop, and ``hop(host)`` too when
-    given (a further scope rule of the caller: '' when the host may be asked, else why not; a refusal raises ValueError like ``_permitted``). A "try later" (429, 503) is
-    asked again once after a pause; an edge challenge is never retried and never pushed against: it is returned with ``challenge`` naming the
-    edge. ``project`` (an id) lets the gate and the pinned transport accept the tailnet address of a device that project's own Tailscale
-    integration imported. Returns the probe dict plus ``final_url`` and ``challenge``, and, after a redirect, ``redirected_from``: the first
-    answer (the asked URL's own redirect, its headers without a body)."""
-    from cveFeed import route_auth
-    probe = probe or route_auth.probe_url
-    last = None
-    for attempt in range(len(RETRY_DELAYS) + 1):
-        current, hops, first = url, 0, None
-        while True:
-            if not _permitted(urlsplit(current).hostname or '', project):
-                raise ValueError('probe destination is not allowed')
-            if hop is not None and hop(urlsplit(current).hostname or ''):
-                raise ValueError('probe destination is outside the scope')
-            response = probe(current, max_bytes=max_bytes or route_auth.MAX_PROBE_BYTES, browser=True, project=project,
-                             **({'headers': headers} if headers else {}))
-            location = response.get('location') or ''
-            if 300 <= (response.get('status') or 0) < 400 and location and hops < MAX_REDIRECTS:
-                nxt = urljoin(current, location)
-                if urlsplit(nxt).hostname and (allowed is None or urlsplit(nxt).hostname.lower() in allowed):
-                    first = first or {**response, 'url': current, 'final_url': current, 'body': '', 'title': '', 'challenge': ''}
-                    current, hops = nxt, hops + 1
-                    sleep(REQUEST_GAP)
-                    continue
-            break
-        last = {**response, 'final_url': current, 'challenge': challenge_of(response)}
-        if first is not None:
-            last['redirected_from'] = first  # the asked host's own answer (a redirect), headers only: what it says about itself
-        if last['challenge'] or (response.get('status') or 0) not in (429, 503):
-            return last
-        if attempt < len(RETRY_DELAYS):
-            sleep(RETRY_DELAYS[attempt])
-    return last
 
 
 # ----------------------------------------------------------------------------- reading answers (pure)
@@ -396,9 +349,9 @@ def observations_from_page(response, source_prefix='page'):
         hint = source == 'script:filename'  # a library version a script's file name carries: a hint (cveFeed.js_libraries)
         out.append(_observation('version', base, version, outcome='found' if version else 'hidden',
                                 confidence=(js_libraries.CONFIDENCE['filename'] if hint else 0.9) if version else 0.7, source=source, url='/'))
+    scripts = js_libraries.script_sources(response.get('body', ''), response.get('final_url') or response.get('url', ''))[0]
     found = fingerprint.from_response(response.get('server', ''), response.get('powered_by', ''), response.get('body', ''),
-                                      response.get('content_type', ''), scripts=fingerprint.script_sources(response.get('body', ''), response.get('final_url') or response.get('url', ''))[0],
-                                      headers=headers)
+                                      response.get('content_type', ''), from_scripts=js_libraries.script_fingerprints(scripts), headers=headers)
     for item in found:
         add(item['name'], item['source'])
     for product in cms.SOURCES:  # a version the front page already carries (Drupal's core scripts); WordPress has its own probe
@@ -419,7 +372,6 @@ def next_version(body):
     return found.group(1) if found else ''
 
 
-_NEXT_CHUNK = re.compile(r'/_next/static/chunks/(?:main|main-app|framework|webpack)-[A-Za-z0-9]{8,}\.js')
 
 
 def _wordpress_signals(responses):
@@ -446,47 +398,13 @@ def _wordpress_signals(responses):
             if product.lower() == 'wordpress':
                 signals.append(('meta:generator', path))
                 generator = generator or found
-    # the version: the generator tag, the core's own versioned assets, the feed, the readme (cveFeed.cms: best source wins, a library's ?ver= never)
+    # the version: the generator tag, the core's own versioned assets, the feed, the readme (cvengine_scanner.cms: best source wins, a library's ?ver= never)
     pages = [(path, response) for path, response in responses if response and not (path == '/readme.html' and 'wordpress' not in (response.get('body') or '').lower())]
     candidates = cms.read('WordPress', pages) + ([(generator, 'meta:generator', 0.9)] if generator else [])
     candidates.sort(key=lambda c: -c[2])
     if any(label.startswith('asset:') for _v, label, _c in candidates):
         signals.append(('body:core-asset-ver', '/'))
     return signals, (candidates[0][0] if candidates else '')
-
-
-def wordpress_observations(responses):
-    """The observations of the WordPress probe from its responses ``[(path, response)]``: found (with how and the version when stated),
-    challenged (an edge answered and no signature was readable: the owner is told what to allow), absent, or none when nothing answered."""
-    signals, version = _wordpress_signals(responses)
-    probed = [{'path': path, 'status': (r or {}).get('status'), 'challenge': (r or {}).get('challenge', '')} for path, r in responses]
-    if signals:
-        order = list(dict.fromkeys(s for s, _ in signals))
-        evidence = {'signals': order, 'probed': probed}
-        found = [_observation('wordpress', 'WordPress', version, 'wordpress', 'found', min(0.95, 0.6 + 0.1 * len(order)), order[0],
-                              url=next(p for s, p in signals), evidence=evidence)]
-        from cveFeed import wp_core
-        answers = dict(responses)
-        if wp_core.UPGRADE_PATH in answers:  # the directory an update is extracted into: whether the web server serves it (cveFeed.wp_core)
-            state = wp_core.classify_dir(answers[wp_core.UPGRADE_PATH], answers.get(wp_core.UPGRADE_MISSING))
-            status = (answers[wp_core.UPGRADE_PATH] or {}).get('status')
-            found.append(_observation('wp-upgrade-dir', 'WordPress', variant=state, source='probe:upgrade-dir', url=wp_core.UPGRADE_PATH,
-                                      outcome='found' if state in (wp_core.LISTING, wp_core.REACHABLE) else 'absent' if state == wp_core.DENIED else 'hidden',
-                                      confidence=0.9 if state in (wp_core.LISTING, wp_core.DENIED) else 0.7 if state == wp_core.REACHABLE else 0.0,
-                                      evidence={'status': status, 'state': state}))
-        return found
-    challenged = next((r['challenge'] for _p, r in responses if r and r.get('challenge')), '')
-    reachable = [r for _p, r in responses if r]
-    if not reachable:
-        return []  # the host did not answer at all: nothing was learned, so nothing is recorded
-    if challenged or (reachable and all((r.get('status') or 0) in EDGE_STATUSES for r in reachable)):
-        provider = challenged or (versions.edges_from_headers((reachable[0].get('headers') or {})) or ['an edge'])[0]
-        evidence = {'probed': probed, 'edge': provider,
-                    'hint': (f'The edge ({provider}) answered cvENGINE\'s requests with a challenge or a block, so it could not be read whether '
-                             'this host runs WordPress. Allow the scanner\'s address (or its user agent) in the WAF or bot rules for this host, '
-                             'then rescan.')}
-        return [_observation('wordpress', 'WordPress', outcome='challenged', confidence=0.0, source='edge', evidence=evidence)]
-    return [_observation('wordpress', 'WordPress', outcome='absent', confidence=0.7, source='probe', evidence={'probed': probed})]
 
 
 # ----------------------------------------------------------------------------- running one probe
@@ -504,52 +422,6 @@ def allowed_names(sub):
     return names
 
 
-def run_http_probe(probe_id, base, allowed, get=None, sleep=time.sleep, project=None, reader=None, target=None):
-    """Run one http probe against ``base`` and return its observations. ``get(url)`` replaces the network (tests)."""
-    probe = BY_ID[probe_id]
-    # a script is read further than a page (cveFeed.js_libraries.MAX_SCRIPT_BYTES); a test's ``get`` reads both
-    script_get = None if get else (lambda url, headers=None: fetch(url, allowed=allowed, sleep=sleep, project=project,
-                                                                   max_bytes=js_libraries.MAX_SCRIPT_BYTES, headers=headers))
-    get = get or (lambda url: fetch(url, allowed=allowed, sleep=sleep, project=project))
-    handler = probe.get('handler')
-    if handler == 'wordpress':
-        return wordpress_observations(_wordpress_responses(base, get, sleep))
-    responses = []
-    for index, (method, path) in enumerate(probe['requests']):
-        if index:
-            sleep(REQUEST_GAP)
-        try:
-            responses.append(get(base.rstrip('/') + path))
-        except (OSError, ValueError) as exc:
-            logger.info('probe %s: %s did not answer (%s)', probe_id, path, type(exc).__name__)
-            responses.append(None)
-    # fetch follows a redirect inside the host's group (apex and www answer for each other): a page another host served is that host's
-    # (its scripts, Server header and generator tags; the other host's own probe records them). Only what this host answered itself, its
-    # redirect, is read for it
-    responses = [own_answer(r, base) for r in responses]
-    out = []
-    first = responses[0] if responses else None
-    if handler == 'headers' and first:
-        out += observations_from_page(first)
-    elif handler == 'nextjs' and first:
-        out += _nextjs_observations(first, get, sleep)
-    elif handler == 'libraries' and first:
-        out += _library_observations(first, script_get or get, sleep, project, reader=reader, target=target)
-    out += apply_rules(probe, responses)
-    if first and first.get('challenge') and not any(o['kind'] == 'edge' for o in out):
-        out.append(_observation('edge', first['challenge'], outcome='challenged', confidence=0.8, source='edge-challenge', url=probe['requests'][0][1]))
-    return out
-
-
-def own_answer(response, base):
-    """``response`` when ``base``'s own host served it, else that host's own first answer (``redirected_from``: a redirect, headers only),
-    or None when there is none to read: what another host served is never attributed to this one."""
-    if not response or served_by(response, base):
-        return response
-    origin = response.get('redirected_from')
-    return origin if origin and served_by(origin, base) else None
-
-
 def served_by(response, base):
     """Whether ``response`` (a ``fetch`` result) is the page of ``base``'s own host: where its redirects ended (``final_url``) is that host. A
     host that only redirects to another one serves none of the scripts of the page it sends visitors to."""
@@ -561,291 +433,8 @@ def served_by(response, base):
     return not there or here == there
 
 
-def _wordpress_responses(base, get, sleep):
-    paths = ['/', '/wp-login.php', '/wp-json/']
-    responses = []
-    for index, path in enumerate(paths):
-        if index:
-            sleep(REQUEST_GAP)
-        try:
-            responses.append((path, get(base.rstrip('/') + path)))
-        except (OSError, ValueError):
-            responses.append((path, None))
-    if _wordpress_signals(responses)[0]:  # only a site that is WordPress is asked for its readme, and for the directory updates are extracted into
-        sleep(REQUEST_GAP)
-        try:
-            responses.append(('/readme.html', get(base.rstrip('/') + '/readme.html')))
-        except (OSError, ValueError):
-            pass
-        for path, _sources in cms.asked('WordPress'):
-            if path == '/readme.html' or _wordpress_signals(responses)[1]:
-                continue   # the readme was asked above; the feed only while no page states the version
-            sleep(REQUEST_GAP)
-            try:
-                responses.append((path, get(base.rstrip('/') + path)))
-            except (OSError, ValueError):
-                pass
-        from cveFeed import wp_core
-        sleep(REQUEST_GAP)
-        try:
-            answer = get(base.rstrip('/') + wp_core.UPGRADE_PATH)
-        except (OSError, ValueError):
-            answer = None
-        responses.append((wp_core.UPGRADE_PATH, answer))
-        if wp_core.classify_dir(answer) == wp_core.REACHABLE:  # an empty page: ask once for a path that cannot exist beside it, to tell a catch-all
-            sleep(REQUEST_GAP)
-            try:
-                responses.append((wp_core.UPGRADE_MISSING, get(base.rstrip('/') + wp_core.UPGRADE_MISSING)))
-            except (OSError, ValueError):
-                pass
-    return responses
-
-
-def _same_host_scripts(response, pattern=None, limit=4):
-    page = response.get('final_url') or response.get('url') or ''
-    _every, local = fingerprint.script_sources(response.get('body', ''), page, limit=40)
-    return [u for u in local if pattern is None or pattern.search(u)][:limit]
-
-
-def _nextjs_observations(first, get, sleep):
-    scripts = _same_host_scripts(first, _NEXT_CHUNK, limit=3)
-    for url in scripts:
-        sleep(REQUEST_GAP)
-        try:
-            got = get(url)
-        except (OSError, ValueError):
-            continue
-        number = next_version(got.get('body'))
-        if number:
-            return [_observation('version', 'Next.js', number, outcome='found', confidence=0.9, source='script:next-chunk', url=urlsplit(url).path)]
-    seen = bool(scripts) or '__NEXT_DATA__' in (first.get('body') or '')
-    if seen:
-        return [_observation('version', 'Next.js', outcome='hidden', confidence=0.7, source='script:next-chunk', url='/')]
-    return []
-
-
-def _library_observations(first, get, sleep, project=None, reader=None, target=None):
-    """The library versions the front page's scripts state (cveFeed.js_libraries): one observation per library, its effective copy's
-    version, with every copy and which one runs in ``evidence['library']``. A version from a file name only (the file could not be read or
-    states none) is kept at low confidence; a query string is never a version."""
-    if not 200 <= (first.get('status') or 0) < 300 or first.get('challenge'):
-        return []  # an error page or an edge's challenge is not the site's page: its scripts say nothing (as for the route check)
-    page = first.get('final_url') or first.get('url') or ''
-    entries = js_libraries.parse_page(first.get('body', ''), page)
-    records = js_libraries.read_page(entries, page, get, js_libraries.vetter(page, project, target=target),
-                                     {'left': js_libraries.MAX_SCRIPTS_PER_HOST}, before_each=lambda: sleep(REQUEST_GAP), reader=reader, project=project)
-    return _library_records_observations(records)
-
-
-def _library_records_observations(records):
-    """One ``version`` observation per library record (``js_libraries.resolve``), carrying the record in ``evidence['library']``."""
-    out = []
-    for record in records.values():
-        version = record['version']
-        out.append(_observation('version', record['product'], version, source='script:body' if record['version_source'] == 'body' else 'script:filename',
-                                confidence=record['version_confidence'] if version else 0.7, outcome='found' if version else 'hidden', url='/',
-                                evidence={'library': record}))
-    return out
-
-
-_JS_STRING = re.compile(r'''["']([^"'\s<>]{1,300}?\.js(?:\?[^"'\s<>]{0,200})?)["']''')
-
-
-def lazy_libraries(body, page_url, entries):
-    """The library keys a page names in a script file path that is not one of its ``<script src>`` tags (``parse_page`` ``entries``): a loader,
-    a consent manager or inline code that adds the script at run time (``createElement('script')``, a ``src`` set later, an import map). Such a
-    copy is not read by the page read, so it can never be ruled out."""
-    seen = {e['url'] for e in entries or [] if e.get('url')}
-    out = set()
-    for found in itertools.islice(_JS_STRING.finditer((body or '').replace('\\/', '/')), 2000):
-        url = js_libraries._absolute(found.group(1), page_url)
-        key = js_libraries.identify(url)['library'] if url else ''
-        if key and url not in seen:
-            out.add(key)
-    return sorted(out)
-
-
-def scope_hop(project_id, sub, unattended=True):
-    """``hop(host)`` for ``fetch``: why a script read may not ask ``host`` at any hop of a redirect ('' when it may), beyond ``_permitted``'s
-    address, exclusion and archive gate: a host-scoped target reads its own host only, a name held only under a target set to exactly one
-    host is never read (``narrowed_names``), and a bug bounty project's program scope (``bounty_gate``; ``unattended``: a run the system
-    started is also held to the project's confirmation). A public library CDN (``js_libraries.CDN_HOSTS``) touches no target and is not
-    asked about."""
-    from cveFeed.bounty_gate import Gate
-    from targetApp.models import narrowed_names
-    own = sub.name.lower().rstrip('.')
-    target = getattr(sub, 'target_domain', None)
-    scoped = target is not None and target.is_host_scoped()
-    gate, memo = Gate(), {}
-
-    def hop(host):
-        host = (host or '').lower().rstrip('.')
-        if host in js_libraries.CDN_HOSTS:
-            return ''
-        if host not in memo:
-            if scoped and host != own:
-                memo[host] = 'host-scoped target'
-            elif narrowed_names(project_id, [host]):
-                memo[host] = 'host_only_scope'
-            else:
-                memo[host] = gate.refusal(project_id, host, unattended=unattended)
-        return memo[host]
-    return hop
-
-
-def _scanned(got, error=''):
-    """What one fetched script says, searched whole (``js_libraries.whole_body``): ``status``, ``whole`` (a 2xx body read to its end, not a
-    challenge), ``truncated`` and, for a whole body, ``versions``, ``unplaceable``, ``blocks``, ``loaders`` and ``overflow``."""
-    if got is None:
-        return {'status': 0, 'whole': False, 'error': error or 'not read'}
-    status = got.get('status') or 0
-    text = got.get('body') or ''
-    raw = got.get('bytes')
-    size = raw if isinstance(raw, int) else len(text.encode('utf-8', 'replace'))
-    truncated = size >= js_libraries.MAX_SCRIPT_BYTES or bool(got.get('truncated'))
-    out = {'status': status, 'truncated': truncated, 'whole': 200 <= status < 300 and not truncated and not got.get('challenge')}
-    if not out['whole']:
-        out['error'] = ('cut at the read limit' if truncated else f"challenged by {got['challenge']}" if got.get('challenge')
-                        else f'answered {status}')
-        return out
-    return {**out, **js_libraries.whole_body(text)}
-
-
-def _entry_kinds(entries, page_url):
-    """The page's scripts with a source, as a script read needs them: ``url``, ``kind`` (``js_libraries.kind_of``), ``library`` (the library
-    its name is, ``js_libraries.identify``) and ``fallback``."""
-    out = []
-    for entry in entries:
-        if entry.get('url'):
-            out.append({'url': entry['url'], 'kind': js_libraries.kind_of(entry['url'], page_url),
-                        'library': js_libraries.identify(entry['url'])['library'], 'fallback': bool(entry.get('fallback'))})
-    return out
-
-
-def read_host_libraries(project_id, sub, bases, get=None, sleep=time.sleep, unattended=True):
-    """The html-libraries read of every web base of ``sub`` for a validation re-test (``cveFeed.validation.run_script_read``): each base's front
-    page through the same gated, pinned GET as every probe (a redirect is followed only on the host itself, so a redirect to another host is
-    seen as it is), then the scripts of every page through ``js_libraries`` (its vetter, one fresh ``Reader`` with the usual budgets, the
-    per-host script limit shared by the bases), past the script cache: every script is asked for in full (no ETag), and every script and
-    page is searched whole (``js_libraries.whole_body``). Every hop of every request, redirects included, passes the probe gate and the
-    scope rules of ``scope_hop`` (host scope, a one-host target, the bug bounty program; ``unattended`` for a run the system started).
-    Nothing is stored. ``get(url, headers=None)`` replaces the network (tests). Returns ``{'pages': [...], 'scanned': {url: _scanned},
-    'budget_left': n}``, one page per base: ``outcome`` is ``read`` (the host's own page answered 2xx and its scripts were read),
-    ``redirect`` (``status`` and ``location``), ``challenged``, ``error_page``, ``unanswered``, ``refused`` (the gate refused the address)
-    or ``held`` (this server's egress governor or skip list held the port: ``cveFeed.local_egress``; nothing was sent). Every connection
-    goes through the pinned transport, so it is counted, logged and paced like any in-process connection; a read page carries ``records``
-    (``js_libraries.resolve``), ``entries`` (its scripts with a source: ``_entry_kinds``), ``skipped`` (scripts it wanted and did not read,
-    with why), ``truncated`` (scripts read only up to the size cap), ``read_whole`` (scripts whose file was read whole), ``capped`` (the
-    parse could not see every script), ``page_truncated`` (the page itself was cut at the read limit), ``inline`` (``[library key,
-    version]`` inline scripts state), ``inline_unread`` (inline code no rule reads), ``scripts`` (how many scripts with a source the page
-    has), ``lazy`` (libraries the page adds at run time) and ``page_scan`` (the page's own text searched whole)."""
-    host = sub.name.lower().rstrip('.')
-    own = {host}
-    scanned = {}
-    if get is not None:
-        page_get, raw_get = (lambda url: get(url)), (lambda url: get(url))
-    else:
-        allowed = allowed_names(sub)
-        hop = scope_hop(project_id, sub, unattended=unattended)
-        page_get = lambda url: fetch(url, allowed=own, sleep=sleep, project=project_id, hop=hop)  # noqa: E731
-        raw_get = lambda url: fetch(url, allowed=allowed, sleep=sleep, project=project_id,  # noqa: E731
-                                    max_bytes=js_libraries.MAX_SCRIPT_BYTES, hop=hop)
-
-    def script_get(url, headers=None):
-        # asked in full, never revalidated with an ETag: a 304 would leave nothing to search whole
-        try:
-            got = raw_get(url)
-        except local_egress.PortHeld:
-            scanned[url] = {'status': 0, 'whole': False, 'held': True, 'error': 'held by this server\'s egress governor'}
-            raise
-        except (OSError, ValueError) as exc:
-            scanned[url] = {'status': 0, 'whole': False, 'error': 'refused by the scope gate' if isinstance(exc, ValueError) else type(exc).__name__}
-            raise
-        scanned[url] = _scanned(got)
-        return got
-    reader = js_libraries.Reader(project_id, fresh=True)
-    budget = {'left': js_libraries.MAX_SCRIPTS_PER_HOST}
-    pages = []
-    for base in bases:
-        page = {'base': base, 'outcome': '', 'status': 0}
-        try:
-            first = page_get(base.rstrip('/') + '/') or {}
-        except ValueError:
-            page['outcome'] = 'refused'
-            pages.append(page)
-            continue
-        except local_egress.PortHeld as exc:  # this server's egress governor or skip list held the port: nothing was sent (cveFeed.local_egress)
-            page.update(outcome='held', error=str(exc)[:200])
-            pages.append(page)
-            continue
-        except OSError as exc:
-            page.update(outcome='unanswered', error=type(exc).__name__)
-            pages.append(page)
-            continue
-        status = first.get('status') or 0
-        final = first.get('final_url') or first.get('url') or base
-        page.update(status=status, final_url=str(final)[:500])
-        if first.get('challenge'):
-            page.update(outcome='challenged', challenge=first['challenge'])
-        elif 300 <= status < 400:
-            page.update(outcome='redirect', location=urljoin(final, (first.get('location') or '').strip())[:500])
-        elif 200 <= status < 300 and not served_by(first, base):
-            # followed to another host (a caller's fetch that follows): the host's own answer, when fetch kept it, says which redirect it was
-            origin = first.get('redirected_from') or {}
-            page.update(outcome='redirect', location=urljoin(origin.get('final_url') or base, (origin.get('location') or '').strip())[:500]
-                        if origin.get('location') else str(final)[:500], status=origin.get('status') or status)
-        elif not 200 <= status < 300:
-            page['outcome'] = 'error_page'
-        else:
-            body = first.get('body', '')
-            entries = js_libraries.parse_page(body, final)
-            report, coverage = {}, {}
-            records = js_libraries.read_page(entries, final, script_get, js_libraries.vetter(final, project_id, target=getattr(sub, 'target_domain', None)),
-                                             budget, before_each=lambda: sleep(REQUEST_GAP), reader=reader, project=project_id, report=report,
-                                             coverage=coverage)
-            page.update(outcome='read', records=records, skipped=list(report.get('skipped') or [])[:40], truncated=list(report.get('truncated') or [])[:20],
-                        scripts=sum(1 for e in entries if e.get('url')), read_whole=coverage.get('read', 0),
-                        capped=bool(getattr(entries, 'capped', False)), inline_unread=int(getattr(entries, 'inline_unread', 0)),
-                        inline=[list(pair) for pair in getattr(entries, 'inline', ())][:20],
-                        lazy=lazy_libraries(body, final, entries), entries=_entry_kinds(entries, final)[:js_libraries.MAX_ENTRIES],
-                        page_truncated=bool(first.get('truncated')), page_scan=js_libraries.whole_body(body, page=True))
-        pages.append(page)
-    return {'pages': pages, 'scanned': scanned, 'budget_left': budget['left']}
-
-
-def refetch_script(project_id, sub, url, get=None, sleep=time.sleep, page_url=None, unattended=True):
-    """A script file a match was made on (or the host was seen to load the library from), fetched again for a script read when the pages
-    did not load it: through ``js_libraries.vetter`` for ``page_url`` (its port rule, a third-party or analytics host never, a same-site
-    host only under the vetter's rules) and the same gated, scoped GET as the page read (``scope_hop``). Returns ``_scanned`` (the file
-    searched whole), with ``held`` when this server's egress governor held the port, or ``{'status': 0, 'whole': False, 'error': why}``
-    when it may not be read."""
-    page_url = page_url or f'https://{sub.name}/'
-    try:
-        refusal = js_libraries.vetter(page_url, project_id, target=getattr(sub, 'target_domain', None))(url)
-    except Exception:  # noqa: BLE001 - a host that cannot be vetted is not read
-        refusal = 'not vetted'
-    if refusal:
-        return {'status': 0, 'whole': False, 'error': f'not read ({refusal})'}
-    if get is not None:
-        getter = get
-    else:
-        target_host = (urlsplit(url).hostname or '').lower()
-        hop = scope_hop(project_id, sub, unattended=unattended)
-        getter = lambda u: fetch(u, allowed={target_host}, sleep=sleep, project=project_id,  # noqa: E731
-                                 max_bytes=js_libraries.MAX_SCRIPT_BYTES, hop=hop)
-    try:
-        got = getter(url)
-    except local_egress.PortHeld:
-        return {'status': 0, 'whole': False, 'held': True, 'error': 'held by this server\'s egress governor'}
-    except ValueError:
-        return {'status': 0, 'whole': False, 'error': 'refused by the scope gate'}
-    except OSError as exc:
-        return {'status': 0, 'whole': False, 'error': type(exc).__name__}
-    return _scanned(got or {})
-
-
 def observations_from_nmap(inventory, port):
-    """Observations of the nmap probe from ``nmap_scan.parse_xml`` output for one port: the product and version (``hidden`` when nmap
+    """Observations of the version probe from the parsed report of one port: the product and version (``hidden`` when nmap
     names the product only), the Server header the http-server-header script printed and every generator tag."""
     from cveFeed.correlation import parse_cpe
     record = next((p for host in inventory for p in host['ports'] if p['number'] == port), None)
@@ -871,13 +460,19 @@ def observations_from_nmap(inventory, port):
     return out
 
 
-def run_nmap_probe(ip, port, service='', runner=None):
-    """Run the nmap probe on one port. Returns ``(observations, inventory)``; ``inventory`` is what ``nmap_scan.persist_inventory`` stores."""
-    from cveFeed import nmap_scan
-    argv = nmap_argv(ip, port, service)
-    runner = runner or (lambda args: nmap_scan.run_nmap_args(args[1:], label=f'{ip}:{port}', timeout=NMAP_TIMEOUT))
-    inventory = nmap_scan.parse_xml(runner(argv))
-    return observations_from_nmap(inventory, int(port)), inventory
+def nmap_scripts(service=''):
+    """The reviewed scripts the version probe runs for ``service``, as a list of names (``probe_nmap_flags``, cvengine_scanner.flags)."""
+    flags = probe_nmap_flags(1, service)
+    return flags[flags.index('--script') + 1].split(',')
+
+
+def _sentinel_nmap_probe(project_id, target):
+    """The version probe of ``target`` on a scanner (an ``nmap_verify`` task: ``--version-all`` with the same safe scripts as ``nmap_argv``): the host
+    records cut to the probed address. Raises ``ScannerUnavailable`` when no scanner can take it: the probe never runs here."""
+    from agentapi import sentinel_dispatch
+    task = sentinel_dispatch.nmap_verify_target(target['ip'], [target['port']], version_all=True, scripts=nmap_scripts(target.get('service', '')),
+                                                host_timeout=90)
+    return sentinel_dispatch.try_nmap_verify(sentinel_dispatch._project_of(project_id), task)
 
 
 # ----------------------------------------------------------------------------- recording
@@ -939,7 +534,7 @@ def apply_known(scan):
     project = scan.domain.project_id
     cutoff = timezone.now() - timedelta(seconds=ledger.ttl(SERVICE) * 4)
     by_host = {}
-    # only what a probe read (not the candidate signals or WPScan's state rows): a hint is never turned into a technology
+    # only what a probe read (not the candidate signals or the WordPress scan's state rows): a hint is never turned into a technology
     for row in ProbeObservation.objects.filter(project_id=project, outcome='found', observed_at__gte=cutoff, probe__in=list(BY_ID)):
         by_host.setdefault(row.host, []).append({'kind': row.kind, 'product': row.product, 'version': row.version, 'variant': row.variant,
                                                  'outcome': row.outcome, 'evidence': row.evidence or {}})
@@ -1005,8 +600,10 @@ def max_hosts():
     return _int_env('CVENGINE_PROBE_MAX_HOSTS', 60)
 
 
-def run_one(project_id, domain_id, sub, entry, get=None, nmap_runner=None, sleep=time.sleep, reader=None, fresh=False):
-    """Run one planned probe (``plan_for_host`` entry) on ``sub``, store what it found, apply it, and return the observations."""
+def run_one(project_id, domain_id, sub, entry, scan=None):
+    """Run one planned probe (``plan_for_host`` entry) on ``sub`` through a Sentinel, store what it found, apply it, and return the observations. The
+    http family is a ``http_probe`` task (``agentapi.probe_dispatch.try_http_probes``: ``ScannerUnavailable`` when no Sentinel can take it, so
+    nothing is recorded); the nmap family is a Sentinel's too."""
     probe_id, target = entry['probe'], entry['target']
     if BY_ID[probe_id]['family'] == 'nmap':
         from startScan.ip_rows import org_id_of_project
@@ -1015,17 +612,22 @@ def run_one(project_id, domain_id, sub, entry, get=None, nmap_runner=None, sleep
         if not is_scannable_ip(target['ip'], project=project_id):
             raise ValueError('probe destination is not allowed')
 
-        from cveFeed import nmap_scan
-        found, inventory = run_nmap_probe(target['ip'], target['port'], target.get('service', ''), runner=nmap_runner)
-        nmap_scan.persist_inventory(inventory, source='nmap-probe', org_id=org_id_of_project(project_id))
-    else:
-        reader = reader if reader is not None else js_libraries.Reader(project_id, fresh=fresh)
-        found = run_http_probe(probe_id, target['base'], allowed_names(sub), get=get, sleep=sleep, project=project_id, reader=reader,
-                               target=getattr(sub, 'target_domain', None))
-    record(project_id, domain_id, sub.name, probe_id, found)
-    if apply_to_subdomain(sub, found):
-        recorrelate(sub)
-    return found
+        from cveFeed import port_inventory
+        inventory = _sentinel_nmap_probe(project_id, target)
+        found = observations_from_nmap(inventory, int(target['port']))
+        port_inventory.persist_inventory(inventory, source='nmap-probe', org_id=org_id_of_project(project_id))
+        record(project_id, domain_id, sub.name, probe_id, found)
+        if apply_to_subdomain(sub, found):
+            recorrelate(sub)
+        return found
+    from agentapi import probe_dispatch
+    from dashboard.models import Project
+    asset = asset_key(sub.name, entry)
+    answered = probe_dispatch.try_http_probes(Project.objects.get(pk=project_id), scan, [(sub, asset, entry)])
+    found = answered.get(asset)
+    if found is None or isinstance(found, Exception):
+        raise found or RuntimeError('the scanner did not report this probe')
+    return apply_remote(project_id, domain_id, sub, entry, found)
 
 
 def summarize(found):
@@ -1046,9 +648,9 @@ def summarize(found):
     return '; '.join(dict.fromkeys(parts))[:300] or 'nothing the probe could read'
 
 
-def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sleep):
+def run_for_scan(scan_id, force=False):
     """The pipeline stage: for each host of the scan with unversioned products or unidentified ports, run the probes ``plan_for_host`` picks
-    (at most MAX_PROBES_PER_HOST that are due), inside the ledger TTL and ``max_hosts`` per scan, honouring exclusions, scan stop and pause. Returns ``{'hosts', 'probes', 'versions', 'reused', 'errors'}``."""
+    (at most MAX_PROBES_PER_HOST that are due; the http probes are a Sentinel's: ``http_probe``), inside the ledger TTL and ``max_hosts`` per scan, honouring exclusions, scan stop and pause. Returns ``{'hosts', 'probes', 'versions', 'reused', 'errors'}``."""
     from cveFeed import activity, host_context, ledger
     from cveFeed.nuclei_scan import scan_targets
     from reNgine import resources
@@ -1079,17 +681,30 @@ def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sl
     due = due[:max_hosts()]
     if not due:
         return stats
-    reader = js_libraries.Reader(project, fresh=force)  # the scan's script budget, shared by every host's library probe
+    if resources.abort_requested(scan_id) or resources.global_pause_requested(fail_closed=True):
+        return stats  # nothing is handed to a scanner for a scan that was stopped or while scanning is paused: the probes stay due
     running = activity.log('run_check', f'Version and identity probes for {len(due)} host(s) of {domain.name}', project=project,
                            status='running', scan_id=scan.id)
+    # the http probes go to a Sentinel (agentapi.probe_dispatch); this server runs none: with no scanner able to take them they stay due
+    remote, waiting = _remote_http(scan, due)
+    if waiting:
+        stats['waiting'] = True
     for sub, todo in due:
         if resources.abort_requested(scan_id) or resources.global_pause_requested(fail_closed=True):
             break
         ran = False
         for asset, entry in todo.items():
+            if waiting and BY_ID[entry['probe']]['family'] == 'http':
+                continue  # no scanner can take it and it may not run here: it stays due
             try:
-                found = run_one(project, domain.id, sub, entry, get=get, nmap_runner=nmap_runner, sleep=sleep, reader=reader)
-            except local_egress.PortHeld as exc:  # skipped or paced on this server (cveFeed.local_egress): not run, not failed, still due
+                if BY_ID[entry['probe']]['family'] == 'http':
+                    found = remote.get(asset)
+                    if found is None or isinstance(found, Exception):
+                        raise found or RuntimeError('the scanner did not report this probe')
+                    found = apply_remote(project, domain.id, sub, entry, found)
+                else:
+                    found = run_one(project, domain.id, sub, entry, scan=scan)
+            except resources.ScannerUnavailable as exc:  # held here, or waiting for a scanner: not run, not failed, still due
                 logger.info('probe %s on host %s held: %s', entry['probe'], sub.pk, exc)
                 stats['held'] = stats.get('held', 0) + 1
                 continue
@@ -1104,5 +719,28 @@ def run_for_scan(scan_id, get=None, nmap_runner=None, force=False, sleep=time.sl
             ran = True
         stats['hosts'] += int(ran)
     activity.settle(running, 'done', message=(f'Probes for {domain.name}: {stats["probes"]} probe(s) on {stats["hosts"]} host(s), '
-                                              f'{stats["versions"]} version(s) found'), **stats)
+                                              f'{stats["versions"]} version(s) found' + ('; the web probes wait for a scanner' if waiting else '')),
+                    **stats)
     return stats
+
+
+def _remote_http(scan, due):
+    """``(answers, waiting)``: the http probes of ``due`` a Sentinel ran (``{asset: observations or the error}``, see
+    ``agentapi.probe_dispatch.try_http_probes``), and whether they must wait because no scanner can take them (the kind never runs here)."""
+    from agentapi import probe_dispatch
+    from reNgine.resources import ScannerUnavailable
+    planned = [(sub, asset, entry) for sub, todo in due for asset, entry in todo.items() if BY_ID[entry['probe']]['family'] == 'http']
+    try:
+        got = probe_dispatch.try_http_probes(scan.domain.project, scan, planned)
+    except ScannerUnavailable as exc:
+        logger.info('version probes of scan %s wait for a scanner: %s', scan.pk, exc)
+        return {}, True
+    return got, False
+
+
+def apply_remote(project_id, domain_id, sub, entry, found):
+    """Store and apply what a Sentinel's run of one planned probe found (``run_one``'s second half: the observations are the scanner's)."""
+    record(project_id, domain_id, sub.name, entry['probe'], found)
+    if apply_to_subdomain(sub, found):
+        recorrelate(sub)
+    return found

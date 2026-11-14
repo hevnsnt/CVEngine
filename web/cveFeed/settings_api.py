@@ -11,7 +11,8 @@ import re
 from django.http import FileResponse, Http404, JsonResponse
 from django.http.response import HttpResponseBase
 
-from cveFeed import egress_proxy, mailer, openvas_admin, tailscale_admin
+from cveFeed import egress_proxy, mailer, openvas_admin, seed_admin, tailscale_admin
+from reNgine import ai_prompts
 from reNgine.ai_profiles import (KEEP_ALIVE_PATTERN, NUMBER_SETTINGS, REASONING_CHOICES, SETTING_APPLIES, SETTING_ENV, STRUCTURED_MODES, AIRuntime, same_service)
 from dashboard.models import (AIProviderSettings, ChaosAPIKey, HackerOneAPIKey, NetlasAPIKey, OpenAiAPIKey)
 from scanEngine.models import Notification, Proxy, VulnerabilityReportSetting
@@ -119,16 +120,30 @@ def _env_in_force():
     return {name: os.environ.get(env_name, '').strip() for name, env_name in SETTING_ENV.items() if os.environ.get(env_name, '').strip()}
 
 
+def _nuclei_in_force(cfg):
+    """The model the Nuclei tag choice uses now, from what is known without asking the provider (the page asks for the list itself): a
+    chosen model, else the cheapest haiku of a list read in the last ten minutes, else '' (the page says the default is found when it loads)."""
+    if (cfg.nuclei_model or '').strip():
+        return cfg.nuclei_model.strip()
+    from reNgine import ai_nuclei_model
+    from reNgine.ai_providers import get_provider
+    try:
+        return ai_nuclei_model.haiku_default(get_provider(cfg.provider, api_key=cfg.api_key or 'x', base_url=cfg.base_url or None), fetch=False) or ''
+    except Exception:  # noqa: BLE001 - a stored provider this version does not know
+        return ''
+
+
 def ai_get(request):
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
-    from reNgine.ai_providers import DEFAULT_MODELS, KEYLESS, SELECTABLE, effective_settings, provider_defaults
+    from reNgine.ai_providers import DEFAULT_MODELS, KEYLESS, SELECTABLE, SERVER_URL_PROVIDERS, effective_settings, provider_defaults
     out = {'provider': cfg.provider, 'model': cfg.model, 'base_url': cfg.base_url, 'enabled': cfg.enabled,
            'verified_at': cfg.verified_at.isoformat() if cfg.verified_at else None,
-           'selectable': list(SELECTABLE), 'keyless': list(KEYLESS),
+           'selectable': list(SELECTABLE), 'keyless': list(KEYLESS), 'needs_url': list(SERVER_URL_PROVIDERS),
            'has_key': bool(cfg.api_key), 'auto_fire': cfg.auto_fire,
            'auto_fire_max_scans': cfg.auto_fire_max_scans, 'plan_daily_total': cfg.plan_daily_total,
            'plan_daily_per_project': cfg.plan_daily_per_project, 'cve_guidance_daily': cfg.cve_guidance_daily,
-           'cve_guidance': _guidance_progress(), 'default_models': DEFAULT_MODELS,
+           'cve_guidance': _guidance_progress(), 'default_models': DEFAULT_MODELS, 'nuclei_model': cfg.nuclei_model,
+           'nuclei_model_in_force': _nuclei_in_force(cfg),
            'providers': [p for p, _ in AIProviderSettings.PROVIDER_CHOICES]}
     # How a request is made. null / '' is "not set here": the request follows the environment, then the provider's default (see `env`,
     # `provider_defaults` and `effective`, which says where each value in force comes from).
@@ -172,6 +187,30 @@ def _ai_runtime_values(data):
     return out
 
 
+def _nuclei_model_value(raw, cfg, old_connection, old_value):
+    """The validated model for the Nuclei tag choice: '' (the default) or a model the provider lists. Checked against the provider's list
+    only when it changes, so saving the rest of the page never fails because the provider is slow."""
+    if raw is None:
+        raw = ''
+    if not isinstance(raw, str):
+        raise SettingsError(400, 'nuclei_model must be a model name, or empty for the default')
+    value = raw.strip()
+    if value == (old_value or '') and (cfg.provider, cfg.base_url) == (old_connection[0], old_connection[2]):
+        return value
+    if not value:
+        return ''
+    if not MODEL_NAME.match(value):
+        raise SettingsError(400, 'a model name is letters, digits and . _ : / @ + - (at most 100), or empty for the default')
+    key = cfg.api_key if (cfg.api_key != old_connection[3] or same_service(old_connection[0], old_connection[2], cfg.provider, cfg.base_url)) else ''  # a stored key goes only where it was saved for
+    try:
+        listed = _models_hit(cfg.provider, (cfg.base_url or '').strip(), key or '')['models']
+    except SettingsError as exc:
+        raise SettingsError(400, f'could not check the Nuclei model against the provider\'s list: {exc}')
+    if value not in {m['id'] for m in listed}:
+        raise SettingsError(400, 'the Nuclei model must be one the provider lists: choose it from the list')
+    return value
+
+
 def ai_put(request):
     from reNgine.ai_providers import DEFAULT_MODELS, LOCAL_PORT, SERVER_URL_PROVIDERS
     data = _body(request)
@@ -190,6 +229,11 @@ def ai_put(request):
     if provider in SERVER_URL_PROVIDERS and data.get('enabled') and not cfg.base_url.strip():
         raise SettingsError(400, f'{provider} needs the server address (a Tailscale or remote address, or http://localhost:{LOCAL_PORT[provider]} if it runs on this server)')
     cfg.api_key = _text(data, 'api_key', cfg.api_key, secret=True)
+    old_nuclei = cfg.nuclei_model
+    if 'nuclei_model' in data:
+        cfg.nuclei_model = _nuclei_model_value(data['nuclei_model'], cfg, old_connection, old_nuclei)
+    elif (cfg.provider, cfg.base_url) != (old_connection[0], old_connection[2]):
+        cfg.nuclei_model = ''  # a model belongs to the provider it was chosen from
     old_runtime = {name: getattr(cfg, name) for name in AI_RUNTIME_FIELDS}
     runtime_changes = _ai_runtime_values(data)  # validated before anything is stored
     for name, value in runtime_changes.items():
@@ -221,61 +265,127 @@ def ai_put(request):
     changed = [name for name in AI_RUNTIME_FIELDS if getattr(cfg, name) != old_runtime[name]]
     connection = [label for label, was, now in (('provider', old_connection[0], cfg.provider), ('model', old_connection[1], cfg.model),
                   ('base_url', old_connection[2], cfg.base_url), ('api_key', old_connection[3], cfg.api_key)) if was != now]
+    nuclei = ['nuclei_model'] if cfg.nuclei_model != old_nuclei else []
+    if nuclei:
+        audit(request.user, 'ai.nuclei_model', cfg.provider, changed=nuclei, nuclei_model=cfg.nuclei_model or 'default')  # a model name, never a key
     if changed or connection:  # names of what changed, and the new value of a setting that is a number or a word; never a key or an address
         audit(request.user, 'ai.settings', cfg.provider, changed=connection + changed, **{name: getattr(cfg, name) for name in changed})
     return ai_get(request)
 
 
-# --- the CVE catalog seed (build here, publish as the cve-seed release) --------------------------
+# --- the CVE catalog seed (create, download, import: cveFeed.seed_admin) --------------------------
 
-SEED_NAME = 'cve-seed.jsonl.gz'
-SEED_BUILDING = 'cvengine:cve-seed-building'
+SEED_NAME = seed_admin.SEED_NAME
+SEED_BUILDING = seed_admin.LOCK
 
 
 def seed_dir():
-    import os
-    from django.conf import settings
-    return os.path.join(getattr(settings, 'RENGINE_HOME', '/usr/src/app'), 'exports')
+    return seed_admin.seed_dir()
 
 
 def cve_seed_get(request):
-    """What the last build holds (count, tiers, how many carry a detection record, size, sha256) and whether one is running."""
-    import os
-    from django.core.cache import cache
-    path = os.path.join(seed_dir(), SEED_NAME)
-    manifest = None
-    try:
-        with open(path + '.manifest.json', encoding='utf-8') as f:
-            manifest = json.load(f)
-    except (OSError, ValueError):
-        pass
-    return {'built': manifest, 'building': bool(cache.get(SEED_BUILDING)), 'file': SEED_NAME if manifest and os.path.exists(path) else None}
+    """What the seed on disk holds (count, tiers, size, sha256, what the scrub dropped), when it is removed, and the running job's progress."""
+    return seed_admin.status()
 
 
 def cve_seed_build(request):
-    from django.core.cache import cache
     from cveFeed.admin_api import audit
     from cveFeed.tasks import build_cve_seed
-    if not cache.add(SEED_BUILDING, 1, 3600):
-        raise SettingsError(409, 'a seed is already being built')
-    build_cve_seed.delay()
+    if not seed_admin.begin('export', request.user):
+        raise SettingsError(409, 'a seed file is already being created or imported')
+    try:
+        build_cve_seed.delay(request.user.pk)
+    except Exception:
+        seed_admin.finish(error='the job could not be queued')
+        raise
     audit(request.user, 'cve_seed.build', SEED_NAME)
-    return {'building': True}
+    return seed_admin.status()
 
 
 def cve_seed_download(request, which):
+    """The seed or its manifest as an attachment, streamed from the private folder. App Admin only (checked by ``dispatch``), GET only,
+    a fixed file name (nothing in the request picks a path), and every download is audit-logged."""
     import os
-    path = os.path.join(seed_dir(), SEED_NAME)
-    path = path + '.manifest.json' if which == 'manifest' else path
-    if not os.path.isfile(path):
-        raise Http404('no seed has been built yet')
-    return FileResponse(open(path, 'rb'), as_attachment=True, filename=os.path.basename(path),
-                        content_type='application/json' if which == 'manifest' else 'application/gzip')
+    from cveFeed.admin_api import audit
+    manifest, _ = seed_admin.built()
+    if manifest is None:
+        raise Http404('no seed has been created yet, or it was removed after 24 hours')
+    path = seed_admin.manifest_path() if which == 'manifest' else seed_admin.seed_path()
+    handle = open(path, 'rb')
+    response = FileResponse(handle, as_attachment=True, filename=os.path.basename(path),
+                            content_type='application/json' if which == 'manifest' else 'application/gzip')
+    response['Cache-Control'] = 'no-store'
+    response['X-Content-Type-Options'] = 'nosniff'
+    audit(request.user, 'cve_seed.download', os.path.basename(path), file=which, bytes=os.path.getsize(path), sha256=manifest.get('sha256'))
+    return response
+
+
+def cve_seed_import(request):
+    """Load a seed file uploaded by an App Admin. The file is the request body itself (``Content-Type: application/octet-stream``), read in
+    blocks straight to the private folder and never held in memory or parsed as a form: Django's CSRF check would otherwise parse a
+    multipart upload before this code could cap it. ``X-Seed-Manifest`` optionally carries the manifest's format, count, bytes and sha256
+    as JSON; with it the file is checked (size, sha256, count) before anything is imported. A worker then imports it with the same validation
+    as the command line (``seed.import_seed``)."""
+    import os
+    from cveFeed import seed
+    from cveFeed.admin_api import audit
+    from cveFeed.tasks import import_cve_seed_file
+    try:
+        declared = int(request.META.get('CONTENT_LENGTH') or 0)
+    except ValueError:
+        declared = 0
+    if declared > seed_admin.MAX_UPLOAD:
+        raise SettingsError(413, 'the file is larger than the %d MB limit' % (seed_admin.MAX_UPLOAD >> 20))
+    if request.content_type != 'application/octet-stream' or declared <= 0:
+        raise SettingsError(400, 'choose a seed file (cve-seed.jsonl.gz)')
+    manifest = None
+    raw_manifest = request.META.get('HTTP_X_SEED_MANIFEST')
+    if raw_manifest:
+        try:
+            manifest = json.loads(raw_manifest) if len(raw_manifest) <= 4096 else None
+        except ValueError:
+            manifest = None
+        if not isinstance(manifest, dict):
+            raise SettingsError(400, 'the seed manifest is missing or not understood')
+    name = re.sub(r'[^A-Za-z0-9._-]', '_', request.META.get('HTTP_X_SEED_NAME', '') or 'seed')[:120]
+    if not seed_admin.begin('import', request.user):
+        raise SettingsError(409, 'a seed file is already being created or imported')
+    path = None
+    try:
+        path = seed_admin.save_stream(request, seed_admin.MAX_UPLOAD, 'incoming-seed')
+        with open(path, 'rb') as f:
+            if f.read(2) != b'\x1f\x8b':
+                raise ValueError('that is not a gzip file; choose cve-seed.jsonl.gz')
+        if manifest is not None:
+            seed.verify_seed(path, manifest)
+        else:
+            for _ in seed.iter_lines(path):  # the first line must be a seed manifest (format 1); nothing else is read yet
+                break
+    except (ValueError, OSError, EOFError) as exc:
+        seed_admin.finish(error=str(exc)[:300])
+        if path:
+            seed_admin._remove(path)
+        raise SettingsError(400, str(exc)[:300] or 'that file could not be read')
+    except BaseException:
+        seed_admin.finish(error='the upload failed')
+        if path:
+            seed_admin._remove(path)
+        raise
+    verified = manifest is not None
+    audit(request.user, 'cve_seed.import', name, bytes=os.path.getsize(path), verified=verified)
+    try:
+        import_cve_seed_file.delay(path, request.user.pk, verified)
+    except Exception:
+        seed_admin._remove(path)
+        seed_admin.finish(error='the job could not be queued')
+        raise
+    return seed_admin.status()
 
 
 def scan_policy_get(request):
     from dashboard.models import ScanPolicy
-    return {'nuclei_all_templates': ScanPolicy.current().nuclei_all_templates}
+    row = ScanPolicy.current()
+    return {'nuclei_all_templates': row.nuclei_all_templates, 'allow_credential_checks': row.allow_credential_checks}
 
 
 def scan_policy_put(request):
@@ -291,26 +401,121 @@ def scan_policy_put(request):
         row.save()
         if changed:
             audit(request.user, 'scan_policy.nuclei_all_templates', 'on' if row.nuclei_all_templates else 'off')
+    if 'allow_credential_checks' in data:
+        if not isinstance(data['allow_credential_checks'], bool):
+            raise SettingsError(400, 'allow_credential_checks must be true or false')
+        changed = row.allow_credential_checks != data['allow_credential_checks']
+        row.allow_credential_checks = data['allow_credential_checks']
+        row.save()
+        if changed:
+            audit(request.user, 'scan_policy.allow_credential_checks', 'on' if row.allow_credential_checks else 'off')
     return scan_policy_get(request)
 
 
+MODELS_CACHE_SECONDS = 300  # a provider's model list changes a few times a year: five minutes is fresh enough and spares the provider
+MODELS_FAIL_SECONDS = 30  # a failed list is remembered briefly, so a page that asks again and again does not hammer a server that is down
+MODELS_MAX = 500  # models returned; a gateway can list thousands, and a drop-down of more than this is not a choice
+MODELS_ID_MAX = 200
+
+MODELS_FAIL_WORDS = {
+    'provider_auth': 'the key was refused, or none was sent (check the API key, and for a gateway the address it expects; a saved key is only used for the address it was saved for)',
+    'provider_rate_limit': 'the provider is rate limiting this key, so try again in a minute',
+    'provider_timeout': 'it did not answer in time',
+    'provider_connect_timeout': 'it did not accept a connection in time (check the address and the port)',
+    'provider_network': 'nothing answered at that address (check the address and the port, and that the server is running)',
+    'provider_http': 'it answered with an error (check the address: it may not offer a list of models)',
+    'provider_json': 'it answered, but not with a list of models (check the address, often it ends in /v1)',
+    'provider_redirect': 'redirected to an address this server will not call (use the final address of the server instead)',
+    'provider_shape': 'it answered, but not with a list of models (check that the provider type matches the server)',
+}
+
+
+def _models_cache_key(provider, base_url, key):
+    """The cache key of one list: provider, address and a hash of the key. The key itself is never part of it."""
+    import hashlib
+    from django.conf import settings
+    # a slow, salted derivation (the server's secret is the salt): the entry names a key without a dump of Redis being a way to guess it
+    digest = hashlib.pbkdf2_hmac('sha256', (key or '').encode(), f'cve-ai-models:{settings.SECRET_KEY}'.encode(), 20_000).hex()
+    raw = hashlib.sha256(f'{provider}\0{(base_url or "").strip().rstrip("/").lower()}\0{digest}'.encode()).hexdigest()
+    return f'cve:ai-models:{raw}'
+
+
+def _clean_models(listed):
+    out, seen = [], set()
+    for m in listed or []:
+        mid = m.get('id') if isinstance(m, dict) else None
+        if not isinstance(mid, str) or not mid or len(mid) > MODELS_ID_MAX or mid in seen:
+            continue
+        seen.add(mid)
+        price = m.get('price')
+        price = float(price) if isinstance(price, (int, float)) and not isinstance(price, bool) and 0 <= price < 1e6 else None
+        out.append({'id': mid, 'price': price})
+        if len(out) >= MODELS_MAX:
+            break
+    return out
+
+
+def _models_hit(provider, base_url, key, refresh=False):
+    """The provider's model list as ``ai_models`` answers it (cached per provider, address and key hash): ``{models, recommended,
+    nuclei_default}``. Raises SettingsError(400) with the plain reason when the list cannot be read."""
+    from django.core.cache import cache
+    from reNgine.ai_providers import SELECTABLE, AIProviderError, get_provider, pick_cheapest_newest
+    cache_key = _models_cache_key(provider, base_url, key)
+    hit = None
+    if not refresh:
+        try:
+            hit = cache.get(cache_key)
+        except Exception:  # noqa: BLE001 - a cache that is down is a miss, not a failed page
+            hit = None
+    if hit is None:
+        try:
+            raw = get_provider(provider, api_key=key or None, base_url=base_url or None).list_models()
+            listed = _clean_models(raw)
+            recommended = '' if provider in SELECTABLE else (pick_cheapest_newest(raw) or '')
+            from reNgine import ai_nuclei_model
+            haiku = ai_nuclei_model.remember(provider, base_url, raw)
+            hit = {'models': listed, 'recommended': recommended if any(m['id'] == recommended for m in listed) else '',
+                   'nuclei_default': haiku if any(m['id'] == haiku for m in listed) else ''}
+            ttl = MODELS_CACHE_SECONDS
+        except AIProviderError as exc:
+            words = MODELS_FAIL_WORDS.get(getattr(exc, 'category', ''))
+            if words is None and 'requires an API key' in str(exc):  # no key typed, and the saved one belongs to another address
+                words = 'there is no API key for this address: type one (a saved key is only used for the address it was saved for)'
+            hit = {'error': words or 'it did not answer'}
+            ttl = MODELS_FAIL_SECONDS
+        except (AttributeError, KeyError, TypeError, ValueError):  # a shape the provider class did not expect: not a list of models
+            hit = {'error': MODELS_FAIL_WORDS['provider_shape']}
+            ttl = MODELS_FAIL_SECONDS
+        try:
+            cache.set(cache_key, hit, ttl)
+        except Exception:  # noqa: BLE001
+            pass
+    if 'error' in hit:
+        raise SettingsError(400, hit['error'])
+    return hit
+
+
 def ai_models(request):
-    """The models the chosen provider offers, for the model picker. Uses the key typed in the form, else the stored
-    one (only when the provider is unchanged, so a stored key is never sent to a different service)."""
-    from reNgine.ai_providers import AIProviderError, SELECTABLE, get_provider, pick_cheapest_newest
+    """The models the chosen provider offers, for the model drop-downs. Uses the key typed in the form, else the stored one (only when the
+    provider and address are the one it was saved for, so a stored key is never sent to a different service); the page never receives a
+    key. The answer is cached for a few minutes per provider, address and key hash (``refresh`` skips the cache), a failure for a few
+    seconds. Nothing in the answer, the cache or the log holds a key or the provider's own words."""
+    from reNgine.ai_providers import DEFAULT_MODELS, SERVER_URL_PROVIDERS
     data = _body(request)
     cfg = AIProviderSettings.objects.first() or AIProviderSettings()
     provider = data.get('provider') or cfg.provider
+    if provider not in DEFAULT_MODELS:
+        raise SettingsError(400, 'unknown provider')
     base_url = str(data.get('base_url') or '').strip() or (cfg.base_url if provider == cfg.provider else '')
+    if base_url and not re.match(r'^https?://', base_url, re.I):
+        raise SettingsError(400, 'the server URL must start with http:// or https://')
     if base_url and ai_url_blocked(base_url):
         raise SettingsError(400, 'that address is a link-local or cloud metadata address, which no AI server uses: enter the address of the server itself')
+    if provider in SERVER_URL_PROVIDERS and not base_url:
+        raise SettingsError(400, 'enter the address of the server first')
     key = str(data.get('api_key') or '').strip() or (cfg.api_key if same_service(cfg.provider, cfg.base_url, provider, base_url) else '')  # the stored key goes only where it was saved for
-    try:
-        listed = get_provider(provider, api_key=key or None, base_url=base_url or None).list_models()
-    except AIProviderError as exc:
-        raise SettingsError(400, f'could not list models: {exc}')
-    recommended = '' if provider in SELECTABLE else (pick_cheapest_newest(listed) or '')
-    return {'models': [{'id': m['id'], 'price': m['price']} for m in listed[:500]], 'recommended': recommended}
+    hit = _models_hit(provider, base_url, key, refresh=data.get('refresh') is True)
+    return {'models': hit['models'], 'recommended': hit['recommended'], 'nuclei_default': hit.get('nuclei_default', '')}
 
 
 AI_ERROR_HINTS = {
@@ -321,8 +526,10 @@ AI_ERROR_HINTS = {
     'provider_network': 'the server could not be reached: check the address and the port, that the server is running, and that this machine can reach it (inside Docker, localhost is the Docker host)',
     'provider_http': 'the server answered with an error: check the model name and the address (a model it does not serve, or the wrong path, shows up here)',
     'provider_json': 'the address answered, but not with an AI API: check that it is the server\'s API address (often ending in /v1)',
+    'provider_redirect': 'redirected to an address this server will not call (use the final address of the server instead)',
     'provider_shape': 'the address answered, but not in the shape this provider type uses: check that the provider type matches the server',
     'output_truncated': 'the reply was cut off at the reply limit: raise "Reply limit" (a reasoning model spends part of it thinking)',
+    'refused': 'the model declined to answer (stop reason: refusal): asking again does not change that; check the model and what it was asked',
     'empty_response': 'the model answered with nothing: a reasoning model may have used the whole reply limit thinking, so raise "Reply limit" or lower "Reasoning"',
 }
 
@@ -359,7 +566,7 @@ def ai_test(request):
                                 base_url=cfg.base_url or None, runtime=runtime)
         from reNgine.ai_providers import usage_stage
         with usage_stage('connection_test'):
-            reply = provider.complete('Reply with the single word: ok', 'ping')
+            reply = provider.complete(ai_prompts.CONNECTION_TEST_SYSTEM, ai_prompts.CONNECTION_TEST_USER)
     except AIProviderError as exc:
         cfg.verified_at, cfg.verified_provider, cfg.verified_model = None, '', ''
         cfg.save(update_fields=['verified_at', 'verified_provider', 'verified_model'])
@@ -779,12 +986,12 @@ def autotune_get(request):
 
 
 def autotune_put(request):
-    """{"mode": "off" | "suggest" | "auto", "advisor": true | false}: either or both."""
+    """{"mode": "off" | "suggest" | "auto", "advisor": true | false, "agent_policy": "off" | "suggest" | "auto"}: any of them."""
     from cveFeed import autotune
     data = _body(request)
-    if not data or set(data) - {'mode', 'advisor'}:
-        raise SettingsError(400, 'send mode and/or advisor')
-    _autotune(autotune.set_mode, request.user, data.get('mode'), data.get('advisor'))
+    if not data or set(data) - {'mode', 'advisor', 'agent_policy'}:
+        raise SettingsError(400, 'send mode, advisor and/or agent_policy')
+    _autotune(autotune.set_mode, request.user, data.get('mode'), data.get('advisor'), data.get('agent_policy'))
     return autotune_get(request)
 
 
@@ -822,9 +1029,16 @@ def _update_row():
     return UpdateSettings.current()
 
 
+def _updates_state(row):
+    """The update state plus the question the Update button asks first (which scanners run) and what an unattended update left to say."""
+    from cveFeed import autotune, scanner_plan, updater
+    pin = autotune.discovery_pin()
+    return {**updater.state(row), 'scanner_choice': scanner_plan.decision(), 'scanner_notice': scanner_plan.notice(),
+            'discovery_pin_notice': pin['text'] if pin else None}
+
+
 def updates_get(request):
-    from cveFeed import updater
-    return updater.state(_update_row())
+    return _updates_state(_update_row())
 
 
 def updates_put(request):
@@ -852,6 +1066,13 @@ def updates_put(request):
             audit(request.user, 'update.mode_changed', mode)
             if mode == 'manual' and row.approved_by == 'automatic':
                 updater.cancel_approval(row)  # an approval nobody gave is withdrawn when the administrator takes control back
+    if 'wait_for_scans' in data:
+        from cveFeed.admin_api import audit
+        if not isinstance(data['wait_for_scans'], bool):
+            raise SettingsError(400, 'wait_for_scans must be true or false')
+        if data['wait_for_scans'] != updater.read_wait_scans():
+            updater.set_wait_scans(data['wait_for_scans'])
+            audit(request.user, 'update.wait_scans_changed', 'on' if data['wait_for_scans'] else 'off')
     row.token = _text(data, 'token', row.token, secret=True)
     if 'enabled' in data:
         row.enabled = bool(data['enabled'])
@@ -874,13 +1095,33 @@ def updates_approve(request):
     from cveFeed import updater
     from cveFeed.admin_api import audit
     row = _update_row()
+    plan = _body(request).get('sentinels')
     try:
-        updater.approve(row, request.user)
+        updater.approve(row, request.user, plan)
     except updater.UpdateError as exc:
         raise SettingsError(400, str(exc))
+    extra = {'sentinels': plan} if plan else {}
     audit(request.user, 'update.approved', row.latest_sha[:7], message=row.latest_message, behind_by=row.behind_by,
-          branch=row.branch, release_branch=not updater.branch_warning(row.branch))
+          branch=row.branch, release_branch=not updater.branch_warning(row.branch), **extra)
     return updater.state(row)
+
+
+def scanner_plan_get(request):
+    from cveFeed import scanner_plan
+    return scanner_plan.state()
+
+
+def scanner_plan_post(request):
+    """Which scanners run, changed on its own (Settings > Sentinels): the host applies it within seconds (scripts/apply-scanner-plan.sh)."""
+    from cveFeed import scanner_plan
+    from cveFeed.admin_api import audit
+    plan = _body(request).get('plan')
+    try:
+        scanner_plan.request(plan)
+    except scanner_plan.PlanError as exc:
+        raise SettingsError(400, str(exc))
+    audit(request.user, 'scanner_plan.changed', plan, previous=scanner_plan.current_plan())
+    return scanner_plan.state()
 
 
 def updates_cancel(request):
@@ -931,16 +1172,176 @@ def factory_reset_post(request):
     return {'ok': True, 'removed': removed, 'redirect': '/cve/welcome/'}
 
 
+# --- AI reviewer and admin alerts (docs/AI-REVIEWER.md) ---------------------------
+
+MODEL_NAME = re.compile(r'^[A-Za-z0-9._:/@+-]{0,100}$')
+
+
+def reviewer_get(request):
+    from agentapi import builtin_reviewer
+    from cveFeed import ai_jobs, host_review, reviewer
+    from dashboard.models import Project
+    row, provider = reviewer.settings_row(), reviewer.provider_row()
+    out = {'enabled': row.enabled, 'env_enabled': reviewer.env_enabled(), 'review_model': row.review_model, 'ops_model': row.ops_model,
+           'auto_close': row.auto_close, 'review_daily_max': row.review_daily_max, 'ops_hours': reviewer.ops_hours(row),
+           'template_validation_enabled': row.template_validation_enabled,
+           'host_review_enabled': row.host_review_enabled, 'host_review_auto_close': row.host_review_auto_close, 'host_review_daily_max': row.host_review_daily_max,
+           'host_review_auto_per_project_day': row.host_review_auto_per_project_day, 'host_reviews_today': host_review.reviews_today(),
+           'host_review_projects': [{'slug': p.slug, 'name': p.name, 'mode': host_review.mode_of(p)} for p in Project.objects.order_by('name')[:500]],
+           'default_ops_hours': list(reviewer.DEFAULT_OPS_HOURS), 'default_models': reviewer.DEFAULT_MODELS,
+           'reviews_today': reviewer.reviews_today(), 'last_ops_at': row.last_ops_at.isoformat() if row.last_ops_at else None,
+           'container': builtin_reviewer.status(), 'working': reviewer.enabled(row, provider)}
+    jobs = ai_jobs.waiting()
+    out['ai_jobs'] = {**jobs, 'message': ai_jobs.waiting_message(jobs)}
+    if provider is not None:
+        out['models_in_force'] = {'review': reviewer.model_for('review', row, provider), 'ops': reviewer.model_for('ops', row, provider)}
+    return out
+
+
+def reviewer_put(request):
+    from cveFeed import reviewer
+    data = _body(request)
+    row = reviewer.settings_row()
+    fields = []
+    for name in ('enabled', 'auto_close'):
+        if name in data:
+            if not isinstance(data[name], bool):
+                raise SettingsError(400, f'{name} must be true or false')
+            setattr(row, name, data[name])
+            fields.append(name)
+    for name in ('review_model', 'ops_model'):
+        if name in data:
+            value = str(data[name] or '').strip()
+            if not MODEL_NAME.match(value):
+                raise SettingsError(400, 'a model name is letters, digits and . _ : / @ + - (at most 100), or empty for the default')
+            setattr(row, name, value)
+            fields.append(name)
+    if 'review_daily_max' in data:
+        try:
+            value = int(data['review_daily_max'])
+        except (TypeError, ValueError):
+            raise SettingsError(400, 'reviews per day must be a whole number')
+        if not 0 <= value <= 20000:
+            raise SettingsError(400, 'reviews per day must be between 0 and 20000')
+        row.review_daily_max = value
+        fields.append('review_daily_max')
+    # the AI host review spends the provider's money on every host: a person switches it on and sets its caps in the web interface. An agent (the MCP
+    # bridge marks its request) may switch it off or lower a cap, never turn it on or raise one
+    via_agent = bool(getattr(request, 'via_agent', False))
+    if 'host_review_enabled' in data:
+        if not isinstance(data['host_review_enabled'], bool):
+            raise SettingsError(400, 'host_review_enabled must be true or false')
+        if data['host_review_enabled'] and via_agent:
+            raise SettingsError(403, 'the AI host review is billed by the AI provider: only a person switches it on, in Settings in the web interface')
+        row.host_review_enabled = data['host_review_enabled']
+        fields.append('host_review_enabled')
+    if 'template_validation_enabled' in data:
+        if not isinstance(data['template_validation_enabled'], bool):
+            raise SettingsError(400, 'template_validation_enabled must be true or false')
+        if data['template_validation_enabled'] and via_agent:
+            raise SettingsError(403, 'AI-written checks are validated with AI calls the provider bills, and then run on hosts: only a person switches that on, in Settings in the web interface')
+        row.template_validation_enabled = data['template_validation_enabled']
+        fields.append('template_validation_enabled')
+    if 'host_review_auto_close' in data:
+        if not isinstance(data['host_review_auto_close'], bool):
+            raise SettingsError(400, 'host_review_auto_close must be true or false')
+        if data['host_review_auto_close'] and via_agent:
+            raise SettingsError(403, 'only a person lets the AI host review close findings by itself, in Settings in the web interface')
+        row.host_review_auto_close = data['host_review_auto_close']
+        fields.append('host_review_auto_close')
+    for name, top in (('host_review_daily_max', 20000), ('host_review_auto_per_project_day', 20000)):
+        if name in data:
+            value = data[name]
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= top:
+                raise SettingsError(400, f'{name} must be a whole number from 0 to {top}')
+            if via_agent and value > getattr(row, name):
+                raise SettingsError(403, 'an agent may lower this limit; only a person raises it, in Settings in the web interface')
+            setattr(row, name, value)
+            fields.append(name)
+    modes = data.get('host_review_modes')  # {project slug: auto | recommend | off}: the same setting as the host page's, listed here so there is one obvious place
+    if modes is not None:
+        from cveFeed.models import ProjectSettings
+        from dashboard.models import Project
+        if not isinstance(modes, dict) or len(modes) > 500 or not all(isinstance(k, str) and v in ProjectSettings.HOST_REVIEW_MODES for k, v in modes.items()):
+            raise SettingsError(400, 'host_review_modes is {project slug: auto, recommend or off}')
+        projects = {p.slug: p for p in Project.objects.filter(slug__in=list(modes))}
+        if set(modes) - set(projects):
+            raise SettingsError(404, 'no such project: ' + ', '.join(sorted(set(modes) - set(projects))[:5]))
+        from cveFeed import host_review
+        if via_agent and any(host_review.MODE_RANK[mode] > host_review.MODE_RANK[host_review.mode_of(projects[slug])] for slug, mode in modes.items()):
+            raise SettingsError(403, 'only a person raises the host review of a project, in Settings in the web interface; an agent may only lower it')
+        for slug, mode in modes.items():
+            ProjectSettings.objects.update_or_create(project=projects[slug], defaults={'host_review_mode': mode, 'updated_by': request.user})
+        from cveFeed.admin_api import audit
+        audit(request.user, 'settings.reviewer', 'AI host review mode per project', projects=sorted(modes))
+    if 'ops_hours' in data:
+        hours = data['ops_hours']
+        if not isinstance(hours, list) or len(hours) > 24 or not all(isinstance(h, int) and not isinstance(h, bool) and 0 <= h <= 23 for h in hours):
+            raise SettingsError(400, 'operations hours are a list of UTC hours from 0 to 23')
+        if via_agent and not set(hours) <= set(reviewer.ops_hours(row)):  # each extra hour is a billed call: an agent may take hours away, never add one
+            raise SettingsError(403, f'ops_hours: every hour is a paid call to the AI provider, so an agent may only take hours away (now {sorted(reviewer.ops_hours(row))}); a person adds them in the web interface')
+        row.ops_hours = sorted(set(hours))
+        fields.append('ops_hours')
+    if fields:
+        by_person = not getattr(request, 'via_agent', False)  # FB-12: an agent's save is not a person's choice, so it leaves the mark alone (the audit row says who made it)
+        if by_person:
+            row.updated_by = request.user
+        row.save(update_fields=fields + (['updated_by'] if by_person else []) + ['updated_at'])
+        from cveFeed.admin_api import audit
+        audit(request.user, 'settings.reviewer', 'AI reviewer settings', fields=fields)
+    return reviewer_get(request)
+
+
+def alerts_get(request):
+    from cveFeed import reviewer, setup_questions
+    setup_questions.settle(request.user)  # an "inside only" answer that waited for the first Sentinel of your own is applied once one is live
+    return {'alerts': reviewer.open_alerts(request.user), 'questions': setup_questions.reminder()}  # the reminder of the questions about an update, or None
+
+
+def setup_questions_get(request):
+    from cveFeed import setup_questions
+    return setup_questions.snapshot()
+
+
+def setup_questions_post(request):
+    """Answer one question (``{key, answer}``: one of its choices, or ``later``), or leave them all for later (``{later: true}``). The answer is carried out
+    through the Settings handler of the feature it is about, so its limits and its audit entry apply."""
+    from cveFeed import setup_questions
+    data = _body(request)
+    try:
+        if data.get('later') is True:
+            return setup_questions.defer_all(request.user)
+        if 'answers' in data:
+            return setup_questions.answer_many(request.user, data['answers'])
+        if not isinstance(data.get('key'), str) or not isinstance(data.get('answer'), str):
+            raise SettingsError(400, 'send answers (a key and its choice for each question), or key and answer, or later: true')
+        return setup_questions.answer(request.user, data['key'], data['answer'])
+    except setup_questions.QuestionError as exc:
+        raise SettingsError(exc.status, exc.message)
+
+
+def alert_dismiss(request, alert_id):
+    from cveFeed import reviewer
+    if not reviewer.dismiss_alert(int(alert_id), request.user):
+        raise SettingsError(404, 'no such open alert')
+    return {'ok': True}
+
+
 # --- routing -----------------------------------------------------------------------
 
 ROUTES = [
     ('GET', r'ai', lambda r, **k: ai_get(r)), ('PUT', r'ai', lambda r, **k: ai_put(r)),
     ('GET', r'ai/usage', lambda r, **k: ai_usage_get(r)),
+    ('GET', r'reviewer', lambda r, **k: reviewer_get(r)), ('PUT', r'reviewer', lambda r, **k: reviewer_put(r)),
+    ('GET', r'alerts', lambda r, **k: alerts_get(r)),
+    ('GET', r'setup_questions', lambda r, **k: setup_questions_get(r)), ('POST', r'setup_questions', lambda r, **k: setup_questions_post(r)),
+    ('POST', r'alerts/(?P<alert_id>\d{1,12})/dismiss', lambda r, alert_id, **k: alert_dismiss(r, alert_id)),
     ('PUT', r'ai/usage/rate', lambda r, **k: ai_usage_rate_put(r)),
     ('GET', r'scan_policy', lambda r, **k: scan_policy_get(r)), ('PUT', r'scan_policy', lambda r, **k: scan_policy_put(r)),
     ('POST', r'ai/test', lambda r, **k: ai_test(r)),
     ('POST', r'cve_guidance/run', lambda r, **k: cve_guidance_run(r)),
     ('GET', r'cve_seed', lambda r, **k: cve_seed_get(r)), ('POST', r'cve_seed/build', lambda r, **k: cve_seed_build(r)),
+    ('POST', r'cve_seed/import', lambda r, **k: cve_seed_import(r)),
     ('GET', r'cve_seed/download/(?P<which>seed|manifest)', lambda r, which, **k: cve_seed_download(r, which)),
     ('POST', r'ai/models', lambda r, **k: ai_models(r)),
     ('GET', r'factory_reset', lambda r, **k: factory_reset_get(r)), ('POST', r'factory_reset', lambda r, **k: factory_reset_post(r)),
@@ -955,6 +1356,7 @@ ROUTES = [
     ('POST', r'autotune/decisions/(?P<decision_id>\d+)/revert', lambda r, decision_id, **k: autotune_revert(r, decision_id)),
     ('POST', r'autotune/release', lambda r, **k: autotune_release(r)),
     ('GET', r'updates', lambda r, **k: updates_get(r)), ('PUT', r'updates', lambda r, **k: updates_put(r)),
+    ('GET', r'scanner_plan', lambda r, **k: scanner_plan_get(r)), ('POST', r'scanner_plan', lambda r, **k: scanner_plan_post(r)),
     ('POST', r'updates/check', lambda r, **k: updates_check(r)), ('POST', r'updates/approve', lambda r, **k: updates_approve(r)),
     ('POST', r'updates/cancel', lambda r, **k: updates_cancel(r)), ('POST', r'updates/dismiss', lambda r, **k: updates_dismiss(r)),
     ('GET', r'keys', lambda r, **k: keys_get(r)), ('PUT', r'keys', lambda r, **k: keys_put(r)),
@@ -970,7 +1372,6 @@ ROUTES = [
     ('POST', r'tailscale/(?P<project_id>\d+)/test', lambda r, project_id, **k: tailscale_admin.tailscale_test(r, project_id)),
     ('POST', r'tailscale/(?P<project_id>\d+)/sync', lambda r, project_id, **k: tailscale_admin.tailscale_sync_now(r, project_id)),
     ('GET', r'openvas', lambda r, **k: openvas_admin.openvas_get(r)), ('PUT', r'openvas', lambda r, **k: openvas_admin.openvas_put(r)),
-    ('POST', r'openvas/test', lambda r, **k: openvas_admin.openvas_test(r)),
     ('PUT', r'openvas/projects/(?P<project_id>\d+)', lambda r, project_id, **k: openvas_admin.project_put(r, project_id)),
     ('GET', r'openvas/projects/(?P<project_id>\d+)/queue', lambda r, project_id, **k: openvas_admin.project_queue(r, project_id)),
     ('DELETE', r'openvas/projects/(?P<project_id>\d+)', lambda r, project_id, **k: openvas_admin.project_delete(r, project_id)),

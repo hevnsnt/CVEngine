@@ -1,0 +1,24 @@
+{
+  "targets": [
+    {
+      "address": "192.0.2.10",
+      "port": 22
+    },
+    {
+      "address": "198.51.100.7",
+      "port": 2222
+    }
+  ],
+  "scope": {
+    "hosts": [
+      "192.0.2.10",
+      "198.51.100.7"
+    ],
+    "domains": [],
+    "excluded": [],
+    "excluded_trees": [],
+    "private": false,
+    "addresses": [],
+    "blocked": []
+  }
+}

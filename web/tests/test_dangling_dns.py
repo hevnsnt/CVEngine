@@ -14,10 +14,11 @@ from django.utils import timezone
 from cveFeed import dangling_dns as dd
 from cveFeed import domain_ownership as own
 from dashboard.models import Org, Project
-from reNgine import bbot as bbot_lib
+from reNgine import discovery_events as bbot_lib
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain, Vulnerability
 from targetApp.models import Domain
+from tests.fake_scanner import FakeScanner
 
 GCLOUD = [f'ns-cloud-c{i}.googledomains.com' for i in range(1, 5)]
 
@@ -265,10 +266,24 @@ class Stored(TestCase):
                                                results_dir='x')
         self.ctx = {'scan_history_id': self.scan.id, 'domain_id': self.domain.id, 'subdomain_id': None, 'subscan_id': None}
         mock.patch('reNgine.tasks.geo_localize.delay').start()
+        mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False).start()
+        mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True).start()
         self.addCleanup(mock.patch.stopall)
         zones, addresses = registry_and_client(client_children={'d.fs.app.example.com': GCLOUD},
                                                cnames={'vision.example.com': 'abc123.up.railway.app'})
         self.net = FakeDns(zones, addresses)
+
+    def scanner(self, descriptions):
+        """The fake built-in scanner, rating each asked finding with the rules of ``dangling_dns.assess`` over the in-memory DNS (``self.net``): what a
+        Sentinel's probe does with the real network. ``descriptions`` maps a host to the baddns text the server holds for it."""
+        def answer(task):
+            rows = []
+            for check in task['target']['checks']:
+                rating = dd.assess({'host': check['host'], 'description': descriptions[check['host']], 'module': 'baddns'}, net=self.net)
+                rows.append({'id': check['id'], 'state': 'unknown'} if rating is None else
+                            {'id': check['id'], 'state': 'rated', 'severity': rating.severity, 'drop': rating.drop, 'note': rating.note, 'zone': rating.zone})
+            return {'outcome': 'done', 'ratings': rows, 'touched': [], 'refused': []}
+        return FakeScanner(kinds=['dangling_dns_check'], responders={'dangling_dns_check': answer})
 
     def event(self, host, description):
         return {'type': 'FINDING', 'id': host, 'host': host, 'module': 'baddns', 'data': None,
@@ -276,10 +291,9 @@ class Stored(TestCase):
 
     def persist(self, *events):
         from reNgine.tasks import persist_bbot_result
-        result = bbot_lib.BbotResult()
-        for event in events:
-            bbot_lib.parse_event(event, result, {})
-        with mock.patch('cveFeed.dangling_dns.Net', return_value=self.net):
+        from tests.discovery_fixtures import fold_findings
+        result = fold_findings(events)
+        with self.scanner({e['host']: e['data_json']['description'] for e in events}):
             persist_bbot_result(result, ctx=self.ctx)
 
 
@@ -312,7 +326,7 @@ class RerateCommandTests(Stored):
 
     def run_command(self, *args):
         out = io.StringIO()
-        with mock.patch('cveFeed.dangling_dns.Net', return_value=self.net):
+        with self.scanner({v.subdomain.name if v.subdomain_id else v.http_url: v.description for v in Vulnerability.objects.all()}):
             call_command('rerate_dangling_dns', *args, stdout=out)
         return out.getvalue()
 

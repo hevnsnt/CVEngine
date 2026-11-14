@@ -1,6 +1,6 @@
 """One-click PDF reports: queue a report, poll it, download it, and clean up.
 
-A report is built in a celery task (``generate_report`` on ``cve_feed_queue``) from ``cveFeed.report_data``, rendered by
+A report is built in a celery task (``generate_report`` on its own ``report_queue``, served by the classic worker, so a long feed or certificate lookup cannot hold it) from ``cveFeed.report_data``, rendered by
 ``cveFeed.report_pdf`` in a child process, and written under the report directory with a random file name. A ``ReportExport`` row
 says who asked, for what, how it went and when the file expires (24 hours). The only way to read the file is ``download``, an
 authenticated view of the user who asked, which checks the project role again. Expired files are removed on access and in the weekly
@@ -30,7 +30,9 @@ TTL_HOURS_DEFAULT, TTL_HOURS_CEILING = 24, 168
 ACTIVE_PER_USER_DEFAULT = 3
 PER_HOUR_DEFAULT = 20
 ACTIVE_TOTAL_DEFAULT = 8
-STUCK_AFTER = timedelta(hours=2)  # a queued or running report this old lost its worker
+QUEUE = 'report_queue'
+STUCK_AFTER = timedelta(hours=2)  # a running report this old lost its worker
+UNTAKEN_AFTER = timedelta(minutes=10)  # a report no worker has taken in this long is not going to be: say so, the page stops waiting
 FILE_RE = re.compile(r'^[0-9a-f]{48}\.pdf$')
 ACTIVE = ('queued', 'running')
 
@@ -107,7 +109,7 @@ def enqueue(ctx, slug, host=None, include_closed=False):
     audit.record(ctx.user, 'report.export', project.slug, org=project.org_id, host=host, include_closed=bool(include_closed))
     from cveFeed.tasks import generate_report
     try:
-        task = generate_report.apply_async(args=[job.pk], queue='cve_feed_queue')
+        task = generate_report.apply_async(args=[job.pk], queue=QUEUE)
         ReportExport.objects.filter(pk=job.pk, status='queued').update(celery_id=task.id)
     except Exception as exc:  # noqa: BLE001 - the broker is down: the row says so instead of waiting forever
         logger.exception('could not queue report %s', job.pk)
@@ -117,10 +119,14 @@ def enqueue(ctx, slug, host=None, include_closed=False):
 
 
 def _expire_stuck(now):
-    """A report whose worker died would otherwise stay "running" for ever: fail the ones older than STUCK_AFTER."""
+    """A report whose worker died would otherwise stay "running" for ever: fail the ones older than STUCK_AFTER. One still queued
+    after UNTAKEN_AFTER (a report takes seconds to minutes once a worker has it) found no worker, so it fails at once rather than leaving
+    the page waiting for hours; a worker that later takes the message finds the row no longer queued and skips it."""
     from cveFeed.models import ReportExport
     ReportExport._base_manager.filter(status__in=ACTIVE, created_at__lt=now - STUCK_AFTER).update(
         status='failed', finished_at=now, error='the report was not finished (the worker stopped); ask for it again')
+    ReportExport._base_manager.filter(status='queued', created_at__lt=now - UNTAKEN_AFTER).update(
+        status='failed', finished_at=now, error='no worker took the report (they are busy or stopped); ask for it again in a few minutes')
 
 
 # --- reading -------------------------------------------------------------------------------------------------------------------

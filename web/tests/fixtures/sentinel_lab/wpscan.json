@@ -1,0 +1,213 @@
+{
+ "kind": "wpscan",
+ "name": "wpscan",
+ "payload": {
+  "outcome": "done",
+  "report": {
+   "cached_requests": 8,
+   "command_line": "wpscan --url http://192.0.2.10/ --format json --no-banner --random-user-agent --throttle 100 --request-timeout 30 --connect-timeout 15 --detection-mode mixed --plugins-detection passive --themes-detection passive --disable-tls-checks --enumerate p,t,cb,dbe,u1-5 --max-scan-duration 870 -o /tmp/wpscan-8hou3zon/report.json",
+   "config_backups": {},
+   "data_received": 26578700,
+   "data_received_humanised": "25.347 MB",
+   "data_sent": 74963,
+   "data_sent_humanised": "73.206 KB",
+   "db_exports": {},
+   "db_files_updated": [
+    "metadata.json",
+    "wp_fingerprints.json",
+    "timthumbs-v3.txt",
+    "config_backups.txt",
+    "db_exports.txt",
+    "backup_folders.txt",
+    "dynamic_finders.yml",
+    "LICENSE",
+    "sponsor.txt"
+   ],
+   "db_update_finished": true,
+   "db_update_started": true,
+   "effective_url": "http://192.0.2.10/",
+   "elapsed": 33,
+   "hostname": "5681a22850e5",
+   "interesting_findings": [
+    {
+     "confidence": 100,
+     "confirmed_by": {},
+     "found_by": "Headers (Passive Detection)",
+     "interesting_entries": [
+      "Server: nginx/1.31.8"
+     ],
+     "references": {},
+     "to_s": "Headers",
+     "type": "headers",
+     "url": "http://192.0.2.10/"
+    },
+    {
+     "confidence": 100,
+     "confirmed_by": {},
+     "found_by": "Direct Access (Aggressive Detection)",
+     "interesting_entries": [],
+     "references": {},
+     "to_s": "WordPress readme found: http://192.0.2.10/readme.html",
+     "type": "readme",
+     "url": "http://192.0.2.10/readme.html"
+    }
+   ],
+   "main_theme": {
+    "active_installs": 300000,
+    "author": null,
+    "author_uri": null,
+    "confidence": 70,
+    "confirmed_by": {},
+    "description": null,
+    "directory_listing": false,
+    "error_log_url": null,
+    "found_by": "Css Style In Homepage (Passive Detection)",
+    "interesting_entries": [],
+    "last_updated": "2026-08-19T00:00:00Z",
+    "last_updated_relative": "2 months ago",
+    "last_updated_source": "WordPress.org",
+    "latest_version": "1.6",
+    "license": null,
+    "license_uri": null,
+    "location": "http://192.0.2.10/wp-content/themes/twentytwentythree/",
+    "outdated": true,
+    "parents": [],
+    "readme_url": false,
+    "slug": "twentytwentythree",
+    "style_name": "Twenty Twenty-Three",
+    "style_uri": null,
+    "style_url": "http://192.0.2.10/wp-content/themes/twentytwentythree/style.css?ver=1.2",
+    "tags": null,
+    "template": null,
+    "text_domain": null,
+    "version": {
+     "confidence": 80,
+     "confirmed_by": {},
+     "found_by": "Style (Passive Detection)",
+     "interesting_entries": [
+      "http://192.0.2.10/wp-content/themes/twentytwentythree/style.css?ver=1.2, Match: 'Version: 1.2'"
+     ],
+     "number": "1.2"
+    },
+    "vulnerabilities": []
+   },
+   "plugins": {
+    "contact-form-7": {
+     "active_installs": 10000000,
+     "confidence": 80,
+     "confirmed_by": {},
+     "directory_listing": false,
+     "error_log_url": null,
+     "found_by": "Urls In Homepage (Passive Detection)",
+     "interesting_entries": [],
+     "last_updated": "2026-11-10T05:46:00Z",
+     "last_updated_relative": "2 days ago",
+     "last_updated_source": "WordPress.org",
+     "latest_version": "6.2.5",
+     "location": "http://192.0.2.10/wp-content/plugins/contact-form-7/",
+     "outdated": true,
+     "readme_url": null,
+     "slug": "contact-form-7",
+     "version": {
+      "confidence": 10,
+      "confirmed_by": {},
+      "found_by": "Query Parameter (Passive Detection)",
+      "interesting_entries": [
+       "http://192.0.2.10/wp-content/plugins/contact-form-7/includes/css/styles.css?ver=5.7.1"
+      ],
+      "number": "5.7.1"
+     },
+     "vulnerabilities": []
+    }
+   },
+   "requests_done": 283,
+   "response_status_codes": {
+    "200": 39,
+    "403": 1,
+    "404": 240,
+    "failed": 3
+   },
+   "response_status_codes_warning": false,
+   "response_status_codes_warnings": [],
+   "start_memory": 61788160,
+   "start_time": 1794499711,
+   "stop_time": 1794499744,
+   "target_ip": "192.0.2.10",
+   "target_url": "http://192.0.2.10/",
+   "themes": {
+    "twentytwentythree": {
+     "active_installs": 300000,
+     "author": null,
+     "author_uri": null,
+     "confidence": 80,
+     "confirmed_by": {},
+     "description": null,
+     "directory_listing": false,
+     "error_log_url": null,
+     "found_by": "Urls In Homepage (Passive Detection)",
+     "interesting_entries": [],
+     "last_updated": "2026-08-19T00:00:00Z",
+     "last_updated_relative": "2 months ago",
+     "last_updated_source": "WordPress.org",
+     "latest_version": "1.6",
+     "license": null,
+     "license_uri": null,
+     "location": "http://192.0.2.10/wp-content/themes/twentytwentythree/",
+     "outdated": true,
+     "parents": [],
+     "readme_url": null,
+     "slug": "twentytwentythree",
+     "style_name": "Twenty Twenty-Three",
+     "style_uri": null,
+     "style_url": "http://192.0.2.10/wp-content/themes/twentytwentythree/style.css",
+     "tags": null,
+     "template": null,
+     "text_domain": null,
+     "version": {
+      "confidence": 80,
+      "confirmed_by": {},
+      "found_by": "Style (Passive Detection)",
+      "interesting_entries": [
+       "http://192.0.2.10/wp-content/themes/twentytwentythree/style.css, Match: 'Version: 1.2'"
+      ],
+      "number": "1.2"
+     },
+     "vulnerabilities": []
+    }
+   },
+   "used_memory": 272678912,
+   "used_memory_humanised": "260.047 MB",
+   "users": {},
+   "version": {
+    "confidence": 100,
+    "confirmed_by": {
+     "Most Common Wp Includes Query Parameter In Homepage (Passive Detection)": {
+      "confidence": 40,
+      "interesting_entries": [
+       "http://192.0.2.10/wp-includes/js/wp-embed.min.js?ver=6.4.1"
+      ]
+     }
+    },
+    "found_by": "Meta Generator (Passive Detection)",
+    "interesting_entries": [
+     "http://192.0.2.10/, Match: 'WordPress 6.4.1'"
+    ],
+    "number": "6.4.1",
+    "release_date": "2023-11-09",
+    "status": "insecure",
+    "vulnerabilities": []
+   },
+   "vuln_api": {
+    "error": "No WPScan API Token given, as a result vulnerability data has not been output.\nYou can get a free API token with 25 daily requests by registering at https://wpscan.com/register"
+   }
+  },
+  "returncode": 0,
+  "stderr_tail": ""
+ },
+ "sentinel_seconds": 38.0,
+ "target": {
+  "token": "",
+  "url": "http://192.0.2.10/"
+ },
+ "tool_rows": null
+}

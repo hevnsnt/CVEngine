@@ -127,6 +127,21 @@ class GroupedFindingsTests(TestCase):
 		self.assertEqual(len(found), 1, [r['title'] for r in self.groups(body)])
 		return found[0]['group']
 
+	def test_a_group_row_shows_the_newest_ai_review_of_its_members_and_says_which(self):
+		from cveFeed import triage as triage_lib
+		from cveFeed.models import FindingReview
+		triage_lib.track(list(self.m23.values()))
+		body = self.get(type='cve', group='cve')
+		self.assertIsNone(next(r for r in self.groups(body) if r['title'] == 'CVE-2020-11023')['ai_review'])
+		for name, verdict in (('blog', 'false_positive'), ('info', 'true_open')):  # the one shown for the group is the newest, not the representative's
+			FindingReview.objects.create(triage=Triage.objects.get(match=self.m23[name]), project_id=self.pa.pk, review_key='c' * 40,
+										 verdict=verdict, confidence='high', outcome='held' if verdict == 'false_positive' else 'recorded')
+		body = self.get(type='cve', group='cve')
+		review = next(r for r in self.groups(body) if r['title'] == 'CVE-2020-11023')['ai_review']
+		self.assertEqual(review['verdict'], 'true_open')
+		self.assertIn('6 hosts in this group', review['scope_text'])
+		self.assertIn('2 of them', review['scope_text'])
+
 	def test_the_default_stays_one_row_per_host(self):
 		body = self.get(type='cve')
 		self.assertEqual(len(body['results']), 14)  # 6 + 6 siblings, othersite, the port match

@@ -1,0 +1,72 @@
+"""The fields the review of the scanners needs from a Sentinel's result survive result cleaning, and a result without them reads exactly as before."""
+from django.test import SimpleTestCase
+
+from agentapi import probe_results, sentinel_broker as broker
+
+
+class ResultFieldTests(SimpleTestCase):
+    def test_an_nmap_host_that_timed_out_keeps_that_and_only_that_explicit_flag(self):
+        out = broker._clean_nmap_result({'hosts': [{'ip': '192.0.2.10', 'timed_out': True, 'ports': []}, {'ip': '192.0.2.11', 'timed_out': 'yes', 'ports': []},
+                                                    {'ip': '192.0.2.12', 'ports': []}]})
+        flags = {h['ip']: h.get('timed_out') for h in out['hosts']}
+        self.assertEqual(flags, {'192.0.2.10': True, '192.0.2.11': None, '192.0.2.12': None})
+
+    def test_an_incomplete_naabu_result_names_the_addresses_it_did_not_finish(self):
+        out = broker._clean_naabu_result({'ports': {'192.0.2.10': [22, 80]}, 'incomplete': True, 'unfinished': ['192.0.2.11', 'not an address', '192.0.2.12']})
+        self.assertEqual((out['incomplete'], out['unfinished']), (True, ['192.0.2.11', '192.0.2.12']))
+        self.assertEqual(broker._clean_naabu_result({'ports': {}}), {'ports': {}})
+
+    def test_a_nuclei_result_keeps_the_unreachable_hosts_and_the_template_release(self):
+        out = broker._clean_nuclei_result({'findings': [], 'unreachable': ['Down.Example.com', '', 5], 'templates_release': 'v10.5.1'})
+        self.assertEqual((out['unreachable'], out['templates_release']), (['down.example.com'], 'v10.5.1'))
+        self.assertEqual(broker._clean_nuclei_result({'findings': []}), {'findings': []})
+
+    def test_a_testssl_result_keeps_the_return_code_and_the_handshake_flag(self):
+        out = broker._clean_testssl_result({'items': [], 'returncode': 9, 'handshake': False})
+        self.assertEqual((out['returncode'], out['handshake']), (9, False))
+        self.assertEqual(broker._clean_testssl_result({'items': [], 'returncode': True, 'handshake': 'no'}), {'items': []})
+
+    def test_a_hygiene_result_keeps_error_rows_and_the_names_whose_lookup_failed(self):
+        out = probe_results.clean_hygiene_check({'certs': [], 'mail': [{'name': 'example.com', 'error': 'mx lookup failed'}], 'unknown_names': ['mail.example.com', 7]})
+        self.assertEqual(out['mail'], [{'name': 'example.com', 'has_mx': False, 'findings': [], 'error': 'mx lookup failed'}])
+        self.assertEqual(out['unknown_names'], ['mail.example.com'])
+        self.assertNotIn('unknown_names', probe_results.clean_hygiene_check({'certs': [], 'mail': []}))
+
+
+class OpenvasUnreachedTests(SimpleTestCase):
+    def test_a_host_gvmd_listed_but_that_never_answered_is_not_scanned(self):
+        from cveFeed import openvas_scan
+        out = broker._clean_openvas_result({'results': [], 'scanned_addresses': ['192.0.2.10', '192.0.2.11'], 'unreached_hosts': ['192.0.2.11', 4]})
+        self.assertEqual(out['unreached_hosts'], ['192.0.2.11'])
+        self.assertEqual(openvas_scan.scanned_hosts(out), {'192.0.2.10'})
+
+    def test_a_result_without_the_field_counts_every_listed_host_as_before(self):
+        from cveFeed import openvas_scan
+        out = broker._clean_openvas_result({'results': [], 'scanned_addresses': ['192.0.2.10']})
+        self.assertNotIn('unreached_hosts', out)
+        self.assertEqual(openvas_scan.scanned_hosts(out), {'192.0.2.10'})
+
+
+class NucleiFindingDetailTests(SimpleTestCase):
+    FINDING = {'template_id': 'CVE-2021-41773', 'name': 'Apache path traversal', 'severity': 'critical', 'host': 'a.example.com', 'matched_at': 'https://a.example.com/x',
+               'cve_ids': ['CVE-2021-41773'], 'cvss_score': 7.5, 'references': ['https://example.com/advisory', 'javascript:alert(1)', 7],
+               'remediation': 'Upgrade.', 'request': 'GET /x', 'response': 'HTTP/1.1 200 OK'}
+
+    def test_cvss_references_and_remediation_survive_cleaning_and_reach_the_result_line(self):
+        from agentapi import sentinel_dispatch
+        findings, _ = broker._clean_findings([self.FINDING])
+        self.assertEqual((findings[0]['cvss_score'], findings[0]['references'], findings[0]['remediation']), (7.5, ['https://example.com/advisory'], 'Upgrade.'))
+        line = sentinel_dispatch._finding_to_nuclei_line(findings[0])
+        self.assertEqual(line['info']['classification'], {'cve-id': ['CVE-2021-41773'], 'cvss-score': 7.5})
+        self.assertEqual((line['info']['reference'], line['info']['remediation'], line['request']), (['https://example.com/advisory'], 'Upgrade.', 'GET /x'))
+
+    def test_a_finding_without_them_reads_as_before(self):
+        from agentapi import sentinel_dispatch
+        findings, _ = broker._clean_findings([{'template_id': 't', 'name': 'n', 'severity': 'info', 'host': 'a.example.com', 'matched_at': 'https://a.example.com/'}])
+        self.assertNotIn('cvss_score', findings[0])
+        line = sentinel_dispatch._finding_to_nuclei_line(findings[0])
+        self.assertEqual((line['info']['classification'], line['info']['reference']), ({'cve-id': []}, []))
+
+    def test_a_score_out_of_range_is_dropped(self):
+        findings, _ = broker._clean_findings([{**self.FINDING, 'cvss_score': 11}])
+        self.assertNotIn('cvss_score', findings[0])

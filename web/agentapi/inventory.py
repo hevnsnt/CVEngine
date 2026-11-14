@@ -304,6 +304,8 @@ def set_policy(ctx, project, changes):
     if 'create_hosts' in changes:
         if not isinstance(changes['create_hosts'], bool):
             raise ApiError(400, 'create_hosts must be true or false')
+        if changes['create_hosts'] and ctx.token is not None and not row.inventory_create_hosts:  # an API token or MCP call: a report would add hosts to scan
+            raise ApiError(403, 'switching create_hosts on lets a host report add hosts that are then scanned, so only a person does it, in the web interface; a token may switch it off')
         row.inventory_create_hosts = changes['create_hosts']
     if 'stale_days' in changes:
         days = changes['stale_days']

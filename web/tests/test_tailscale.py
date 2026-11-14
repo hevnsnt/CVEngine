@@ -17,7 +17,7 @@ from django.utils import timezone
 
 from agentapi import services as svc
 from agentapi.services import ApiError
-from cveFeed import hygiene, tailscale_api, tailscale_checks, tailscale_local, tailscale_scope, tailscale_sync
+from cveFeed import tailscale_api, tailscale_checks, tailscale_local, tailscale_scope, tailscale_sync
 from cveFeed.models import HostExclusion, HostLabel, HostProfile, HostState, HygieneFinding, TailscaleDevice, TailscaleLink
 from cveFeed.tailscale_api import TailscaleError
 from dashboard.models import AuditLog, Org, OrgMembership, Project, ProjectMembership
@@ -28,6 +28,8 @@ from targetApp.target_types import is_scannable_ip
 from tests.test_agentapi import call, tool_call
 from tests.test_settings import send
 from tests.test_tenancy import client_for
+from tests.port_stage_stub import port_double
+from tests import hygiene_harness
 
 SECRET = 'tskey-client-SECRETSECRETSECRET'
 TOKEN = 'tskey-api-TOPSECRETTOKEN'
@@ -593,7 +595,7 @@ class ScopePolicyTests(ScopeFixture, TestCase):
 
     def test_bbot_port_events_for_a_name_that_resolves_into_a_tailnet_store_nothing(self):
         """Old code: a port event whose host was the address (no subdomain) was stored with tailnet authority for any scan."""
-        from reNgine import bbot as bbot_lib
+        from reNgine import discovery_events as bbot_lib
         from reNgine.tasks import persist_bbot_result
         EngineType.objects.get_or_create(engine_name='e', defaults={'yaml_configuration': 'x', 'default_engine': True})
         attacker = Domain.objects.create(name='evil.example.test', project=self.other_project, insert_date=timezone.now())
@@ -719,14 +721,14 @@ class PipelineReachTests(ScopeFixture, TestCase):
             scan = discovery.start_discovery(domain)
         nmap = []
 
-        def runner(targets, flags, timeout):
+        def runner(targets):
             nmap.append(list(targets))
             return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
-        kwargs = dict(stream=mock.Mock(side_effect=AssertionError('no bbot for an IP')), light_stream=lambda path, **k: iter([]),
-                      targeted_stream=lambda path, **k: iter([]), nmap_runner=runner, db_exposure_checks={}, provider=None,
-                      route_probe=lambda url: {'url': url, 'status': 200, 'body': '', 'title': ''},
+        kwargs = dict(light_stream=lambda path, **k: iter([]),
+                      targeted_stream=lambda path, **k: iter([]), port_stage_run=port_double(runner), db_exposure_checks={}, provider=None,
                       ip_lookups={'ptr': lambda ip: [], 'certificate': lambda ip: []})
-        with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
+        with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'), \
+                mock.patch('agentapi.sentinel_stream.dispatch_stream', side_effect=AssertionError('no discovery run for an IP')):
             discovery.run_pipeline(scan.id, **kwargs)
         return scan, nmap
 
@@ -1267,10 +1269,10 @@ class FindingStorageTests(SyncBase):
     def test_the_tls_and_email_sweep_leaves_tailscale_findings_alone(self):
         self.sync()
         domain = self.domains()['100.64.0.1']
-        hygiene.run_hygiene(domain.id, probe=lambda host, port: None, emailer=lambda name: ([], False), mx=lambda *a: False)
+        hygiene_harness.run_hygiene(domain.id, probe=lambda host, port: None, emailer=lambda name: ([], False), mx=lambda *a: False)
         self.assertEqual({r.status for r in self.rows().values()}, {'open'})
         HygieneFinding.objects.create(domain=domain, host='100.64.0.1', check_name='tls_expired', severity=3, title='old')
-        hygiene.run_hygiene(domain.id, probe=lambda host, port: None, emailer=lambda name: ([], False), mx=lambda *a: False)
+        hygiene_harness.run_hygiene(domain.id, probe=lambda host, port: None, emailer=lambda name: ([], False), mx=lambda *a: False)
         self.assertEqual(HygieneFinding.objects.get(check_name='tls_expired').status, 'resolved')  # its own checks still resolve
 
     def test_policy_findings_are_skipped_when_the_policy_cannot_be_read_and_kept_otherwise(self):
@@ -1655,7 +1657,7 @@ class ComposeProfileTests(SimpleTestCase):
 
     def test_the_rest_of_the_stack_is_unchanged_without_the_profile(self):
         services = self.compose['services']
-        self.assertEqual({n for n, s in services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy'})
+        self.assertEqual({n for n, s in services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer', 'scanner'})  # the AI reviewer and the built-in scanner are part of the default stack
         for name in ('celery', 'web'):
             self.assertNotIn('cap_add', services[name])
             self.assertNotIn('network_mode', services[name])

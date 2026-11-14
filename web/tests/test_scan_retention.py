@@ -8,7 +8,7 @@ from django.core.management import call_command
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import discovery, scan_retention
+from cveFeed import scan_retention
 from cveFeed.models import CVEEntry, CVEMatch, FindingAuditEvent, FindingComment
 from dashboard.models import Org, Project
 from scanEngine.models import EngineType

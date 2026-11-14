@@ -56,16 +56,29 @@ class Harness:
 
 class GeventAutoscalerTests(unittest.TestCase):
 
-    def test_celerys_own_autoscaler_keeps_a_gevent_worker_at_one_task_while_it_runs(self):
-        # The bug this module works around, pinned: if a celery release fixes it, this test says the workaround can go.
+    def test_celerys_own_autoscaler_now_takes_the_next_message_while_a_task_runs(self):
+        # Celery 5.7 fixed the bug GeventAutoscaler was first written for (it counted running greenlets and its grow never woke the consumer
+        # waiting in spawn). GeventAutoscaler relies on that fix now: if a celery release brings the bug back, this fails first.
         h = Harness()
         h.deliver(1)
-        h.deliver(2)  # the consumer now waits in spawn with the second message
+        h.deliver(2)
         scaler = h.scaler(Autoscaler)
-        h.tick(scaler, 5)
-        self.assertEqual(h.started, [1])  # five "Scaling up" rounds, still one task running
-        self.assertEqual(scaler.processes, 1)  # it counts running greenlets, not the pool's limit...
-        self.assertGreaterEqual(h.inner.size, 6)  # ...so it raised the limit every round, and none of it reached the waiting consumer
+        h.tick(scaler)
+        self.assertEqual(h.started, [1, 2])
+        self.assertEqual((scaler.processes, h.pool.limit, h.inner.size), (2, 2, 2))
+        h.finish()
+
+    def test_the_pool_limit_celery_reports_follows_every_change(self):
+        """``TaskPool.limit`` is what the worker's stats report as its concurrency: grown and shrunk through celery, it always matches the pool."""
+        h = Harness()
+        for n in (1, 2, 3):
+            h.deliver(n)
+        scaler = h.scaler(GeventAutoscaler, max_concurrency=3)
+        h.tick(scaler, 3)
+        self.assertEqual((h.pool.limit, h.inner.size), (3, 3))
+        scaler.update(max=2, min=1)
+        h.tick(scaler)
+        self.assertEqual((h.pool.limit, h.inner.size), (2, 2))
         h.finish()
 
     def test_the_worker_takes_the_next_message_while_a_long_task_runs(self):

@@ -1,0 +1,5 @@
+{
+  "url": "https://example.com/",
+  "token": "example-token",
+  "timeout_seconds": 43200
+}

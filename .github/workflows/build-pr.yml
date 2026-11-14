@@ -25,8 +25,13 @@ concurrency:
 
 jobs:
   security-tests:
-    name: 🔒 Django security and tenancy tests
+    name: 🔒 Django security and tenancy tests (${{ matrix.shard }} of 3)
     runs-on: ubuntu-latest
+    # the suite is split in three jobs of about the same size (scripts/ci_shard.py): each has its own Postgres and Redis, so they never share state
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     services:
       postgres:
         image: postgres:18-alpine
@@ -61,6 +66,10 @@ jobs:
         run: printf 'XDG_CACHE_HOME=%s/cvengine-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Resolver fallback (only when the runner cannot find the Ubuntu package servers)
+        uses: ./.github/actions/resolver-fallback
+        with:
+          docker: "false"  # this job has service containers (Postgres, Redis): a Docker restart would stop them
       - name: Python 3.12
         uses: actions/setup-python@v5
         with:
@@ -69,38 +78,141 @@ jobs:
           cache-dependency-path: web/requirements.txt
       - name: Native rendering libraries
         run: sudo apt-get update && sudo apt-get install -y libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0
+      - name: The proxy's own nginx image (web/tests/test_tunnel_client_address.py runs config/nginx/rengine.conf in it and fails when it cannot)
+        run: docker pull nginx:alpine
       - name: Install application dependencies
         run: |
           sed '/^psycopg2==/d' web/requirements.txt > "$RUNNER_TEMP/cvengine-ci-requirements.txt"
-          python -m pip install -r "$RUNNER_TEMP/cvengine-ci-requirements.txt" psycopg2-binary==2.9.11 tblib==3.2.2  # tblib lets a failure in a parallel test worker show its real traceback
-      - name: Nuclei positive and negative loopback fixture smoke
-        working-directory: web
-        env:
-          XDG_CONFIG_HOME: ${{ runner.temp }}/cvengine-nuclei-config
-          XDG_CACHE_HOME: ${{ runner.temp }}/cvengine-nuclei-cache
-        run: |
-          nuclei_archive="$RUNNER_TEMP/nuclei_3.11.1_linux_amd64.zip"
-          curl --fail --location --retry 2 --max-time 120 \
-            --output "$nuclei_archive" \
-            https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_amd64.zip
-          printf '%s  %s\n' 'ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6' "$nuclei_archive" | sha256sum --check --status
-          unzip -p "$nuclei_archive" nuclei > "$RUNNER_TEMP/cvengine-nuclei"
-          chmod 700 "$RUNNER_TEMP/cvengine-nuclei"
-          CVENGINE_NUCLEI_SMOKE_BIN="$RUNNER_TEMP/cvengine-nuclei" python tests/nuclei_fixture_smoke.py
+          python -m pip install -r "$RUNNER_TEMP/cvengine-ci-requirements.txt" psycopg2-binary==2.9.11 tblib==3.2.2 jsonschema==4.26.0  # jsonschema checks the Sentinel result contract (cvengine_scanner/contract/sentinel_contract.json, from the installed scanner library) in the tests; tblib lets a failure in a parallel test worker show its real traceback
       - name: No model change without its migration
+        if: matrix.shard == 1
         working-directory: web
         env:
           DEBUG: '0'
         # the celery container no longer writes migrations at start (it used to, into the host's checkout): a model change must carry its migration
         run: python manage.py makemigrations --check --dry-run
+      - name: No migration number used twice
+        if: matrix.shard == 1
+        # makemigrations --check passes when the second file depends on the first (one leaf); two files with one number still leave the run order unclear
+        run: python scripts/check_migrations.py
+      - name: Pinned Kingfisher rule bundle (secret validation allow-list)
+        # tests/test_secrets_validation.py recomputes the hash of every allow-listed validator from the rule bundle the Sentinel image pins: the
+        # attested release asset, checked against the sha256 in web/cveFeed/data/secrets_validation_allowlist.json (docs/SECRETS-PLAN.md 5.2)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(python -c "import json; print(json.load(open('web/cveFeed/data/secrets_validation_allowlist.json'))['kingfisher_version'])")
+          pinned=$(python -c "import json; print(json.load(open('web/cveFeed/data/secrets_validation_allowlist.json'))['rule_bundle_sha256'])")
+          dir="$RUNNER_TEMP/kingfisher-rules"
+          mkdir -p "$dir"
+          cd "$dir"
+          gh release download "v$version" --repo mongodb/kingfisher --pattern kingfisher-rule-bundle.tgz --pattern multiple.intoto.jsonl
+          gh attestation verify kingfisher-rule-bundle.tgz --repo mongodb/kingfisher \
+            --signer-workflow mongodb/kingfisher/.github/workflows/release.yml --source-ref "refs/tags/v$version" --bundle multiple.intoto.jsonl
+          printf '%s  %s\n' "$pinned" kingfisher-rule-bundle.tgz | sha256sum --check --status
+          tar xzf kingfisher-rule-bundle.tgz
+          printf 'CVENGINE_KINGFISHER_RULES=%s\n' "$dir/generated/rules" >> "$GITHUB_ENV"
+      - name: Sentinel image pins (the About page lists every tool they hold)
+        # tests/test_about_page.py reads the Sentinel repository's Dockerfile and requirements.txt at the commit web/requirements.txt pins and fails when a tool
+        # pinned there is missing from the About page or listed at another version
+        run: |
+          set -euo pipefail
+          sha=$(sed -n 's/.*cvENGINE-sentinel@\([0-9a-f]\{40\}\).*/\1/p' web/requirements.txt | head -1)
+          dir="$RUNNER_TEMP/sentinel-files"
+          mkdir -p "$dir"
+          for f in Dockerfile requirements.txt; do
+            curl -fsSL "https://raw.githubusercontent.com/hevnsnt/cvENGINE-sentinel/$sha/$f" -o "$dir/$f"
+          done
+          printf 'CVENGINE_SENTINEL_FILES=%s\nCVENGINE_REQUIRE_SENTINEL_FILES=1\n' "$dir" >> "$GITHUB_ENV"
+      - name: Scanner lock (the built-in scanner follows the newest Sentinel; the lock is its known-good floor)
+        # scripts/scanner_lock.py check: docker-compose.yml's default scanner image is the moving tag the lock names (never a digest), the floor's contract
+        # version is not above what this server reads, and (--remote) the floor commit exists on the Sentinel repository's main branch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/scanner_lock.py check --remote
       - name: Django test suite
         working-directory: web
         env:
           DEBUG: '0'
+          CVENGINE_TEST_BLOCK_NETWORK: '1'  # a test that resolves a name or connects outside loopback, Postgres and Redis fails (reNgine/test_runner.py)
         # one worker per core (at most 7: reNgine/test_runner.py gives each worker its own Redis databases)
-        run: python manage.py test --noinput --parallel auto
-      - name: Graph cluster regression gate
-        run: node --test web/tests/test_graph_cluster.mjs web/tests/test_links.mjs web/tests/test_inventory_snippets.mjs web/tests/test_frontend_static.mjs web/tests/test_poll.mjs web/tests/test_config_maxxing.mjs web/tests/test_config_maxxing_page.mjs web/tests/test_ai_settings_logic.mjs web/tests/test_tunables_card.mjs web/tests/test_autotune_card.mjs web/tests/test_sentinel_live.mjs web/tests/test_discover_mode_logic.mjs web/tests/test_finding_groups_logic.mjs web/tests/test_addtargets_logic.mjs web/tests/test_closure_logic.mjs
+        run: python manage.py test --noinput --parallel auto $(python ../scripts/ci_shard.py ${{ matrix.shard }} 3) --durations 15
+      - name: Front-end node tests (every file in web/tests)
+        # was a hand-kept list of 29 files that left 19 of the 50 out (retest, Situations, list failure states, nav fold, ...): a new test file now runs without anyone adding it here
+        if: matrix.shard == 1
+        run: node --test web/tests/*.mjs
+
+
+  ui-gates:
+    name: 🖥️ UI gates (headless Chromium on the seeded demo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: cvengine_ci
+          POSTGRES_USER: cvengine_ci
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cvengine_ci -d cvengine_ci"
+          --health-interval 5s --health-timeout 3s --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 12
+    env:
+      POSTGRES_DB: cvengine_ci
+      POSTGRES_USER: cvengine_ci
+      POSTGRES_PASSWORD: ci-only-password
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: 5432
+      CELERY_BROKER: redis://127.0.0.1:6379/0
+      CELERY_BACKEND: redis://127.0.0.1:6379/0
+      CACHE_URL: redis://127.0.0.1:6379/1
+      RENGINE_HOME: ${{ github.workspace }}/web
+      DOMAIN_NAME: localhost
+      DEBUG: '0'
+    steps:
+      - name: Set cache directory
+        run: printf 'XDG_CACHE_HOME=%s/cvengine-cache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Resolver fallback (only when the runner cannot find the Ubuntu package servers)
+        uses: ./.github/actions/resolver-fallback
+        with:
+          docker: "false"
+      - name: Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: web/requirements.txt
+      - name: Native rendering libraries
+        run: sudo apt-get update && sudo apt-get install -y libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0
+      - name: Install application dependencies and the browser
+        run: |
+          sed '/^psycopg2==/d' web/requirements.txt > "$RUNNER_TEMP/cvengine-ci-requirements.txt"
+          python -m pip install -r "$RUNNER_TEMP/cvengine-ci-requirements.txt" psycopg2-binary==2.9.11 tblib==3.2.2 jsonschema==4.26.0 playwright==1.64.1
+          python -m playwright install --with-deps chromium
+      - name: Migrate
+        working-directory: web
+        run: python manage.py migrate --noinput
+      - name: "UI gates (scripts/ci_ui_gates.sh: seed, start the app, run every ui_* gate)"
+        run: scripts/ci_ui_gates.sh
+      - name: Gate logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-gate-logs
+          path: /tmp/ui-gates
+          if-no-files-found: ignore
 
   build:
     name: 🐳 Build Docker image (${{ matrix.platform }})
@@ -118,6 +230,8 @@ jobs:
     steps:
       - name: 📥 Checkout the git repo
         uses: actions/checkout@v4
+      - name: Resolver fallback (only when the runner cannot find the Ubuntu package servers)
+        uses: ./.github/actions/resolver-fallback
 
       - name: 🏗️ Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -160,17 +274,27 @@ jobs:
           cache-from: type=gha,scope=image-${{ matrix.arch }}
           cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope=image-{0}', matrix.arch) || '' }}
 
-      # Chromium's sandbox for the web screenshots cannot be proven by the build (build steps run under the builder's default seccomp profile, which
-      # refuses user namespaces). Run the image the way the celery container runs the browser: as nobody with Playwright's seccomp profile the sandbox
-      # must engage (shot_worker.py --probe: the renderer in its own user and PID namespace, under its own seccomp filter); with Docker's default
-      # profile it must fail closed (engaged false, exit status 1), never fall back to running without it.
-      - name: 🧪 Screenshot browser sandbox
-        env:
-          IMAGE: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+  reviewer-image:
+    # The AI reviewer's own image (docs/AI-REVIEWER.md): it must build, run as its unprivileged user on a read-only filesystem with no
+    # capabilities, import every module (the Anthropic SDK included) with the network off, and pass its unit tests there.
+    name: 🤖 Build the AI reviewer image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 📥 Checkout the git repo
+        uses: actions/checkout@v4
+      - name: Resolver fallback (only when the runner cannot find the Ubuntu package servers)
+        uses: ./.github/actions/resolver-fallback
+      - name: 🏗️ Build the reviewer image
+        run: docker build -t cvengine-reviewer-ci reviewer/
+      - name: 🧪 Run it the way compose runs it
         run: |
-          probe() { docker run --rm --user nobody -e HOME=/tmp "$@" --entrypoint python3 "$IMAGE" /usr/src/app/cveFeed/shot_worker.py --probe; }
-          probe --security-opt seccomp=config/seccomp/playwright-chromium.json | tee "$RUNNER_TEMP/sandbox-on.json"
-          grep -q '"engaged":true' "$RUNNER_TEMP/sandbox-on.json" || { echo "::error::Chromium's sandbox did not engage with the seccomp profile"; exit 1; }
-          status=0; probe > "$RUNNER_TEMP/sandbox-off.json" || status=$?  # no pipe: the probe's own exit status is what counts
-          cat "$RUNNER_TEMP/sandbox-off.json"
-          [ "$status" = 1 ] && grep -q '"engaged":false' "$RUNNER_TEMP/sandbox-off.json" || { echo "::error::without the profile the browser did not fail closed (status $status)"; exit 1; }
+          docker run --rm --read-only --tmpfs /tmp --user 10002:10002 --cap-drop ALL --security-opt no-new-privileges:true \
+            --network none --entrypoint python3 cvengine-reviewer-ci -I -c \
+            "import os, cvengine_reviewer.llm, cvengine_reviewer.jobs, cvengine_reviewer.server, cvengine_reviewer.__main__, anthropic; assert os.getuid() == 10002; print('reviewer image ok', anthropic.__version__)"
+      - name: 🧪 Run the reviewer package's unit tests inside the image
+        # reviewer/tests (standard library only): the pipeline's request layer and the job loop, on the image's own Python, no network
+        run: |
+          docker run --rm --read-only --tmpfs /tmp --user 10002:10002 --cap-drop ALL --security-opt no-new-privileges:true \
+            --network none -v "$PWD/reviewer/tests:/reviewer-tests:ro" --entrypoint python3 cvengine-reviewer-ci \
+            -m unittest discover -s /reviewer-tests -v

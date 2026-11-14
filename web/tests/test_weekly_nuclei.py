@@ -23,9 +23,10 @@ class WeeklyDeepNucleiTests(TestCase):
         self.first = Subdomain.objects.create(name='a.weekly.test', target_domain=domain, scan_history=self.scan)
         self.second = Subdomain.objects.create(name='b.weekly.test', target_domain=domain, scan_history=self.scan)
         self.project = project
+        self.stream = object()  # what a scanner-backed stream is to the sweep: handed to run_nuclei untouched
 
     def run_sweep(self, result=None, allowed=True):
-        with mock.patch('cveFeed.nuclei_scan.approved_templates', return_value=('/tmp/approved', 'rev1', 1)), \
+        with mock.patch('agentapi.sentinel_dispatch.wrap_nuclei_stream', return_value=self.stream) as self.wrapped, mock.patch('cveFeed.nuclei_scan.approved_templates', return_value=('/tmp/approved', 'rev1', 1)), \
                 mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda names, **kw: names if allowed else []), \
                 mock.patch('cveFeed.nuclei_scan.scan_targets', return_value=(
                     {self.first.name, self.second.name}, set(), {(self.first.name, 8443), (self.second.name, 9443)})), \
@@ -64,17 +65,13 @@ class WeeklyDeepNucleiTests(TestCase):
 
     def test_the_pass_offers_its_stream_to_a_live_eligible_sentinel_first(self):
         # weekly_deep_nuclei builds its stream through sentinel_dispatch.wrap_nuclei_stream(scan, 'nuclei_deep'), the
-        # same seam the per-scan light/targeted passes use; with no Sentinel registered this stays the identity
-        # (stream_nuclei itself), so run_nuclei's own call is unaffected other than the new stream= kwarg.
-        from agentapi import sentinel_dispatch
-        from cveFeed.nuclei_scan import stream_nuclei
-        with mock.patch.object(sentinel_dispatch, 'wrap_nuclei_stream', wraps=sentinel_dispatch.wrap_nuclei_stream) as wrapped:
-            _, run = self.run_sweep()
-        self.assertEqual(wrapped.call_count, 1)
-        scan_arg, kind_arg = wrapped.call_args.args
+        # same seam the per-scan light/targeted passes use, and hands it to run_nuclei untouched: there is no local stream.
+        _, run = self.run_sweep()
+        self.assertEqual(self.wrapped.call_count, 1)
+        scan_arg, kind_arg = self.wrapped.call_args.args
         self.assertEqual(scan_arg.pk, self.scan.pk)
         self.assertEqual(kind_arg, 'nuclei_deep')
-        self.assertIs(run.call_args.kwargs['stream'], stream_nuclei)
+        self.assertIs(run.call_args.kwargs['stream'], self.stream)
 
     def test_reuse_reads_only_the_newest_copy_of_each_finding(self):
         """S04-16: every scan stores its own copy of a finding; the reuse reads one per (name, URL), not the whole history."""

@@ -149,21 +149,6 @@ def expand_cidr(value, max_hosts=65536):
     return out
 
 
-def expand_target(value):
-    """Return (target_type, [host strings]).
-
-    Domains and single IPs return themselves; CIDR/range expand to host IPs.
-    """
-    target_type = classify_target(value)
-    if target_type == CIDR:
-        return target_type, expand_cidr(value)
-    if target_type == RANGE:
-        return target_type, expand_range(value)
-    if target_type in (IP, DOMAIN):
-        return target_type, [value.strip()]
-    return None, []
-
-
 # Addresses a scanner must never be pointed at on a user's say-so (or because a domain they control resolves
 # there): loopback, link-local (cloud metadata 169.254.169.254), multicast and "this host". Internal ranges
 # (RFC1918, CGNAT, unique-local) are refused too unless the operator opts in, because on a shared instance
@@ -460,7 +445,7 @@ def scannable_hosts(names, resolver=None, project=None):
     if project:
         from cveFeed.exclusions import excluded_names
         from cveFeed.archive_rediscovery import archived_names
-        banned = excluded_names(project) | archived_names(project)
+        banned = excluded_names(project, names_only=True) | archived_names(project)
         from cveFeed.bounty_gate import Gate
         gate = Gate(blocked=())  # a bug bounty program's scope: a host it does not name is never a scan target
     verdict, out, seen = {}, [], set()

@@ -1,0 +1,16 @@
+{
+ "kind": "db_probe",
+ "name": "db_probe_pg",
+ "payload": {
+  "evidence": "",
+  "open": false,
+  "outcome": "done"
+ },
+ "sentinel_seconds": 0.0,
+ "target": {
+  "address": "192.0.2.14",
+  "db": "postgres",
+  "port": 5432
+ },
+ "tool_rows": null
+}

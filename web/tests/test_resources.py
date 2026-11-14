@@ -300,39 +300,6 @@ class WatchdogTests(unittest.TestCase):
                                                        'tree_rss_mb': 0, 'reservations': 0})
 
 
-class CallerReactionTests(unittest.TestCase):
-    def test_nuclei_light_profile_lowers_concurrency_and_rate(self):
-        from cveFeed import nuclei_scan
-        normal, light = nuclei_scan.build_flags(), nuclei_scan.build_flags(profile='light')
-        self.assertEqual(normal[normal.index('-c') + 1], '40')
-        self.assertEqual((light[light.index('-c') + 1], light[light.index('-rl') + 1], light[light.index('-bs') + 1]), ('10', '50', '10'))
-        self.assertEqual(nuclei_scan.build_flags(['rce', 'apache'], 'light')[-2:], ['-tags', 'apache,rce'])
-
-    def test_nmap_chunks_are_halved_after_a_memory_kill_and_everything_is_scanned(self):
-        from cveFeed import nmap_scan
-        calls = []
-
-        def runner(chunk, flags, timeout):
-            calls.append(len(chunk))
-            if len(chunk) > 8:
-                raise res.MemoryKill('low memory')
-            return '<nmaprun/>'
-        with mock.patch.object(nmap_scan, 'parse_xml', return_value=[]), \
-                mock.patch.object(nmap_scan, 'persist_inventory', return_value={'ports': 2, 'hosts_with_os': 1}):
-            totals = nmap_scan.scan_in_chunks(runner, [f'h{i}.test' for i in range(40)], ['-F'], '3m', size=40)
-        self.assertEqual(calls[0], 40)
-        self.assertEqual(sum(c for c in calls if c <= 8), 40)  # every host ended up in a run that fit
-        self.assertEqual(totals['ports'], 2 * len([c for c in calls if c <= 8]))
-
-    def test_nmap_gives_up_when_even_a_tiny_chunk_is_killed(self):
-        from cveFeed import nmap_scan
-
-        def runner(chunk, flags, timeout):
-            raise res.MemoryKill('low memory')
-        with self.assertRaises(res.MemoryKill):
-            nmap_scan.scan_in_chunks(runner, ['a.test', 'b.test', 'c.test'], ['-F'], '3m')
-
-
 class LearnedCostTests(unittest.TestCase):
 	"""The static estimates are guesses; the gate reserves what real runs of that kind actually needed."""
 

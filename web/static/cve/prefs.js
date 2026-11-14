@@ -68,6 +68,15 @@ export function fmtDateTime(iso) {
   return `${f.y}-${pad(f.mo + 1)}-${pad(f.d)} ${pad(f.h)}:${pad(f.mi)}`;
 }
 
+// "Nov 7, 2026 12:31 AM" in the chosen zone: a time written for a person in a sentence.
+export function fmtLong(iso) {
+  const d = iso && parse(iso);
+  if (!d) return "";
+  const f = fields(d);
+  const h12 = f.h % 12 || 12;
+  return `${MONTHS[f.mo]} ${f.d}, ${f.y} ${h12}:${pad(f.mi)} ${f.h < 12 ? "AM" : "PM"}`;
+}
+
 export function fmtTime(iso, withSeconds = true) {
   const d = iso && parse(iso);
   if (!d) return "";

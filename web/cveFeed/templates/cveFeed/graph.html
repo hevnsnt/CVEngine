@@ -1,9 +1,10 @@
 {% extends 'cveFeed/base.html' %} {% load static assets %} {% block title %}CVEngine · Graph{% endblock %} {% block content %}
 <div class="page-head">
   <div>
-    <h1>Asset graph</h1>
-    <p class="sub">Domains, subdomains, IPs, ports and the CVEs that hit them. Click a bubble for details; pan or zoom to explore a project and its registered domains. <span class="live" id="live">live</span></p>
+    <h1>Graph</h1>
+    <p class="sub">Domains, subdomains, IPs, ports and the CVEs that hit them, with a click on a bubble for details and a pan or zoom to explore a project and its registered domains.</p>
   </div>
+  <span class="live" id="live">live</span>
   <span class="note" id="count"></span>
 </div>
 <div class="toolbar">
@@ -23,7 +24,7 @@
 <div class="card graph-card">
   <div class="soc-hud">
     <div class="soc-bar">
-      <strong class="soc-title">Asset graph</strong>
+      <strong class="soc-title">Graph</strong>
       <span class="soc-scope" id="soc-scope"></span>
       <span class="soc-stats">
         <span><b id="soc-running">0</b>scanning</span>

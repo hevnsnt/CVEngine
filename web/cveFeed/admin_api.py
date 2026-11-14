@@ -7,6 +7,7 @@ Who may do what:
   everyone else          403.
 Every handler checks the specific org it touches, so an Org Admin of A can never reach B.
 """
+import time
 import json
 import re
 import secrets
@@ -22,7 +23,7 @@ from django.utils.text import slugify
 from dashboard.models import (ApiCredential, AuditLog, Org, OrgMembership, Project, ProjectMembership, SystemTimings,
                               UserProfile)
 from tenancy import audit as audit_trail, roles
-from cveFeed import mailer, openvas_admin
+from cveFeed import mailer, openvas_admin, probe_cache
 
 
 class AdminError(Exception):
@@ -40,8 +41,8 @@ def _body(request):
 
 
 def audit(actor, action, target='', org=None, **detail):
-    AuditLog.objects.create(actor=actor, actor_name=actor.username, action=action, target=target[:300],
-                            org_id=getattr(org, 'pk', org), detail=detail)
+    AuditLog.objects.create(actor=actor if getattr(actor, 'pk', None) else None, actor_name=actor.username, action=action, target=target[:300],
+                            org_id=getattr(org, 'pk', org), detail={**detail, **audit_trail.token_detail()})
 
 
 def temp_password():
@@ -401,7 +402,7 @@ def org_api_credential_set(request, actor, org_id, service):
     for name, _label, _secret in fields:
         if data.get(name) and str(data[name]).strip():
             value[name] = str(data[name]).strip()[:500]
-    if not value:  # never store an empty row: it would show as configured while feeding nothing to bbot
+    if not value:  # never store an empty row: it would show as configured while feeding nothing to the discovery
         raise AdminError(400, 'enter a value to save')
     cred.value = value
     cred.save()
@@ -414,6 +415,35 @@ def org_api_credential_delete(request, actor, org_id, service):
     ApiCredential.objects.filter(org=org, service=service).delete()
     audit(actor, 'org.api_key.remove', service, org=org)
     return {'deleted': True}
+
+
+def org_excluded_addresses_list(request, actor, org_id):
+    """The organization's \"Addresses we must never scan\" list (organization admins and App Admins only: the same answer for a missing org and one that is not yours)."""
+    from agentapi import excluded_addresses
+    org = _need_org(actor, org_id)
+    return excluded_addresses.list_rows(org.pk)
+
+
+def org_excluded_addresses_add(request, actor, org_id):
+    """Add one address or network; body {cidr, note, confirm_broad}. A network broader than /8 (IPv4) or /32 (IPv6) needs ``confirm_broad: true``."""
+    from agentapi import excluded_addresses
+    org = _need_org(actor, org_id)
+    data = _body(request)
+    try:
+        row, cancelled = excluded_addresses.add(actor, org, data.get('cidr'), data.get('note', ''), data.get('confirm_broad'))
+    except excluded_addresses.EntryError as exc:
+        raise AdminError(exc.status, exc.message) from None
+    return {**excluded_addresses._row(row), 'cancelled_tasks': cancelled}, 201
+
+
+def org_excluded_addresses_remove(request, actor, org_id, entry_id):
+    from agentapi import excluded_addresses
+    org = _need_org(actor, org_id)
+    try:
+        cidr = excluded_addresses.remove(actor, org, entry_id)
+    except excluded_addresses.EntryError as exc:
+        raise AdminError(exc.status, exc.message) from None
+    return {'removed': cidr}
 
 
 @transaction.atomic
@@ -466,6 +496,8 @@ def projects_delete(request, actor, project_id):
         raise AdminError(400, 'type the project name to confirm')
     name, org = project.name, project.org
     project.delete()  # cascades to its targets, scans and findings
+    from cveFeed import snapshot_cache
+    snapshot_cache.bump_on_commit()  # an All projects view counted them
     audit(actor, 'project.delete', name, org=org)
     return {'deleted': True}
 
@@ -605,6 +637,76 @@ BEAT_FLUSH_SECONDS = 300
 BEAT_SILENT_SECONDS = 120
 
 
+WORKERS = {'discovery_worker': 'discovery_queue', 'cve_feed_worker': 'cve_feed_queue',
+           'validation_priority_worker': 'validation_priority_queue', 'classic_worker': 'api_queue'}  # the layout of celery-entrypoint.sh
+WORKER_PROBE_KEY = 'cvengine:admin:worker-probe'
+WORKER_PROBE_SECONDS = 30  # the workers' answer is served this long without asking again (and older ones at once, refreshed behind the request)
+
+
+WORKER_PING_SECONDS = 10  # one ping waits this long for a busy worker (it was 5: a worker under load missed it and was reported as missing)
+WORKER_PING_TRIES = 3  # a worker that did not answer is asked again, up to this many pings in all, spaced WORKER_PING_GAP apart (about 30 seconds)
+WORKER_PING_GAP = 10
+WORKER_MISS_KEY = 'cvengine:admin:worker-miss'
+WORKER_MISS_EVALUATIONS = 2  # a worker is reported missing only when it was missing in this many probes in a row (about two minutes: one probe is about a minute)
+
+
+def _pause(seconds):
+    time.sleep(seconds)
+
+
+def _ask_workers(app, quick):
+    inspector = app.control.inspect(timeout=WORKER_PING_SECONDS, limit=len(WORKERS) if quick else None)
+    return {name: [q.get('name') for q in qs or []] for name, qs in (inspector.active_queues() or {}).items()}
+
+
+def _absent(queues):
+    """The required workers (``WORKERS``) none of whose replies names their queue."""
+    def has(prefix, queue):
+        return any(prefix in str(name).split('@') and queue in (qs or []) for name, qs in queues.items())
+    return [prefix for prefix, queue in WORKERS.items() if not has(prefix, queue)]
+
+
+def _confirm_misses(missing):
+    """Count, per required worker, the probes in a row that found it missing, and return ``(counts, confirmed)``: ``confirmed`` are the workers missing in
+    ``WORKER_MISS_EVALUATIONS`` probes in a row. A worker that answered resets its count, so one busy moment is never a problem."""
+    from django.core.cache import cache
+    try:
+        held = cache.get(WORKER_MISS_KEY) or {}
+    except Exception:  # noqa: BLE001
+        held = {}
+    counts = {w: int(held.get(w, 0)) + 1 for w in missing}
+    try:
+        cache.set(WORKER_MISS_KEY, counts, 900)
+    except Exception:  # noqa: BLE001
+        pass
+    return counts, [w for w, n in counts.items() if n >= WORKER_MISS_EVALUATIONS]
+
+
+def _inspect_workers(app, quick=False):
+    """What the workers say, as plain counts and names (task arguments never leave the worker): ``{'queues': {worker: [queue names]}, 'active': {worker:
+    running tasks}, 'active_warning': text, 'pings': how many pings were sent, 'seconds': how long they took, 'confirmed': [workers missing in
+    ``WORKER_MISS_EVALUATIONS`` probes in a row]}``. A busy worker can miss one ping, so a required worker that did not answer is asked again (up to
+    ``WORKER_PING_TRIES`` pings over about 30 seconds, ``WORKER_PING_SECONDS`` each) and what any ping heard is kept; only the probes that still find
+    it missing, twice in a row (``_confirm_misses``), make it a problem. ``cveFeed.probe_cache`` keeps all of this off the request path; the one request
+    with nothing held (``quick``) sends one ping and confirms nothing."""
+    started = time.time()
+    queues = _ask_workers(app, quick)
+    pings = 1
+    while not quick and pings < WORKER_PING_TRIES and _absent(queues):
+        _pause(WORKER_PING_GAP)
+        for name, qs in _ask_workers(app, False).items():
+            queues[name] = sorted(set(queues.get(name) or []) | set(qs))
+        pings += 1
+    active, warning = {}, ''
+    if queues:
+        try:
+            active = {name: len(tasks or []) for name, tasks in (app.control.inspect(timeout=WORKER_PING_SECONDS, destination=list(queues)).active() or {}).items()}
+        except Exception:  # queue routing remains observable even if the active-task query times out
+            warning = ' Active-task inspection did not respond.'
+    confirmed = [] if quick else _confirm_misses(_absent(queues))[1]
+    return {'queues': queues, 'active': active, 'active_warning': warning, 'pings': pings, 'seconds': int(time.time() - started), 'confirmed': confirmed}
+
+
 def scheduler_health(request, actor):
     """Bounded, read-only scheduler and worker snapshot for the App Admin.
 
@@ -614,10 +716,10 @@ def scheduler_health(request, actor):
     """
     if not actor.is_superuser:
         raise AdminError(403, 'App Admin only')
-    from datetime import timedelta
+    from datetime import datetime, timedelta, timezone as dt_timezone
     from django_celery_beat.models import PeriodicTask
     from cveFeed.models import (AutomaticValidation, DeferredRetest, OnDemandValidation, AgentActivity,
-                                AssessmentReview, ArchiveRediscovery, InactiveArchiveReview, HostAssessment, HostState)
+                                ArchiveRediscovery, InactiveArchiveReview, HostAssessment, HostState)
     from reNgine.celery import app
     from startScan.models import ScanHistory
 
@@ -638,39 +740,45 @@ def scheduler_health(request, actor):
                           'next_due_state': 'past_due_unconfirmed' if overdue else ('estimated' if next_due else 'unknown'),
                           'dispatch_count': task.total_run_count,
                           'next_due_note': None if next_due else 'unknown for this schedule'})
-    expected = {'discovery_worker': 'discovery_queue', 'cve_feed_worker': 'cve_feed_queue',
-                'validation_priority_worker': 'validation_priority_queue', 'classic_worker': 'api_queue'}
+    expected = WORKERS
     worker_state = 'unknown'
     worker_note = 'No worker replied to the inspection within 5 seconds (all busy, or none running).'
     workers = []
+    workers_checked = None
     try:
-        inspector = app.control.inspect(timeout=5)
-        queues = inspector.active_queues() or {}
-        if queues:
-            active_warning = ''
-            def is_worker_name(name, prefix):
-                # Celery deployments use both worker@host and celery@worker hostnames.
-                return prefix in str(name).split('@')
-            try:
-                active = inspector.active() or {}
-            except Exception:  # queue routing remains observable even if the active-task query times out
-                active = {}
-                active_warning = ' Active-task inspection did not respond.'
-            for prefix, queue in expected.items():
-                names = [name for name in queues if is_worker_name(name, prefix)]
-                consuming = (any(any(q.get('name') == queue for q in queues.get(name) or []) for name in names)
-                             if names else None)
-                workers.append({'worker': prefix, 'queue': queue, 'responding': bool(names), 'consuming': consuming,
-                                'reply': 'consuming' if consuming else ('replied_without_queue' if names else 'no_reply_within_5s'),
-                                'active': sum(len(active.get(name) or []) for name in names) if active and names else None})
-            missing = [row['worker'] for row in workers if row['consuming'] is not True]
-            silent = [row['worker'] for row in workers if row['reply'] == 'no_reply_within_5s']
-            without_queue = [row['worker'] for row in workers if row['reply'] == 'replied_without_queue']
-            worker_state = 'degraded' if missing else 'responding'
-            detail = ''.join([f" Did not reply within 5 seconds: {', '.join(silent)}." if silent else '',
-                              f" Replied without its queue: {', '.join(without_queue)}." if without_queue else ''])
-            worker_note = ('Missing or unconfirmed required queue consumers: ' + ', '.join(missing) + '.' + detail
-                           if missing else 'Required queue names were reported by workers; this does not prove scheduled tasks executed.') + active_warning
+        probe, workers_checked = probe_cache.cached_probe(WORKER_PROBE_KEY, lambda: _inspect_workers(app), fresh=WORKER_PROBE_SECONDS,
+                                                              first=lambda: _inspect_workers(app, quick=True))
+        queues, active, active_warning = probe['queues'], probe['active'], probe['active_warning']
+        confirmed = set(probe.get('confirmed') or [])
+
+        def is_worker_name(name, prefix):
+            # Celery deployments use both worker@host and celery@worker hostnames.
+            return prefix in str(name).split('@')
+        for prefix, queue in expected.items():
+            names = [name for name in queues if is_worker_name(name, prefix)]
+            consuming = (any(queue in (queues.get(name) or []) for name in names) if names else None)
+            workers.append({'worker': prefix, 'queue': queue, 'responding': bool(names), 'consuming': consuming,
+                            'reply': 'consuming' if consuming else ('replied_without_queue' if names else 'no_reply_within_5s'),
+                            'active': sum(active.get(name) or 0 for name in names) if active and names else None})
+        missing = [row['worker'] for row in workers if row['consuming'] is not True]
+        unconfirmed = [w for w in missing if w not in confirmed]
+        missing = [w for w in missing if w in confirmed]  # one missed ping is not a missing consumer: only a worker missing probe after probe is
+        silent = [row['worker'] for row in workers if row['reply'] == 'no_reply_within_5s' and row['worker'] in missing]
+        without_queue = [row['worker'] for row in workers if row['reply'] == 'replied_without_queue' and row['worker'] in missing]
+        worker_state = 'degraded' if missing else 'responding'
+        pings = probe.get('pings', 1)
+        tried = (f" Tried: no reply to {pings} ping{'s' if pings != 1 else ''} over {probe.get('seconds', 0)} s ({WORKER_PING_SECONDS} s each), "
+                 f"in {WORKER_MISS_EVALUATIONS} checks in a row, and no consumer on the queue.")
+        detail = ''.join([f" No reply from: {', '.join(silent)}." if silent else '',
+                          f" Replied without its queue: {', '.join(without_queue)}." if without_queue else '', tried])
+        if missing and not queues:  # nothing replied at all, probe after probe
+            worker_state, worker_note = 'unknown', 'No worker replied to the inspection (all busy, or none running).' + tried + active_warning
+        elif missing:
+            worker_note = 'Missing or unconfirmed required queue consumers: ' + ', '.join(missing) + '.' + detail + active_warning
+        else:
+            worker_note = ('Required queue names were reported by workers; this does not prove scheduled tasks executed.'
+                           + (f" {', '.join(unconfirmed)} did not answer the last check; confirming before this is a problem." if unconfirmed else '')
+                           + active_warning)
     except Exception as exc:  # noqa: BLE001 - expose a safe category, never raw broker addresses or credentials
         worker_note = ('Worker inspection failed (broker connection).' if isinstance(exc, (ConnectionError, OSError))
                        else 'Worker inspection failed (internal error).')
@@ -690,19 +798,6 @@ def scheduler_health(request, actor):
     for row in AgentActivity.objects.order_by('-id').values('created_at', 'kind', 'status')[:1000]:
         if row['status'] in activity and activity[row['status']] is None:
             activity[row['status']] = {'at': row['created_at'].isoformat(), 'stage': row['kind']}
-    latest_review = AssessmentReview.objects.order_by('-id').first()
-    review = None
-    if latest_review:
-        decisions = list(latest_review.decisions.select_related('project').order_by('-id')[:20])
-        review = {'id': latest_review.pk, 'status': latest_review.status,
-                  'started_at': latest_review.started_at.isoformat() if latest_review.started_at else None,
-                  'finished_at': latest_review.finished_at.isoformat() if latest_review.finished_at else None,
-                  'reviewed': latest_review.reviewed_projects, 'total': latest_review.total_projects,
-                  'cursor_project_id': latest_review.cursor_project_id, 'model_calls': latest_review.model_calls,
-                  'actions': latest_review.queued_actions, 'errors': latest_review.error_count,
-                  'performance': latest_review.performance, 'note': latest_review.error,
-                  'recent_decisions': [{'project': d.project.slug, 'action': d.action, 'status': d.status,
-                                        'reason': d.reason, 'job_id': d.job_id} for d in decisions]}
     from cveFeed.scan_control import pause_requested
     latest_archive = ArchiveRediscovery.objects.order_by('-id').first()
     archive = {'archived_hosts': HostState.objects.filter(archived_at__isnull=False).count(),
@@ -732,8 +827,9 @@ def scheduler_health(request, actor):
     # beat writes its heartbeat every few seconds: silent for two minutes means it is not running (the schedule rows' last_run_at lags
     # by minutes even when it is); no heartbeat at all means beat predates it or Redis cannot be read, which proves nothing
     beat = {'state': 'unknown' if age is None else ('running' if age <= BEAT_SILENT_SECONDS else 'silent'), 'seconds_since_tick': age}
-    return {'at': now.isoformat(), 'workers_state': worker_state, 'worker_note': worker_note, 'workers': workers, 'beat': beat,
-            'scanning_paused': pause_requested(), 'assessment_review': review, 'archive_rediscovery': archive,
+    return {'at': now.isoformat(), 'workers_state': worker_state, 'worker_note': worker_note, 'workers': workers,
+            'workers_checked_at': datetime.fromtimestamp(workers_checked, tz=dt_timezone.utc).isoformat() if workers_checked else None, 'beat': beat,
+            'scanning_paused': pause_requested(), 'archive_rediscovery': archive,
             'inactive_archive_review': inactive,
             'scheduler_process': 'unknown', 'scheduler_note': 'Last dispatch comes from Beat; this web request cannot inspect its process.',
             'schedules': schedules, 'jobs': jobs, 'last_activity': activity, 'activity_window': 1000}
@@ -766,6 +862,29 @@ def scan_control_get(request, actor):
                     'Stopped scans remain stopped; queued jobs resume when scanning resumes.'}
 
 
+def watchdog_get(request, actor):
+    """The outer watchdog for the Watchdog panel of the Scanners page (App Admin only): each rule's state in words, the last 20 actions and what it changed (cveFeed.watchdog.view)."""
+    if not actor.is_superuser:
+        raise AdminError(403, 'App Admin only')
+    from cveFeed import watchdog
+    return watchdog.view()
+
+
+def watchdog_set(request, actor):
+    """Switch the watchdog (``{"enabled": bool}``, the Watchdog instance setting) or one rule (``{"rule": "R1", "enabled": bool}``) on or off."""
+    if not actor.is_superuser:
+        raise AdminError(403, 'App Admin only')
+    from cveFeed import watchdog
+    body = _body(request)
+    if not isinstance(body.get('enabled'), bool):
+        raise AdminError(400, 'enabled must be true or false')
+    rule = body.get('rule')
+    if rule is not None and (not isinstance(rule, str) or rule not in watchdog.BY_CODE):
+        raise AdminError(400, 'unknown rule')
+    watchdog.set_enabled(rule, body['enabled'], actor)
+    return watchdog.view()
+
+
 def scan_control_set(request, actor):
     if not actor.is_superuser:
         raise AdminError(403, 'App Admin only')
@@ -787,7 +906,9 @@ def scan_control_set(request, actor):
                 if row.paused:
                     row.paused, row.paused_by_update, row.reason, row.actor, row.changed_at, row.last_error = \
                         False, False, '', actor.username, timezone.now(), ''
-                    row.save(update_fields=['paused', 'paused_by_update', 'reason', 'actor', 'changed_at', 'last_error'])
+                    from cveFeed import scan_control
+                    row.save(update_fields=['paused', 'paused_by_update', 'reason', 'actor', 'changed_at', 'last_error',
+                                            *scan_control.close_update_window(row, row.changed_at)])  # a failed update's open window ends with the pause
                     audit(actor, 'scanning.resume', 'all projects')
         except (OSError, RuntimeError) as exc:
             raise AdminError(409, 'An update is running or its lock is unavailable; scanning cannot resume yet') from exc
@@ -826,6 +947,9 @@ ROUTES = [
     ('GET', r'orgs/(?P<org_id>\d+)/api-keys', org_api_credentials_list),
     ('PUT', r'orgs/(?P<org_id>\d+)/api-keys/(?P<service>[-\w]+)', org_api_credential_set),
     ('DELETE', r'orgs/(?P<org_id>\d+)/api-keys/(?P<service>[-\w]+)', org_api_credential_delete),
+    ('GET', r'orgs/(?P<org_id>\d+)/excluded-addresses', org_excluded_addresses_list),
+    ('POST', r'orgs/(?P<org_id>\d+)/excluded-addresses', org_excluded_addresses_add),
+    ('DELETE', r'orgs/(?P<org_id>\d+)/excluded-addresses/(?P<entry_id>\d+)', org_excluded_addresses_remove),
     ('GET', r'projects', projects_list), ('POST', r'projects', projects_create),
     ('DELETE', r'projects/(?P<project_id>\d+)', projects_delete),
     ('GET', r'timings', timings_get), ('PUT', r'timings', timings_put),
@@ -833,8 +957,8 @@ ROUTES = [
     ('GET', r'activity', activity_list),
     ('GET', r'health', scheduler_health),
     ('GET', r'scan-control', scan_control_get), ('POST', r'scan-control', scan_control_set),
+    ('GET', r'watchdog', watchdog_get), ('POST', r'watchdog', watchdog_set),
     ('GET', r'openvas', lambda r, actor, **k: openvas_admin.admin_get(r, actor)), ('PUT', r'openvas', lambda r, actor, **k: openvas_admin.admin_put(r, actor)),
-    ('POST', r'openvas/check', lambda r, actor, **k: openvas_admin.admin_check(r, actor)),
 ]
 COMPILED = [(m, re.compile(f'^{p}/?$'), fn) for m, p, fn in ROUTES]
 

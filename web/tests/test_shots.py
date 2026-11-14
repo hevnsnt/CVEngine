@@ -69,36 +69,36 @@ class HashTests(SimpleTestCase):
 
 
 class PersistTests(ChangeFixture, TestCase):
+	"""The screenshots a Sentinel sends with a discovery batch are hashed as they are stored."""
+
 	def setUp(self):
 		super().setUp()
 		self.media_root = tempfile.mkdtemp()
-		self.bbot_home = tempfile.mkdtemp()
+		self.work = tempfile.mkdtemp()
 		self.addCleanup(shutil.rmtree, self.media_root, ignore_errors=True)
-		self.addCleanup(shutil.rmtree, self.bbot_home, ignore_errors=True)
+		self.addCleanup(shutil.rmtree, self.work, ignore_errors=True)
 
-	def plant(self, rel_path, kind):
-		full = os.path.join(self.bbot_home, 'scanname1', rel_path)
-		os.makedirs(os.path.dirname(full), exist_ok=True)
-		make_png(full, kind)
+	def blob(self, host, name, kind='gradient'):
+		import base64
+		path = os.path.join(self.work, name)
+		make_png(path, kind)
+		with open(path, 'rb') as handle:
+			return {'host': host, 'filename': name, 'data': base64.b64encode(handle.read()).decode()}
 
 	def persist(self, scan, shot_list):
-		with mock.patch('cveFeed.discovery.BBOT_SCANS_HOME', self.bbot_home), self.settings(MEDIA_ROOT=self.media_root):
-			discovery.persist_screenshots(scan, shot_list, 'scanname1')
+		with self.settings(MEDIA_ROOT=self.media_root):
+			discovery.persist_screenshot_blobs(scan, shot_list)
 
 	def test_persist_screenshots_stores_the_hash(self):
 		scan = self.scan({'www.ct.test': HOST})
-		self.plant('gowitness/screenshots/a.png', 'gradient')
-		self.persist(scan, [{'host': 'www.ct.test', 'rel_path': 'gowitness/screenshots/a.png', 'url': 'x'}])
+		self.persist(scan, [self.blob('www.ct.test', 'a.png')])
 		sub = Subdomain.objects.get(scan_history=scan)
 		self.assertEqual(sub.screenshot_hash, shots.dhash_file(os.path.join(self.media_root, sub.screenshot_path)))
 		self.assertEqual(len(sub.screenshot_hash), 16)
 
 	def test_at_most_the_flush_cap_is_hashed(self):
 		scan = self.scan({f'h{i}.ct.test': HOST for i in range(4)})
-		items = []
-		for i in range(4):
-			self.plant(f'gowitness/screenshots/{i}.png', 'gradient')
-			items.append({'host': f'h{i}.ct.test', 'rel_path': f'gowitness/screenshots/{i}.png', 'url': 'x'})
+		items = [self.blob(f'h{i}.ct.test', f'{i}.png') for i in range(4)]
 		with mock.patch.object(shots, 'MAX_HASH_PER_FLUSH', 2):
 			self.persist(scan, items)
 		hashed = Subdomain.objects.filter(scan_history=scan).exclude(screenshot_hash='').count()
@@ -106,8 +106,7 @@ class PersistTests(ChangeFixture, TestCase):
 
 	def test_without_pillow_nothing_raises_and_the_skip_is_logged_once_per_scan(self):
 		scan = self.scan({'www.ct.test': HOST})
-		self.plant('gowitness/screenshots/a.png', 'gradient')
-		item = [{'host': 'www.ct.test', 'rel_path': 'gowitness/screenshots/a.png', 'url': 'x'}]
+		item = [self.blob('www.ct.test', 'a.png')]
 		with mock.patch.object(shots, 'Image', None):
 			self.persist(scan, item)
 			self.persist(scan, item)

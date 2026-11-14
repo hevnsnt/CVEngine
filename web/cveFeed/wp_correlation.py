@@ -2,9 +2,9 @@
 
 A WordPress plugin CVE names the plugin by its title ("Cloudflare Image Resizing") and often its slug ("package"), and applies only to that plugin
 at a version inside the advisory's bounded range. The general correlation treats a product name as a fuzzy lead; for a plugin that would link
-every "forms" or "seo" CVE to every site, so this module is stricter: a plugin sighting (the slug, and its title when WPScan or a readme gave
+every "forms" or "seo" CVE to every site, so this module is stricter: a plugin sighting (the slug, and its title when the scan or a readme gave
 one) matches an advisory only when the normalized slug or title **equals** the advisory's normalized product or package name, and the version
-WPScan read is inside a bounded range. A plugin whose version was not read matches nothing. Matches have source ``wp-plugin``.
+the scan read is inside a bounded range. A plugin whose version was not read matches nothing. Matches have source ``wp-plugin``.
 
 The sightings are ``ProbeObservation`` rows written by cveFeed.wpscan_scan (kind ``wp-plugin`` or ``wp-theme``)."""
 import logging
@@ -96,7 +96,7 @@ def run_for_host(sub, pool=None):
 
 def carry_forward(scan):
     """Correlate the plugin sightings of this scan's hosts: hosts are stored once per scan, so a fresh row has no plugin matches until this
-    runs, even when WPScan itself is not due again. Only sightings seen in the last FRESH_DAYS."""
+    runs, even when the scan itself is not due again. Only sightings seen in the last FRESH_DAYS."""
     from cveFeed import correlation
     from cveFeed.models import ProbeObservation
     from startScan.models import Subdomain

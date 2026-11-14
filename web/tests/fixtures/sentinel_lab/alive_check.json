@@ -1,0 +1,71 @@
+{
+ "kind": "alive_check",
+ "name": "alive_check",
+ "payload": {
+  "checks": [
+   {
+    "alive": true,
+    "id": "web:80"
+   },
+   {
+    "alive": false,
+    "id": "gone:80"
+   },
+   {
+    "alive": true,
+    "id": "ssh:22"
+   }
+  ],
+  "outcome": "done",
+  "refused": [],
+  "touched": [
+   "192.0.2.10",
+   "192.0.2.99",
+   "192.0.2.12"
+  ]
+ },
+ "sentinel_seconds": 3.0,
+ "target": {
+  "checks": [
+   {
+    "host": "web.lab.test",
+    "id": "web:80",
+    "ip": "192.0.2.10",
+    "port": 80,
+    "scheme": "http"
+   },
+   {
+    "host": "gone.lab.test",
+    "id": "gone:80",
+    "ip": "192.0.2.99",
+    "port": 80,
+    "scheme": "http"
+   },
+   {
+    "host": "ssh.lab.test",
+    "id": "ssh:22",
+    "ip": "192.0.2.12",
+    "port": 2222,
+    "scheme": "tcp"
+   }
+  ],
+  "scope": {
+   "addresses": [
+    "192.0.2.10",
+    "192.0.2.99",
+    "192.0.2.12"
+   ],
+   "blocked": [],
+   "domains": [],
+   "excluded": [],
+   "excluded_trees": [],
+   "hosts": [
+    "192.0.2.10",
+    "192.0.2.99",
+    "192.0.2.12"
+   ],
+   "private": true
+  }
+ },
+ "tool_rows": null
+}

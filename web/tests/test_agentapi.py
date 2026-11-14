@@ -12,11 +12,15 @@ from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests.test_tenancy import client_for
+from tests import ai_queue
 
 
 def call(token, method, path, body=None):
-	c = Client()
-	headers = {'HTTP_AUTHORIZATION': f'Bearer {token}'} if token else {}
+	if path.endswith('/sentinels/bootstrap'):  # the call is counted per client address (SN-13), and every test is 127.0.0.1: a test that is not about the limit starts with none
+		from django.core.cache import cache
+		cache.delete('agentapi:bootstrap:addr:127.0.0.1')
+	c = client_for(token) if isinstance(token, User) else Client()  # a User is a person signed in to the web interface (no token): the agent rules that refuse an API token do not apply
+	headers = {'HTTP_AUTHORIZATION': f'Bearer {token}'} if token and not isinstance(token, User) else {}
 	kwargs = dict(content_type='application/json', **headers)
 	data = json.dumps(body) if body is not None else None
 	fn = getattr(c, method.lower())
@@ -692,6 +696,31 @@ class AgentApiTests(TestCase):
 		self.assertEqual(self.mcp_post({'jsonrpc': '2.0', 'id': 7, 'result': {}}), (202, None))
 		self.assertEqual(self.mcp_post({'jsonrpc': '2.0', 'id': 7, 'error': {'code': -1, 'message': 'x'}}), (202, None))
 
+	def test_a_batch_runs_one_search_or_listing_and_refuses_the_rest(self):
+		"""Twenty searches in one request were twenty queries back to back (review 2 F2): the first heavy call runs, the others are refused by name."""
+		calls = [{'jsonrpc': '2.0', 'id': i, 'method': 'tools/call', 'params': {'name': name, 'arguments': {'project': 'proj-a'}}}
+		         for i, name in enumerate(['search_hosts', 'list_hosts', 'list_projects', 'search_hosts'], 1)]
+		status, data = self.mcp_post(calls)
+		self.assertEqual(status, 200)
+		by_id = {r['id']: r for r in data}
+		self.assertNotIn('error', by_id[1])
+		self.assertNotIn('error', by_id[3])
+		for refused in (2, 4):
+			self.assertEqual(by_id[refused]['error']['code'], -32600)
+			self.assertIn('one search_hosts or list_hosts', by_id[refused]['error']['message'])
+
+	def test_a_statement_the_database_cut_off_is_answered_plainly_by_the_api_and_the_mcp(self):
+		from django.db.utils import OperationalError
+		cut = OperationalError('canceling statement due to statement timeout')
+		cut.__cause__ = type('Canceled', (Exception,), {'pgcode': '57014'})()
+		with mock.patch('agentapi.services.list_projects', side_effect=cut):
+			status, data = call(self.t_alice, 'GET', '/api/v1/projects')
+		self.assertEqual(status, 503)
+		self.assertIn('narrow it', data['error'])
+		with mock.patch('agentapi.mcp.call_tool', side_effect=cut):
+			status, data = rpc(self.t_alice, 'tools/call', {'name': 'list_projects', 'arguments': {}}, rpc_id=11)
+		self.assertEqual((status, data['id'], data['result']['isError']), (200, 11, True))
+
 	def test_an_unknown_tool_is_a_protocol_error_and_a_crash_is_a_json_rpc_error(self):
 		status, data = rpc(self.t_alice, 'tools/call', {'name': 'no_such_tool', 'arguments': {}})
 		self.assertEqual((status, data['error']['code']), (200, -32602))
@@ -991,7 +1020,7 @@ class AgentsPageTests(TestCase):
 		self.assertEqual(Client().get('/cve/agents/').status_code, 302)
 		r = client_for(user).get('/cve/agents/')
 		self.assertEqual(r.status_code, 200)
-		self.assertContains(r, 'Agent access')
+		self.assertContains(r, '<h1>API keys</h1>', html=True)
 
 
 class ModernUiTests(TestCase):
@@ -1182,6 +1211,26 @@ class ListSummaryTests(TestCase):
 		rows = {t['name']: (t['hosts'], t['exposed']) for t in list_targets(Ctx(user=self.user), 'sum-p', {})['results']}
 		self.assertEqual(rows, {'sum.example': (2, 1), 'empty.example': (0, 0)})  # one of two hosts has an open high finding
 
+	def test_targets_count_hosts_the_way_the_hosts_page_does(self):
+		"""Review 1 F2: two names on one address are one host, and a scan-less row beside the scanned copy of the same name is not another host."""
+		from agentapi.services import Ctx, list_targets
+		from cveFeed import counts
+		from scanEngine.models import EngineType
+		from startScan.models import IpAddress, ScanHistory, Subdomain
+		now = timezone.now()
+		project = Project.objects.get(slug='sum-p')
+		domain = Domain.objects.create(name='fold.example', project=project, insert_date=now)
+		engine = EngineType.objects.create(engine_name='e2', yaml_configuration='x')
+		scan = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=now, scan_status=2)
+		ip = IpAddress.objects.create(address='192.0.2.77')
+		for name in ('www.fold.example', 'api.fold.example'):
+			Subdomain.objects.create(name=name, target_domain=domain, scan_history=scan, http_status=200).ip_addresses.add(ip)
+		Subdomain.objects.create(name='www.fold.example', target_domain=domain, scan_history=None)  # a certificate transparency row
+		row = {t['name']: t for t in list_targets(Ctx(user=self.user), 'sum-p', {})['results']}['fold.example']
+		self.assertEqual(row['hosts'], counts.host_reps(domain.id).count())
+		self.assertEqual(row['hosts'], 1)
+		self.assertEqual(row['exposed'], 0)
+
 class ScanDetailApiTests(TestCase):
 	@classmethod
 	def setUpTestData(cls):
@@ -1315,14 +1364,17 @@ class LiveDashboardTests(TestCase):
 	def test_dashboard_redirects_to_welcome_until_onboarded(self):
 		root = User.objects.create_superuser('liveroot', 'l@x.io', 'x')
 		c = client_for(root)
+		self.assertEqual(c.get('/cve/?skip=1').status_code, 200)  # this install already has targets: the wizard is not forced on it (cveFeed.setup_flow.needs_wizard)
+		from dashboard.models import SetupWizard
+		SetupWizard.objects.create(started_at=timezone.now())  # a wizard somebody started resumes
 		r = c.get('/cve/')
 		self.assertEqual((r.status_code, r['Location']), (302, '/cve/welcome/'))
 		self.assertEqual(c.get('/cve/welcome/').status_code, 200)
 		self.assertEqual(client_for(self.user).get('/cve/welcome/').status_code, 403)  # superuser only
 		self.assertEqual(client_for(self.user).get('/cve/').status_code, 200)  # members go straight in
 		c.post('/cve/api/welcome/finish', content_type='application/json')
-		self.assertEqual(c.get('/cve/').status_code, 200)
-		self.assertContains(c.get('/cve/'), 'AI activity')
+		self.assertEqual(c.get('/cve/?skip=1').status_code, 200)  # (?skip=1: an App Admin is otherwise sent once to the update questions, cveFeed.setup_questions)
+		self.assertContains(c.get('/cve/?skip=1'), 'AI activity')
 
 
 class NodeDetailTests(TestCase):
@@ -1539,7 +1591,6 @@ class BulkTargetTests(TestCase):
 		self.assertIn('the cap is', data['error'])
 
 	def test_the_add_cap_can_be_set_from_the_environment(self):
-		import importlib
 		from agentapi import services
 		with mock.patch.dict('os.environ', {'CVENGINE_MAX_TARGETS_PER_ADD': '77'}):
 			self.assertEqual(services._max_targets(), 77)
@@ -1691,6 +1742,10 @@ class HostSearchTests(TestCase):
 		host(da, 'db.srch.example', ip='10.0.0.5', port=(3306, 'MySQL', '8.0'))
 		host(da, 'www.srch.example', ip='10.0.1.9', tech='PHP', title='Welcome to Acme Tomcat')
 		host(db, 'theirs.other.example', ip='10.0.0.7', tech='PHP', port=(3306, 'MySQL', '8.0'))
+
+	def setUp(self):
+		from django.core.cache import cache
+		cache.clear()  # the whole-match counts are a shared snapshot (15 s): a test that edits hosts must not read another test's
 
 	def search(self, q, **extra):
 		from urllib.parse import urlencode
@@ -1936,7 +1991,7 @@ class TriageApiTests(TestCase):
 			findings = triage.with_cves(CVEMatch.objects.filter(subdomain__target_domain=self.da).select_related('subdomain__target_domain'))
 			findings += triage.vulnerabilities(__import__('startScan.models', fromlist=['Vulnerability']).Vulnerability.objects.filter(target_domain=self.da))
 			findings += [self.route, self.hyg]
-			triage.run_triage(triage.track(findings), provider=provider)
+			ai_queue.run_triage(triage.track(findings), provider=provider)
 
 	def get(self, path, token=None):
 		return call(token or self.t_alice, 'GET', f'/api/v1/projects/proj-a/{path}')
@@ -2048,6 +2103,15 @@ class TriageApiTests(TestCase):
 		d = self.get(f'findings/match/{self.match.id}')[1]
 		self.assertEqual((d['ai']['classification'], d['ai']['status'], d['why_it_matters']), ('', 'untracked', ''))
 
+	def test_the_detail_says_whether_an_ai_model_is_connected_to_triage_it(self):
+		# the pane says "Waiting for AI triage." only while a model is there to do it (app.js waitingForNobody)
+		from unittest import mock
+		path = f'findings/match/{self.match.id}'
+		with mock.patch('cveFeed.ai_jobs.ai_on', return_value=False):
+			self.assertIs(self.get(path)[1]['ai']['connected'], False)
+		with mock.patch('cveFeed.ai_jobs.ai_on', return_value=True):
+			self.assertIs(self.get(path)[1]['ai']['connected'], True)
+
 	def test_list_triage_filters(self):
 		self.triaged('likely_false_positive')
 		everything = self.get('triage')[1]
@@ -2111,7 +2175,7 @@ class TriageApiTests(TestCase):
 		self.assertEqual(call(self.t_alice, 'POST', bbot)[0], 409)
 
 	def test_nonmatch_retriage_is_hourly_bounded(self):
-		from cveFeed.models import AutomaticValidation, Triage
+		from cveFeed.models import AutomaticValidation
 		from cveFeed import triage
 		row = triage.track([self.bbot])[0][0]
 		for _ in range(20):

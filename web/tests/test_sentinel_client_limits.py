@@ -85,7 +85,10 @@ class NginxResultRouteTests(SimpleTestCase):
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         conf = open(os.path.join(repo, 'config', 'nginx', 'rengine.conf'), encoding='utf-8').read()
         sizes = re.findall(r'client_max_body_size\s+(\d+)M', conf)
-        self.assertEqual(sizes, ['4', '24'])  # the server default, then the one route
+        self.assertEqual(sizes, ['4', '24', '260'])  # the server default, the Sentinel result route, and the App Admin seed import (the one other upload)
         block = conf[conf.index('location ~ ^/api/v1/sentinel/tasks/'):]
         block = block[:block.index('proxy_pass')]
         self.assertIn('24M', block)
+        seed = conf[conf.index('location = /cve/api/settings/cve_seed/import'):]
+        seed = seed[:seed.index('proxy_pass')]
+        self.assertIn('260M', seed)  # a seed is about 14 MB; the application caps it at 256 MB

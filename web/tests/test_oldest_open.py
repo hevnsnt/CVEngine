@@ -5,7 +5,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from cveFeed import counts
-from cveFeed.models import CVEEntry, CVEMatch, HygieneFinding
+from cveFeed.models import CVEMatch, HygieneFinding
 from startScan.models import ScanHistory, Subdomain, Vulnerability
 from tests.test_counts import CountFixture
 

@@ -2,9 +2,9 @@
 // one group of the registry; its rows, ranges, defaults and help texts all come from the server, so a new tunable needs no change here, and a new
 // group is one registerTunableGroup() line below (a test keeps these ids equal to the server's groups). Everything from the server is set with
 // textContent or value.
-import { api, button, el, shortDate, toast } from "/staticfiles/cve/ui.js";
+import { api, button, details, el, shortDate, toast } from "/staticfiles/cve/ui.js";
 import { API, autoTuneRow, registerCard } from "/staticfiles/cve/config-maxxing.js";
-import { canPin, canReset, changesFrom, originLines, rangeText, runningText, softWarning, sourceLabel, usageText } from "/staticfiles/cve/config-maxxing-logic.js";
+import { canPin, canReset, changesFrom, originLines, rangeText, runningText, serverSetting, softWarning, sourceLabel, usageText } from "/staticfiles/cve/config-maxxing-logic.js";
 
 const PATH = `${API}/tunables`;
 // A small addition under one card's intro: the Outbound connections card links the connection log (every local connection to the logged
@@ -46,7 +46,7 @@ function row(field, onInput, save, mode, reload) {
       await save({ [field.key]: field.env_value }, input.id);
       toast(`${field.label} is now saved here`);
     }, "btn ghost sm");
-    pin.title = `Keep ${field.env_value} here even if ${field.env_name} changes`;
+    pin.title = `Keep ${field.env_value} here even if the server's own setting changes`;
     pin.setAttribute("aria-label", `Save the current value of ${field.label} here`);
     controls.append(pin);
   }
@@ -57,7 +57,7 @@ function row(field, onInput, save, mode, reload) {
     id: `${id}-note`, style: "margin:4px 0 0",
   });
   const warning = el("p", "msg err", "", { style: "margin:4px 0 0", hidden: "", role: "status" });
-  wrap.append(top, el("p", "note", field.help, { style: "margin:4px 0 0" }), facts);
+  wrap.append(top, el("p", "note", field.help, { style: "margin:4px 0 0" }), facts, details(serverSetting(field)));
   const tuning = autoTuneRow(field, mode, reload);
   if (tuning) wrap.append(tuning);
   wrap.append(warning);
@@ -122,5 +122,8 @@ export function registerTunableGroup(id, title) {
 registerTunableGroup("ai_spend", "AI spend");
 registerTunableGroup("throughput", "Scan pacing");
 registerTunableGroup("autotune_pace", "Auto-tuning pace");
+registerTunableGroup("retention", "Data retention");
 registerTunableGroup("egress", "Outbound connections");
+registerTunableGroup("planner", "Work planner");
 registerTunableGroup("heat", "Heat policy");
+registerTunableGroup("discovery_keys", "Discovery API keys");

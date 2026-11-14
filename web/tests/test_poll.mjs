@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 
-import {createGet, createPace, every, jitter, retryAfterMs, staleRows} from '../static/cve/poll.js';
+import {createGet, createPace, readWithin, fetchWithin, within, REQUEST_MS, every, jitter, retryAfterMs, staleRows} from '../static/cve/poll.js';
 
 // A response stand-in: the status, headers by name (case-insensitive) and a JSON body.
 const reply = (status, body = {}, headers = {}) => ({
@@ -247,4 +247,51 @@ test('staleRows picks the rows with no detail, a moved key, or a detail older th
   assert.deepEqual(stale.map((r) => r.id), [2, 4], 'row 2 moved, row 4 was never fetched; 1 and 3 are fresh');
   const later = staleRows(rows, seen, {key: (r) => r.k, has: (id) => have.has(id), now: 130000, safetyMs: 120000});
   assert.deepEqual(later.map((r) => r.id), [1, 2, 3, 4], 'the net catches the rest');
+});
+
+// The time limit covers the body: a server that sends headers and then stalls the body must end in a TimeoutError, not wait for ever.
+const stalled = () => ({status: 200, ok: true, headers: {get: () => '"t"'}, json: () => new Promise(() => {})}); // json() never settles, ignores the signal
+const withFakeTimers = async (body) => {
+  const {mock} = await import('node:test');
+  mock.timers.enable({apis: ['setTimeout']});
+  try { await body(mock); } finally { mock.timers.reset(); }
+};
+const flushAll = async () => { for (let i = 0; i < 5; i += 1) await new Promise((r) => setImmediate(r)); };
+
+test('readWithin: headers arrive, json() never settles: TimeoutError after the limit', () => withFakeTimers(async (mock) => {
+  let outcome = 'pending';
+  readWithin('/x', {}, (r) => r.json(), REQUEST_MS, async () => stalled()).then(() => { outcome = 'ok'; }, (e) => { outcome = e.name; });
+  await flushAll();
+  assert.equal(outcome, 'pending');
+  mock.timers.tick(REQUEST_MS + 1);
+  await flushAll();
+  assert.equal(outcome, 'TimeoutError');
+}));
+
+test('createGet: headers arrive, json() never settles: TimeoutError, and no ETag is kept for the body never read', () => withFakeTimers(async (mock) => {
+  const sent = [];
+  const get = createGet({fetchImpl: async (url, init) => (sent.push(init.headers['If-None-Match']), sent.length === 1 ? stalled() : reply(200, {n: 2}))});
+  let outcome = 'pending';
+  get('/x').then(() => { outcome = 'ok'; }, (e) => { outcome = e.name; });
+  await flushAll();
+  mock.timers.tick(REQUEST_MS + 1);
+  await flushAll();
+  assert.equal(outcome, 'TimeoutError');
+  assert.deepEqual(await get('/x'), {n: 2});
+  assert.deepEqual(sent, [undefined, undefined], 'the second ask is not conditional');
+}));
+
+test('createGet: the limit passes an abort signal and aborts it', () => withFakeTimers(async (mock) => {
+  let signal;
+  const get = createGet({fetchImpl: (url, init) => { signal = init.signal; return new Promise(() => {}); }});
+  get('/x').catch(() => {});
+  await flushAll();
+  mock.timers.tick(REQUEST_MS + 1);
+  assert.equal(signal.aborted, true);
+}));
+
+test('a fast read clears its timer and keeps the body', async () => {
+  assert.deepEqual(await readWithin('/x', {}, (r) => r.json(), 50, async () => reply(200, {a: 1})), {a: 1});
+  assert.equal((await fetchWithin('/x', {}, 50, async () => reply(200))).status, 200);
+  await assert.rejects(within(async () => { throw new Error('boom'); }, 50), /boom/);
 });

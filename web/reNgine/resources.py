@@ -33,6 +33,8 @@ from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
+
+
 # Estimated peak resident memory per job kind, in MB. Deliberately a little pessimistic.
 BASE_COSTS_MB = {
     'bbot-deep': 2400,      # kitchen-sink preset: dozens of modules and a spider (raised to what real runs reach, see effective_cost)
@@ -46,9 +48,9 @@ BASE_COSTS_MB = {
     'naabu': 150,           # SYN port discovery over every TCP port, one process for many addresses
     'template-test': 600,   # one generated template against one host
     'route-probe': 150,     # safe GETs over a few threads; no process, so the watchdog only watches the stop flag
-    'wpscan': 400,          # WPScan (Ruby) on one site; a thorough pass can run for hours
-    'testssl': 150,         # testssl.sh and its openssl children against one TLS port
-    'screenshot': 450,      # one headless Chromium and its driver, one page at a time (cveFeed.web_shot); a batch of pages is one job
+    'wpscan': 400,          # the WordPress scan of one site
+    'testssl': 150,         # a TLS audit of one port
+    'screenshot': 450,      # the drain of the screenshot queue (cveFeed.web_shot); the browser itself runs on a Sentinel
 }
 # How many of each kind may run at once in a container, whatever memory is free: these are CPU and network bound, so more
 # in parallel only makes every one of them slower. Override with HEAVY_MAX_<KIND>, e.g. HEAVY_MAX_NMAP=2.
@@ -68,6 +70,37 @@ class MemoryKill(RuntimeError):
 
 class MemoryBusy(RuntimeError):
     """The job waited for memory for longer than allowed."""
+
+
+class ScannerUnavailable(MemoryBusy):
+    """The scan work needs a Sentinel and none could take it, and no kind runs on this server (``sentinel_dispatch.NEVER_LOCAL``). It is
+    a ``MemoryBusy`` on purpose: every stage already treats that as "not the target's failure, it stays due", which is what waiting for
+    a scanner to come back must look like (nothing marked failed, nothing scanned locally). ``done`` is what a Sentinel did finish of the
+    stage before it had to wait (the nmap stage's addresses a Sentinel fully covered, ``sentinel_dispatch.try_nmap``): the caller may mark
+    those done, and only the rest stays due. Empty everywhere else."""
+
+    waiting = False  # back-pressure: every Sentinel that can run it was busy (or none claimed it in time); nothing is wrong, so it is not recorded as a failure
+
+    def __init__(self, kind, why='', waiting=False):
+        self.kind, self.why, self.done = kind, why, []
+        self.waiting = bool(waiting)
+        super().__init__(f'no scanner could run {kind} work{": " + why if why else ""}; it stays due until one can')
+
+
+class AddressExcluded(ScannerUnavailable):
+    """The work names an address (or a host that resolves to one) on the organization's do-not-scan list, or the list could not be read: no task is created
+    (``agentapi.address_guard``). A ``ScannerUnavailable`` so that every stage already treats it as \"not the target's failure, nothing ran\"; ``refusal`` says
+    why, in plain words."""
+
+    def __init__(self, kind, refusal):
+        self.kind, self.why, self.done, self.refusal, self.waiting = kind, str(refusal), [], refusal, False
+        MemoryBusy.__init__(self, f'{kind} work was not started: {refusal}')
+
+
+class ScannerReportedNothing(ScannerUnavailable):
+    """A Sentinel took the work and finished it, but its report is unusable for the address (empty, cut short, or naming other addresses
+    only). Unlike a plain ``ScannerUnavailable`` (no scanner was there), asking again at once cannot help when the scanner keeps returning
+    the same, so a caller may cap how often it asks (``cveFeed.udp_scan.MAX_EMPTY_PER_DAY``)."""
 
 
 class ScanAborted(RuntimeError):
@@ -102,6 +135,11 @@ def request_abort(scan_id):
             client.set(f'{ABORT_KEY}{int(scan_id)}', '1', ex=ABORT_TTL)
         except Exception:  # noqa: BLE001 - the database status is the source of truth; the flag only speeds things up
             logger.warning('could not publish the abort of scan %s', scan_id, exc_info=True)
+    try:  # a stage of it that waits on Sentinels without a worker (agentapi.stage_runs) hears of the stop now, not at its next budget
+        from agentapi import stage_runs
+        stage_runs.wake_scan(int(scan_id))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def abort_requested(scan_id):
@@ -393,23 +431,9 @@ def base_cap(kind):
 
 
 def max_concurrent(kind):
-    """How many runs of a kind may run at once. Only the auto-tuner (cveFeed.autotune) moves it now, through ``base_cap``: the step the old
-    three-hour review kept in Redis (``cvengine:adaptive:max:<kind>``) is no longer read, so a leftover one changes nothing."""
+    """How many runs of a kind may run at once. Only the auto-tuner (cveFeed.autotune) moves it, through ``base_cap``: the step the retired
+    capacity review kept in Redis (``cvengine:adaptive:max:<kind>``) is not read, so a leftover one changes nothing."""
     return max(1, base_cap(kind))
-
-
-def adaptive_bounds(kind, baseline=None):
-    """The range the three-hour review's candidate is judged against (cveFeed.performance_review, which now only reports). The cap an App Admin
-    saved is the default maximum; HEAVY_TUNE_MIN/MAX_<KIND> narrow or widen it as before. The auto-tuner has its own range per kind
-    (cveFeed.autotune.envelope), which HEAVY_TUNE_MIN/MAX_<KIND> also narrow or widen."""
-    baseline = baseline or base_cap(kind)
-    saved = _admin_cap(kind)
-    suffix = kind.upper().replace('-', '_')
-    env_low = max(1, int(_env_float('HEAVY_TUNE_MIN_' + suffix) or 1))
-    env_high = int(_env_float('HEAVY_TUNE_MAX_' + suffix) or baseline)
-    if saved is None:
-        return env_low, max(env_low, env_high)
-    return min(env_low, saved), max(env_high, saved)
 
 
 def cost_mb(kind):
@@ -716,10 +740,15 @@ def claim_release(client, key, owner):
 
 
 @contextmanager
-def redis_claim(key, owner, ttl):
+def redis_claim(key, owner, ttl, adopt=False, hold=False, keep=None):
     """Hold ``key`` in Redis for ``owner`` (SET NX EX), refreshing it while the block runs. Yields True when this
     caller holds it, or when no Redis is available to ask, else the owner that does. The key is released on exit, and
-    expires on its own ``ttl`` seconds after a crashed worker stops refreshing it."""
+    expires on its own ``ttl`` seconds after a crashed worker stops refreshing it.
+
+    For a stage that waits on Sentinels without its worker (``agentapi.stage_runs``): ``adopt`` treats a key ``owner`` already holds as won (the
+    pass that continues a run takes back the claim its first pass held); ``hold`` keeps the claim, instead of releasing it, when the block ends
+    because the run waits (``Suspend``); ``keep`` is a dict the block may set ``keep['seconds']`` in to keep the claim that long after a normal end
+    (a pipeline whose stages went on waiting). A kept claim is the run's to release or let expire."""
     client = getattr(get_store(), 'r', None)
     if client is None:
         yield True
@@ -728,6 +757,8 @@ def redis_claim(key, owner, ttl):
     try:
         got = client.set(key, owner, nx=True, ex=ttl)
         holder = None if got else client.get(key)
+        if not got and adopt and holder == owner:
+            got = bool(client.expire(key, ttl))
     except Exception:  # noqa: BLE001 - never block scanning because the claim is unavailable
         yield True
         return
@@ -745,12 +776,24 @@ def redis_claim(key, owner, ttl):
             except Exception:  # noqa: BLE001
                 pass
     threading.Thread(target=keep_alive, name='redis-claim', daemon=True).start()
+    from agentapi import stage_runs
+    run = stage_runs.current()
+    suspending = False
     try:
         yield True
+    except stage_runs.Suspend:
+        suspending = hold
+        raise
     finally:
         stop.set()
         try:
-            claim_release(client, key, owner)
+            if suspending and run is not None:
+                claim_refresh(client, key, owner, stage_runs.HOLD_SECONDS)
+                run.hold_claim(key, owner)
+            elif keep and keep.get('seconds'):
+                claim_refresh(client, key, owner, int(keep['seconds']))
+            else:
+                claim_release(client, key, owner)
         except Exception:  # noqa: BLE001
             pass
 
@@ -999,6 +1042,9 @@ def report_state(store=None, state_fn=memory_state, now_fn=time.time):
     store.publish_state({'host': socket.gethostname(), 'memory': state, 'budget_mb': budget_mb(state), 'headroom_mb': headroom_mb(state),
                          'critical_mb': critical_mb(state), 'waiting_by_kind': waiting, 'running_by_kind': running,
                          'memory_kills_3h': sum(1 for event in store.events() if now - event.get('t', 0) <= 3 * 3600), 't': now})
+    if isinstance(store, RedisStore):  # this container's memory against its limit and its kernel oom kills, for the maintainer's signals (reNgine/container_signals.py)
+        from reNgine import container_signals
+        container_signals.publish('worker', client=store.r, now=now)
 
 
 def adaptive_history(since):
@@ -1007,7 +1053,7 @@ def adaptive_history(since):
     if not isinstance(store, RedisStore):
         return []
     samples = []
-    for key in store.r.scan_iter(match='cvengine:heavy:*:history'):
+    for key in store.r.scan_iter(match='cvengine:heavy:*:history', count=1000):
         for raw in store.r.lrange(key, 0, 399):
             try:
                 item = json.loads(raw)
@@ -1025,7 +1071,7 @@ def cluster_snapshot(now_fn=time.time):
     if _store['kind'] != 'redis':
         return {'store': 'process', 'containers': [{'host': socket.gethostname(), **snapshot(store, now_fn=now_fn)}]}
     containers = []
-    for key in sorted(store.r.scan_iter(match='cvengine:heavy:*:state')):
+    for key in sorted(store.r.scan_iter(match='cvengine:heavy:*:state', count=1000)):
         namespace = key[:-len(':state')]
         other = RedisStore(store.r, namespace)
         try:

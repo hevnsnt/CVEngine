@@ -1,0 +1,14 @@
+# Run the built-in scanner under the AppArmor profile in config/apparmor/cvengine-scanner: Docker's default profile refuses the user namespace
+# Chromium's sandbox needs on a host whose AppArmor restricts them (Ubuntu 24.04+, recent Debian and Kali), and the screenshots then fail.
+#
+#   sudo apparmor_parser -r -W config/apparmor/cvengine-scanner      # load the profile once (and after a reboot)
+#   echo 'CVENGINE_COMPOSE_FILES=docker-compose.yml,docker-compose.apparmor.yml' >> .env
+#   docker compose -f docker-compose.yml -f docker-compose.apparmor.yml up -d scanner
+#
+# The line in .env makes `make up` and the updater use this file too. Compose adds this entry to the seccomp profile docker-compose.yml already sets.
+# The fallback, if you cannot load a profile, is `apparmor=unconfined` here instead: it works, and it removes the container's AppArmor confinement
+# altogether (its capabilities, unprivileged user and seccomp limits remain). docs/DEPLOYMENT.md, "Screenshots and AppArmor".
+services:
+  scanner:
+    security_opt:
+      - apparmor=cvengine-scanner

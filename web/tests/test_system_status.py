@@ -33,6 +33,21 @@ class FakeBroker:
 	def hlen(self, name):
 		return 2
 
+	def pipeline(self, transaction=True):
+		"""The queue depths are read in one pipeline (one round trip): the same answers, queued and returned together."""
+		broker, queued = self, []
+
+		class Pipe:
+			def llen(self, name):
+				queued.append(broker.llen(name))
+
+			def hlen(self, name):
+				queued.append(broker.hlen(name))
+
+			def execute(self):
+				return list(queued)
+		return Pipe()
+
 
 HEALTH = {'workers_state': 'responding', 'worker_note': 'ok', 'scheduler_note': 'n',
 		  'workers': [{'worker': 'discovery_worker', 'queue': 'discovery_queue', 'responding': True, 'consuming': True, 'active': 1}],
@@ -70,10 +85,19 @@ class SystemStatusTests(TestCase):
 		_, cls.t_root = create_token(cls.root, 'root')
 
 	def setUp(self):
+		# the conductor's last round lives in Redis too, which no test rolls back: an earlier test's round must not read as a stalled conductor here
+		patch = mock.patch('cveFeed.conductor.last_round', return_value={'at': timezone.now().isoformat(), 'depth': 3, 'started': 0, 'skipped': 'nothing is due'})
+		patch.start()
+		self.addCleanup(patch.stop)
 		# the egress ledger lives in Redis, which a test database does not roll back: Sentinel tasks that fell back to local execution in
 		# earlier tests of this run must not make this instance look unhealthy (tests.test_local_egress covers that problem line)
 		from tests.test_local_egress import _clear
 		_clear()
+		# refusals of the rate limiter live in Redis too (agentapi.claim_refusals): another test's refusals, an action named 'secret' among them, are real numbers in the status
+		from agentapi import claim_refusals
+		client = claim_refusals._client(claim_refusals.KEY)
+		for key in client.scan_iter(match=claim_refusals.KEY + '*'):
+			client.delete(key)
 		# the per-project cache is exercised by CountsCacheTests; here every call counts afresh
 		patch = mock.patch.dict(os.environ, {'CVENGINE_STATUS_CACHE_SECONDS': '0'})
 		patch.start()
@@ -236,7 +260,7 @@ class SystemStatusTests(TestCase):
 		self.assertEqual(data['overall'], 'degraded')
 		self.assertEqual(data['system']['broker'], {'error': 'ConnectionError'})
 		self.assertTrue(any(p.startswith('broker:') for p in data['problems']))
-		self.assertNotIn('secret', str(data))  # the error text itself is never returned
+		self.assertNotIn('secret', str(data).replace("'secrets_scan'", "'<kind>'"))  # the error text itself is never returned
 		self.assertTrue(data['system']['database']['ok'])  # the other probes still ran
 
 	def test_workers_that_do_not_answer_are_a_problem(self):
@@ -299,7 +323,7 @@ class SystemStatusTests(TestCase):
 		with mock.patch('cveFeed.updater.read_phase', lambda: {'phase': 'draining', 'detail': 'waiting', 'scans_running': 2, 'changed_at': 1}):
 			_, data = self.get(self.t_member)
 		self.assertTrue(data['scanning']['paused'])
-		self.assertEqual(set(data['scanning']), {'paused', 'paused_by_update'})
+		self.assertEqual(set(data['scanning']), {'paused', 'paused_by_update', 'scanner', 'builtin_scanner'})
 		self.assertEqual(data['update'], {'phase': 'draining'})
 		blob = str(data)
 		for secret in ('maintenance window', 'bill', 'boom', 'waiting'):
@@ -323,13 +347,17 @@ class SystemStatusTests(TestCase):
 
 	def test_no_address_or_credential_is_returned(self):
 		_, data = self.run_status(self.t_root)
-		text = str(data).lower()
+		text = str(data).lower().replace("'secrets_scan'", "'<kind>'")  # a task kind's name, listed per kind, is not a credential
 		for word in ('redis://', 'postgres://', 'password', 'secret', 'api_key'):
 			self.assertNotIn(word, text)
 
 
 class WorkConductorStatusTests(TestCase):
 	def setUp(self):
+		# the conductor's last round lives in Redis too, which no test rolls back: an earlier test's round must not read as a stalled conductor here
+		patch = mock.patch('cveFeed.conductor.last_round', return_value={'at': timezone.now().isoformat(), 'depth': 3, 'started': 0, 'skipped': 'nothing is due'})
+		patch.start()
+		self.addCleanup(patch.stop)
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		org = Org.objects.create(name='W', slug='w')
 		self.project = Project.objects.create(name='W', slug='ws', insert_date=NOW, org=org)
@@ -342,18 +370,68 @@ class WorkConductorStatusTests(TestCase):
 			out = system_status._system(self.user, problems, notes)
 		return out, problems
 
-	def test_no_work_with_targets_is_a_problem_and_a_queued_scan_clears_it(self):
+	def test_a_due_target_with_nothing_running_or_queued_is_a_problem_and_a_queued_scan_clears_it(self):
 		out, problems = self.problems()
-		self.assertEqual((out['work']['running'], out['work']['queued'], out['work']['targets']), (0, 0, True))
-		self.assertTrue([p for p in problems if p.startswith('work: nothing is running or queued')])
+		self.assertEqual((out['work']['running'], out['work']['queued'], out['work']['targets'], out['work']['due']), (0, 0, True, True))
+		self.assertTrue([p for p in problems if p.startswith('work: a target is due for a scan but nothing is running or queued')])
 		ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, scan_status=-1, start_scan_date=NOW, results_dir='/x')
 		_, problems = self.problems()
 		self.assertFalse([p for p in problems if p.startswith('work:')])
+
+	def scanned(self, ago):
+		ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, scan_status=2, start_scan_date=timezone.now() - ago, results_dir='/x')
+
+	def round_at(self, ago, **extra):
+		return {'at': (timezone.now() - ago).isoformat(), 'depth': 3, 'started': 0, **extra}
+
+	def with_round(self, last, beat='running'):
+		problems, notes = [], []
+		with mock.patch.dict('os.environ', {'CVENGINE_WORK_DEPTH': '3'}), mock.patch('cveFeed.conductor.last_round', return_value=last), \
+				mock.patch('agentapi.system_status._workers_and_jobs', return_value={'workers_state': 'responding', 'beat': {'state': beat, 'seconds_since_tick': 400 if beat == 'silent' else 5}, 'jobs': {}, 'workers': []}), \
+				mock.patch('agentapi.system_status._schedules', return_value={'past_due': []}):
+			out = system_status._system(self.user, problems, notes)
+		return out, [p for p in problems if p.startswith('work:')]
+
+	def test_nothing_due_and_idle_is_no_problem(self):
+		self.scanned(timedelta(minutes=20))  # scanned inside the two hour minimum gap: the conductor rightly starts nothing
+		out, problems = self.with_round(self.round_at(timedelta(seconds=30), skipped='nothing is due'))
+		self.assertEqual((out['work']['running'], out['work']['queued'], out['work']['targets'], out['work']['due']), (0, 0, True, False))
+		self.assertEqual(problems, [])
+
+	def test_a_due_target_and_nothing_queued_is_a_problem_in_plain_words_without_a_timestamp(self):
+		self.scanned(timedelta(hours=5))
+		out, problems = self.with_round(self.round_at(timedelta(minutes=2)))
+		self.assertTrue(out['work']['due'])
+		self.assertEqual(len(problems), 1)
+		self.assertIn('a target is due for a scan but nothing is running or queued; the work conductor last ran 2 minutes ago; first check', problems[0])
+		self.assertNotRegex(problems[0], r'\d{4}-\d\d-\d\d|T\d\d:')
+
+	def test_a_stale_conductor_is_a_problem_while_beat_ticks_even_when_nothing_is_due(self):
+		self.scanned(timedelta(minutes=20))
+		_, problems = self.with_round(self.round_at(timedelta(minutes=12), skipped='nothing is due'))
+		self.assertEqual(len(problems), 1)
+		self.assertIn('the work conductor last ran 12 minutes ago, though it is scheduled every minute', problems[0])
+
+	def test_a_silent_beat_is_reported_once_by_its_own_line_not_again_as_a_stale_conductor(self):
+		self.scanned(timedelta(minutes=20))
+		_, problems = self.with_round(self.round_at(timedelta(minutes=12), skipped='nothing is due'), beat='silent')
+		self.assertEqual(problems, [])
+
+	def test_a_last_round_with_an_error_is_a_problem(self):
+		self.scanned(timedelta(minutes=20))
+		_, problems = self.with_round(self.round_at(timedelta(seconds=30), error='could not queue discovery'))
+		self.assertEqual(len(problems), 1)
+		self.assertIn('the last round of the work conductor failed (could not queue discovery)', problems[0])
 
 	def test_a_paused_instance_is_not_a_work_problem(self):
 		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
 		_, problems = self.problems()
 		self.assertFalse([p for p in problems if p.startswith('work:')])
+
+	def test_paused_is_no_problem_even_with_a_due_target_a_stale_round_and_an_error(self):
+		ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
+		_, problems = self.with_round(self.round_at(timedelta(minutes=30), error='could not queue discovery'))
+		self.assertEqual(problems, [])
 
 
 class SentinelStatusTests(TestCase):
@@ -442,7 +520,7 @@ class CountsCacheTests(TestCase):
 	def setUp(self):
 		from django.core.cache import cache
 		self.cache = cache
-		self.key = f'sysstatus:project:{self.user.pk}:{self.project.id}'
+		self.key = f'sysstatus:project:{self.project.id}'  # one row per project, shared by every caller (was per user and project)
 		self.cache.delete(self.key)
 		self.addCleanup(self.cache.delete, self.key)
 		self.ctx = mock.Mock(user=self.user)

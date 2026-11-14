@@ -3,6 +3,9 @@
 // validation job, the checks) folds away under a one-line summary. Nothing here invents data: every line comes from the detail the
 // server already sends; a signal that is not known says so.
 import { el, badge } from "/staticfiles/cve/ui.js";
+import { fmtLong, zoneLabel } from "/staticfiles/cve/prefs.js";
+import { proofOf, templateSegments, textSegments } from "/staticfiles/cve/finding-glance-logic.js";
+import * as RT from "/staticfiles/cve/retest-logic.js";
 
 const CLASS_WORDS = {
   confirmed: "Confirmed",
@@ -27,8 +30,25 @@ export function fold(title, sub, { open = false } = {}) {
 const step = (d, label) =>
   (d.how_found.steps || []).find((s) => s.label === label);
 
+// A value as a sentence: words wrap at spaces, a check name is a code chip, a time is written for people (viewer's zone) with the
+// exact ISO value in the tooltip.
+function richValue(segs) {
+  const box = document.createDocumentFragment();
+  segs.forEach((s) => {
+    if (s.k === "code" || s.k === "when") {
+      // the lead word stays with the thing it introduces, so a line never ends on "Check:" or "Tested"
+      const unit = el("span", "gl-unit");
+      if (s.lead) unit.append(document.createTextNode(s.lead));
+      if (s.k === "code") unit.append(el("code", "gl-code", s.v));
+      else unit.append(el("time", "gl-when", fmtLong(s.iso) || s.iso, { datetime: s.iso, title: `${s.iso} (shown in ${zoneLabel()})` }));
+      box.append(unit);
+    } else box.append(document.createTextNode(s.v));
+  });
+  return box;
+}
+
 // The three states a piece of evidence can be in. "for" supports the finding being real, "against" speaks for a false alarm.
-const signal = (tone, label, value) => {
+const signal = (tone, label, value, segs) => {
   const row = el("li", `sig sig-${tone}`);
   row.append(
     el("i", "sig-mark", tone === "for" ? "✓" : tone === "against" ? "✕" : "•", {
@@ -36,7 +56,7 @@ const signal = (tone, label, value) => {
     }),
   );
   const text = el("span", "sig-text");
-  text.append(el("b", "", label), document.createTextNode(` ${value}`));
+  text.append(el("b", "", label), " ", richValue(segs || textSegments(value)));
   row.append(text);
   const word =
     tone === "for"
@@ -75,9 +95,11 @@ function foundCard(d) {
   const rest = steps.filter((x) => x !== first);
   if (rest.length) {
     const list = el("dl", "gl-facts");
-    rest.forEach((x) =>
-      list.append(el("dt", "", x.label), el("dd", "", x.value)),
-    );
+    rest.forEach((x) => {
+      const dd = el("dd", "gl-val");
+      dd.append(richValue(x.label === "Template check" ? templateSegments(x.value) : textSegments(x.value)));
+      list.append(el("dt", "", x.label), dd);
+    });
     card.append(list);
   }
   return card;
@@ -134,6 +156,7 @@ function confidenceCard(d, row) {
             : "unk",
         "Template",
         tpl.value,
+        templateSegments(tpl.value),
       ),
     );
   const dist = step(d, "Distribution");
@@ -187,6 +210,27 @@ function clamped(text, cls = "") {
   return box;
 }
 
+const CONFIDENCE_WORDS = { high: "High", medium: "Medium", low: "Low" };
+
+// The AI reviewer's newest verdict on this finding (cvENGINE's review, not the triage): what it thinks, how sure, why, and what the
+// server did about it. The sentences come from the server; the model's own note is set as text, never as markup.
+function reviewerBlock(review) {
+  if (!review) return null;
+  const box = el("div", "gl-reviewer");
+  box.append(el("h4", "gl-h2", "AI reviewer"));
+  box.append(el("p", "gl-reviewer-verdict", review.verdict_text || ""));
+  const facts = [
+    `Confidence: ${CONFIDENCE_WORDS[review.confidence] || "not stated"}`,
+    review.reason_code ? `Reason: ${String(review.reason_code).replace(/_/g, " ")}` : null,
+    review.model ? `Model: ${review.model}` : null,
+  ].filter(Boolean);
+  box.append(el("p", "note", facts.join(". ")));
+  box.append(el("p", "", review.outcome_text || ""));
+  if (review.note) box.append(el("p", "gl-reviewer-note", review.note));
+  if (review.scope_text) box.append(el("p", "note", review.scope_text));
+  return box;
+}
+
 function aiCard(d, aiBadge, note) {
   const card = el("section", "gl-card gl-ai");
   card.append(el("h3", "gl-h", "AI assessment"));
@@ -196,6 +240,8 @@ function aiCard(d, aiBadge, note) {
   const verdict = el("div", "gl-verdict");
   verdict.append(aiBadge);
   left.append(verdict);
+  const reviewer = reviewerBlock(d.ai_review);
+  if (reviewer) left.append(reviewer);
   if (d.ai.overridden && d.ai.model_classification) {
     const said = el("p", "gl-override");
     said.append(
@@ -291,8 +337,51 @@ function threatLine(d) {
   return line;
 }
 
+// The proof, first: when a check cvENGINE ran against this host reproduced the finding, say so before anything else and show what the host answered.
+// Everything underneath still folds away; this is the part a person reads to believe it. Nothing is drawn for a finding no check reproduced.
+function proofCard(d) {
+  const proof = proofOf(d.validation);
+  if (!proof) return null;
+  const card = el("section", "gl-card gl-proof");
+  card.append(el("h3", "gl-h", "Proven on this host"));
+  const line = el("p", "gl-proof-line");
+  line.append(`Reproduced by the ${proof.label}`);
+  if (proof.at) line.append(" on ", el("time", "gl-when", fmtLong(proof.at) || proof.at, { datetime: proof.at, title: `${proof.at} (shown in ${zoneLabel()})` }));
+  if (proof.summary) line.append(`: ${proof.summary}`);
+  card.append(line);
+  if (proof.display) card.append(el("p", "note", "Repeat it yourself:"), el("pre", "banner mono", proof.display));
+  proof.exchanges.forEach((e) => {
+    const name = e.kind.replace(/_/g, " ");
+    if (e.request) card.append(el("h4", "gl-h2", `Request (${name})`), el("pre", "banner mono gl-proof-pre", e.request));
+    if (e.response) card.append(el("h4", "gl-h2", "What the host answered"), el("pre", "banner mono gl-proof-pre", e.response));
+    if (e.reply) card.append(el("h4", "gl-h2", "The service replied"), el("pre", "banner mono gl-proof-pre", e.reply));
+  });
+  if (!proof.exchanges.length) card.append(el("p", "note", "No request or response was kept for this check."));
+  return card;
+}
+
+// What a re-check found after the finding was marked fixed, before the proof: a state in plain words, the Sentinel and the time, and why when it
+// could not be told. Drawn only for a finding that was marked fixed (or reopened by a retest); never says verified unless a check ran.
+function retestCard(d) {
+  const r = RT.retestOf(d);
+  if (!r) return null;
+  const card = el("section", `gl-card gl-retest gl-retest-${r.state.replace(/_/g, "-")}`);
+  card.append(el("h3", "gl-h", "Retest after the fix"));
+  card.append(badge(r.label, RT.toneOf(r)));
+  card.append(el("p", "gl-proof-line", RT.cardNote(r)));
+  const list = el("dl", "gl-facts");
+  RT.cardFacts(r).forEach(([label, value]) => {
+    const dd = el("dd", "gl-val");
+    if (label === "Checked") dd.append(el("time", "gl-when", fmtLong(value) || value, { datetime: value, title: `${value} (shown in ${zoneLabel()})` }));
+    else dd.textContent = value;
+    list.append(el("dt", "", label), dd);
+  });
+  if (list.children.length) card.append(list);
+  return card;
+}
+
 export function glance(d, { row, aiBadge, note }) {
   const grid = el("div", "gl-grid");
   grid.append(foundCard(d), confidenceCard(d, row), aiCard(d, aiBadge, note));
-  return [grid, threatLine(d)].filter(Boolean);
+  return [retestCard(d), proofCard(d), grid, threatLine(d)].filter(Boolean);
 }

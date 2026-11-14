@@ -12,7 +12,6 @@ from tests.test_internal_scan import NMAP_RESULT, TLS_ITEMS, UDP_XML, Base, iter
 from unittest import mock
 
 from cveFeed import internal_scan
-from django.utils import timezone
 
 # the checks the internal scan runs, and the cleartext services check, which the daily hygiene sweep derives from the ports the Sentinel's nmap stored
 # (it sends nothing); every other check does not apply to an internal host

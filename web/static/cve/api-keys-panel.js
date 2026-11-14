@@ -7,6 +7,7 @@ import {
   ask,
   badge,
   button,
+  couldNotRead,
   dialog,
   el,
   field,
@@ -85,13 +86,14 @@ export async function apiKeysPanel(mount) {
 
   // where the key applies: every organization (App Admins see all) and every project
   const scopes = [];
+  let readFailed = null; // the words of a failed read: with nothing to pick from it is "could not be read", not "create one first"
   const [orgs, projects] = await Promise.all([
     api("GET", ORGS)
       .then((d) => d.results || [])
-      .catch(() => []),
+      .catch((err) => { readFailed = err.message || "The server did not answer."; return []; }),
     api("GET", PROJECTS)
       .then((d) => d.results || [])
-      .catch(() => []),
+      .catch((err) => { readFailed = err.message || "The server did not answer."; return []; }),
   ]);
   orgs.forEach((o) =>
     scopes.push({
@@ -129,8 +131,15 @@ export async function apiKeysPanel(mount) {
   bar.append(scopeNote);
   head.append(bar);
   const body = el("div", "ak-body");
-  page.append(body);
+  // a read that failed is said above the list whenever it failed, also when the other read gave rows: the list is then only part of the truth
+  const notice = el("div", "ak-read-failed");
+  if (readFailed) notice.append(couldNotRead("The list of organizations or projects", () => { page.remove(); apiKeysPanel(mount); }, readFailed));
+  page.append(notice, body);
 
+  if (!scopes.length && readFailed) {
+    bar.setAttribute("hidden", "");
+    return;
+  }
   if (!scopes.length) {
     body.append(
       el(
@@ -431,13 +440,8 @@ export async function apiKeysPanel(mount) {
       loadVault(),
     ]).catch((err) => {
       body.textContent = "";
-      body.append(
-        el(
-          "p",
-          "msg err",
-          `Could not load the keys of ${scope.name}: ${err.message}`,
-        ),
-      );
+      body.removeAttribute("aria-busy");
+      body.append(couldNotRead(`The keys of ${scope.name}`, draw, err.message));
       return [null];
     });
     if (mine !== version || !data) return;

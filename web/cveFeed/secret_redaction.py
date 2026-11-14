@@ -1,6 +1,6 @@
 """Mask secrets in text before it reaches an AI provider, and in what the model answers.
 
-Scanners find real credentials on a target (a nuclei token template extracts the key itself, bbot's badsecrets prints the secret it
+Scanners find real credentials on a target (a nuclei token template extracts the key itself, a discovery module's badsecrets prints the secret it
 decoded). The AI provider is a third party, so no raw secret may leave in a prompt. Two layers, both pure (no Django, no I/O):
 
   * ``mask_secret(value, hint)``: the whole value of a finding known to be a secret becomes
@@ -117,7 +117,7 @@ _PLACEHOLDER = re.compile(r'^(?:[*x#.\-_]+|null|none|true|false|undefined|requir
 # A bearer token anywhere in text (not a lowercase word: "Bearer token-based authentication" is prose), and an Authorization header.
 _BEARER = re.compile(r'(\bBearer\s+)(?!(?-i:[a-z-]+)(?![A-Za-z0-9._~+/=-]))([A-Za-z0-9._~+/=-]{16,2048})', re.I)
 _AUTH_HEADER = re.compile(r'(\bAuthorization["\']?\s{0,3}[:=]\s{0,3}["\']?(?:Basic|Token|Digest)\s+)([A-Za-z0-9._~+/=-]{8,2048})', re.I)
-# A bbot finding that prints the secret in brackets: "Secret: [value]" (badsecrets), "Raw result: [value]" and "RawV2 result: [...]" (trufflehog).
+# A discovery finding that prints the secret in brackets: "Secret: [value]" (badsecrets), "Raw result: [value]" and "RawV2 result: [...]" (trufflehog).
 _BBOT_BRACKET = re.compile(r'(\b(?:Secret|Raw ?(?:V2)? result)\s{0,3}:\s{0,3}\[)([^\[\]\n]{1,1024})(\])')
 # ... and the signed cookie, ViewState or token a badsecrets finding cracked ("Product: [<value>]"): a long value with no space is one.
 _BBOT_PRODUCT = re.compile(r'(\bProduct\s{0,3}:\s{0,3}\[)([^\[\]\s]{40,2048})(\])')
@@ -135,10 +135,13 @@ def _sub_shape(kind, prefix):
     return lambda match: _mask(match.group(0), kind, _prefix_of(match.group(0), prefix))
 
 
+_A_MASK = re.compile('^[A-Za-z0-9_.:/+-]{0,40}\u2026[A-Za-z0-9_-]{0,4}$')  # what ``secrets_catalog.mask`` makes of a value: a prefix, an ellipsis, up to four characters
+
+
 def _plausible_value(value, quoted):
     """Whether a value after ``password=`` looks like a secret and not like prose or a placeholder: not already masked, not a placeholder or a
     template variable, and either quoted (a config or JSON value) or holding a digit or a symbol."""
-    if value.startswith(('\u2026', '$', '{', '%', '@')) or '[redacted' in value or _PLACEHOLDER.match(value):
+    if value.startswith(('\u2026', '$', '{', '%', '@')) or '[redacted' in value or _A_MASK.match(value) or _PLACEHOLDER.match(value):
         return False
     return quoted or bool(re.search(r'[0-9!#$%^*_+=/~]', value))
 
@@ -180,7 +183,7 @@ def classify(value):
 
 
 def mask_secret(value, hint=''):
-    """The mask of ``value``, a value known to be a secret (the extracted result of a token template, a bbot secret): the public prefix of
+    """The mask of ``value``, a value known to be a secret (the extracted result of a token template, a discovery secret): the public prefix of
     its format when it has one, its length, its kind and a keyed fingerprint. Empty stays empty."""
     text = str(value if value is not None else '').strip()
     if not text:

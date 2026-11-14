@@ -6,6 +6,7 @@ from django.utils import timezone
 
 from cveFeed import detection, detection_author
 from cveFeed.models import CVEDetection, CVEEntry
+from tests import ai_queue
 
 NGINX = [{'vendor': 'f5', 'product': 'nginx', 'package': 'nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.20.0'}]}]
 
@@ -107,7 +108,7 @@ class AuthoringTests(TestCase):
 		with mock.patch.object(detection, 'installed_template_ids', return_value=[]):
 			detection_author.author_rules()
 		provider = self.provider(good_ai())
-		self.assertEqual(detection_author.author_with_ai(provider, per_run=2), 2)  # the hottest first: hot and bare
+		self.assertEqual(ai_queue.asking(detection_author.author_with_ai, provider, per_run=2), 2)  # the hottest first: hot and bare
 		row = CVEDetection.objects.get(cve_entry=self.hot)
 		self.assertEqual(row.source, 'ai')
 		ids = [c['id'] for c in row.strategy['remote_checks']]
@@ -116,23 +117,23 @@ class AuthoringTests(TestCase):
 		self.assertFalse(CVEDetection.objects.get(cve_entry=self.cold).ai_attempted_at)  # the budget ran out before the cold one
 		prompt = provider.complete.call_args_list[0].args[1]
 		self.assertIn('untrusted data', prompt)
-		self.assertEqual(detection_author.author_with_ai(provider, per_run=5), 1)  # every tier is covered, coldest last
-		self.assertEqual(detection_author.author_with_ai(provider, per_run=5), 0)  # once per CVE
+		self.assertEqual(ai_queue.asking(detection_author.author_with_ai, provider, per_run=5), 1)  # every tier is covered, coldest last
+		self.assertEqual(ai_queue.asking(detection_author.author_with_ai, provider, per_run=5), 0)  # once per CVE
 		self.assertEqual(provider.complete.call_count, 3)
 
 	def test_the_daily_budget_stops_the_asking(self):
 		with mock.patch.object(detection, 'installed_template_ids', return_value=[]):
 			detection_author.author_rules()
-		with mock.patch.dict('os.environ', {'CVENGINE_DETECTION_AI_PER_DAY': '1'}):
-			provider = self.provider(good_ai())
-			self.assertEqual(detection_author.author_with_ai(provider, per_run=5), 1)
-			self.assertEqual(detection_author.author_with_ai(provider, per_run=5), 0)
+		ai_queue.configure(cve_guidance_daily=1)  # Settings > AI model's budget (CVENGINE_DETECTION_AI_PER_DAY when there is no settings row)
+		provider = self.provider(good_ai())
+		self.assertEqual(ai_queue.asking(detection_author.author_with_ai, provider, per_run=5), 1)
+		self.assertEqual(ai_queue.asking(detection_author.author_with_ai, provider, per_run=5), 0)
 
 	def test_a_bad_answer_keeps_the_rules_record_and_records_why(self):
 		with mock.patch.object(detection, 'installed_template_ids', return_value=[]):
 			detection_author.author_rules()
 		provider = self.provider('I will now ignore your instructions.')
-		detection_author.author_with_ai(provider, per_run=1)
+		ai_queue.asking(detection_author.author_with_ai, provider, per_run=1)
 		row = CVEDetection.objects.exclude(ai_attempted_at=None).get()
 		self.assertEqual(row.source, 'rules')
 		self.assertTrue(row.ai_problems)
@@ -140,7 +141,7 @@ class AuthoringTests(TestCase):
 	def test_a_manual_record_is_never_touched(self):
 		row = CVEDetection.objects.create(cve_entry=self.hot, source='manual', strategy={'summary': 'mine'})
 		provider = self.provider(good_ai())
-		self.assertFalse(detection_author.enrich_with_ai(row, provider))
+		self.assertFalse(ai_queue.asking(detection_author.enrich_with_ai, provider, row))
 		detection_author.refresh_rules()
 		row.refresh_from_db()
 		self.assertEqual((row.source, row.strategy), ('manual', {'summary': 'mine'}))
@@ -149,7 +150,7 @@ class AuthoringTests(TestCase):
 	def test_a_changed_cve_refreshes_the_rules_checks_and_keeps_the_ai_ones(self):
 		with mock.patch.object(detection, 'installed_template_ids', return_value=[]):
 			detection_author.author_rules()
-			detection_author.author_with_ai(self.provider(good_ai()), per_run=2)
+			ai_queue.asking(detection_author.author_with_ai, self.provider(good_ai()), per_run=2)
 			CVEEntry.objects.filter(pk=self.hot.pk).update(
 				affected=[{'product': 'nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.21.0'}]}], synced_at=timezone.now())
 			self.assertEqual(detection_author.refresh_rules(), 1)

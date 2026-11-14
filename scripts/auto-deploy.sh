@@ -12,6 +12,7 @@
 #   CVENGINE_AUTO_DEPLOY_BACKUPS        Database backups to keep (default 7; 0 skips the backup)
 #   CVENGINE_AUTO_DEPLOY_RETRY_SECONDS  Wait before retrying a commit that failed (default 3600)
 #   CVENGINE_AUTO_DEPLOY_DRAIN_SECONDS  Longest wait for active tasks during the update (default 1800)
+#   CVENGINE_SCANNER_UPDATE_HOURS       How often the built-in scanner image is brought to the newest published one (default 24; 0 never)
 set -Euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -43,6 +44,18 @@ chmod 700 "$state" "$state/backups"
 if [[ -f scripts/renew-certs.sh ]]; then scripts/renew-certs.sh --if-due >>"$state/cert.log" 2>&1 || log "The certificate check failed; see $state/cert.log"; fi
 exec 8>"$state/lock"
 flock -n 8 || { log "Another auto-deploy run is still working."; exit 0; }
+
+# The built-in scanner follows the newest published Sentinel image whatever the update mode (scripts/scanner-update.sh: it pulls, starts the new
+# container only when it is a new image, keeps it only once it is healthy and checked in, and puts the previous one back otherwise). It runs at most
+# every CVENGINE_SCANNER_UPDATE_HOURS (default 24; 0 turns the schedule off) and never when CVENGINE_SCANNER_IMAGE holds the scanner at a version.
+scanner_hours=$(setting CVENGINE_SCANNER_UPDATE_HOURS 24)
+if [[ -f scripts/scanner-update.sh ]] && (( scanner_hours > 0 )); then
+    scanner_last=$(cat "$state/scanner-update.last" 2>/dev/null) || scanner_last=0
+    [[ $scanner_last =~ ^[0-9]+$ ]] || scanner_last=0
+    if (( $(date +%s) - scanner_last >= scanner_hours * 3600 )); then
+        scripts/scanner-update.sh >>"$state/scanner-update.log" 2>&1 || log "The scanner update failed; see $state/scanner-update.log"
+    fi
+fi
 
 # Nothing here changes the code of an install unless its administrator chose Automatic in Settings > Updates (web/.update-mode). The default,
 # and anything unreadable, is Manual: the timer stays installed and does nothing.

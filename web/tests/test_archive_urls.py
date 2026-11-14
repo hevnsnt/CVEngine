@@ -64,6 +64,10 @@ class ArchiveLookupTests(TestCase):
 		ProjectMembership.objects.create(user=user, project=cls.project, role='user')
 		_, cls.token = create_token(user, 'arc')
 
+	def setUp(self):
+		from django.core.cache import cache
+		cache.delete_many([archive_urls.BREAKER_KEY, archive_urls.FAILS_KEY, archive_urls.TARGET_KEY + 'acme.example'])
+
 	def run_lookup(self, urls=('https://www.acme.example/index.php', 'https://www.acme.example/wp-login.php'), **kwargs):
 		return archive_urls.run_for_domain(self.domain.id, get=lambda *a, **k: FakeResponse(urls), **kwargs)
 
@@ -86,6 +90,38 @@ class ArchiveLookupTests(TestCase):
 		self.assertIn('error', out)
 		self.assertFalse(HostArchive.objects.exists())
 		self.assertFalse(ServiceRun.objects.filter(service='archive-urls').exists())  # so the next run tries again
+
+	def test_a_target_whose_lookup_failed_is_left_alone_for_hours_and_not_forced_ones(self):
+		calls = []
+
+		def broken(*a, **k):
+			calls.append(1)
+			raise OSError('archive.org refused')
+		archive_urls.run_for_domain(self.domain.id, get=broken)
+		out = archive_urls.run_for_domain(self.domain.id, get=broken)
+		self.assertEqual(out, {'skipped': 'the last lookup failed; trying again later'})
+		self.assertEqual(len(calls), 1)
+		self.assertIn('stored', self.run_lookup(force=True))  # asking for it by hand still works, and a success clears the back-off
+		self.assertIn('skipped', self.run_lookup())  # checked recently now
+
+	def test_three_failures_in_a_row_pause_every_target_and_a_success_resets_the_count(self):
+		from django.core.cache import cache
+		calls = []
+
+		def broken(*a, **k):
+			calls.append(1)
+			raise OSError('archive.org refused')
+		for n in range(archive_urls.FAILURES_TO_OPEN):
+			cache.delete(archive_urls.TARGET_KEY + 'acme.example')  # different targets in real life
+			archive_urls.run_for_domain(self.domain.id, get=broken)
+		self.assertEqual(len(calls), archive_urls.FAILURES_TO_OPEN)
+		cache.delete(archive_urls.TARGET_KEY + 'acme.example')
+		out = archive_urls.run_for_domain(self.domain.id, get=broken)
+		self.assertEqual(out, {'skipped': 'the archive is not answering; trying again later'})
+		self.assertEqual(len(calls), archive_urls.FAILURES_TO_OPEN)  # no further request was made
+		cache.delete(archive_urls.BREAKER_KEY)
+		self.assertIn('stored', self.run_lookup())
+		self.assertIsNone(cache.get(archive_urls.FAILS_KEY))
 
 	def test_can_be_switched_off(self):
 		with mock.patch.dict('os.environ', {'CVENGINE_ARCHIVE_LOOKUP': '0'}):

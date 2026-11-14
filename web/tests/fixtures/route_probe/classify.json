@@ -1,0 +1,471 @@
+{
+ "note": "classify() cases both sides are held to: cveFeed.route_auth.classify (cvENGINE) and cvengine_scanner.probes.routes.classify (the Sentinel). Keep the two copies byte-identical.",
+ "cases": [
+  {
+   "name": "401 basic",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 401,
+    "location": "",
+    "www_authenticate": "Basic realm=\"x\"",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "session_required",
+    "provider": "",
+    "redirect_to": "",
+    "markers": [
+     "401"
+    ]
+   }
+  },
+  {
+   "name": "401 negotiate",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 401,
+    "location": "",
+    "www_authenticate": "Negotiate",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "sso",
+    "provider": "Windows integrated",
+    "redirect_to": "",
+    "markers": []
+   }
+  },
+  {
+   "name": "401 ntlm",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 401,
+    "location": "",
+    "www_authenticate": "NTLM abc",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "sso",
+    "provider": "Windows integrated",
+    "redirect_to": "",
+    "markers": []
+   }
+  },
+  {
+   "name": "403",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 403,
+    "location": "",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "session_required",
+    "provider": "",
+    "redirect_to": "",
+    "markers": [
+     "forbidden"
+    ]
+   }
+  },
+  {
+   "name": "redirect to Entra",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 302,
+    "location": "https://login.microsoftonline.com/common/oauth2/authorize?x=1",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "sso",
+    "provider": "Entra ID",
+    "redirect_to": "https://login.microsoftonline.com/common/oauth2/authorize?x=1",
+    "markers": [
+     "redirect"
+    ]
+   }
+  },
+  {
+   "name": "redirect to login",
+   "probe": {
+    "url": "https://www.example.test/admin",
+    "status": 302,
+    "location": "/login?next=/admin",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "session_required",
+    "provider": "",
+    "redirect_to": "/login?next=/admin",
+    "markers": [
+     "redirect"
+    ]
+   }
+  },
+  {
+   "name": "plain redirect",
+   "probe": {
+    "url": "http://www.example.test/",
+    "status": 301,
+    "location": "https://www.example.test/",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "redirect",
+    "provider": "",
+    "redirect_to": "https://www.example.test/",
+    "markers": [
+     "redirect"
+    ]
+   }
+  },
+  {
+   "name": "redirect without location",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 302,
+    "location": "",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "redirect",
+    "provider": "",
+    "redirect_to": "",
+    "markers": []
+   }
+  },
+  {
+   "name": "redirect to Okta",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 302,
+    "location": "https://acme.okta.com/app/x",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "sso",
+    "provider": "Okta",
+    "redirect_to": "https://acme.okta.com/app/x",
+    "markers": [
+     "redirect"
+    ]
+   }
+  },
+  {
+   "name": "redirect to ADFS path",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 302,
+    "location": "https://app.example.com/adfs/ls/?wa=wsignin1.0",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "sso",
+    "provider": "",
+    "redirect_to": "https://app.example.com/adfs/ls/?wa=wsignin1.0",
+    "markers": [
+     "redirect"
+    ]
+   }
+  },
+  {
+   "name": "redirect to GitHub oauth",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 302,
+    "location": "https://github.com/login/oauth/authorize",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "sso",
+    "provider": "GitHub",
+    "redirect_to": "https://github.com/login/oauth/authorize",
+    "markers": [
+     "redirect"
+    ]
+   }
+  },
+  {
+   "name": "redirect to GitHub elsewhere",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 302,
+    "location": "https://github.com/somewhere",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "redirect",
+    "provider": "",
+    "redirect_to": "https://github.com/somewhere",
+    "markers": [
+     "redirect"
+    ]
+   }
+  },
+  {
+   "name": "password input",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 200,
+    "location": "",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "<form><input type=\"password\" name=\"p\"></form>",
+    "title": ""
+   },
+   "expect": {
+    "state": "login",
+    "provider": "",
+    "redirect_to": "",
+    "markers": [
+     "password_input"
+    ]
+   }
+  },
+  {
+   "name": "login title",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 200,
+    "location": "",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": "Sign in to Acme"
+   },
+   "expect": {
+    "state": "login",
+    "provider": "",
+    "redirect_to": "",
+    "markers": [
+     "login_title"
+    ]
+   }
+  },
+  {
+   "name": "okta widget",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 200,
+    "location": "",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "<div id=\"okta-sign-in\"></div><input type=password>",
+    "title": ""
+   },
+   "expect": {
+    "state": "sso",
+    "provider": "Okta",
+    "redirect_to": "",
+    "markers": [
+     "password_input",
+     "sso_marker"
+    ]
+   }
+  },
+  {
+   "name": "open page",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 200,
+    "location": "",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "<html><h1>Welcome</h1></html>",
+    "title": "Home"
+   },
+   "expect": {
+    "state": "open",
+    "provider": "",
+    "redirect_to": "",
+    "markers": []
+   }
+  },
+  {
+   "name": "405 is open",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 405,
+    "location": "",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "open",
+    "provider": "",
+    "redirect_to": "",
+    "markers": []
+   }
+  },
+  {
+   "name": "meta refresh to login",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 200,
+    "location": "",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "<meta http-equiv=\"refresh\" content=\"0; url=/login\">",
+    "title": ""
+   },
+   "expect": {
+    "state": "session_required",
+    "provider": "",
+    "redirect_to": "/login",
+    "markers": [
+     "meta_refresh"
+    ]
+   }
+  },
+  {
+   "name": "meta refresh elsewhere",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 200,
+    "location": "",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "<meta http-equiv=\"refresh\" content=\"0; url=/home\">",
+    "title": ""
+   },
+   "expect": {
+    "state": "open",
+    "provider": "",
+    "redirect_to": "",
+    "markers": [
+     "meta_refresh"
+    ]
+   }
+  },
+  {
+   "name": "404",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 404,
+    "location": "",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "not_found",
+    "provider": "",
+    "redirect_to": "",
+    "markers": []
+   }
+  },
+  {
+   "name": "410",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 410,
+    "location": "",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "not_found",
+    "provider": "",
+    "redirect_to": "",
+    "markers": []
+   }
+  },
+  {
+   "name": "503",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 503,
+    "location": "",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "error",
+    "provider": "",
+    "redirect_to": "",
+    "markers": []
+   }
+  },
+  {
+   "name": "0 is an error",
+   "probe": {
+    "url": "https://www.example.test/",
+    "status": 0,
+    "location": "",
+    "www_authenticate": "",
+    "cookies": [],
+    "content_type": "text/html",
+    "body": "",
+    "title": ""
+   },
+   "expect": {
+    "state": "error",
+    "provider": "",
+    "redirect_to": "",
+    "markers": []
+   }
+  }
+ ]
+}

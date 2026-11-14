@@ -12,6 +12,7 @@ from dashboard.models import AIProviderSettings, Org, Project
 from scanEngine.models import EngineType, Notification
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain
 from targetApp.models import Domain
+from tests import ai_queue
 
 SENDERS = ('send_discord_message', 'send_slack_message', 'send_lark_message', 'send_telegram_message')
 NGINX = [{'product': 'nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.20.0'}]}]
@@ -88,14 +89,14 @@ class FeedAnnouncementTests(TestCase):
 
 	def test_a_match_the_ai_calls_a_false_positive_stays_open_but_is_not_announced(self):
 		# the version is in range, so the AI cannot close the match on its own; it does keep it from paging anyone
-		AIProviderSettings.objects.create(auto_fire=True, enabled=True)
+		AIProviderSettings.objects.create(auto_fire=True, enabled=True, api_key='sk-ant-test-key')
 		cve = self.cve()
 		provider = mock.Mock(model='m')
-		provider.name = 'test'
+		provider.name = 'anthropic'
 		provider.complete.return_value = '{"classification": "likely_false_positive", "reason": "banner says patched"}'
-		with mock.patch('reNgine.ai_settings.get_configured_provider', return_value=provider), \
-				mock.patch('cveFeed.tasks.template_test_for_cve.delay'):
+		with mock.patch('cveFeed.tasks.template_test_for_cve.delay'):
 			out = auto_fire_new_cves([cve.pk])
+			ai_queue.serve(provider)  # the AI reviewer container answers the triage auto-fire queued
 		self.assertEqual(out, {'fired': 1})  # still tested: a template hit is evidence, and is announced on its own
 		self.assertEqual(CVEMatch.objects.get().ai_verdict, 'uncertain')
 		self.assertEqual(self.slack(), [])
@@ -184,14 +185,14 @@ class KevFeedAnnouncementTests(FeedAnnouncementTests):
 	def test_a_match_the_ai_calls_a_false_positive_stays_open_but_is_not_announced(self):
 		# The AI's call cannot close a match whose version is in range (it is held at needs validation), and since 1.3.5 needs validation holds
 		# the heat at smoke even with runZero's report: it stays open, is still tested, and is not announced until a check confirms it.
-		AIProviderSettings.objects.create(auto_fire=True, enabled=True)
+		AIProviderSettings.objects.create(auto_fire=True, enabled=True, api_key='sk-ant-test-key')
 		cve = self.cve()
 		provider = mock.Mock(model='m')
-		provider.name = 'test'
+		provider.name = 'anthropic'
 		provider.complete.return_value = '{"classification": "likely_false_positive", "reason": "banner says patched"}'
-		with mock.patch('reNgine.ai_settings.get_configured_provider', return_value=provider), \
-				mock.patch('cveFeed.tasks.template_test_for_cve.delay'):
+		with mock.patch('cveFeed.tasks.template_test_for_cve.delay'):
 			out = auto_fire_new_cves([cve.pk])
+			ai_queue.serve(provider)  # the AI reviewer container answers the triage auto-fire queued
 		self.assertEqual(out, {'fired': 1})
 		self.assertEqual(CVEMatch.objects.get().ai_verdict, 'uncertain')
 		self.assertEqual(self.slack(), [])

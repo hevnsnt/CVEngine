@@ -1,4 +1,4 @@
-"""Richer metadata from the database NSE scripts in cveFeed.nmap_scan.NSE_SCRIPTS: each one's pre-authentication
+"""Richer metadata from the database NSE scripts in cvengine_scanner.flags.NSE_SCRIPTS: each one's pre-authentication
 greeting, parsed into ``Port.extra['db']`` and used to fill ``Port.version``/``Port.product`` when nmap's own
 ``-sV`` probe came back empty. This is metadata only, same as cveFeed.service_intel's RDP and SMB facts: whether
 a database is reachable with NO authentication at all is a separate question, answered by cveFeed.db_exposure's

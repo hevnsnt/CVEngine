@@ -1,13 +1,13 @@
 """Check coverage: which of the checks that apply to a host have run, and which are due.
 
-There are many checks now (port discovery, nuclei passes, WPScan, the TLS audit, the slow web sweeps, ...) and no single place said what had
+There are many checks now (port discovery, nuclei passes, the WordPress scan, the TLS audit, the slow web sweeps, ...) and no single place said what had
 run on a host. This module is that place. It is internal accounting: it reads what the checks already recorded and never runs, queues or
 changes anything.
 
 One registry (``CHECKS``) lists each check once: its id and label, the facts that make it apply to a host (open ports and services,
 technologies, whether the host is web, whether its project is bug bounty blocked, whether the feature switch is on), where its last run
 is recorded, and how long that run stays fresh. Only checks that apply are counted: a host with no TLS port is not counted against the TLS
-audit, a host that does not show WordPress is not counted against WPScan, a UDP sweep counts only the addresses it would scan.
+audit, a host that does not show WordPress is not counted against the WordPress scan, a UDP sweep counts only the addresses it would scan.
 
 States, per check and host:
 
@@ -16,7 +16,8 @@ States, per check and host:
   ``CVENGINE_TTL_<KIND>`` override; a check that has no ledger kind is judged by its scan stage, ``STAGE_TTL_HOURS``).
 * ``due``: it applies and never ran, ran longer ago than its window, or its last attempt failed.
 
-``coverage`` returns ``{done, applicable, paused, internal, checks: [{id, label, state, last_run, ttl_hours, detail}]}`` (``internal`` is the declared
+``coverage`` returns ``{done, applicable, paused, internal, checks: [{id, label, state, last_run, ttl_hours, detail}], no_check: [{port, target, state, last_run, detail}]}``
+(``no_check`` names each open port a nuclei service run found no check for, "Port 9200: no check exists for this service": neither a pass nor a gap, never counted in ``done`` or ``applicable``) (``internal`` is the declared
 network of a host inside one, else null: such a host is judged by what the internal scan runs, see "hosts inside a declared internal network"); the single-host view also
 carries ``units`` (the addresses, ports or CVEs a check is judged on). ``done`` of ``applicable`` is the "NN of NNN applicable checks done"
 the host page shows.
@@ -241,20 +242,51 @@ def _chunks(items, size=CHUNK):
 def _tls_numbers(h, starttls=False):
     """The TCP ports of the host the TLS checks would test: the sweep's own rule (an implicit TLS port, a service that says ssl or https, and
     for the audit the STARTTLS mail and directory ports). A host with no port data is counted for 443 only when its own URL is https."""
-    from cveFeed import testssl_scan
+    from cveFeed import tls_audit
     numbers = set()
     for entry in h.addresses.values():
         for port in entry.ports:
             if port.protocol not in TCP:
                 continue
             name = (port.service_name or '').lower()
-            if port.number in testssl_scan.IMPLICIT_PORTS or 'ssl' in name or name.startswith('https'):
+            if port.number in tls_audit.IMPLICIT_PORTS or 'ssl' in name or name.startswith('https'):
                 numbers.add(port.number)
-            elif starttls and port.number in testssl_scan.STARTTLS_PORTS:
+            elif starttls and port.number in tls_audit.STARTTLS_PORTS:
                 numbers.add(port.number)
     if not numbers and not any(e.ports for e in h.addresses.values()) and h.http_url.startswith('https'):
         numbers.add(443)
     return sorted(numbers)[:MAX_UNITS]
+
+
+def _tcp_ports(h):
+    """``[(number, Addr)]``: each open TCP port of the host once (the first address that has it), at most ``MAX_UNITS * 4``."""
+    seen = {}
+    for entry in h.addresses.values():
+        for p in entry.ports:
+            if p.protocol in TCP and getattr(p, 'state', 'open') == 'open' and p.number not in seen:
+                seen[p.number] = entry
+    return sorted(seen.items())[:MAX_UNITS * 4]
+
+
+NO_CHECK_REASON = 'no check exists for this service'
+
+
+def no_check_ports(h, ev):
+    """``[{'port', 'target', 'state': 'no_check', 'last_run', 'detail'}]``: the ports of the host a nuclei service run answered "no check exists for this service"
+    for (``ledger.nocheck_service``), inside that kind's window and under the allowlist now in use. Not a pass and not a gap: never counted in ``done`` or
+    ``applicable``."""
+    from cveFeed import ledger
+    release, out = ledger.allowlist_release(), []
+    for number, entry in _tcp_ports(h):
+        best = None
+        for asset in (f'{h.name}:{number}', f'{_norm(entry.address)}:{number}'):
+            for service, status, when in ev.ledger.get(('nuclei-nocheck', h.project_id, _norm(asset)), ()):
+                if (status == 'done' and when and service.split(':')[1:2] == [release] and (ev.now - when).total_seconds() <= ledger.ttl(service)
+                        and (best is None or when > best[1])):
+                    best = (asset, when)
+        if best:
+            out.append({'port': number, 'target': best[0], 'state': 'no_check', 'last_run': best[1].isoformat(), 'detail': f'Port {number}: {NO_CHECK_REASON}'})
+    return out
 
 
 def _rdp_ports(h):
@@ -313,7 +345,11 @@ def load(entries, now=None):
             assets.update((_norm(entry.address), _norm(_udp_asset(entry))))
         for number in _tls_numbers(h, starttls=True):
             assets.add(f'{h.name}:{number}')
+        for number, _entry in _tcp_ports(h):  # the ports a nuclei service run may have answered "no check exists for this service" for
+            assets.update((f'{h.name}:{number}', f"{_norm(_entry.address)}:{number}"))
         for address, number in _rdp_ports(h):
+            assets.add(f'{address}:{number}')
+        for address, number in _ssh_ports(h):  # the ledger rows of the SSH inspection are per endpoint: without them an inspected endpoint read as never run
             assets.add(f'{address}:{number}')
         heads.update(_norm(a.address) for a in _web_addresses(h))
     if not pids:
@@ -448,8 +484,8 @@ def plan_nmap(h, ev):
 
 
 def plan_naabu(h, ev):
-    from cveFeed import naabu_scan
-    if not naabu_scan.enabled():
+    from cveFeed import port_stage
+    if not port_stage.enabled():
         return 'naabu is switched off (CVENGINE_NAABU=0)'
     return _by_address(h, ev, ('naabu',))
 
@@ -487,6 +523,21 @@ def plan_rdp(h, ev):
     if not ports:
         return 'no RDP service that accepts a connection without Network Level Authentication'
     return [Unit(f'{address}:{number}', ev.ledger_runs(('rdp-shot',), h.project_id, f'{address}:{number}')) for address, number in ports]
+
+
+def _ssh_ports(h):
+    from cveFeed import ssh_scan
+    return sorted({(a.address, p.number) for a in h.scannable() for p in a.ports if ssh_scan.is_ssh_port(p)})[:MAX_UNITS]
+
+
+def plan_ssh(h, ev):
+    from cveFeed import ssh_scan
+    if not ssh_scan.enabled():
+        return 'the SSH inspection is switched off (CVENGINE_SSH_PROBE=0)'
+    ports = _ssh_ports(h)
+    if not ports:
+        return 'no open SSH service'
+    return [Unit(f'{address}:{number}', ev.ledger_runs(('ssh-probe', 'ssh-probe-failed'), h.project_id, f'{address}:{number}')) for address, number in ports]
 
 
 def plan_db_exposure(h, ev):
@@ -530,8 +581,8 @@ def plan_nuclei_cve(h, ev):
 
 
 def plan_waf(h, ev):
-    from cveFeed import waf_scan
-    if not waf_scan.enabled():
+    from cveFeed import waf_fingerprint
+    if not waf_fingerprint.enabled():
         return 'the WAF fingerprint is switched off (CVENGINE_WAFW00F=0)'
     if not h.http_up:
         return 'the host did not answer over HTTP'
@@ -547,6 +598,12 @@ def plan_routes(h, ev):
         return reason
     when = ev.routes.get((h.project_id, h.name))
     return [Unit(h.name, [Run(when, ledger.ttl('route-auth'), True)] if when else [])]
+
+
+def plan_secrets(h, ev):
+    if not h.web:
+        return 'no web service'
+    return _targetable(h) or _one(h, ev, ('secrets-scan',))
 
 
 def plan_probes(h, ev):
@@ -575,7 +632,7 @@ def plan_wpscan(h, ev):
         return 'no sign of WordPress'
     if state['state'] == 'not_wordpress':
         return 'the WordPress probe found no WordPress'
-    return _one(h, ev, ('wpscan', 'wpscan-partial'))
+    return _one(h, ev, ('wpscan', 'wpscan-partial', 'wpscan-redirected', 'wpscan-not-scannable'))
 
 
 def plan_wpscan_thorough(h, ev):
@@ -585,7 +642,7 @@ def plan_wpscan_thorough(h, ev):
     if state is None or state['state'] == 'not_wordpress':
         return 'no sign of WordPress'
     if state['state'] != 'scanned':
-        return 'it follows the quick WPScan pass, which has not scanned this site yet'
+        return 'it follows the quick WordPress scan, which has not scanned this site yet'
     return _one(h, ev, ('wpscan-thorough', 'wpscan-thorough-partial'))
 
 
@@ -787,8 +844,8 @@ def plan_internal_wpscan(h, ev):
     if state is None and not any(t.lower().startswith('wordpress') for t in h.techs):
         return 'no sign of WordPress'
     if state is not None and state['state'] == 'not_wordpress':
-        return 'WPScan found no WordPress'
-    return _one(h, ev, ('wpscan', 'wpscan-partial'))
+        return 'the WordPress scan found no WordPress'
+    return _one(h, ev, ('wpscan', 'wpscan-partial', 'wpscan-redirected', 'wpscan-not-scannable'))
 
 
 # check id -> the rule for an internal host; every other check does not apply to one (``INTERNAL_REASON``)
@@ -816,21 +873,23 @@ CHECKS = (
     Check('full-ports', 'All 65,535 TCP ports (background sweep)', plan_full_ports, kinds=('nmap-full',)),
     Check('udp', 'UDP exposure sweep', plan_udp, kinds=('udp-scan', 'udp-scan-failed'), sweeps=('udp-kick',)),
     Check('rdp-screenshot', 'RDP login screen capture', plan_rdp, kinds=('rdp-shot',), stages=('rdp_screenshot',)),
+    Check('ssh-inspection', 'SSH inspection (host key and banner, on a Sentinel)', plan_ssh, kinds=('ssh-probe', 'ssh-probe-failed'), stages=('ssh_probe',), ttl_kind='ssh-probe'),
     Check('db-exposure', 'Unauthenticated database check', plan_db_exposure, stages=('db_exposure_scan',)),
     Check('nuclei-tech', 'Nuclei technology pass', plan_nuclei_tech, kinds=('nuclei-light',), stages=('nuclei_light_scan',)),
-    Check('nuclei', 'Nuclei template scan', plan_nuclei, kinds=('nuclei',), stages=('nuclei_targeted_scan',)),
+    Check('nuclei', 'Nuclei template scan', plan_nuclei, kinds=('nuclei', 'nuclei-nocheck'), stages=('nuclei_targeted_scan',)),
     Check('nuclei-deep', 'Weekly deep Nuclei', plan_nuclei_deep, kinds=('nuclei-deep-host', 'nuclei-deep-target')),
     Check('nuclei-cve', 'CVE template tests', plan_nuclei_cve, kinds=('nuclei-cve',)),
-    Check('waf', 'WAF fingerprint (wafw00f)', plan_waf, kinds=('wafw00f',), stages=('wafw00f',)),
+    Check('waf', 'WAF fingerprint', plan_waf, kinds=('wafw00f',), stages=('wafw00f',)),
     Check('web-routes', 'Web route auth check', plan_routes, kinds=('route-auth',), stages=('route_auth_scan',)),
+    Check('secrets-scan', 'Secrets scan (Kingfisher, in a scanner)', plan_secrets, kinds=('secrets-scan',), stages=('secrets_scan',)),
     Check('version-probes', 'Version and identity probes', plan_probes, kinds=('probe',), stages=('version_probes',)),
     Check('wp-detect', 'WordPress detection probe', plan_wp_probe, kinds=('wp-probe',)),
-    Check('wpscan', 'WPScan (quick pass)', plan_wpscan, kinds=('wpscan', 'wpscan-partial'), stages=('wpscan',)),
-    Check('wpscan-thorough', 'WPScan (thorough pass)', plan_wpscan_thorough, kinds=('wpscan-thorough', 'wpscan-thorough-partial')),
+    Check('wpscan', 'WordPress scan (quick pass)', plan_wpscan, kinds=('wpscan', 'wpscan-partial', 'wpscan-redirected', 'wpscan-not-scannable'), stages=('wpscan',)),
+    Check('wpscan-thorough', 'WordPress scan (thorough pass, on a Sentinel)', plan_wpscan_thorough, kinds=('wpscan-thorough', 'wpscan-thorough-partial')),
     Check('node2shell', 'node2shell check (CVE-2026-111497)', plan_node2shell, kinds=('node2shell',), stages=('node2shell',)),
     Check('vhost', 'Other sites on the host\'s addresses', plan_vhost, kinds=('vhost', 'vhost-ip'), sweeps=('vhost',), ttl_kind='vhost'),
     Check('subapps', 'Applications under subdirectories', plan_subapps, kinds=('subapp',), sweeps=('subapp',)),
-    Check('tls-audit', 'TLS configuration audit (testssl.sh)', plan_testssl, kinds=('testssl', 'testssl-failed'), sweeps=('testssl',),
+    Check('tls-audit', 'TLS configuration audit', plan_testssl, kinds=('testssl', 'testssl-failed'), sweeps=('testssl',),
           ttl_kind='testssl'),
     Check('certificates', 'Certificate and legacy TLS check', plan_certificates, stages=('host_hygiene',), ttl_kind='hygiene'),
     Check('cleartext', 'Cleartext services (Telnet, FTP, rlogin, plain-HTTP login)', plan_cleartext, stages=('host_hygiene',), ttl_kind='hygiene'),
@@ -846,10 +905,12 @@ EXCLUDED = {
     'kinds': {
         'retest': 'a re-test of a changed host runs the checks above again; it is not a check of its own',
         'validate': 'validation of a CVE match is recorded on the match, not on the host',
+        'secrets-validate': 'opt-in validation of found secrets: part of the secrets scan of a host, limited once a week per host',
         'buckets': 'cloud storage candidates belong to the project (found in page content and DNS), not to one host',
         'buckets-failed': 'the retry window of the cloud storage sweep',
         'supplier': 'a third-party supplier host card; suppliers are not owned hosts and are deliberately kept out of this registry',
         'supplier-failed': 'the retry window of the supplier sweep',
+        'udp-scan-noipv6': 'an IPv6 address a Sentinel had no route to, not scanned for a day (it is not a scan, so the udp check still calls the address due)',
     },
     'sweeps': {
         'buckets': 'cloud storage candidates belong to the project, not to one host',
@@ -859,17 +920,15 @@ EXCLUDED = {
         'triage': 'AI review of findings, not a check of a host',
         'validate': 'validation of CVE matches, recorded on the match',
         'rescore': 'recomputes host scores from stored data',
-        'udp-unavailable-note': 'a once-a-day rate limit for a note in the activity feed',
         'suppliers': 'third-party supplier host cards; suppliers are not owned hosts and are deliberately kept out of this registry',
         'screenshot-backfill': 'queues web screenshots for hosts that have none (cveFeed.web_shot); a picture is evidence for a person, not a check, and its own state (outcome and reason per page) is on the host page and in get_system_status',
-        'egress-catch-up': 'the paced pass over ports the egress governor held back (cveFeed.local_egress); it finishes the nmap pass of an address, whose own check (nmap-fast) is already judged',
     },
     'stages': {
         'triage': 'AI review of what the scan produced, not a check of a host',
         'asset_changes': 'the change log of the scan, bookkeeping only',
-        'web_screenshot': 'queues the web screenshots of the scan\'s hosts for the screenshot worker (cveFeed.web_shot); a picture is evidence for a person, not a check of the host, and each page records its own outcome and reason',
+        'web_screenshot': 'queues the web screenshots of the scan\'s hosts for a Sentinel to photograph (cveFeed.web_shot); a picture is evidence for a person, not a check of the host, and each page records its own outcome and reason',
         'internal_testssl': 'the TLS audit step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the testssl ledger kind, which the tls-audit check judges for an internal host',
-        'internal_wpscan': 'the WPScan step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the wpscan ledger kind, which the wpscan check judges for an internal host',
+        'internal_wpscan': 'the WordPress scan step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the wpscan ledger kind, which the wpscan check judges for an internal host',
         'internal_udp_scan': 'the UDP sweep step of the internal scan driver (cveFeed.internal_scan), run by a Sentinel inside the network; it records the udp-scan ledger kind, which the udp check judges for an internal host',
     },
 }
@@ -971,7 +1030,8 @@ def coverage(h, ev, rich=False, paused=''):
                 entry['units'] = [{'unit': u.label, 'state': 'done' if u.fresh(ev.now) else 'due',
                                    'last_run': u.last().isoformat() if u.last() else None} for u in plan]
         rows.append(entry)
-    return {'done': done, 'applicable': applicable, 'paused': paused, 'internal': h.internal or None, 'checks': rows}
+    return {'done': done, 'applicable': applicable, 'paused': paused, 'internal': h.internal or None, 'checks': rows,
+            'no_check': [] if paused else no_check_ports(h, ev)}
 
 
 def for_host(ev, sub, others, project_id, *, excluded=False, shared_platform=False, hot_cves=(), unversioned=0, probe_rows=(), root=None, rich=False):

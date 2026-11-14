@@ -1,0 +1,157 @@
+{
+ "kind": "http_probe",
+ "name": "http_probe",
+ "payload": {
+  "outcome": "done",
+  "probes": [
+   {
+    "id": "web|headers-root|http",
+    "observations": [
+     {
+      "confidence": 0.9,
+      "evidence": {},
+      "kind": "version",
+      "outcome": "found",
+      "port": 0,
+      "product": "nginx",
+      "source": "header:server",
+      "url": "/",
+      "variant": "",
+      "version": "1.31.8"
+     },
+     {
+      "confidence": 0.9,
+      "evidence": {},
+      "kind": "version",
+      "outcome": "found",
+      "port": 0,
+      "product": "WordPress",
+      "source": "meta:generator",
+      "url": "/",
+      "variant": "",
+      "version": "6.4.1"
+     },
+     {
+      "confidence": 0.7,
+      "evidence": {},
+      "kind": "version",
+      "outcome": "hidden",
+      "port": 0,
+      "product": "PHP",
+      "source": "page:.php link",
+      "url": "/",
+      "variant": "",
+      "version": ""
+     }
+    ]
+   },
+   {
+    "id": "web|wordpress-detect|http",
+    "observations": [
+     {
+      "confidence": 0.95,
+      "evidence": {
+       "probed": [
+        {
+         "challenge": "",
+         "path": "/",
+         "status": 200
+        },
+        {
+         "challenge": "",
+         "path": "/wp-login.php",
+         "status": 200
+        },
+        {
+         "challenge": "",
+         "path": "/wp-json/",
+         "status": 403
+        },
+        {
+         "challenge": "",
+         "path": "/readme.html",
+         "status": 200
+        },
+        {
+         "challenge": "",
+         "path": "/wp-content/upgrade/",
+         "status": 404
+        }
+       ],
+       "signals": [
+        "body:wp-content",
+        "meta:generator",
+        "body:login-form",
+        "body:core-asset-ver"
+       ]
+      },
+      "kind": "wordpress",
+      "outcome": "found",
+      "port": 0,
+      "product": "WordPress",
+      "source": "body:wp-content",
+      "url": "/",
+      "variant": "wordpress",
+      "version": "6.4.1"
+     },
+     {
+      "confidence": 0.9,
+      "evidence": {
+       "state": "denied",
+       "status": 404
+      },
+      "kind": "wp-upgrade-dir",
+      "outcome": "absent",
+      "port": 0,
+      "product": "WordPress",
+      "source": "probe:upgrade-dir",
+      "url": "/wp-content/upgrade/",
+      "variant": "denied",
+      "version": ""
+     }
+    ]
+   }
+  ],
+  "refused": [],
+  "touched": [
+   "192.0.2.10"
+  ]
+ },
+ "sentinel_seconds": 0.8,
+ "target": {
+  "probes": [
+   {
+    "allowed": [
+     "192.0.2.10"
+    ],
+    "base": "http://192.0.2.10",
+    "host": "192.0.2.10",
+    "id": "web|headers-root|http",
+    "probe": "headers-root"
+   },
+   {
+    "allowed": [
+     "192.0.2.10"
+    ],
+    "base": "http://192.0.2.10",
+    "host": "192.0.2.10",
+    "id": "web|wordpress-detect|http",
+    "probe": "wordpress-detect"
+   }
+  ],
+  "scope": {
+   "addresses": [
+    "192.0.2.10"
+   ],
+   "blocked": [],
+   "domains": [],
+   "excluded": [],
+   "excluded_trees": [],
+   "hosts": [
+    "192.0.2.10"
+   ],
+   "private": true
+  }
+ },
+ "tool_rows": null
+}

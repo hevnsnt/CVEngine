@@ -1,0 +1,99 @@
+{
+  "seq": 1,
+  "scan_name": "demonic_jimmy",
+  "subdomains": [
+    "api.example.com",
+    "example.com",
+    "www.example.com"
+  ],
+  "ips": [
+    "192.0.2.10",
+    "192.0.2.11"
+  ],
+  "ports": [
+    {
+      "host": "192.0.2.10",
+      "port": 443
+    },
+    {
+      "host": "www.example.com",
+      "port": 443
+    }
+  ],
+  "urls": [
+    {
+      "url": "https://www.example.com/",
+      "status": 200
+    }
+  ],
+  "technologies": [
+    {
+      "host": "www.example.com",
+      "technology": "nginx"
+    }
+  ],
+  "resolutions": [
+    {
+      "name": "api.example.com",
+      "ip": "192.0.2.11"
+    },
+    {
+      "name": "www.example.com",
+      "ip": "192.0.2.10"
+    }
+  ],
+  "edges": [
+    {
+      "parent": "example.com",
+      "child": "www.example.com"
+    }
+  ],
+  "findings": [
+    {
+      "name": "Possible subdomain takeover",
+      "informational": false,
+      "severity": 2,
+      "host": "api.example.com",
+      "url": "https://api.example.com/",
+      "description": "Possible subdomain takeover: api.example.com points to an unclaimed bucket",
+      "module": "baddns"
+    }
+  ],
+  "http": [
+    {
+      "host": "www.example.com",
+      "url": "https://www.example.com/",
+      "port": 443,
+      "status": 200,
+      "title": "Example Domain",
+      "webserver": "nginx",
+      "content_type": "text/html",
+      "location": ""
+    }
+  ],
+  "events": [
+    {
+      "type": "DNS_NAME",
+      "label": "www.example.com",
+      "host": "www.example.com",
+      "parent_host": "example.com",
+      "module": "crt"
+    },
+    {
+      "type": "TECHNOLOGY",
+      "label": "nginx on www.example.com",
+      "host": "www.example.com",
+      "parent_host": "www.example.com",
+      "module": "httpx"
+    }
+  ],
+  "screenshots": [
+    {
+      "host": "www.example.com",
+      "url": "https://www.example.com/",
+      "filename": "https-www.example.com-443.png",
+      "content_type": "image/png",
+      "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4z8DwHwAFAAIBpfbD5AAAAABJRU5ErkJggg=="
+    }
+  ]
+}

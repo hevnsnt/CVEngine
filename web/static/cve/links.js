@@ -35,6 +35,61 @@ export const ipAnchor = (project, address) => a("host-link", address, ipHref(pro
 export const cveAnchor = (project, cveId, matchId, host) =>
   a("host-link cve-link", cveId, cveHref(project, cveId, matchId, host), matchId || host ? "The match on this host" : "Every match of this CVE");
 
+// The live page a route, a finding or a secret was seen on, as an address a person can open. It is a page on the SCANNED host, not on cvENGINE, so the
+// link opens in a new tab with no opener and no referrer, and says so in its title. Only http and https; never a login in the address, never a fragment,
+// never the masked sample of a route (counts and samples are text beside the link, not part of it). Unsafe characters in a path are percent-encoded by the
+// URL parser, so a path cannot add a query, a fragment or another host.
+export const PAGE_LINK_TITLE = "Opens the live page on the scanned host";
+const HOSTNAME = /^(?:[A-Za-z0-9_.-]{1,253}|\[[0-9A-Fa-f:.]{2,45}\])$/;  // flat (no nested repeat); the URL parser judges the rest
+const webUrl = (u) => (u.protocol === "http:" || u.protocol === "https:") && u.hostname ? u : null;
+const bare = (u) => {
+  u.username = "";
+  u.password = "";
+  u.hash = "";
+  return u.href;
+};
+/**
+ * The address of a page: ``url`` when it is a whole http(s) address, else ``scheme`` (https unless said) + ``host`` + ``port`` (left out when it is the
+ * scheme's own) + ``path``. ``null`` when nothing safe can be made of it.
+ */
+export function pageUrl({ url, scheme, host, port, path } = {}) {
+  if (typeof url === "string" && url) {
+    try {
+      const u = webUrl(new URL(url));
+      return u ? bare(u) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+  const proto = String(scheme || "https").toLowerCase();
+  if ((proto !== "http" && proto !== "https") || typeof host !== "string" || !HOSTNAME.test(host)) return null;
+  const n = port == null || port === "" ? null : Number(port);
+  if (n !== null && !(Number.isInteger(n) && n >= 1 && n <= 65535)) return null;
+  try {
+    const u = webUrl(new URL(`${proto}://${host}${n !== null ? `:${n}` : ""}/`));
+    if (!u) return null;
+    const p = typeof path === "string" && path ? path : "/";
+    u.pathname = p.startsWith("/") ? p : `/${p}`;
+    return bare(u);
+  } catch (_) {
+    return null;
+  }
+}
+/** An ``a`` to the page (see ``pageUrl``) with ``text`` as its label, or a plain ``span`` when there is no address to open. */
+export function pageAnchor(parts, text, cls = "host-link mono") {
+  const href = pageUrl(parts);
+  const n = document.createElement(href ? "a" : "span");
+  n.className = cls;
+  n.textContent = text;
+  if (href) {
+    n.setAttribute("href", href);
+    n.setAttribute("target", "_blank");
+    n.setAttribute("rel", "noopener noreferrer");
+    n.title = PAGE_LINK_TITLE;
+  }
+  return n;
+}
+
 // Free text (an activity line, a scan note) names hosts, addresses and CVEs without saying which are which. This finds them.
 const TOKEN = /\b(CVE-\d{4}-\d{4,})\b|\b((?:\d{1,3}\.){3}\d{1,3})\b|\b((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24})\b/gi;
 // not hosts: names of files and of the products CVEngine reads

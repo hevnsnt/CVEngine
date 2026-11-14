@@ -1,6 +1,6 @@
 """How hot a hygiene finding is once what is known about its endpoint is taken into account.
 
-``cveFeed.hygiene`` and ``cveFeed.testssl_scan`` rate a finding from the record or the handshake alone. Some of those ratings are too
+``cveFeed.hygiene`` and ``cveFeed.tls_audit`` rate a finding from the record or the handshake alone. Some of those ratings are too
 hot for where the endpoint is (1.3.5 audit):
 
 * a name the client points at a vendor's platform by CNAME (Zendesk, Squarespace, Railway, Microsoft 365, ...) is served by the
@@ -110,16 +110,16 @@ def stored_cnames(project_id, names):
 
 
 def resolve_cnames(project_id, names, live=False, lookup=None):
-    """Stored CNAMEs first; with ``live`` a name with none stored is looked up once (``hosting.canonical_name``, cached)."""
+    """Stored CNAMEs first; with ``live`` a name with none stored is looked up once (``hosting.canonical_names``, read by a Sentinel, cached)."""
     found = stored_cnames(project_id, names)
     if live:
         from cveFeed import hosting
-        lookup = lookup or hosting.canonical_name
-        for name in names:
-            if name not in found and not re.fullmatch(r'[\d.]+|[0-9a-f:]+', name):
-                canon = lookup(name)
-                if canon:
-                    found[name] = [_clean(canon)]
+        missing = [name for name in names if name not in found and not re.fullmatch(r'[\d.]+|[0-9a-f:]+', name)]
+        read = {} if lookup or not missing else hosting.canonical_names(missing)  # one identity_check read by a Sentinel; no answer is no CNAME here
+        for name in missing:
+            canon = lookup(name) if lookup else read.get(hosting._host(name), '')
+            if canon:
+                found[name] = [_clean(canon)]
     return found
 
 

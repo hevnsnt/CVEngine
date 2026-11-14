@@ -5,7 +5,7 @@ from unittest import mock
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import fingerprint, fullscan, hosting, nmap_scan, route_auth
+from cveFeed import fullscan, hosting, port_stage, route_auth
 from cveFeed.models import RouteAuth
 from dashboard.models import Org, Project
 from scanEngine.models import EngineType
@@ -15,61 +15,6 @@ from targetApp.models import Domain
 
 def names(found):
 	return [f['name'] for f in found]
-
-
-class FingerprintTests(unittest.TestCase):
-	def test_a_netlify_nextjs_site(self):
-		found = fingerprint.from_response(server='Netlify', content_type='text/html', body='<script id="__NEXT_DATA__"></script>')
-		self.assertEqual(names(found), ['Netlify', 'Next.js'])
-		self.assertEqual([f['source'] for f in found], ['header:server', 'page:_next'])
-
-	def test_server_and_powered_by_headers_carry_versions(self):
-		found = fingerprint.from_response(server='nginx/1.25.3 (Ubuntu)', powered_by='PHP/8.2.30')
-		self.assertEqual(names(found), ['nginx:1.25.3', 'PHP:8.2.30'])
-		self.assertEqual(names(fingerprint.from_response(server='Apache/2.4.58 (Ubuntu)')), ['Apache HTTP Server:2.4.58'])
-		self.assertEqual(names(fingerprint.from_response(server='Microsoft-IIS/10.0')), ['Microsoft IIS:10.0'])
-
-	def test_several_powered_by_values(self):
-		self.assertEqual(names(fingerprint.from_response(server='cloudflare', powered_by='Craft CMS, SEOmatic')),
-			['Cloudflare', 'Craft CMS', 'SEOmatic'])
-
-	def test_generator_meta_and_wordpress_paths(self):
-		body = '<meta name="generator" content="WordPress 6.4.2" /><link href="/wp-content/x.css">'
-		self.assertEqual(names(fingerprint.from_response(body=body, content_type='text/html')), ['WordPress:6.4.2'])
-
-	def test_a_php_link_names_php_and_a_header_version_replaces_it(self):
-		body = '<a href="/index.php?x=1">x</a>'
-		self.assertEqual(names(fingerprint.from_response(body=body, content_type='text/html')), ['PHP'])
-		found = fingerprint.from_response(powered_by='PHP/8.2.30', body=body, content_type='text/html')
-		self.assertEqual(names(found), ['PHP:8.2.30'])
-
-	def test_a_page_with_no_php_signs_names_no_php(self):
-		body = '<script src="/_next/static/a.js"></script><img src="https://www.datocms-assets.com/1/a.png">'
-		self.assertNotIn('PHP', ' '.join(names(fingerprint.from_response(server='Netlify', body=body, content_type='text/html'))))
-
-	def test_a_hostile_header_cannot_inject_a_name(self):
-		for value in ('<script>alert(1)</script>/9', 'x' * 80, 'a"b', 'Robert\'); DROP TABLE'):
-			self.assertEqual(names(fingerprint.from_response(powered_by=value)), [], value)
-		found = fingerprint.from_response(server='nginx/1.2<b>', powered_by='')
-		for name in names(found):
-			self.assertNotRegex(name, r'[<>"\']')
-
-	def test_names_are_capped(self):
-		body = ''.join(f'<meta name="x{i}">' for i in range(100)) + '__NEXT_DATA__ /_nuxt/ /wp-content/ Drupal.settings cdn.shopify.com csrfmiddlewaretoken .php'
-		self.assertLessEqual(len(fingerprint.from_response(server='Netlify', powered_by=', '.join(f'P{i}' for i in range(50)), body=body, content_type='text/html')),
-			fingerprint.MAX_FINGERPRINTS)
-
-	def test_a_body_that_is_not_html_is_not_searched(self):
-		self.assertEqual(fingerprint.from_response(body='/wp-content/', content_type='application/json'), [])
-
-	def test_categories(self):
-		self.assertEqual(fingerprint.categorize('PHP:8.2.30'), 'language')
-		self.assertEqual(fingerprint.categorize('nginx:1.25.3'), 'web server')
-		self.assertEqual(fingerprint.categorize('Next.js'), 'framework')
-		self.assertEqual(fingerprint.categorize('google-tag-manager'), 'analytics')
-		self.assertEqual(fingerprint.categorize('datocms'), 'cms')
-		self.assertEqual(fingerprint.categorize('Netlify'), 'hosting')
-		self.assertEqual(fingerprint.categorize('mystery'), '')
 
 
 class ClassifyTests(unittest.TestCase):
@@ -109,30 +54,6 @@ class ClassifyTests(unittest.TestCase):
 	def test_odd_input_does_not_raise(self):
 		self.assertFalse(hosting.classify(name=None, cname=None, webserver=None, reverse_pointers=None)['shared_ip'])
 		self.assertFalse(hosting.classify(name='\u202e\x00', cname='\n')['shared_ip'])
-
-
-class CanonicalNameTests(unittest.TestCase):
-	def setUp(self):
-		hosting._canon.clear()
-		self.addCleanup(hosting._canon.clear)
-
-	def test_the_end_of_the_cname_chain_is_returned_and_cached(self):
-		with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, 'acme-website.netlify.app', ('1.2.3.4', 0))]) as lookup:
-			self.assertEqual(hosting.canonical_name('archive.acme-example.org'), 'acme-website.netlify.app')
-			self.assertEqual(hosting.canonical_name('ARCHIVE.acme-example.org.'), 'acme-website.netlify.app')
-		self.assertEqual(lookup.call_count, 1)
-
-	def test_a_plain_host_and_a_failed_lookup_have_no_canonical_name(self):
-		with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, 'www.example.org', ('1.2.3.4', 0))]):
-			self.assertEqual(hosting.canonical_name('www.example.org'), '')
-		with mock.patch('socket.getaddrinfo', side_effect=OSError('nope')):
-			self.assertEqual(hosting.canonical_name('gone.example.org'), '')
-
-	def test_the_cache_is_bounded(self):
-		with mock.patch('socket.getaddrinfo', return_value=[]), mock.patch.object(hosting, 'CANON_MAX', 5):
-			for i in range(40):
-				hosting.canonical_name(f'h{i}.example.org')
-		self.assertLessEqual(len(hosting._canon), 5)
 
 
 class Fixture(TestCase):
@@ -184,6 +105,68 @@ class SharedAddressTests(Fixture):
 		self.assertEqual(hosting.shared_by_address([None, '']), {})
 
 
+class CanonicalNameTests(Fixture):
+	"""``hosting.canonical_names``: the CNAME of a name is read by a Sentinel (``identity_check``); this server asks no DNS question."""
+
+	def setUp(self):
+		super().setUp()
+		hosting._canon.clear()
+		self.addCleanup(hosting._canon.clear)
+		self.host('archive.acme.test', '198.51.100.7')
+		self.asked = []
+		live = mock.patch('agentapi.sentinel_dispatch.any_scanner_for', return_value=True)
+		live.start()
+
+	def answers(self, rows):
+		def try_identity(project, scan, dns=(), certs=(), unattended=True):
+			self.asked.append([q['name'] for q in dns])
+			return {q['id']: rows[q['name']] for q in dns if q['name'] in rows}, {}
+		return mock.patch('agentapi.probe_dispatch.try_identity', side_effect=try_identity)
+
+	def test_the_end_of_the_cname_chain_is_returned_and_cached(self):
+		with self.answers({'archive.acme.test': {'id': 'archive.acme.test', 'status': 'ok', 'records': [], 'canonical': 'acme-website.netlify.app'}}):
+			self.assertEqual(hosting.canonical_names(['archive.acme.test']), {'archive.acme.test': 'acme-website.netlify.app'})
+			self.assertEqual(hosting.canonical_names(['ARCHIVE.acme.test.']), {'archive.acme.test': 'acme-website.netlify.app'})
+		self.assertEqual(self.asked, [['archive.acme.test']])  # the second and third read came from the cache
+
+	def test_a_plain_host_has_an_empty_canonical_name_that_is_cached(self):
+		with self.answers({'archive.acme.test': {'id': 'archive.acme.test', 'status': 'ok', 'records': [], 'canonical': ''}}):
+			self.assertEqual(hosting.canonical_names(['archive.acme.test']), {'archive.acme.test': ''})
+		self.assertEqual(len(self.asked), 1)
+
+	def test_a_lookup_nobody_answered_is_missing_and_not_cached(self):
+		with self.answers({'archive.acme.test': {'id': 'archive.acme.test', 'status': 'unknown', 'records': [], 'error': 'Timeout'}}):
+			self.assertEqual(hosting.canonical_names(['archive.acme.test']), {})
+			self.assertEqual(hosting.canonical_names(['archive.acme.test']), {})
+		self.assertEqual(len(self.asked), 2)  # asked again: unknown is not "not an alias"
+
+	def test_no_scanner_for_the_kind_asks_nothing(self):
+		with mock.patch('agentapi.sentinel_dispatch.any_scanner_for', return_value=False), self.answers({}):
+			self.assertEqual(hosting.canonical_names(['archive.acme.test']), {})
+		self.assertEqual(self.asked, [])
+
+	def test_a_name_no_project_holds_is_not_asked(self):
+		with self.answers({}):
+			self.assertEqual(hosting.canonical_names(['nobody.example.org']), {})
+		self.assertEqual(self.asked, [])
+
+	def test_the_cache_is_bounded(self):
+		rows = {f'h{i}.acme.test': {'id': f'h{i}.acme.test', 'status': 'ok', 'records': [], 'canonical': ''} for i in range(40)}
+		for i in range(40):
+			self.host(f'h{i}.acme.test', f'198.51.100.{i + 10}')
+		with self.answers(rows), mock.patch.object(hosting, 'CANON_MAX', 5):
+			for name in rows:
+				hosting.canonical_names([name])
+		self.assertLessEqual(len(hosting._canon), 5)
+
+	def test_shared_by_address_reads_every_missing_cname_in_one_task(self):
+		rows = {'archive.acme.test': {'id': 'archive.acme.test', 'status': 'ok', 'records': [], 'canonical': 'acme-website.netlify.app'}}
+		with self.answers(rows):
+			found = hosting.shared_by_address(['198.51.100.7'])
+		self.assertEqual(found['198.51.100.7']['provider'], 'Netlify')
+		self.assertEqual(self.asked, [['archive.acme.test']])
+
+
 class PortScanGuardTests(Fixture):
 	def setUp(self):
 		super().setUp()
@@ -201,9 +184,9 @@ class PortScanGuardTests(Fixture):
 
 	def test_the_host_nmap_pass_leaves_a_shared_platform_address_alone(self):
 		self.host('archive.acme.test', '192.0.2.50', cname='acme-website.netlify.app')
-		runner = mock.Mock()
-		out = nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
-		runner.assert_not_called()
+		with mock.patch('agentapi.sentinel_dispatch.try_nmap') as sent:
+			out = port_stage.run_for_scan(self.scan.id)
+		sent.assert_not_called()
 		self.assertEqual(out, {'targets': 0, 'shared': 1})
 		self.assertTrue(IpAddress.objects.get(address='192.0.2.50').is_cdn)
 
@@ -212,11 +195,11 @@ class PortScanGuardTests(Fixture):
 		self.host('www.own.test', '192.0.2.51')
 		seen = []
 
-		def runner(targets, flags, host_timeout):
+		def sent(project, scan, targets, **kwargs):
 			seen.append(list(targets))
-			return '<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
-		with mock.patch('cveFeed.naabu_scan.discover', return_value=None):
-			nmap_scan.run_nmap_for_scan(self.scan.id, runner=runner)
+			return {'ports': 0, 'hosts_with_os': 0}
+		with mock.patch('cveFeed.port_stage.enabled', return_value=False), mock.patch('agentapi.sentinel_dispatch.try_nmap', sent):
+			port_stage.run_for_scan(self.scan.id)
 		self.assertEqual(seen, [['192.0.2.51']])
 
 

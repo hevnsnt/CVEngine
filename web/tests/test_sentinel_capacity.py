@@ -9,6 +9,7 @@ from django.utils import timezone
 from agentapi import sentinel_broker as sb
 from agentapi import sentinel_dispatch as dispatch
 from agentapi.models import Agent, SentinelTask
+from reNgine.resources import ScannerUnavailable
 from tests.test_agentapi import call, tool_call
 from tests.test_sentinel_dispatch import DispatchBase
 from tests.test_sentinels import build_world, register_sentinel, reset_rates
@@ -44,7 +45,7 @@ class Clock:
 
 
 class CapacityBase(DispatchBase):
-    def busy(self, agent, kind='nmap', n=1):
+    def busy(self, agent, kind='openvas', n=1):
         """Hold ``n`` of the Sentinel's slots with tasks it is running."""
         for _ in range(n):
             SentinelTask.objects.create(project=self.project, kind=kind, target={}, agent=agent, status='running',
@@ -52,7 +53,7 @@ class CapacityBase(DispatchBase):
 
     def dispatch(self, **kw):
         kw.setdefault('host', 'www.example.test')
-        return dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, **kw)
+        return dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, **kw)  # a kind that may still wait or run here
 
     def waiting(self):
         return SentinelTask.objects.filter(status='queued').first()
@@ -101,7 +102,7 @@ class StateTests(CapacityBase):
 
 class QueueTests(CapacityBase):
     def test_work_for_a_busy_sentinel_waits_for_a_slot_and_is_not_run_locally(self):
-        agent = self.make_sentinel(['nmap'])
+        agent = self.make_sentinel(['openvas'])
         Agent.objects.filter(pk=agent.pk).update(max_concurrent=1)
         self.busy(agent)
         clock = Clock()
@@ -114,28 +115,28 @@ class QueueTests(CapacityBase):
                 mock.patch('cveFeed.activity.log', wraps=activity.log) as log:
             out = self.dispatch(timeout=120)
         self.assertEqual(out, RESULT)  # well past the 8 s claim timeout: the queue budget, not the claim timeout, governed the wait
-        self.assertIn('Queued nmap work', log.call_args_list[0].args[1])
+        self.assertIn('Queued openvas work', log.call_args_list[0].args[1])
         self.assertIn('Sentinel slot', log.call_args_list[0].args[1])
 
-    def test_the_queue_budget_ending_falls_back_locally_and_says_no_slot_freed_up(self):
-        agent = self.make_sentinel(['nmap'])
+    def test_the_queue_budget_ending_leaves_the_targets_due_and_says_no_slot_freed_up(self):
+        agent = self.make_sentinel(['openvas'])
         Agent.objects.filter(pk=agent.pk).update(max_concurrent=1)
         self.busy(agent)
         clock = Clock()
         monotonic, sleep = clock.patches()
         with monotonic, sleep, mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_QUEUE_TIMEOUT': '90'}):
-            out = self.dispatch(timeout=120)
-        self.assertIsNone(out)
+            with self.assertRaises(ScannerUnavailable):  # nothing runs here: the work stays due
+                self.dispatch(timeout=120)
         self.assertGreaterEqual(clock.now - 1000, 90)
         self.assertLess(clock.now - 1000, 100)
         task = SentinelTask.objects.exclude(target={}).get()
         self.assertEqual(task.status, 'expired')
         self.assertIn('no Sentinel slot freed up', task.error)
         from cveFeed.models import AgentActivity
-        self.assertIn('No Sentinel slot freed up', AgentActivity.objects.filter(project=self.project).order_by('id').last().message)
+        self.assertIn('is waiting for a free Sentinel slot', AgentActivity.objects.filter(project=self.project).order_by('id').last().message)
 
     def test_the_completion_budget_counts_from_the_claim_not_from_the_queueing(self):
-        agent = self.make_sentinel(['nmap'])
+        agent = self.make_sentinel(['openvas'])
         Agent.objects.filter(pk=agent.pk).update(max_concurrent=1)
         self.busy(agent)
         clock = Clock()
@@ -148,7 +149,7 @@ class QueueTests(CapacityBase):
         self.assertEqual(out, RESULT)
 
     def test_a_claimed_task_that_outlasts_its_completion_budget_still_expires(self):
-        agent = self.make_sentinel(['nmap'])
+        agent = self.make_sentinel(['openvas'])
         Agent.objects.filter(pk=agent.pk).update(max_concurrent=1)
         self.busy(agent)
         clock = Clock()
@@ -156,26 +157,26 @@ class QueueTests(CapacityBase):
         clock.at(11, lambda: self.claim(agent))
         monotonic, sleep = clock.patches()
         with monotonic, sleep:
-            out = self.dispatch(timeout=60)  # claimed at ~11 s, never reported
-        self.assertIsNone(out)
+            with self.assertRaises(ScannerUnavailable):  # claimed at ~11 s, never reported
+                self.dispatch(timeout=60)
         self.assertGreaterEqual(clock.now - 1000, 71)
         self.assertEqual(SentinelTask.objects.exclude(target={}).get().status, 'expired')
 
     def test_the_last_live_sentinel_going_away_ends_the_wait_without_waiting_out_the_queue(self):
-        agent = self.make_sentinel(['nmap'])
+        agent = self.make_sentinel(['openvas'])
         Agent.objects.filter(pk=agent.pk).update(max_concurrent=1)
         self.busy(agent)
         clock = Clock()
         clock.at(15, lambda: Agent.objects.filter(pk=agent.pk).update(last_seen=timezone.now() - timedelta(hours=1)))
         monotonic, sleep = clock.patches()
         with monotonic, sleep:
-            out = self.dispatch(timeout=60)
-        self.assertIsNone(out)
+            with self.assertRaises(ScannerUnavailable):
+                self.dispatch(timeout=60)
         self.assertLess(clock.now - 1000, 40)  # nowhere near the 300 s queue budget
         self.assertIn('no live Sentinel is left', SentinelTask.objects.exclude(target={}).get().error)
 
     def test_a_slot_taken_by_another_stage_first_sends_the_wait_into_the_queue_not_to_a_local_run(self):
-        agent = self.make_sentinel(['nmap'])
+        agent = self.make_sentinel(['openvas'])
         Agent.objects.filter(pk=agent.pk).update(max_concurrent=1)
         clock = Clock()
         # at the start a slot is free, so the short claim timeout applies; before it ends another stage's task takes the slot
@@ -188,8 +189,9 @@ class QueueTests(CapacityBase):
             out = self.dispatch(timeout=120)
         self.assertEqual(out, RESULT)
 
-    def test_no_sentinel_at_all_is_still_an_immediate_no_op(self):
-        self.assertIsNone(self.dispatch(timeout=5))
+    def test_no_sentinel_at_all_is_still_an_immediate_wait_with_no_task(self):
+        with self.assertRaises(ScannerUnavailable):
+            self.dispatch(timeout=5)
         self.assertFalse(SentinelTask.objects.exists())
 
 
@@ -198,8 +200,23 @@ class BudgetTests(SimpleTestCase):
         one = dispatch._dispatch_timeout('nmap', 1)
         self.assertEqual(one, dispatch.COMPLETION_CEILING['nmap'])
         self.assertEqual(dispatch._dispatch_timeout('nmap', 0), one)
-        self.assertEqual(dispatch._dispatch_timeout('nmap', 65), one + 64 * dispatch.PER_TARGET_SECONDS['nmap'])
+        self.assertEqual(dispatch._dispatch_timeout('nuclei_light', 65), dispatch.COMPLETION_CEILING['nuclei_light'] + 64 * dispatch.PER_TARGET_SECONDS['nuclei_light'])
+        self.assertEqual(dispatch._dispatch_timeout('nmap', 65), dispatch.CEILING_CAP['nmap'])  # nmap's wait is capped just above the Sentinel's own limit
         self.assertEqual(dispatch._dispatch_timeout('testssl', 5), dispatch.COMPLETION_CEILING['testssl'])  # one host:port per task: no scaling
+
+    def test_the_stage_never_gives_up_on_a_chunk_before_the_sentinel_does(self):
+        """The Sentinel limits its own run (nmap: min(3600, max(600, 90 x addresses)) seconds; naabu: 900). A stage that waits for less gives the chunk up
+        while the Sentinel still works, and the late result is discarded: the work repeats on the next scan."""
+        for addresses in range(1, dispatch.MAX_ADDRESSES + 1):
+            self.assertGreaterEqual(dispatch._dispatch_timeout('nmap', addresses), min(3600, max(600, 90 * addresses)), addresses)
+        from cvengine_scanner import flags
+        for addresses in range(1, dispatch.MAX_ADDRESSES + 1):  # the Sentinel's own limit grows with the chunk: the wait is never below it
+            self.assertGreater(dispatch._dispatch_timeout('naabu', addresses), flags.task_seconds('naabu', addresses), addresses)
+        self.assertLessEqual(dispatch.NAABU_CHUNK, flags.hosts_per_task('naabu'))  # a chunk the Sentinel can finish inside its largest limit
+
+    def test_a_naabu_task_names_few_enough_addresses_to_finish(self):
+        self.assertEqual([len(c) for c in dispatch._chunks(list(range(20)), dispatch.NAABU_CHUNK)], [8, 8, 4])
+        self.assertEqual(len(dispatch._chunks(list(range(70)))), 2)  # the other kinds keep MAX_ADDRESSES
 
     def test_the_operators_single_number_still_replaces_every_ceiling(self):
         with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_DISPATCH_TIMEOUT': '45'}):

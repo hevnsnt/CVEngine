@@ -66,7 +66,9 @@ def update_profile(request):
     return account_payload(user)
 
 
-def change_password(request):
+def change_password(request, keep_machine_tokens=False):
+    """``keep_machine_tokens`` leaves the Sentinel and reviewer tokens of this user alone (the setup wizard asks for it: the built-in scanner's token belongs to
+    the first App Admin and a discovery is running on it); every token a person holds is revoked either way."""
     data, user = _body(request), request.user
     key = f'pw-change-fail:{user.pk}'
     if throttle.exceeded(key, PASSWORD_MAX_FAILURES):
@@ -87,7 +89,10 @@ def change_password(request):
     update_session_auth_hash(request, user)  # keep this session signed in
     # Like an administrator reset, a password change cuts off bearer tokens: otherwise a token minted
     # from a stolen session would outlive the very password change meant to end the compromise.
-    ApiToken.objects.filter(user=user, revoked=False).update(revoked=True)
+    tokens = ApiToken.objects.filter(user=user, revoked=False)
+    if keep_machine_tokens:
+        tokens = tokens.exclude(scope__in=('sentinel', 'reviewer'))
+    tokens.update(revoked=True)
     profile, _ = UserProfile.objects.get_or_create(user=user)
     profile.must_change_password = False
     profile.save(update_fields=['must_change_password'])

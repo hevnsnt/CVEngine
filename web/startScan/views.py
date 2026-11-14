@@ -5,7 +5,6 @@ import markdown
 from html import escape
 
 from collections import Counter, defaultdict
-from datetime import datetime
 from django.db.models import Count, Case, When, IntegerField, Prefetch
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -72,7 +71,7 @@ def create_report(request, id):
         show_vuln = True
         report_name = 'Full Scan Report'
 
-    scan = ScanHistory.objects.get(id=id)
+    scan = get_object_or_404(ScanHistory, id=id)
     vulns = (
         Vulnerability.objects
         .filter(scan_history=scan)

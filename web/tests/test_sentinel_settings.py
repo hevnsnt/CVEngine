@@ -6,6 +6,7 @@ from django.utils import timezone
 
 from agentapi import sentinel_settings as ss
 from agentapi.models import Agent
+from cveFeed import software
 from tests.test_agentapi import call
 from tests.test_sentinels import build_world, register_sentinel, reset_rates
 
@@ -24,13 +25,13 @@ class Base(TestCase):
         return Agent.objects.get(pk=out['id']), out
 
     def manage(self, agent, settings):
-        return call(self.tokens['root'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'settings': settings})
+        return call(self.root, 'PATCH', f'/api/v1/agents/{agent.pk}', {'settings': settings})  # a person: an API token may not widen (FB-5)
 
 
 class ReportedTests(Base):
     def test_a_sentinel_reports_its_own_settings_and_is_told_the_effective_ones(self):
         agent, out = self.sentinel({'network': 'internal', 'profile': 'light', 'disabled_kinds': ['wpscan'], 'max_concurrent': 4})
-        self.assertEqual(out['settings']['values'], {'network': 'external', 'profile': 'light', 'disabled_kinds': ['wpscan'], 'max_concurrent': 4, 'self_update': 'manual'})  # it says internal, but only the server decides that
+        self.assertEqual(out['settings']['values'], {'network': 'external', 'profile': 'light', 'disabled_kinds': ['wpscan'], 'max_concurrent': 4, 'self_update': 'automatic'})  # it says internal, but only the server decides that
         self.assertEqual(out['settings']['detail']['network']['value'], 'external')
         self.assertEqual(out['settings']['detail']['network']['server_grant'], 'external')
         self.assertEqual(out['settings']['detail']['network']['machine_value'], 'internal')
@@ -62,7 +63,7 @@ class ReportedTests(Base):
         agent, _ = self.sentinel({'network': 'internal'})
         status, out = call(self.tokens['alice'], 'PUT', '/api/v1/sentinel', {'name': 'sentinel-1'})
         self.assertEqual(status, 200)
-        self.assertEqual(out['settings']['values'], {'network': 'external', 'self_update': 'manual'})  # its own claim of internal is not honoured
+        self.assertEqual(out['settings']['values'], {'network': 'external', 'self_update': 'automatic'})  # its own claim of internal is not honoured
 
 
 class MostRecentWinsTests(Base):
@@ -78,8 +79,8 @@ class MostRecentWinsTests(Base):
         self.assertEqual(out['settings']['max_concurrent']['source'], 'sentinel')  # untouched settings stay the Sentinel's
         status, beat = call(self.tokens['alice'], 'POST', '/api/v1/sentinel/heartbeat')
         self.assertEqual(status, 200, beat)
-        self.assertEqual(beat['settings']['values'], {'network': 'external', 'max_concurrent': 2, 'self_update': 'manual'})
-        self.assertEqual(beat['settings']['rev'], ss.revision({'network': 'external', 'max_concurrent': 2, 'self_update': 'manual'}))
+        self.assertEqual(beat['settings']['values'], {'network': 'external', 'max_concurrent': 2, 'self_update': 'automatic'})
+        self.assertEqual(beat['settings']['rev'], ss.revision({'network': 'external', 'max_concurrent': 2, 'self_update': 'automatic'}))
         ss.record_reported(agent, {'network': 'internal'})
         agent.refresh_from_db()
         self.assertEqual(ss.effective(agent)['network'], 'internal')
@@ -99,7 +100,7 @@ class MostRecentWinsTests(Base):
         ss.record_reported(agent, {'network': 'external', 'max_concurrent': 3}, now=later)  # the operator changed the machine's concurrency after
         agent.refresh_from_db()
         self.assertEqual({k: v['source'] for k, v in ss.detail(agent).items()}, {'network': 'sentinel', 'max_concurrent': 'sentinel'})
-        self.assertEqual(ss.effective(agent), {'network': 'external', 'max_concurrent': 3, 'self_update': 'manual'})
+        self.assertEqual(ss.effective(agent), {'network': 'external', 'max_concurrent': 3, 'self_update': 'automatic'})
 
     def test_clearing_a_server_value_hands_the_setting_back_to_the_sentinel(self):
         agent, _ = self.sentinel({'max_concurrent': 3})
@@ -112,7 +113,7 @@ class MostRecentWinsTests(Base):
         agent, _ = self.sentinel()
         self.manage(agent, {'disabled_kinds': ['openvas', 'wpscan', 'openvas']})
         agent.refresh_from_db()
-        self.assertEqual(ss.effective(agent), {'disabled_kinds': ['openvas', 'wpscan'], 'self_update': 'manual', 'network': 'external'})
+        self.assertEqual(ss.effective(agent), {'disabled_kinds': ['openvas', 'wpscan'], 'self_update': 'automatic', 'network': 'external'})
 
 
 class AdminTests(Base):
@@ -149,7 +150,7 @@ class UpdateTests(Base):
         status, beat = call(self.tokens['alice'], 'POST', '/api/v1/sentinel/heartbeat',
                             {'info': {'version': 'abc1234', 'update': {'status': 'waiting', 'phase': 'drain', 'detail': '2 tasks running'}}})
         self.assertEqual(status, 200, beat)
-        self.assertEqual(beat['update'], {'mode': 'manual', 'setting': 'manual', 'requested': False})
+        self.assertEqual(beat['update'], {'mode': 'auto', 'setting': 'automatic', 'requested': False, 'target': software.SENTINEL_PINS_COMMIT, 'reason': 'pinned'})  # Automatic is always told where to go (FB-7)
         status, detail = call(self.tokens['root'], 'GET', f'/api/v1/agents/{agent.pk}')
         self.assertEqual(detail['version'], 'abc1234')
         self.assertEqual(detail['update']['status'], 'waiting')
@@ -199,14 +200,15 @@ class SelfUpdateSettingTests(Base):
         agent.refresh_from_db()
         return ss.effective(agent)['self_update']
 
-    def test_it_follows_the_instances_update_choice_until_someone_sets_it(self):
-        from unittest import mock
+    def test_it_follows_keep_sentinels_on_the_newest_version_until_someone_sets_it(self):
         agent, _ = self.sentinel()
-        self.assertEqual(self.effective(agent), 'manual')
-        with mock.patch('cveFeed.updater.read_mode', return_value='auto'):
-            self.assertEqual(self.effective(agent), 'automatic')
-            status, out = call(self.tokens['root'], 'GET', '/api/v1/sentinels/defaults')
-        self.assertEqual((status, out['self_update'], out['follows_instance'], out['effective_self_update']), (200, None, True, 'automatic'))
+        self.assertEqual(self.effective(agent), 'automatic')  # the switch is on by default
+        status, out = call(self.tokens['root'], 'GET', '/api/v1/sentinels/defaults')
+        self.assertEqual((status, out['self_update'], out['follows_instance'], out['effective_self_update'], out['keep_newest']), (200, None, True, 'automatic', True))
+        self.assertEqual(call(self.tokens['root'], 'PUT', '/api/v1/sentinels/defaults', {'keep_newest': False})[0], 200)
+        self.assertEqual(self.effective(agent), 'manual')  # off: Sentinels update only when an administrator presses Update now
+        out = call(self.tokens['root'], 'GET', '/api/v1/sentinels/defaults')[1]
+        self.assertEqual((out['effective_self_update'], out['keep_newest']), ('manual', False))
 
     def test_the_instance_default_applies_to_a_sentinel_with_no_value_of_its_own_and_its_own_value_beats_it(self):
         agent, _ = self.sentinel()
@@ -217,8 +219,8 @@ class SelfUpdateSettingTests(Base):
         self.assertEqual(self.effective(agent), 'automatic')  # an administrator's value for this Sentinel beats the default
         self.assertEqual(self.manage(agent, {'self_update': None})[0], 200)  # handed back: the default applies again
         self.assertEqual(self.effective(agent), 'off')
-        call(self.tokens['root'], 'PUT', '/api/v1/sentinels/defaults', {'self_update': None})
-        self.assertEqual(self.effective(agent), 'manual')
+        call(self.root, 'PUT', '/api/v1/sentinels/defaults', {'self_update': None})  # a person: an API token may not hand the default back to automatic (FB-5)
+        self.assertEqual(self.effective(agent), 'automatic')
 
     def test_the_sentinels_own_configuration_and_the_dashboard_follow_the_most_recent_change(self):
         agent, _ = self.sentinel({'self_update': 'automatic'})
@@ -239,7 +241,7 @@ class SelfUpdateSettingTests(Base):
 
     def test_a_change_of_the_default_is_audited(self):
         from dashboard.models import AuditLog
-        call(self.tokens['root'], 'PUT', '/api/v1/sentinels/defaults', {'self_update': 'automatic'})
+        call(self.root, 'PUT', '/api/v1/sentinels/defaults', {'self_update': 'automatic'})  # a person: an API token may not choose automatic (FB-5)
         entry = AuditLog.objects.filter(action='sentinel.defaults').latest('id')
         self.assertEqual((entry.detail['before'], entry.detail['after']), (None, 'automatic'))
 
@@ -247,7 +249,7 @@ class SelfUpdateSettingTests(Base):
         agent, _ = self.sentinel()
         self.manage(agent, {'self_update': 'automatic'})
         beat = call(self.tokens['alice'], 'POST', '/api/v1/sentinel/heartbeat')[1]
-        self.assertEqual(beat['update'], {'setting': 'automatic', 'mode': 'auto', 'requested': False})
+        self.assertEqual(beat['update'], {'setting': 'automatic', 'mode': 'auto', 'requested': False, 'target': software.SENTINEL_PINS_COMMIT, 'reason': 'pinned'})  # (FB-7)
         self.assertEqual(beat['settings']['values']['self_update'], 'automatic')
         self.assertEqual(call(self.tokens['root'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'update': 'now'})[0], 200)
         self.manage(agent, {'self_update': 'off'})
@@ -317,7 +319,7 @@ class UpdaterStateTests(Base):
         self.beat({'installed': False, 'running': False})
         status, out = call(self.tokens['root'], 'GET', '/api/v1/agents?kind=scanner')
         row = next(r for r in out['results'] if r['id'] == agent.pk)
-        self.assertEqual((row['version'], row['self_update'], row['updater']['state']), ('abc1234', 'manual', 'not_installed'))
+        self.assertEqual((row['version'], row['self_update'], row['updater']['state']), ('abc1234', 'automatic', 'not_installed'))
 
     def test_a_bad_report_is_refused_and_text_is_cleaned_and_clipped(self):
         self.sentinel()
@@ -329,3 +331,116 @@ class UpdaterStateTests(Base):
         self.assertEqual(len(agent.info['updater']['detail']), 300)
         self.assertTrue(agent.info['updater']['detail'].startswith('okxxx'))  # the control character is dropped
         self.assertNotIn('install_command', agent.info['updater'])  # whatever else a Sentinel sends is dropped; the command is the server\'s
+
+
+class WaitingReportTests(Base):
+    """What a Sentinel says it holds back for lack of memory shows on its detail, clipped and typed, and an empty report clears it."""
+
+    def detail(self, agent):
+        status, out = call(self.tokens['root'], 'GET', f'/api/v1/agents/{agent.pk}')
+        self.assertEqual(status, 200, out)
+        return out
+
+    def waiting(self, rows):
+        return self.beat_info({'version': 'abc1234', 'waiting': rows})
+
+    def beat_info(self, info):
+        return call(self.tokens['alice'], 'POST', '/api/v1/sentinel/heartbeat', {'info': info})
+
+    def test_a_waiting_kind_and_a_stopping_task_are_shown_and_an_empty_list_clears_them(self):
+        agent, _ = self.sentinel()
+        self.assertEqual(self.detail(agent)['waiting'], [])
+        rows = [{'kind': 'web_screenshot', 'need_mb': 400, 'free_mb': 140, 'budget_mb': 1540, 'seconds': 840,
+                 'held_by': [{'task': 3534, 'kind': 'naabu', 'mb': 80, 'seconds': 1800}]},
+                {'kind': 'naabu', 'task': 3534, 'seconds': 45, 'stopping': True}]
+        self.assertEqual(self.waiting(rows)[0], 200)
+        out = self.detail(agent)['waiting']
+        self.assertEqual(out[0]['kind'], 'web_screenshot')
+        self.assertEqual((out[0]['need_mb'], out[0]['free_mb'], out[0]['held_by'][0]['task']), (400, 140, 3534))
+        self.assertEqual(out[1], {'kind': 'naabu', 'seconds': 45, 'stopping': True, 'task': 3534})
+        self.assertEqual(self.waiting([])[0], 200)
+        self.assertEqual(self.detail(agent)['waiting'], [])
+
+    def test_the_report_is_clipped_and_a_bad_shape_is_refused(self):
+        agent, _ = self.sentinel()
+        rows = [{'kind': 'x' * 100 + '\n', 'need_mb': -5, 'free_mb': 'lots', 'budget_mb': True, 'seconds': 1.5,
+                 'held_by': [{'task': 1, 'kind': 'k', 'mb': 1, 'seconds': 1}] * 9}] * 9
+        self.assertEqual(self.waiting(rows)[0], 200)
+        out = self.detail(agent)['waiting']
+        self.assertEqual(len(out), 6)
+        self.assertEqual(len(out[0]['kind']), 40)
+        self.assertEqual((out[0]['need_mb'], out[0]['free_mb'], out[0]['budget_mb'], out[0]['seconds']), (0, 0, 0, 0))
+        self.assertEqual(len(out[0]['held_by']), 3)
+        for bad in ('web_screenshot', {'kind': 'a'}, [1], [{'kind': 1}], [{'kind': 'a'}] * 21):
+            self.assertEqual(self.waiting(bad)[0], 400, bad)
+
+
+class WatchdogReportTests(Base):
+    """The optional ``info.watchdog`` of a Sentinel: kept clipped and typed, shown in plain words, never refused, and the notice hook says when it is stale."""
+
+    REPORT = {'last_tick': 1_900_000_000, 'actions_last_hour': 2, 'kills': 1, 'overcommit_active': True, 'overcommit_mb': 120, 'low_disk': False, 'withheld': [],
+              'reasons': ['stopped a hung nuclei deep scan: no output or CPU for 30 minutes'], 'spool': {'count': 2, 'oldest_seconds': 90},
+              'actions': [{'at': 1_899_999_000, 'code': 'stopped_hung', 'kind': 'nuclei_deep', 'minutes': 30}, {'at': 1_899_999_500, 'code': 'overcommit', 'kind': 'nuclei_light', 'minutes': None}]}
+
+    def detail(self, agent):
+        status, out = call(self.tokens['root'], 'GET', f'/api/v1/agents/{agent.pk}')
+        self.assertEqual(status, 200, out)
+        return out
+
+    def beat_info(self, info):
+        return call(self.tokens['alice'], 'POST', '/api/v1/sentinel/heartbeat', {'info': info})
+
+    def beat(self, report):
+        return self.beat_info({'version': 'abc1234', 'watchdog': report})
+
+    def test_a_server_never_told_about_a_watchdog_shows_none(self):
+        agent, _ = self.sentinel()
+        self.assertIsNone(self.detail(agent)['watchdog'])
+        self.assertEqual(self.beat_info({'version': 'abc1234'})[0], 200)  # an old Sentinel's heartbeat is unchanged
+        self.assertIsNone(self.detail(agent)['watchdog'])
+
+    def test_the_report_is_stored_and_shown_as_plain_sentences_newest_first(self):
+        agent, _ = self.sentinel()
+        self.assertEqual(self.beat(self.REPORT)[0], 200)
+        view = self.detail(agent)['watchdog']
+        self.assertEqual([a['text'] for a in view['actions']], ['let a nuclei light scan start ahead of a long scan, within the memory that was really free',
+                                                                'stopped a hung nuclei deep scan: no output or CPU for 30 minutes'])
+        self.assertTrue(view['overcommit_active'])
+        agent.refresh_from_db()
+        self.assertEqual(agent.info['watchdog']['spool'], {'count': 2, 'oldest_seconds': 90})
+
+    def test_a_bad_shape_is_dropped_not_refused_and_text_and_lists_are_clipped(self):
+        agent, _ = self.sentinel()
+        for bad in ('x', 5, [1], None):
+            self.assertEqual(self.beat(bad)[0], 200, bad)
+        self.assertEqual(self.beat({'last_tick': 'now', 'kills': -4, 'actions_last_hour': True, 'reasons': ['r' * 500] * 9, 'withheld': ['k' * 90, 4], 'low_disk': 'yes',
+                                    'actions': [{'code': 'stopped_hung', 'kind': 'k\n' * 40, 'minutes': 5}] * 20 + ['x', {'code': 5}]})[0], 200)
+        stored = (self.sentinel_row(agent).info or {}).get('watchdog') or {}
+        self.assertEqual((stored['last_tick'], stored['kills'], stored['actions_last_hour'], stored['low_disk']), (0, 0, 0, False))
+        self.assertEqual(len(stored['reasons']), 5)
+        self.assertEqual(len(stored['reasons'][0]), 160)
+        self.assertEqual(stored['withheld'], ['k' * 40])
+        self.assertEqual(len(stored['actions']), 8)
+
+    def sentinel_row(self, agent):
+        agent.refresh_from_db()
+        return agent
+
+    def test_a_secret_shaped_extra_key_is_not_stored(self):
+        agent, _ = self.sentinel()
+        self.beat({**self.REPORT, 'token': 'S3cr3t', 'actions': [{**self.REPORT['actions'][0], 'target': 'https://customer.example/x?key=S3cr3t'}]})
+        text = str(self.sentinel_row(agent).info)
+        self.assertNotIn('S3cr3t', text)
+
+    def test_the_notice_hook_names_a_stale_watchdog_and_repeated_stops(self):
+        from agentapi import sentinel_settings as ss
+        agent, _ = self.sentinel()
+        self.assertIsNone(ss.watchdog_problem(agent))  # nothing reported
+        self.beat(self.REPORT)
+        agent = self.sentinel_row(agent)
+        self.assertIsNone(ss.watchdog_problem(agent, now=self.REPORT['last_tick'] + 30))
+        self.assertIn('has not run for 10 minutes', ss.watchdog_problem(agent, now=self.REPORT['last_tick'] + 600))
+        self.beat({**self.REPORT, 'kills': 3})
+        self.assertIn('stopped 3 stuck tasks', ss.watchdog_problem(self.sentinel_row(agent), now=self.REPORT['last_tick'] + 30))
+        view = ss.watchdog_view(self.sentinel_row(agent), now=self.REPORT['last_tick'] + 600)
+        self.assertTrue(view['stale'])

@@ -82,6 +82,50 @@ class ComputeSnapshotTests(TestCase):
 		self.assertEqual(StatsSnapshot.objects.filter(project=self.proj, date=TODAY).count(), 1)
 
 
+class FixedStatsTests(TestCase):
+	"""One fixed finding is one fixed finding however many scans kept a copy of it (review 1 F1)."""
+
+	def test_a_fixed_match_kept_by_three_scans_counts_once_with_a_positive_mean(self):
+		from cveFeed.stats_history import _fixed_stats
+		from scanEngine.models import EngineType
+		from startScan.models import ScanHistory
+		now = timezone.now()
+		project = Project.objects.create(name='fx', slug='fx', insert_date=now)
+		domain = Domain.objects.create(name='fx.example.com', project=project, insert_date=now)
+		cve = CVEEntry.objects.create(cve_id='CVE-2099-0001', title='t', cvss=9.8)
+		engine = EngineType.objects.create(engine_name='fx-engine', yaml_configuration='x')
+		fixed_at = now - timedelta(days=20)
+		for age in (30, 10, 1):  # the host was scanned 30, 10 and 1 days ago; the fixed mark was copied onto each later copy
+			scan = ScanHistory.objects.create(domain=domain, scan_status=2, start_scan_date=now - timedelta(days=age), tasks=['subdomain_discovery'], scan_type=engine)
+			sub = Subdomain.objects.create(name='www.fx.example.com', target_domain=domain, scan_history=scan)
+			match = CVEMatch.objects.create(cve_entry=cve, subdomain=sub, scan_history=scan, source='tech', matched_product='x', matched_version='1')
+			CVEMatch.objects.filter(pk=match.pk).update(created_at=now - timedelta(days=age), remediation_status='fixed', remediation_updated_at=fixed_at)
+		fixed, mean = _fixed_stats(project)
+		self.assertEqual(fixed, 1)
+		self.assertAlmostEqual(mean, 10.0, places=1)  # first seen 30 days ago, marked fixed 20 days ago
+
+
+class RemediationBumpsTheDashboardTests(TestCase):
+	def test_marking_a_finding_fixed_makes_the_dashboard_snapshots_stale(self):
+		"""Review 1 F11: the person who closes a finding sees the numbers move now, not when the snapshot ages out."""
+		from unittest import mock
+
+		from agentapi import services
+		from scanEngine.models import EngineType
+		from startScan.models import ScanHistory
+		now = timezone.now()
+		project = Project.objects.create(name='rb', slug='rb', insert_date=now)
+		domain = Domain.objects.create(name='rb.example.com', project=project, insert_date=now)
+		engine = EngineType.objects.create(engine_name='rb-engine', yaml_configuration='x')
+		scan = ScanHistory.objects.create(domain=domain, scan_status=2, start_scan_date=now, tasks=['subdomain_discovery'], scan_type=engine)
+		sub = Subdomain.objects.create(name='www.rb.example.com', target_domain=domain, scan_history=scan)
+		finding = Vulnerability.objects.create(name='x', severity=3, scan_history=scan, subdomain=sub, target_domain=domain, open_status=True)
+		user = User.objects.create_user('rb-user', password='x')
+		with mock.patch('cveFeed.views.bump_stats_revision') as bump, self.captureOnCommitCallbacks(execute=True):
+			services._apply_remediation(finding, 'fixed', 'done', user, rescore=False)
+		bump.assert_called_once_with()
+
+
 class StatsHistoryApiTests(TestCase):
 	@classmethod
 	def setUpTestData(cls):

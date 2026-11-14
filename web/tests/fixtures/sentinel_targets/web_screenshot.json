@@ -1,0 +1,28 @@
+{
+  "pages": [
+    {
+      "id": "1",
+      "url": "https://www.example.com/"
+    },
+    {
+      "id": "2",
+      "url": "http://www.example.com:8080/"
+    }
+  ],
+  "scope": {
+    "hosts": [
+      "www.example.com"
+    ],
+    "domains": [],
+    "excluded": [
+      "admin.example.com"
+    ],
+    "excluded_trees": [],
+    "private": false,
+    "addresses": [],
+    "blocked": []
+  },
+  "open_web": true,
+  "timeout_seconds": 20,
+  "max_bytes": 2097152
+}

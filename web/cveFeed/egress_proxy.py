@@ -5,11 +5,8 @@ URL per line, ``http``, ``https``, ``socks5`` or ``socks5h``); a line that is no
 at most once every few seconds, so a hot path (every probe asks) does not query the database per call. A proxy is picked per request, round
 robin over the valid lines the caller can use.
 
-What goes through it (traffic to SCANNED TARGETS sent from this server): the in-process probes (through ``cveFeed.pinned_transport``, which
-keeps vetting and pinning the numeric destination and sends that address to the proxy, never the name), ``db_exposure``'s HTTP checks
-(``requests``), and the external tools that take a proxy: nuclei, bbot, WPScan, testssl.sh and wafw00f (``for_tool``). What does not: nmap, naabu,
-the UDP sweeps, the raw database and RDP checks and OpenVAS use raw sockets and connect directly, a Sentinel keeps its own egress, and no call to a
-third-party API (CVE feeds, AI providers, Shodan, GitHub, HackerOne, runZero, Tailscale, crt.sh) uses it.
+This server no longer sends traffic to a scanned target (every probe and tool run is a Sentinel's, which keeps its own egress), so no
+in-process connection is opened through a proxy here. No call to a third-party API (CVE feeds, AI providers, Shodan, GitHub, HackerOne, runZero, Tailscale, crt.sh) uses it.
 
 Loopback, this stack's own services, private, link-local and tailnet addresses (unless ``CVENGINE_PROXY_PRIVATE=1``) and anything in ``CVENGINE_PROXY_BYPASS`` or ``NO_PROXY`` (host names, ``.suffix`` domains, IPs and CIDR
 ranges, comma separated) are never sent through a proxy (no_proxy semantics), so a scan of a local fixture stays local.
@@ -22,7 +19,6 @@ import ipaddress
 import itertools
 import logging
 import os
-import socket
 import threading
 import time
 from dataclasses import dataclass
@@ -232,121 +228,3 @@ def requests_proxies(host=None):
     built for it must not read the environment's proxy settings (``trust_env = False``) so no proxy is added behind the setting's back."""
     spec = pick(host)
     return {'http': spec.url, 'https': spec.url} if spec is not None else {}
-
-
-# ----------------------------------------------------------------------------- external tools
-
-# tool -> (schemes it can use, how it takes the proxy as arguments). Each lambda gets the ProxySpec.
-def _wpscan_args(spec):
-    return ['--proxy', spec.plain_url] + (['--proxy-auth', spec.credentials] if spec.credentials else [])
-
-
-TOOLS = {
-    'nuclei': (('http', 'https', 'socks5'), lambda s: ['-proxy', s.url]),
-    'bbot': (SCHEMES, lambda s: ['-c', f'web.http_proxy={s.url}']),  # bbot's own setting; bbot.private_config moves it into a 0600 file
-    'wpscan': (SCHEMES, _wpscan_args),
-    'wafw00f': (('http', 'https', 'socks5'), lambda s: ['-p', s.url]),
-    'testssl': (('http',), lambda s: ['--proxy', s.netloc]),  # testssl.sh speaks to a plain HTTP proxy only, and has no way to give it a login
-}
-
-
-def hostname(target):
-    """The host of a tool target: a URL, ``host:port``, a bare host or an IP literal (IPv6 included)."""
-    text = str(target or '').strip()
-    if '://' in text:
-        return urlsplit(text).hostname or ''
-    if text.startswith('['):
-        return text[1:].split(']', 1)[0]
-    return text.rsplit(':', 1)[0] if text.count(':') == 1 else text
-
-
-def for_tool(tool, hosts=None):
-    """The command line arguments (a list, empty for a direct run) that send ``tool`` through the picked proxy. ``hosts`` are the destinations
-    of the run: when every one never goes through a proxy (loopback), the run stays direct. Raises ``ProxyUnavailable`` when the setting is on
-    and no configured proxy suits the tool, or (testssl.sh) every suitable one needs a login the tool cannot send."""
-    schemes, build = TOOLS[tool]
-    everything = configured()
-    if not everything or (hosts is not None and all(bypass(hostname(h)) for h in hosts)):
-        return []
-    specs = [s for s in everything if s.scheme in schemes and (tool != 'testssl' or not s.credentials)]
-    if not specs:
-        raise ProxyUnavailable(f'Settings > Proxy is on, but {tool} cannot use any of its proxies (it takes ' + ', '.join(schemes) +
-                               (' without a login' if tool == 'testssl' else '') + ')')
-    return build(specs[next(_turn) % len(specs)])
-
-
-# ----------------------------------------------------------------------------- connecting through a proxy (in-process clients)
-
-def connect_proxy(spec, timeout):
-    """A TCP connection to the proxy itself (the address an administrator typed in Settings, so no destination vetting applies to it)."""
-    return socket.create_connection((spec.host, spec.port), timeout=timeout)
-
-
-def _read_exact(sock, count):
-    data = b''
-    while len(data) < count:
-        chunk = sock.recv(count - len(data))
-        if not chunk:
-            raise OSError('the proxy closed the connection')
-        data += chunk
-    return data
-
-
-def _http_connect(sock, ip, port, spec):
-    authority = f'[{ip}]:{port}' if ':' in ip else f'{ip}:{port}'
-    lines = [f'CONNECT {authority} HTTP/1.1', f'Host: {authority}', 'Proxy-Connection: keep-alive']
-    if spec.credentials:
-        lines.append('Proxy-Authorization: ' + spec.authorization())
-    sock.sendall(('\r\n'.join(lines) + '\r\n\r\n').encode('ascii'))
-    head = b''
-    while not head.endswith(b'\r\n\r\n'):  # one byte at a time: nothing the target sends after the tunnel opens may be read here
-        byte = sock.recv(1)
-        if not byte:
-            raise OSError('the proxy closed the connection')
-        head += byte
-        if len(head) > MAX_REPLY_HEADER:
-            raise OSError('the proxy answered with too long a header')
-    status = head.split(b'\r\n', 1)[0].split()
-    if len(status) < 2 or not status[0].startswith(b'HTTP/') or status[1] != b'200':
-        raise OSError(f'the proxy refused the tunnel (status {status[1].decode("ascii", "replace")[:3] if len(status) > 1 else "?"})')
-
-
-def _socks5_connect(sock, ip, port, spec):
-    """SOCKS5 CONNECT to the numeric address (``socks5h`` makes no difference here: the name was resolved and vetted before this)."""
-    login = spec.credentials != ''
-    sock.sendall(b'\x05\x02\x00\x02' if login else b'\x05\x01\x00')
-    version, method = _read_exact(sock, 2)
-    if version != 5 or method == 0xFF or (method == 2 and not login) or method not in (0, 2):
-        raise OSError('the proxy offered no method this client can use')
-    if method == 2:
-        user, password = spec.username.encode('utf-8'), spec.password.encode('utf-8')
-        sock.sendall(b'\x01' + bytes([len(user)]) + user + bytes([len(password)]) + password)
-        if _read_exact(sock, 2)[1] != 0:
-            raise OSError('the proxy refused the login')
-    address = ipaddress.ip_address(ip)
-    sock.sendall(b'\x05\x01\x00' + (b'\x04' if address.version == 6 else b'\x01') + address.packed + int(port).to_bytes(2, 'big'))
-    version, code, _reserved, kind = _read_exact(sock, 4)
-    if version != 5 or code != 0:
-        raise OSError(f'the proxy refused the connection (SOCKS reply {code})')
-    if kind == 3:  # the bound address, read and dropped
-        _read_exact(sock, _read_exact(sock, 1)[0] + 2)
-    elif kind in (1, 4):
-        _read_exact(sock, (4 if kind == 1 else 16) + 2)
-    else:
-        raise OSError('the proxy answered with an unknown address type')
-
-
-def open_tunnel(spec, ip, port, timeout):
-    """A socket connected to ``ip:port`` THROUGH the proxy: HTTP CONNECT or SOCKS5, always to the numeric address the caller vetted. Raises
-    ``OSError`` when the proxy cannot be reached or refuses; there is no direct fallback. ``spec`` must be of an ``IN_PROCESS_SCHEMES`` kind."""
-    if spec.scheme not in IN_PROCESS_SCHEMES:
-        raise ProxyUnavailable('an https:// proxy cannot carry this check; use an http:// or socks5:// proxy')
-    deadline = time.monotonic() + timeout
-    sock = connect_proxy(spec, timeout)
-    try:
-        sock.settimeout(max(0.1, deadline - time.monotonic()))
-        (_http_connect if spec.scheme == 'http' else _socks5_connect)(sock, ip, port, spec)
-        return sock
-    except BaseException:
-        sock.close()
-        raise

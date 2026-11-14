@@ -181,11 +181,11 @@ def record_service_findings(scan):
     return new
 
 
-def run_nmap_stage(scan_id, **kwargs):
+def run_nmap_stage(scan_id, run=None, **kwargs):
     """The nmap stage plus what its script output proves. Never lets the extras fail the stage."""
-    from cveFeed import nmap_scan
+    from cveFeed import port_stage
     from startScan.models import ScanHistory
-    result = nmap_scan.run_nmap_for_scan(scan_id, **kwargs)
+    result = (run or port_stage.run_for_scan)(scan_id, **kwargs)
     try:
         scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
         found = record_service_findings(scan)

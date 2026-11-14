@@ -37,6 +37,8 @@ import threading
 import time
 from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
 
+from cvengine_scanner.fingerprint import versioned
+
 logger = logging.getLogger(__name__)
 
 MAX_SCRIPTS_PER_HOST = 6     # scripts read per page host, all its pages and web bases together
@@ -388,6 +390,63 @@ def parse_page(body, page_url):
     # data-main, an SVG script href, a loader in an inline script): the files they load are never read
     out.loaders = runtime_loaders(text, markup=True)[:10]
     return out
+
+
+# ----------------------------------------------------------------------------- what a page's scripts state, for the fingerprint
+# The scanner library's ``fingerprint.from_response`` reads a response; which library a script is, and the version its file states, is read
+# here and handed to it as ``(name, source)`` pairs (``script_fingerprints``), so the order and the de-duplication stay in the library.
+
+def script_sources(body, page_url, limit=4):
+    """``(all script URLs, same-host ones to read)`` of a page: absolute URLs, at most ``limit`` to fetch. A script on another
+    host (a CDN) is identified by its name only, never fetched. The page is read the way a browser tokenizes it
+    (``parse_page``): a ``<script src>`` inside an HTML comment or inside another script's text (a ``<script>`` that never
+    closes swallows the rest of the page) is not a script the page loads, and a fallback written only when another script fails is not
+    either."""
+    page = urlsplit(page_url or "")
+    every, local = [], []
+    for entry in parse_page(body, page_url):
+        absolute = entry.get("url")
+        if not absolute or entry.get("fallback"):
+            continue
+        try:
+            parts = urlsplit(absolute)
+        except ValueError:
+            continue
+        if parts.scheme not in ("http", "https") or not parts.hostname or absolute in every:
+            continue
+        every.append(absolute)
+        if parts.hostname.lower() == (page.hostname or "").lower() and parts.port == page.port and len(local) < limit:
+            local.append(absolute)
+    return every[:40], local
+
+
+def from_script_urls(urls):
+    """``[(name, 'script:filename')]`` from the names of the scripts a page loads: the library each file name is (one script, one library)
+    with the version its file name or CDN path carries (``jquery-3.4.1.min.js``, ``/ajax/libs/vue/3.3.4/vue.js``). A hint only, used
+    when the file itself cannot be read (``read_page``); a query string (``jquery.min.js?ver=3.4.1``, a WordPress asset's
+    cache-buster) never gives a version."""
+    out = []
+    for url in urls:
+        hint = identify(url)
+        if hint['library']:
+            name = LIBRARIES[hint['library']][0]
+            out.append((versioned(name, hint['filename_version']), "script:filename"))
+    return out
+
+
+def from_script_body(text):
+    """``[(name, source)]`` a script's own text states: its comment banner or, for jQuery and a few others, code only the library's file
+    has (``read_body``)."""
+    return [(versioned(LIBRARIES[key][0], version), "script:body") for key, version, _how in read_body(text)]
+
+
+def script_fingerprints(urls=(), bodies=()):
+    """``[(name, source)]`` for ``fingerprint.from_response(from_scripts=...)``: the libraries the script names state, then what each script
+    text read from the page's own host states, in that order."""
+    found = from_script_urls(urls)
+    for text in bodies:
+        found += from_script_body(text)
+    return found
 
 
 _LIBRARY_SHAPED = re.compile(r'/\*!|@license|\(c\)\s{0,4}(?:19|20)\d\d', re.IGNORECASE)

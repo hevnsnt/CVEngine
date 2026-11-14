@@ -1,0 +1,40 @@
+{% extends 'cveFeed/base.html' %}
+{% load static assets %}
+{% block title %}CVEngine · CVE catalog{% endblock %}
+{% block content %}
+<div class="page-head"><div>
+<h1>CVE catalog</h1>
+<p class="sub">Search the whole CVE catalog by id (<code>CVE-2024-6387</code>, <code>2024-6387</code>) or by technology (<code>ssh</code>, <code>php</code>), and see how many of your hosts each one matches (to search your own hosts, use the Hosts page).</p>
+</div></div>
+
+<form class="card cvx-form" id="cvx-form" method="get" action="" role="search" autocomplete="off">
+  <div class="cvx-q">
+    <label for="cve-q" class="cvx-sr">Search CVEs</label>
+    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" class="cvx-q-icon"><use href="#i-search"/></svg>
+    <input id="cve-q" name="q" type="search" value="{{ q }}" placeholder="CVE id, product or vendor" maxlength="120" enterkeyhint="search" spellcheck="false" autofocus>
+  </div>
+  <div class="cvx-filters">
+    <label for="cve-sev" class="cvx-sr">Severity</label>
+    <select id="cve-sev" name="severity">
+      <option value="">Any severity</option>
+      {% for s in severities %}<option value="{{ s }}"{% if s == severity %} selected{% endif %}>{{ s|capfirst }}</option>{% endfor %}
+    </select>
+    <label class="cvx-kev"><input type="checkbox" id="cve-kev" name="kev" value="1"{% if kev %} checked{% endif %}> KEV only</label>
+    <button class="btn sm" type="submit">Search</button>
+  </div>
+</form>
+
+<section class="card cvx-card" aria-labelledby="cvx-count">
+  <div class="cvx-head"><h2 id="cvx-count" aria-live="polite">Searching…</h2></div>
+  <ol class="cvx-list" id="cvx-list" aria-label="CVEs"></ol>
+  <div id="cvx-empty"></div>
+  <nav class="cvx-pager" id="cvx-pager" aria-label="Pages" hidden>
+    <button class="btn ghost sm" type="button" id="cvx-prev">Previous</button>
+    <span class="note" id="cvx-page"></span>
+    <button class="btn ghost sm" type="button" id="cvx-next">Next</button>
+  </nav>
+</section>
+{% endblock %}
+{% block scripts %}
+<script type="module" src="{% asset 'cve/explorer.js' %}"></script>
+{% endblock %}

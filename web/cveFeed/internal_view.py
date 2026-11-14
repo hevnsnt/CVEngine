@@ -136,11 +136,11 @@ def declared_networks():
     return out
 
 
-def summary():
+def summary(reps=None):
     """The ``internal`` object of ``/cve/api/stats``: the caller's declared internal networks (each with its host count, last internal scan
     and the state of the Sentinels inside it) and the internal share of the headline numbers. ``has`` is false when no visible project
     declared a network, so the page can leave the group out. The headline totals elsewhere in the payload still include internal hosts;
-    these are the subset."""
+    these are the subset. ``reps``: the host rows (``counts.reps_of(counts.rep_ids())``) when the caller already collapsed the inventory; by default it is collapsed here."""
     from cveFeed import counts
     from startScan.models import Vulnerability
     networks = declared_networks()
@@ -148,7 +148,7 @@ def summary():
         return {'has': False, 'networks': [], 'hosts': 0, 'hosts_live': 0, 'findings': 0, 'matches': 0, 'last_scan_at': None, 'sentinels_online': 0}
     last_overall = max((n['last_scan_at'] for n in networks if n['last_scan_at']), default=None)  # all UTC isoformat, so the strings sort as times
     sentinels = {n['project']: n['sentinel'] for n in networks}
-    reps = counts.host_reps().filter(internal_q())
+    reps = (counts.host_reps() if reps is None else reps).filter(internal_q())
     return {'has': True, 'networks': networks, 'hosts': reps.count(), 'hosts_live': reps.filter(counts.LIVE_HOST_Q).distinct().count(),
             'findings': counts.actionable_findings(Vulnerability.objects.filter(internal_q('subdomain__'))).count(),
             'matches': counts.exposed_matches().filter(internal_q('subdomain__')).count(),

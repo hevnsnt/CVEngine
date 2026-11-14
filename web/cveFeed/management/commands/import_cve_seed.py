@@ -1,3 +1,5 @@
+import os
+
 from django.core.management.base import BaseCommand, CommandError
 
 from cveFeed import seed
@@ -14,6 +16,10 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         try:
             if options['path']:
+                manifest_file = options['path'] + '.manifest.json'
+                if os.path.exists(manifest_file):  # the manifest beside the file is checked the same way the downloaded seed is
+                    seed.verify_seed(options['path'], seed.read_manifest_file(manifest_file))
+                    self.stdout.write('checked against its manifest: size, sha256 and count agree')
                 counts = seed.import_seed(options['path'], progress=lambda c: self.stdout.write(f"  {c['seen']} read, {c['created']} new..."))
             else:
                 counts = seed.load_published_seed(options['url'])

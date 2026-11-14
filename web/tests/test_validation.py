@@ -9,12 +9,15 @@ import yaml
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import ledger, nuclei_scan, templategen, triage, validation
+from cvengine_scanner import flags as scan_flags
+
+from cveFeed import nuclei_scan, templategen, triage, validation
 from cveFeed.models import CVEEntry, CVEMatch, GeneratedTemplate, ServiceRun, Triage
 from dashboard.models import Org, Project
 from reNgine import resources
-from startScan.models import IpAddress, Port, Subdomain, Vulnerability
+from startScan.models import Subdomain, Vulnerability
 from targetApp.models import Domain
+from tests import ai_queue
 
 GET_TEMPLATE = """
 id: cve-2099-1
@@ -42,6 +45,146 @@ http:
       - type: word
         words: [x]
 """
+
+
+def _with_headers(headers='', path='{{BaseURL}}/x', extra=''):
+    return ("id: c\ninfo: {name: c, severity: info}\n" + extra + "http:\n  - method: GET\n    path: [\"" + path + "\"]\n"
+            + ("    headers:\n" + ''.join(f"      {k}: \"{v}\"\n" for k, v in headers.items()) if headers else '')
+            + "    matchers:\n      - type: word\n        words: [ok]\n")
+
+
+class CredentialInATemplateTests(TestCase):
+	"""TL-2 item 3: a template that sends a credential of its own is refused unless an App Admin allowed credential checks (never for an AI-written one)."""
+	HOSTILE = {
+		'basic': _with_headers({'Authorization': 'Basic YWRtaW46YWRtaW4='}),
+		'bearer': _with_headers({'Authorization': 'Bearer abc123def456'}),
+		'cookie': _with_headers({'Cookie': 'PHPSESSID=0123456789abcdef'}),
+		'api_key': _with_headers({'X-Api-Key': 'letmein'}),
+		'function': _with_headers({'Authorization': "Basic {{base64('admin:admin')}}"}),
+		'userinfo': _with_headers(path='http://admin:admin@{{Hostname}}/'),
+		'raw': "id: c\ninfo: {name: c, severity: info}\nhttp:\n  - raw:\n      - |\n        GET /s HTTP/1.1\n        Host: {{Hostname}}\n        Authorization: Basic YWRtaW46YWRtaW4=\n",
+		'variable': _with_headers({'Authorization': 'Bearer {{tok}}'}, extra='variables:\n  tok: "s3cret-value"\n'),
+	}
+	FINE = {
+		'placeholder': _with_headers({'Authorization': 'Bearer {{token}}'}),  # what a signed-in run's secrets file or an extractor supplies
+		'echoed_cookie': _with_headers({'Cookie': 'PHPSESSID={{sid}}'}),
+		'user_agent': _with_headers({'User-Agent': 'cvengine-check/1.0'}),
+		'plain': GET_TEMPLATE,
+	}
+
+	def test_the_read_only_rule_refuses_each_fixed_credential_and_passes_the_placeholders(self):
+		for name, text in self.HOSTILE.items():
+			with self.subTest(hostile=name):
+				self.assertTrue(validation.credential_problem(text).startswith('template not validated: it sends a credential'), name)
+				self.assertTrue(validation.readonly_problem(text), name)  # a user name in a URL is also a destination the rule never allowed
+				if name != 'userinfo':
+					self.assertTrue(validation.readonly_problem(text).startswith('template not validated: it sends a credential'), name)
+					self.assertEqual(validation.readonly_problem(text, allow_credentials=True), '')  # only an installed template is ever given this
+		for name, text in self.FINE.items():
+			with self.subTest(fine=name):
+				self.assertEqual(validation.readonly_problem(text), '')
+
+	BODY = {
+		'form_body': "id: c\ninfo: {name: c, severity: info}\nhttp:\n  - method: POST\n    path: [\"{{BaseURL}}/login\"]\n    body: 'user=admin&password=admin'\n    matchers:\n      - type: word\n        words: [ok]\n",
+		'json_body': "id: c\ninfo: {name: c, severity: info}\nhttp:\n  - method: POST\n    path: [\"{{BaseURL}}/login\"]\n    body: '{\"username\":\"a\",\"password\":\"admin\"}'\n    matchers:\n      - type: word\n        words: [ok]\n",
+		'raw_body': "id: c\ninfo: {name: c, severity: info}\nhttp:\n  - raw:\n      - |\n        POST /login HTTP/1.1\n        Host: {{Hostname}}\n\n        log=admin&pwd=secret1\n",
+		'query_string': "id: c\ninfo: {name: c, severity: info}\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/login?user=a&password=admin\"]\n    matchers:\n      - type: word\n        words: [ok]\n",
+		'literal_variable': "id: c\ninfo: {name: c, severity: info}\nvariables:\n  pw: admin\nhttp:\n  - method: POST\n    path: [\"{{BaseURL}}/login\"]\n    body: 'password={{pw}}'\n    matchers:\n      - type: word\n        words: [ok]\n",
+		'payload_list': "id: c\ninfo: {name: c, severity: info}\nhttp:\n  - method: POST\n    path: [\"{{BaseURL}}/login\"]\n    body: 'password={{pass}}'\n    payloads:\n      pass: [admin, password]\n    matchers:\n      - type: word\n        words: [ok]\n",
+		'helper_over_a_variable': "id: c\ninfo: {name: c, severity: info}\nvariables:\n  auth: admin:admin\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/\"]\n    headers:\n      Authorization: 'Basic {{base64(auth)}}'\n    matchers:\n      - type: word\n        words: [ok]\n",
+	}
+	PASSWORD_PLACEHOLDERS = "id: c\ninfo: {name: c, severity: info}\nhttp:\n  - method: POST\n    path: [\"{{BaseURL}}/login\"]\n    body: 'user={{username}}&password={{password}}&bypass=1'\n    matchers:\n      - type: word\n        words: [ok]\n"
+
+	def test_a_password_in_a_body_or_behind_a_placeholder_over_a_fixed_value_is_a_credential(self):
+		for name, text in self.BODY.items():
+			with self.subTest(name=name):
+				self.assertTrue(validation.credential_problem(text).startswith('template not validated: it sends a credential'), name)
+		self.assertEqual(validation.credential_problem(self.PASSWORD_PLACEHOLDERS), '')  # what a signed-in run supplies, and a field that only looks like one
+
+	def test_a_template_tagged_default_login_or_bruteforce_is_left_out_by_its_tag_until_the_switch_is_on(self):
+		from dashboard.models import ScanPolicy
+		login = "id: dl\ninfo: {name: x, severity: high, tags: 'default-login,vendor'}\nhttp:\n  - method: GET\n    path: [\"{{BaseURL}}/status\"]\n    matchers:\n      - type: word\n        words: [ok]\n"
+		brute = login.replace('default-login', 'bruteforce').replace('id: dl', 'id: bf')
+		listed = login.replace("tags: 'default-login,vendor'", "tags: [vendor, default-login]").replace('id: dl', 'id: dl2')
+		for everything in (False, True):
+			ScanPolicy.objects.all().delete()
+			ScanPolicy.objects.create(nuclei_all_templates=everything)
+			for text in (login, brute, listed):
+				self.assertIn('check that sends credentials', validation.installed_template_problem(text), everything)
+			self.assertEqual(validation.installed_template_problem(GET_TEMPLATE), '')
+			self.assertEqual(validation.installed_template_problem(GET_TEMPLATE.replace('tags: cve-2099-1', 'description: a default-login page')), '')  # a word is not a tag
+			ScanPolicy.objects.update(allow_credential_checks=True)
+			self.assertEqual(validation.installed_template_problem(login), '', everything)
+
+	def test_the_bundle_leaves_out_a_default_login_template_that_posts_a_body_password_until_the_switch_is_on(self):
+		"""FA-2a: the approved snapshot a Sentinel downloads (an older one has no tag filter of its own)."""
+		from dashboard.models import ScanPolicy
+		ScanPolicy.objects.create(nuclei_all_templates=True)
+		posting = "id: dl\ninfo: {name: x, severity: high, tags: 'default-login,vendor'}\nhttp:\n  - method: POST\n    path: [\"{{BaseURL}}/login\"]\n    body: 'user=admin&password=admin'\n    matchers:\n      - type: word\n        words: [ok]\n"
+		with tempfile.TemporaryDirectory() as root:
+			os.makedirs(os.path.join(root, 'http'))
+			for name, text in (('plain', GET_TEMPLATE), ('login', posting)):
+				with open(os.path.join(root, 'http', f'{name}.yaml'), 'w') as output:
+					output.write(text)
+			with mock.patch.object(templategen, 'TEMPLATES_ROOT', root):
+				nuclei_scan._APPROVED.update(value=None, root=None, rev=None, at=0)
+				directory, off_revision, count = nuclei_scan.approved_templates()
+				self.assertEqual((count, sorted(os.listdir(os.path.join(directory, 'http')))), (1, ['plain.yaml']))
+				ScanPolicy.objects.update(allow_credential_checks=True)
+				nuclei_scan._APPROVED.update(value=None, root=None, rev=None, at=0)
+				directory, on_revision, count = nuclei_scan.approved_templates()
+				self.assertEqual(count, 2)
+				self.assertNotEqual(off_revision, on_revision)  # the bundle hash changes with the switch
+
+	def test_an_installed_template_needs_the_switch_under_either_policy(self):
+		from dashboard.models import ScanPolicy
+		hostile = self.HOSTILE['basic']
+		for everything in (False, True):
+			ScanPolicy.objects.all().delete()
+			ScanPolicy.objects.create(nuclei_all_templates=everything)
+			self.assertTrue(validation.installed_template_problem(hostile), everything)
+			self.assertEqual(validation.installed_template_problem(self.FINE['placeholder']), '')
+			ScanPolicy.objects.update(allow_credential_checks=True)
+			self.assertEqual(validation.installed_template_problem(hostile), '', everything)
+
+	def test_the_approved_snapshot_leaves_such_a_template_out_until_the_switch_is_on(self):
+		from dashboard.models import ScanPolicy
+		ScanPolicy.objects.create(nuclei_all_templates=True)
+		with tempfile.TemporaryDirectory() as root:
+			os.makedirs(os.path.join(root, 'http'))
+			for name, text in (('plain', GET_TEMPLATE), ('basic', self.HOSTILE['basic'])):
+				with open(os.path.join(root, 'http', f'{name}.yaml'), 'w') as output:
+					output.write(text)
+			with mock.patch.object(templategen, 'TEMPLATES_ROOT', root):
+				nuclei_scan._APPROVED.update(value=None, root=None, rev=None, at=0)
+				directory, _revision, count = nuclei_scan.approved_templates()
+				self.assertEqual((count, sorted(os.listdir(os.path.join(directory, 'http')))), (1, ['plain.yaml']))
+				ScanPolicy.objects.update(allow_credential_checks=True)
+				nuclei_scan._APPROVED.update(value=None, root=None, rev=None, at=0)
+				directory, _revision, count = nuclei_scan.approved_templates()
+				self.assertEqual(count, 2)
+
+	def test_an_ai_written_check_never_gets_the_switch(self):
+		from agentapi import ai_checks
+		from dashboard.models import ScanPolicy
+		ScanPolicy.objects.create(nuclei_all_templates=True, allow_credential_checks=True)
+		for text in self.HOSTILE.values():
+			self.assertTrue(ai_checks.external_problem(text))  # an external Sentinel's check
+			self.assertTrue(validation.readonly_problem(text))  # the default: nobody passes allow_credentials for generated text
+
+	def test_a_builtin_check_with_every_template_allowed_still_needs_the_switch(self):
+		from agentapi import ai_checks
+		from dashboard.models import ScanPolicy
+		ScanPolicy.objects.create(nuclei_all_templates=True)
+		hostile = self.HOSTILE['basic']
+		self.assertTrue(ai_checks.approval_problem('test', hostile, builtin=True))
+		self.assertEqual(ai_checks.approval_problem('test', self.FINE['placeholder'], builtin=True), '')
+		ScanPolicy.objects.update(allow_credential_checks=True)
+		self.assertEqual(ai_checks.approval_problem('test', hostile, builtin=True), '')
+
+	def test_the_template_policy_revisions_moved_so_hosts_are_judged_again(self):
+		self.assertNotIn(nuclei_scan.TEMPLATE_POLICY_REV, ('readonly-1', 'readonly-2', 'readonly-3', 'readonly-4'))
+		self.assertNotIn(nuclei_scan.ALL_TEMPLATES_REV, ('all-1', 'all-2', 'all-3', 'all-4'))
 
 
 class AllTemplatesSettingTests(TestCase):
@@ -124,61 +267,9 @@ class ReadOnlyTemplateTests(unittest.TestCase):
 					self.assertEqual(count, 1)
 					self.assertTrue(os.path.isfile(os.path.join(approved, 'safe.yaml')))
 					self.assertFalse(os.path.exists(os.path.join(approved, 'write.yaml')))
-					self.assertIn('-ni', nuclei_scan.build_flags(templates_dir=approved))
+					self.assertIn('-ni', scan_flags.nuclei_flags(templates_dir=approved))
 				finally:
 					shutil.rmtree(approved, ignore_errors=True)
-
-	def test_broad_nuclei_process_failure_is_not_a_clean_scan(self):
-		import io
-		class Job:
-			def __enter__(self): return self
-			def __exit__(self, *args): return False
-			def attach(self, proc): pass
-			def raise_if_killed(self): pass
-		class Process:
-			stdout = io.StringIO('')
-			returncode = 2
-			def poll(self): return self.returncode
-			def wait(self): return self.returncode
-		with tempfile.NamedTemporaryFile('w') as targets:
-			targets.write('www.example.test\n')
-			targets.flush()
-			with mock.patch.object(nuclei_scan, 'approved_templates', return_value=('/tmp/approved', 'revision', 1)), \
-					mock.patch('reNgine.resources.heavy_job', return_value=Job()), \
-					mock.patch.object(nuclei_scan.subprocess, 'Popen', return_value=Process()):
-				with self.assertRaisesRegex(RuntimeError, 'exited with status 2'):
-					list(nuclei_scan.stream_nuclei(targets.name, timeout=1))
-
-	def run_stream(self, returncode, stderr_text, stdout=''):
-		import io
-		class Job:
-			def __enter__(self): return self
-			def __exit__(self, *args): return False
-			def attach(self, proc): pass
-			def raise_if_killed(self): pass
-		class Process:
-			def __init__(self, stderr):
-				stderr.write(stderr_text)
-				self.stdout, self.returncode = io.StringIO(stdout), returncode
-			def poll(self): return self.returncode
-			def wait(self): return self.returncode
-		with tempfile.NamedTemporaryFile('w') as targets:
-			targets.write('www.example.test\n')
-			targets.flush()
-			with mock.patch.object(nuclei_scan, 'approved_templates', return_value=('/tmp/approved', 'revision', 1)), \
-					mock.patch('reNgine.resources.heavy_job', return_value=Job()), \
-					mock.patch.object(nuclei_scan.subprocess, 'Popen', side_effect=lambda *a, **kw: Process(kw['stderr'])):
-				return list(nuclei_scan.stream_nuclei(targets.name, timeout=1, tags=['wordpress']))
-
-	def test_a_failed_nuclei_run_says_why(self):
-		with self.assertLogs('cveFeed.nuclei_scan', 'ERROR'), \
-				self.assertRaisesRegex(RuntimeError, r'status 1: \[FTL\] Could not create runner: bad flag'):
-			self.run_stream(1, '\x1b[31m[FTL]\x1b[0m Could not create runner: bad flag\n')
-
-	def test_no_approved_template_for_the_tags_is_an_empty_run_not_a_failure(self):
-		self.assertEqual(self.run_stream(1, '[FTL] Could not run nuclei: no templates provided for scan\n'), [])
-		with self.assertRaises(RuntimeError):  # results then a fatal exit is still a failure
-			self.run_stream(1, '[FTL] Could not run nuclei: no templates provided for scan\n', stdout='{"host": "x"}\n')
 
 	def test_policy_report_logs_an_excluded_essential_template_as_failed_once_per_revision(self):
 		from django.core.cache import cache
@@ -197,26 +288,6 @@ class ReadOnlyTemplateTests(unittest.TestCase):
 			nuclei_scan._report_policy('rev-b', 10, {'x': 1}, {})
 		self.assertEqual(log.call_args.kwargs['status'], 'done')
 
-	def test_broad_nuclei_malformed_output_is_not_clean(self):
-		import io
-		class Job:
-			def __enter__(self): return self
-			def __exit__(self, *args): return False
-			def attach(self, proc): pass
-			def raise_if_killed(self): pass
-		class Process:
-			returncode = 0
-			def __init__(self): self.stdout = io.StringIO('{broken\n')
-			def poll(self): return 0
-			def wait(self): return 0
-		with tempfile.NamedTemporaryFile('w') as targets:
-			targets.write('www.example.test\n')
-			targets.flush()
-			with mock.patch.object(nuclei_scan, 'approved_templates', return_value=('/tmp/approved', 'revision', 1)), \
-					mock.patch('reNgine.resources.heavy_job', return_value=Job()), \
-					mock.patch.object(nuclei_scan.subprocess, 'Popen', return_value=Process()):
-				with self.assertRaisesRegex(RuntimeError, 'malformed JSON'):
-					list(nuclei_scan.stream_nuclei(targets.name, timeout=1))
 	def test_template_revision_changes_coverage_keys(self):
 		with tempfile.TemporaryDirectory() as directory:
 			path = os.path.join(directory, 'cve.yaml')
@@ -296,8 +367,8 @@ class PlanTests(unittest.TestCase):
 		self.assertEqual(nmap['argv'], ['nmap', '-sV', '--version-intensity', '5', '-Pn', '-p', '443', '--host-timeout', '60s', '-oX', '-', '203.0.113.7'])
 		self.assertEqual(nmap['display'], 'nmap -sV --version-intensity 5 -Pn -p 443 --host-timeout 60s -oX - 203.0.113.7')
 		self.assertTrue(nmap['service'].startswith(f'validate:nmap_sv:{"a" * 16}:'))
-		self.assertIn('-ni', checks[0]['argv'])
-		self.assertIn('-retries', checks[0]['argv'])
+		self.assertEqual(checks[0]['argv'], [])  # the template check runs on the built-in scanner: there is no command of this server's to show
+		self.assertEqual(checks[0]['display'], 'template check cve-2099-1.yaml against www.v.test')
 
 	def test_only_the_four_kinds_with_allowlisted_argv_exist(self):
 		subjects = [{'kind': 'cve_match', 'host': 'www.v.test', 'cve_id': 'CVE-1', 'source': 'port', 'ip': '203.0.113.7', 'port': 80},
@@ -476,7 +547,7 @@ class ValidationBase(TestCase):
 	def rows(self, **kw):
 		findings = triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))
 		pairs = triage.track(findings)
-		triage.run_triage(pairs, provider=None)  # no AI: validation does not need one
+		ai_queue.run_triage(pairs, provider=None)  # no AI: validation does not need one
 		return list(Triage.objects.all())
 
 	def runners(self, status='no_match', **extra):
@@ -506,6 +577,34 @@ class ValidationBase(TestCase):
 		return stats, calls
 
 
+class BudgetTests(ValidationBase):
+	def worked(self, rows):
+		"""How many of ``rows`` a run actually validated (their status moved off none or pending)."""
+		return Triage.objects.filter(pk__in=[r.pk for r in rows]).exclude(validation_status__in=('none', 'pending')).count()
+
+	def test_a_spent_budget_stops_after_one_finding_and_names_the_rest(self):
+		for n in range(3):
+			self.match(name=f'h{n}.v.test')
+		rows = self.rows()
+		self.assertEqual(len(rows), 3)
+		stats, _ = self.run_validation(rows, budget_seconds=-1)
+		self.assertEqual(stats['rows'], 3)
+		self.assertEqual(len(stats['deferred_ids']), 2)
+		self.assertEqual(self.worked(rows), 1)  # one finding was worked, then the slot was handed back
+		left = [r for r in rows if r.pk in stats['deferred_ids']]
+		stats2, _ = self.run_validation(left, budget_seconds=-1)
+		self.assertEqual(len(stats2['deferred_ids']), 1)  # each slice makes progress, so the chain ends
+		self.assertEqual(self.worked(rows), 2)
+
+	def test_no_budget_runs_everything_as_before(self):
+		for n in range(3):
+			self.match(name=f'h{n}.v.test')
+		rows = self.rows()
+		stats, _ = self.run_validation(rows)
+		self.assertNotIn('deferred_ids', stats)
+		self.assertEqual(self.worked(rows), 3)
+
+
 class ApplyValidationTests(ValidationBase):
 	def check(self, kind='nuclei_template'):
 		argv = ['nuclei', '-t', '/t/cve-2099-1.yaml', '-u', 'www.v.test', '-ni']
@@ -521,7 +620,6 @@ class ApplyValidationTests(ValidationBase):
 		m, row = self.prepared()
 		self.assertEqual((row.classification, row.validation_status), ('', 'none'))  # not triaged: no provider
 		self.assertEqual(row.status, 'not_triaged')
-		from cveFeed.templategen import _host_key
 		result = validation._result_from_outcome({'host': 'www.v.test', 'vulnerable': True, 'hit': hit(), 'output': '{}'})
 		validation.apply_validation(row, self.check(), result)
 		row.refresh_from_db()
@@ -559,13 +657,13 @@ class ApplyValidationTests(ValidationBase):
 		provider = mock.Mock(model='m')
 		provider.name = 'anthropic'
 		provider.complete.return_value = '{"classification": "likely_false_positive", "reason": "no"}'
-		triage.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=provider)
+		ai_queue.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=provider)
 		row.refresh_from_db()
 		self.assertEqual(row.classification, 'needs_validation')
 		validation.apply_validation(row, self.check(), validation._result_from_outcome({'host': 'www.v.test', 'vulnerable': True, 'hit': hit()}))
 		row.refresh_from_db()
 		self.assertEqual((row.classification, row.status, row.verdict_id), ('confirmed', 'pending', None))
-		triage.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=provider)
+		ai_queue.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=provider)
 		row.refresh_from_db()
 		self.assertEqual((row.classification, row.status), ('confirmed', 'triaged'))
 
@@ -574,7 +672,7 @@ class ApplyValidationTests(ValidationBase):
 		provider = mock.Mock(model='m')
 		provider.name = 'anthropic'
 		provider.complete.return_value = '{"classification": "likely_false_positive", "reason": "no"}'
-		triage.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=provider)
+		ai_queue.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))), provider=provider)
 		row.refresh_from_db()
 		self.assertEqual(row.classification, 'needs_validation')  # in range: the floor
 		validation.apply_validation(row, self.check(), {'status': 'no_match', 'summary': 'the template did not match'})
@@ -893,15 +991,17 @@ class OnDemandKeepsTriageTests(ValidationBase):
 		with mock.patch('cveFeed.validation_plan.plan', return_value=(plan, None)), \
 				mock.patch('cveFeed.validation_authority.require_authority'), \
 				mock.patch.dict(validation.RUNNERS, {'nmap_sv': lambda check: observed}), \
-				mock.patch('cveFeed.triage._resolve_provider', return_value=provider), \
+				mock.patch('cveFeed.triage._resolve_provider', return_value=provider and ai_queue.ensure_configured(provider) or provider), \
 				mock.patch('cveFeed.validation.resolve_template', return_value=('', 'no template covers this CVE')):
 			tasks.validate_match_on_demand(job.pk)
+		if provider:
+			ai_queue.serve(provider)  # the AI reviewer container answers the question the validation queued
 		return job
 
 	def triaged_match(self):
 		from tests.test_triage import reply
 		m = self.match()
-		triage.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))),
+		ai_queue.run_triage(triage.track(triage.with_cves(CVEMatch.objects.select_related('subdomain__target_domain'))),
 						  provider=self.provider(reply('likely')))
 		row = Triage.objects.get(match=m)
 		self.assertEqual((row.status, row.classification), ('triaged', 'needs_validation'))  # version string alone: capped
@@ -961,7 +1061,7 @@ class TemplateOutcomeFeedTests(ValidationBase):
 		(row,) = self.rows()
 		outcomes = [{'host': 'www.v.test', 'vulnerable': True, 'output': '{}', 'hit': hit()}]
 		with mock.patch('cveFeed.validation.resolve_template', return_value=('/t/cve-2099-1.yaml', '')), \
-				mock.patch.object(templategen, '_run_template_with_retry', return_value=outcomes):
+				mock.patch.object(templategen, '_test_chunk', return_value=outcomes):
 			templategen.run_cve_tests(self.cve, ['www.v.test'], project=self.project.id)
 		row.refresh_from_db()
 		self.assertEqual((row.classification, row.validation_status), ('confirmed', 'hit'))

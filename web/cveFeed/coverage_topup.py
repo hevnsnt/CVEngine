@@ -1,15 +1,13 @@
-"""Fast, deterministic top-up of host-assessment coverage, independent of the three-hour AI review.
+"""Fast, deterministic top-up of host-assessment coverage, with no model involved.
 
-cveFeed.assessment_review's three-hour review offers the model at most one due host per project per
-three-hour window (AssessmentReviewDecision allows one decision per project per window, and the model
-may or may not even pick the offered action over triage/validate/discover). That is far too slow for a
-project that just picked up dozens of new subdomains from one discovery run: at one host every three
-hours, an 80-host backlog would take ten days to drain.
+A project that just picked up dozens of new subdomains from one discovery run needs its first pass on every one of them within hours.
+(The three-hourly AI assessment review that once offered a model one due host per project per window was far too slow for that, and is
+retired: the AI reviewer's operations check, docs/AI-REVIEWER.md, watches coverage now.)
 
 This module runs on a short interval (see the migration that schedules ``top_up_host_assessments``,
 every TOPUP_INTERVAL_MINUTES) and queues host assessments directly, with no model call and no per-project
 decision throttle: for every project with free host-assessment capacity, it enqueues the next due hosts
-from the same population cveFeed.assessment_review.host_coverage_due() looks at (missing core stage
+from the population ``host_coverage_due`` below looks at (missing core stage
 coverage, no recent attempt, not excluded, not archived), up to that project's free capacity.
 
 Interval and cap choice (see also docs/PIPELINE.md): a backlog the size of today's (roughly 80 hosts in
@@ -17,7 +15,7 @@ one project) needs to drain within hours, not days. A host assessment's own pipe
 nuclei pass, CVE correlation, the targeted nuclei pass) typically finishes well inside this sweep's
 interval, so throughput is bounded by the per-project queue slot (5) refilling as each assessment
 finishes, not by how often this sweep runs. Every TOPUP_INTERVAL_MINUTES (5) is frequent enough that a
-freed slot is refilled within minutes rather than sitting idle until the next three-hour review, while
+freed slot is refilled within minutes rather than sitting idle, while
 staying far below the per-minute cadence of cveFeed.conductor's own work_conductor sweep. At the
 project's cap of 5 concurrent assessments, draining an 80-host backlog takes roughly 80 / 5 = 16 rounds;
 even at a generous 20 minutes per host assessment that is about 16 * 20 = 320 minutes, call it half a day
@@ -31,16 +29,124 @@ before picking their next deep-scan target: first-pass coverage everywhere outra
 port sweep or UDP exposure check. It reuses host_coverage_due() rather than a second query.
 """
 import logging
+import time
 from datetime import timedelta
 
+from django.core.cache import cache
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
+
+# An empty answer ("nothing is due") that took ``IDLE_MIN_COST`` seconds or more to give is kept for ``IDLE_FACTOR`` times that, at most ``IDLE_CEILING`` seconds:
+# four callers ask every minute (the Sentinel feed, the watchdog snapshot, the full-port and UDP gates) and each made the database evaluate every host of every
+# project to say so again. A quick answer is not kept, so a small install behaves exactly as before.
+IDLE_MIN_COST = 0.5
+IDLE_FACTOR = 10
+IDLE_CEILING = 60  # a host that becomes due without a new row (its retry window ends, it is restored) waits this long at most
+_monotonic = time.monotonic
+
+
+def _idle_key(kind, project):
+    return f'cve:topup:idle:{kind}:{getattr(project, "pk", project)}'
+
+
+def _inventory_token(project):
+    """What the project's inventory looked like when an empty answer was given: its newest host row and how many of its scans finished. A host that is
+    discovered adds a row, and a scan that finishes makes the hosts it holds current, so either one changes the token and the remembered answer is
+    not used. Two small indexed reads, against the per-host stage checks the answer spares."""
+    from django.db.models import Max
+    from startScan.models import ScanHistory, Subdomain
+    pk = getattr(project, 'pk', project)
+    newest = Subdomain.objects.filter(target_domain__project_id=pk).aggregate(n=Max('id'))['n']
+    finished = ScanHistory.objects.filter(domain__project_id=pk, scan_status=2).count()
+    return f'{newest}:{finished}'
+
+
+def _idle_known(kind, project):
+    try:
+        remembered = cache.get(_idle_key(kind, project))
+        return remembered is not None and remembered == _inventory_token(project)  # nothing remembered: no statement at all
+    except Exception:  # noqa: BLE001 - without the cache every call reads the database, as before
+        return False
+
+
+def _idle_remember(kind, project, took):
+    """Keep an empty answer that took ``took`` seconds to give, when that was slow enough to be worth sparing the database the next ask, with the
+    inventory token read now. A quick answer (a small install) reads nothing extra, so it stays one statement. A host that arrived while a slow read was
+    running can be hidden for the memo's life (a minute at most); every later host or finished scan changes the token."""
+    if took < IDLE_MIN_COST:
+        return
+    try:
+        cache.set(_idle_key(kind, project), _inventory_token(project), int(min(IDLE_CEILING, IDLE_FACTOR * took)))
+    except Exception:  # noqa: BLE001
+        pass
+
 
 PROJECT_LIMIT = 100          # projects examined per run; today's installations have under ten
 MAX_ENQUEUED_PER_RUN = 20    # mirrors host_assessment's base global cap (it grows with the Sentinels' slots, see host_assessment.caps)
 MAX_PER_RUN_BASE = MAX_ENQUEUED_PER_RUN
 PER_PROJECT_LIMIT = 5        # mirrors host_assessment's per-project active cap
+
+
+HOST_STAGES = ('nmap_scan', 'nuclei_light_scan', 'cve_correlation', 'nuclei_targeted_scan')
+
+
+def host_coverage_due(project, at, limit=1, need_count=True):
+    """Count every distinct current-inventory name missing a successful core stage; return up to ``limit`` due stored host
+    ids, ordered by id so every caller (the top-up below, the deep-scan gate, the Sentinel feed) walks the same deterministic
+    queue.
+
+    A recent attempt or active scan is deferred, not falsely counted as covered. This query
+    evaluates the full project population in the database, including scanless CT hosts.
+
+    ``need_count`` is on by default for the callers that report how big the backlog is, but a caller that only asks "is there
+    at least one" (the top-up and the full-port/UDP sweep gate) passes ``need_count=False`` to skip the DISTINCT aggregate below: with
+    it off, this is a single bounded ``LIMIT`` query.
+    """
+    if not need_count and _idle_known('due', project):  # nothing was due a moment ago, the inventory is as it was, and finding that out was slow: the same answer
+        return None, []
+    started = _monotonic()
+    from django.db.models import Exists, OuterRef
+    from cveFeed.correlation import latest_scan_q
+    from cveFeed.models import HostAssessment, HostExclusion, HostState
+    from cveFeed.internal_scan import TASK_TAG as INTERNAL_PIPELINE_TASK
+    from cveFeed.unresolved_archive import COUNTS_FOR
+    from startScan.models import ScanActivity, Subdomain
+    from targetApp.models import Domain
+
+    completed = Subdomain.objects.filter(target_domain__project=project, name=OuterRef('name'),
+                                         scan_history__scan_status=2)
+    for index, stage in enumerate(HOST_STAGES):
+        check = ScanActivity.objects.filter(scan_of_id=OuterRef('scan_history_id'), name=stage, status=2)
+        key = f'stage_{index}'
+        completed = completed.annotate(**{key: Exists(check)}).filter(**{key: True})
+    from cveFeed.host_assessment import BATCH_STOPPED
+    attempts = HostAssessment.objects.filter(project=project, host=OuterRef('name'),
+                                             created_at__gte=at - timedelta(hours=24)).exclude(error=BATCH_STOPPED)  # a host caught in a batch someone stopped never had its turn
+    active = Subdomain.objects.filter(target_domain__project=project, name=OuterRef('name'),
+                                      scan_history__scan_status__in=(-1, 1))
+    excluded = HostExclusion.objects.filter(org_id=project.org_id, host=OuterRef('name'))
+    archived = HostState.objects.filter(project=project, host=OuterRef('name'), archived_at__isnull=False)
+    # A host that has no scannable address (a dangling name, or one that points inside a private network) was tried and has nothing to scan: it is
+    # not a first-pass backlog. Counting it kept the full-port and UDP sweeps waiting, and the project's few assessment slots busy, for ever.
+    # unresolved_archive.recheck resolves it again every few hours and puts it back here the moment it has an address.
+    no_address = HostState.objects.filter(project=project, host=OuterRef('name'), unresolved_checks__gte=1,
+                                          unresolved_last_at__gte=at - COUNTS_FOR)
+    # the current inventory only (one row per host, from the latest scan), not every scan's copy of every name: with a long history the
+    # six correlated checks below ran once per host per scan, every minute for every project
+    # Internal inventory has its own Sentinel-only scan cadence. A host assessment
+    # here would try the external pipeline and cannot repair missing internal stages.
+    rows = (Subdomain.objects.filter(latest_scan_q()).filter(target_domain__project=project)
+            .exclude(scan_history__tasks__contains=[INTERNAL_PIPELINE_TASK])
+            .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: no automatic assessment, so it is no backlog either
+            .annotate(covered=Exists(completed), recent_attempt=Exists(attempts), active_scan=Exists(active),
+                      excluded_name=Exists(excluded), archived_name=Exists(archived), no_address=Exists(no_address))
+            .filter(covered=False, recent_attempt=False, active_scan=False, excluded_name=False, archived_name=False, no_address=False))
+    due_ids = list(rows.order_by('id').values_list('id', flat=True)[:limit]) if limit else []
+    count = (rows.order_by().values('name').distinct().count()) if need_count else None
+    if not need_count and limit and not due_ids:
+        _idle_remember('due', project, _monotonic() - started)
+    return count, due_ids
 
 
 def top_up(now=None, only_sentinel_projects=False):
@@ -86,7 +192,6 @@ def _remember_cursor(pk):
 
 
 def _top_up(now, only_sentinel_projects):
-    from cveFeed.assessment_review import host_coverage_due
     from cveFeed.conductor import bounty_blocked_projects
     from cveFeed.host_assessment import active_slots, batch_size_for, batches, caps, enqueue_batch
     from cveFeed.scan_control import pause_requested
@@ -168,28 +273,56 @@ def refresh_gap():
 def stalest_hosts(project, now, limit, gap):
     """Up to ``limit`` ``Subdomain`` rows of ``project``'s current inventory whose last host assessment started longest ago (never assessed first),
     leaving out a host assessed inside ``gap``. One row per host name. This is for hosts that already have their first-pass coverage: the ones that
-    miss it are ``host_coverage_due``'s."""
-    from django.db.models import F, OuterRef, Q, Subquery
-    from django.db.models.functions import Lower
+    miss it are ``host_coverage_due``'s.
+
+    Four plain reads joined here, not one query. The single query (a correlated "last assessment of this host name" sub-select, a ``Lower(name)`` anti-join
+    for archived hosts and a sort on the sub-select) took 129 seconds for a project of 12,700 host rows on the VPS, because ``HostAssessment`` has no
+    index on the host and every outer row scanned the project's assessments again. The CVE-feed lane ran it for every project every minute and could do
+    nothing else while it ran (11/10). Each read below takes well under a second."""
+    from django.db.models import Max
+
     from cveFeed.correlation import latest_scan_q
-    from cveFeed.models import HostAssessment
+    from cveFeed.models import HostAssessment, HostState
     from startScan.models import Subdomain
     from targetApp.models import Domain
 
-    last = HostAssessment._base_manager.filter(project=project, host=OuterRef('lowered')).order_by('-created_at').values('created_at')[:1]
-    rows = (Subdomain.objects.filter(latest_scan_q(), target_domain__project=project).select_related('target_domain')
-            .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: never assessed on its own (host_assessment._admit refuses it too)
-            .annotate(lowered=Lower('name')).annotate(last_assessed=Subquery(last))
-            .filter(Q(last_assessed__isnull=True) | Q(last_assessed__lt=now - gap))
-            .order_by(F('last_assessed').asc(nulls_first=True), 'id')[:limit * 4])
-    seen, out = set(), []
-    for row in rows:
-        if row.lowered in seen:
+    memo = f'stale:{int(gap.total_seconds())}'  # one answer per gap: a shorter gap finds hosts a longer one leaves out
+    if _idle_known(memo, project):  # no host was stale a moment ago, the inventory is as it was, and finding that out was slow (it reads the whole inventory): the same answer
+        return []
+    started = _monotonic()
+    current = list(Subdomain.objects.filter(latest_scan_q(), target_domain__project=project)
+                   .exclude(target_domain__discovery_mode=Domain.DISCOVERY_MANUAL)  # manual only: never assessed on its own (host_assessment._admit refuses it too)
+                   .values_list('id', 'name'))
+    last = dict(HostAssessment._base_manager.filter(project=project).order_by().values('host').annotate(at=Max('created_at')).values_list('host', 'at'))
+    # An archived host is never assessed (host_assessment._admit refuses it), so it never gets a newer assessment and stays the stalest host for ever: left in,
+    # a few hundred of them filled the whole candidate window, every pass queued nothing and logged a line per host, and the Sentinels idled while real hosts
+    # waited (the owner's VPS, 2026-11-09).
+    archived = set(HostState.objects.filter(project=project, archived_at__isnull=False).values_list('host', flat=True))
+    cutoff = now - gap
+    epoch = now.min.replace(tzinfo=now.tzinfo) if now.tzinfo else now.min
+    candidates = []
+    for pk, name in current:
+        lowered = name.lower()
+        if lowered in archived:
             continue
-        seen.add(row.lowered)
+        at = last.get(lowered)
+        if at is None or at < cutoff:
+            candidates.append((at is not None, at or epoch, pk, lowered))  # never assessed first, then the longest ago, then by id
+    candidates.sort()
+    chosen = candidates[:limit * 4]
+    rows = Subdomain.objects.select_related('target_domain').in_bulk([c[2] for c in chosen])
+    seen, out = set(), []
+    for _flag, _at, pk, lowered in chosen:
+        if lowered in seen or pk not in rows:
+            continue
+        seen.add(lowered)
+        row = rows[pk]
+        row.lowered = lowered
         out.append(row)
         if len(out) >= limit:
             break
+    if not out:
+        _idle_remember(memo, project, _monotonic() - started)
     return out
 
 
@@ -260,7 +393,7 @@ def feed_sentinels(now=None):
         slots = sentinel_broker.total_slots()
         if not slots:
             return {'skipped': 'no live Sentinel'}
-        waiting = sentinel_broker.waiting_tasks()
+        waiting = sentinel_broker.waiting_tasks(planner=False)  # the work planner's own low-priority backlog (cveFeed.work_planner) is not first-pass work
         wanted = 2 * slots
         if waiting >= wanted:
             return {'skipped': 'queue is deep enough', 'slots': slots, 'waiting': waiting}
@@ -295,7 +428,6 @@ def backlog_exists(now=None):
     backlog that cannot currently shrink; both sweeps have their own pause gates and act on neither result while
     paused.
     """
-    from cveFeed.assessment_review import host_coverage_due
     from cveFeed.conductor import bounty_blocked_projects
     from cveFeed.scan_control import pause_requested
     from dashboard.models import Project
@@ -328,7 +460,6 @@ def backlog_summary(now=None, limit=GATE_PROJECT_LIMIT):
     """How big the current gate-blocking backlog is: (hosts, projects). Only for the deferral log line, never on
     the hot gate-check path (backlog_exists already proved there is at least one due host before this runs), and
     the caller rate-limits how often it is actually computed (see cveFeed.ledger.sweep_claim)."""
-    from cveFeed.assessment_review import host_coverage_due
     from cveFeed.conductor import bounty_blocked_projects
     from dashboard.models import Project
 

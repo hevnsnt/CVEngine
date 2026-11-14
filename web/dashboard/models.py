@@ -100,6 +100,9 @@ class AIProviderSettings(models.Model):
 	structured_mode = models.CharField(max_length=8, blank=True, default='', db_default='')  # '', auto, all, off
 	reasoning = models.CharField(max_length=8, blank=True, default='', db_default='')  # '', default, off, low, medium, high, max
 	keep_alive = models.CharField(max_length=8, blank=True, default='', db_default='')  # Ollama: 30m, 1h, 0, -1
+	# The model for the nuclei tag choice (stages nuclei_tag_selection and nuclei_targeting). '' = the default, resolved when it is read: the
+	# cheapest haiku the provider lists as available, else the model above (reNgine/ai_nuclei_model.py). Never written by a migration.
+	nuclei_model = models.CharField(max_length=200, blank=True, default='', db_default='')
 	verified_at = models.DateTimeField(null=True, blank=True)
 	verified_provider = models.CharField(max_length=32, blank=True, default='')
 	verified_model = models.CharField(max_length=200, blank=True, default='')
@@ -226,7 +229,8 @@ class ApiToken(models.Model):
 	user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='api_tokens')
 	name = models.CharField(max_length=100)
 	key_hash = models.CharField(max_length=64, unique=True)
-	prefix = models.CharField(max_length=12)  # shown in the UI to tell tokens apart
+	prefix = models.CharField(max_length=12)  # the first 4 characters of the token (always the fixed 'cve_' marker): shown in the UI with `suffix`, never more
+	suffix = models.CharField(max_length=2, blank=True, default='', db_default='')  # the last 2 characters; '' for a token made before they were kept (only a hash of it exists, so they cannot be recovered)
 	read_only = models.BooleanField(default=False)
 	created_at = models.DateTimeField(auto_now_add=True)
 	last_used_at = models.DateTimeField(null=True, blank=True)
@@ -240,7 +244,12 @@ class ApiToken(models.Model):
 	project = models.ForeignKey('Project', null=True, blank=True, on_delete=models.CASCADE, related_name='+')  # the one project an inventory token reports to
 
 	def __str__(self):
-		return f'{self.name} ({self.prefix}...) for {self.user}'
+		return f'{self.name} ({self.hint}) for {self.user}'
+
+	@property
+	def hint(self):
+		"""What the screens show of the token: its first 4 and last 2 characters (just the first 4 when the last are not known), never more."""
+		return f'{self.prefix[:4]}...{self.suffix[-2:]}' if self.suffix else f'{self.prefix[:4]}...'
 
 
 class SystemTimings(models.Model):
@@ -257,12 +266,29 @@ class SystemTimings(models.Model):
 		return cls.objects.first() or cls()
 
 
+class SetupWizard(models.Model):
+	"""Single-row, server-side state of the first-run setup wizard (cveFeed.setup_flow): what each step saved, which were skipped, and when it was
+	completed. Stored on the server so the wizard resumes from any browser and a finished one never comes back. Holds no secret: a key or password
+	goes to its own settings row the moment it is entered and is never kept here."""
+	started_at = models.DateTimeField(null=True, blank=True)
+	completed_at = models.DateTimeField(null=True, blank=True)
+	completed_by = models.CharField(max_length=150, blank=True, default='')
+	data = models.JSONField(default=dict, blank=True)
+
+	@classmethod
+	def current(cls):
+		return cls.objects.first() or cls()
+
+
 class ScanPolicy(models.Model):
 	"""Single-row App Admin setting for what the scanners may run (Settings > Scan engines)."""
 	id = models.AutoField(primary_key=True)
 	# On (the default): every template Nuclei ships may run (the AI-written ones always stay read-only). Off: only Nuclei templates
 	# whose own text is a read-only check run.
 	nuclei_all_templates = models.BooleanField(default=True, db_default=True)
+	# Off (the default, for a new install and for an upgraded one): no check that sends credentials runs (Nuclei's default-login and bruteforce templates, which
+	# post vendor default logins to login forms), and the targeted pass never picks those tags. On: an App Admin turned it on; the web pass may run them.
+	allow_credential_checks = models.BooleanField(default=False, db_default=False)
 
 	@classmethod
 	def current(cls):
@@ -361,7 +387,7 @@ class ApiCredential(models.Model):
 	class Meta:
 		constraints = [
 			models.CheckConstraint(
-				check=(models.Q(org__isnull=False, project__isnull=True) | models.Q(org__isnull=True, project__isnull=False)),
+				condition=(models.Q(org__isnull=False, project__isnull=True) | models.Q(org__isnull=True, project__isnull=False)),
 				name='apicredential_exactly_one_scope'),
 		]
 		unique_together = [('org', 'service'), ('project', 'service')]

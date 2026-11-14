@@ -1,0 +1,10 @@
+{
+  "probes": [
+    {"id": "www.example.com|headers-root|https://www.example.com", "host": "www.example.com", "probe": "headers-root",
+     "base": "https://www.example.com", "allowed": ["example.com", "www.example.com"]},
+    {"id": "www.example.com|wordpress-detect|https://www.example.com", "host": "www.example.com", "probe": "wordpress-detect",
+     "base": "https://www.example.com", "allowed": ["example.com", "www.example.com"]}
+  ],
+  "scope": {"hosts": ["www.example.com", "static.example.com", "cdnjs.cloudflare.com"], "domains": [], "excluded": ["old.example.com"],
+            "excluded_trees": [], "private": false, "addresses": [], "blocked": []}
+}

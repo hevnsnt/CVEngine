@@ -33,17 +33,17 @@ class SbomTests(SimpleTestCase):
 
 	def test_every_scanner_tool_is_listed_with_its_pinned_version(self):
 		dockerfile = sbom.read('web/Dockerfile')
-		for name, argname in (('nmap', 'NMAPVERSION'), ('nuclei', 'NUCLEI_VERSION'), ('naabu', 'NAABU_VERSION'), ('bbot', 'BBOT_VERSION'),
-				('wpscan', 'WPSCAN_VERSION'), ('go', 'GOVERSION'), ('tzdata', 'TZDATA_VERSION'), ('testssl.sh', 'TESTSSL_VERSION')):
+		for name, argname in (('nuclei', 'NUCLEI_VERSION'), ('go', 'GOVERSION')):
 			self.assertEqual(self.by_name[name]['version'], sbom.arg(dockerfile, argname), name)
 			self.assertEqual(self.by_name[name]['properties'][0], {'name': 'cvengine:pinned', 'value': 'true'}, name)
 		self.assertEqual(self.by_name['nuclei']['purl'], f"pkg:golang/github.com/projectdiscovery/nuclei/v3@v{self.by_name['nuclei']['version']}")
 
 	def test_downloads_carry_their_checksums(self):
-		for name in ('nmap', 'go', 'testssl.sh'):
-			hashes = [h['content'] for h in self.by_name[name]['hashes']]
-			self.assertTrue(hashes and all(re.fullmatch(r'[0-9a-f]{64}', h) for h in hashes), name)
-		self.assertEqual(len(self.by_name['nmap']['hashes']), 2)  # the source tarball and the amd64 RPM
+		hashes = [h['content'] for h in self.by_name['go']['hashes']]
+		self.assertTrue(hashes and all(re.fullmatch(r'[0-9a-f]{64}', h) for h in hashes))
+		self.assertEqual(len(hashes), 2)  # amd64 and arm64
+		for gone in ('nmap', 'naabu', 'bbot', 'tzdata', 'wpscan', 'testssl.sh'):  # the scan tools run on the Sentinels, not in this image
+			self.assertNotIn(gone, self.by_name)
 
 	def test_what_is_not_pinned_is_marked_as_such(self):
 		self.assertEqual(self.by_name['nuclei-templates']['properties'][0]['value'], 'false')
@@ -97,11 +97,12 @@ class SbomTests(SimpleTestCase):
 		self.assertNotIn('-r', parsed)
 
 	def test_the_apt_packages_and_the_report_dependencies_are_listed(self):
-		for name in ('fonts-dejavu-core', 'bind9-dnsutils', 'libpango-1.0-0'):
+		for name in ('fonts-dejavu-core', 'libpq-dev', 'libpango-1.0-0', 'tzdata'):
 			self.assertEqual(self.apt[name]['purl'], f"pkg:deb/ubuntu/{name}?distro=ubuntu-26.04", name)
 			self.assertEqual(self.apt[name]['properties'][0]['value'], 'false', name)  # apt installs whatever the release holds that day
 		self.assertNotIn('libarchive-tools', self.apt)  # installed and purged in the same build
-		self.assertEqual(self.by_name['tzdata']['purl'], f"pkg:pypi/tzdata@{self.by_name['tzdata']['version']}")
+		for gone in ('bind9-dnsutils', 'ruby', 'cargo', 'cmake', 'libpcap-dev'):  # only the scan tools needed them
+			self.assertNotIn(gone, self.apt)
 		self.assertEqual(self.by_name['pypdf']['version'], re.search(r'(?m)^pypdf==(\S+)', sbom.read('web/requirements.txt')).group(1))
 		self.assertEqual(self.by_name['pypdf']['properties'][0]['value'], 'true')
 

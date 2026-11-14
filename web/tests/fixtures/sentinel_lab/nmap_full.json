@@ -1,0 +1,13 @@
+{
+ "kind": "nmap_full",
+ "name": "nmap_full",
+ "payload": {
+  "outcome": "done",
+  "xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nmaprun>\n<?xml-stylesheet href=\"file:///usr/local/share/nmap/nmap.xsl\" type=\"text/xsl\"?>\n<!-- Nmap 7.993 scan initiated Thu Nov 12 16:07:12 2026 as: nmap -p- -&#45;open -T4 -Pn -n -&#45;host-timeout 10m -oX - 192.0.2.10 -->\n<nmaprun scanner=\"nmap\" args=\"nmap -p- -&#45;open -T4 -Pn -n -&#45;host-timeout 10m -oX - 192.0.2.10\" start=\"1794499632\" startstr=\"Thu Nov 12 16:07:12 2026\" version=\"7.993\" xmloutputversion=\"1.05\">\n<scaninfo type=\"syn\" protocol=\"tcp\" numservices=\"65535\" services=\"1-65535\"/>\n<verbose level=\"0\"/>\n<debugging level=\"0\"/>\n<hosthint><status state=\"up\" reason=\"arp-response\" reason_ttl=\"0\"/>\n<address addr=\"192.0.2.10\" addrtype=\"ipv4\"/>\n<address addr=\"12:60:A0:9D:2E:6E\" addrtype=\"mac\"/>\n<hostnames>\n</hostnames>\n</hosthint>\n<host starttime=\"1794499632\" endtime=\"1794499633\"><status state=\"up\" reason=\"arp-response\" reason_ttl=\"0\"/>\n<address addr=\"192.0.2.10\" addrtype=\"ipv4\"/>\n<address addr=\"12:60:A0:9D:2E:6E\" addrtype=\"mac\"/>\n<hostnames>\n</hostnames>\n<ports><extraports state=\"closed\" count=\"65534\">\n<extrareasons reason=\"reset\" count=\"65534\" proto=\"tcp\" ports=\"1-79,81-65535\"/>\n</extraports>\n<port protocol=\"tcp\" portid=\"80\"><state state=\"open\" reason=\"syn-ack\" reason_ttl=\"64\"/><service name=\"http\" method=\"table\" conf=\"3\"/></port>\n</ports>\n<times srtt=\"4\" rttvar=\"0\" to=\"100000\"/>\n</host>\n<runstats><finished time=\"1794499633\" timestr=\"Thu Nov 12 16:07:13 2026\" summary=\"Nmap done at Thu Nov 12 16:07:13 2026; 1 IP address (1 host up) scanned in 0.59 seconds\" elapsed=\"0.59\" exit=\"success\"/><hosts up=\"1\" down=\"0\" total=\"1\"/>\n</runstats>\n</nmaprun>\n"
+ },
+ "sentinel_seconds": 0.6,
+ "target": {
+  "address": "192.0.2.10"
+ },
+ "tool_rows": null
+}

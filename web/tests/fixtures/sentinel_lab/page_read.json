@@ -1,0 +1,68 @@
+{
+ "kind": "page_read",
+ "name": "page_read",
+ "payload": {
+  "outcome": "done",
+  "reads": [
+   {
+    "head": {
+     "method": "HEAD",
+     "powered_by": "",
+     "server": "nginx/1.31.8",
+     "status": 200,
+     "title": ""
+    },
+    "id": "r1"
+   },
+   {
+    "id": "r2",
+    "readme": {
+     "asked": 2,
+     "titles": {
+      "contact-form-7": "Contact Form 7"
+     },
+     "unread": 0
+    }
+   }
+  ],
+  "refused": [],
+  "touched": [
+   "192.0.2.10"
+  ]
+ },
+ "sentinel_seconds": 0.4,
+ "target": {
+  "reads": [
+   {
+    "host": "192.0.2.10",
+    "id": "r1",
+    "op": "head",
+    "url": "http://192.0.2.10/"
+   },
+   {
+    "base": "http://192.0.2.10",
+    "host": "192.0.2.10",
+    "id": "r2",
+    "op": "readme",
+    "slugs": [
+     "contact-form-7",
+     "no-such-plugin"
+    ]
+   }
+  ],
+  "scope": {
+   "addresses": [
+    "192.0.2.10"
+   ],
+   "blocked": [],
+   "domains": [],
+   "excluded": [],
+   "excluded_trees": [],
+   "hosts": [
+    "192.0.2.10"
+   ],
+   "private": true
+  }
+ },
+ "tool_rows": null
+}

@@ -1,0 +1,31 @@
+{
+ "kind": "testssl",
+ "name": "testssl_closed",
+ "payload": {
+  "handshake": false,
+  "items": [
+   {
+    "cve": "",
+    "finding": "Can't connect to '192.0.2.10:443' Make sure a firewall is not between you and your scanning target!",
+    "id": "scanProblem",
+    "severity": "FATAL"
+   },
+   {
+    "cve": "",
+    "finding": "Scan interrupted",
+    "id": "scanTime",
+    "severity": "WARN"
+   }
+  ],
+  "outcome": "done",
+  "returncode": 246
+ },
+ "sentinel_seconds": 0.9,
+ "target": {
+  "host": "web.lab.test",
+  "ip": "192.0.2.10",
+  "port": 443,
+  "starttls": ""
+ },
+ "tool_rows": null
+}

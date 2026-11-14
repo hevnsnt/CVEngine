@@ -5,7 +5,7 @@ from unittest import mock
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import correlation, nuclei_scan, views
+from cveFeed import correlation, nuclei_scan
 from cveFeed.models import CVEEntry, CVEMatch
 from dashboard.models import Org, Project
 from scanEngine.models import EngineType

@@ -37,10 +37,12 @@ const fmtDay = (ms) =>
   });
 
 // Bucket ISO timestamps into one count per local day, ending today.
-export function dailyCounts(isoDates, days) {
+// ``perDay`` ([{date: "YYYY-MM-DD", n}], counted by the server) stands in for isoDates when the server has already counted exactly.
+export function dailyCounts(isoDates, days, perDay) {
   const end = dayKey(new Date());
   const counts = new Map();
-  isoDates.forEach((iso) => {
+  (perDay || []).forEach((d) => counts.set(keyOfDate(d.date), d.n));
+  (perDay ? [] : isoDates).forEach((iso) => {
     const d = new Date(iso);
     if (!Number.isNaN(d.getTime()))
       counts.set(dayKey(d), (counts.get(dayKey(d)) || 0) + 1);
@@ -78,6 +80,7 @@ export function areaChart({
   unit = "events",
   ranges,
   dates,
+  perDay,
   defaultRange,
   compare = true,
 }) {
@@ -98,6 +101,8 @@ export function areaChart({
   stage.tabIndex = 0;
   stage.setAttribute("role", "img");
   const svg = s("svg", {
+    width: W,
+    height: H,
     viewBox: `0 0 ${W} ${H}`,
     preserveAspectRatio: "none",
     "aria-hidden": "true",
@@ -142,8 +147,8 @@ export function areaChart({
 
   function draw() {
     const days = ranges.find((r) => r[0] === active)[1];
-    series = dailyCounts(dates, days * 2).slice(days); // second half is the range, first half is the comparison
-    const prev = dailyCounts(dates, days * 2)
+    series = dailyCounts(dates, days * 2, perDay).slice(days); // second half is the range, first half is the comparison
+    const prev = dailyCounts(dates, days * 2, perDay)
       .slice(0, days)
       .reduce((n, p) => n + p.v, 0);
     const sum = series.reduce((n, p) => n + p.v, 0);
@@ -229,7 +234,7 @@ export function areaChart({
  * Contribution calendar: one cell per day for the last `weeks` weeks, weeks as columns, Monday on top.
  * @param {{title:string, unit?:string, dates:string[], weeks?:number}} opts
  */
-export function heatmap({ title, unit = "events", dates, weeks = 18 }) {
+export function heatmap({ title, unit = "events", dates, perDay, weeks = 18 }) {
   const root = h("section", "card chart heat");
   const head = h("div", "chart-head");
   const total = h("b", "chart-total");
@@ -242,7 +247,8 @@ export function heatmap({ title, unit = "events", dates, weeks = 18 }) {
   head.append(lead, readout);
 
   const counts = new Map();
-  dates.forEach((iso) => {
+  (perDay || []).forEach((d) => counts.set(keyOfDate(d.date), d.n));
+  (perDay ? [] : dates).forEach((iso) => {
     const d = new Date(iso);
     if (!Number.isNaN(d.getTime())) counts.set(dayKey(d), (counts.get(dayKey(d)) || 0) + 1);
   });
@@ -291,6 +297,8 @@ export function sparkline(values) {
   const W = 120;
   const H = 24;
   const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("width", String(W));
+  svg.setAttribute("height", String(H));
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.setAttribute("preserveAspectRatio", "none");
   svg.setAttribute("class", "spark");
@@ -323,7 +331,25 @@ const TIER_NAMES = ["fire", "smoke", "ice"];
 const MATRIX_DAYS = 90;
 const plural = (n, unit) => `${n} ${unit}`;
 
-export function activityMatrix({ title, rows }) {
+// The zone the page draws its days in, as the name the server groups by: UTC when the page shows UTC, else the browser's own zone.
+export function displayZone() {
+  if (tzMode() === "utc") return "UTC";
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch (_) {
+    return "UTC";
+  }
+}
+
+// A "YYYY-MM-DD" the server counted a day under, as this page's day key (the midnight of that calendar date).
+const keyOfDate = (ymd) => {
+  const [y, m, d] = String(ymd).split("-").map(Number);
+  return new Date(y, m - 1, d).getTime();
+};
+
+// rows: each { key, label, unit, tiered, explain, href, and either items: [{date, tier}] (counted here) or days: [{date, n, fire, smoke, ice}] (already counted
+// by the server, exact: then first/last, "YYYY-MM-DD", bound the window and nothing is counted again) }.
+export function activityMatrix({ title, rows, first, last }) {
   const root = h("section", "card chart matrix");
   const head = h("div", "mx-head");
   head.append(h("span", "eyebrow", `${title} · last ${MATRIX_DAYS} days`));
@@ -345,11 +371,12 @@ export function activityMatrix({ title, rows }) {
   legend.append(h("span", "mx-scale", "More"));
   head.append(readout, legend);
 
-  const today = dayKey(new Date());
-  const start = addDays(today, -(MATRIX_DAYS - 1));
+  const today = last ? keyOfDate(last) : dayKey(new Date());
+  const start = first ? keyOfDate(first) : addDays(today, -(MATRIX_DAYS - 1));
   const series = rows.map((row) => {
     const days = new Map();
-    row.items.forEach((it) => {
+    (row.days || []).forEach((d) => days.set(keyOfDate(d.date), { n: d.n, fire: d.fire || 0, smoke: d.smoke || 0, ice: d.ice || 0 }));
+    (row.items || []).forEach((it) => {
       const d = new Date(it.date);
       if (Number.isNaN(d.getTime())) return;
       const k = dayKey(d);
@@ -377,14 +404,24 @@ export function activityMatrix({ title, rows }) {
   grid.setAttribute("aria-label", series.map((s) => `${s.row.label}: ${s.sum} ${s.row.unit}`).join("; ") + ` over the last ${MATRIX_DAYS} days.`);
   series.forEach((s) => {
     const lead = h("div", "mx-lead");
-    lead.append(h("span", "eyebrow", s.row.label), h("b", "mx-total", s.sum.toLocaleString()));
+    // what the number counts, and the list it comes from: on hover and on keyboard focus (the title is on the focusable total as well)
+    const label = s.row.href ? h("a", "eyebrow", s.row.label) : h("span", "eyebrow", s.row.label);
+    const total = h("b", "mx-total", s.sum.toLocaleString());
+    if (s.row.href) label.href = s.row.href;
+    if (s.row.explain) {
+      lead.title = s.row.explain;
+      total.title = s.row.explain;
+      total.tabIndex = 0;
+      total.setAttribute("aria-label", `${s.sum.toLocaleString()}. ${s.row.explain}`);
+    }
+    lead.append(label, total);
     leads.append(lead);
     const side = h("div", "mx-side");
     if (s.row.tiered) {
       const chips = h("span", "mx-chips");
       TIER_NAMES.forEach((t, i) => {
         const chip = h("span", "mx-stat");
-        chip.title = `${s.byTier[i]} ${t}`;
+        chip.title = `${s.byTier[i].toLocaleString()} of the ${s.sum.toLocaleString()} ${s.row.unit} are ${t}`;
         chip.append(h("i", `mx-key ${t}`), h("b", "", String(s.byTier[i])));
         chips.append(chip);
       });

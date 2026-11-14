@@ -68,19 +68,39 @@ def normalized_org(org):
 
 class Lookup:
     """The DNS and RDAP reads ``foreign_owner`` makes (replaced in tests). ``records`` returns None when DNS gave no answer at all, so a
-    failed lookup is never read as "no name servers"."""
+    failed lookup is never read as "no name servers". The name server and mail server records are read by a Sentinel (``identity_check``,
+    ``prime`` asks for the whole set in one task); this server sends no DNS question. The kind has no local path, so with no Sentinel able to
+    take it there is no answer (None), exactly as for a lookup that failed. The registrant read is a registry (RDAP), not a target."""
+
+    def __init__(self, project=None):
+        self.project, self.answers = project, {}
+
+    def prime(self, domains):
+        """Ask for the NS and MX records of ``domains`` in one task and keep the answers; whatever is not answered stays unanswered."""
+        queries = [{'id': f'{rtype}:{name}', 'name': name, 'type': rtype} for name in dict.fromkeys(domains) for rtype in ('NS', 'MX')
+                   if f'{rtype}:{name}' not in self.answers]
+        if not queries or self.project is None:
+            return
+        try:
+            from agentapi import probe_dispatch, sentinel_dispatch
+            from dashboard.models import Project
+            project = Project.objects.get(pk=self.project)
+            if not sentinel_dispatch.any_scanner_for(project, 'identity_check'):  # a pre-check for a bucket sweep: nothing waits for it
+                return
+            got, _certs = probe_dispatch.try_identity(project, None, dns=queries)
+        except Exception as exc:  # noqa: BLE001 - ScannerUnavailable or any failure: no answer, never "no name servers"
+            logger.info('name server and mail server records were not read (%s)', exc)
+            return
+        for query in queries:
+            row = got.get(query['id'])
+            if row and row.get('status') in ('ok', 'none'):
+                self.answers[query['id']] = [r for r in row.get('records') or []] if row['status'] == 'ok' else []
 
     def records(self, name, rtype):
-        import dns.exception
-        import dns.resolver
-
-        from cveFeed.hygiene import _resolver
-        try:
-            return [rd.to_text() for rd in _resolver().resolve(name, rtype)]
-        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
-            return []
-        except (dns.exception.DNSException, OSError):
-            return None
+        key = f'{rtype}:{name}'
+        if key not in self.answers:
+            self.prime([name])
+        return self.answers.get(key)
 
     def registrant(self, domain):
         """The registrant organization RDAP publishes for ``domain`` ('' when redacted or not published, None when RDAP gave no answer).
@@ -175,10 +195,10 @@ def _shared(domains):
     return {d for d in domains if d in SHARED_INFRASTRUCTURE}
 
 
-def foreign_owner(domain, other_domains, lookup=None):
+def foreign_owner(domain, other_domains, lookup=None, project=None):
     """Why ``domain`` (a registrable domain of the project) shows another owner than the project's ``other_domains``, or None (the same
     owner, or nothing shows otherwise). Never raises."""
-    lookup = lookup or Lookup()
+    lookup = lookup or Lookup(project)
     domain = _clean(domain)
     others = sorted({_clean(d) for d in other_domains if _clean(d) and _clean(d) != domain})
     if not domain or not others:
@@ -191,6 +211,8 @@ def foreign_owner(domain, other_domains, lookup=None):
 
 
 def _foreign_owner(domain, others, lookup):
+    if hasattr(lookup, 'prime'):
+        lookup.prime([domain, *others])
     mine = lookup.registrant(domain)
     theirs = {d: lookup.registrant(d) for d in others}
     known = {d: org for d, org in theirs.items() if normalized_org(org)}

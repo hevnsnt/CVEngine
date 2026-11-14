@@ -3,7 +3,6 @@
 The matcher, the WordPress plugin matcher, the triage brief, the detection strategy, the agent API and the AI prompts must agree on what a
 list of ranges says, and a range list that cannot be read with certainty must never give a confident "in range" for a version the advisory
 fixes: the answer is unknown (``version_in_range`` None, which routes to needs_validation) and the WordPress path records no match."""
-import json
 from types import SimpleNamespace
 
 from django.test import SimpleTestCase
@@ -169,8 +168,7 @@ class ConsumerTests(SimpleTestCase):
         from cveFeed import detection_author
         from cveFeed.models import CVEEntry
         cve = CVEEntry(cve_id='CVE-2099-6', title='x', affected=CONFLUENCE_AFFECTED)
-        prompt = detection_author.build_user_prompt(cve)
-        info = json.loads(prompt[prompt.index('{'):prompt.rindex('}') + 1])
+        info = next(part['data'] for part in detection_author.user_parts(cve) if part.get('fence') == 'CVE')
         self.assertJoined(info['affected'][0]['ranges'])
 
     def test_the_template_and_validation_prompt_context(self):

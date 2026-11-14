@@ -1,0 +1,44 @@
+{
+ "kind": "bbot_discovery",
+ "name": "bbot_discovery",
+ "payload": {
+  "hard_failures": [],
+  "incomplete": "",
+  "mode": "passive",
+  "outcome": "done",
+  "partials": 1,
+  "problems": [],
+  "scan_name": "surreal_william",
+  "web_events": {
+   "HTTP_RESPONSE": 0,
+   "URL": 1
+  }
+ },
+ "sentinel_seconds": 2.850167751312256,
+ "target": {
+  "api_keys": false,
+  "domain": "web.lab.test",
+  "exclude_modules": [],
+  "force": true,
+  "mode": "passive",
+  "presets": [
+   "subdomain-enum"
+  ],
+  "require_flags": [
+   "safe"
+  ],
+  "scope": {
+   "deny_ranges": [],
+   "exact_host": false,
+   "exclusions": [],
+   "in_scope_domains": [
+    "web.lab.test",
+    "192.0.2.10"
+   ]
+  },
+  "strict_scope": false,
+  "timeout_seconds": 600,
+  "trufflehog": false
+ },
+ "tool_rows": null
+}

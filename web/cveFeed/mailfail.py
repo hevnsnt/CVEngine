@@ -1,10 +1,10 @@
 """Email-security checks adapted from MailFail by Black Hills Information Security (https://github.com/ACK-J/MailFail).
 
 MailFail is a browser extension that reviews a domain's mail setup for spoofing and takeover risks. These are its
-checks, re-implemented server side for CVEngine's hygiene scan, beside the SPF / DMARC / DKIM / CAA review in
+checks, re-implemented for CVEngine's hygiene scan, beside the SPF / DMARC / DKIM / CAA review in
 cveFeed.hygiene (which already covers MailFail's missing / multiple / +all / ?all / ptr / p=none / pct / sp / weak-key
-rules). Like MailFail they only read DNS, ask public domain registries (RDAP) whether a referenced domain is registered,
-and fetch the domain's own MTA-STS policy over HTTPS. Nothing sends mail or opens an SMTP connection.
+rules). The reads (DNS, the domain's MTA-STS policy over HTTPS) are a Sentinel's (``hygiene_check``, ``cvengine_scanner.probes.mailfail``); this module
+holds the evaluators over what it reports. Nothing sends mail or opens an SMTP connection.
 
 Two MailFail checks need no code here: dnspython follows a CNAME at _dmarc on its own, and it joins a TXT record's
 quoted strings the way RFC 7208 §3.3 says receivers must. The zone-walking (NSEC / NSEC3) and SRV / NS listings are
@@ -13,9 +13,7 @@ reconnaissance, not configuration findings, and are left out.
 Evaluators are pure functions over fetched records, as in cveFeed.hygiene, so every rule is unit tested.
 """
 import base64
-import concurrent.futures
 import logging
-import os
 import re
 import time
 
@@ -25,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 CREDIT = 'MailFail by Black Hills Information Security (https://github.com/ACK-J/MailFail)'
 HTTP_TIMEOUT = 5
-MAX_POLICY_BYTES = 64 * 1024
 MAX_TAKEOVER_DOMAINS = 15
 MAX_REPORT_DOMAINS = 10
 SPF_MAX_TERMS = 200  # terms read from one SPF record
@@ -453,76 +450,4 @@ def evaluate_takeover(domain, spf_domains, report_domains):
 
 # ----------------------------------------------------------------------------- network and the review
 
-def fetch_mta_sts_policy(domain):
-    """The domain's own MTA-STS policy over verified HTTPS (RFC 8461 requires a valid certificate), connecting only to the
-    addresses admitted once by pinned_transport (no rebinding between check and connect), no redirects, at most
-    MAX_POLICY_BYTES. None when there is no usable answer."""
-    import ssl
 
-    from cveFeed import pinned_transport
-    host = f'mta-sts.{domain}'
-    try:
-        addresses = pinned_transport.resolve(host, 443)
-    except (OSError, ValueError):
-        return None
-    ctx = ssl.create_default_context()
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    conn = pinned_transport.HTTPConnection(host, 443, addresses, HTTP_TIMEOUT, context=ctx)
-    try:
-        conn.request('GET', '/.well-known/mta-sts.txt', headers={'Host': host, 'User-Agent': 'CVEngine'})
-        resp = conn.getresponse()
-        if resp.status != 200:
-            return None
-        body = pinned_transport.read_body(resp, MAX_POLICY_BYTES + 1)  # a server that sends gzip despite identity is decoded, capped after decoding
-        return None if len(body) > MAX_POLICY_BYTES else body.decode('utf-8', 'replace')
-    except Exception:  # noqa: BLE001
-        return None
-    finally:
-        conn.close()
-
-
-def review(domain, has_mx, spf_txt, dmarc_txt, dkim_found, fetch, records, http=False):
-    """Every MailFail check for one mail domain. ``fetch`` reads TXT records and ``records`` (name, type) any other type, as
-    text; ``http`` allows the two outbound kinds of request (RDAP and the MTA-STS policy), off when DNS is injected."""
-    findings = evaluate_spf(domain, spf_txt) + evaluate_dmarc(domain, dmarc_txt) + evaluate_dkim(domain, dkim_found)
-
-    def safe(label, fn):
-        try:
-            return fn()
-        except Exception:  # noqa: BLE001 - one failing check never stops the others
-            logger.warning('MailFail check %s failed for %s', label, domain, exc_info=True)
-            return []
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        arc = dict(zip(ARC_SELECTORS, pool.map(lambda s: fetch(f'{s}._domainkey.{domain}'), ARC_SELECTORS)))
-        names = {'adsp': f'_adsp._domainkey.{domain}', 'bimi': f'default._bimi.{domain}', 'sts': f'_mta-sts.{domain}',
-                 'rpt': f'_smtp._tls.{domain}', 'mc': f'_mailchannels.{domain}'}
-        txt = dict(zip(names, pool.map(fetch, names.values())))
-    found_arc = {s: next((r for r in rs if 'p=' in r.lower()), '') for s, rs in arc.items()}
-    findings += safe('arc', lambda: evaluate_arc(domain, {s: r for s, r in found_arc.items() if r}))
-    findings += safe('adsp', lambda: evaluate_adsp(domain, txt['adsp']))
-    findings += safe('bimi', lambda: evaluate_bimi(domain, txt['bimi']))
-    findings += safe('mailchannels', lambda: evaluate_mailchannels(domain, txt['mc']))
-    findings += safe('tlsrpt', lambda: evaluate_tls_reporting(domain, txt['rpt'], has_mx))
-    findings += safe('mta-sts', lambda: evaluate_mta_sts(
-        domain, txt['sts'], fetch_mta_sts_policy(domain) if (http and txt['sts']) else None, has_mx, policy_checked=http))
-    mx_hosts = [r.split()[-1] for r in records(domain, 'MX') if r.split()]
-    findings += safe('mx', lambda: evaluate_mx(domain, mx_hosts))
-    findings += safe('dane', lambda: evaluate_dane(domain, {
-        mx.rstrip('.'): records(f'_25._tcp.{mx.rstrip(".")}', 'TLSA') for mx in mx_hosts[:MAX_DANE_MX] if mx.rstrip('.')}))
-    findings += safe('dnssec', lambda: evaluate_dnssec(domain, records(domain, 'DNSKEY')))
-    reports = dmarc_report_domains(dmarc_txt)
-    from cveFeed.hygiene import dmarc_policy
-    policy = dmarc_policy(dmarc_txt)
-    external = [r for r in reports if registrable(r) and registrable(r) != registrable(domain)][:MAX_REPORT_DOMAINS]
-    for ext in external:
-        findings += safe('report-auth', lambda ext=ext: evaluate_report_authorization(domain, ext, fetch(f'{domain}._report._dmarc.{ext}'), policy))
-    if http and os.environ.get('CVENGINE_HYGIENE_RDAP', '1') != '0':
-        import requests
-        session = requests.Session()
-        has_ns = lambda name: bool(records(name, 'NS'))  # noqa: E731
-        registered = lambda name: rdap_registered(name, session)  # noqa: E731
-        findings += safe('takeover', lambda: evaluate_takeover(
-            domain, unregistered_domains(spf_referenced_domains(spf_txt), domain, has_ns, registered),
-            unregistered_domains(reports, domain, has_ns, registered)))
-    return findings

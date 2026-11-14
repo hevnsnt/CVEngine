@@ -156,6 +156,28 @@ def scan_text(text):
     return {name: {'count': len(values), 'sample': sample(values[0], name)} for name, values in found.items() if values}
 
 
+MAX_CREDENTIAL_VALUES = 20  # raw credentials handed to the secrets inventory per body
+
+
+def credential_values(text):
+    """``[(type, value)]``: the distinct credentials in ``text``, for the secrets inventory (``cveFeed.secrets_inventory.from_route``), which
+    fingerprints and masks them at once. The only function here that returns a value: its caller holds the list in memory for the duration of one
+    route check and never stores it. A private key is returned as its whole PEM block when the block is complete, else as its header."""
+    text = text or ''
+    out = []
+    for name in CREDENTIAL_TYPES:
+        for value in _distinct(name, text):
+            if name == 'private_key':
+                start = text.find(value)
+                end = text.find('-----END', start)
+                close = text.find('-----', end + 8) if end >= 0 else -1
+                value = text[start:close + 5] if 0 <= end and close >= 0 and close - start <= 8192 else value
+            out.append((name, value))
+            if len(out) >= MAX_CREDENTIAL_VALUES:
+                return out
+    return out
+
+
 def sensitive_score(found):
     """0 to 25: any credential 25; PII (5 or more emails, 3 or more phone numbers, any card) 15; a few emails or phone numbers
     (a contact page) or internal identifiers 5; the highest that applies."""

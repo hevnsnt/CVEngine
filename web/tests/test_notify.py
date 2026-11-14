@@ -12,7 +12,9 @@ from dashboard.models import Org, Project
 from scanEngine.models import EngineType, Notification
 from startScan.models import ScanHistory, Subdomain
 from targetApp.models import Domain
+from tests.discovery_fixtures import sentinel_discovery
 from tests.test_discovery import EVENTS
+from tests.port_stage_stub import port_double
 
 SENDERS = ('send_discord_message', 'send_slack_message', 'send_lark_message', 'send_telegram_message')
 
@@ -209,9 +211,9 @@ class NotifyTests(TestCase):
 		self.enable()
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
 			scan = discovery.start_discovery(self.domain)
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
-			discovery.run_pipeline(scan.id, stream=lambda *a, **k: iter(EVENTS), light_stream=lambda path, **k: iter([]),
-			                       targeted_stream=lambda path, **k: iter([]), nmap_runner=lambda *a, **k: '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>',
+		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'), sentinel_discovery(EVENTS):
+			discovery.run_pipeline(scan.id, light_stream=lambda path, **k: iter([]),
+			                       targeted_stream=lambda path, **k: iter([]), port_stage_run=port_double(),
 			                       db_exposure_checks={}, provider=None)
 		slack = [t for n, t in self.sent if n == 'send_slack_message']
 		self.assertEqual(len(slack), 1)

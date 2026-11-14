@@ -83,7 +83,7 @@ def list_connections(ctx, args):
         record['project'] = names.get(record['project'], record['project'])
     page['logged_ports'] = sorted(local_egress.log_ports())
     page['note'] = ('exact: this server opened, or decided not to open, that very connection; estimated: an external tool (nmap, naabu, '
-                    'testssl.sh, nuclei) was given the address and the port in its probe plan, and its own packets are not watched')
+                    'nuclei) was given the address and the port in its probe plan, and its own packets are not watched')
     return page
 
 

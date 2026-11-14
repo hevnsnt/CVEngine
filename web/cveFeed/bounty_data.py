@@ -36,7 +36,7 @@ HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\
 WILDCARD_RE = re.compile(r"^\*\.(" + HOST_RE.pattern[len("^(?=.{1,253}$)"):-1] + r")$")
 SPLIT = re.compile(r"[,;\s]+")
 MOBILE_TYPES = {"google_play_app_id", "apple_store_app_id", "other_apk", "android", "ios", "mobile-application-android",
-                "mobile-application-ios", "mobile-application", "testflight", "windows_app_store_app_id", "apple_store_app_id"}
+                "mobile-application-ios", "mobile-application", "testflight", "windows_app_store_app_id"}
 CODE_TYPES = {"source_code", "code"}
 SEVERITIES = ("none", "low", "medium", "high", "critical")
 

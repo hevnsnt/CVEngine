@@ -13,8 +13,7 @@ from urllib.parse import urlencode
 from agentapi import mcp
 from agentapi import services as svc
 from agentapi.auth import create_token
-from cveFeed.models import (FindingAuditEvent, FindingComment, HostArchive, HostAssessment, HostExclusion, HostProfile, HostState,
-                            HygieneFinding, ProbeObservation, RdpScreenshot)
+from cveFeed.models import (FindingAuditEvent, FindingComment, HostArchive, HostAssessment, HostExclusion, HostProfile, HygieneFinding, ProbeObservation, RdpScreenshot)
 from dashboard.models import Org, OrgMembership, Project, ProjectMembership
 from startScan.models import IpAddress, Port, Subdomain, Vulnerability
 from targetApp.models import Domain
@@ -260,6 +259,20 @@ class PaginationTests(TestCase):
 	def test_page_args_rejects_an_infinite_json_number(self):
 		with self.assertRaises(svc.ApiError):
 			svc.page_args({'page': float('inf')})
+
+	def test_the_cve_feed_tier_filter_reads_the_whole_feed_not_the_newest_two_thousand(self):
+		"""A fire CVE older than the newest 2,000 was invisible, and ``count`` was the size of that sample (review 1 F3)."""
+		from datetime import timedelta
+
+		from cveFeed.models import CVEEntry
+		now = timezone.now()
+		old = CVEEntry.objects.create(cve_id='CVE-2099-8000', kev=True, cvss=9.8, published_at=now - timedelta(days=900))
+		CVEEntry.objects.bulk_create([CVEEntry(cve_id=f'CVE-2098-{i:05d}', cvss=3.0, published_at=now - timedelta(minutes=i)) for i in range(2005)])
+		_, fire = call(self.tok, 'GET', '/api/v1/cves?tier=fire&page_size=5')
+		self.assertEqual((fire['count'], [r['cve_id'] for r in fire['results']]), (1, [old.cve_id]))
+		_, ice = call(self.tok, 'GET', '/api/v1/cves?tier=ice&page_size=1')
+		self.assertEqual(ice['count'], 2005)  # the whole feed, not a 2,000-row sample
+		self.assertEqual(call(self.tok, 'GET', '/api/v1/cves?tier=nonsense')[1]['count'], 0)
 
 	def test_the_cve_feed_tier_window_pages_and_never_goes_negative(self):
 		from cveFeed.models import CVEEntry
