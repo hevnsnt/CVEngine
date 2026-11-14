@@ -589,6 +589,150 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertEqual(self.deployed_marker(), self.new)
         self.assertEqual(self.head(), self.new)
 
+    # --- documentation-only updates (scripts/update-docs-only.sh): no maintenance page, no pause, no container touched -----------------
+
+    def push_from_other(self, files, message='docs'):
+        """A commit on origin that writes ``files`` (path -> text, or bytes), on top of the one already there; returns its id."""
+        other = self.tmp / 'other'
+        for name, body in files.items():
+            target = other / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if body is None:
+                target.unlink()
+            elif isinstance(body, bytes):
+                target.write_bytes(body)
+            else:
+                target.write_text(body)
+        self.git('add', '-A', cwd=other)
+        self.git('commit', '-m', message, cwd=other)
+        self.git('push', 'origin', 'master', cwd=other)
+        return self.git('rev-parse', 'HEAD', cwd=other)
+
+    def deployed_at(self, sha):
+        """This checkout is a finished, migrated deploy of ``sha`` (the build marker and the host's own record agree)."""
+        self.git('pull', '--ff-only', 'origin', 'master', cwd=self.work)
+        self.assertEqual(self.head(), sha)
+        (self.work / 'web' / '.commit').write_text(sha + '\n')
+        self.mark_deployed(sha)
+
+    def start_docs_only(self, files, deployed=True):
+        """Work is a finished deploy of the first commit; origin gains one commit with ``files``; the helper is installed; approved."""
+        shutil.copy(SCRIPTS / 'update-docs-only.sh', self.work / 'scripts' / 'update-docs-only.sh')
+        if deployed:
+            self.deployed_at(self.new)
+        else:
+            self.git('pull', '--ff-only', 'origin', 'master', cwd=self.work)
+        self.docs_base = self.head()
+        self.docs_new = self.push_from_other(files)
+        self.approve(self.docs_new)
+
+    def assert_full_deploy(self, result):
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertTrue([c for c in calls if ' build ' in c], calls)
+        self.assertTrue([c for c in calls if '--force-recreate' in c], calls)
+        self.assertEqual(self.head(), self.docs_new)
+        self.assertEqual(self.deployed_marker(), self.docs_new)
+
+    def test_a_documentation_only_update_restarts_nothing_and_shows_no_maintenance_page(self):
+        self.start_docs_only({'README.md': 'new readme\n', 'docs/UPDATES.md': 'notes\n', 'docs/images/a.png': b'\x89PNG'})
+        (self.stub / 'running_count').write_text('3\n')  # jobs running: a real update would pause and settle; this one must not even ask
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.head(), self.docs_new)
+        self.assertEqual(self.calls() and [c for c in self.calls() if any(k in c for k in (' build ', 'recreate', 'update_scan_pause', ' stop ', ' up ', ' run '))], [], self.calls())
+        self.assertFalse((self.work / 'config' / 'nginx' / 'state' / 'maintenance').exists())
+        flags = (self.stub / 'flags.log')
+        self.assertFalse(flags.exists() and any(line.startswith('on') for line in flags.read_text().splitlines()))
+        self.assertEqual((self.work / 'web' / '.commit').read_text().strip(), self.docs_new)
+        self.assertEqual(self.deployed_marker(), self.docs_new)
+        self.assertFalse(self.approved())
+        log = (self.work / 'web' / '.update-log').read_text()
+        self.assertIn('documentation only', log)
+        self.assertNotIn('maintenance page up', log)
+        self.assertEqual(json.loads((self.work / 'web' / '.update-phase.json').read_text())['phase'], 'done')
+        # and the next approval of the same commit is "already at", as after any finished update
+        self.approve(self.docs_new)
+        again = self.run_script()
+        self.assertEqual(again.returncode, 0)
+        self.assertIn('already at', (self.work / 'web' / '.update-log').read_text())
+
+    def test_the_skip_keeps_the_env_file_and_local_scan_pause_untouched(self):
+        (self.work / '.env').write_text('SECRET=keep\n')
+        self.start_docs_only({'docs/UPDATES.md': 'notes\n'})
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertEqual((self.work / '.env').read_text(), 'SECRET=keep\n')
+        self.assertFalse([c for c in self.calls() if 'update_scan_pause' in c])
+
+    def test_a_range_with_one_code_file_is_a_full_deploy(self):
+        self.start_docs_only({'README.md': 'x\n', 'web/README': 'v9\n'})
+        result = self.run_script()
+        self.assert_full_deploy(result)
+        self.assertIn('full deploy: web/README is not on the documentation allowlist', (self.work / 'web' / '.update-log').read_text())
+
+    def test_unlisted_paths_are_a_full_deploy(self):
+        for path in ('docker-compose.yml', 'config/nginx/rengine.conf', 'scripts/x.sh', 'docs/notes.txt', 'docs/run.sh', 'README.txt', 'Makefile',
+                     'web/requirements.txt', 'web/Dockerfile', 'scanner.lock.json', 'docs-extra/a.md', 'sub/README.md'):
+            with self.subTest(path=path):
+                self.setUp()
+                self.start_docs_only({path: 'changed\n'})
+                result = self.run_script()
+                self.assert_full_deploy(result)
+
+    def test_a_docs_file_that_is_a_symlink_or_executable_is_a_full_deploy(self):
+        shutil.copy(SCRIPTS / 'update-docs-only.sh', self.work / 'scripts' / 'update-docs-only.sh')
+        self.deployed_at(self.new)
+        other = self.tmp / 'other'
+        (other / 'docs').mkdir(exist_ok=True)
+        (other / 'docs' / 'link.md').symlink_to('../web/README')
+        self.docs_new = self.push_from_other({})
+        self.approve(self.docs_new)
+        self.assert_full_deploy(self.run_script())
+
+    def test_a_deleted_or_renamed_code_file_is_a_full_deploy(self):
+        self.start_docs_only({'web/README': None})
+        self.assert_full_deploy(self.run_script())
+
+    def test_an_unfinished_earlier_deploy_means_a_full_deploy_even_for_docs(self):
+        self.start_docs_only({'docs/UPDATES.md': 'notes\n'}, deployed=False)  # no deployed-commit record: something is still owed
+        self.assert_full_deploy(self.run_script())
+
+    def test_migrations_waiting_means_a_full_deploy_even_for_docs(self):
+        self.start_docs_only({'docs/UPDATES.md': 'notes\n'})
+        (self.stub / 'unmigrated').write_text('')
+        self.assert_full_deploy(self.run_script())
+
+    def test_a_branch_switch_is_never_a_documentation_skip(self):
+        self.start_docs_only({'docs/UPDATES.md': 'notes\n'})
+        other = self.tmp / 'other'
+        self.git('checkout', '-q', '-b', 'side', cwd=other)
+        side = self.push_from_other({'docs/SIDE.md': 'side\n'}, 'side')
+        self.git('push', 'origin', 'side', cwd=other)
+        (self.work / 'web' / '.update-branch').write_text('side\n')
+        self.approve(side)
+        result = self.run_script()
+        self.assertTrue([c for c in self.calls() if 'update_scan_pause --request' in c], self.calls())  # the normal path paused scanning first
+        self.assertNotIn('documentation only', (self.work / 'web' / '.update-log').read_text())
+
+    def test_without_the_helper_script_every_update_is_a_full_deploy(self):
+        self.start_docs_only({'docs/UPDATES.md': 'notes\n'})
+        (self.work / 'scripts' / 'update-docs-only.sh').unlink()
+        self.assert_full_deploy(self.run_script())
+
+    def test_the_decision_script_on_its_own_changes_nothing(self):
+        shutil.copy(SCRIPTS / 'update-docs-only.sh', self.work / 'scripts' / 'update-docs-only.sh')
+        docs = self.push_from_other({'docs/A.md': 'a\n'})
+        code = self.push_from_other({'web/README': 'v7\n'})
+        run = lambda a, b: subprocess.run(['bash', 'scripts/update-docs-only.sh', '--explain', a, b], cwd=self.work, env=self.env, capture_output=True, text=True)
+        self.git('fetch', 'origin', cwd=self.work)
+        self.assertEqual((run(self.new, docs).returncode, run(self.new, docs).stdout.strip()), (0, 'skip'))
+        self.assertEqual((run(self.new, code).returncode, run(self.new, code).stdout.strip()), (1, 'deploy'))
+        self.assertEqual(run(code, docs).stdout.strip(), 'deploy')  # not an ancestor
+        self.assertEqual(run(self.new, self.new).stdout.strip(), 'deploy')  # nothing changed
+        self.assertEqual(run('nonsense', docs).stdout.strip(), 'deploy')
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.head(), self.prev)
+
     def publish_deploy_file_again(self):
         """A further commit on top of the deploy file, for a second update."""
         other = self.tmp / 'other'
