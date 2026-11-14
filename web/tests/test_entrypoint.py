@@ -194,7 +194,7 @@ class WebEntrypointTests(SimpleTestCase):
     def test_proxy_upstream_port_matches(self):
         conf = Path(__file__).resolve().parents[2] / 'config' / 'nginx' / 'rengine.conf'
         if conf.is_file():  # the config directory is not mounted inside the web container
-            self.assertIn('http://rengine:8000/', conf.read_text())
+            self.assertIn('http://rengine:8000;', conf.read_text())
 
 
 class BeatEntrypointTests(SimpleTestCase):
