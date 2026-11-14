@@ -1,6 +1,6 @@
 # Exposed secrets for 1.4: a secrets inventory built on Kingfisher
 
-Status: **built for `1.4-develop`** (S1 to S7, with the Sentinel half in `hevnsnt/cvENGINE-sentinel`). "Built in 1.4" below lists where the
+Status: **built and released in 1.4.0** (S1 to S7, with the Sentinel half in `hevnsnt/cvENGINE-sentinel`). "Built in 1.4" below lists where the
 code differs from this plan and why; the rest of the document is the plan as it was reviewed. It sits next to [SCANNER-ARCHITECTURE.md](SCANNER-ARCHITECTURE.md) (the 1.4
 one-scanner plan from PR #278) and follows that plan's decisions: the scanning moves into the Sentinel, the built-in Sentinel does any work that touches a
 credential, the shared code lives in `cvengine_scanner`, and the server decides policy and stores results. Slices S1 to S7 below target `1.4-develop`.

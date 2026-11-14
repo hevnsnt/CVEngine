@@ -33,7 +33,7 @@ Firewall 443 and 8082 to the people who need them. The development stack has no 
 
 ## Install
 
-On a Linux server (Debian or Ubuntu is easiest; 4 GB of RAM at the least and 8 GB for comfort, and 20 GB of free disk):
+On a Linux server (Debian or Ubuntu is easiest; 4 GB of RAM at the least and 8 GB for comfort, and 20 GB of free disk for a fresh install; `install.sh` warns below about 15 GB. Updating an install needs its own free space, about 14 GB for the first update to 1.4, see [UPDATES.md](UPDATES.md#small-hosts-disk-memory-and-stuck-scans)):
 
 ```bash
 git clone https://github.com/hevnsnt/CVEngine.git
