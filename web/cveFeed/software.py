@@ -93,7 +93,7 @@ TOOLS = [
     tool('go', 'Go toolchain', 'https://go.dev', 'scanners', '1.27.4', 'BSD-3-Clause',
          'Builds nuclei and naabu; removed again in the same image layer, so no Go runs in either image', where='both',
          pins=[('web/Dockerfile', r'ARG GOVERSION=([0-9.]+)'), (SENTINEL_DOCKERFILE, r'ARG GOVERSION=([0-9.]+)')]),
-    tool('tailscale', 'Tailscale', GH + 'tailscale/tailscale', 'scanners', '1.104.6', 'BSD-3-Clause',
+    tool('tailscale', 'Tailscale', GH + 'tailscale/tailscale', 'scanners', '1.104.7', 'BSD-3-Clause',
          'The optional sidecar that joins a tailnet so scans can reach it', where='server', optional='COMPOSE_PROFILES=tailscale',
          pins=[('docker-compose.yml', r'tailscale/tailscale:v([0-9.]+)')]),
     # -- OpenVAS add-on -----------------------------------------------------------------------------------------------------------------------------
