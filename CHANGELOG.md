@@ -2,6 +2,11 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Fixed
+- **The Graph page shows every project when All projects is chosen.** With more than one project each is drawn as a constellation, and the page then gave every constellation a slot in the grid it uses for host-by-host clusters, about a thousand units apart, and measured the picture by anchors that a constellation does not have. So the view stayed on the first project alone and Fit graph did nothing. The constellations now keep the places they are packed into, side by side as on the Overview, and the page fits all of them, on load and from Fit graph. One project drawn host by host is unchanged.
+
 ## v1.4.0 (2026-11-13)
 
 ### Added

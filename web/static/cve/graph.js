@@ -242,7 +242,9 @@ export function clusterGraph(data, {columns: requestedColumns} = {}) {
   const originals = new Map(data.nodes.map(node => [node.id, node]));
   const domains = data.nodes.filter(node => node.kind === 'domain' && node.project && node.root);
   const clouds = data.nodes.filter(node => node.kind === 'cloud');
-  if (!domains.length && !clouds.length) return {nodes: data.nodes, edges: data.edges};
+  // Nothing drawn host by host (every project is a cloud): there is nothing to cluster. The clouds are already packed side by side
+  // (cloudProjects), and a slot each in the cluster grid would throw them a thousand units apart, too far to see more than one.
+  if (!domains.length) return {nodes: data.nodes, edges: data.edges};
   const projects = new Map(clouds.map(cloud => [cloud.project, {slug: cloud.project, name: cloud.label, cloud, roots: new Map()}]));
   for (const domain of domains) {
     const project = projects.get(domain.project) ||
@@ -1380,8 +1382,13 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
       y1 = Infinity,
       x2 = -Infinity,
       y2 = -Infinity;
+    // A clustered picture is measured by its project and root anchors. With every project a cloud there are none (the clouds are
+    // packed, not clustered), and measuring nothing left the view where it started, on the first cloud alone: measure them all.
+    let anchors = false;
+    if (clustered) graph.forEachNode((n) => { if (['project', 'root'].includes(n.data?.kind)) anchors = true; });
+    const grid = clustered && anchors;
     graph.forEachNode((n) => {
-      if (clustered && !['project', 'root'].includes(n.data?.kind)) return;
+      if (grid && !['project', 'root'].includes(n.data?.kind)) return;
       const p = layout.getNodePosition(n.id);
       x1 = Math.min(x1, p.x);
       y1 = Math.min(y1, p.y);
@@ -1395,7 +1402,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
     // fit by screen margin instead of a fixed padding in graph units, so the picture uses the room it is given; a clustered
     // graph also needs space for each root's host bubbles and labels around it
     const margin = 26;
-    const room = clustered ? 260 : 14; // graph units around the outermost node centers (node radius, label)
+    const room = grid ? 260 : 14; // graph units around the outermost node centers (node radius, label)
     // spread the short side so the picture matches the card's shape (a little rounder than the card, for the labels). The padding
     // around the outermost nodes does not stretch, so it is solved for: (bw*sx + 2*room) / (bh*sy + 2*room) = the wanted ratio.
     const bw0 = Math.max(x2 - x1, 1);
@@ -1403,7 +1410,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
     const want = Math.max((w - margin * 2) / Math.max(h - margin * 2, 1), 0.2) * 0.9;
     let sx = 1;
     let sy = 1;
-    if (!clustered && graph.getNodesCount() >= 4) {
+    if (!grid && graph.getNodesCount() >= 4) {
       if ((bw0 + room * 2) / (bh0 + room * 2) < want) sx = Math.min(Math.max((want * (bh0 + room * 2) - room * 2) / bw0, 1), 4);
       else sy = Math.min(Math.max(((bw0 + room * 2) / want - room * 2) / bh0, 1), 4);
     }
@@ -1414,7 +1421,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
     }
     const bw = bw0 * spread.x + room * 2,
       bh = bh0 * spread.y + room * 2;
-    const k = Math.min((w - margin * 2) / bw, (h - margin * 2) / bh, clustered ? 1.8 : 3);
+    const k = Math.min((w - margin * 2) / bw, (h - margin * 2) / bh, grid ? 1.8 : 3);
     const key = [x1, y1, x2, y2, w, h, spread.x, spread.y].map((v) => Math.round(v / 6)).join();
     if (key === lastBox) return;
     lastBox = key;
