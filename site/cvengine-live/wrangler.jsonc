@@ -1,0 +1,13 @@
+{
+  // cvengine.live on Cloudflare Workers (free plan): static site + one small API route.
+  "name": "cvengine-live",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "./public", "binding": "ASSETS", "not_found_handling": "404-page" },
+  "d1_databases": [
+    // Fill database_id with the id printed by: npx wrangler d1 create cvengine-live
+    { "binding": "DB", "database_name": "cvengine-live", "database_id": "REPLACE_WITH_D1_DATABASE_ID" }
+  ],
+  "routes": [ { "pattern": "cvengine.live", "custom_domain": true } ],
+  "observability": { "enabled": true }
+}
