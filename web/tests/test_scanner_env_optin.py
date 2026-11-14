@@ -149,7 +149,7 @@ class InstallTests(unittest.TestCase):
         if not shutil.which('ss'):
             self.skipTest('needs ss')
         with socket.socket() as busy:
-            busy.bind(('0.0.0.0', 0))
+            busy.bind(('127.0.0.1', 0))
             busy.listen(1)
             self.env['CVENGINE_INSTALL_PORTS'] = str(busy.getsockname()[1])
             proc = self.install()

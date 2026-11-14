@@ -170,7 +170,7 @@ def status_changed(obj, before, after):
         if after != 'fixed' and triage.retest_state:
             _set_state(triage, '', '', None, '')
     except Exception:  # noqa: BLE001
-        logger.warning('retest hook failed for %r', obj, exc_info=True)
+        logger.warning('retest hook failed for %s #%s', type(obj).__name__, getattr(obj, 'pk', None), exc_info=True)
     return None
 
 

@@ -21,7 +21,9 @@ def diagnostic(what, raw, kind=''):
     """A failure line safe to store and show to project members: what failed, the exception type, and a diagnostic id. The raw
     text (an exception message can carry paths, addresses or provider replies) goes to the worker log under that id only."""
     import hashlib
-    raw = str(raw or '')
+
+    from cveFeed.secret_redaction import redact_text
+    raw = redact_text(str(raw or ''))  # a provider reply or a failed signed-in request can echo a key, token or password: the log gets it masked
     stamp = hashlib.sha256(f'{what}:{raw}:{timezone.now().isoformat()}'.encode()).hexdigest()[:12]
     logger.warning('%s failed (diagnostic %s): %s', what, stamp, raw[:2000])
     return f'{what} failed{f" ({kind})" if kind else ""}; diagnostic {stamp} is in the worker log'
