@@ -9,16 +9,16 @@
 <p align="center">Assess each host with industry-standard scanners and fix what matters first.</p>
 
 <p align="center">
-  <a href="CHANGELOG.md"><img alt="Release 1.4.0" src="https://img.shields.io/badge/release-1.4.0-2ea44f"></a>
+  <a href="CHANGELOG.md"><img alt="Release 1.4.1" src="https://img.shields.io/badge/release-1.4.1-2ea44f"></a>
   <a href="LICENSE"><img alt="License GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
   <img alt="Self-hosted with Docker Compose" src="https://img.shields.io/badge/self--hosted-Docker%20Compose-blue">
 </p>
 
 <p align="center">
-  <img src="docs/images/cvengine-tour-1.4.gif" alt="A 50-second tour of cvENGINE 1.4 on a fictional demo company: the Overview, the asset graph of every domain, host and address, Shodan-style search typed on the Hosts page, CVE matches arriving on the live graph while a scan runs (smoke turning to fire), Situations, and the Sentinels" width="880">
+  <img src="docs/images/cvengine-tour-1.3.gif" alt="A 35-second tour of cvENGINE on a fictional demo company: the Overview, the Hosts page, the Sentinels that scan from inside a network, and the Settings tabs" width="880">
 </p>
 
-<p align="center"><sub>cvENGINE 1.4 on demo data.</sub></p>
+<p align="center"><sub>Tour recorded on 1.3 with demo data. 1.4 has a simpler left rail.</sub></p>
 
 ---
 
