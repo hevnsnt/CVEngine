@@ -22,13 +22,28 @@
 
 ---
 
-**cvENGINE is a self-hosted external attack surface and vulnerability assessment platform.** Give it your domains and it keeps discovering the subdomains, addresses and certificates you expose, then builds a searchable, Shodan-style inventory of every host, port, service, technology and certificate. Each host is assessed with industry-standard open-source scanners, and what to fix first is ranked by proof, real-world exploitation and exposure, with the evidence one click away. Because discovery keeps running, forgotten and shadow assets come to light, and new hosts, opened ports and version changes land on a timeline as soon as a scan sees them. Issues a check reproduced are marked as proven, so real problems stand apart from the noise.
+**cvENGINE is a self-hosted external attack surface and vulnerability assessment platform.** It reads the CVE and exploitation feeds all day and works out, with proof, which new CVEs actually reach your hosts.
+
+### Every new CVE, checked against your hosts
+
+1. **Watch the feeds.** The [cve.now](https://cve.now) feed is read every 30 minutes, and CISA KEV, ENISA EUVD, FIRST EPSS, Exploit-DB, Metasploit and (with a key) VulnCheck KEV every hour, so a CVE that becomes exploited turns hot within the hour.
+2. **Find who is exposed.** A CVE becomes a match only when a host in your inventory runs the same product at a version inside the affected range.
+3. **Write the check.** With your AI key, cvENGINE reads the advisories of hot CVEs (within a daily budget) and records how to detect each one. When no vetted Nuclei template exists, the AI can draft a read-only one, which runs on a host only after the system validated it: syntax and a harmless control run on a Sentinel, an offline test against an affected and a fixed response, and a second AI pass.
+4. **Prove it on a Sentinel.** Every five minutes, matches (fire first) are reproduced with one of six read-only checks, and the exact command and result are kept as evidence.
+5. **Cut the noise.** AI triage rates CVE matches, scanner findings, open databases and admin routes, and medium-or-worse hygiene findings within daily caps, and the [AI reviewer](docs/AI-REVIEWER.md) reads each open finding once and can close false positives when you allow it. Fixed rules set a floor the model cannot go below, so the AI never closes a finding a check proved.
+
+**Bring your own AI.** Use Anthropic, OpenAI or OpenRouter with your own key, or stay fully local with Ollama, LM Studio or vLLM. Daily caps on the AI jobs and a usage page with cost estimates keep spend in your hands. For triage and review the model sees structured evidence with host names redacted, it has no tools, and the server checks every answer before it counts. Nothing AI runs until an administrator connects a provider, and the AI reviewer, AI-written checks and auto-fire (AI confirmation and tests the moment a new hot CVE lands) each ship switched off. Without a model, cvENGINE still discovers, scans, matches and validates.
+
+### Know everything you expose
+
+Give cvENGINE your domains and it keeps discovering the subdomains, addresses and certificates you expose, in a searchable, Shodan-style inventory of every host, port, service, technology and certificate. Forgotten and shadow assets come to light, and new hosts, opened ports and version changes land on a timeline as soon as a scan sees them. Every host is assessed with industry-standard open-source scanners, and [Situations](docs/SITUATIONS.md) ranks what to fix first: proof before likelihood, known exploited before severity alone.
 
 ## cvENGINE 1.4.0 is here
 
 | | |
 | --- | --- |
 | **Scan from wherever you need** | You choose where scanning happens: on your server, with the built-in scanner that ships with every install in its own container; on remote [Sentinels](docs/SENTINELS.md) you place anywhere, in other clouds or regions or inside private networks to reach internal assets; or both. Add Sentinels to scale out. |
+| **AI that cuts false positives** | The new AI reviewer, in its own boxed-in container, reads each open finding once (up to a daily cap) and records whether it is real, and AI-written checks are validated by the system before they run, also on your own Sentinels. Both stay off until you switch them on. |
 | **Set up in the browser** | `install.sh` is a thin bootstrap. A [setup wizard](docs/DEPLOYMENT.md#setup-wizard) takes your organization, project and first domain, and discovery starts at once. |
 | **What needs you, ranked** | [Situations](docs/SITUATIONS.md) lists the hosts that need a person, most urgent first. Findings a check reproduced show their proof first, and a finding marked fixed is checked again. |
 | **Exposed secrets and SSH** | A project secrets inventory fed by Kingfisher, and SSH inspection with sshamble that checks host keys against a known-bad list and never logs in. |
