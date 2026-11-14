@@ -128,7 +128,7 @@ class BundledProxyTests(SimpleTestCase):
         self.assertIn('"~^8443:1:.+"', head)
         head = head.replace('"~^8443:1:.+"', f'"~^{tunnel}:1:.+"')
         server = CONF[CONF.index('    location / {'):]
-        server = server[:server.index('\n    }') + 6].replace('http://rengine:8000/', f'http://127.0.0.1:{upstream.server_port}/')
+        server = server[:server.index('\n    }') + 6].replace('http://rengine:8000', f'http://127.0.0.1:{upstream.server_port}')  # the address is set in a variable in the location (follows the web container)
         server = server.replace('/etc/nginx/state/', f'{etc}/state/')
         scratch = f'{tmp}/scratch' if self.runner == 'local' else '/tmp'
         os.makedirs(scratch, exist_ok=True)

@@ -1,6 +1,6 @@
 # Configuration
 
-Every value in `.env` reaches the `web`, `celery`, and `celery-beat` containers. To change a setting, add a line such as `CVENGINE_TTL_NUCLEI=48` to `.env` and run `make up`. This needs Docker Compose 2.24 or newer. Compose fixes a few values and ignores them in `.env`: the broker URLs, `CELERY_BACKEND`, `DEBUG` (0 in production, 1 in the development stack), and `GUNICORN_WORKERS`. Avoid `#` and `$` in passwords, because `make` and Compose both parse `.env`.
+Every value in `.env` reaches the `web`, `celery`, and `celery-beat` containers. To change a setting, add a line such as `CVENGINE_TTL_NUCLEI=48` to `.env` and run `make up`. Recreating only `web` (`docker compose up -d web`) is also safe from 1.4.0 on: the proxy looks the `web` container's address up again every 10 seconds, so it follows the new one. On a server that does not have 1.4.0 yet, the proxy keeps the old address and the site answers 502 until the proxy is restarted: use `docker compose up -d web proxy`, or run `docker compose restart proxy` afterwards. This needs Docker Compose 2.24 or newer. Compose fixes a few values and ignores them in `.env`: the broker URLs, `CELERY_BACKEND`, `DEBUG` (0 in production, 1 in the development stack), and `GUNICORN_WORKERS`. Avoid `#` and `$` in passwords, because `make` and Compose both parse `.env`.
 
 ## Basics
 
