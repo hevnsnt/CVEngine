@@ -1,8 +1,9 @@
 // Records the 1.4 tour: a scripted walk through a demo instance (scripts/demo/seed_demo.py) as a WebM, which make_gif.sh turns into the README GIF.
 // Run it through make_gif.sh (one command, from a fresh seed); on its own:
 //   BASE=http://127.0.0.1:8001 OUT=/tmp/tour STAGE='python3 manage.py shell < ../scripts/demo/stage_live.py' STAGE_CWD=web NODE_PATH=$(npm root -g) node scripts/demo/record_tour.js
-// Scenes: Overview, the asset graph (hover a hot host), Shodan-style search typed on camera, CVEs arriving while a scan runs (SOC mode, the second seed
-// step scripts/demo/stage_live.py writes them through the product's own code while this records), Situations, Sentinels, and back to the Overview.
+// Scenes: Overview (the Live discovery card), the All-projects graph (every project a constellation, a card), Acme Corp's own constellations (one per domain, the
+// dive host by host), Shodan-style search typed on camera, CVEs landing on the constellations while a scan runs (the second seed step
+// scripts/demo/stage_live.py writes them through the product's own code while this records), the CVE matches page, the Sentinels, and back to the Overview.
 const { chromium } = require('playwright');
 const { exec } = require('child_process');
 const fs = require('fs');
@@ -98,42 +99,74 @@ const stage = (phase, outDir) => {
   dead.push([0, 0.4]);
   const arm = stage('arm', OUT), detect = stage('detect', OUT), confirm = stage('confirm', OUT), finish = stage('done', OUT);
 
-  // 1. Overview: the counts, and what needs you first
-  await go(`${BASE}/cve/?project=${PROJECT}`); await settle(900);
+  // 1. Overview of all projects, ending on the Live discovery card (the constellations, with the counts under them)
+  await go(`${BASE}/cve/?project=_all`); await settle(900);
   await p.mouse.move(820, 330, { steps: 14 });
-  await cap('<b>Overview</b> of a fictional company: what is exposed, and what to fix first');
-  await sleep(1000);
-  await p.mouse.move(790, 400, { steps: 14 });
-  await sleep(1000);
-  await mark('1-overview');
+  await cap('<b>Overview</b> of fictional companies: what is exposed, and what to fix first');
+  await sleep(1500);
+  await smoothScroll(540);
+  await cap('<b>Live discovery</b>: every project as a constellation');
+  await sleep(2200);
+  await mark('1-overview-card');
+  await smoothScroll(0);
 
-  // 2. The asset graph: every domain, host, address and CVE of the estate; settle, zoom to the hot hosts, open one
+  // 2. THE STAR: the Graph page, All projects. Every project is a constellation (size is hosts, flares are fire, smoke and ice); open the hot one
   await cap('');
-  await click(nav('Hosts'), 500);
-  await click(tab('Graph'), 400);
-  await cap('The <b>asset graph</b>: every domain, host, address, and the CVEs that hit them');
+  await go(`${BASE}/cve/graph/?project=_all`); await settle(300);
+  await cap('Every project is a <b>constellation</b>: size is hosts, flares are fire, smoke and ice');
   await smoothScroll(300);
-  await sleep(4000);
-  await mark('2-graph');
-  const cloud = await p.evaluate(() => {
-    const s = [...document.querySelectorAll('svg')].filter((x) => x.querySelectorAll('circle').length > 20)[0];
-    const rows = [...s.querySelectorAll('text')].filter((x) => x.textContent === 'acme-example.com').map((t) => t.getBoundingClientRect()).sort((a, b) => b.width - a.width);
-    return rows[0] ? [rows[0].x + rows[0].width / 2 + 40, rows[0].y + 45] : [960, 460];
-  });
-  await wheel(cloud[0], cloud[1], -540, 14, 1200);
-  await p.mouse.move(900, 300, { steps: 8 });
-  await p.mouse.down(); await p.mouse.move(520, 250, { steps: 16 }); await p.mouse.up();  // pan the hot hosts into the middle
+  await sleep(5200);  // let it settle: packets run along the wires, the flares breathe
+  await mark('2-all-projects');
+  const cloudAt = (label) => p.evaluate((l) => {
+    const t = [...document.querySelectorAll('svg g text')].find((x) => x.textContent === l);
+    const r = t && t.getBoundingClientRect();
+    return r ? [r.x + r.width / 2, r.y + r.height + 40] : null;
+  }, label);
+  const acme = (await cloudAt('Acme Corp')) || [830, 480];
+  await p.mouse.move(acme[0], acme[1], { steps: 22 });
   await sleep(300);
+  await p.mouse.click(acme[0], acme[1]);
+  await cap('Click one: its hottest hosts, and exactly why they are hot');
+  await sleep(2800);
+  await mark('2-project-card');
+  const closeCard = p.locator('button').filter({ hasText: /^Close$/ }).first();
+  if (await closeCard.isVisible()) await click(closeCard, 300);
+
+  // 3. Choose Acme Corp: one constellation per domain (and IP assets); dive into the hot one host by host
+  await cap('');
+  await go(`${BASE}/cve/graph/?project=${PROJECT}`); await settle(300);
+  await smoothScroll(300);
+  await p.mouse.move(640, 640, { steps: 6 });
+  await cap('Choose a project: one <b>constellation</b> per domain, and one for the IP assets');
+  await sleep(4200);
+  await mark('3-acme-constellations');
+  const dom = (await cloudAt('acme-example.com')) || [810, 520];
+  await p.mouse.move(dom[0], dom[1], { steps: 20 });
+  await sleep(250);
+  await cap('Double-click one to dive in, host by host');
+  await p.mouse.dblclick(dom[0], dom[1]);
+  await cap('Inside: every host of this domain, hot ones in colour');
+  await sleep(4600);
+  await mark('3-dive');
   const cache = await labelAt('cache');
   if (cache) {
-    await p.mouse.move(cache[0], cache[1], { steps: 14 });
-    await cap('Live data, not a picture: click a hot host to see why it is hot');
-    await sleep(600);
-    await p.mouse.click(cache[0], cache[1]);
-    await sleep(2200);
-    await mark('2-graph-hover');
-    await click(p.locator('button').filter({ hasText: /^Close$/ }).first(), 300);
+    await p.mouse.move(cache[0], cache[1], { steps: 16 });
+    await sleep(300);
+    for (let tries = 0; tries < 3 && !(await closeCard.isVisible()); tries++) {  // the hosts drift a little: aim again at where the host is now
+      const now = (await labelAt('cache')) || cache;
+      await p.mouse.move(now[0], now[1], { steps: 4 });
+      await p.mouse.click(now[0], now[1]);
+      await sleep(900);
+    }
+    await cap('Live data, not a picture: why this host is on fire');
+    await sleep(2000);
+    await mark('3-why-fire');
+    if (await closeCard.isVisible()) await click(closeCard, 300);
   }
+  const backBtn = p.locator('button').filter({ hasText: /^← All of / }).first();
+  if (await backBtn.count()) await click(backBtn, 300);
+  await sleep(1500);
+  await mark('3-back');
 
   // 3. Shodan-style search, typed on camera
   await cap('');
@@ -149,30 +182,29 @@ const stage = (phase, outDir) => {
     await sleep(hold);
   };
   await type('tech:php', '<b>Search</b> your own attack surface like Shodan: <code>tech:php</code>', 800);
-  await mark('3-search-1');
+  await mark('4-search-1');
   await type('port:3389 -host:vpn', 'Remote Desktop exposed, but not on the VPN: <code>port:3389 -host:vpn</code>', 900);
-  await mark('3-search-2');
-  await type('tech:"apache tomcat" sev:high', 'Tomcat hosts with a high finding: <code>tech:"apache tomcat" sev:high</code>', 1200);
-  await mark('3-search-3');
+  await mark('4-search');
   await box.fill(''); await sleep(200);
 
-  // 4. CVEs being detected: a scan is running, SOC mode watches it, and the detections arrive while the camera rolls
+  // 5. CVEs being detected: a scan runs, the constellation it works on lights up, and the detections land while the camera rolls
   await cap('');
   arm.go(); await arm.done;  // a scan is now running (its Nuclei stage), and the Sentinels have just checked in
-  await go(`${BASE}/cve/graph/?project=${PROJECT}`); await settle(1500);
-  await click(p.locator('#graph-soc'), 600);
-  await cap('<b>SOC mode</b>: a scan is running, the hosts it is checking pulse');
-  await sleep(1800);
-  await mark('4-soc-before');
-  await cap('The scan matches CVEs to hosts: new detections arrive');
-  detect.go(); await detect.done; await sleep(3200);
-  await mark('4-soc-arrived');
+  await go(`${BASE}/cve/graph/?project=${PROJECT}`); await settle(300);
+  await smoothScroll(300);
+  await p.mouse.move(640, 660, { steps: 6 });
+  await cap('A scan is running: the <b>constellation</b> it works on lights up');
+  await sleep(3200);
+  await mark('5-live-before');
+  await cap('The scan matches CVEs to hosts: new detections land');
+  detect.go(); await detect.done; await sleep(6200);
+  await mark('5-live-arrived');
   await cap('A check reproduces the flaw: <b>smoke</b> (version only) turns to <b>fire</b> (confirmed)');
-  confirm.go(); await confirm.done; await sleep(5600);
-  await mark('4-soc-fire');
-  await click(p.locator('#soc-exit'), 500);
+  confirm.go(); await confirm.done; await sleep(6200);
+  await mark('5-live');
   finish.go(); await finish.done;  // the scan finishes
   await cap('');
+  await smoothScroll(0);
   await click(nav('Findings'), 500);
   await click(tab('CVE matches'), 900);
   await cap('Every match shows its heat, the exploited-in-the-wild mark, and the proof');
@@ -183,34 +215,21 @@ const stage = (phase, outDir) => {
     await p.mouse.move(rb.x + 250, rb.y + rb.height / 2, { steps: 20 }); await sleep(250); await p.mouse.click(rb.x + 250, rb.y + rb.height / 2); await settle(900);
   }
   await sleep(1200);
-  await mark('4-matches');
-  await p.mouse.move(980, 560, { steps: 10 });
-  for (let i = 0; i < 12; i++) { await p.mouse.wheel(0, 14); await sleep(40); }
-  await sleep(900);
-  await mark('4-proof');
+  await mark('5-matches');
 
-  // 5. Situations, then the Sentinels, then back to the Overview
-  await cap('');
-  await go(`${BASE}/cve/${PROJECT}/situations/`); await settle(900);
-  await p.mouse.move(760, 300, { steps: 16 });
-  await cap('<b>Situations</b>: what needs you, ranked, one host at a time');
-  await sleep(1900);
-  await mark('5-situations');
+  // 5. The Sentinels, then back to the Overview
   await cap('');
   await click(nav('Scanners'), 500);
   await click(tab('Sentinels'), 700);
   await cap('<b>Sentinels</b> are the scanners: the built-in one, and your own inside the network');
-  await sleep(1200);
-  const plan = p.locator('text=Which scanners run').first();
-  if (await plan.count()) { await plan.scrollIntoViewIfNeeded(); }
-  await sleep(1600);
-  await mark('5-sentinels');
+  await sleep(2200);
+  await mark('6-sentinels');
   await cap('');
   await click(nav('Overview'), 900);
   await p.mouse.move(820, 330, { steps: 14 });
-  await cap('<b>cvENGINE 1.4</b>: self-hosted external attack-surface assessment');
+  await cap('<b>cvENGINE</b>: self-hosted external attack-surface assessment');
   await sleep(1300);
-  await mark('6-overview');
+  await mark('7-overview');
   await cap('');
 
   await sleep(400);
