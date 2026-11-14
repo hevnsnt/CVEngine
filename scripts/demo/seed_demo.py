@@ -1,8 +1,10 @@
 """Fill an empty cvENGINE database with a fictional company for screenshots and the tour GIFs. Run it inside the web container, or locally
 with the settings environment set:  python3 manage.py shell < scripts/demo/seed_demo.py
 
-Everything here is made up: the company (Acme Corp), its domain (acme-example.com), documentation-range addresses (198.51.100.0/24,
-203.0.113.0/24) and private ranges, and the CVEs are real public ones attached to invented hosts. Never run it against a real install: it
+Everything here is made up: the company (Acme Corp), its domains (acme-example.com and four more *-example.com/.net/.org names), documentation-range
+addresses (198.51.100.0/24, 203.0.113.0/24, 192.0.2.0/24) and private ranges, and the CVEs are real public ones attached to invented hosts.
+About 75 hosts across five domains, shared addresses, a shared edge address, cloud and internal hosts, Technology rows (for `tech:` searches) and
+a few findings, so the asset graph and the search have something to show. scripts/demo/stage_live.py is the second step the 1.4 tour runs while it records. Never run it against a real install: it
 creates an App Admin with a known password.
 """
 import random
@@ -17,8 +19,9 @@ from cveFeed.models import CVEEntry, CVEMatch, HostState, InternalRange
 from dashboard.models import Org, OrgMembership, Project, UserProfile
 from scanEngine.models import EngineType
 from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
-from startScan.models import IpAddress, Port, ScanActivity, ScanHistory, Subdomain, Vulnerability
+from startScan.models import IpAddress, Port, ScanActivity, ScanHistory, Subdomain, Technology, Vulnerability
 from targetApp.models import Domain
+from cveFeed.models import DiscoveryEvent, SetupAnswer
 
 random.seed(13)
 NOW = timezone.now()
@@ -104,6 +107,99 @@ for name, address, ports in EXTERNAL:
     fresh = name in UNSCANNED  # a second, newly found domain whose hosts nothing has scanned yet
     subs[name] = host(domain_new if fresh else domain, scan_new if fresh else scan_main, f'{name}.' + ('acme-sites-example.com' if fresh else 'acme-example.com'), address, ports)
 
+# --- the rest of the estate: more domains, cloud, labs and payments hosts ---------------------------------------------
+SCORES.update({'blog': 58, 'forum': 46, 'portal': 61, 'crm': 39, 'helpdesk': 34, 'rdp-gw1': 91, 'ts01': 57, 'vpn-rdp': 53, 'tc-portal': 87, 'reports': 74, 'tc-legacy': 45,
+               'elastic': 89, 'mongo': 63, 'registry': 48, 'bastion': 37, 'k8s-api': 32, 'k8s-ingress': 23, 'objstore': 20, 'queue': 18, 'etl': 15, 'airflow': 35, 'vault': 11,
+               'web-eu1': 21, 'web-us1': 19, 'web-ap1': 17, 'ml-gpu': 28, 'labs': 25, 'jupyter': 55, 'gitea': 30, 'ci': 43, 'sandbox': 40, 'mlflow': 36, 'ftp': 51, 'staging': 33,
+               'test': 31, 'pay': 26, 'checkout': 29, 'threeds': 22, 'ledger': 13, 'invoices': 27, 'careers': 14, 'press': 10, 'events': 12, 'partners': 24,
+               'dc01': 59, 'jump': 54, 'k8s-n1': 25, 'k8s-n2': 25, 'runner': 31})
+REASONS.update({91: 'Known exploited CVE matched', 87: 'Critical CVE matched', 89: 'Critical CVE matched', 74: 'Critical CVE matched'})
+UNSCANNED.update({'careers', 'press', 'events', 'partners', 'ledger', 'threeds'})
+ESTATE = {  # domain: [(name, address or [addresses], [(port, service, product, version)], [technologies], os guess)]
+    'acme-example.com': [
+        ('blog', '198.51.100.50', [(443, 'https', 'Apache httpd', '2.4.49')], ['PHP:7.4.33', 'WordPress:6.2.2'], ''),
+        ('forum', '198.51.100.51', [(443, 'https', 'nginx', '1.18.0')], ['PHP:7.3.33', 'phpBB:3.3.5'], ''),
+        ('portal', ['198.51.100.52', '198.51.100.53'], [(443, 'https', 'nginx', '1.20.1')], ['PHP:8.1.2', 'Laravel'], ''),
+        ('crm', '198.51.100.54', [(443, 'https', 'Apache httpd', '2.4.54')], ['PHP:8.0.30', 'SuiteCRM:7.12'], ''),
+        ('helpdesk', ['198.51.100.54', '198.51.100.55'], [(443, 'https', 'Apache httpd', '2.4.54')], ['PHP:8.0.30'], ''),
+        ('rdp-gw1', '198.51.100.60', [(3389, 'ms-wbt-server', 'Microsoft Terminal Services', '10.0.17763')], [], 'Windows Server 2019'),
+        ('ts01', '198.51.100.61', [(3389, 'ms-wbt-server', 'Microsoft Terminal Services', '6.1.7601')], [], 'Windows Server 2008 R2'),
+        ('vpn-rdp', ['198.51.100.23', '198.51.100.65'], [(3389, 'ms-wbt-server', 'Microsoft Terminal Services', '10.0.17763')], [], 'Windows Server 2019'),
+        ('tc-portal', '198.51.100.62', [(8443, 'https', 'Apache Tomcat', '9.0.30')], ['Java'], ''),
+        ('reports', '198.51.100.63', [(8080, 'http', 'Apache Tomcat', '9.0.50')], ['Java', 'Spring Framework:5.3.17'], ''),
+        ('tc-legacy', '198.51.100.64', [(8080, 'http', 'Apache Tomcat', '8.5.60')], ['Java'], ''),
+        ('shop-eu', ['198.51.100.13', '198.51.100.14'], [(443, 'https', 'Apache httpd', '2.4.58')], ['PHP:7.4.33', 'Magento:2.4.3'], ''),
+    ],
+    'acme-cloud-example.org': [
+        ('elastic', '192.0.2.10', [(9200, 'http', 'Elasticsearch', '7.10.2')], ['Java'], ''),
+        ('mongo', '192.0.2.11', [(27017, 'mongodb', 'MongoDB', '4.0.28')], [], ''),
+        ('registry', '192.0.2.12', [(5000, 'http', 'Docker Registry', '2.8.1')], [], ''),
+        ('bastion', '192.0.2.13', [(22, 'ssh', 'OpenSSH', '9.2p1')], [], ''),
+        ('k8s-api', '192.0.2.14', [(6443, 'https', 'Kubernetes API server', '1.27.4')], [], ''),
+        ('k8s-ingress', '192.0.2.15', [(443, 'https', 'nginx', '1.25.3')], [], ''),
+        ('objstore', '192.0.2.16', [(443, 'https', 'MinIO', '2023-12-07')], [], ''),
+        ('queue', '192.0.2.17', [(5672, 'amqp', 'RabbitMQ', '3.12.10')], ['Erlang'], ''),
+        ('etl', '192.0.2.18', [(443, 'https', 'nginx', '1.24.0')], ['Python'], ''),
+        ('airflow', '192.0.2.19', [(8080, 'http', 'Apache Airflow', '2.7.3')], ['Python'], ''),
+        ('vault', '192.0.2.20', [(8200, 'https', 'HashiCorp Vault', '1.15.2')], [], ''),
+        ('web-eu1', ['192.0.2.30', '203.0.113.200'], [(443, 'https', 'nginx', '1.25.3')], ['PHP:8.2.12'], ''),
+        ('web-us1', ['192.0.2.31', '203.0.113.200'], [(443, 'https', 'nginx', '1.25.3')], ['PHP:8.2.12'], ''),
+        ('web-ap1', ['192.0.2.32', '203.0.113.200'], [(443, 'https', 'nginx', '1.25.3')], [], ''),
+        ('ml-gpu', '192.0.2.33', [(22, 'ssh', 'OpenSSH', '8.9p1'), (8888, 'http', 'Jupyter Notebook', '6.5.4')], ['Python'], ''),
+    ],
+    'acme-labs-example.net': [
+        ('labs', '198.51.100.70', [(443, 'https', 'nginx', '1.25.3')], ['PHP:8.2.12'], ''),
+        ('jupyter', '198.51.100.71', [(8888, 'http', 'Jupyter Notebook', '6.0.3')], ['Python'], ''),
+        ('gitea', '198.51.100.72', [(3000, 'http', 'Gitea', '1.21.1')], ['Go'], ''),
+        ('ci', '198.51.100.73', [(8080, 'http', 'Jenkins', '2.346.3')], ['Java'], ''),
+        ('sandbox', '198.51.100.74', [(443, 'https', 'Apache httpd', '2.4.52')], ['PHP:7.4.33'], ''),
+        ('mlflow', '198.51.100.75', [(5000, 'http', 'MLflow', '2.8.1')], ['Python'], ''),
+        ('ftp', '198.51.100.76', [(21, 'ftp', 'vsftpd', '3.0.3')], [], ''),
+        ('staging', ['198.51.100.77', '198.51.100.11'], [(443, 'https', 'nginx', '1.24.0')], ['PHP:8.1.2'], ''),
+        ('test', '198.51.100.78', [(443, 'https', 'nginx', '1.22.1')], ['PHP:7.4.33'], ''),
+    ],
+    'acme-pay-example.com': [
+        ('pay', '203.0.113.60', [(443, 'https', 'nginx', '1.25.3')], [], ''),
+        ('checkout', '203.0.113.61', [(443, 'https', 'nginx', '1.25.3')], ['PHP:8.2.12'], ''),
+        ('threeds', '203.0.113.62', [(443, 'https', 'Caddy', '2.7.6')], ['Go'], ''),
+        ('ledger', '203.0.113.63', [(5432, 'postgresql', 'PostgreSQL', '15.4')], [], ''),
+        ('invoices', '203.0.113.64', [(443, 'https', 'Apache httpd', '2.4.58')], ['PHP:8.1.2'], ''),
+    ],
+    'acme-careers-example.net': [
+        ('careers', '203.0.113.80', [(443, 'https', 'nginx', '1.25.3')], [], ''),
+        ('press', '203.0.113.81', [(443, 'https', 'nginx', '1.25.3')], ['WordPress:6.4.2', 'PHP:8.2.12'], ''),
+        ('events', '203.0.113.82', [(443, 'https', 'nginx', '1.25.3')], [], ''),
+        ('partners', '203.0.113.83', [(443, 'https', 'nginx', '1.24.0')], [], ''),
+    ],
+}
+for dom_name, rows in ESTATE.items():
+    dom = Domain.objects.get_or_create(name=dom_name, project=project, defaults={'insert_date': NOW - timedelta(days=45)})[0]
+    scan_row = scan_main if dom_name == 'acme-example.com' else make_scan(dom, scanned=any(r[0] not in UNSCANNED for r in rows))  # a domain's hosts share its one latest scan
+    for short, addresses, ports, techs, os_guess in rows:
+        for address in ([addresses] if isinstance(addresses, str) else addresses):
+            IpAddress.objects.get_or_create(address=address, org=org, defaults={'is_private': False, 'os_guess': os_guess, 'last_seen': NOW})
+        first, *more = ([addresses] if isinstance(addresses, str) else addresses)
+        sub = host(dom, scan_row, f'{short}.{dom_name}', first, ports, os_guess=os_guess)
+        for address in more:
+            sub.ip_addresses.add(IpAddress.objects.get(address=address, org=org))
+        for name in techs:
+            sub.technologies.add(Technology.objects.get_or_create(name=name)[0])
+        subs[short] = sub
+IpAddress.objects.filter(address='203.0.113.200').update(is_cdn=True)  # a shared edge: many unrelated sites sit behind it, so its hosts are not collapsed into one
+for short, techs in (('shop', ['PHP:7.4.33', 'Magento:2.4.3']), ('www', ['React']), ('wiki', ['Java']), ('jenkins', ['Java']), ('git', ['Ruby on Rails'])):
+    for name in techs:
+        subs[short].technologies.add(Technology.objects.get_or_create(name=name)[0])
+# how discovery found the hosts: a host a named parent revealed (certificate names, links, DNS), drawn as a line between the two
+for parent, children in (('www', ['blog', 'forum', 'portal', 'crm', 'helpdesk', 'shop-eu', 'tc-portal', 'reports', 'tc-legacy']), ('app', ['api', 'k8s-ingress', 'etl']),
+                         ('git', ['ci', 'gitea', 'runner']), ('vpn', ['vpn-rdp', 'rdp-gw1', 'ts01']), ('k8s-api', ['k8s-ingress', 'registry', 'objstore', 'queue']),
+                         ('labs', ['jupyter', 'sandbox', 'mlflow', 'staging', 'test', 'ftp']), ('pay', ['checkout', 'threeds', 'ledger', 'invoices']),
+                         ('web-eu1', ['web-us1', 'web-ap1', 'elastic', 'mongo', 'airflow', 'vault', 'bastion', 'ml-gpu']), ('careers', ['press', 'events', 'partners'])):
+    if parent in subs:
+        for child in children:
+            if child in subs and parent != child:
+                DiscoveryEvent.objects.create(domain=subs[child].target_domain, scan=subs[child].scan_history, type='DNS_NAME', label=subs[child].name, host=subs[child].name,
+                                              parent_host=subs[parent].name, module='certificate_transparency')
+
 # --- the private networks a Sentinel covers ------------------------------------------------------------------------
 HQ, DC = '10.20.0.0/24', '10.30.0.0/24'
 InternalRange.objects.get_or_create(project=project, cidr=HQ, defaults={'description': 'Head office', 'last_discovery_at': NOW - timedelta(hours=5), 'last_discovery_hosts': 9})
@@ -116,6 +212,10 @@ INTERNAL = [
     ('10.30.0.4', 'erp', [(8443, 'https', 'Apache Tomcat', '9.0.83')]), ('10.30.0.8', 'sql01', [(1433, 'ms-sql-s', 'Microsoft SQL Server', '2019')]),
     ('10.30.0.9', 'ldap', [(389, 'ldap', 'OpenLDAP', '2.5.16')]), ('10.30.0.15', 'build', [(8080, 'http', 'Jenkins', '2.401.3')]),
     ('10.30.0.22', 'backup', [(22, 'ssh', 'OpenSSH', '8.4p1')]), ('10.30.0.30', 'vmhost', [(443, 'https', 'VMware ESXi', '7.0.3')]),
+    ('10.20.0.50', 'dc01', [(389, 'ldap', 'Microsoft Windows Active Directory LDAP', '10.0'), (445, 'microsoft-ds', 'Microsoft Windows SMB', '10.0')]),
+    ('10.20.0.51', 'jump', [(3389, 'ms-wbt-server', 'Microsoft Terminal Services', '10.0.17763')]),
+    ('10.30.0.40', 'k8s-n1', [(10250, 'https', 'Kubelet', '1.27.4')]), ('10.30.0.41', 'k8s-n2', [(10250, 'https', 'Kubelet', '1.27.4')]),
+    ('10.30.0.50', 'runner', [(22, 'ssh', 'OpenSSH', '9.2p1')]),
 ]
 internal_subs = {}
 for address, name, ports in INTERNAL:
@@ -133,15 +233,37 @@ CVES = [
     ('CVE-2024-1086', 'A use-after-free in the Linux netfilter component allows local privilege escalation.', 7.8, False, None),
     ('CVE-2023-4966', 'Citrix NetScaler session token disclosure ("Citrix Bleed").', 9.4, True, None),
 ]
-for cve_id, summary, cvss, kev, hostname in CVES:
+# CVEs the tour's second step (stage_live.py) lets the product detect while it records: the entries are in the feed, no host matches them yet
+LIVE = {
+    'CVE-2021-41773': ('A path traversal in Apache HTTP Server 2.4.49 allows reading files outside the document root and, with CGI enabled, remote code execution.', 7.5, True),
+    'CVE-2020-1938': ('Apache Tomcat AJP connector Ghostcat: an attacker can read web application files and, with an upload, run code.', 9.8, True),
+    'CVE-2021-44228': ('Apache Log4j2 JNDI lookups allow remote code execution through crafted log messages (Log4Shell).', 10.0, True),
+    'CVE-2019-0708': ('A remote code execution flaw in Remote Desktop Services lets an unauthenticated attacker run code (BlueKeep).', 9.8, True),
+    'CVE-2019-11043': ('A buffer underflow in PHP-FPM behind nginx lets a remote attacker run code through a crafted URL.', 9.8, True),
+}
+EXTRA = [
+    ('CVE-2021-23017', 'An off-by-one in the nginx resolver allows a DNS response to overwrite memory.', 7.7, False, 'hr'),
+    ('CVE-2022-41741', 'The nginx mp4 module can corrupt memory with a crafted file.', 7.8, False, 'dev'),
+    ('CVE-2024-6387', 'A race condition in OpenSSH sshd (regreSSHion) may allow unauthenticated remote code execution.', 8.1, False, 'bastion'),
+]
+CONFIRMED = {'cache', 'wiki', 'jenkins'}  # a check reproduced the flaw on these hosts: fire (the others are a version only: smoke, or ice when nothing exploits the CVE)
+for cve_id, summary, cvss, kev, hostname in CVES + EXTRA:
     entry = CVEEntry.objects.get_or_create(cve_id=cve_id, defaults={'title': cve_id, 'summary': summary, 'cvss': cvss, 'kev': kev, 'status': 'published',
                                                                       'published_at': NOW - timedelta(days=200), 'first_seen_at': NOW - timedelta(days=30)})[0]
     sub = subs.get(hostname) or internal_subs.get(hostname)
     if sub:
+        confirmed = hostname in CONFIRMED
         CVEMatch.objects.get_or_create(cve_entry=entry, subdomain=sub, defaults={
             'scan_history': sub.scan_history, 'matched_product': sub.webserver, 'matched_version': '', 'version_in_range': True, 'confidence': 0.9,
             'source': 'version', 'ai_verdict': 'confirmed' if kev else 'likely', 'ai_reason': 'The advertised version is inside the affected range.',
-            'remediation_status': 'open'})
+            'remediation_status': 'open', **({'template_result': 'vulnerable', 'template_id': cve_id.lower(), 'template_tested_at': NOW - timedelta(hours=3)} if confirmed else {})})
+for cve_id, (summary, cvss, kev) in LIVE.items():
+    CVEEntry.objects.get_or_create(cve_id=cve_id, defaults={'title': cve_id, 'summary': summary, 'cvss': cvss, 'kev': kev, 'status': 'published',
+                                                              'published_at': NOW - timedelta(days=400), 'first_seen_at': NOW - timedelta(days=30)})
+
+# --- the questions this update asks an administrator, answered, so the tour shows no banner -----------------------------
+for key, answer, version in (('scan_from', 'both', 1), ('ai_validation', 'off', 3), ('credential_checks', 'off', 1), ('agent_policy', 'suggest', 1)):
+    SetupAnswer.objects.update_or_create(key=key, defaults={'answer': answer, 'answered_by': admin, 'version': version})
 
 # --- Sentinels -----------------------------------------------------------------------------------------------------
 KINDS = ['nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'testssl', 'nmap_udp', 'wpscan', 'discover']
@@ -155,7 +277,7 @@ for name, network, note, slots, caps in SENTINELS:
     token, _ = create_token(admin, name, scope=SCOPE_SENTINEL)
     agents[name] = Agent.objects.create(token=token, name=name, kind='scanner', scope={'projects': ['acme-corp']}, capabilities=caps, network=network,
                                         max_concurrent=slots, status='active', status_note='', last_seen=NOW - timedelta(seconds=random.randint(3, 40)),
-                                        info={'version': '1.3.0', 'host': note})
+                                        info={'version': '1.4.0', 'host': note})
 
 tasks = []
 for i, (name, sub) in enumerate(list(internal_subs.items()) + list(subs.items())[:8]):
@@ -179,8 +301,13 @@ SentinelTask.objects.bulk_create(tasks)
 # --- a few scanner findings ----------------------------------------------------------------------------------------
 for hostname, name, severity, template in (('jenkins', 'Jenkins script console exposed', 4, 'jenkins-script-console'), ('git', 'GitLab sign-up open', 2, 'gitlab-open-registration'),
                                             ('grafana', 'Grafana default credentials', 4, 'grafana-default-login'), ('erp', 'Tomcat manager exposed', 3, 'tomcat-manager-detect'),
-                                            ('backup', 'SSH password authentication enabled', 1, 'ssh-password-auth')):
+                                            ('backup', 'SSH password authentication enabled', 1, 'ssh-password-auth'),
+                                            ('tc-portal', 'Tomcat manager exposed', 3, 'tomcat-manager-detect'), ('reports', 'Spring Boot actuator exposed', 3, 'springboot-actuator'),
+                                            ('tc-legacy', 'Tomcat version disclosed', 1, 'tomcat-version-detect'), ('elastic', 'Elasticsearch open without authentication', 4, 'elasticsearch-open'),
+                                            ('mongo', 'MongoDB open without authentication', 4, 'mongodb-unauth'), ('ftp', 'Anonymous FTP login allowed', 2, 'ftp-anonymous-login'),
+                                            ('jupyter', 'Jupyter Notebook without a token', 3, 'jupyter-unauth'),
+                                            ('rdp-gw1', 'RDP without network level authentication', 3, 'rdp-nla-disabled')):
     sub = subs.get(hostname) or internal_subs.get(hostname)
     Vulnerability.objects.create(scan_history=sub.scan_history, target_domain=sub.target_domain, subdomain=sub, name=name, severity=severity, template_id=template,
                                  source='nuclei', http_url=f'https://{sub.name}/', open_status=True, discovered_date=NOW - timedelta(hours=random.randint(2, 30)))
-print('seeded', project.slug, len(EXTERNAL), 'external hosts,', len(INTERNAL), 'internal,', len(agents), 'sentinels,', len(tasks), 'tasks')
+print('seeded', project.slug, len(subs), 'external hosts,', len(INTERNAL), 'internal,', len(agents), 'sentinels,', len(tasks), 'tasks')
