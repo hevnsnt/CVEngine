@@ -201,8 +201,9 @@ def _row_keys(project):
 # A counted row that has expired is renewed, not counted again, when nothing it reads has been written since it was counted. What it reads is the tables of
 # ``row_fingerprint_tables`` (PostgreSQL's own insert/update/delete counters, ``snapshot_cache.table_fingerprint``: one cheap read, no scan) and the browser sandbox's
 # last result (kept in the cache, not a table) and the switches a row shows. A renewal gives the same row another ``CVENGINE_STATUS_CACHE_SECONDS`` and never moves when it was counted
-# (``computed_at``): after ``ROW_RENEWAL_SECONDS`` the row is counted again whatever the counters say, so the numbers that come from the clock (a scan marked running
-# for longer than the running window moves to ``stalled`` with no write) are never older than that. Without the counters (``track_counts`` off, not PostgreSQL) a row is
+# (``computed_at``): after ``ROW_RENEWAL_SECONDS`` the row is counted again whatever the counters say, . The only numbers that come from the clock are the scans (a scan marked running
+# for longer than the running window moves to ``stalled`` with no write): a row with any running, queued or stalled scan is never renewed, so those are never older than
+# ``CVENGINE_STATUS_CACHE_SECONDS`` (a row with none cannot change that way). Without the counters (``track_counts`` off, not PostgreSQL) a row is
 # counted each time it expires, as before. ``tests/test_status_row_renewal.py`` fails when the counts read a table that is not listed.
 ROW_RENEWAL_SECONDS = 300
 
@@ -242,6 +243,8 @@ def _renewed_row(project, now_fp, seconds):
         last = cache.get(_row_keys(project)[1])
         if not (seconds and isinstance(held, dict) and held.get('fp') is not None and isinstance(last, dict)):
             return None
+        if any((last.get('scans') or {}).get(k) for k in ('running', 'queued', 'stalled')):
+            return None  # a scan marked running passes the running window with no write: such a row is counted each time it expires
         if time.time() - held['computed_at'] >= ROW_RENEWAL_SECONDS or now_fp() != held['fp']:
             return None
         cache.set(_row_keys(project)[0], last, seconds)

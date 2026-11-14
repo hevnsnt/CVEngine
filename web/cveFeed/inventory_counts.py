@@ -81,9 +81,12 @@ def current_rows():
     wanted_scans = sorted(full_ids | after)
     unscanned_domains = sorted(set(targets) - set(latest_full))
     table = Subdomain._meta.db_table
+    from tenancy import scope as tenancy_scope
+    scoped = tenancy_scope.current_allowed() is not None  # the raw read skips the tenancy manager: a scoped call reads only the rows of the domains it may see (``targets`` is already scoped)
     with connection.cursor() as cursor:
-        cursor.execute(f'SELECT id, name, scan_history_id, target_domain_id FROM "{table}" WHERE scan_history_id IS NULL OR target_domain_id IS NULL '
-                       'OR scan_history_id = ANY(%s) OR target_domain_id = ANY(%s)', [wanted_scans, unscanned_domains])
+        cursor.execute(f'SELECT id, name, scan_history_id, target_domain_id FROM "{table}" WHERE (scan_history_id IS NULL OR target_domain_id IS NULL '
+                       'OR scan_history_id = ANY(%s) OR target_domain_id = ANY(%s))' + (' AND target_domain_id = ANY(%s)' if scoped else ''),
+                       [wanted_scans, unscanned_domains] + ([sorted(targets)] if scoped else []))
         subs = cursor.fetchall()
     newest_after, newest_scanned = {}, {}
     for start in range(0, len(subs), YIELD_EVERY):

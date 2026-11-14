@@ -162,3 +162,58 @@ class RenewalTests(Fixtures):
                 mock.patch.object(system_status, '_shared_inputs', lambda ids: order.append('count') or real_shared(ids)):
             self.call()
         self.assertEqual(order[:2], ['fingerprint', 'count'])
+
+
+class ClockDerivedTests(Fixtures):
+    def test_a_row_with_a_running_queued_or_stalled_scan_is_counted_again_not_renewed(self):
+        """A scan marked running passes the running window with no write, so its row's numbers move by the clock alone: worst case one cache period, not five minutes."""
+        for scans in ({'running': 1, 'queued': 0, 'stalled': 0}, {'running': 0, 'queued': 1, 'stalled': 0}, {'running': 0, 'queued': 0, 'stalled': 1}):
+            with mock.patch.object(system_status, '_row_fingerprint', lambda: 'same'):
+                self.call()
+                for project in self.projects:
+                    cache.set(system_status._row_keys(project)[1], {**cache.get(system_status._row_keys(project)[1]), 'scans': scans}, 600)
+                self.expire_rows()
+                self.call()
+            self.assertEqual(len(self.counted), 3, scans)
+            cache.clear()
+
+    def test_a_row_with_no_such_scan_is_still_renewed(self):
+        with mock.patch.object(system_status, '_row_fingerprint', lambda: 'same'):
+            self.call()
+            for project in self.projects:
+                cache.set(system_status._row_keys(project)[1], {**cache.get(system_status._row_keys(project)[1]), 'scans': {'running': 0, 'queued': 0, 'stalled': 0}}, 600)
+            self.expire_rows()
+            self.call()
+        self.assertEqual(self.counted, [])
+
+
+class ScopedCurrentRowsTests(World):
+    def test_a_project_scoped_call_reads_only_that_projects_hosts(self):
+        from cveFeed import inventory_counts
+        from startScan.models import Subdomain
+        from targetApp.models import Domain
+        Subdomain.objects.create(name='orphan.test', target_domain=None)
+        Subdomain.objects.create(name='scanless.sc1.example.test', target_domain=Domain.objects.get(project=self.projects[1]))
+        unscoped = inventory_counts.current_rows()
+        from tenancy import scope
+        tokens = scope.set_scope({self.projects[0].id}, None)
+        try:
+            rows = inventory_counts.current_rows()
+        finally:
+            scope.reset_scope(tokens)
+        mine = set(Subdomain.objects.filter(target_domain__project=self.projects[0]).values_list('id', flat=True))
+        self.assertTrue(rows)
+        self.assertLessEqual({r[0] for r in rows}, mine)
+        self.assertEqual({r[0] for r in rows}, {r[0] for r in unscoped if r[3] == self.projects[0].id})
+        self.assertTrue({r[3] for r in unscoped} > {self.projects[0].id})  # the unscoped read does hold the others
+
+    def test_a_scoped_and_an_unscoped_snapshot_never_share_a_key(self):
+        from cveFeed import snapshot_cache
+        from tenancy import scope
+        unscoped = snapshot_cache.scope_hash('host-reps')
+        tokens = scope.set_scope({self.projects[0].id}, None)
+        try:
+            scoped = snapshot_cache.scope_hash('host-reps')
+        finally:
+            scope.reset_scope(tokens)
+        self.assertNotEqual(scoped, unscoped)
