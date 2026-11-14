@@ -723,7 +723,7 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         shutil.copy(SCRIPTS / 'update-docs-only.sh', self.work / 'scripts' / 'update-docs-only.sh')
         docs = self.push_from_other({'docs/A.md': 'a\n'})
         code = self.push_from_other({'web/README': 'v7\n'})
-        run = lambda a, b: subprocess.run(['bash', 'scripts/update-docs-only.sh', '--explain', a, b], cwd=self.work, env=self.env, capture_output=True, text=True)
+        run = lambda a, b: subprocess.run(['bash', 'scripts/update-docs-only.sh', a, b], cwd=self.work, env=self.env, capture_output=True, text=True)
         self.git('fetch', 'origin', cwd=self.work)
         self.assertEqual((run(self.new, docs).returncode, run(self.new, docs).stdout.strip()), (0, 'skip'))
         self.assertEqual((run(self.new, code).returncode, run(self.new, code).stdout.strip()), (1, 'deploy'))

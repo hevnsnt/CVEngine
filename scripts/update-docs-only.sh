@@ -2,7 +2,7 @@
 # Decides whether an update between two commits changes documentation only, so the host can move to the new commit without a maintenance
 # page, a scan pause or any container recreate (scripts/apply-update.sh uses it; nothing here touches Docker, a flag or any state).
 #
-#   scripts/update-docs-only.sh [--explain] FROM TO      prints "skip" (exit 0) or "deploy" (exit 1); --explain adds the reason on stderr
+#   scripts/update-docs-only.sh FROM TO      prints "skip" (exit 0) or "deploy" (exit 1) on stdout and the reason on stderr; reads git only
 #   . scripts/update-docs-only.sh; cvengine_docs_only_update FROM TO
 #
 # THE ALLOWLIST. A range is docs-only only when EVERY path it changes matches one of these, and nothing else (any other path, in any
@@ -73,14 +73,12 @@ cvengine_docs_only_update() {
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
   set -uo pipefail
-  explain=0
-  if [[ ${1:-} == --explain ]]; then explain=1; shift; fi
-  if [[ $# -ne 2 ]]; then echo "usage: $0 [--explain] FROM TO" >&2; exit 2; fi
+  if [[ $# -ne 2 ]]; then echo "usage: $0 FROM TO" >&2; exit 2; fi
   # full ids only (the function insists), so a name or a short id is resolved here, by git, in this checkout
   from=$(git rev-parse --verify --quiet "$1^{commit}") || from=$1
   to=$(git rev-parse --verify --quiet "$2^{commit}") || to=$2
   if cvengine_docs_only_update "$from" "$to"; then verdict=skip; code=0; else verdict=deploy; code=1; fi
   echo "$verdict"
-  [[ $explain = 1 ]] && echo "$cvengine_docs_only_reason" >&2
+  echo "$cvengine_docs_only_reason" >&2
   exit $code
 fi
