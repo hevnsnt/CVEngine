@@ -30,7 +30,7 @@ CLASS_WORDS = {'P': 'browser key', 'S': 'server secret', 'I': 'identifier'}
 STATUSES = ('unverified', 'live', 'inactive', 'inconclusive', 'public_by_design', 'accepted', 'revoked', 'false_positive')
 PERSON_STATUSES = ('unverified', 'public_by_design', 'accepted', 'revoked', 'false_positive')  # what a person may set; the rest come from validation
 QUIET_STATUSES = ('public_by_design', 'accepted', 'false_positive', 'revoked')  # count for nothing in a host's score
-# Kingfisher's machine-readable validation outcomes (its docs/USAGE.md "Finding Validation Statuses") and what each makes of the status.
+# Kingfisher's machine-readable validation outcomes (Kingfisher's own USAGE.md, "Finding Validation Statuses") and what each makes of the status.
 OUTCOMES = ('verified_active', 'assumed', 'locally_derived', 'invalid_material', 'verified_inactive', 'unavailable', 'skipped', 'not_attempted')
 OUTCOME_STATUS = {'verified_active': 'live', 'verified_inactive': 'inactive', 'invalid_material': 'inactive', 'unavailable': 'inconclusive',
                   'skipped': 'inconclusive'}
