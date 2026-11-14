@@ -148,10 +148,11 @@ function packClouds(clouds, feet, aspect) {
   }
   return items;
 }
-// One project on the picture: each of its targets is a constellation of its own, packed like the projects of the all-projects view. A pure
+// One project on the picture: each of its registered roots is a constellation of its own (the ``root`` of its domain nodes, the group the
+// host-by-host view clusters by: a registered domain, or "IP assets" for every address target), packed like the projects of the all-projects view. A pure
 // pre-transform, so cloudProjects and focusProject do the rest: every host and target gets a group key in place of its ``project`` (the
 // real slug stays in ``slug``), ``data.projects[key]`` names the group, and ``constellations`` makes even a handful of hosts a cloud.
-// Hosts with no target group under the project's name. A payload the server capped has only some of the hosts, so per-target counts
+// A host belongs to the root of the domain it hangs off; with no domain edge it falls back to its target, then to the project's name. A payload the server capped has only some of the hosts, so per-target counts
 // would be wrong: the project is then one constellation with the server's true total. More than one project: left as it is.
 export const GROUP_SEP = "|";
 export function byTarget(data) {
@@ -163,9 +164,15 @@ export function byTarget(data) {
   if (((data.hosts && data.hosts.projects) || {})[slug] > drawn) return { ...data, constellations: true };
   const projectName = (about[slug] && about[slug].name) || data.nodes.find((n) => n.project === slug && n.project_name)?.project_name || slug;
   const projects = { ...about };
+  const byId = new Map(data.nodes.map((n) => [n.id, n]));
+  const rootOf = new Map(); // host id -> the root of the domain it hangs off
+  for (const e of data.edges) {
+    const from = byId.get(e.from), to = byId.get(e.to);
+    if (from && from.kind === "domain" && from.project === slug && from.root && to && to.kind === "subdomain" && !rootOf.has(to.id)) rootOf.set(to.id, from.root);
+  }
   const nodes = data.nodes.map((n) => {
     if (n.project !== slug || !["subdomain", "domain"].includes(n.kind)) return n;
-    const name = (n.kind === "domain" ? n.label : n.target) || projectName;
+    const name = (n.kind === "domain" ? n.root || n.label : rootOf.get(n.id) || n.target) || projectName;
     const key = `${slug}${GROUP_SEP}${name}`;
     projects[key] = { name, hygiene: 0, slug, target: name }; // hygiene is known per project, not per target
     return { ...n, project: key, slug, ...(n.kind === "domain" ? { project_name: name } : {}) };
@@ -582,7 +589,7 @@ function cloudArt(d) {
   count.style.fontSize = `${Math.round(R * 0.38)}px`;
   count.textContent = Number(d.hosts || 0).toLocaleString();
   const unitText = svgEl("text", { y: Math.round(R * 0.1) + 18, "text-anchor": "middle" }, "cloud-u");
-  unitText.textContent = "hosts";
+  unitText.textContent = Number(d.hosts || 0) === 1 ? "host" : "hosts";
   const base = Math.max(...nodes.map((n) => n.y), R * 0.5) + 10; // under the lowest star
   const found = svgEl("text", { y: Math.round(base + 14), "text-anchor": "middle" }, "cloud-f");
   found.textContent = d.findings ? `${d.findings} with findings` : "no findings";
@@ -673,6 +680,8 @@ function rewire(c, t) {
 function refreshCloud(ui, d) {
   const n = ui.querySelector(".cloud-n");
   if (n) n.textContent = Number(d.hosts || 0).toLocaleString();
+  const u = ui.querySelector(".cloud-u");
+  if (u) u.textContent = Number(d.hosts || 0) === 1 ? "host" : "hosts";
   const f = ui.querySelector(".cloud-f");
   if (f) {
     f.textContent = d.findings ? `${d.findings} with findings` : "no findings";
@@ -1430,10 +1439,13 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
     graph.forEachNode((n) => {
       if (grid && !['project', 'root'].includes(n.data?.kind)) return;
       const p = layout.getNodePosition(n.id);
-      x1 = Math.min(x1, p.x);
-      y1 = Math.min(y1, p.y);
-      x2 = Math.max(x2, p.x);
-      y2 = Math.max(y2, p.y);
+      const d = n.data || {};
+      // a constellation is its radius wide, with its name above; a bubble its own radius: the edge of the picture is theirs, not their centre
+      const ext = d.kind === "cloud" ? cloudRadius(d) + 28 : d.kind === "tier" ? tierRadius(d) + 14 : 0;
+      x1 = Math.min(x1, p.x - ext);
+      y1 = Math.min(y1, p.y - ext);
+      x2 = Math.max(x2, p.x + ext);
+      y2 = Math.max(y2, p.y + ext);
     });
     if (!Number.isFinite(x1)) return;
     const w = container.clientWidth,
@@ -1537,7 +1549,7 @@ export function mountGraph(container, { onSelect, pinKey, pods: podsOn = true } 
     transition("graph-diving", () => {
       focus = slug;
       burst = true;
-      back.textContent = d.target ? "← All targets" : "← All projects";
+      back.textContent = d.target ? `← All of ${d.project_name || "the project"}` : "← All projects";
       where.textContent = `${d.label || slug} · ${Number(d.hosts || 0).toLocaleString()} hosts${d.findings ? ` · ${d.findings} with findings` : ""}`;
       bar.hidden = false;
       container.classList.add("graph-focused");
@@ -1872,7 +1884,7 @@ async function tierDetails(box, data) {
     if (!rows.length) sec.append(mk("p", "note", "None right now: a scan since may have cooled them."));
     box.append(sec);
   }
-  box.append(actionsOf(mk("a", "btn sm", `Every host ${HEAT_WORDS[data.tier]}${data.target ? " in the project" : ""}`, { href: `/cve/${slug}/hosts/?heat=${data.tier}` }), openProject(data.project, data.target ? "Open the target" : "Open the project")));
+  box.append(actionsOf(mk("a", "btn sm", `Every host ${HEAT_WORDS[data.tier]}${data.target ? " in the project" : ""}`, { href: `/cve/${slug}/hosts/?heat=${data.tier}` }), openProject(data.project, data.target ? "Open these hosts" : "Open the project")));
 }
 async function hygieneDetails(box, data, slug) {
   const project = realSlug(data);
@@ -1915,7 +1927,7 @@ async function cloudDetails(box, data) {
   const slug = encodeURIComponent(project);
   const sum = (key) => (data.parts || []).reduce((n, p) => n + (p[key] || 0), 0);
   const head = mk("div", `why-hero why-${data.hot === "calm" ? "clean" : data.hot}`);
-  head.append(mk("span", "why-kicker", data.target ? `Target in ${data.project_name || project}` : "Project"), mk("strong", "why-title", data.label),
+  head.append(mk("span", "why-kicker", data.target ? `Part of ${data.project_name || project}` : "Project"), mk("strong", "why-title", data.label),
     mk("p", "why-lede", `${plural(data.hosts || 0, "host")}, ${data.findings ? `${data.findings} with findings` : "none with findings"}.`));
   const tally = mk("div", "why-tally");
   for (const [key, n] of [["fire", sum("fire")], ["smoke", sum("smoke")], ["ice", sum("ice")], ...(data.target ? [] : [["hygiene", data.hygiene || 0]])]) { // hygiene is known per project, not per target
@@ -1938,7 +1950,7 @@ async function cloudDetails(box, data) {
       box.append(sayFailed("its hosts"));
     }
   }
-  box.append(actionsOf(openProject(data.project, data.target ? "Open the target" : "Open the cloud"), mk("a", "btn ghost sm", data.target ? "Every host in the project" : "Every host", { href: `/cve/${slug}/hosts/` })));
+  box.append(actionsOf(openProject(data.project, data.target ? "Open these hosts" : "Open the cloud"), mk("a", "btn ghost sm", data.target ? "Every host in the project" : "Every host", { href: `/cve/${slug}/hosts/` })));
 }
 
 export async function showNodeDetails(box, data) {
