@@ -57,7 +57,7 @@ An App Admin sees every row; an organization admin sees the rows tagged with an 
 | Seen by organization admins | Events |
 | --- | --- |
 | People and organizations | `user.create`, `user.update`, `user.delete`, `user.reset_password`, `user.reset_mfa`, `user.bugbounty_grant`, `user.bugbounty_revoke`, `membership.set`, `membership.remove`, `org.create`, `org.update`, `project.create`, `project.delete`, and the `org.api_key.*` and `project.api_key.*` events |
-| Hosts | `host.archive`, `host.restore`, `host.pin`, `host.delete`, `host.exclude`, `host.unexclude` |
+| Hosts | `host.archive`, `host.restore`, `host.pin`, `host.delete`, `host.exclude`, `host.unexclude`, `host.export` (the Export all hosts file: who, which project or organization, format, scope, archived and the number of hosts) |
 | Accounts and tokens | `account.password_change`, `account.mfa_enable`, `account.mfa_disable`, `account.mfa_locked`, `account.login_locked`, `token.create`, `token.revoke` (never the token or its name) |
 | Bug bounty | `bounty.project_create`, `bounty.engagement_create`, `bounty.automated_ok`, `bounty.policy_ack`, `bounty.import_targets`, `bounty.submit` |
 | Sentinels and agents | `agent.register`, `agent.update`, `agent.unregister`, `agent.status`, `agent.limits`, `agent.settings`, `agent.update_requested`, `agent.task.*`, `sentinel.enroll.generate` (project and organization scope), `sentinel.task.*` |

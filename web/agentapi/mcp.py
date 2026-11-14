@@ -11,6 +11,7 @@ from django.core.exceptions import RequestDataTooBig
 
 from agentapi import db_timeout, storage_safe
 from agentapi import agent_broker as broker
+from agentapi import host_export
 from agentapi import host_manage as hosts
 from agentapi import saved_search as saved
 from agentapi import secrets_api
@@ -199,6 +200,10 @@ TOOLS = [
                           'heat': {'type': 'string', 'enum': ['fire', 'smoke', 'ice', 'clean', 'unscanned']},
                           'facets': {'type': 'string'}, 'facet_size': {'type': 'integer'}}), ['project']),
      lambda c, a: svc.search_hosts(c, a.get('project'), a), False),
+    ('export_hosts', 'The list of every discovered host of one project, or of every project of one organization you can access, as the text of a file to hand to a penetration testing company (no findings, notes or owners in it). format csv (default): host, IP addresses, open TCP and UDP ports, services, web URLs, project, organization, target, first and last seen; format txt: every host name then every IP address, unique and sorted, for nmap -iL. scope external (default) leaves out hosts and addresses that are internal or private, all keeps them; archived (default false) adds archived hosts. Hosts removed and excluded are never listed. Returns {filename, hosts, entries, projects, content}. Read only; written to the audit log. A list too large for an answer here is a 413: download it with GET projects/{slug}/hosts/export.',
+     _schema({'project': SLUG, 'org': {'type': 'string', 'description': 'Organization slug: every project of it you can access (give project or org, not both)'},
+              'format': {'type': 'string', 'enum': ['csv', 'txt']}, 'scope': {'type': 'string', 'enum': ['external', 'all']}, 'archived': {'type': 'boolean'}}),
+     lambda c, a: host_export.tool(c, a), False),
     ('list_saved_searches', 'Your saved searches in a project (private to you): query, alert settings, last run, last match count and status, plus the limits and which notification channels are on.',
      _schema({'project': SLUG}, ['project']), lambda c, a: saved.list_saved_searches(c, a.get('project')), False),
     ('create_saved_search', 'Save a host search (the search_hosts syntax) and optionally be alerted. It is evaluated on its frequency (default daily) with your own access. The first evaluation only records the hosts that match now; later ones alert, in one message per search per evaluation, on new matches (alert_new), on hosts that stopped matching (alert_gone) and when the count reaches a threshold. The query is validated like a live search. Limits: 25 per user, 100 per project.',

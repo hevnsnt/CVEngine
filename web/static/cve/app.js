@@ -28,6 +28,7 @@ import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation, pa
 import { inventoryBadge, openInventoryDialog, renderHostInventory } from "/staticfiles/cve/inventory.js";
 import { loadSignIns, signInButton } from "/staticfiles/cve/authcheck.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
+import { hostExportButton } from "/staticfiles/cve/host-export.js";
 import { hostReviewCard } from "/staticfiles/cve/host-review-card.js";
 import { STORED, canDiscover, defaultChoice, discoverBody, discoverHint, discoverOptions, modeAfter, modeText, startedText } from "/staticfiles/cve/discover-mode-logic.js";
 import { suppliersPage } from "/staticfiles/cve/suppliers.js";
@@ -3431,6 +3432,12 @@ const pages = {
     }
     const inventoryBtn = el("button", "new-toggle", "Host inventory", { type: "button", title: "Have hosts report their own OS, packages and patches" });
     inventoryBtn.onclick = () => openInventoryDialog({ project: slug });
+    // "Export all hosts" sits in the page head, not in the list's tools: a scope list for a testing company, made by the server (not the CSV of the current filter beside it)
+    const pageHead = document.querySelector(".page-head");
+    if (pageHead) {
+      pageHead.querySelectorAll(".head-action").forEach((n) => n.remove());
+      pageHead.append(hostExportButton({ slug, all: ALL }));
+    }
     metaTools.append(fresh.node, galleryBtn, ...(ALL ? [] : [inventoryBtn]), csv, bulk.toggle);
     metaRow.append(countLine, metaTools);
     const lh = listHead({ page: "hosts", lead: [q], panelNodes: [sortBy, views.node, ...(searches ? [searches.node] : []), heatChips, scopeChips], meta: metaRow });

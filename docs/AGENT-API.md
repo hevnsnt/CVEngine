@@ -41,6 +41,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | scan detail | `GET .../scans/{id}/subdomains`, `endpoints`, `vulnerabilities`, `activity` | `list_scan_subdomains`, `list_scan_endpoints`, `list_scan_vulnerabilities`, `get_scan_activity` |
 | inventory | `GET projects/{slug}/hosts` | `list_hosts` |
 | search | `GET projects/{slug}/search?q=...` (`page_size=0`: the count alone; `facets=none`: no facets) | `search_hosts` |
+| host list file (for a penetration test) | `GET projects/{slug}/hosts/export`, `GET orgs/{org}/hosts/export` (`format=csv\|txt`, `scope=external\|all`, `archived=0\|1`) | `export_hosts` |
 | saved searches | `GET/POST projects/{slug}/saved-searches`, `GET/PATCH/DELETE .../saved-searches/{id}`, `POST .../{id}/run`, `GET .../{id}/matches` | `list_saved_searches`, `create_saved_search`, `update_saved_search`, `delete_saved_search`, `run_saved_search`, `get_saved_search_matches` |
 | routes | `GET projects/{slug}/routes` | `list_routes` |
 | changes | `GET projects/{slug}/changes?since=7d` | `list_changes` |
@@ -337,6 +338,18 @@ Any field filter's value takes a comma-separated list for OR within that one fil
 `?facets=port,product,tech,os,country` (comma-separated) adds the same whole-match, heat-chip-style counting for those fields: the response's `facets.port`, `facets.product`, and so on are each `[{value, count}]`, highest count first, up to `?facet_size=` values (default 10, max 50); `count` is the number of distinct hosts with that value, over the same (and equally 5,000-capped) match `facets.heat` counts. `org:`, `asn:`, and `hosting:` filters and facets were asked for too, but nothing in CVEngine looks up an IP's ASN or hosting provider today (only its country, via `geoiplookup`), and adding that is its own feature, not implemented here.
 
 Ports are stored per IP, so `product:nginx` finds only hosts whose own IP runs it.
+
+### Export all hosts
+
+`GET projects/{slug}/hosts/export` downloads every discovered host of a project as a file to hand to a penetration testing company, and `GET orgs/{org}/hosts/export` does the same for every project of an organization **that you can access** (a project you cannot see is never in it, and an organization you cannot see is a 404). The answer is a streamed file with no row cap (the CSV button on the Hosts page stops at 20,000 and holds the internal columns; this is a separate, scope-only list). The MCP tool `export_hosts` takes the same choices (`project` or `org`, not both) and returns `{filename, hosts, entries, projects, content}`; a list too big for an MCP answer is a 413 that points at the download.
+
+| Parameter | Values | Meaning |
+| --- | --- | --- |
+| `format` | `csv` (default), `txt` | `csv`: one row per host. `txt`: every host name, then every IP address, one per line, each once and sorted (names alphabetically, addresses in numeric order), ready for `nmap -iL`. |
+| `scope` | `external` (default), `all` | `external` leaves out hosts in a network their project declared internal, hosts named by a private or reserved address (`is_public_address`), hosts that resolve only to private addresses, and the private addresses of the others. `all` keeps them. |
+| `archived` | `0` (default), `1` | Archived hosts are left out unless asked for. |
+
+A host the organization removed and excluded (**Remove & exclude**), a host moved to another project, and an address on the organization's do-not-scan list are never in the file, whatever the parameters. The CSV is UTF-8 with a byte order mark, and a cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a leading apostrophe so a spreadsheet does not run it. Its columns are `Host`, `IP addresses`, `Open TCP ports`, `Open UDP ports`, `Services` (`port/protocol product version`, for example `443/tcp nginx 1.24.0`), `Web URLs` (the `http` and `https` addresses the host serves), `Project`, `Organization`, `Target` (the registered root it was found under), `First seen` and `Last seen` (UTC). There are no findings, CVE matches, heat, score, notes, owners or labels in it. The file is named `cvengine-hosts-<project or organization>-<YYYY-MM-DD>.csv` (or `.txt`); the response carries `X-Export-Hosts` (the number of hosts) and `X-Export-Entries` (rows or lines). Each export is written to the audit log as `host.export` before the file is sent, with who asked, the project or organization, and the three choices. Any role, and a read-only token, may export.
 
 ## Saved searches
 
