@@ -94,6 +94,24 @@ test('dailyCounts follows the UTC display preference', () => {
   }
 });
 
+test('dailyCounts takes the server\'s exact per-day counts as they are, whatever their size', () => {
+  process.env.TZ = 'America/New_York';
+  withClock('2026-11-10T15:00:00Z', () => {
+    const points = charts.dailyCounts([], 4, [{date: '2026-11-10', n: 2032}, {date: '2026-11-08', n: 7}, {date: '2026-06-01', n: 99}]);
+    assert.deepEqual(points.map((p) => p.v), [0, 7, 0, 2032]);  // nothing is capped at a thousand, a day outside the window is not drawn
+  });
+});
+
+test('the Activity card, the Scans chart and the Changes chart are counted by the server, never from a page of a list', () => {
+  const dash = read('dashboard.js');
+  assert.match(dash, /activity-days\?days=90/);
+  assert.doesNotMatch(dash, /hottest of|New findings counts|Inventory changes counts/);
+  const app = read('app.js');
+  assert.match(app, /activity-days\?\$\{query\(\{ days: 126, series: "scans"/);
+  assert.match(app, /activity-days\?\$\{query\(\{ days: 60, series: "changes"/);
+  assert.doesNotMatch(app, /scans\?\$\{query\(\{ page_size: 200 \}\)\}`\)\s*\.then\(\(r\) => \{\s*const dates/);
+});
+
 test('request bodies and links the review found wrong stay fixed', () => {
   const app = read('app.js');
   assert.doesNotMatch(app, /note:\s*(?:d\.remediation|\(detail)/, 'a status change must not resend a stored note');
@@ -139,24 +157,35 @@ test('a count or a badge asks for the count alone, and an export or a palette pr
 });
 
 class SentinelElement {
-  constructor(tag, cls = '', text = '') {
+  constructor(tag, cls = '', text = '', attrs = {}) {
     this.tag = tag;
     this.cls = cls;
     this.text = text == null ? '' : String(text);
+    this.attrs = attrs;
     this.children = [];
+    this.hidden = false;
+    this.value = '';
+    this.listeners = {};
+    this.classes = new Set();
+    this.classList = {toggle: (name, on) => (on ? this.classes.add(name) : this.classes.delete(name))};
   }
   append(...children) { this.children.push(...children); }
+  get textContent() { return this.text; }
+  set textContent(value) { this.text = String(value); }
+  addEventListener(type, fn) { this.listeners[type] = fn; }
+  setAttribute(name, value) { this.attrs = {...this.attrs, [name]: value}; }
+  removeAttribute(name) { const {[name]: _gone, ...rest} = this.attrs; this.attrs = rest; }
 }
 
-const sentinelEl = (tag, cls, text) => new SentinelElement(tag, cls, text);
+const sentinelEl = (tag, cls, text, attrs) => new SentinelElement(tag, cls, text, attrs);
 const sentinelText = (node) => typeof node === 'string' ? node : [node.text, ...node.children.map(sentinelText)].join(' ');
 globalThis.localStorage = {getItem: () => null};
 globalThis.document = {createTextNode: (text) => new SentinelElement('#text', '', text), getElementById: () => null};
 globalThis.__sentinelUi = {el: sentinelEl, badge: (text) => sentinelEl('span', 'badge', text)};
 const sentinelSource = read('sentinel-live.js');
 const sentinelModule = sentinelSource.replace(/^import .*;\n/gm, '');
-const {task, recent, openvasQueue} = await import(`data:text/javascript,${encodeURIComponent(
-  `const {el, badge} = globalThis.__sentinelUi;\n${sentinelModule}\nexport {task, recent, openvasQueue};`,
+const {task, recent, openvasQueue, utilisationBar} = await import(`data:text/javascript,${encodeURIComponent(
+  `const {el, badge} = globalThis.__sentinelUi;\n${sentinelModule}\nexport {task, recent, openvasQueue, utilisationBar};`,
 )}`);
 
 test('current and recent Sentinel tasks prefer the server label for multi-host work', () => {
@@ -179,7 +208,40 @@ test('Sentinel page renders OpenVAS running, due and deferred hosts with reasons
     assert.ok(content.includes(expected), expected);
   }
   assert.equal(panel.tag, 'section');
-  assert.match(sentinelSource, /if \(data\.openvas\) mount\.append\(openvasQueue\(data\.openvas\)\)/);
+  assert.match(sentinelSource, /if \(data\.openvas\) built\.append\(openvasQueue\(data\.openvas\)\)/);
+});
+
+test('the OpenVAS queue card shows the server\'s summary line above the collapsed Not due list, and the per-host list stays', () => {
+  const panel = openvasQueue({
+    running: null, next: [],
+    not_due: [{host: 'a.example.test', project: 'north', reason: 'not Fire or Smoke (ice): x'}, {host: 'b.example.test', project: 'north', reason: 'scanned 1 day ago; due again after a week'}],
+    counts: {next: 0, not_due: 33},
+    not_due_summary: '33 not due: 20 not Fire or Smoke, 8 scanned this week, 5 on shared platforms',
+  });
+  const walk = (n, out = []) => { if (typeof n === 'string') return out; out.push(n); (n.children || []).forEach((c) => walk(c, out)); return out; };
+  const nodes = walk(panel);
+  const summary = nodes.find((n) => n.cls === 'note sl-openvas-summary');
+  assert.equal(summary.text, '33 not due: 20 not Fire or Smoke, 8 scanned this week, 5 on shared platforms');
+  const details = nodes.find((n) => n.tag === 'details');
+  assert.ok(nodes.indexOf(summary) < nodes.indexOf(details), 'the summary is above the list');
+  assert.ok(!sentinelText(details).includes('20 not Fire or Smoke'), 'the summary is not inside the collapsed list');
+  assert.match(sentinelText(details), /Not due \(33\)/);
+  assert.match(sentinelText(details), /a\.example\.test.*not Fire or Smoke \(ice\): x/);
+  const none = openvasQueue({running: null, next: [], not_due: [], counts: {next: 0, not_due: 0}, not_due_summary: ''});
+  assert.ok(!walk(none).some((n) => n.cls === 'note sl-openvas-summary'));
+  const old = openvasQueue({running: null, next: [], not_due: [{host: 'c.example.test', project: 'p', reason: 'r'}], counts: {next: 0, not_due: 1}});  // a server that sends no summary
+  assert.ok(!walk(old).some((n) => n.cls === 'note sl-openvas-summary'));
+});
+
+test('the Sentinel card shows how busy its slots were in the last hour', () => {
+  const bar = utilisationBar({utilisation_1h: 0.4237, tasks_1h: 7, wait_p50_seconds: 2.4, wait_p95_seconds: 31});
+  const meter = bar.children[0];
+  assert.equal(meter.tag, 'meter');
+  assert.equal(meter.attrs.value, 42);
+  assert.match(sentinelText(bar), /Busy 42% of the last hour · 7 finished · queue wait 2s typical, 31s at worst/);
+  assert.match(sentinelText(utilisationBar({utilisation_1h: 7, tasks_1h: 0, wait_p50_seconds: null})), /Busy 100% of the last hour · 0 finished · no tasks claimed/);
+  assert.equal(utilisationBar(undefined), null, 'an older server sends no load');
+  assert.match(sentinelSource, /const util = utilisationBar\(s\.load\)/);
 });
 
 test('Sentinel page shows the OpenVAS idle state without a deferred list', () => {
@@ -188,6 +250,255 @@ test('Sentinel page shows the OpenVAS idle state without a deferred list', () =>
   assert.match(content, /No OpenVAS scan is running/);
   assert.match(content, /No hosts are due/);
   assert.equal(panel.children.some((child) => child.cls === 'sl-openvas-deferred'), false);
+});
+
+const settingsSource = read('sentinel-settings.js').replace(/^import[\s\S]*?from "[^"]*";\n/gm, '');
+globalThis.__sentinelUi.button = (label, _fn, cls) => sentinelEl('button', cls, label);
+globalThis.__sentinelUi.text = (value = '', attrs = {}) => Object.assign(sentinelEl('input', '', null, attrs), {value});
+const {versionBlock, newestLine, toolsLine, updateLine, waitingLines, watchdogLines, WAIT_RED_SECONDS, kindState, kindNote, kindChips, kindsChange, modesOffered, canReset, capProblem, defaultHint, kindsPanel} = await import(`data:text/javascript,${encodeURIComponent(
+  `const {el, badge, button, text} = globalThis.__sentinelUi;\n${settingsSource}`,
+)}`);
+const buttonLabels = (node) => (node.tag === 'button' ? [node.text] : []).concat(...node.children.filter((c) => typeof c !== 'string').map(buttonLabels));
+
+test('a card names the tools that are behind, next to the version, and draws nothing for a Sentinel that reports none or is current', () => {
+  const behind = {status: 'behind', flagged: true, behind: [{tool: 'nuclei', running: '3.10.0', current: '3.11.1'}, {tool: 'nmap', running: '7.97', current: '7.993'}]};
+  const line = toolsLine({tools_state: behind});
+  assert.match(sentinelText(line), /Tools behind: nuclei 3\.10\.0 \(this release ships 3\.11\.1\), nmap 7\.97 \(this release ships 7\.993\)/);
+  assert.match(line.cls, /msg err/);
+  assert.equal(toolsLine({tools_state: {status: 'current', behind: []}}), null);
+  assert.equal(toolsLine({tools_state: {status: 'unknown', behind: []}}), null);
+  assert.equal(toolsLine({}), null);
+});
+
+test('a Sentinel card has Update now, the built-in scanner does not and says why', () => {
+  const detail = {id: 7, name: 'CVEngine Scanner', version: 'abc1234', update: {requested_at: null}, settings: {}};
+  const external = versionBlock(detail, {onChange() {}});
+  assert.deepEqual(buttonLabels(external), ['Update now', 'Settings']);
+  const builtin = versionBlock(detail, {onChange() {}, builtin: true});
+  assert.deepEqual(buttonLabels(builtin), ['Settings']);
+  assert.match(sentinelText(builtin), /follows the newest published Sentinel image/);
+  assert.match(sentinelText(builtin), /hold it at one version, set CVENGINE_SCANNER_IMAGE/);
+  assert.doesNotMatch(sentinelText(external), /follows the newest published/);
+});
+
+test('a card says whether the build is the newest the server saw, since when it runs, and the contract message', () => {
+  const base = {id: 7, name: 'CVEngine Scanner', version: 'abc1234', update: {requested_at: null}, settings: {}};
+  assert.match(sentinelText(newestLine({...base, version_state: {status: 'current'}, version_since: '2026-11-08T01:02:03Z'})), /The newest build the server saw, running since /);
+  assert.match(sentinelText(newestLine({...base, version_state: {status: 'behind', behind_by: 4, latest: 'f00dfeed1234'}})), /4 commits behind the newest build \(f00dfeed1234\)/);
+  assert.equal(newestLine({...base, version_state: {status: 'unknown'}}), null);
+  const checked = new Date(Date.now() - 12 * 60000).toISOString();
+  assert.match(sentinelText(newestLine({...base, version_state: {status: 'current', checked_at: checked}})), /The newest build the server saw, checked 12 minutes ago/);
+  const old = versionBlock({...base, contract: {version: 1, state: 'unsupported', note: 'This scanner is older than this server needs, update it'}}, {onChange() {}});
+  assert.match(sentinelText(old), /This scanner is older than this server needs, update it/);
+  assert.equal(old.children.some((c) => c.cls === 'msg err ss-detail'), true);
+});
+
+test('a card says what is running, what is newest and whether an update was asked for, in plain words', () => {
+  const base = {id: 7, name: 'edge-1', version: 'abc1234def56', update: {requested_at: null}, settings: {}};
+  const asked = new Date(2026, 10, 8, 10, 42).toISOString();
+  assert.match(sentinelText(updateLine({...base, auto_update: {code: 'requested', running: 'abc1234def56', newest: 'def5678abc12', requested_at: asked, flagged: false}})), /^running abc1234, newest def5678, update requested \d{1,2}:42/);
+  assert.match(sentinelText(updateLine({...base, update: {status: 'draining'}, auto_update: {code: 'requested', running: 'abc1234def56', newest: 'def5678abc12', requested_at: asked}})), /running abc1234, newest def5678, updating$/);
+  assert.match(sentinelText(updateLine({...base, auto_update: {code: 'current', running: 'abc1234def56', newest: 'abc1234def56'}})), /^running abc1234, newest abc1234, current$/);
+  const waiting = updateLine({...base, auto_update: {code: 'waiting_for_server', text: 'The newest Sentinel build is newer than this server, waiting for the server update', running: 'abc1234def56', newest: 'def5678abc12'}});
+  assert.match(sentinelText(waiting), /newer than this server, waiting for the server update/);
+  const flagged = updateLine({...base, auto_update: {code: 'flagged', flagged: true, text: 'Did not report a newer version within 90 minutes of the request, so cvENGINE stopped asking. Press Update now to try again', running: 'abc1234def56', newest: 'def5678abc12'}});
+  assert.equal(flagged.cls, 'msg err ss-detail');
+  assert.equal(updateLine(base), null);
+});
+
+test('a card says which kind waits for memory and what holds it, and a task that is still stopping', () => {
+  const base = {id: 7, name: 'zebra', version: 'abc1234', update: {requested_at: null}, settings: {}};
+  assert.deepEqual(waitingLines({...base, waiting: []}), []);
+  assert.deepEqual(waitingLines(base), []);
+  const lines = waitingLines({...base, waiting: [
+    {kind: 'web_screenshot', need_mb: 400, free_mb: 140, budget_mb: 1540, seconds: 840, held_by: [{task: 3534, kind: 'naabu', mb: 80, seconds: 1800}]},
+    {kind: 'naabu', task: 3534, seconds: 45, stopping: true},
+  ]});
+  assert.equal(lines.length, 2);
+  assert.equal(sentinelText(lines[0]), 'Waiting for memory, 14 min: screenshots. Needs 400 MB, 140 MB free of 1540 MB; held by naabu on zebra (30 min).');
+  assert.match(sentinelText(lines[1]), /Task 3534 \(naabu\) was taken back by the server and is still stopping, 45 s later/);
+  assert.match(sentinelText(versionBlock({...base, waiting: [{kind: 'web_screenshot', need_mb: 400, free_mb: 0, budget_mb: 1540, seconds: 5, held_by: []}]}, {onChange() {}})), /Waiting for memory, 5 s: screenshots\. Needs 400 MB/);
+});
+
+test('waiting for memory is amber back-pressure, and red only past what the watchdog should have fixed', () => {
+  const base = {id: 7, name: 'haxxxk-docker', version: 'abc1234', update: {requested_at: null}, settings: {}};
+  const wait = (seconds) => ({kind: 'nuclei_light', need_mb: 520, free_mb: 500, budget_mb: 1540, seconds, held_by: [{task: 9522, kind: 'nuclei_deep', mb: 520, seconds: 780}, {task: 9672, kind: 'nuclei_targeted', mb: 520, seconds: 480}]});
+  const rows = [wait(480), {...wait(480), kind: 'nuclei_targeted'}, {...wait(480), kind: 'nuclei_deep'}];
+  const eight = waitingLines({...base, waiting: rows});
+  assert.equal(eight.length, 1, 'three kinds waiting on the same memory are one line, not three');
+  assert.equal(eight[0].cls, 'msg warn ss-detail');
+  assert.equal(sentinelText(eight[0]), 'Waiting for memory, 8 min: nuclei (light), nuclei (targeted), nuclei (deep). Needs 520 MB, 500 MB free of 1540 MB; held by nuclei (deep) on haxxxk-docker (13 min), nuclei (targeted) on haxxxk-docker (8 min).');
+  assert.doesNotMatch(eight[0].cls, /err/);
+  const justUnder = waitingLines({...base, waiting: [wait(WAIT_RED_SECONDS - 1)]});
+  assert.equal(justUnder[0].cls, 'msg warn ss-detail');
+  const late = waitingLines({...base, waiting: [wait(WAIT_RED_SECONDS)]});
+  assert.equal(late[0].cls, 'msg err ss-detail');
+  assert.match(sentinelText(late[0]), /longer than the Sentinel's watchdog should allow/);
+  assert.equal(WAIT_RED_SECONDS, 1200);
+});
+
+test('a card lists what the Sentinel watchdog did, and says so when the watchdog itself has stopped', () => {
+  const base = {id: 7, name: 'zebra', version: 'abc1234', update: {requested_at: null}, settings: {}};
+  assert.deepEqual(watchdogLines(base), []);
+  assert.deepEqual(watchdogLines({...base, watchdog: null}), []);
+  const at = Math.floor(Date.now() / 1000) - 120;
+  const lines = watchdogLines({...base, watchdog: {stale: false, low_disk: false, actions: [
+    {at, text: 'stopped a hung nuclei deep scan: no output or CPU for 30 minutes'},
+    {at, text: 'let a nuclei light scan start ahead of a long scan, within the memory that was really free'}]}});
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0].cls, 'note ss-detail');
+  assert.match(sentinelText(lines[0]), /^Watchdog 2 min ago: stopped a hung nuclei deep scan: no output or CPU for 30 minutes\.$/);
+  const stale = watchdogLines({...base, watchdog: {stale: true, age_seconds: 600, actions: []}});
+  assert.equal(stale[0].cls, 'msg err ss-detail');
+  assert.match(sentinelText(stale[0]), /watchdog has not run for 10 min/);
+  assert.equal(watchdogLines({...base, watchdog: {low_disk: true, actions: []}})[0].cls, 'msg warn ss-detail');
+  assert.equal(watchdogLines({...base, watchdog: {actions: Array(9).fill({at, text: 'x'})}}).length, 5);
+});
+
+test('the Built-in chip is drawn from the live row flag, and only for the built-in scanner', () => {
+  assert.match(sentinelSource, /if \(s\.builtin\) state\.append\(" ", el\("span", "chip sl-builtin", s\.last_resort \? "Built-in, last resort" : "Built-in"/);
+  assert.match(sentinelSource, /versionBlock\(detail, \{ onChange: reload, builtin: s\.builtin \}\)/);
+});
+
+// --- the capability policy of a Sentinel (GET agents/{id} `kinds`, PATCH settings.kinds) ---------------------------------------------------------
+const kindInfo = (changes = {}) => ({declared: true, effective: true, mode: 'allow', source: 'default', cap: null, held: 0, by: null, at: null, retry_at: null, state: 'on', note: '', ...changes});
+const policyKinds = {
+  nmap: kindInfo(),
+  openvas: kindInfo({mode: 'deny', source: 'agent', by: 'alice', state: 'denied', effective: false}),
+  nuclei_light: kindInfo({state: 'cool_off', source: 'cool-off', effective: false, retry_at: '2026-10-31T12:30:00Z'}),
+  wpscan: kindInfo({declared: false, effective: false, state: 'unavailable'}),
+  testssl: kindInfo({mode: 'deny', source: 'machine', declared: true, effective: false, state: 'machine_off'}),
+  naabu: kindInfo({mode: 'prefer', cap: 2}),
+};
+
+test('a kind says what it is on this Sentinel, in words that name the cause', () => {
+  assert.equal(kindState(policyKinds.nmap), 'on');
+  assert.equal(kindState(policyKinds.openvas), 'denied');
+  assert.match(kindNote(policyKinds.openvas), /Denied by alice/);
+  assert.match(kindNote(policyKinds.wpscan), /Not available on this Sentinel \(tool missing or off on the machine\)/);
+  assert.match(kindNote(policyKinds.testssl), /Turned off on the machine/);
+  assert.match(kindNote(policyKinds.nuclei_light), /Withheld after repeated failures until/);
+  assert.match(kindNote(policyKinds.naabu), /Preferred.*at most 2 at once/);
+  assert.match(kindNote({...policyKinds.openvas, source: 'instance default', by: 'root'}), /Denied by the instance default \(set by root\)/);
+  // an older server without `state` is read from the other fields
+  assert.equal(kindState({declared: true, mode: 'allow', source: 'cool-off'}), 'cool_off');
+  assert.equal(kindState({declared: false, mode: 'allow', source: 'default'}), 'unavailable');
+  assert.equal(kindState({declared: true, mode: 'deny', source: 'machine'}), 'machine_off');
+});
+
+test('the panel offers Allow, Deny and Prefer only for what the Sentinel declares and its machine left on', () => {
+  assert.deepEqual(modesOffered(policyKinds.nmap), ['allow', 'deny', 'prefer']);
+  assert.deepEqual(modesOffered(policyKinds.openvas), ['allow', 'deny', 'prefer']);
+  assert.deepEqual(modesOffered(policyKinds.wpscan), []);
+  assert.deepEqual(modesOffered(policyKinds.testssl), []);
+  assert.equal(canReset(policyKinds.openvas), true);
+  assert.equal(canReset(policyKinds.nmap), false);
+});
+
+test('only a kind that changed is sent, a reset sends null, and a bad cap is refused before anything is sent', () => {
+  assert.deepEqual(kindsChange(policyKinds, {nmap: {mode: 'allow', cap: ''}, openvas: {mode: 'deny', cap: ''}}), {});
+  assert.deepEqual(kindsChange(policyKinds, {openvas: {mode: 'allow', cap: ''}}), {openvas: {mode: 'allow', max_concurrent: null}});
+  assert.deepEqual(kindsChange(policyKinds, {nmap: {mode: 'prefer', cap: '3'}}), {nmap: {mode: 'prefer', max_concurrent: 3}});
+  assert.deepEqual(kindsChange(policyKinds, {naabu: {mode: 'prefer', cap: ''}}), {naabu: {mode: 'prefer', max_concurrent: null}});
+  assert.deepEqual(kindsChange(policyKinds, {openvas: {reset: true}, nmap: {reset: true}}), {openvas: null});
+  assert.deepEqual(kindsChange(policyKinds, {wpscan: {mode: 'allow', cap: ''}, testssl: {mode: 'allow', cap: ''}}), {});
+  for (const cap of ['0', '11', '2.5', 'abc']) assert.throws(() => kindsChange(policyKinds, {nmap: {mode: 'allow', cap}}), /whole number from 1 to 10/);
+});
+
+test('a card shows a chip per kind in three styles, with who or what decided in the tooltip, and none for a kind it does not have', () => {
+  const chips = kindChips(policyKinds);
+  const byText = Object.fromEntries(chips.children.map((c) => [c.text, c]));
+  assert.equal(byText['nmap'].cls, 'chip kind-on');
+  assert.equal(byText['OpenVAS (denied)'].cls, 'chip kind-denied');
+  assert.match(byText['OpenVAS (denied)'].attrs.title, /Denied by alice/);
+  assert.equal(byText['nuclei (light) (withheld)'].cls, 'chip kind-held');
+  assert.match(byText['nuclei (light) (withheld)'].attrs.title, /Withheld after repeated failures until/);
+  // turned off on the machine is its own style (hatched, dashed, "off on machine"), not the denied one, and says so in words as well
+  assert.equal(byText['testssl (off on machine)'].cls, 'chip kind-locked');
+  assert.match(byText['testssl (off on machine)'].attrs.title, /Turned off on the machine/);
+  assert.notEqual(byText['testssl (off on machine)'].cls, byText['OpenVAS (denied)'].cls);
+  assert.ok(byText['naabu (preferred) x2'], 'preferred and capped kinds say so');
+  assert.equal(byText['WPScan'], undefined);
+  assert.equal(kindChips({wpscan: policyKinds.wpscan}), null);
+  assert.equal(kindChips(undefined), null);
+});
+
+test('the capability policy is drawn with textContent only', () => {
+  for (const name of ['sentinel-settings.js', 'sentinel-live.js', 'scannerbar.js']) {
+    assert.doesNotMatch(read(name), /innerHTML|insertAdjacentHTML|outerHTML/, `${name} sets server text with textContent only`);
+  }
+  assert.match(settingsSource, /settings: \{ kinds: \{ \[kind\]: null \} \}/, 'Use default removes the Sentinel\'s own policy of a kind');
+  assert.match(sentinelSource, /kindChips\(detail\.kinds\)/);
+  assert.match(read('scannerbar.js'), /disabled_message/);
+});
+
+// --- the settings panel: a cap that cannot be saved says why under its field, and the instance default is explained -----------------------------
+const walk = (node, found = []) => { found.push(node); (node.children || []).forEach((c) => typeof c !== 'string' && walk(c, found)); return found; };
+
+test('a cap that is not a whole number from 1 to 10 has a sentence of its own, and empty means no limit', () => {
+  assert.equal(capProblem(''), '');
+  assert.equal(capProblem('  '), '');
+  for (const ok of ['1', '3', '10']) assert.equal(capProblem(ok), '');
+  for (const bad of ['0', '11', '2.5', '-1', 'abc', '1e1']) assert.match(capProblem(bad), /whole number from 1 to 10, or empty for no limit/);
+});
+
+test('the panel marks an invalid cap inline with an alert, tells Save, and clears when it is fixed', () => {
+  {
+    const validity = [];
+    const panel = kindsPanel({nmap: kindInfo()}, async () => {}, (ok) => validity.push(ok));
+    assert.equal(validity.at(-1), true, 'a panel that opens clean can be saved');
+    const row = walk(panel.node).find((n) => n.cls === 'ss-pol-row');
+    const cap = row.children.find((c) => c.tag === 'input');
+    const err = row.children.find((c) => c.cls && c.cls.includes('ss-pol-err'));
+    assert.equal(err.attrs.role, 'alert');
+    assert.equal(err.attrs['aria-live'], 'assertive');
+    assert.equal(err.hidden, true);
+    cap.value = '99';
+    cap.listeners.input();
+    assert.match(err.text, /whole number from 1 to 10/);
+    assert.equal(err.hidden, false);
+    assert.equal(cap.attrs['aria-invalid'], 'true');
+    assert.ok(cap.classes.has('invalid'));
+    assert.equal(validity.at(-1), false, 'Save is told to stay disabled');
+    assert.equal(panel.invalid(), true);
+    cap.value = '3';
+    cap.listeners.input();
+    assert.equal(err.hidden, true);
+    assert.equal(cap.attrs['aria-invalid'], undefined);
+    assert.equal(validity.at(-1), true);
+    assert.equal(panel.invalid(), false);
+    cap.validity = {badInput: true};  // letters typed into a number field read as empty, which is not "no limit"
+    cap.value = '';
+    cap.listeners.input();
+    assert.equal(panel.invalid(), true);
+  }
+});
+
+test('a kind denied by the instance default gets a one-line hint that Allow overrides it for this Sentinel only', () => {
+  const builtin = {openvas: kindInfo({mode: 'deny', source: 'instance default', by: 'root', state: 'denied', effective: false}), nmap: kindInfo()};
+  assert.match(defaultHint(builtin), /^OpenVAS is denied here by the instance default\. Choosing Allow overrides that default for this Sentinel only\.$/);
+  assert.equal(defaultHint({openvas: kindInfo({mode: 'deny', source: 'agent', state: 'denied'})}), '');
+  assert.equal(defaultHint({openvas: kindInfo({mode: 'deny', source: 'machine', state: 'machine_off'})}), '');
+  assert.equal(defaultHint({openvas: kindInfo({mode: 'deny', source: 'instance default', declared: false, state: 'denied'})}), '', 'nothing to override for a kind the Sentinel does not have');
+  assert.match(defaultHint({openvas: builtin.openvas, wpscan: kindInfo({mode: 'deny', source: 'instance default', state: 'denied'})}), /^OpenVAS, WPScan are denied here/);
+});
+
+test('the rows keep a stable grid: every row reserves its columns and the note and error take their own lines', () => {
+  const css = readFileSync(new URL('../static/cve/cve.css', import.meta.url), 'utf8');
+  // the tracks fit any container: fluid (fr) tracks, and the fixed ones add up to well under the narrowest dialog, so the row never overflows it
+  const grid = css.match(/\.ss-pol-row\{display:grid;grid-template-columns:([^;]+);/)[1];
+  assert.match(grid, /minmax\(0,1\.3fr\)/);
+  assert.match(grid, /fr\)/);
+  const fixed = [...grid.replace(/minmax\(0,[^)]*\)/g, '').matchAll(/(\d+)px/g)].map((m) => Number(m[1]));
+  assert.ok(fixed.reduce((a, b) => a + b, 0) + 3 * 10 <= 360, `fixed tracks ${fixed} plus gaps must stay far under a 530px container`);
+  assert.match(css, /\.ss-pol-row\{[^}]*min-width:0;box-sizing:border-box\}/);
+  assert.match(css, /\.ss-pol-row>\*\{min-width:0;box-sizing:border-box\}/);
+  assert.match(css, /\.ss-pol\{[^}]*min-width:0;max-width:100%\}/);
+  assert.match(css, /\.ss-pol-note\{grid-column:1\/-1/);
+  assert.match(css, /\.ss-pol-row \[hidden\]\{display:block;visibility:hidden\}/, 'a control a row does not offer keeps its column');
+  assert.match(css, /\.chip\.kind-locked\{[^}]*dashed/);
+  assert.match(css, /\.chip\.kind-denied\{[^}]*var\(--fire-ink\)/);
+  assert.match(settingsSource, /role: "alert"/);
 });
 
 // The alias and note a person types on a host or target are shown in many places: they must only ever become text nodes, and the inputs must

@@ -14,6 +14,7 @@ from cveFeed.threat import FIRE, SMOKE, classify_threat_tier, hot_tier_q
 from dashboard.models import Org, Project
 from startScan.models import IpAddress, Port, Subdomain
 from targetApp.models import Domain
+from tests import ai_queue
 
 NGINX = [{'product': 'nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.20.0'}]}]
 
@@ -91,6 +92,13 @@ class MemoisedConfirmTests(TestCase):
 			correlation.candidate_subdomains(correlation.build_product_index([self.cve])),
 			correlation.build_product_index([self.cve]), {self.cve.id: self.cve}, min_confidence=0.4)
 
+	def _confirm(self, matches, provider):
+		"""Auto-fire's triage step, with ``provider`` answering the questions it queued as the AI reviewer container would."""
+		ai_queue.ensure_configured(provider)
+		asked = confirm_matches(matches, self.cve, provider=provider)
+		ai_queue.serve(provider)
+		return asked
+
 	def test_one_question_for_many_hosts_with_the_same_signature(self):
 		for i in range(10):
 			self._host(f'h{i}.memo.test')
@@ -98,7 +106,7 @@ class MemoisedConfirmTests(TestCase):
 		self._correlate()
 		provider = _provider()
 		matches = list(CVEMatch.objects.filter(cve_entry=self.cve).select_related('subdomain'))
-		self.assertEqual(confirm_matches(matches, self.cve, provider=provider), 2)
+		self.assertEqual(self._confirm(matches, provider), 2)
 		self.assertEqual(provider.complete.call_count, 2)
 		self.assertEqual(set(CVEMatch.objects.values_list('ai_verdict', flat=True)), {'uncertain'})  # a banner version alone is a lead, whatever the model says
 		self.assertEqual(MatchVerdict.objects.count(), 2)
@@ -107,13 +115,13 @@ class MemoisedConfirmTests(TestCase):
 		self._host('a.memo.test')
 		self._correlate()
 		provider = _provider()
-		confirm_matches(list(CVEMatch.objects.select_related('subdomain')), self.cve, provider=provider)
+		self._confirm(list(CVEMatch.objects.select_related('subdomain')), provider)
 		self._host('b.memo.test')  # a new host with the same product and version appears later
 		self._correlate()
 		matches = list(CVEMatch.objects.filter(cve_entry=self.cve).select_related('subdomain'))
 		self.assertEqual(len(matches), 2)
 		self.assertEqual({m.ai_verdict for m in matches}, {'uncertain'})
-		self.assertEqual(confirm_matches(matches, self.cve, provider=provider), 0)
+		self.assertEqual(self._confirm(matches, provider), 0)
 		self.assertEqual(provider.complete.call_count, 1)
 
 	def test_no_provider_stores_nothing(self):

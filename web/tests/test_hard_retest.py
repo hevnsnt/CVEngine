@@ -2,7 +2,7 @@ from unittest import mock
 
 from django.test import TestCase
 
-from cveFeed import discovery, route_auth as ra
+from cveFeed import discovery
 from cveFeed.models import HostState
 from tests.test_perf_hostpipeline import _stages
 from tests.test_retest import RetestFixture
@@ -11,10 +11,6 @@ from tests.test_route_auth import RouteFixture
 
 class ForcedRouteAuthTests(RouteFixture, TestCase):
 	"""Verdict 7: a re-test asks the host's routes again now, whatever the ledger says."""
-
-	def run_it(self, scan, **kw):
-		with mock.patch.object(ra, 'PER_REQUEST_GAP', 0):
-			return ra.run_route_auth(scan.id, probe=self.probe, **kw)
 
 	def test_a_fresh_route_is_not_asked_again_unless_forced(self):
 		scan = self.scan()
@@ -27,11 +23,6 @@ class ForcedRouteAuthTests(RouteFixture, TestCase):
 		self.assertEqual(len(self.asked), 2 * first)
 		self.assertEqual(forced['routes'], first)
 		self.assertEqual(forced['reused'], 0)
-
-	def test_a_forced_run_still_refuses_a_blocked_host(self):
-		self.blocked.return_value = True  # the host now resolves to a blocked address
-		self.run_it(self.scan(), force=True)
-		self.assertEqual(self.asked, [])
 
 
 class RetestPipelineForcesRouteAuthTests(RetestFixture, TestCase):

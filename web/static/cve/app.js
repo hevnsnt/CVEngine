@@ -1,6 +1,7 @@
 // CVEngine project pages: targets, scans, hosts, vulnerabilities, CVE matches (the last two as list plus detail, like hosts).
 // Plain ES module over the REST API (/api/v1). DOM is built with textContent only.
-import { areaChart, heatmap } from "/staticfiles/cve/charts.js";
+import { areaChart, displayZone, heatmap } from "/staticfiles/cve/charts.js";
+import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
 import { readParam, savedViews, writeParams } from "/staticfiles/cve/views.js";
 import { savedSearches } from "/staticfiles/cve/saved-searches.js";
 import { createBulk, undoNotice } from "/staticfiles/cve/bulk.js";
@@ -15,19 +16,31 @@ import {
   copyButton,
   copyText,
   dialog,
+  disclosure,
   emptyState,
   field,
   text as uiText,
+  watchWide,
+  waiting,
+  whatIs,
 } from "/staticfiles/cve/ui.js";
-import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation } from "/staticfiles/cve/links.js";
+import { cveAnchor, hostAnchor, hostHref, ipAnchor, linkify, needsValidation, pageAnchor, pageUrl } from "/staticfiles/cve/links.js";
 import { inventoryBadge, openInventoryDialog, renderHostInventory } from "/staticfiles/cve/inventory.js";
 import { loadSignIns, signInButton } from "/staticfiles/cve/authcheck.js";
 import { reportButton } from "/staticfiles/cve/report-export.js";
+import { hostReviewCard } from "/staticfiles/cve/host-review-card.js";
 import { STORED, canDiscover, defaultChoice, discoverBody, discoverHint, discoverOptions, modeAfter, modeText, startedText } from "/staticfiles/cve/discover-mode-logic.js";
 import { suppliersPage } from "/staticfiles/cve/suppliers.js";
+import { situationsPage } from "/staticfiles/cve/situations.js";
+import { secretsPage } from "/staticfiles/cve/secrets.js";
+import { scoreList } from "/staticfiles/cve/score-detail.js";
+import { openSecret } from "/staticfiles/cve/secret-panel.js";
 import * as FG from "/staticfiles/cve/finding-groups-logic.js";
 import * as CL from "/staticfiles/cve/closure-logic.js";
+import { changeDetail, authLabel, pathOf } from "/staticfiles/cve/change-text.js";
+import * as RT from "/staticfiles/cve/retest-logic.js";
 import { askClosureNote } from "/staticfiles/cve/closure-note.js";
+import * as LM from "/staticfiles/cve/loadmore-logic.js";
 
 const root = document.getElementById("section");
 const { slug, kind } = root.dataset;
@@ -245,6 +258,8 @@ function createList({
   onReset,
   prepare, // async (items) before the rows are drawn: what they need to know first (a project's SLA)
   pageSize = 30, // a number, or a function for a list that asks for more at a time when a filter narrows it
+  noun = "item", // for the "Loaded 30 more items, 90 of 217 shown" message
+  plural = "items",
 }) {
   let page = 1;
   let timer = null;
@@ -255,7 +270,56 @@ function createList({
   let seq = 0; // the newest request: an answer to an older one (an earlier filter, a slower response) is dropped
   const body = el("div");
   const more = el("div", "more-row");
-  mount.append(body, more);
+  // the polite live region: what a press of "Load more" added
+  const say = el("p", "sr", "", { role: "status", "aria-live": "polite", "aria-atomic": "true" });
+  mount.append(body, more, say);
+  let moreBtn = null; // the button under the rows: the same element from page to page, so a reader's place and focus stay on it
+  const announce = (text) => {
+    say.textContent = "";
+    setTimeout(() => (say.textContent = text), 30); // a changed node is what a screen reader reads out
+  };
+  function ensureBtn() {
+    if (moreBtn && moreBtn.isConnected) return;
+    more.textContent = "";
+    moreBtn = el("button", "btn ghost", "", { type: "button" });
+    moreBtn.onclick = () => {
+      const focused = document.activeElement === moreBtn;
+      page += 1;
+      busyMore();
+      load(false, false, focused);
+    };
+    more.append(moreBtn);
+  }
+  // the button while a page is on its way: disabled, aria-busy, saying how many are coming
+  function busyMore() {
+    const size = typeof pageSize === "function" ? pageSize() : pageSize;
+    const total = lastCount == null ? 0 : lastCount;
+    const view = LM.moreView({ phase: "busy", total, page: Math.max(1, page - 1), size: lastSize || size });
+    ensureBtn();
+    moreBtn.disabled = true;
+    moreBtn.setAttribute("aria-busy", "true");
+    moreBtn.textContent = view.kind === "button" ? view.label : LM.busyLabel(size);
+  }
+  // after a page arrived: the button says how many are left, or "All N shown" takes its place
+  function paintMore(data, added, hadFocus) {
+    const view = LM.moreView({ total: data.count, page: data.page, size: data.page_size });
+    if (view.kind !== "button") {
+      more.textContent = "";
+      moreBtn = null;
+      if (view.kind === "done") {
+        const done = el("p", "note more-done", view.label, { tabindex: "-1" });
+        more.append(done);
+        if (hadFocus) done.focus({ preventScroll: true });
+      }
+    } else {
+      ensureBtn();
+      moreBtn.disabled = false;
+      moreBtn.removeAttribute("aria-busy");
+      moreBtn.textContent = view.label;
+      if (hadFocus) moreBtn.focus({ preventScroll: true });
+    }
+    if (added) announce(LM.loadedMessage(added, LM.shownCount(data.count, data.page, data.page_size), data.count, noun, plural));
+  }
 
   // The auto-refresh of a list that is waiting on something (a running scan): quiet, only while the tab is visible and the reader has
   // not asked for more rows, and backing off after a failure. A hidden tab resumes on visibilitychange.
@@ -281,7 +345,7 @@ function createList({
   }
 
   // quiet: a refresh the reader did not ask for. The rows are swapped when the answer arrives, with no skeleton in between.
-  async function load(reset, quiet = false) {
+  async function load(reset, quiet = false, hadFocus = false) {
     const mine = ++seq;
     if (reset) page = 1;
     if (reset && !quiet) {
@@ -290,7 +354,10 @@ function createList({
       body.setAttribute("aria-busy", "true");
       body.append(...loadingSkeleton(skeleton));
     }
-    more.textContent = "";
+    if (reset) {
+      more.textContent = "";
+      moreBtn = null;
+    } else if (!moreBtn || !moreBtn.isConnected) busyMore(); // a retry, or the gallery asking for more: the same busy button
     try {
       const size = typeof pageSize === "function" ? pageSize() : pageSize;
       const data = await api("GET", `${path}?${query({ ...params(), page, page_size: size })}`);
@@ -303,25 +370,23 @@ function createList({
       lastCount = data.count;
       lastSize = data.page_size || size;
       failures = 0;
-      if (reset) body.textContent = "";
       body.removeAttribute("aria-busy");
-      if (reset && !items.length) body.append(emptyNode(empty));
-      else render(body, items, reset);
-      if (onLoaded) onLoaded(data, reset, quiet);
-      more.textContent = "";
-      if (data.page * data.page_size < data.count) {
-        const b = el(
-          "button",
-          "btn ghost",
-          `Load more (${data.count - data.page * data.page_size} left)`,
-        );
-        b.type = "button";
-        b.onclick = () => {
-          page += 1;
-          load(false);
-        };
-        more.append(b);
+      if (reset && quiet) {
+        // A refresh nobody asked for: the rows are drawn aside and handed to renderKeepingState, so a row the reader opened, a list they scrolled, a field
+        // they typed in or a menu they have open is still there after it (static/cve/keep-state.js). The render function closes over the table it drew (a later
+        // "Load more" appends to it), so these blocks are always replaced, never kept.
+        const aside = el("div");
+        if (!items.length) aside.append(emptyNode(empty, data));
+        else render(aside, items, true, true);
+        aside.childNodes.forEach((n) => n.setAttribute && n.setAttribute("data-keep-fresh", ""));
+        renderKeepingState(body, () => Array.from(aside.childNodes));
+      } else {
+        if (reset) body.textContent = "";
+        if (reset && !items.length) body.append(emptyNode(empty, data));
+        else render(body, items, reset);
       }
+      if (onLoaded) onLoaded(data, reset, quiet);
+      paintMore(data, reset ? 0 : items.length, hadFocus);
       disarm();
       refreshing = Boolean(autoRefresh && autoRefresh(items));
       if (refreshing) arm(REFRESH_MS);
@@ -337,7 +402,9 @@ function createList({
       if (!reset) {
         // a failed "Load more" keeps the rows already shown and offers the same page again
         page = Math.max(1, page - 1);
-        more.append(loadError(err, () => { page += 1; load(false); }, true));
+        more.textContent = "";
+        moreBtn = null;
+        more.append(loadError(err, () => { page += 1; load(false, false, true); }, true));
         return;
       }
       if (onReset) onReset();
@@ -357,6 +424,7 @@ function createList({
     // the next page of rows, for a view that shows the same rows another way (the host gallery)
     more: () => {
       page += 1;
+      busyMore();
       return load(false);
     },
     left: () => (lastCount == null ? 0 : Math.max(0, lastCount - page * lastSize)),
@@ -562,10 +630,26 @@ const whenCell = (iso) => {
 
 // What an empty list shows: a plain sentence, emptyState() options, or a function returning either, so a list can tell "nothing yet"
 // (say what to do next) from "nothing matches these filters" (offer to clear them).
-function emptyNode(empty) {
-  const v = typeof empty === "function" ? empty() : empty;
+function emptyNode(empty, data) {
+  const v = typeof empty === "function" ? empty(data) : empty;  // a function may read the answer that came back (Situations: the server's state)
   return typeof v === "string" ? el("p", "empty", v) : emptyState(v);
 }
+// A project with no scan at all has nothing to report "fine" about: the Findings and Hygiene lists say so, and what to do, instead of "everything is fixed" or
+// "looks healthy". The answer is asked for only when a list came back empty (an all-projects view has no single project to ask about).
+async function neverScanned() {
+  if (ALL) return false;
+  try {
+    return (await api("GET", `${base}/scans?${query({ page_size: 0 })}`)).count === 0;
+  } catch (_) {
+    return false;
+  }
+}
+const nothingScanned = (what) => ({
+  icon: "target",
+  title: "Nothing has been scanned yet",
+  body: `${what} appear once a scan has looked at your hosts. Add a target to start one.`,
+  actions: addTargetsAction(),
+});
 // The empty Targets page's next step: the shell's own Add targets button, when this page has one
 function addTargetsAction() {
   const add = document.querySelector("[data-add-targets]");
@@ -633,6 +717,123 @@ function select(label, options, onChange) {
   return s;
 }
 
+// The head of a split list (Findings, CVE matches, Hosts): a search line and one line of buttons stay in view, and every other filter
+// (chip groups, dropdowns, saved views) sits in a panel that opens OVER the rows, so the rows keep the column. The filters that are
+// not at their first option show as removable chips; "Filters (3)" counts them. Open or closed is remembered per page.
+// `lead`: nodes for the search line (the Filters button joins them). `panelNodes`: everything else. `meta`: the count and tools row, which gets the chips.
+// A button with data-flag is a standalone on/off filter (Show every host); in a .picker the first button is the unfiltered one.
+function listHead({ page, lead, panelNodes, meta }) {
+  const key = `cvengine.filters.${page}`;
+  const id = `filters-${page}`;
+  const head = el("div", "list-head");
+  const bar = el("div", "list-bar");
+  bar.append(...lead.filter(Boolean));
+  const btn = el("button", "filters-btn btn sm ghost", "Filters", { type: "button", "aria-expanded": "false", "aria-controls": id });
+  const pop = el("div", "filters-pop", null, { id, role: "group", "aria-label": "Filters" });
+  pop.hidden = true;
+  pop.append(...panelNodes.filter(Boolean));
+  const chips = el("div", "active-chips", null, { "aria-label": "Active filters" });
+  chips.hidden = true;
+  bar.append(btn);
+  meta.prepend(chips); // the chips sit on the count line, wrapping with it
+  head.append(bar, pop, meta);
+  const labelOf = (b) => [...b.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join("").trim() || b.textContent.trim();
+  const active = () => {
+    const out = [];
+    pop.querySelectorAll(".picker").forEach((p) => {
+      if (p.hidden) return;
+      const bs = [...p.querySelectorAll("button:not([data-flag])")];
+      const at = bs.findIndex((b) => b.getAttribute("aria-pressed") === "true");
+      if (at > 0) out.push({ label: labelOf(bs[at]), group: p.getAttribute("aria-label") || "", clear: () => bs[0].click() });
+    });
+    pop.querySelectorAll("button[data-flag]").forEach((b) => {
+      if (b.getAttribute("aria-pressed") === "true") out.push({ label: labelOf(b), group: "", clear: () => b.click() });
+    });
+    pop.querySelectorAll("select:not([data-quiet])").forEach((sel) => {
+      if (sel.selectedIndex > 0) out.push({ label: sel.options[sel.selectedIndex].text, group: sel.getAttribute("aria-label") || "", clear: () => { sel.selectedIndex = 0; sel.dispatchEvent(new Event("change", { bubbles: true })); } });
+    });
+    return out;
+  };
+  const refresh = () => {
+    const now = active();
+    chips.textContent = "";
+    now.forEach((a) => {
+      const c = el("button", "chip-x", null, { type: "button", "aria-label": `Remove filter ${a.group ? `${a.group}: ` : ""}${a.label}`, title: "Remove this filter" });
+      c.append(a.label, el("span", "", "\u00d7", { "aria-hidden": "true" }));
+      c.onclick = () => {
+        a.clear();
+        btn.focus();
+      };
+      chips.append(c);
+    });
+    chips.hidden = !now.length;
+    btn.textContent = now.length ? `Filters (${now.length})` : "Filters";
+  };
+  const setOpen = (open, focus = false) => {
+    pop.hidden = !open;
+    btn.setAttribute("aria-expanded", String(open));
+    head.classList.toggle("filters-open", open);
+    try {
+      localStorage.setItem(key, open ? "1" : "0");
+    } catch {}
+    if (focus) (open ? pop.querySelector("input, select, button") || pop : btn).focus();
+  };
+  btn.onclick = () => setOpen(pop.hidden, true);
+  head.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || pop.hidden) return;
+    e.stopPropagation();
+    setOpen(false, true);
+  });
+  const outside = (e) => {
+    if (!head.isConnected) return document.removeEventListener("pointerdown", outside, true);
+    if (!pop.hidden && !head.contains(e.target)) setOpen(false);
+  };
+  document.addEventListener("pointerdown", outside, true);
+  let queued = false;
+  const later = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      refresh();
+    });
+  };
+  new MutationObserver(later).observe(pop, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["aria-pressed", "hidden"] });
+  pop.addEventListener("change", later);
+  // the rows scroll under this head: how tall it is says how far a row must be kept from the top when it scrolls into view
+  if (window.ResizeObserver) new ResizeObserver(() => head.parentElement && head.parentElement.style.setProperty("--head-h", `${head.offsetHeight}px`)).observe(head);
+  // the column ends at the bottom of the screen wherever the page is scrolled: its top is the pinned edge once the page has scrolled past it, and
+  // wherever the page put it before that, so a row scrolled to the bottom of the column is on screen
+  const fit = () => {
+    const side = head.parentElement;
+    if (!side) return removeEventListener("scroll", fit);
+    if (!window.matchMedia("(min-width:900px)").matches) return side.style.removeProperty("--fit");
+    const bar = document.querySelector(".topbar");
+    const top = Math.max(side.getBoundingClientRect().top, (bar ? bar.offsetHeight : 56) + 4);
+    side.style.setProperty("--fit", `${Math.max(240, window.innerHeight - top - 8)}px`);
+  };
+  addEventListener("scroll", fit, { passive: true });
+  addEventListener("resize", fit);
+  requestAnimationFrame(fit);
+  requestAnimationFrame(() => head.parentElement && head.parentElement.classList.contains("table-page") && watchWide(head.parentElement));
+  let was = false;
+  try {
+    was = localStorage.getItem(key) === "1";
+  } catch {}
+  if (was) setOpen(true);
+  refresh();
+  return { head, refresh, setOpen };
+}
+
+// A row the reader picked opens its detail at the top: the list stays pinned while the page scrolls, so the pane's top may be above the
+// screen. Only for a pick (a click), never for the first row the page selects by itself.
+function revealPane(pane) {
+  const bar = document.querySelector(".topbar");
+  const edge = (bar ? bar.offsetHeight : 56) + 8;
+  const top = pane.getBoundingClientRect().top;
+  if (top < edge) window.scrollBy({ top: top - edge - 8 });
+}
+
 // --- asset changes (the Changes page and the host pane share these) ------------------------------
 const CHANGE_LABEL = {
   host_new: "New host",
@@ -654,16 +855,6 @@ const CHANGE_LABEL = {
   screenshot_changed: "Screenshot changed",
 };
 const AUTH_RANK = { open: 0, login: 1, session_required: 2, sso: 3 };
-const AUTH_LABEL = { open: "open", login: "login page", session_required: "session required", sso: "SSO", redirect: "redirect", not_found: "not found", catch_all: "same as a missing page" };
-const authLabel = (s) => AUTH_LABEL[s] || s || "unknown";
-const pathOf = (url) => {
-  try {
-    const u = new URL(url);
-    return u.pathname + u.search;
-  } catch (_) {
-    return url || "";
-  }
-};
 // Amber ("smoke") for more exposure, slate ("ice") for less, plain for the rest.
 function changeClass(c) {
   if (["host_new", "host_returned", "port_opened", "zombie_host", "zombie_route", "sensitive_found"].includes(c.kind)) return "smoke";
@@ -674,56 +865,6 @@ function changeClass(c) {
     return was != null && now != null && now < was ? "smoke" : "";
   }
   return "";
-}
-const svcText = (s) => [s.product || s.service, s.version].filter(Boolean).join(" ");
-const dateOnly = (iso) => (iso ? String(iso).slice(0, 10) : "?");
-function changeDetail(c) {
-  const b = c.before || {};
-  const a = c.after || {};
-  switch (c.kind) {
-    case "host_new":
-      return `New host${a.ips && Object.keys(a.ips).length ? ` · ${Object.keys(a.ips).join(", ")}` : ""}`;
-    case "host_returned":
-      return "Resolves again after being retired";
-    case "host_retired":
-      return "No longer resolves";
-    case "port_opened":
-      return `${c.ip}:${a.port || c.port} ${svcText(a)}`.trim();
-    case "port_closed":
-      return `${c.ip}:${b.port || c.port} ${svcText(b)}`.trim();
-    case "service_changed":
-      return `${a.port || c.port} ${svcText(b) || "?"} -> ${svcText(a) || "?"}`;
-    case "tech_added":
-      return String(a);
-    case "tech_removed":
-      return String(b);
-    case "tech_version_changed":
-      return `${b} -> ${a}`;
-    case "cert_changed": {
-      const parts = [];
-      if (b.issuer !== a.issuer) parts.push(`issuer ${b.issuer || "?"} -> ${a.issuer || "?"}`);
-      if (b.subject !== a.subject) parts.push(`subject ${b.subject || "?"} -> ${a.subject || "?"}`);
-      if (b.not_after !== a.not_after) parts.push(`expires ${dateOnly(b.not_after)} -> ${dateOnly(a.not_after)}`);
-      if (!parts.length) parts.push("names or key changed");
-      return parts.join(", ");
-    }
-    case "auth_changed":
-      return `${pathOf(a.url || b.url)}: ${authLabel(b.auth_state)} -> ${authLabel(a.auth_state)}`;
-    case "sensitive_found":
-      return `${pathOf(a.url)}: ${(a.types || []).join(", ")}`;
-    case "zombie_host":
-      return `DNS is gone but it still answers on ${(a.alive || []).join(", ")}`;
-    case "zombie_cleared":
-      return "Resolves again";
-    case "route_retired":
-      return `${pathOf(b.url || a.url)}: ${authLabel(b.auth_state)} -> gone (${a.http_status})`;
-    case "zombie_route":
-      return `${pathOf(a.url)} answers again (${a.http_status})`;
-    case "screenshot_changed":
-      return `front page changed (distance ${a.distance} of 64)${["login", "sso"].includes(a.root_auth) ? ", now shows a login page" : ""}`;
-    default:
-      return c.kind;
-  }
 }
 const SENSITIVE_GROUP = {
   credentials: ["aws_key", "google_key", "slack_token", "github_token", "stripe_key", "jwt", "private_key"],
@@ -737,7 +878,8 @@ function routeLine(r) {
   line.append(badge(authLabel(r.auth_state), AUTH_BADGE[r.auth_state] || ""));
   if (r.zombie_since) line.append(badge("zombie", "smoke"));
   else if (r.retired_at) line.append(badge("retired", "queued"));
-  line.append(el("span", "mono", r.path), el("span", "note", r.http_status ? String(r.http_status) : ""));
+  const page = { url: r.url, host: r.host, path: r.path };  // the page itself, on the scanned host: its path is the link
+  line.append(pageAnchor(page, r.path), el("span", "note", r.http_status ? String(r.http_status) : ""));
   const types = Object.keys(r.sensitive || {});
   if (types.some((t) => SENSITIVE_GROUP.credentials.includes(t))) line.append(badge("credentials", "fire"));
   if (types.some((t) => SENSITIVE_GROUP.pii.includes(t))) line.append(badge("PII", "smoke"));
@@ -747,7 +889,10 @@ function routeLine(r) {
   if (types.length) {
     // counts and a masked sample only: the API never returns the values
     const first = r.sensitive[types[0]];
-    line.append(el("span", "note", `GET ${r.path} → ${types.map((t) => `${t} x${r.sensitive[t].count}`).join(", ")} (${first.sample})`));
+    // the path is a link to the page; the masked sample stays text after it and is never part of an address
+    const note = el("span", "note");
+    note.append("GET ", pageAnchor(page, r.path, "host-link"), ` → ${types.map((t) => `${t} x${r.sensitive[t].count}`).join(", ")} (${first.sample})`);
+    line.append(note);
   }
   return line;
 }
@@ -766,7 +911,7 @@ function shotPair(c, project = slug) {
   return pair;
 }
 function changeCell(c, project = slug) {
-  const box = el("div");
+  const box = el("div", "change-detail", null, { title: changeDetail(c) }); // two lines at most in a list, the whole sentence is the tooltip
   box.append(linkify(el("span"), changeDetail(c), project, { kinds: ["ip"] }));
   if (c.kind === "screenshot_changed" && project) box.append(shotPair(c, project));
   return box;
@@ -849,7 +994,7 @@ const runzeroLine = (rz) => {
 const runzeroReports = (rz) => {
   const vulns = (rz && rz.vulns) || [];
   if (!vulns.length) return null;
-  const box = el("details", "nse");
+  const box = el("details", "nse", null, { "data-keep-key": "runzero-reports" });
   box.append(el("summary", "", `runZero reports (${vulns.length})`));
   box.append(el("p", "note", "runZero's own scan lists these CVEs for this address. They are evidence, not a confirmed finding: a CVE cvENGINE also matched on the same port is ranked higher."));
   vulns.forEach((v) => {
@@ -893,7 +1038,9 @@ const coverageLine = (c) => {
   if (!c.applicable) return "no check applies yet";
   const due = (c.checks || []).filter((x) => x.state === "due").map((x) => x.label);
   const shown = due.slice(0, 4).join(", ") + (due.length > 4 ? ` and ${due.length - 4} more` : "");
-  return `${c.done} of ${c.applicable} applicable checks done` + (due.length ? `; due: ${shown}` : "");
+  const none = (c.no_check || []).map((x) => x.port);
+  const noCheck = none.length ? `; no check exists for the service on port${none.length > 1 ? "s" : ""} ${none.slice(0, 6).join(", ")}${none.length > 6 ? ` and ${none.length - 6} more` : ""}` : "";
+  return `${c.done} of ${c.applicable} applicable checks done` + (due.length ? `; due: ${shown}` : "") + noCheck;
 };
 const hostOverview = (h) => {
   const http = h.http || {};
@@ -901,6 +1048,7 @@ const hostOverview = (h) => {
   const rows = [];
   if (h.alias) rows.push({ label: "Alias", value: h.alias });
   if (h.note) rows.push({ label: "Note", value: h.note });
+  if (h.scan_blocked) rows.push({ label: "Not scanned", value: h.scan_blocked });
   const coverage = coverageLine(h.check_coverage);
   if (coverage) rows.push({ label: "Checks", value: coverage });
   if (hosting.provider) {
@@ -977,13 +1125,13 @@ const technologyTable = (h) => {
   }
   return box;
 };
-// WordPress on a host: where it stands (detected how, scanned when, or why it was not), and the core, plugin and theme versions WPScan read.
+// WordPress on a host: where it stands (detected how, scanned when, or why it was not), and the core, plugin and theme versions the WordPress scan read.
 const WP_STATE_LABELS = {
-  scanned: "Scanned with WPScan", detected: "WordPress detected, not scanned yet", candidate: "Signs of WordPress, not confirmed",
-  blocked: "Blocked by the edge", failed: "WPScan failed", waiting: "Waiting for the next scan", queued: "Queued, WPScan runs on it in the background", unavailable: "WPScan not available",
-  not_wordpress: "Not WordPress",
+  scanned: "Scanned", detected: "WordPress detected, not scanned yet", candidate: "Signs of WordPress, not confirmed",
+  blocked: "Blocked by the edge", failed: "Scan failed", waiting: "Waiting for the next scan", queued: "Queued, the scan runs on it in the background", unavailable: "Scan not available",
+  not_wordpress: "Not WordPress", unreachable: "Site did not answer", redirected: "Redirects to another site", not_scannable: "Not scannable by WPScan",
 };
-// The thorough pass asks the site for every plugin and theme WPScan knows (hours per site) after the quick pass, in the background.
+// The thorough pass asks the site for every plugin and theme the scanner knows (hours per site) after the quick pass, in the background, on a Sentinel.
 const WP_THOROUGH_LABELS = {
   pending: "Thorough pass queued (takes hours, runs in the background)", running: "Thorough pass running (takes hours)", done: "Thorough pass finished",
   partial: "Thorough pass stopped early, what it read is kept", blocked: "Thorough pass blocked by the edge", failed: "Thorough pass failed",
@@ -998,7 +1146,7 @@ const wordpressCard = (h) => {
   if (st.reason) rows.push({ label: "Why", value: st.reason });
   if (st.detected_how) rows.push({ label: "Detected by", value: st.detected_how });
   if (wp.core) rows.push({ label: "Core version", value: wp.core });
-  if (st.scanned_at) rows.push({ label: "WPScan ran", value: `${shortDate(st.scanned_at)}${st.findings != null ? `, ${st.findings} finding(s)` : ""}` });
+  if (st.scanned_at) rows.push({ label: "Scan ran", value: `${shortDate(st.scanned_at)}${st.findings != null ? `, ${st.findings} finding(s)` : ""}` });
   if (st.vulnerability_data) rows.push({ label: "Vulnerability data", value: st.vulnerability_data });
   if (st.next_scan) rows.push({ label: "Next scan", value: st.next_scan });
   if (st.hint) rows.push({ label: "What to do", value: st.hint });
@@ -1094,8 +1242,8 @@ const subdirectoryCard = (h) => {
 // title, and what happened to the pages that have no picture. "Take screenshot" queues a fresh capture and follows it until it is done.
 const shotUrl = (project, h, extra = "") => `/cve/${encodeURIComponent(project)}/hosts/${h.id}/screenshot/?${extra}`;
 const OUTCOME_TEXT = {
-  ok: "Captured", queued: "Waiting for the screenshot worker", blank: "Rendered blank", timeout: "Timed out", unreachable: "Could not be reached",
-  tls_error: "TLS handshake failed", blocked: "Blocked", nla_required: "NLA required", unavailable: "Browser unavailable", too_big: "Page too heavy", error: "Failed",
+  ok: "Captured", queued: "Waiting for a scanner", blank: "Rendered blank", timeout: "Timed out", unreachable: "Could not be reached",
+  tls_error: "TLS handshake failed", blocked: "Blocked", nla_required: "NLA required", unavailable: "Scanner could not take it", too_big: "Page too heavy", error: "Failed",
 };
 function screenshotsSection(h, project, isCurrent) {
   const box = el("div", "shots-box");
@@ -1120,7 +1268,15 @@ function screenshotsSection(h, project, isCurrent) {
         alt: r.alt || `Screenshot of ${h.host} port ${r.port}`, loading: "lazy",
       });
       img.onerror = () => img.remove();
-      const caption = el("figcaption", "note", [`${r.scheme}://${h.host}:${r.port}`, r.http_status ? `HTTP ${r.http_status}` : "", r.title, r.final_url && r.final_url.replace(/\/$/, "") !== `${r.scheme}://${h.host}${(r.scheme === "https" && r.port === 443) || (r.scheme === "http" && r.port === 80) ? "" : `:${r.port}`}` ? `ended at ${r.final_url}` : "", r.captured_at ? `captured ${shortDate(r.captured_at)}` : ""].filter(Boolean).join(" · "));
+      const own = `${r.scheme}://${h.host}${(r.scheme === "https" && r.port === 443) || (r.scheme === "http" && r.port === 80) ? "" : `:${r.port}`}`;
+      const caption = el("figcaption", "note");
+      // the page's own address is the link (a page on the scanned host); the rest of the caption is text
+      caption.append(pageAnchor({ scheme: r.scheme, host: h.host, port: r.port, path: "/" }, `${r.scheme}://${h.host}:${r.port}`, "host-link"));
+      const rest = [r.http_status ? `HTTP ${r.http_status}` : "", r.title, r.captured_at ? `captured ${shortDate(r.captured_at)}` : ""].filter(Boolean);
+      if (r.final_url && r.final_url.replace(/\/$/, "") !== own) {
+        caption.append(" · ended at ", pageUrl({ url: r.final_url }) ? pageAnchor({ url: r.final_url }, r.final_url, "host-link") : r.final_url);
+      }
+      if (rest.length) caption.append(` · ${rest.join(" · ")}`);
       figure.append(img, caption);
       if (r.outcome !== "ok" && r.outcome !== "queued") figure.append(el("p", "note", `Latest attempt: ${r.reason || OUTCOME_TEXT[r.outcome] || r.outcome}`));
       if (r.has_previous) {
@@ -1563,6 +1719,8 @@ function renderFinding(d, cfg, row) {
     }
   }
 
+  // "Waiting for AI triage." is true only while a model is connected to do it: with none, a finding that has no verdict yet never gets one
+  const waitingForNobody = (ai) => ai.connected === false && (ai.status === "pending" || ai.status === "untracked");
   const noAssessment = {
     not_triaged: "No AI provider is configured, so there is no written assessment. The evidence stands on its own.",
     pending: "Waiting for AI triage.",
@@ -1624,6 +1782,13 @@ function renderFinding(d, cfg, row) {
     fix.append(el("p", "note", "No remediation advice is recorded yet."));
   }
   if (d.agent_task) fix.append(el("p", "note", agentLine(d.agent_task)));
+  (d.secrets || []).forEach((s) => {
+    // a token finding's secret lives in the secrets inventory: its mask, kind and rating, and a link there (never the value)
+    const line = el("p", "note");
+    line.append("Tracked in Secrets: ", el("code", "", s.masked), ` (${s.label}, ${s.status === "unverified" ? s.severity_basis : s.status.replace(/_/g, " ")}) `);
+    line.append(el("a", "", "Open Secrets", { href: `/cve/${encodeURIComponent(projectOf(row) || slug)}/secrets/` }));
+    fix.append(line);
+  });
   if (cfg.statusControl) {
     // the status is a change: in the all-projects view it is shown, and set from the finding's own project
     if (!ALL) fix.append(cfg.statusControl(d));
@@ -1728,7 +1893,7 @@ function renderFinding(d, cfg, row) {
     : "This check did not reproduce the finding. It does not prove the host is unaffected."));
   if (v.status === "observed") check.append(el("p", "note", "These checks observed host metadata only. They did not validate or rule out this CVE on this host."));
   out.push(
-    ...glance(d, { row, aiBadge: aiBadge(d.ai, { project, kind: d.kind, id: d.id }), note: noAssessment[d.ai.status] }),
+    ...glance(d, { row, aiBadge: aiBadge(d.ai, { project, kind: d.kind, id: d.id }), note: noAssessment[waitingForNobody(d.ai) ? "not_triaged" : d.ai.status] }),
     fix,
     ...[checkFold, advisoryFold, seenFold, aiHasDetail ? aiFold : null, requestFold, jobFold].filter(Boolean).map((x) => x.root),
   );
@@ -1757,6 +1922,27 @@ function findingStatusControl(d) {
     why.textContent = CL.closureText(r) || r.note || "";
     why.hidden = !why.textContent;
   };
+  // what a re-check found after it was marked fixed, and Retest now (POST .../retest: runs the check that proved it again on a Sentinel)
+  const retestLine = el("p", "note retest-line");
+  const retestNow = el("button", "btn ghost sm", "Retest now", { type: "button", title: "Run the check that proved this finding again, on a Sentinel" });
+  const paintRetest = () => {
+    const r = RT.retestOf(d);
+    retestLine.textContent = r ? RT.sentence(r) : "";
+    retestLine.hidden = !r;
+    retestNow.hidden = !RT.canRetestNow({ retest: d.retest, remediation_status: d.remediation.status });
+  };
+  retestNow.onclick = async () => {
+    retestNow.disabled = true;
+    try {
+      const r = await api("POST", `${base}/findings/${kind}/${d.id}/retest`);
+      d.retest = r.retest;
+      paintRetest();
+      toast(r.queued ? "Retest queued" : r.retest.text);
+    } catch (err) {
+      toast(err.message, true);
+    }
+    retestNow.disabled = false;
+  };
   const s = select("Remediation status", CL.STATUS_OPTIONS, async () => {
     const value = s.value;
     let body = { status: value }; // no note when not closing: the route leaves the stored one alone, and ours may be stale
@@ -1774,7 +1960,9 @@ function findingStatusControl(d) {
         status: r.remediation_status, note: r.remediation_note, closure_note: r.closure_note, closed_by: r.closed_by,
         closed_at: r.closed_at, closed_automatically: r.closed_automatically,
       });
+      d.retest = r.retest || null;
       paint();
+      paintRetest();
       toast(`Marked ${CL.statusLabel(value).toLowerCase()}`);
     } catch (err) {
       s.value = d.remediation.status;
@@ -1783,8 +1971,9 @@ function findingStatusControl(d) {
   });
   s.value = d.remediation.status;
   const box = el("div", "tools");
-  box.append(el("span", "note", "Remediation status"), s, why);
+  box.append(el("span", "note", "Remediation status"), s, why, retestLine, retestNow);
   paint();
+  paintRetest();
   return box;
 }
 
@@ -1840,6 +2029,13 @@ function findingHeatControl(d, onChange) {
 
 // A row's status chip when it is not open, its tooltip the closure line (who, when, why). null for an open finding.
 function statusBadge(item) {
+  // a finding marked fixed shows what its retest found (Fixed, verifying / Verified fixed / Fixed, not verified / ...), a reopened one says so
+  const retest = RT.retestOf(item);
+  if (retest) {
+    const chip = badge(retest.label, RT.toneOf(retest));
+    chip.title = [RT.sentence(retest), CL.closureText(item)].filter(Boolean).join(" ");
+    return chip;
+  }
   const status = item.status ?? item.remediation_status;
   if (!status || ["open", "actionable"].includes(status)) return null;
   const chip = badge(CL.statusLabel(status).toLowerCase(), status === "false_positive" ? "fp" : "");
@@ -2137,8 +2333,11 @@ function findingPage(mount, cfg) {
     );
   }
   if (bulk) metaTools.append(bulk.toggle);
-  metaRow.append(el("span"), metaTools);
-  side.append(...cfg.filters, metaRow, ...(bulk ? [bulk.note, bulk.bar] : []), rows);
+  const countLine = el("span", "list-count note");
+  metaRow.append(countLine, metaTools);
+  const isSearch = (n) => n instanceof Element && n.matches("input[type=search]");
+  const lh = listHead({ page: cfg.seenPage || cfg.kind || "findings", lead: cfg.filters.filter(isSearch), panelNodes: cfg.filters.filter((n) => !isSearch(n)), meta: metaRow });
+  side.append(lh.head, ...(bulk ? [bulk.note, bulk.bar] : []), rows);
   const byId = new Map();
   let current = null;
   let token = 0;
@@ -2219,11 +2418,23 @@ function findingPage(mount, cfg) {
     path: cfg.path,
     params: cfg.params,
     empty: cfg.empty,
-    onLoaded: cfg.onLoaded,
-    prepare: (items) => Promise.all([...new Set(items.map(projectOf))].map(loadSla)),
-    render: (_, items, reset) => {
+    noun: cfg.noun,
+    plural: cfg.plural,
+    onLoaded: (data, reset, quiet) => {
+      countLine.textContent = `${data.count} ${data.count === 1 ? cfg.noun : cfg.plural}`;
+      lh.refresh();
+      if (cfg.onLoaded) cfg.onLoaded(data, reset, quiet);
+    },
+    prepare: async (items) => {
+      await Promise.all([...new Set(items.map(projectOf))].map(loadSla));
+      if (!items.length && cfg.askScanned) cfg.askScanned(await neverScanned());
+    },
+    // quiet: a refresh nobody asked for. The rows are drawn aside and handed to renderKeepingState, so a disclosure the reader opened in a row (the hosts of a
+    // finding group) and the scroll of the list survive it (static/cve/keep-state.js)
+    render: (_, items, reset, quiet) => {
+      const target = reset && quiet ? el("div") : rows;
       if (reset) {
-        rows.textContent = "";
+        if (target === rows) rows.textContent = "";
         byId.clear();
       }
       items.forEach((item) => {
@@ -2233,9 +2444,21 @@ function findingPage(mount, cfg) {
         const title = el("span", "cve-id");
         if (r.title instanceof Node) title.append(r.title);
         else title.textContent = r.title;
-        row.append(title);
+        // the chip that says how bad it is (r.lead) sits on the title's line, after the title, so it is never at the end of a long second line
+        const lead = (r.lead || []).filter(Boolean);
+        if (lead.length) {
+          const top = el("span", "row-head");
+          top.append(title, ...lead);
+          row.append(top);
+        } else row.append(title);
+        // a row is two lines: the title, then one line of meta that opens with the host (and product) and carries the badges; what does not fit
+        // on that line (the description, the badges past the edge) is in the pane, and the row's tooltip says all of it
         const meta = el("span", "host-meta");
+        const lines = (r.notes || []).filter(Boolean);
+        const hostLine = lines.length && lines[0] instanceof Node ? lines.shift() : null;
+        if (hostLine) meta.append(hostLine);
         meta.append(...r.meta.filter(Boolean));
+        r.notes = lines;
         if (isNewSince(detectedOf(item), lastLook)) {
           row.dataset.fresh = "1";
           meta.prepend(newTag());
@@ -2244,6 +2467,7 @@ function findingPage(mount, cfg) {
         if (aging) meta.append(...ageTags(item));
         if (aging && aging.overdueBy) row.dataset.overdue = "1";
         row.append(meta);
+        row.title = [title.textContent, ...lead.map((c) => c.textContent.trim()), ...[...meta.children].map((c) => c.textContent.trim()), ...lines.filter((n) => typeof n === "string")].filter(Boolean).join("\n");
         const rowName = item.title || (item.cve && item.cve.id) || `finding ${item.id}`;
         attachRowMenu(row, rowName, () => {
           const was = item.status ?? item.remediation_status;
@@ -2297,10 +2521,12 @@ function findingPage(mount, cfg) {
           if (e.target.closest("a, summary, details")) return; // a link inside the row goes where it points; a group's host list opens in place
           history.replaceState(null, "", location.pathname + location.search + `#${hashOf(item)}`);
           show(keyOf(item), projectOf(item));
+          revealPane(pane);
         };
         if (bulk) bulk.decorate(row, item, keyOf(item));
-        rows.append(row);
+        target.append(row);
       });
+      if (target !== rows) keepRows(rows, target);
       settleRows(rows);
       fresh.update();
       updateOverdue();
@@ -2334,6 +2560,13 @@ const FINDING_KINDS = { match: 1, vulnerability: 1, hygiene: 1, route: 1 };
 // is invalid HTML that browsers handle inconsistently. Keyboard use matches a button's.
 // A selectable row is one control (role=button); the links inside it (host, address) stay clickable but leave the tab order,
 // so the row never nests focusable content. Run after a page of rows is drawn.
+// The rows of a quiet refresh (built in ``aside``) go into ``rows`` through renderKeepingState: each row is replaced (a row's handlers close over its item),
+// keeping what the reader did in them and the scroll of the list.
+const keepRows = (rows, aside) => {
+  aside.childNodes.forEach((n) => n.setAttribute && n.setAttribute("data-keep-fresh", ""));
+  renderKeepingState(rows, () => Array.from(aside.childNodes), { after: () => settleRows(rows) });
+};
+
 const settleRows = (container) => container.querySelectorAll(".host-row a").forEach((a) => a.setAttribute("tabindex", "-1"));
 
 function selectableRow(id, heat, attr = "id") {
@@ -2616,7 +2849,7 @@ const pages = {
           render: (t) => {
             const box = named(hostLink(t.name), t);
             // the edit sits with the name it labels (the actions column is already full)
-            const edit = el("button", "btn ghost sm alias-edit", t.alias || t.note ? "Edit alias" : "Add alias", { type: "button", "aria-label": `Alias and note of ${t.name}` });
+            const edit = el("button", "btn ghost sm alias-edit", t.alias || t.note ? "Edit alias" : "Add alias", { type: "button", "aria-label": `${t.alias || t.note ? "Edit alias" : "Add alias"} and note for ${t.name}` });
             edit.title = "Give this target a short display name and a note. The name that is scanned does not change";
             edit.onclick = () => editLabel(t);
             box.append(el("br"), edit);
@@ -2742,19 +2975,31 @@ const pages = {
       }
       stopAll.disabled = false;
     };
-    const bar = el("div", "scans-bar");
-    bar.append(status.node);
-    if (!ALL) bar.append(stopAll); // stopping scans is per project
+    // the same head as Findings and Hosts: the status chips are the Filters panel, Stop all and the activity chart open from the count line
+    const root = el("div", "table-page");
+    mount.append(root);
     const rhythm = el("div", "chart-slot");
-    mount.append(rhythm, bar);
-    api("GET", `${base}/scans?${query({ page_size: 200 })}`)
+    const activity = disclosure("Scan activity", rhythm);
+    activity.hidden = true;
+    const countLine = el("span", "list-count note", "", { role: "status" });
+    const tools = el("span", "meta-tools");
+    tools.append(activity);
+    if (!ALL) tools.append(stopAll); // stopping scans is per project
+    const metaRow = el("div", "list-meta");
+    metaRow.append(countLine, tools);
+    const lh = listHead({ page: "scans", lead: [], panelNodes: [status.node], meta: metaRow });
+    root.append(lh.head);
+    // counted by the server, exactly (the newest 200 scans are a page, not the 18 weeks the chart draws)
+    api("GET", `${base}/activity-days?${query({ days: 126, series: "scans", tz: displayZone() })}`)
       .then((r) => {
-        const dates = r.results.map((x) => x.started).filter(Boolean);
-        if (dates.length > 1) rhythm.append(heatmap({ title: "Scan activity", unit: "scans", dates }));
+        if (r.scans.total > 1) {
+          rhythm.append(heatmap({ title: "Scan activity", unit: "scans", perDay: r.scans.days }));
+          activity.hidden = false;
+        }
       })
       .catch(() => {});
     const list = createList({
-      mount,
+      mount: root,
       path: `${base}/scans`,
       params: () => ({ status: status.value }),
       empty: () =>
@@ -2768,7 +3013,11 @@ const pages = {
             },
       autoRefresh: (items) =>
         items.some((s) => s.status === -1 || (s.status === 1 && !s.stalled)),
-      onLoaded: (_, reset, quiet) => reset && !quiet && status.refresh(),
+      onLoaded: (data, reset, quiet) => {
+        countLine.textContent = `${data.count} ${data.count === 1 ? "scan" : "scans"}`;
+        lh.refresh();
+        if (reset && !quiet) status.refresh();
+      },
       render: table(
         withProject(readOnlyColumns([
           {
@@ -2851,9 +3100,9 @@ const pages = {
     // The query lives in the URL (?q=) so a search can be shared: words, tech:php, port:3306, ip:10.0.0.0/24, -host:www
     const params = new URLSearchParams(location.search);
     // Every filter lives in the URL (?q=, sort=, heat=) so any view can be bookmarked or sent; defaults stay out of the link.
-    const HOST_DEFAULTS = { q: "", sort: "score", heat: "all", view: "list", internal: "all" };
+    const HOST_DEFAULTS = { q: "", sort: "score", heat: "all", view: "list", internal: "all", exposed: "0" };
     const syncUrl = () => {
-      writeParams({ q: q.value.trim(), sort: sortBy.value, heat: heatFilter, view: galleryOn ? "gallery" : "list", internal: scopeFilter }, HOST_DEFAULTS, ["host"]);
+      writeParams({ q: q.value.trim(), sort: sortBy.value, heat: heatFilter, view: galleryOn ? "gallery" : "list", internal: scopeFilter, exposed: exposedFilter ? "1" : "0" }, HOST_DEFAULTS, ["host"]);
       views.refresh();
       if (searches) searches.refresh();
     };
@@ -2877,11 +3126,19 @@ const pages = {
     );
     sortBy.value = readParam("sort", "score", ["score", "name"]);
     const rows = el("div", "host-rows");
-    const controls = el("div", "list-tools");
-    controls.append(q, sortBy);
+    sortBy.dataset.quiet = "1"; // an order, not a filter: no chip, not counted
     // heat filter: the server narrows the whole inventory (?heat=), and its facet counts keep every chip's real total while one is selected
     const HEAT_CHIPS = [["all", "All"], ["fire", "Fire", "fire"], ["smoke", "Smoke", "smoke"], ["ice", "Ice", "ice"], ["clean", "Clean", "clean"], ["unscanned", "Not scanned"]];
     let heatFilter = readParam("heat", "all", HEAT_CHIPS.map((c) => c[0]));
+    // ?exposed=1: only the hosts the dashboard's Exposed hosts tile counts (an open CVE match the AI has not ruled out, or an open medium-or-worse finding)
+    let exposedFilter = readParam("exposed", "0", ["0", "1"]) === "1";
+    const exposedBtn = el("button", "", "Exposed only", { type: "button", "data-flag": "1", "aria-pressed": String(exposedFilter), title: "The hosts the Exposed hosts tile on the Overview counts" });
+    exposedBtn.onclick = () => {
+      exposedFilter = !exposedFilter;
+      exposedBtn.setAttribute("aria-pressed", String(exposedFilter));
+      syncUrl();
+      list.reload();
+    };
     let totalHosts = 0;
     let heatFacets = null; // {fire, smoke, ice, clean, unscanned, truncated}: counted by the server over every host the search matches
     const heatChips = el("div", "picker heat-chips", null, { role: "group", "aria-label": "Temperature" });
@@ -2899,6 +3156,7 @@ const pages = {
       chipBtn.set(key, b);
       heatChips.append(b);
     });
+    heatChips.append(exposedBtn);
     // scope filter (?internal=): hosts inside a network a project declared internal are scanned only by a Sentinel there; the chips appear
     // once the server says a visible project declared one
     const SCOPE_CHIPS = [["all", "All hosts"], ["0", "External"], ["1", "Internal"]];
@@ -3175,10 +3433,11 @@ const pages = {
     inventoryBtn.onclick = () => openInventoryDialog({ project: slug });
     metaTools.append(fresh.node, galleryBtn, ...(ALL ? [] : [inventoryBtn]), csv, bulk.toggle);
     metaRow.append(countLine, metaTools);
-    side.append(views.node, ...(searches ? [searches.node] : []), controls, heatChips, scopeChips, metaRow, bulk.bar, rows, gallery);
+    const lh = listHead({ page: "hosts", lead: [q], panelNodes: [sortBy, views.node, ...(searches ? [searches.node] : []), heatChips, scopeChips], meta: metaRow });
+    side.append(lh.head, bulk.bar, rows, gallery);
     split.classList.toggle("gallery", galleryOn); // painted once the list exists (see below)
     const byId = new Map();
-    let hostTab = "overview";
+    let hostTab = new URLSearchParams(location.search).get("tab") || "overview"; // ?tab=web: a link from a score line opens that tab
     let current = null;
 
     const kv = (k, v) => {
@@ -3453,6 +3712,10 @@ const pages = {
       if (chip) head.append(chip);
       if ((h.aliases || []).length) head.append(el("span", "note", `Also answers to ${h.aliases.join(", ")}`, { title: "Names that resolve to the same addresses are one host" }));
       if (h.zombie) head.append(badge("Zombie: DNS gone, still answering", "smoke"));
+      if (h.secrets) {
+        const s = el("a", "badge medium", `Secrets: ${h.secrets}`, { href: `/cve/${encodeURIComponent(projectOf(h))}/secrets/`, title: "Exposed secrets this host serves (masked values only)" });
+        head.append(s);
+      }
       if (h.excluded) head.append(badge("Excluded: never scanned", "smoke"));
       if (h.archived) head.append(badge("Archived: history retained", "queued"));
       if (h.pinned) head.append(badge("Pinned", "success"));
@@ -3482,7 +3745,8 @@ const pages = {
       assessButton.title = h.excluded ? "This host is excluded from scanning" : h.archived ? "Restore this host before scanning" : "Refresh DNS and run the permitted host checks now";
       assessButton.classList.add("host-rescan");
       head.append(assessButton);
-      const assessBody = el("div", "note", "Checking for an existing assessment…");
+      const assessBody = el("div", "note");
+      assessBody.append(waiting("Checking for an existing assessment"));
       assessBox.append(assessHead, assessBody);
       S.manage.append(assessBox);
       // a PDF of this host: findings with evidence and remediation status, built in the background and downloaded when ready
@@ -3597,6 +3861,7 @@ const pages = {
         tile("CVE matches", h.cve_matches, { hot: "fire", href: h.cve_matches ? `/cve/${encodeURIComponent(projectOf(h))}/matches/?host=${encodeURIComponent(h.host)}` : "" }),
       );
       pane.append(stats);
+      OV.main.append(hostReviewCard({ base: baseOf(projectOf(h)), hostId: h.id, isCurrent: () => current === h.id, ago: fullScanAgo }));
       OV.side.append(hostOverview(h));
       // why the host has its colour, so the rating can be checked rather than trusted
       const why = el("div", "why");
@@ -3621,24 +3886,27 @@ const pages = {
       }
       OV.main.prepend(surfaceCard(h, () => openTab("services")));
       OV.main.append(why);
-      // the score is the sum of these lines, so it can be checked rather than trusted
+      // the score is the sum of these lines, so it can be checked rather than trusted: every line says what it is, where and why it scores,
+      // and links to the evidence behind it (a stored line without a link still shows its label and points)
       if (h.score_detail && h.score_detail.length) {
-        const scoreBox = el("div", "why");
+        const scoreBox = el("div", "why score-why", null, { id: "score" });
         scoreBox.append(el("h3", "sec", `Why the score is ${h.score}`));
-        h.score_detail.forEach((d) => {
-          const line = el("div", "find");
-          // a line that cites a CVE match or a finding opens that item's page (the same links as the colour reasons above)
-          const hit =
-            reasons.find((r) => r.id && r.label && d.label.includes(r.label)) ||
-            (/CVE match/.test(d.label) ? reasons.find((r) => r.id && r.finding === "match") : null);
-          line.append(
-            hit
-              ? el("a", "", d.label, { href: `/cve/${encodeURIComponent(projectOf(h))}/${hit.finding === "match" ? "matches" : "vulns"}/#${hit.id}` })
-              : el("span", "", d.label),
-            el("span", "note mono", `+${d.points}`),
-          );
-          scoreBox.append(line);
-        });
+        scoreBox.append(
+          scoreList(h.score_detail, { slug: projectOf(h), host: h.host }, {
+            score: h.score,
+            // a line that points at a tab of this very page opens it in place
+            onOpen: (l) => {
+              if (l.ref && l.ref.type === "secret" && l.ref.id) {
+                openSecret(projectOf(h), l.ref.id);
+                return true;
+              }
+              if (!l.ref || l.ref.type !== "host_tab" || !(l.ref.tab in S)) return false;
+              openTab(l.ref.tab);
+              pane.scrollIntoView({ block: "start" });
+              return true;
+            },
+          }),
+        );
         OV.main.append(scoreBox);
       }
       if (h.title) hdr.append(el("p", "sub", h.title));
@@ -3702,19 +3970,20 @@ const pages = {
         S.services.append(el("div", "note", `full port scan: ${fullScanAgo(ip.full_scanned_at)}${ip.full_scanned_at ? ` (${ip.full_scan_ports} open)` : ""}`));
         if ((ip.udp_unanswered || []).length)
           S.services.append(el("div", "note", `UDP ${ip.udp_unanswered.join(", ")}: no answer (open or filtered, not counted as open)`));
+        (ip.cut_notes || []).forEach((note) => S.services.append(el("div", "note", `The scanner cut its report for this address: ${note}`)));
         ip.ports.forEach((p) => {
           const card = el("div", "svc");
           const top = el("div", "svc-top");
           top.append(
             el("span", "svc-port", `${p.number}/${p.protocol || "tcp"}`),
-            el("span", "svc-name", [p.product || p.service, p.version].filter(Boolean).join(" ")),
+            el("span", "svc-name", [p.product || p.service, p.version].filter(Boolean).join(" ") + (p.tunnel === "ssl" ? " (TLS)" : "")),
           );
           card.append(top);
           if (p.info) card.append(el("div", "note", p.info));
           if (p.cpe) card.append(el("div", "note mono", p.cpe));
           if (p.banner) card.append(el("pre", "banner", p.banner));
           Object.entries(p.scripts || {}).forEach(([id, text]) => {
-            const det = el("details", "nse");
+            const det = el("details", "nse", null, { "data-keep-key": `nse:${id}` });
             det.append(el("summary", "mono", id), el("pre", "banner", text));
             card.append(det);
           });
@@ -3800,6 +4069,8 @@ const pages = {
     const list = createList({
       mount: side,
       skeleton: "rows",
+      noun: "host",
+      plural: "hosts",
       onReset: () => {
         rows.textContent = "";
         byId.clear();
@@ -3807,10 +4078,10 @@ const pages = {
         settleSelection(); // a new search may return nothing; the pane must not keep showing a host from the old one
       },
       path: `${base}/search`,
-      params: () => ({ q: q.value, sort: sortBy.value, ...(heatFilter !== "all" ? { heat: heatFilter } : {}), ...(scopeFilter !== "all" ? { internal: scopeFilter } : {}) }),
-      pageSize: () => (heatFilter === "all" ? 30 : 200), // a temperature filter lists everything it finds, up to the API's page maximum
+      params: () => ({ q: q.value, sort: sortBy.value, ...(heatFilter !== "all" ? { heat: heatFilter } : {}), ...(scopeFilter !== "all" ? { internal: scopeFilter } : {}), ...(exposedFilter ? { exposed: 1 } : {}) }),
+      pageSize: () => (heatFilter === "all" && !exposedFilter ? 30 : 200), // a temperature filter lists everything it finds, up to the API's page maximum
       empty: () =>
-        q.value.trim() || heatFilter !== "all" || scopeFilter !== "all"
+        q.value.trim() || heatFilter !== "all" || scopeFilter !== "all" || exposedFilter
           ? {
               icon: "search",
               title: "No host matches",
@@ -3822,6 +4093,8 @@ const pages = {
                     q.value = "";
                     heatFilter = "all";
                     scopeFilter = "all";
+                    exposedFilter = false;
+                    exposedBtn.setAttribute("aria-pressed", "false");
                     scopeBtn.forEach((btn, k) => btn.setAttribute("aria-pressed", String(k === "all")));
                     syncUrl();
                     paintHeat();
@@ -3842,9 +4115,10 @@ const pages = {
         if (data.facets && data.facets.heat) heatFacets = { ...data.facets.heat, truncated: Boolean(data.facets.truncated) };
         paintHeat();
       },
-      render: (m, items, reset) => {
+      render: (m, items, reset, quiet) => {
+        const target = reset && quiet ? el("div") : rows;
         if (reset) {
-          rows.textContent = "";
+          if (target === rows) rows.textContent = "";
           byId.clear();
         }
         items.forEach((h) => {
@@ -3888,9 +4162,11 @@ const pages = {
             if (link) e.preventDefault();
             history.replaceState(null, "", `#${h.id}`);
             showHost(h);
+            revealPane(pane);
           };
-          rows.append(row);
+          target.append(row);
         });
+        if (target !== rows) keepRows(rows, target);
         settleRows(rows);
         paintHeat();
         markNewHosts();
@@ -3923,10 +4199,11 @@ const pages = {
     mount.append(header);
     // grouped by default: the same client-side library file (jQuery, Bootstrap, ...) on sibling hosts of one site is one row; "Show every host" lists each host's finding
     let groupMode = wanted.get("group") === FG.EVERY_HOST ? FG.EVERY_HOST : FG.GROUPED;
-    const filtersNow = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value, ...(scope.value ? { internal: scope.value } : {}), ...(kev.value ? { kev: kev.value } : {}) });
+    const filtersNow = () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value, ...(scope.value ? { internal: scope.value } : {}), ...(kev.value ? { kev: kev.value } : {}), ...(ai.value ? { ai: ai.value } : {}) });
     const params = () => FG.listParams(filtersNow(), groupMode);
     const everyHost = el("button", "new-toggle every-host", "Show every host", {
       type: "button",
+      "data-flag": "1",
       "aria-pressed": String(groupMode === FG.EVERY_HOST),
       title: "The same client-side library file (jQuery, Bootstrap, ...) on several hosts of one site is one row; servers, CMSs and everything else stay one row per host. Press to list every host's finding on its own row.",
     });
@@ -3942,11 +4219,14 @@ const pages = {
     const q = searchBox("Filter by host", () => reload());
     q.value = wanted.get("host") || "";
     // findings on hosts inside a network a project declared internal (scanned only by a Sentinel there) can be told apart and filtered
-    const scope = select("Scope", [["", "All findings"], ["0", "External only"], ["1", "Internal only"]], () => reload());
+    const scope = select("Scope", [["", "All scopes"], ["0", "External only"], ["1", "Internal only"]], () => reload());
     scope.value = ["0", "1"].includes(wanted.get("internal")) ? wanted.get("internal") : "";
     // KEV whatever the heat: a KEV match whose version is not proven is smoke, so heat alone does not find every exploited CVE
     const kev = select("Known exploited", [["", "Any CVE"], ["1", "Known exploited (KEV) only"]], () => reload());
     kev.value = wanted.get("kev") === "1" ? "1" : "";
+    // what the AI reviewer said: disputed = it called the finding a false positive and cvENGINE kept it open, so a person should look
+    const ai = select("AI reviewer", [["", "Any verdict"], ["disputed", "AI disputed (kept open, look at these)"], ["real", "AI says real"]], () => reload());
+    ai.value = ["disputed", "real"].includes(wanted.get("ai")) ? wanted.get("ai") : "";
     const type = picker(
       "Type",
       [["all", "All"], ["cve", "CVE matches"], ["scanner", "Scanner"], ["hygiene", "Hygiene"]],
@@ -3974,12 +4254,12 @@ const pages = {
     // closed: fixed, accepted risk and false positive together; false positive alone, to review those decisions
     const status = picker(
       "Status",
-      [["actionable", "Actionable"], ["closed", "Closed"], ["false_positive", "False positive"], ["all", "Everything"]],
+      [["actionable", "Actionable"], ["closed", "Closed"], ["false_positive", "False positive"], ...RT.FILTERS, ["all", "Everything"]],
       countOf((key) => ({ status: key })),
       () => reload(),
     );
-    const ALLOWED = { type: ["all", "cve", "scanner", "hygiene"], severity: ["all", "critical", "high", "medium", "low", "info"], status: ["actionable", "closed", "false_positive", "all"] };
-    const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "", internal: "", kev: "", group: FG.GROUPED };
+    const ALLOWED = { type: ["all", "cve", "scanner", "hygiene"], severity: ["all", "critical", "high", "medium", "low", "info"], status: ["actionable", "closed", "false_positive", ...RT.FILTERS.map(([key]) => key), "all"] };
+    const FINDING_DEFAULTS = { type: "all", severity: "all", status: "actionable", host: "", internal: "", kev: "", ai: "", group: FG.GROUPED };
     const setPicker = (p, key, value) => {
       p.value = value;
       p.node.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-pressed", String(ALLOWED[key][i] === value)));
@@ -3990,14 +4270,14 @@ const pages = {
     });
     // the filters live in the URL (type=, severity=, status=, host=) so a view can be bookmarked or sent; defaults stay out of it
     const syncUrl = () => {
-      writeParams({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, kev: kev.value, group: groupMode }, FINDING_DEFAULTS);
+      writeParams({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, kev: kev.value, ai: ai.value, group: groupMode }, FINDING_DEFAULTS);
       views.refresh();
     };
     const views = savedViews({
       page: "findings",
       slug,
       defaults: FINDING_DEFAULTS,
-      read: () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, kev: kev.value, group: groupMode }),
+      read: () => ({ type: type.value, severity: sev.value, status: status.value, host: q.value.trim(), internal: scope.value, kev: kev.value, ai: ai.value, group: groupMode }),
       apply: (v) => {
         setGroupMode(v.group);
         setPicker(type, "type", v.type);
@@ -4006,10 +4286,11 @@ const pages = {
         q.value = v.host;
         scope.value = v.internal || "";
         kev.value = v.kev || "";
+        ai.value = v.ai || "";
         reload();
       },
     });
-    const hint = el("details", "how-filter");
+    const hint = el("details", "how-filter", null, { "data-keep-key": "how-filter" });
     hint.append(el("summary", "", "What does Actionable mean?"), el("p", "", "Actionable is what makes a host hot on its card: CVE matches the AI has not ruled out, and open scanner and hygiene findings above info. Everything adds informational, closed and ruled-out findings."));
     mount.append(hint);
     function reload() {
@@ -4033,7 +4314,7 @@ const pages = {
     // a group row: how many hosts, their own statuses, and the hosts themselves (each opens its own finding here)
     const groupHosts = (f) => {
       const g = f.group;
-      const box = el("details", "group-hosts");
+      const box = el("details", "group-hosts", null, { "data-keep-key": `group-hosts:${g.registrable_domain || f.id}` });
       const heat = FG.heatSplit(g);
       box.append(el("summary", "", `${FG.hostsText(g)} · ${FG.statusSplit(g)}${heat ? ` · ${heat}` : ""}`));
       const list = el("ul", "group-members");
@@ -4053,6 +4334,7 @@ const pages = {
       box.append(list);
       return box;
     };
+    let unscanned = false; // the project has no scan at all (asked for when the list is empty): the empty state says so
     const list = findingPage(mount, {
       bulk: true,
       seenPage: "findings",
@@ -4080,9 +4362,10 @@ const pages = {
       noun: "finding",
       plural: "findings",
       path: `${base}/findings`,
-      filters: [views.node, q, scope, kev, type.node, sev.node, status.node, everyHost],
+      filters: [views.node, q, scope, kev, ai, type.node, sev.node, status.node, everyHost],
       params,
       exportParams: filtersNow, // the CSV is one line per host finding whatever the list shows
+      askScanned: (none) => (unscanned = none),
       empty: () => {
         const narrowed = type.value !== "all" || sev.value !== "all" || q.value.trim() || scope.value || kev.value;
         if (narrowed)
@@ -4103,6 +4386,7 @@ const pages = {
               },
             ],
           };
+        if (unscanned) return nothingScanned("Findings");
         if (status.value === "actionable")
           return {
             icon: "shield",
@@ -4120,7 +4404,8 @@ const pages = {
       row: (f) => ({
         heat: f.heat,
         title: f.type === "cve" && projectOf(f) ? cveAnchor(projectOf(f), f.title, f.id) : f.title,
-        meta: [badge(TYPE_LABEL[f.type] || f.type), FG.isGroup(f) ? badge(`${f.group.hosts} hosts`, "info") : null, f.internal ? internalBadge() : null, badge(f.severity, f.severity), f.kev ? kevBadge(f.heat_capped) : null, f.type === "cve" ? heatWhy(f.heat_reason) : null, aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
+        lead: [badge(f.severity, f.severity)],
+        meta: [badge(TYPE_LABEL[f.type] || f.type), FG.isGroup(f) ? badge(`${f.group.hosts} hosts`, "info") : null, f.internal ? internalBadge() : null, f.kev ? kevBadge(f.heat_capped) : null, f.type === "cve" ? heatWhy(f.heat_reason) : null, aiBadge(f.triage, { project: projectOf(f), kind: f.kind, id: f.id }), validationBadge(f.triage),
                !FG.isGroup(f) ? statusBadge(f) : null, agentTag(f.agent_task), projChip(f)],
         notes: FG.isGroup(f)
           ? [rowLine(`${f.group.registrable_domain}`, f.note ? ` · ${f.note}` : ""), groupHosts(f), f.description || ""]
@@ -4167,7 +4452,7 @@ const pages = {
     );
     const status = picker(
       "Remediation status",
-      [["", "All"], ...CL.STATUS_OPTIONS, ["closed", "Any closed"]],
+      [["", "All"], ...CL.STATUS_OPTIONS, ["closed", "Any closed"], ...RT.FILTERS],
       async (key) => (await api("GET", `${base}/matches?${query({ status: key, host: q.value, classification: cls.value, verdict: verdict.value, cve: cveOnly, kev: kev.value, page_size: 0 })}`)).count,
       () => list.reload(),
     );
@@ -4205,7 +4490,8 @@ const pages = {
       row: (m) => ({
         heat: m.cve.tier,
         title: projectOf(m) ? cveAnchor(projectOf(m), m.cve.cve_id, m.id) : m.cve.cve_id,
-        meta: [heatBadge(m.cve.tier, m.heat_reason), m.cve.kev ? kevBadge(m.cve.heat_capped) : null, heatWhy(m.heat_reason), m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), statusBadge({ ...m, status: m.remediation_status }), agentTag(m.agent_task), projChip(m)],
+        lead: [heatBadge(m.cve.tier, m.heat_reason)],
+        meta: [m.cve.kev ? kevBadge(m.cve.heat_capped) : null, heatWhy(m.heat_reason), m.host_reported ? badge("Reported by the host", "success") : null, aiBadge(m.triage, { project: projectOf(m), kind: "match", id: m.id }), validationBadge(m.triage), statusBadge({ ...m, status: m.remediation_status }), agentTag(m.agent_task), projChip(m)],
         notes: [rowLine(m.host ? hostLink(m.host, projectOf(m)) : "-", ` · ${[m.product, m.version].filter(Boolean).join(" ") || "-"}`), m.cve.short_description || "Description unavailable in the CVE feed."],
       }),
     });
@@ -4214,7 +4500,6 @@ const pages = {
 };
 
 pages.hygiene = function hygiene(mount) {
-  const head = el("div", "tools");
   const run = el("button", "btn sm", "Run checks now", { type: "button" });
   run.onclick = async () => {
     run.disabled = true;
@@ -4236,11 +4521,20 @@ pages.hygiene = function hygiene(mount) {
       run.disabled = false;
     }
   };
-  if (!ALL) head.append(run); // running the checks is per project
-  mount.append(head);
+
+  // The issues come first, under one line of numbers: the same head as Scans and Hosts, so the first screen shows the user's data. The
+  // certificates are a one-line disclosure under the list (the two certificate numbers open it).
+  const certs = el("details", "card hy-card hy-certs", null, { id: "certs", "data-keep-key": "hygiene-certs" });
+  const certsLine = el("span", "note", "");
+  const certsSum = el("summary", "hy-certs-sum");
+  certsSum.append(el("h2", "", "Certificates"), certsLine);
+  const openCerts = () => {
+    certs.open = true;
+    certs.scrollIntoView({ block: "start" });
+  };
 
   // headline numbers, each a count request with page_size 0 (the count alone)
-  const tiles = el("div", "tiles");
+  const tiles = el("div", "tiles slim");
   mount.append(tiles);
   const countOf = (path, qs) =>
     api("GET", `${base}/${path}?${query({ ...qs, page_size: 0 })}`).then((r) => r.count).catch(() => null);
@@ -4253,12 +4547,18 @@ pages.hygiene = function hygiene(mount) {
       countOf("hygiene", {}),
     ]);
     tiles.textContent = "";
+    // a phone has one tile for both certificate numbers (one 44px button instead of two), a screen with room keeps the two
+    const narrow = typeof matchMedia === "function" && matchMedia("(max-width:639px)").matches;
     tiles.append(
-      tile("Certificates tracked", tracked),
-      tile("Expiring in 30 days", expiring, { hot: "smoke" }),
+      ...(narrow
+        ? [tile(`Certificates tracked, ${expiring == null ? "-" : expiring} expiring in 30 days`, tracked, { hot: expiring ? "smoke" : "", onClick: openCerts })]
+        : [tile("Certificates tracked", tracked, { onClick: openCerts }), tile("Expiring in 30 days", expiring, { hot: "smoke", onClick: openCerts })]),
       tile("Critical or high issues", crit == null ? null : crit + (high || 0), { hot: "fire" }),
       tile("Open issues", open, { hot: "ice" }),
     );
+    certsLine.textContent = tracked == null ? "" : tracked === 0
+      ? "None checked yet. They are checked after discovery, daily, or when you run the checks."
+      : `${tracked} tracked, ${expiring || 0} expiring in 30 days. Soonest expiry first.`;
   };
   paintTiles();
   liveCustom.add({ alive: () => tiles.isConnected, run: paintTiles });
@@ -4269,42 +4569,10 @@ pages.hygiene = function hygiene(mount) {
       d < 0 ? "critical" : d <= 7 ? "high" : d <= 30 ? "medium" : "success";
     return badge(d < 0 ? `expired ${-d}d ago` : `${d} days`, cls);
   };
-  const certs = el("section", "card hy-card hy-certs");
-  certs.append(
-    el("h2", "", "Certificates"),
-    el(
-      "p",
-      "note",
-      "Soonest expiry first. Anything under 30 days needs renewing now.",
-    ),
-  );
-  mount.append(certs);
-  createList({
-    mount: certs,
-    path: `${base}/certificates`,
-    empty:
-      "No certificates checked yet. They are checked after discovery, daily, or when you run the checks.",
-    render: table(withProject([
-      { label: "Host", render: (c) => { const n = el("span"); n.append(hostLink(c.host, projectOf(c)), document.createTextNode(`:${c.port}`)); return n; } },
-      {
-        label: "Expires",
-        cls: "cert-expiry",
-        render: (c) => (c.not_after ? c.not_after.slice(0, 10) : "-"),
-      },
-      { label: "Left", render: (c) => dayBadge(c.days_left) },
-      { label: "Issuer", render: (c) => c.issuer || "-" },
-      { label: "Key", render: (c) => c.key || "-" },
-      {
-        label: "TLS",
-        render: (c) =>
-          c.legacy_tls ? badge("1.0/1.1 on", "medium") : c.protocol || "-",
-      },
-    ]), (c) => (c.days_left == null ? "" : c.days_left < 0 ? "critical" : c.days_left <= 7 ? "high" : c.days_left <= 30 ? "medium" : "")),
-  }).start();
 
-  const issues = el("section", "card hy-card");
-  issues.append(el("h2", "", "TLS, email authentication and cleartext services"));
-  const tools = el("div", "tools");
+  const root = el("div", "table-page");
+  mount.append(root);
+  root.append(el("h2", "visually-hidden", "TLS, email authentication and cleartext services"));
   const sev = picker(
     "Severity",
     [
@@ -4341,23 +4609,37 @@ pages.hygiene = function hygiene(mount) {
     () => list.reload(),
   );
   const q = searchBox("Filter by host", () => list.reload());
-  tools.append(kind, q);
-  issues.append(sev.node, tools);
-  mount.append(issues);
+  const countLine = el("span", "list-count note", "", { role: "status" });
+  const tools = el("span", "meta-tools");
+  if (!ALL) tools.append(run); // running the checks is per project
+  const metaRow = el("div", "list-meta");
+  metaRow.append(countLine, tools);
+  const lh = listHead({ page: "hygiene", lead: [q], panelNodes: [sev.node, kind], meta: metaRow });
+  let unscanned = false; // the project has no scan at all (asked for when the list is empty): the empty state says so
+  root.append(lh.head);
   const list = createList({
-    mount: issues,
+    mount: root,
     path: `${base}/hygiene`,
     params: () => ({ severity: sev.value, check: kind.value, q: q.value }),
+    prepare: async (items) => {
+      unscanned = !items.length && (await neverScanned());
+    },
     empty: () =>
       sev.value || kind.value || q.value.trim()
         ? { icon: "search", title: "No issue matches these filters" }
+        : unscanned
+        ? nothingScanned("Hygiene checks (certificates, TLS, email settings, cleartext services)")
         : {
             icon: "shield",
             tone: "calm",
             title: "No open hygiene issues",
             body: "Certificates, TLS settings, SPF, DKIM and DMARC look healthy, and no Telnet, FTP or other cleartext service was found.",
           },
-    onLoaded: (_, reset, quiet) => reset && !quiet && sev.refresh(),
+    onLoaded: (data, reset, quiet) => {
+      countLine.textContent = `${data.count} ${data.count === 1 ? "issue" : "issues"}`;
+      lh.refresh();
+      if (reset && !quiet) sev.refresh();
+    },
     render: table(withProject([
       { label: "Severity", render: (f) => badge(f.severity, f.severity) },
       {
@@ -4374,6 +4656,40 @@ pages.hygiene = function hygiene(mount) {
     ], 3), (f) => f.severity),
   });
   list.start();
+
+  // the certificates: one line until opened, the list is asked for when it is
+  const certsBody = el("div", "hy-certs-body");
+  certs.append(certsSum, certsBody);
+  mount.append(certs);
+  let certsStarted = false;
+  const startCerts = () => {
+    if (certsStarted || !certs.open) return;
+    certsStarted = true;
+    createList({
+      mount: certsBody,
+      path: `${base}/certificates`,
+      empty:
+        "No certificates checked yet. They are checked after discovery, daily, or when you run the checks.",
+      render: table(withProject([
+        { label: "Host", render: (c) => { const n = el("span"); n.append(hostLink(c.host, projectOf(c)), document.createTextNode(`:${c.port}`)); return n; } },
+        {
+          label: "Expires",
+          cls: "cert-expiry",
+          render: (c) => (c.not_after ? c.not_after.slice(0, 10) : "-"),
+        },
+        { label: "Left", render: (c) => dayBadge(c.days_left) },
+        { label: "Issuer", render: (c) => c.issuer || "-" },
+        { label: "Key", render: (c) => c.key || "-" },
+        {
+          label: "TLS",
+          render: (c) =>
+            c.legacy_tls ? badge("1.0/1.1 on", "medium") : c.protocol || "-",
+        },
+      ]), (c) => (c.days_left == null ? "" : c.days_left < 0 ? "critical" : c.days_left <= 7 ? "high" : c.days_left <= 30 ? "medium" : "")),
+    }).start();
+  };
+  certs.addEventListener("toggle", startCerts);
+  if (location.hash === "#certs") openCerts();
 };
 
 // --- scan detail: overview + tabs over the scan's sub-resources ------------------
@@ -4391,7 +4707,7 @@ pages.changes = function changes(mount) {
       list.reload();
     },
   );
-  // /changes/?since=<ISO time> arrives from "changes since you last looked" on the Live page: offer it as one more choice
+  // /changes/?since=<ISO time> arrives from "changes since you last looked" on the Overview: offer it as one more choice
   const sinceParam = new URLSearchParams(location.search).get("since") || "";
   if (Number.isFinite(Date.parse(sinceParam)) && !/^\d+[hdw]$/.test(sinceParam)) {
     since.prepend(Object.assign(el("option", "", "Since you last looked"), { value: sinceParam }));
@@ -4425,12 +4741,19 @@ pages.changes = function changes(mount) {
     count,
     () => list.reload(),
   );
-  const trend = el("div", "chart-slot");
+  // the daily chart is closed under its own line (the changes come first on the screen) and opens on the same 7 days the list starts on
+  const trend = el("details", "chart-slot changes-trend", null, { "data-keep-key": "changes-chart" });
+  trend.hidden = true;
+  const trendSum = el("summary", "", "Changes per day");
+  trend.append(trendSum);
   mount.append(trend, tools, kinds.node);
-  api("GET", `${base}/changes?${query({ since: "30d", page_size: 200 })}`)
+  // counted by the server, exactly: the newest 200 changes are a page, and the chart's total is the sum of what it is given
+  api("GET", `${base}/activity-days?${query({ days: 60, series: "changes", tz: displayZone() })}`)
     .then((r) => {
-      const dates = (r.results || []).map((c) => c.detected).filter(Boolean);
-      if (dates.length) trend.append(areaChart({ title: "Changes per day", unit: "changes", ranges: [["7D", 7], ["30D", 30]], dates, compare: false }));
+      if (!r.changes.total) return;
+      trendSum.textContent = `Changes per day, chart (${r.changes.total} in the last 60 days)`;
+      trend.append(areaChart({ title: "Changes per day", unit: "changes", ranges: [["7D", 7], ["30D", 30]], perDay: r.changes.days, compare: false, defaultRange: "7D" }));
+      trend.hidden = false;
     })
     .catch(() => {});
   const list = createList({
@@ -4442,7 +4765,7 @@ pages.changes = function changes(mount) {
     render: table(withProject([
       { label: "When", render: (c) => whenCell(c.detected) },
       { label: "Kind", render: (c) => badge(CHANGE_LABEL[c.kind] || c.kind, changeClass(c)) },
-      { label: "Host", cls: "mono", render: (c) => hostLink(c.host, projectOf(c)) },
+      { label: "Host", cls: "mono change-host", render: (c) => Object.assign(hostLink(c.host, projectOf(c)), { title: c.host }) },
       { label: "Detail", render: (c) => changeCell(c, projectOf(c)) },
       {
         label: "Scan",
@@ -4475,7 +4798,8 @@ pages.activity = function activity(mount) {
   const tools = el("div", "tools");
   if (ALL && root.dataset.appAdmin === "1") {
     const control = el("section", "card");
-    const state = el("p", "note", "Loading global scanning state…", { role: "status" });
+    const state = el("div", "note", null, { role: "status" });
+    state.append(waiting("Loading the global scanning state", { live: false })); // state is already a status region
     const actions = el("div", "tools");
     const pause = el("button", "btn", "Pause all scanning", { type: "button" });
     const resume = el("button", "btn ghost", "Resume scanning", { type: "button" });
@@ -4571,7 +4895,7 @@ pages.scan = async function scanDetail(mount) {
       label: "Endpoints",
       open: (m) =>
         listTab(m, "endpoints", "Search URLs", [
-          { label: "URL", render: (r) => r.url },
+          { label: "URL", render: (r) => pageAnchor({ url: r.url }, r.url, "host-link") },
           { label: "HTTP", cls: "num", render: (r) => r.http_status || "-" },
           { label: "Title", render: (r) => r.title || "-" },
           { label: "Type", render: (r) => r.content_type || "-" },
@@ -4639,7 +4963,7 @@ pages.scan = async function scanDetail(mount) {
           { label: "Finding", render: (v) => v.name },
           { label: "Host", render: (v) => hostLink(v.host) },
           { label: "CVE", render: (v) => (v.cves.length ? joinNodes(v.cves.map((c) => cveLink(slug, c, v.cve_matches && v.cve_matches[c], v.host))) : "-") },
-          { label: "URL", render: (v) => v.url || "-" },
+          { label: "URL", render: (v) => (v.url ? pageAnchor({ url: v.url }, v.url, "host-link") : "-") },
         ],
         (v) => v.severity,
       ),
@@ -4690,7 +5014,7 @@ pages.scan = async function scanDetail(mount) {
       meta.append(fact("Started", shortDate(s.started))[0], durBox);
       if (s.finished) meta.append(fact("Finished", shortDate(s.finished))[0]);
       // report downloads: a PDF built by the server from this scan's results and the branding in Settings > Reports
-      const pop = el("details", "pop");
+      const pop = el("details", "pop", null, { "data-keep-key": "report-menu", "data-keep-popover": "" }); // an open menu holds a refresh back (static/cve/keep-state.js)
       pop.append(el("summary", "btn ghost sm", "Download report"));
       const menu = el("div", "pop-menu");
       [
@@ -4779,6 +5103,12 @@ pages.scan = async function scanDetail(mount) {
 };
 
 // Third-party suppliers: host cards and the technology search (static/cve/suppliers.js)
-pages.suppliers = (mount) => suppliersPage(mount, { slug, all: ALL });
+pages.suppliers = (mount) => suppliersPage(mount, { slug, all: ALL, listHead });
+
+// Exposed secrets: the secrets inventory, masked values only (static/cve/secrets.js); the API refuses a change the caller's role does not allow
+pages.secrets = (mount) => secretsPage(mount, { slug, all: ALL, canWrite: !ALL, listHead });
+
+// Situations: what needs a person, one host at a time, ranked (static/cve/situations.js)
+pages.situations = (mount) => situationsPage(mount, { slug, all: ALL, listHead, createList, selectableRow, addTargets: addTargetsAction });
 
 pages[kind](root.querySelector("#view"));

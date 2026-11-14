@@ -21,7 +21,9 @@ def diagnostic(what, raw, kind=''):
     """A failure line safe to store and show to project members: what failed, the exception type, and a diagnostic id. The raw
     text (an exception message can carry paths, addresses or provider replies) goes to the worker log under that id only."""
     import hashlib
-    raw = str(raw or '')
+
+    from cveFeed.secret_redaction import redact_text
+    raw = redact_text(str(raw or ''))  # a provider reply or a failed signed-in request can echo a key, token or password: the log gets it masked
     stamp = hashlib.sha256(f'{what}:{raw}:{timezone.now().isoformat()}'.encode()).hexdigest()[:12]
     logger.warning('%s failed (diagnostic %s): %s', what, stamp, raw[:2000])
     return f'{what} failed{f" ({kind})" if kind else ""}; diagnostic {stamp} is in the worker log'
@@ -58,6 +60,12 @@ def log(kind, message, project=None, cve_id='', status='done', **detail):
         from django.db.models import F
         from cveFeed.models import AgentActivity
         message = message[:500]
+        from agentapi import stage_runs
+        run = stage_runs.current()
+        if run is not None:  # a stage continued by a later pass says again what its first pass said: the line it wrote then stands
+            earlier = run.repeated_activity(kind, message, _project_id(project), detail.get('scan_id'), status)
+            if earlier is not None:
+                return earlier
         same = _repeat_of(kind, message, _project_id(project), detail.get('scan_id'), status)
         if same is not None:
             AgentActivity.objects.filter(pk=same.pk).update(repeat=F('repeat') + 1, created_at=timezone.now(), finished_at=timezone.now())
@@ -67,6 +75,8 @@ def log(kind, message, project=None, cve_id='', status='done', **detail):
             kind=kind, message=message, status=status, project_id=_project_id(project),
             cve_id=cve_id or '', detail=detail,
             finished_at=None if status == 'running' else timezone.now())
+        if run is not None:
+            run.note_activity(entry)
         return entry
     except Exception:  # noqa: BLE001
         logger.warning('could not record %s activity', kind, exc_info=True)  # the message is not logged: it may name what a scan found
@@ -85,6 +95,30 @@ def settle(entry, status='done', message=None, **detail):
         entry.save(update_fields=['message', 'status', 'detail', 'finished_at'])
     except Exception:  # noqa: BLE001
         logger.warning('could not settle AI activity', exc_info=True)
+
+
+def settle_waiting(entry, message, scan_id=None, **detail):
+    """Settle ``entry`` as ``waiting``: back-pressure (every Sentinel slot was taken), not a failure. The same line for the same scan right before it counts up
+    (``repeat``) on that row and ``entry`` is dropped, so a scan whose hundred hosts all waited shows one line, not a hundred. Never raises."""
+    if entry is None:
+        return None
+    try:
+        from datetime import timedelta
+        from django.db.models import F
+        from cveFeed.models import AgentActivity
+        same = (AgentActivity.objects.filter(project_id=entry.project_id, kind=entry.kind, message=message[:500], status='waiting',
+                                             detail__scan_id=scan_id, created_at__gte=timezone.now() - timedelta(seconds=REPEAT_WINDOW))
+                .exclude(pk=entry.pk).order_by('-id').first())
+        if same is not None:
+            AgentActivity.objects.filter(pk=same.pk).update(repeat=F('repeat') + 1, created_at=timezone.now(), finished_at=timezone.now())
+            discard(entry)
+            same.refresh_from_db()
+            return same
+        settle(entry, 'waiting', message=message, **detail)
+        return entry
+    except Exception:  # noqa: BLE001
+        logger.warning('could not settle waiting activity', exc_info=True)
+        return None
 
 
 @contextlib.contextmanager

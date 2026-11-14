@@ -22,7 +22,7 @@ MAX_REREAD_HOSTS = 50           # hosts one call asks to be read again
 
 
 def _key(name):
-    from cveFeed import cms
+    from cvengine_scanner import cms
     return cms.key(name)
 
 
@@ -120,8 +120,8 @@ def request_reread(subdomain_ids):
     return len(due)
 
 
-def reread(subdomain_ids, get=None, nmap_runner=None):
-    """Read the version of each host again with the web probes a scan runs for its products (the front page's headers and generator, the
+def reread(subdomain_ids):
+    """Read the version of each host again, through a Sentinel, with the web probes a scan runs for its products (the front page's headers and generator, the
     WordPress probe and the like), then correlate it again whatever they found, so a held KEV match is raised on a fresh reading or not at
     all. A host of a passive or manual only target, an excluded or archived host, or one whose project is paused is left for its next scan.
     Returns the number of hosts read."""
@@ -150,7 +150,10 @@ def reread(subdomain_ids, get=None, nmap_runner=None):
         plan = [e for e in probes.plan_for_host(sub, leads) if e['family'] == 'http']
         for entry in plan:
             try:
-                probes.run_one(project, target.id, sub, entry, get=get, nmap_runner=nmap_runner, fresh=True)
+                probes.run_one(project, target.id, sub, entry)
+            except resources.ScannerUnavailable as exc:  # no scanner can take the probes (they never run here): the host is read at its next scan
+                logger.info('version re-read waits for a scanner: %s', exc)
+                return read
             except Exception as exc:  # noqa: BLE001 - one probe failing never stops the rest; the next scan reads the host anyway
                 logger.info('version re-read %s on host %s failed: %s', entry['probe'], sub.pk, type(exc).__name__)
         probes.recorrelate(sub)

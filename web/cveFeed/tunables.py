@@ -66,14 +66,25 @@ GROUPS = [
     Group('autotune_pace', 'Auto-tuning pace',
           'The auto-tuner aims high for this machine first, backs off at once on trouble, then probes upward slowly. These say how slowly, and how much '
           'history it reads. Longer waits make it calmer, shorter ones let it follow a changing load sooner. The AI advisor\'s own budget is under AI spend.'),
+    Group('retention', 'Data retention',
+          'How long finished work is kept before the weekly cleanup deletes it. Shorter keeps the database smaller on a small server; longer keeps more '
+          'history for the Sentinels page. The audit log keeps who did what either way.'),
     Group('egress', 'Outbound connections',
           'What this server\'s own scanners may send when a stage runs here instead of on a Sentinel. Hosting providers watch outbound port 25 '
           'and may block it after a burst; these numbers pace it (nothing is dropped: a port over budget is probed later) and cap how often a stage '
           'falls back to local execution. Sentinels are never paced by these. The counts per port are in get_system_status (egress).'),
+    Group('planner', 'Work planner',
+          'The work planner keeps the Sentinels busy with checks that are due (SSH inspection, secrets scan) on hosts a scan has not reached yet, instead of '
+          'waiting for a whole target to be rescanned. It runs every minute, uses no AI, and queues work behind everything a scan or a validation sends. '
+          'These numbers bound how much it queues; the switch is the first one.'),
     Group('heat', 'Heat policy',
           'What makes a CVE finding fire, smoke or ice. The KEV rule (1, the default): on the KEV or with a known exploit and the version proven on '
           'the host is fire; on the KEV or with a known exploit and the version only inferred is smoke; anything else is ice, whatever its CVSS '
           'or EPSS. 0 brings back the legacy rule (CVSS and EPSS raise heat too). CVSS and EPSS stay visible either way.'),
+    Group('discovery_keys', 'Discovery API keys',
+          'The API keys a project stores for discovery (Shodan and the like) live encrypted on this server. A Sentinel enrolled on this instance can be sent them, once per '
+          'discovery task and for that project only, so discovery of a project with keys can run there. 0 keeps them on this server: only the built-in scanner '
+          'ever sees them. A single Sentinel can also opt out on the Sentinels page.'),
 ]
 
 TUNABLES = [
@@ -110,6 +121,10 @@ TUNABLES = [
             'Most questions the auto-tuner asks the AI advisor in a day (counted from UTC midnight). Each question is one small call with numbers only. '
             'Over the cap the deterministic controller keeps tuning on its own; with no AI provider it always does.',
             'ai_spend', 'CVENGINE_AUTOTUNE_AI_MAX_PER_DAY', 8, 1, 96, 'questions', caution='cap', window='utc_day', auto_tunable=False),
+    Tunable('nuclei_ai_max_per_day', 'Nuclei targeting AI calls per day',
+            'Most calls the AI may make in a day (counted from UTC midnight) to pick Nuclei tags for a scan: the tag selection and the targeting of each scan. '
+            'Failed calls and the one retry after a cut-off answer count. Over the cap the scan uses the standard templates and says so.',
+            'ai_spend', 'CVENGINE_NUCLEI_AI_MAX_PER_DAY', 400, 1, 20000, 'calls', caution='cap', window='utc_day', auto_tunable=False),
     Tunable('stage_parallel', 'Chunks of one scan stage at once',
             'The most chunk tasks ONE scan stage keeps in flight across Sentinel slots at once (the nmap and naabu chunks of up to 64 addresses, the nuclei chunks). '
             '1 sends them one after another. The window is also limited by the Sentinel slots that are free, so raising this does nothing without free slots.',
@@ -148,18 +163,33 @@ TUNABLES = [
             'autotune_pace', 'CVENGINE_AUTOTUNE_AI_INTERVAL_HOURS', 3, 1, 24, 'hours', auto_tunable=False),
     Tunable('egress_port25_per_hour', 'Local connections to port 25 per hour',
             'New connection attempts to port 25 this server\'s own scans may start: at most this many in any 60 minutes, and at most a quarter of it '
-            'in any 15, or one testssl.sh run (charged 240, as measured) alone; charged when each process starts, shared by every worker. '
+            'in any 15, or one whole run larger than that quarter alone; charged when each process starts, shared by every worker. '
             'Hosts over the budget are scanned without port 25 and port 25 is probed later by a paced pass, so nothing is skipped. '
             'Providers do not publish their limit; 400 is a cautious starting point. 0 turns the pacing off. Other ports: CVENGINE_LOCAL_PORT_BUDGETS.',
             'egress', 'CVENGINE_LOCAL_PORT25_PER_HOUR', 400, 0, 100000, 'connections', caution='cap', window='utc_hour', auto_tunable=False),
-    Tunable('fallback_nmap_per_hour', 'Local nmap fallback runs per hour',
-            'How many nmap stages may run on this server in each UTC clock hour because no Sentinel took them in time. Over it, the addresses '
-            'wait and run when their target is next scanned. 0 is unlimited.',
-            'egress', 'CVENGINE_LOCAL_FALLBACK_NMAP_PER_HOUR', 30, 0, 10000, 'runs', caution='cap', window='utc_hour', auto_tunable=False),
-    Tunable('fallback_naabu_per_hour', 'Local naabu fallback runs per hour',
-            'How many naabu port sweeps may run on this server in each UTC clock hour because no Sentinel took them in time. Over it, the '
-            'addresses wait and run when their target is next scanned. 0 is unlimited.',
-            'egress', 'CVENGINE_LOCAL_FALLBACK_NAABU_PER_HOUR', 10, 0, 10000, 'runs', caution='cap', window='utc_hour', auto_tunable=False),
+    Tunable('sentinel_task_retention_days', 'Days finished Sentinel and agent tasks are kept',
+            'A finished, failed or expired Sentinel task (and a finished agent task) is deleted by the weekly cleanup once it is older than this. A task is a '
+            'row of about a kilobyte; at 3000 targets a day of scanning adds tens of thousands of them. In .env it is CVENGINE_AGENT_TASK_RETENTION_DAYS.',
+            'retention', 'CVENGINE_AGENT_TASK_RETENTION_DAYS', 30, 1, 365, 'days',
+            note='Applies at the next weekly cleanup', auto_tunable=False),
+    Tunable('planner_enabled', 'Keep Sentinels busy with due checks (1 on, 0 off)',
+            'When on, the work planner queues the checks that are due (SSH inspection, secrets scan) whenever Sentinel slots are idle, without waiting for a full '
+            'scan of the target. It never queues work for a host outside its scope, an excluded address, a bug bounty project that has not confirmed automated '
+            'testing, or while scanning is paused, and its tasks are taken after everything else. 0 pauses it: Sentinels then work only on what scans send. '
+            'In .env it is CVENGINE_WORK_PLANNER=on or off.',
+            'planner', 'CVENGINE_WORK_PLANNER', 1, 0, 1, '1 on, 0 off',
+            note='Applies at the next run, within a minute; work already queued still runs', auto_tunable=False, env_choices={'on': 1, 'off': 0}),
+    Tunable('planner_queue_factor', 'Planner queue depth, times the idle Sentinel slots',
+            'How much work the planner keeps waiting for the idle slots of each kind: this many tasks for every idle slot. 2 means a Sentinel that finishes a task '
+            'has the next ones already waiting. A higher number keeps more queued, which shows as more tasks waiting.',
+            'planner', 'CVENGINE_PLANNER_QUEUE_FACTOR', 2, 1, 6, 'times', auto_tunable=False),
+    Tunable('planner_max_queue_per_sentinel', 'Most tasks the planner leaves waiting per Sentinel',
+            'A hard ceiling: the planner never leaves more than this many tasks waiting for each live Sentinel, whatever the factor above says.',
+            'planner', 'CVENGINE_PLANNER_MAX_QUEUE_PER_SENTINEL', 10, 1, 100, 'tasks', auto_tunable=False),
+    Tunable('planner_batches_per_run', 'Most batches the planner queues in one run',
+            'One run (every minute) queues at most this many batches (a batch is one Sentinel task of up to 25 hosts or endpoints), so a backlog of thousands fills the '
+            'queue over a few runs instead of at once.',
+            'planner', 'CVENGINE_PLANNER_BATCHES_PER_RUN', 12, 1, 100, 'batches', auto_tunable=False),
     Tunable('heat_policy', 'Heat policy (1 KEV rule, 0 legacy)',
             'Which rule rates CVE findings. 1, the KEV rule: on the KEV (or with a known exploit) and the version proven on the host is fire, the '
             'version only inferred is smoke, not on the KEV and no known exploit is ice. 0, legacy: KEV, exploits, CVSS 9+ and EPSS make fire, '
@@ -168,6 +198,13 @@ TUNABLES = [
             'heat', 'CVENGINE_HEAT_POLICY', 1, 0, 1, '1 KEV rule, 0 legacy',
             note='Applies within a few seconds to every list, count, alert and API; stored host scores are recomputed within a few minutes',
             auto_tunable=False, env_choices={'kev': 1, 'legacy': 0}),
+    Tunable('sentinel_bbot_keys', 'Send discovery API keys to my Sentinels (1 on, 0 off)',
+            'On (1, the default): a Sentinel enrolled on this instance that says it can handle them (and that has not opted out itself) is sent a project\'s '
+            'discovery API keys, once per discovery task of that project and for nothing else, so discovery of a project with keys can run on it. '
+            'Off (0): the keys never leave this server and only the built-in scanner runs such a discovery. In .env it is CVENGINE_SENTINEL_BBOT_KEYS=0 or 1.',
+            'discovery_keys', 'CVENGINE_SENTINEL_BBOT_KEYS', 1, 0, 1, '1 on, 0 off',
+            note='Applies from the next discovery task a Sentinel claims; a key already sent stays on that Sentinel until its task ends',
+            auto_tunable=False, env_choices={'on': 1, 'off': 0, 'true': 1, 'false': 0}),
 ]
 BY_KEY = {t.key: t for t in TUNABLES}
 GROUP_BY_ID = {g.id: g for g in GROUPS}
@@ -471,14 +508,12 @@ def reset_group(user, group_id):
 def usage_today():
     """{key: number used so far} for the caps that have a counter already: triage questions asked since UTC midnight, validation checks reserved
     today, template drafts in the last 24 hours. A counter that cannot be read is left out, never guessed."""
-    from cveFeed import triage, validation
+    from cveFeed import nuclei_templates, triage, validation
     out = {}
     from cveFeed import autotune
     from cveFeed import local_egress
     for key, read in (('triage_max_per_day', triage.asked_today), ('validate_max_per_day', validation.ran_today), ('template_gen_max_per_day', _drafts_last_day),
-                      ('autotune_ai_max_per_day', autotune.advisor_calls_today), ('egress_port25_per_hour', lambda: local_egress.used_this_hour(25)),
-                      ('fallback_nmap_per_hour', lambda: local_egress.fallback_runs_this_hour('nmap')),
-                      ('fallback_naabu_per_hour', lambda: local_egress.fallback_runs_this_hour('naabu'))):
+                      ('autotune_ai_max_per_day', autotune.advisor_calls_today), ('nuclei_ai_max_per_day', nuclei_templates.ai_calls_today), ('egress_port25_per_hour', lambda: local_egress.used_this_hour(25))):
         try:
             out[key] = int(read())
         except Exception:  # noqa: BLE001

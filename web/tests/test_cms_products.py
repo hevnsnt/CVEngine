@@ -1,7 +1,10 @@
 """The self-hosted CMSs beside WordPress: how a page says which one it is, and where each one states its version."""
 from django.test import SimpleTestCase
 
-from cveFeed import cms, fingerprint, probes
+from cvengine_scanner import fingerprint
+
+from cveFeed import probes
+from tests import probe_scanner
 from tests.test_probes import answers, page
 
 DRUPAL_PAGE = ('<html><head><meta name="Generator" content="Drupal 10 (https://www.drupal.org)">'
@@ -14,23 +17,6 @@ TYPO3_PAGE = '<html><head><link rel="stylesheet" href="/typo3temp/assets/compres
 
 def names(body, headers=None):
     return [f['name'] for f in fingerprint.from_response(body=body, content_type='text/html', headers=headers or {})]
-
-
-class MarkerTests(SimpleTestCase):
-    def test_each_cms_names_itself_from_a_front_page(self):
-        self.assertIn('Joomla', names(JOOMLA_PAGE))
-        self.assertIn('Magento', names(MAGENTO_PAGE))
-        self.assertIn('TYPO3', names(TYPO3_PAGE))
-        self.assertTrue(any(n.startswith('Drupal') for n in names(DRUPAL_PAGE)))
-
-    def test_a_page_that_only_mentions_a_path_in_text_is_not_that_cms(self):
-        text = '<html><body><p>Our migration guide: move your files from /typo3conf/ and /skin/frontend/ to the new theme.</p></body></html>'
-        found = names(text)
-        self.assertNotIn('TYPO3', found)
-        self.assertNotIn('Magento', found)
-
-    def test_a_bare_major_in_the_generator_is_no_version(self):
-        self.assertNotIn('Drupal:10', names(DRUPAL_PAGE))
 
 
 class PassiveVersionTests(SimpleTestCase):
@@ -47,18 +33,9 @@ class PassiveVersionTests(SimpleTestCase):
         body = '<html><script src="/core/assets/vendor/jquery/jquery.min.js?v=3.7.1"></script></html>'
         self.assertEqual([o for o in self.observations(body) if o['product'] == 'Drupal'], [])
 
-    def test_a_pre_release_core_script_is_no_version(self):
-        self.assertEqual(cms.best('Drupal', [('/', page(200, body='<script src="/core/misc/drupal.js?v=10.3.0-beta1"></script>'))]), ('', ''))
-
-    def test_version_headers_name_umbraco_and_magento(self):
-        found = [f['name'] for f in fingerprint.from_response(headers={'x-umbraco-version': '13.4.1', 'x-magento-tags': 'cms_b'})]
-        self.assertIn('Umbraco:13.4.1', found)
-        self.assertIn('Magento', found)
-
-
 class VersionFileTests(SimpleTestCase):
     def run_probe(self, probe_id, table):
-        return probes.run_http_probe(probe_id, 'https://www.rt.test', {'www.rt.test'}, get=answers(table), sleep=lambda s: None)
+        return probe_scanner.run_http_probe(probe_id, 'https://www.rt.test', {'www.rt.test'}, get=answers(table))
 
     def test_joomla_falls_back_to_the_language_pack_when_the_manifest_is_hidden(self):
         found = self.run_probe('joomla-manifest', {'/language/en-GB/en-GB.xml': page(200, body='<metafile><version>4.4.3</version></metafile>')})

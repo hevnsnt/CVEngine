@@ -20,6 +20,17 @@ ip:203.0.113.0/24 product:nginx     nginx anywhere in a network range
 
 Use the slug `_all` to search every project you can see.
 
+### Your inventory or the CVE catalog
+
+Host search (everything above) answers "which of my hosts...". To look up a CVE itself, or every CVE for a technology, use the **CVE catalog** at `/cve/cves/`: type an id (`CVE-2024-6387`, `2024-6387`) or a product (`ssh`, `php`, `tomcat`). Each row says how many of your hosts that CVE matches, and the detail drawer lists them. In `Ctrl+K`, a bare word or id also offers **Search CVEs for "..."**. The API is `GET /cve/api/cves?q=...` ([FRONTEND.md](FRONTEND.md#cve-catalog)).
+
+| You want | Use |
+| --- | --- |
+| Hosts running OpenSSH | Hosts page: `product:openssh` |
+| Hosts matched by one CVE | Hosts page: `cve:CVE-2024-6387` |
+| Every OpenSSH CVE, and how many of your hosts each one hits | CVE catalog: `ssh` |
+| One CVE's summary, ranges and references | CVE catalog: `CVE-2024-6387` |
+
 ## The syntax
 
 - A **bare word** matches almost anything: host name, the alias and note a person gave the host (or, for an address added as a target, the target), IP, technology, web server, port product, service, version, CPE, banner, page title, OS, finding name, and CVE id. `nginx`, `jenkins`, `CVE-2026-111497`.
@@ -28,7 +39,7 @@ Use the slug `_all` to search every project you can see.
 - A leading `-` **excludes**: `-host:www`.
 - Wrap a value with spaces in **quotes**: `tech:"apache tomcat"`.
 - Matching is case-insensitive and by substring, so `nginx` finds `nginx/1.24.0`. There is no OR between terms, no parentheses, and no wildcard. Inside one filter, a comma list is OR: `port:80,443` is port 80 or 443, `sev:high,critical` is either severity, and it is still ANDed with the other terms. Quote the value (`tech:"foo,bar"`) to keep a literal comma.
-- A search may have at most 15 terms of 200 characters each and 1,000 characters in all. More is a 400.
+- A search may have at most 15 terms of 200 characters each and 1,000 characters in all. A search may name at most 40 values in all (every term, and every item of a comma list), and negate at most 3 terms. More is a 400.
 - Unknown filter names are treated as plain text, so a pasted URL searches for the URL.
 
 | Filter | Matches | Example |
@@ -49,6 +60,7 @@ Use the slug `_all` to search every project you can see.
 | `sev:` | A finding of this severity, open or closed: `critical`, `high`, `medium`, `low`, `info` | `sev:critical` |
 | `auth:` | A web route's sign-in state: `open`, `login`, `session_required`, `sso`, `redirect`, `not_found`, `catch_all`, `error` | `auth:open` |
 | `sensitive:` | A route that served sensitive data: `any`, `credentials`, `pii`, `internal` | `sensitive:credentials` |
+| `secret:` | Hosts that serve an exposed secret the inventory counts (docs/SECRETS-PLAN.md): `any`, a class (`s` server secret, `p` browser key, `i` identifier), `live` (validated active) or a provider name | `secret:s`, `secret:google` |
 | `zombie:` | Hosts whose DNS is gone but still answer: `yes` or `no` | `zombie:yes` |
 | `country:` | The country of a host's IP address, by ISO code or name | `country:US`, `country:Germany` |
 

@@ -9,7 +9,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-[ -f .env ] || { (umask 077; cp .env.example .env); echo "Created .env from .env.example."; }
+created=0
+[ -f .env ] || { (umask 077; cp .env.example .env); echo "Created .env from .env.example."; created=1; }
 
 # letters and digits only: a `$` or `#` in .env breaks Make and Compose parsing
 random() { head -c 256 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24; }
@@ -36,6 +37,27 @@ fill() {
   fi
 }
 
+# The Compose project name of a NEW installation (an existing .env keeps its own: volumes, networks and the update scripts are named by it). The example
+# says "rengine". A name given for this run (COMPOSE_PROJECT_NAME=... ./install.sh) is used; else, when another checkout on this host already runs the
+# project "rengine", this one gets a name of its own made from its directory, so a second stack never shares the first one's volumes and network.
+if [ "$created" = 1 ] && grep -q '^COMPOSE_PROJECT_NAME=rengine$' .env; then
+  chosen=${COMPOSE_PROJECT_NAME:-}
+  if ! [[ $chosen =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+    chosen=''
+    if command -v docker >/dev/null 2>&1; then
+      elsewhere=$(docker ps -a --filter 'label=com.docker.compose.project=rengine' --format '{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null | grep -vxF -e "$(pwd)" -e "$(pwd -P)" | head -n 1) || elsewhere=''
+      if [ -n "$elsewhere" ]; then
+        chosen=rengine-$(basename "$(pwd -P)" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//' | cut -c1-30)
+        [[ $chosen =~ ^rengine-[a-z0-9][a-z0-9-]*$ ]] || chosen=rengine-$(random | tr 'A-Z' 'a-z' | head -c 6)
+      fi
+    fi
+  fi
+  if [ -n "$chosen" ] && [ "$chosen" != rengine ]; then
+    set_value COMPOSE_PROJECT_NAME "$chosen"
+    echo "Compose project name: $chosen (another checkout on this host already uses \"rengine\")."
+  fi
+fi
+
 # The key that encrypts the stored API keys, webhook URLs and TOTP seeds, apart from Django's secret. A value already set is
 # never changed (that is what rotation is for: manage.py rotate_field_key); values stored before it existed still read.
 grep -q '^CVENGINE_FIELD_KEY=' .env || echo 'CVENGINE_FIELD_KEY=' >> .env
@@ -56,7 +78,7 @@ if command -v docker >/dev/null 2>&1; then
     project=$(grep -E '^COMPOSE_PROJECT_NAME=' .env 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '\r') || project=''
     project=${project#[\"\']}; project=${project%[\"\']}
   fi
-  project=${project:-$(basename "$(pwd -P)" | tr 'A-Z' 'a-z' | tr -cd 'a-z0-9_-')}
+  project=${project:-$(basename "$(pwd -P)" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')}
   for filter in "label=com.docker.compose.project.working_dir=$(pwd)" "label=com.docker.compose.project.working_dir=$(pwd -P)" "label=com.docker.compose.project=$project"; do
     existing_redis=$(docker ps -a --filter "$filter" --filter "label=com.docker.compose.service=redis" -q 2>/dev/null | head -n 1) || existing_redis=''
     [ -z "$existing_redis" ] || break
@@ -93,7 +115,34 @@ fill_domain() {
   fi
 }
 
+# The built-in scanner is on by default and needs nothing in .env. CVENGINE_ENABLE_BUILTIN_SCANNER=0 (install.sh --no-builtin-scanner) writes
+# CVENGINE_BUILTIN_SCANNER=0 to leave it off; an owner's own value is never changed.
+disable_builtin_scanner() {
+  grep -qE '^CVENGINE_BUILTIN_SCANNER=' .env || { set_value CVENGINE_BUILTIN_SCANNER 0; echo "Set CVENGINE_BUILTIN_SCANNER=0: the built-in scanner stays off."; }
+}
+
+# install.sh asks which Sentinels will scan (CVENGINE_INSTALL_SENTINELS, from its question or --sentinels): internal is the built-in scanner only (the
+# default: nothing is written), both is the built-in scanner plus external Sentinels you add, external leaves the built-in scanner off. Only a choice
+# somebody made reaches here, so it is applied even over an earlier value (switching the choice on a re-run); no choice leaves .env as it is.
+apply_sentinel_plan() {
+  local plan=${CVENGINE_INSTALL_SENTINELS:-} switch
+  switch=$(grep -E '^CVENGINE_BUILTIN_SCANNER=' .env | tail -n 1 | cut -d= -f2- | tr -d '\r"'"'"' ' | tr '[:upper:]' '[:lower:]' || true)
+  case "$plan" in
+    '') return 0 ;;
+    external)
+      case "$switch" in 0|false|no|off) ;; *) set_value CVENGINE_BUILTIN_SCANNER 0; echo "Set CVENGINE_BUILTIN_SCANNER=0: the built-in scanner stays off." ;; esac
+      ! grep -q '^CVENGINE_SENTINEL_PLAN=' .env || set_value CVENGINE_SENTINEL_PLAN external ;;
+    internal|both)
+      case "$switch" in 0|false|no|off) set_value CVENGINE_BUILTIN_SCANNER 1; echo "Set CVENGINE_BUILTIN_SCANNER=1: the built-in scanner is on." ;; esac
+      if [ "$plan" = both ]; then set_value CVENGINE_SENTINEL_PLAN both
+      elif grep -q '^CVENGINE_SENTINEL_PLAN=' .env; then set_value CVENGINE_SENTINEL_PLAN internal; fi ;;
+    *) echo "CVENGINE_INSTALL_SENTINELS must be internal, both or external (got '$plan')." >&2; exit 2 ;;
+  esac
+}
+
 fill POSTGRES_PASSWORD
 fill AUTHORITY_PASSWORD
 fill_domain "${1:-}"
+[ "${CVENGINE_ENABLE_BUILTIN_SCANNER:-}" != 0 ] || disable_builtin_scanner
+apply_sentinel_plan
 chmod 600 .env

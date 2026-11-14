@@ -16,7 +16,7 @@ from cveFeed import scoring, shots
 
 logger = logging.getLogger(__name__)
 
-MAX_HOSTS_PER_DIFF = 5000  # bbot already caps a scan at MAX_EVENTS_PER_SCAN events
+MAX_HOSTS_PER_DIFF = 5000  # a discovery already caps a scan at MAX_EVENTS_PER_SCAN events
 MAX_CHANGES_PER_SCAN = 2000
 MAX_RETIRE_CHECKS = 200
 CHUNK = 500
@@ -179,7 +179,7 @@ def _retire(scan, current, resolver, checker, now, tcp_checker=None):
     standard or passive run that finds fewer names than a deep one did must not retire hosts that are still there. A candidate
     whose last known web address still answers is a zombie (reported once, not retired); one that answers nowhere is retired.
     Returns ``(changes, retired, zombies)``."""
-    from cveFeed import discovery, zombie
+    from cveFeed import zombie
     from cveFeed.models import AssetChange, HostState
     project = scan.domain.project_id
     candidates = []
@@ -191,13 +191,31 @@ def _retire(scan, current, resolver, checker, now, tcp_checker=None):
                 break
     if not candidates:
         return [], 0, 0
+    from reNgine.resources import ScannerUnavailable
     errored = {}
-    resolved = {name for name, _ in (resolver(candidates, errors=errored) if resolver is discovery.resolve_names else resolver(candidates))}
+    try:
+        if resolver is None:  # a Sentinel resolves them (dns_resolve, agentapi.probe_dispatch): the kind has no local path
+            from agentapi import probe_dispatch
+            pairs = probe_dispatch.resolve_for(scan.domain, candidates, errors=errored, scan=scan)
+        else:
+            pairs = resolver(candidates)
+    except ScannerUnavailable as exc:  # no scanner can answer and it may not run here: nothing is retired, the candidates wait
+        logger.info('retire check of scan %s waits for a scanner: %s', scan.pk, exc)
+        return [], 0, 0
+    resolved = {name for name, _ in pairs}
     resolved |= set(errored)  # a lookup the resolver could not answer does not say the host is gone
     gone = [h for h in candidates if h not in resolved]
     rows = {r.host: r for r in HostState.objects.filter(project_id=project, host__in=gone, retired_at__isnull=True)}
-    alive, checked = zombie.check_hosts([h for h in gone if h in rows], {h: r.state for h, r in rows.items()}, checker)
-    open_ports = zombie.tcp_probe_hosts([h for h in checked if h not in alive], {h: r.state for h, r in rows.items()}, tcp_checker)
+    states = {h: r.state for h, r in rows.items()}
+    asked = [h for h in gone if h in rows]
+    if checker is None and tcp_checker is None:  # a Sentinel checks the old addresses when one can take alive_check (agentapi.probe_dispatch)
+        try:
+            checker, tcp_checker, asked = _remote_alive(scan, asked, states)
+        except ScannerUnavailable as exc:
+            logger.info('zombie check of scan %s waits for a scanner: %s', scan.pk, exc)
+            return [], 0, 0
+    alive, checked = zombie.check_hosts(asked, states, checker)
+    open_ports = zombie.tcp_probe_hosts([h for h in checked if h not in alive], states, tcp_checker)
     changes, retire, touched = [], [], []
     for host in checked:
         row = rows[host]
@@ -219,6 +237,36 @@ def _retire(scan, current, resolver, checker, now, tcp_checker=None):
     return changes, len(retire), len(alive)
 
 
+def _check_id(host, ip, port):
+    return f'{host}|{ip}:{port}'
+
+
+def _remote_alive(scan, hosts, states):
+    """``(checker, tcp_checker, hosts)`` for ``zombie.check_hosts`` and ``tcp_probe_hosts`` answered by a Sentinel's ``alive_check`` tasks (the kind has no local path). The web check goes first; the TCP connects are asked only for the hosts it
+    found nothing on, as here. A host with a web check the Sentinel could not answer is left out of ``hosts``: neither alive nor retired, it is
+    checked again at the next scan. Raises ``ScannerUnavailable`` when no Sentinel can take the work."""
+    from agentapi import probe_dispatch
+    from cveFeed import zombie
+    hosts = hosts[:zombie.MAX_ZOMBIE_CHECKS]
+    web = [{'id': _check_id(h, ip, port), 'host': h, 'ip': ip, 'port': port, 'scheme': scheme}
+           for h in hosts for ip, port, scheme in zombie.endpoints(states.get(h))]
+    answers = probe_dispatch.try_alive(scan.domain.project, scan, web)
+    unknown = {c['host'] for c in web if c['id'] not in answers}
+    hosts = [h for h in hosts if h not in unknown or any(answers.get(c['id']) for c in web if c['host'] == h)]
+    dead = [h for h in hosts if not any(answers.get(c['id']) for c in web if c['host'] == h)]
+    tcp = [{'id': _check_id(h, ip, port), 'host': h, 'ip': ip, 'port': port, 'scheme': 'tcp'}
+           for h in dead for ip, port in zombie.tcp_endpoints(states.get(h))]
+    tcp_answers = probe_dispatch.try_alive(scan.domain.project, scan, tcp) if tcp else {}
+    by_endpoint = {(c['host'], c['ip'], c['port']): c['id'] for c in web}
+
+    def checker(host, ip, port, scheme):
+        return answers.get(by_endpoint.get((host, ip, port))) is True
+
+    def tcp_checker(ip, port):  # evidence on a retired row only: an unanswered connect lists nothing
+        return any(tcp_answers.get(c['id']) for c in tcp if c['ip'] == ip and c['port'] == port)
+    return checker, tcp_checker, hosts
+
+
 def record_scan_changes(scan_id, resolver=None, checker=None, tcp_checker=None):
     """Diff a finished scan's hosts against their stored snapshots, append the differences and replace the snapshots.
     The first scan of a target only records a baseline (no changes: everything would be "new")."""
@@ -229,7 +277,6 @@ def record_scan_changes(scan_id, resolver=None, checker=None, tcp_checker=None):
     project = scan.domain.project_id
     if not project:
         return {'changes': 0, 'skipped': 'no project'}
-    resolver = resolver or discovery.resolve_names
     partial = discovery.HOST_PIPELINE_TASK in (scan.tasks or [])
     now = timezone.now()
     current = _current_states(scan)

@@ -1,9 +1,9 @@
-"""Close the WPScan findings the version WPScan last read on the same host is past the fix of (cveFeed.finding_lifecycle).
+"""Close the WordPress scan findings the version the scan last read on the same host is past the fix of (cveFeed.finding_lifecycle).
 
-A later WPScan of a host now closes, as fixed and automatically, the open rows of an older version whose advisory states a fixed version at
+A later WordPress scan of a host now closes, as fixed and automatically, the open rows of an older version whose advisory states a fixed version at
 or below the one it read (with the scan and the version in the note). This command does the same for what is already stored, from the
-core, plugin and theme versions WPScan last recorded for each host. A row a person set is never touched, a component WPScan has no version
-for proves nothing, and the "outdated" rows are left to the next scan (the stored versions do not say what WPScan called outdated). A dry
+core, plugin and theme versions the scan last recorded for each host. A row a person set is never touched, a component the scan has no version
+for proves nothing, and the "outdated" rows are left to the next scan (the stored versions do not say what the scan called outdated). A dry
 run by default.
 
     python3 manage.py close_fixed_findings
@@ -17,7 +17,7 @@ from ._finding_backfill import add_arguments, line, projects
 
 
 class Command(BaseCommand):
-    help = 'Close WPScan findings a later version read on the same host is past the fix of (a dry run unless --apply).'
+    help = 'Close WordPress scan findings a later version read on the same host is past the fix of (a dry run unless --apply).'
 
     def add_arguments(self, parser):
         add_arguments(parser)
@@ -42,4 +42,4 @@ class Command(BaseCommand):
             if counts['closed'] or counts['folded']:
                 self.stdout.write(line(project, counts))
         verb = 'closed' if opts['apply'] else 'would close'
-        self.stdout.write(self.style.SUCCESS(f"{verb} {total['closed']} WPScan finding(s) as fixed"))
+        self.stdout.write(self.style.SUCCESS(f"{verb} {total['closed']} WordPress scan finding(s) as fixed"))

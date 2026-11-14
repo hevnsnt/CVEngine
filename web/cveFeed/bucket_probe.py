@@ -2,28 +2,26 @@
 
 The checks only ever issue HTTPS ``GET`` and ``HEAD`` to the documented storage endpoints of AWS S3, Google Cloud Storage and Azure Blob
 (never to a project host, never on a port other than 443), with no credentials and no signature. The listing is read once (the first
-page, 20 keys at most) and one listed object is asked for with ``HEAD``: no object content is ever downloaded. Each connection goes
-through ``cveFeed.pinned_transport``, so the storage hostname is resolved once and refused when it answers with a prohibited address.
+page, 20 keys at most) and one listed object is asked for with ``HEAD``: no object content is ever downloaded. A Sentinel makes the
+requests (the ``bucket_check`` kind, ``cvengine_scanner.probes.buckets``): this server carries no request code, only the readers of what comes
+back, which take the ``fetch`` and ``dns`` functions that answer (tests inject them).
 
 The response parsers read the documented formats (S3 ``ListBucketResult`` and ``Error``, the GCS JSON object listing and error, the
 Azure ``EnumerationResults``). XML is read with patterns, not a parser: the body comes from a third party and a bucket owner decides
-what is in it, so no entity or DTD is ever expanded. Pure functions plus one network function, ``http_fetch``, that tests replace.
+what is in it, so no entity or DTD is ever expanded. Pure functions.
 """
 import html
 import json
 import logging
 import os
 import re
-import ssl
-import threading
-import time
 from dataclasses import dataclass, field
 from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
-S3, GCS, AZURE = 's3', 'gcs', 'azure'
-PROVIDER_LABELS = {S3: 'AWS S3', GCS: 'Google Cloud Storage', AZURE: 'Azure Blob Storage'}
+S3, GCS, AZURE, FIREBASE = 's3', 'gcs', 'azure', 'firebase'
+PROVIDER_LABELS = {S3: 'AWS S3', GCS: 'Google Cloud Storage', AZURE: 'Azure Blob Storage', FIREBASE: 'Firebase Realtime Database'}
 
 MAX_KEYS = 20  # the first listing page, never more: also the most object names kept
 MAX_BODY = 256 * 1024  # a 20-key listing is a few KB; a body past this is cut and still parsed
@@ -33,6 +31,8 @@ REGION = re.compile(r'^[a-z]{2}(?:-[a-z]+)+-\d{1,2}$')  # us-east-1, eu-central-
 S3_NAME = re.compile(r'^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$')
 GCS_NAME = re.compile(r'^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$')
 AZURE_ACCOUNT = re.compile(r'^[a-z0-9]{3,24}$')
+# a Realtime Database: <name>.firebaseio.com, or <name>.<region>.firebasedatabase.app; the name a reference states is kept as that host
+FIREBASE_DB = re.compile(r'^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.(?:firebaseio\.com|[a-z0-9-]{2,30}\.firebasedatabase\.app)$')
 AZURE_CONTAINER = re.compile(r'^(?:\$web|\$root|[a-z0-9](?:[a-z0-9]|-(?!-)){1,61}[a-z0-9])$')
 
 # The hosts a request may go to: the storage platforms' own endpoints and nothing else (see ``endpoint_allowed``).
@@ -43,6 +43,7 @@ _ENDPOINTS = (
     re.compile(r'^[a-z0-9-]+\.s3\.[a-z]{2}(?:-[a-z]+)+-\d{1,2}\.amazonaws\.com$'),
     re.compile(r'^storage\.googleapis\.com$'),
     re.compile(r'^[a-z0-9]{3,24}\.blob\.core\.windows\.net$'),
+    FIREBASE_DB,  # a Firebase Realtime Database: one shallow read of its root, never a value (``check_firebase``)
 )
 
 
@@ -71,43 +72,6 @@ class Verdict:
 
 # ----------------------------------------------------------------------------- pacing
 
-class Pacer:
-    """The global request rate: ``rate`` requests per second across every worker (one Redis key that expires after one interval), or in
-    this process alone when Redis cannot be reached. ``clock`` and ``sleep`` are replaced in tests."""
-    KEY = 'cvengine:buckets:pace'
-
-    def __init__(self, rate=None, clock=time.monotonic, sleep=time.sleep, client=None):
-        self.rate = rate if rate else request_rate()
-        self.clock, self.sleep, self.client = clock, sleep, client
-        self.next_at = 0.0
-        self.lock = threading.Lock()
-
-    def _redis(self):
-        if self.client is not None:
-            return self.client
-        from reNgine import resources
-        return getattr(resources.get_store(), 'r', None)
-
-    def wait(self):
-        interval = 1.0 / self.rate
-        client = self._redis()
-        if client is not None:
-            try:
-                for _ in range(int(60 / interval) + 2):  # bounded: a stuck key never holds the sweep for good
-                    if client.set(self.KEY, '1', nx=True, px=max(1, int(interval * 1000))):
-                        return
-                    self.sleep(min(interval, max(0.01, (client.pttl(self.KEY) or 10) / 1000.0)))
-                return
-            except Exception:  # noqa: BLE001 - pace this process alone when Redis cannot be asked
-                pass
-        with self.lock:
-            now = self.clock()
-            delay = self.next_at - now
-            self.next_at = max(now, self.next_at) + interval
-        if delay > 0:
-            self.sleep(delay)
-
-
 def request_rate():
     """Requests per second, ``CVENGINE_BUCKETS_RPS`` clamped to 0.1 to 5: a storage sweep is slow on purpose."""
     try:
@@ -116,59 +80,12 @@ def request_rate():
         return DEFAULT_RPS
 
 
-_pacer = None
-
-
-def pacer():
-    global _pacer
-    if _pacer is None or _pacer.rate != request_rate():
-        _pacer = Pacer()
-    return _pacer
-
-
-# ----------------------------------------------------------------------------- the one network function
+# ----------------------------------------------------------------------------- the endpoints a request may name (the requests are a Sentinel's)
 
 def endpoint_allowed(host):
     """Whether ``host`` is a documented storage endpoint of the three providers. Every request is checked against this."""
     host = (host or '').lower()
     return any(p.match(host) for p in _ENDPOINTS)
-
-
-def http_fetch(method, url, paced=True):
-    """One anonymous ``GET`` or ``HEAD`` of a storage endpoint over verified HTTPS on 443, no redirect followed, no credentials, at most
-    MAX_BODY bytes of the body. Raises ``ValueError`` for any other method, scheme, host or port (and for an address
-    ``pinned_transport`` refuses) before anything is sent, and ``OSError``/``HTTPException`` for a network failure."""
-    import http.client
-    from urllib.parse import urlsplit
-
-    from cveFeed import pinned_transport
-    if method not in ('GET', 'HEAD'):
-        raise ValueError('bucket checks are read-only: GET or HEAD')
-    parts = urlsplit(url)
-    if parts.scheme != 'https' or parts.port not in (None, 443) or parts.username or parts.password or not endpoint_allowed(parts.hostname):
-        raise ValueError('not a documented storage endpoint')
-    if any(ord(c) <= 32 or ord(c) == 127 for c in url):
-        raise ValueError('invalid storage URL')
-    host = parts.hostname.lower()
-    addresses = pinned_transport.resolve(host, 443)
-    context = ssl.create_default_context()
-    context.minimum_version = ssl.TLSVersion.TLSv1_2  # certificate and name verification stay on: this is the platform's own name
-    connection = pinned_transport.HTTPConnection(host, 443, addresses, TIMEOUT, context=context)
-    path = parts.path or '/'
-    if parts.query:
-        path += '?' + parts.query
-    if paced:
-        pacer().wait()
-    try:
-        connection.request(method, path, headers={'Host': host, 'User-Agent': 'cvENGINE bucket check', 'Accept': '*/*', 'Accept-Encoding': 'identity'})
-        response = connection.getresponse()
-        body = b'' if method == 'HEAD' else pinned_transport.read_body(response, MAX_BODY)
-        keep = ('x-amz-bucket-region', 'content-type', 'x-ms-error-code', 'x-goog-error')
-        return Response(response.status, {k: response.getheader(k) or '' for k in keep}, body)
-    except (http.client.HTTPException, ValueError) as exc:  # ValueError: a body that claims an encoding it is not in
-        raise OSError(f'storage endpoint answered badly: {type(exc).__name__}') from None
-    finally:
-        connection.close()
 
 
 # ----------------------------------------------------------------------------- reading the documented formats
@@ -326,22 +243,6 @@ def azure_object_url(account, container, key):
     return f'https://{azure_host(account)}/{quote(container, safe="$")}/{quote(key, safe="/")}'
 
 
-def dns_exists(host):
-    """True when ``host`` has an address, False when DNS says it does not exist (NXDOMAIN), None when DNS gave no usable answer."""
-    import dns.exception
-    import dns.resolver
-
-    from cveFeed.hygiene import _resolver
-    try:
-        return bool(list(_resolver().resolve(host, 'A')))
-    except dns.resolver.NXDOMAIN:
-        return False
-    except dns.resolver.NoAnswer:
-        return True  # the name exists, it just has no A record
-    except (dns.exception.DNSException, OSError):
-        return None
-
-
 # ----------------------------------------------------------------------------- object names
 
 # Names a person would not leave in a public bucket: backups, database dumps, keys, credentials, state files.
@@ -399,7 +300,31 @@ def head_object(url, fetch):
 
 # ----------------------------------------------------------------------------- the whole check
 
-def check(provider, name, container='', fetch=http_fetch, dns=dns_exists, read_object=True):
+def check_firebase(db, fetch):
+    """One anonymous, shallow read of a Realtime Database's root (``.json?shallow=true&limitToFirst=1``): ``public`` when it answers with a JSON object
+    or ``null`` (anyone can read it), ``private`` on 401 (Permission denied), ``missing`` on 404 or a Firebase error that names no database. Nothing
+    of the answer is kept: not a key name, not a value."""
+    import json
+    verdict = Verdict(request_count=1)
+    got = fetch('GET', f'https://{db}/.json?shallow=true&limitToFirst=1&orderBy=%22$key%22')
+    verdict.status = got.status
+    text = _text(got.body)
+    if got.status == 200:
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return verdict
+        if parsed is None or isinstance(parsed, dict):
+            verdict.state = 'public'
+        return verdict
+    if got.status == 401 or 'permission denied' in text.lower():
+        verdict.state, verdict.code = 'private', 'PermissionDenied'
+    elif got.status == 404 or (got.status in (400, 423) and 'firebase error' in text.lower()):
+        verdict.state, verdict.code = 'missing', 'NoSuchDatabase'
+    return verdict
+
+
+def check(provider, name, container='', fetch=None, dns=None, read_object=True):
     """Check one bucket (or Azure account and container) anonymously. Returns a ``Verdict``; never raises for a network failure (that is
     state ``unknown``). ``fetch(method, url)`` and ``dns(host)`` are replaced in tests."""
     try:
@@ -409,6 +334,8 @@ def check(provider, name, container='', fetch=http_fetch, dns=dns_exists, read_o
             verdict = check_gcs(name, fetch)
         elif provider == AZURE:
             verdict = check_azure(name, container, fetch, dns)
+        elif provider == FIREBASE:
+            return check_firebase(name, fetch)  # never an object read: a database answer is not a listing of files
         else:
             raise ValueError('unknown provider')
     except (OSError, ValueError) as exc:  # a refused address, a timeout, a reset: no answer, not a finding either way

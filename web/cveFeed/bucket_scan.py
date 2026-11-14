@@ -12,19 +12,23 @@ Candidate buckets, strongest ownership evidence first (the tier says which, and 
 * ``served``: a host of the project answers with a storage server header (``AmazonS3``, ``UploadServer``). The bucket is inferred from the host
   name, so it is checked for exposure but a missing bucket is never called a takeover (a CDN in front may use another name).
 * ``reference``: a storage URL in data cvENGINE already holds (crawled and archived endpoints, page URLs, route redirects, stored scanner
-  responses). The bucket name is stated by the URL.
+  responses), or a resource the secrets scan read in a page or script (``ResourceRef``: S3, GCS, Azure, Firebase Storage as the GCS bucket it is,
+  and Firebase Realtime Databases). The bucket name is stated by the URL.
 * ``guess``: permutations of the target's own domain label with a short curated suffix list. Anyone may own a bucket of that name, so a
   finding says "name guess, ownership unconfirmed, verify the bucket is yours" and is never worse than medium.
 
 Findings: a public listing of a ``cname``/``served`` bucket, or of a ``reference`` bucket whose name carries the project's own label, is high
 (critical when listed names look like backups, database dumps or keys); other public listings are medium. A ``cname`` or ``reference`` name
 that no one has registered is a takeover (high; medium for a GCS name with a dot, which only a verified domain owner may create).
-A finding resolves when a later check of the same bucket ran and no longer finds it, and when the reference that led there is gone. A
+A Firebase Realtime Database anyone can read is ``bkt_firebase_read`` (high when its name carries the project's label, else medium): one shallow
+read of its root, and no key name or value is ever kept. A referenced database that does not exist is a low takeover note when its name carries
+the label. A finding resolves when a later check of the same bucket ran and no longer finds it, and when the reference that led there is gone. A
 check with no answer changes nothing.
 
-Politeness: one global request rate (``bucket_probe.Pacer``), ``CVENGINE_BUCKETS_MAX_PER_SWEEP`` buckets per project per sweep, a weekly
+Politeness: one global request rate (sent as the task's ``rate``, held by the Sentinel), ``CVENGINE_BUCKETS_MAX_PER_SWEEP`` buckets per project per sweep, a weekly
 ledger window per bucket, one sweep at a time, a stop while scanning is paused, a stop for a project whose bug bounty engagement has not
 confirmed automated testing, and no name an organization excluded."""
+import functools
 import logging
 import os
 import re
@@ -32,7 +36,7 @@ from dataclasses import dataclass, field
 from urllib.parse import unquote, urlsplit
 
 from cveFeed import bucket_probe as probe
-from cveFeed.bucket_probe import AZURE, GCS, S3
+from cveFeed.bucket_probe import AZURE, FIREBASE, GCS, S3
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,7 @@ QUEUE = 'bucketscan_queue'
 PREFIX = 'bkt_'  # hygiene must not resolve these (see cveFeed.hygiene.run_hygiene)
 CHECK_LISTING = 'bkt_listing'
 CHECK_TAKEOVER = 'bkt_takeover'
+CHECK_FIREBASE = 'bkt_firebase_read'  # a Firebase Realtime Database anyone can read (a reference in a page or script, cveFeed.secrets_scan)
 OBS_PROBE = 'storage-bucket'
 OBS_KIND = 'storage'
 DEFAULT_MAX_PER_SWEEP = 100
@@ -109,6 +114,8 @@ def valid_name(provider, name):
         return bool(probe.S3_NAME.match(name)) and '..' not in name and not re.fullmatch(r'\d+(?:\.\d+){3}', name)
     if provider == GCS:
         return bool(probe.GCS_NAME.match(name)) and not name.startswith('goog') and 'google' not in name
+    if provider == FIREBASE:
+        return bool(probe.FIREBASE_DB.match(name))
     return bool(probe.AZURE_ACCOUNT.match(name))
 
 
@@ -203,6 +210,8 @@ class Candidate:
             return f'{self.name}.s3.amazonaws.com' if '.' not in self.name else f's3.amazonaws.com/{self.name}'
         if self.provider == GCS:
             return f'storage.googleapis.com/{self.name}'
+        if self.provider == FIREBASE:
+            return self.name
         return f'{self.name}.blob.core.windows.net' + (f'/{self.container}' if self.container else '')
 
     @property
@@ -268,6 +277,47 @@ def _marked(*fields):
     return query
 
 
+RESOURCE_LIMIT = 2000  # ResourceRef rows read per project
+
+
+def firebase_db(value):
+    """The Realtime Database host a reference names: ``<name>`` alone is ``<name>.firebaseio.com``; ``''`` when it is none."""
+    value = (value or '').strip().lower().removeprefix('https://').split('/')[0]
+    host = value if '.' in value else f'{value}.firebaseio.com'
+    return host if probe.FIREBASE_DB.match(host) else ''
+
+
+def ref_from_resource(kind, identifier):
+    """The ``Ref`` a ``ResourceRef`` row leads to, or None: S3, GCS and Azure by name, Firebase Storage as the GCS bucket it is, a Realtime
+    Database by its host. Registries and plain URLs are recorded for a person to look at and never checked."""
+    identifier = (identifier or '').strip().lower()
+    if kind == 's3' and valid_name(S3, identifier):
+        return Ref(S3, identifier)
+    if kind in ('gcs', 'firebase_storage') and valid_name(GCS, identifier):
+        return Ref(GCS, identifier)
+    if kind == 'azure':
+        account, _, container = identifier.partition('/')
+        if valid_name(AZURE, account) and (not container or probe.AZURE_CONTAINER.match(container)):
+            return Ref(AZURE, account, container)
+    if kind == 'firebase_rtdb':
+        host = firebase_db(identifier)
+        return Ref(FIREBASE, host) if host else None
+    return None
+
+
+def resource_refs(project_id):
+    """``[(Ref, host, domain_id, found_url)]``: the storage the project's pages and scripts point at, as the secrets scan recorded it
+    (``cveFeed.models.ResourceRef``, docs/SECRETS-PLAN.md section 9)."""
+    from cveFeed.models import ResourceRef
+    out = []
+    for kind, identifier, host, domain_id, url in (ResourceRef.objects.filter(project_id=project_id).exclude(kind='url')
+                                                   .values_list('kind', 'identifier', 'host', 'domain_id', 'found_url')[:RESOURCE_LIMIT]):
+        ref = ref_from_resource(kind, identifier)
+        if ref is not None:
+            out.append((ref, (host or '').lower(), domain_id, url))
+    return out
+
+
 def collect(project_id, owner_check=None, skipped=None):
     """``(candidates, complete)``: every bucket the project's data points at or its domain labels suggest, strongest tier first, and the set of
     tiers whose list is complete (a tier read up to a row limit is not, so a finding is never closed for a reference that was merely not read).
@@ -321,13 +371,16 @@ def collect(project_id, owner_check=None, skipped=None):
             for ref in refs:
                 _merge(found, ref, 'reference', domain_id, host, f'{label} on {host}' if host else label)
 
+    for ref, host, domain_id, url in resource_refs(project_id):
+        _merge(found, ref, 'reference', domain_id, host, f'page or script content of {host}' + (f' ({url})' if url else ''))
+
     banned = exclusions.excluded_names(project_id)
     labels = domain_labels(name for _id, name in domains if name not in banned)  # an excluded domain gets no name guesses
     by_name = {name: pk for pk, name in domains}
     if guesses_enabled():
         from cveFeed import domain_ownership
         from targetApp.target_types import apex_domain
-        owner_check = owner_check or domain_ownership.foreign_owner
+        owner_check = owner_check or functools.partial(domain_ownership.foreign_owner, project=project_id)
         apexes = {apex_domain(name) or name for _id, name in domains if name not in banned}
         for label, apex in labels.items():
             reason = owner_check(apex, sorted(apexes - {apex}))
@@ -449,6 +502,35 @@ def takeover_finding(cand, verdict):
     return Finding(CHECK_TAKEOVER, severity, title, detail, cand.host, evidence)
 
 
+def firebase_finding(cand, verdict):
+    """A Realtime Database anyone can read: high when its name carries the project's label, else medium (a page may point at a vendor's). The
+    finding says only that the root answered: no key name and no value is ever kept."""
+    from cveFeed.hygiene import Finding
+    severity = HIGH if cand.name_match else MEDIUM
+    basis = ('The database answers an anonymous read and its name carries a label of the project.' if cand.name_match else
+             'The database answers an anonymous read, but its name carries no label of the project: ownership is unconfirmed.')
+    fix = ('Set the Realtime Database security rules so that ".read" is not true for everyone (require authentication, and limit each path to '
+           'the users who own it), then review what was readable.')
+    title = f'Firebase Realtime Database {cand.name} can be read by anyone'
+    detail = (f'{cand.name} is referenced by {", ".join(cand.hosts[:3]) or "data of the project"} and answers an anonymous read of its root '
+              f'(only the shallow answer was asked for, and nothing of it was kept). {basis} Fix: {fix}')
+    evidence = {'source': 'bucket check', 'provider': FIREBASE, 'database': cand.name, 'endpoint': cand.endpoint, 'tier': cand.tier,
+                'ownership': OWNERSHIP[cand.tier], 'referenced_by': cand.hosts[:MAX_HOSTS], 'via': cand.via, 'read': 'public',
+                'severity_basis': basis, 'remediation': fix}
+    return Finding(CHECK_FIREBASE, severity, title, detail, cand.host, evidence)
+
+
+def firebase_missing_finding(cand, verdict):
+    from cveFeed.hygiene import Finding
+    title = f'Dangling Firebase reference: data of the project points at {cand.name}, which does not exist'
+    basis = 'A Realtime Database name that no longer exists can be created by anyone in their own Firebase project.'
+    fix = 'Remove the reference from the page or script, or recreate the database in a project you control.'
+    evidence = {'source': 'bucket check', 'provider': FIREBASE, 'database': cand.name, 'endpoint': cand.endpoint, 'tier': cand.tier,
+                'ownership': OWNERSHIP[cand.tier], 'referenced_by': cand.hosts[:MAX_HOSTS], 'via': cand.via,
+                'provider_answer': verdict.code, 'severity_basis': basis, 'remediation': fix}
+    return Finding(CHECK_TAKEOVER, LOW, title, f'{title}. {basis} Fix: {fix}', cand.host, evidence)
+
+
 def evaluate(cand, verdict):
     """The findings one verdict gives, whether it answered, and the observation to record."""
     out = Outcome()
@@ -457,6 +539,12 @@ def evaluate(cand, verdict):
     out.conclusive = True
     if cand.tier != 'guess' or verdict.state == 'public':
         out.observation = {'public': 'found', 'private': 'hidden', 'missing': 'absent'}[verdict.state]
+    if cand.provider == FIREBASE:
+        if verdict.state == 'public':
+            out.findings.append(firebase_finding(cand, verdict))
+        elif verdict.state == 'missing' and cand.tier in ('cname', 'reference') and cand.name_match:
+            out.findings.append(firebase_missing_finding(cand, verdict))
+        return out
     if verdict.state == 'public':
         out.findings.append(listing_finding(cand, verdict))
     elif verdict.state == 'missing' and takeover_severity(cand) is not None:
@@ -506,7 +594,7 @@ def sweep(project_id, fetch=None, dns=None, owner_check=None):
     """Check the due buckets of one project, one at a time. Returns ``{'checked', 'public', 'takeover', 'private', 'missing', 'unknown',
     'resolved'}`` (and ``skipped`` with the reason when nothing ran; ``not_guessed`` names the domains no bucket name was guessed from because
     they show another owner). ``fetch``, ``dns`` and ``owner_check`` replace the network in tests."""
-    from cveFeed import activity, exclusions, ledger
+    from cveFeed import activity, ledger
     from cveFeed.conductor import bounty_blocked_projects
     from reNgine import resources
     from targetApp.models import Domain
@@ -515,7 +603,7 @@ def sweep(project_id, fetch=None, dns=None, owner_check=None):
         return {**summary, 'skipped': 'bucket checks are turned off (CVENGINE_BUCKETS=0)'}
     if project_id in bounty_blocked_projects():
         return {**summary, 'skipped': 'the bug bounty engagement has not confirmed automated testing'}
-    fetch, dns = fetch or probe.http_fetch, dns or probe.dns_exists
+    injected = fetch is not None or dns is not None  # tests replace the network; production asks a Sentinel (the kind has no local path)
     owner = f'buckets-{os.getpid()}'
     with resources.redis_claim(f'cvengine:buckets:{project_id}', owner, 300) as holder:
         if holder is not True:
@@ -529,20 +617,24 @@ def sweep(project_id, fetch=None, dns=None, owner_check=None):
         found_by_domain, checked_by_domain = {}, {}
         running = activity.log('run_check', f'Cloud storage check: {len(candidates)} candidate bucket{"s" if len(candidates) != 1 else ""}',
                                project=project_id, status='running')
-        for cand in due(project_id, candidates)[:max_per_sweep()]:
+        todo = due(project_id, candidates)[:max_per_sweep()]
+        remote, waiting = ({}, False) if injected else _remote_verdicts(project_id, [c for c in todo if _runnable(project_id, c, domains, manual)])
+        if waiting:
+            summary['skipped'] = 'waiting for a scanner: the buckets stay due'
+        for cand in todo:
+            if waiting:
+                break
             if resources.global_pause_requested(fail_closed=True):
                 summary['skipped'] = 'scanning is paused: the buckets stay due'
                 break
-            banned = exclusions.excluded_names(project_id)  # read again: an exclusion made while the sweep runs stops the next request
-            if cand.name in banned or any(h in banned for h in cand.hosts) or cand.domain_id not in domains:
+            if not _runnable(project_id, cand, domains, manual):
                 continue
-            if cand.domain_id in manual:  # a manual only target's names are not checked on a schedule, unless a target that is not manual only holds a host that leads here
-                from cveFeed.manual_only import other_holder
-                holders = [d for d in (other_holder(project_id, h) for h in cand.hosts) if d is not None]
-                if not holders:
-                    continue
-                cand.domain_id = holders[0].pk
-            verdict = probe.check(cand.provider, cand.name, cand.container, fetch=fetch, dns=dns)
+            if cand.asset in remote:
+                verdict = remote[cand.asset]
+            elif injected:
+                verdict = probe.check(cand.provider, cand.name, cand.container, fetch=fetch, dns=dns)
+            else:  # a Sentinel did not report it: unknown, checked again later (never checked from here)
+                verdict = probe.Verdict(state='unknown')
             summary['checked'] += 1
             if verdict.state == 'unknown':
                 summary['unknown'] += 1
@@ -564,6 +656,39 @@ def sweep(project_id, fetch=None, dns=None, owner_check=None):
             f', {summary["takeover"]} dangling' + (f', {summary["unknown"]} without an answer' if summary['unknown'] else '')
             + ''.join(f'; no bucket names guessed from {d}: {r}' for d, r in sorted(not_guessed.items()))), **summary)
     return summary
+
+
+def _runnable(project_id, cand, domains, manual):
+    """Whether ``cand`` may be checked now: no exclusion names it or a host that leads to it (read again for every candidate: an exclusion made
+    while the sweep runs stops the next request), its target is one of the project's, and a manual only target's names are checked only when a
+    target that is not manual only holds a host that leads here (``cand.domain_id`` then becomes that target)."""
+    from cveFeed import exclusions
+    banned = exclusions.excluded_names(project_id)
+    if cand.name in banned or any(h in banned for h in cand.hosts) or cand.domain_id not in domains:
+        return False
+    if cand.domain_id in manual:
+        from cveFeed.manual_only import other_holder
+        holders = [d for d in (other_holder(project_id, h) for h in cand.hosts) if d is not None]
+        if not holders:
+            return False
+        cand.domain_id = holders[0].pk
+    return True
+
+
+def _remote_verdicts(project_id, candidates):
+    """``(verdicts, waiting)``: the verdicts a Sentinel's ``bucket_check`` tasks gave (``{asset: Verdict}``), and whether the sweep must wait
+    because no Sentinel can take the kind (it has no local path)."""
+    from agentapi import probe_dispatch
+    from dashboard.models import Project
+    from reNgine.resources import ScannerUnavailable
+    if not candidates:
+        return {}, False
+    try:
+        got = probe_dispatch.try_buckets(Project.objects.get(pk=project_id), candidates, probe.request_rate())
+    except ScannerUnavailable as exc:
+        logger.info('bucket sweep of project %s waits for a scanner: %s', project_id, exc)
+        return {}, True
+    return (got or {}), False
 
 
 def sweep_all(fetch=None, dns=None):

@@ -1,10 +1,21 @@
 #!/bin/bash
 
+# A worker that dies with a native crash (a segmentation fault in the interpreter) must say what Python was doing: with this on, the crash prints the
+# traceback of every thread to the container log before the process ends. Off by default in Python, no cost while nothing crashes. A value set by the
+# administrator wins.
+export PYTHONFAULTHANDLER="${PYTHONFAULTHANDLER:-1}"
+
 # web owns migrations; wait until they are applied (avoids concurrent-migrate race)
 until python3 manage.py migrate --check >/dev/null 2>&1; do
     echo "Waiting for web to apply migrations..."
     sleep 3
 done
+
+# The built-in scanner's first enrollment blob must not wait for the beat task (every five minutes). CVENGINE_BUILTIN_SCANNER=0 revokes it instead,
+# and never a reason for the container not to start.
+python3 manage.py ensure_builtin_scanner >/dev/null 2>&1 || true
+# The same for the AI reviewer container's token (docs/AI-REVIEWER.md); CVENGINE_REVIEWER=0 revokes it instead.
+python3 manage.py ensure_reviewer_token >/dev/null 2>&1 || true
 
 # (This used to run `makemigrations` for five apps against the bind-mounted source, which is the git checkout on the host: model drift became
 # untracked migration files that later conflicted with the real ones. A migration is written and committed by a developer; CI checks for drift.)
@@ -30,12 +41,11 @@ if [ ! -d "/usr/src/scan_results" ]
 then
   mkdir /usr/src/scan_results
 fi
-# Only root and the bundled nginx (gid 101 in nginx:alpine; the proxy serves /protected_media/ from this volume, read-only) may enter it: the
-# screenshot browser runs as nobody in this container and has no business with scan output, PDF reports or log archives. Applied at every start.
+# Only root and the bundled nginx (gid 101 in nginx:alpine; the proxy serves /protected_media/ from this volume, read-only) may enter it: no other
+# account in this container has any business with scan output, PDF reports or log archives. Applied at every start.
 chgrp 101 /usr/src/scan_results && chmod 0750 /usr/src/scan_results || echo "Could not restrict /usr/src/scan_results to root and the proxy"
 
-# test the scanners the pipeline runs, required for configuration
-naabu -version
+# the one tool the server runs itself (it refreshes and reads the template set); every scan runs on a Sentinel
 nuclei -version
 
 # geeknik/the-nuclei-templates produces false positives (#1521), drop copies left by older installs
@@ -84,11 +94,6 @@ generate_worker_command() {
 # (12 hours). Nothing of this stack consumes yet, so what is still unacknowledged is orphaned: return it to its queues now.
 python3 manage.py requeue_unacked || echo "Could not return the unacknowledged broker messages (they are returned after the visibility timeout)"
 
-# Chromium's sandbox for the web screenshots (cveFeed/web_shot.py): started once here as the screenshot worker starts it. While it cannot engage
-# (a container without config/seccomp/playwright-chromium.json, a kernel without unprivileged user namespaces) screenshots stay off and the host
-# page, get_system_status and this log say why. It never stops the workers from starting.
-python3 manage.py check_screenshot_sandbox || echo "Web screenshots stay off until Chromium's sandbox can start (see above)."
-
 echo "Starting Celery Workers..."
 
 # Three gevent workers instead of one process per queue: every worker process loads all of Django (150-250 MB), so
@@ -97,11 +102,11 @@ echo "Starting Celery Workers..."
 # api_queue has no tasks any more (the legacy /api/ surface that used it is gone), but the classic worker keeps consuming it: the
 # status page, the update script and the admin worker panel recognise this worker by that queue name.
 classic_queues="send_notif_queue,send_task_notif_queue,geo_localize_queue"
-# wpscan_queue: the thorough WPScan pass (hours per site, one per project at a time) must not hold a feed worker
+# wpscan_queue: a long, per-site, one-per-project-at-a-time pass must not hold a feed worker
 # testssl_queue: the daily TLS audit (a minute per port, one sweep at a time) likewise
 # bucketscan_queue: the daily cloud storage sweep (a few requests per second, one sweep at a time) likewise
 # vhost_queue: the slow, polite sweeps for other sites on an address and for applications under subdirectories (one request at a time)
-# udp_queue: the background UDP sweep (nmap -sU waits on silent ports, one IP at a time) likewise
+# udp_queue: the background UDP sweep (it waits on silent ports, one IP at a time) likewise
 # openvas_queue: the optional OpenVAS sweep (one GVM task at a time, polled for hours); nothing is queued on it unless the add-on is switched on
 # supplier_queue: the daily third-party supplier posture sweep (a few polite requests per supplier, one sweep at a time) likewise
 # ctwatch_queue: certificate transparency lookups of new targets (crt.sh rate limits them; a bulk add queues hundreds) must not hold the feed worker
@@ -110,11 +115,17 @@ classic_queues="send_notif_queue,send_task_notif_queue,geo_localize_queue"
 # hours; the slots here are greenlets (10, CLASSIC_CONCURRENCY; a certificate lookup may sleep up to 30 s in one waiting for crt.sh's pacing), of which the one-at-a-time sweeps above hold a handful. A worker per lane is capped at four (memory, see
 # tests/test_entrypoint.py). A refresh that finds no free slot expires (three intervals) and the Live screen computes on request until the next one runs.
 classic_queues+=",run_command_queue,api_queue,wpscan_queue,testssl_queue,bucketscan_queue,vhost_queue,udp_queue,openvas_queue,supplier_queue,live_cache_queue,ctwatch_queue"
-# screenshot_queue: the web screenshot drain (one Chromium, one page at a time, under the memory gate, one drain at a time: a second task returns at once)
+# screenshot_queue: the web screenshot drain and the hourly sweep (they hand pages to Sentinels and wait for them, one drain at a time: a second task returns at once; no browser runs here)
 classic_queues+=",screenshot_queue"
+# planner_queue: the work planner's batches (cveFeed/work_planner.py): each is one Sentinel task of due checks waited for here, at most a dozen at once, and their own queue keeps a
+# backlog of them from ever holding a feed or discovery slot
+classic_queues+=",planner_queue"
+# report_queue: the one-click PDF report (cveFeed/report_export.py): seconds to minutes of work for one person who is waiting for it. Its own queue, so a long feed run or
+# a certificate lookup in backoff on the cve_feed worker cannot hold it; the classic worker has the free slots.
+classic_queues+=",report_queue"
 
 commands=""
-# each bbot kitchen-sink run is memory hungry, so discovery gets a small pool of its own
+# each discovery run is memory hungry, so discovery gets a small pool of its own
 # How many discovery tasks and host assessments run at once: what an App Admin saved on Settings, configMaxxing, else DISCOVERY_CONCURRENCY, else 8.
 # (A save also resizes the running worker live, see cveFeed/scan_concurrency.py; this makes a restart or an update land on the same number.)
 discovery_concurrency=$(python3 manage.py scan_concurrency_value discovery_concurrency 2>/dev/null | tail -n 1)
@@ -123,30 +134,97 @@ if ! [[ "$discovery_concurrency" =~ ^[0-9]+$ ]] || [ "$discovery_concurrency" -l
 fi
 echo "Discovery pool size (autoscale ceiling): $discovery_concurrency"
 commands+="$(generate_worker_command "discovery_queue" "$discovery_concurrency" "discovery_worker")"$'\n'
-commands+="$(generate_worker_command "cve_feed_queue" "4" "cve_feed_worker")"$'\n'
+# The CVE-feed and classic lanes start with what an App Admin saved on Settings, configMaxxing, else what auto-tuning chose (it lowers a lane that is killed for memory and
+# never goes above the configured number), else CVE_FEED_CONCURRENCY / CLASSIC_CONCURRENCY, else 4 and 10. A save or a tuned change also resizes the running worker live.
+lane_concurrency() {
+    local value
+    value=$(python3 manage.py scan_concurrency_value "$1" 2>/dev/null | tail -n 1)
+    if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 1 ]; then
+        value="$2"
+    fi
+    echo "$value"
+}
+cve_feed_concurrency=$(lane_concurrency lane.cve_feed "${CVE_FEED_CONCURRENCY:-4}")
+classic_concurrency=$(lane_concurrency lane.classic "${CLASSIC_CONCURRENCY:-10}")
+echo "Lane sizes (autoscale ceilings): cve_feed $cve_feed_concurrency, classic $classic_concurrency"
+commands+="$(generate_worker_command "cve_feed_queue" "$cve_feed_concurrency" "cve_feed_worker")"$'\n'
 # A reserved one-at-a-time lane keeps requested validation ahead of routine feed work.
 # Redis priority 0 is highest; this worker reserves one task for future severity-aware dispatch.
 commands+="$(generate_worker_command "validation_priority_queue" "1" "validation_priority_worker")"$'\n'
-commands+="$(generate_worker_command "$classic_queues" "${CLASSIC_CONCURRENCY:-10}" "classic_worker")"$'\n'
-commands="${commands%&}"
+commands+="$(generate_worker_command "$classic_queues" "$classic_concurrency" "classic_worker")"$'\n'
 
-eval "$commands"
+# --- start_lanes: the four workers, each its own background job, with its pid and name recorded ---------------------------------------------
+# Every line of $commands is one `celery ... -n <node> &`. The pid of each is kept next to the lane's name, so the supervisor below can say WHICH lane
+# is gone and check each one itself (waiting for any one child to exit says that something exited, and nothing about which).
+lane_names=()
+lane_pids=()
+start_lanes() {
+    local line name
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        name=$(printf '%s\n' "$line" | sed -n 's/.* -n \([a-z_]*\).*/\1/p')
+        eval "$line"
+        lane_names+=("${name:-lane$((${#lane_pids[@]} + 1))}")
+        lane_pids+=("$!")
+    done <<<"$commands"
+}
+start_lanes
+
+# alive: the process exists and is not a zombie that nobody has reaped yet.
+lane_alive() {
+    kill -0 "$1" 2>/dev/null || return 1
+    local state
+    state=$(sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -c1-1) || return 0
+    [ "$state" != "Z" ]
+}
+
+# stop_lanes: a warm stop (SIGTERM: the worker takes no new task and finishes or re-queues what it holds), but BOUNDED. A discovery worker holds host
+# assessments that wait on a Sentinel for hours, so an unbounded `wait` here is how a container with ONE dead lane stayed "up" for good with the
+# other lanes stopped and the restart policy never reached: it never exits. After CELERY_STOP_GRACE seconds (default 45, under the 60 s of
+# stop_grace_period in docker-compose.yml) what is still there is killed; the tasks it held are returned to their queues at the next start
+# (manage.py requeue_unacked above).
+stop_lanes() {
+    trap - TERM INT
+    local pid waited=0 grace="${CELERY_STOP_GRACE:-45}"
+    for pid in "${lane_pids[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
+    while [ "$waited" -lt "$grace" ]; do
+        local any=0
+        for pid in "${lane_pids[@]}"; do lane_alive "$pid" && any=1; done
+        [ "$any" = 0 ] && break
+        sleep 1
+        waited=$((waited + 1))
+    done
+    for pid in "${lane_pids[@]}"; do
+        if lane_alive "$pid"; then
+            echo "Worker process $pid did not stop within ${grace}s; killing it."
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+    wait 2>/dev/null || true
+}
 
 # This shell is the container's main process and the parent of the four workers. As PID 1 (or the child of Docker's init) it only receives
-# SIGTERM if a trap asks for it, so without one `docker stop` waited out the grace period and killed the workers mid-task. Pass the stop on as a
-# warm shutdown (celery finishes or re-queues what it holds), and when ANY worker exits, stop the rest and exit non-zero: `restart: always`
-# then brings all four lanes back, where a plain `wait` kept the container "up" with a lane (discovery, the CVE feed) no longer consumed.
-stop_workers() {
-    trap - TERM INT
-    local pids
-    pids=$(jobs -p) || true
-    # shellcheck disable=SC2086
-    [ -z "$pids" ] || kill -TERM $pids 2>/dev/null || true
-    wait || true
+# SIGTERM if a trap asks for it, so without one `docker stop` waited out the grace period and killed the workers mid-task.
+trap 'echo "Stop requested; stopping the Celery workers."; stop_lanes; exit 143' TERM INT
+
+# The supervisor. Every CELERY_SUPERVISE_INTERVAL seconds (default 2) each lane's process is checked; when ANY is gone (it crashed, it was killed for
+# memory, it failed to start) the others are stopped (bounded, above) and the container EXITS non-zero, so `restart: always` brings all four lanes back
+# together: a container must never stay up with a lane that no longer consumes (discovery, the CVE feed, validation or the classic queues).
+supervise() {
+    local i status
+    while true; do
+        for i in "${!lane_pids[@]}"; do
+            if ! lane_alive "${lane_pids[$i]}"; then
+                status=0
+                wait "${lane_pids[$i]}" 2>/dev/null || status=$?
+                echo "The Celery worker '${lane_names[$i]}' (pid ${lane_pids[$i]}) is gone (status $status); stopping the other workers so the container restarts with all four lanes."
+                stop_lanes
+                return "$(( status == 0 ? 1 : status ))"
+            fi
+        done
+        sleep "${CELERY_SUPERVISE_INTERVAL:-2}" &
+        wait $! 2>/dev/null || true
+    done
 }
-trap 'stop_workers; exit 143' TERM INT
-status=0
-wait -n || status=$?
-echo "A Celery worker exited (status $status); stopping the other workers so the container restarts with all of them."
-stop_workers
-exit "$(( status == 0 ? 1 : status ))"
+supervise
+exit "$?"

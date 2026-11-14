@@ -29,6 +29,17 @@ class Node {
 }
 const walk = (n, f) => { f(n); n.children.forEach((c) => walk(c, f)); };
 const find = (root, pred) => { const out = []; walk(root, (n) => pred(n) && out.push(n)); return out; };
+
+// The words are inside a closed <details> (whose summary says "Details") and are not shown anywhere outside it: a person who never opens it never reads them.
+const behindDetails = (host, pattern) => {
+  const boxes = find(host, (n) => n.tag === 'details');
+  const inside = boxes.filter((d) => pattern.test(d.textContent));
+  assert.ok(inside.length >= 1, `${pattern} is inside a details element`);
+  assert.ok(inside[0].textContent.startsWith('Details'), 'whose summary is Details');
+  assert.ok(!inside[0].attrs || !('open' in inside[0].attrs), 'closed by default');
+  const outside = host.textContent.split(inside[0].textContent).join('');
+  assert.doesNotMatch(outside, pattern, `${pattern} is not shown outside the details`);
+};
 const buttonNamed = (root, text) => find(root, (n) => n.tag === 'button' && n.textContent === text);
 
 globalThis.document = {
@@ -98,7 +109,8 @@ test('the Auto-tuning card comes first and says it is on by default and how to t
   assert.match(text, /Used today: 2 of 8/);
   assert.match(text, /Last run .*: 1 change\(s\)\./);
   assert.match(text, /Sized for this machine: 8 cores, 3\.4 GB memory budget, 9 Sentinel slots\./);
-  assert.match(text, /Port and service scan \(nmap\): raised 2 -> 3 by controller · nmap runs waited <b>x<\/b>/);  // text, never markup
+  assert.match(text, /Port and service scan \(nmap\) 2 → 3 · auto-tune/);  // the History line: what, who
+  assert.match(text, /Why: Nmap runs waited <b>x<\/b>/);  // text, never markup
   assert.ok(!find(host, (n) => n.tag === 'b').length);
   const select = find(host, (n) => n.tag === 'select')[0];
   assert.deepEqual(select.children.map((o) => o.value), ['auto', 'suggest', 'off']);
@@ -121,11 +133,29 @@ test('Save sends the mode and the advisor switch; Revert and Apply post to their
   assert.equal(buttonNamed(host, 'Revert').length, 1);  // only the newest applied change of a setting offers it
 });
 
+test('the agent policy is its own control: Suggest by default, and changing it sends only the policy', async () => {
+  reply = {status: status(), concurrency: concurrency()};
+  const host = new Node('div');
+  await maxxing.cards()[0].build(host);
+  const selects = find(host, (n) => n.tag === 'select');
+  assert.equal(selects.length, 2);
+  const policy = selects[1];
+  assert.equal(policy.attrs.id, 'autotune-agent-policy');
+  assert.equal(policy.value, 'suggest');
+  assert.match(host.textContent, /Whether AI agents may change performance settings by themselves/);
+  assert.match(host.textContent, /never raise a spend cap/);
+  policy.value = 'auto';
+  calls.length = 0;
+  await policy.onchange();
+  assert.deepEqual(calls[0], {url: '/cve/api/settings/autotune', method: 'PUT', body: {agent_policy: 'auto'}});
+});
+
 test('the kill switch disables the controls and says why', async () => {
   reply = {status: status({killed: true, effective_mode: 'off'}), concurrency: concurrency()};
   const host = new Node('div');
   await maxxing.cards()[0].build(host);
-  assert.match(host.textContent, /CVENGINE_AUTOTUNE=0 is set in the environment/);
+  assert.match(host.textContent, /Auto-tuning is switched off for this whole server by its administrator/);
+  behindDetails(host, /For the server's administrator: CVENGINE_AUTOTUNE=0 is set in the environment/);
   assert.equal(find(host, (n) => n.tag === 'select')[0].disabled, true);
   assert.equal(buttonNamed(host, 'Save')[0].disabled, true);
   reply = {status: status(), concurrency: concurrency()};
@@ -199,6 +229,103 @@ test('typing the number auto-tuning chose and saving pins it; an untouched box i
 
 test('an environment pin says where it comes from and offers no hand-back', () => {
   const line = logic.autoTuneLine({value: 1, autotune: {managed: true, pinned: true, pinned_by: null, pinned_env: 'HEAVY_MAX_NMAP=1'}}, 'auto');
-  assert.equal(line.text, 'Pinned by the environment (HEAVY_MAX_NMAP=1): remove it from .env, or save a value here');
+  assert.equal(line.text, "Fixed by the server's own settings: save a value here to take it over");
   assert.equal(line.release, false);
+});
+
+// --- the History: one entry per change, the newest five on the first screen, a Show more for the rest ----------------------------------
+const BAD = /\[object|undefined|\bnull\b|NaN|(^|[\s(:→>])\?($|[\s),.:])/;
+const entry = (id, over = {}) => ({id, at: new Date(Date.now() - id * 60000).toISOString(), setting: 'discovery_concurrency', label: 'Hosts assessed at once', old_value: 12, new_value: 14,
+  source: 'controller', action: 'raise', applied: true, pressure: false, phase: 'probe', reason: 'work waited', resolution: null, can_revert: false, can_apply: false, ...over});
+const lines = (host) => find(host, (n) => n.tag === 'li' && /at-line/.test(n.className));
+const buildCard = async (history) => {
+  reply = {status: status({history}), concurrency: concurrency()};
+  const host = new Node('div');
+  await maxxing.cards()[0].build(host, {focus: buildCard.focus});
+  buildCard.focus = null;
+  return host;
+};
+
+test('History: the newest five lines, then Show more for the rest, and every line says what, why and what happened', async () => {
+  const host = await buildCard(Array.from({length: 8}, (_, i) => entry(i + 1, i === 0 ? {can_revert: true, outcome: 'helped', baseline: {metric: 'discovery_queue', value: 12, after: {metric: 'discovery_queue', value: 3, trouble: 0}}} : {})));
+  assert.equal(lines(host).length, 5);
+  const first = lines(host)[0];
+  assert.match(first.textContent, /^Hosts assessed at once 12 → 14 · auto-tune · 1 min agoWhy: Work waitedWhat happened: scans waiting in the queue 12 → 3, no memory pressure; kept/);
+  assert.equal(first.attrs.id, 'configmaxxing-autotune-line-1');
+  assert.equal(buttonNamed(host, 'Revert').length, 1);  // only the line the server marks can_revert has one
+  const more = find(host, (n) => n.tag === 'button' && /^Show more/.test(n.textContent));
+  assert.equal(more.length, 1);
+  assert.equal(more[0].textContent, 'Show more (3)');
+  await more[0].onclick();
+  assert.equal(lines(host).length, 8);
+});
+
+test('History: with five lines or fewer there is no Show more, and an empty history is one line', async () => {
+  const few = await buildCard([entry(1), entry(2)]);
+  assert.equal(lines(few).length, 2);
+  assert.equal(find(few, (n) => n.tag === 'button' && /^Show more/.test(n.textContent)).length, 0);
+  const none = await buildCard([]);
+  assert.equal(lines(none).length, 0);
+  assert.match(none.textContent, /No change yet: auto-tune writes a line here for every change it makes\./);
+});
+
+test('History: a line the page is pointed at (an alert link) is shown even when it is older than the first five, and is marked', async () => {
+  buildCard.focus = '7';
+  const host = await buildCard(Array.from({length: 8}, (_, i) => entry(i + 1)));
+  assert.equal(lines(host).length, 7);
+  assert.match(find(host, (n) => n.attrs.id === 'configmaxxing-autotune-line-7')[0].className, /at-focus/);
+  assert.equal(lines(host).filter((n) => /at-focus/.test(n.className)).length, 1);
+});
+
+test('History: every decision shape draws without "[object Object]", "undefined", "null", "NaN" or a bare "?", and an undone or revert line has no button', async () => {
+  const shapes = [
+    entry(1, {outcome: 'regressed', resolution: 'reverted', can_revert: true, baseline: {metric: 'wait_share', value: 0.4, after: {metric: 'wait_share', value: 0.8, trouble: 1}}}),
+    entry(2, {action: 'revert', phase: 'verify', pressure: true, outcome: 'reverted', undoes: 1, reason: 'verification of the change of 2026-11-13T13:00: put 14 back to 12', old_value: 14, new_value: 12}),
+    entry(3, {applied: false, can_apply: true, mode: 'suggest'}),
+    entry(4, {source: 'agent', actor: 'ci-agent', verify_at: new Date(Date.now() + 600000).toISOString()}),
+    entry(5, {source: 'ai', outcome: 'unknown', outcome_detail: 'too few measurements'}),
+    entry(6, {source: 'person', action: 'revert', actor: 'bill', old_value: null, new_value: null}),
+    entry(7, {action: 'release', source: 'person', old_value: null}),
+    {id: 8}, {},
+  ];
+  const host = await buildCard(shapes);
+  await find(host, (n) => n.tag === 'button' && /^Show more/.test(n.textContent))[0].onclick();
+  assert.equal(lines(host).length, 9);
+  lines(host).forEach((n) => assert.doesNotMatch(n.textContent, BAD, n.textContent));
+  const undone = lines(host)[0];
+  assert.equal(buttonNamed(undone, 'Revert').length, 0);
+  assert.equal(buttonNamed(lines(host)[1], 'Revert').length, 0);
+  assert.equal(buttonNamed(lines(host)[2], 'Apply').length, 1);
+  assert.match(lines(host)[3].textContent, /being checked, result at \d\d:\d\d/);
+  assert.match(lines(host)[3].textContent, /an agent \(ci-agent\)/);
+});
+
+test('a link can name one History line after the card: #configmaxxing/autotune/12', () => {
+  assert.equal(logic.hashItem('#configmaxxing/autotune/12'), '12');
+  assert.equal(logic.hashItem('#configmaxxing/autotune'), '');
+  assert.equal(logic.hashItem('#configmaxxing'), '');
+  assert.equal(logic.hashItem(undefined), '');
+  assert.deepEqual(logic.parseHash('#configmaxxing/autotune/12'), {section: 'configmaxxing', card: 'autotune'});
+});
+
+test('the advisor note says in words when today\'s count is not known', async () => {
+  const unknown = status();
+  unknown.advisor = {...unknown.advisor, used_today: null};
+  reply = {status: unknown, concurrency: concurrency()};
+  const host = new Node('div');
+  await maxxing.cards()[0].build(host);
+  assert.match(host.textContent, /Used today: not known yet, limit 8/);
+  assert.doesNotMatch(host.textContent, /\?/);
+  reply = {status: status(), concurrency: concurrency()};
+});
+
+test('the AI advisor switch says it also covers the health check\'s proposals', async () => {
+  const host = await buildCard([]);
+  assert.match(host.textContent, /This switch covers the AI advisor and the changes the server health check .* may propose\. The health check is an AI agent: its proposals follow the mode above and the setting for AI agents below, and are suggestions unless both are Automatic\./);
+});
+
+test('a worker lane left alone says why, in words', () => {
+  const line = logic.autoTuneLine({value: 3, autotune: {managed: false, why_not_managed: 'this lane is set to 3, which is at or below its floor of 3'}}, 'auto');
+  assert.match(line.text, /^Not auto-tuned: this lane is set to 3/);
+  assert.equal(logic.autoTuneLine({value: 3, autotune: {managed: false, why_not_managed: 'x'}}, 'off').text, '');
 });

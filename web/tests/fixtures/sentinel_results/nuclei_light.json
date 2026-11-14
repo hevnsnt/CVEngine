@@ -1,0 +1,28 @@
+{
+  "outcome": "done",
+  "findings": [
+    {
+      "template_id": "tech-detect",
+      "name": "Tech detect",
+      "severity": "info",
+      "host": "example.com",
+      "matched_at": "https://example.com/",
+      "description": "",
+      "matcher_name": "nginx",
+      "extracted_results": [
+        "nginx"
+      ],
+      "tags": [
+        "tech"
+      ]
+    }
+  ],
+  "cuts": [
+    {
+      "what": "findings",
+      "kind": "items",
+      "limit": 5000,
+      "dropped": 120
+    }
+  ]
+}

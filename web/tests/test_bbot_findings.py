@@ -5,7 +5,8 @@ from django.test import TestCase
 from django.utils import timezone
 
 from dashboard.models import Org, Project
-from reNgine.bbot import BbotResult, parse_event, short_title
+from reNgine.discovery_events import short_title
+from tests.discovery_fixtures import fold_findings
 from startScan.models import Vulnerability
 from targetApp.models import Domain
 
@@ -22,8 +23,7 @@ def finding(description, severity=None, etype='FINDING', host='example.com'):
 
 class ShortTitleTests(TestCase):
 	def test_baddns_blob_gets_a_short_name_and_keeps_the_description(self):
-		result = BbotResult()
-		parse_event(finding(BLOB), result, {})
+		result = fold_findings([finding(BLOB)])
 		f = result.findings[0]
 		self.assertEqual(f['name'], 'No DMARC record found')
 		self.assertEqual(f['description'], BLOB)

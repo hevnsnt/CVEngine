@@ -1,7 +1,7 @@
 // Settings, configMaxxing: the section for advanced tunables. It is a small registry of cards: a card is {id, title, build(host, ctx)} and is
 // added with registerCard() (see scan-concurrency-card.js), so another tunable never needs a redesign of the section. Administrators only (the
 // whole Settings page is, and so is the API behind every card). DOM is built with textContent / value only.
-import { api, ask, badge, button, el, shortDate, toast } from "/staticfiles/cve/ui.js";
+import { api, ask, badge, button, details, el, shortDate, toast } from "/staticfiles/cve/ui.js";
 import { SECTION_ID, SECTION_LABEL, WARNING_TEXT, autoTuneLine } from "/staticfiles/cve/config-maxxing-logic.js";
 
 export const API = "/cve/api/settings";
@@ -19,9 +19,10 @@ const BADGE = { pinned: ["Pinned", ""], tuned: ["Auto-tuned", "success"], sugges
 export function autoTuneRow(field, mode, reload) {
   const line = autoTuneLine(field, mode, shortDate);
   if (!line.text) return null;
-  const row = el("p", "note", null, { style: "margin:4px 0 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap" });
+  const row = el("div", "note", null, { style: "margin:4px 0 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap" });
   const [label, tone] = BADGE[line.kind];
   row.append(badge(label, tone), el("span", "", line.text));
+  if (line.detail) row.append(details(line.detail));
   if (line.release) {
     const release = button("Let auto-tune manage this", async () => {
       await api("POST", `${API}/autotune/release`, { setting: field.key });
@@ -44,7 +45,8 @@ export function autoTuneRow(field, mode, reload) {
 }
 export const cardAnchor = (id) => `${SECTION_ID}-${id}`;
 
-export async function buildSection(host, { card = "" } = {}) {
+// ``item``: a line inside the card the link points at (#configmaxxing/autotune/12: the History line of decision 12); the card draws it marked and it is scrolled to.
+export async function buildSection(host, { card = "", item = "" } = {}) {
   host.textContent = "";
   const head = el("div", "card", null, { style: "max-width:720px;margin-bottom:16px" });
   head.append(el("h2", "", SECTION_LABEL, { style: "margin-bottom:8px" }), el("p", "note", WARNING_TEXT, { style: "margin:0 0 12px" }));
@@ -52,7 +54,7 @@ export async function buildSection(host, { card = "" } = {}) {
     button(
       "Reset all configMaxxing settings to defaults",
       async () => {
-        const sure = await ask("Every setting in configMaxxing goes back to its default (or to the environment variable, where one is set). Scans keep running; the new limits apply within seconds.", {
+        const sure = await ask("Every setting in configMaxxing goes back to its default (or to the value the server sets, where there is one). Scans keep running; the new limits apply within seconds.", {
           title: "Reset everything in configMaxxing?",
           ok: "Reset all",
         });
@@ -66,14 +68,14 @@ export async function buildSection(host, { card = "" } = {}) {
   );
   host.append(head);
   for (const entry of registry) {
-    const wrap = el("div", "", null, { id: cardAnchor(entry.id), style: "margin-bottom:16px" });
+    const wrap = el("div", "", null, { id: cardAnchor(entry.id), style: "margin-bottom:16px;scroll-margin-top:72px" });
     host.append(wrap);
     try {
-      await entry.build(wrap, { reload: () => buildSection(host) });
+      await entry.build(wrap, { reload: () => buildSection(host), focus: entry.id === card && item ? item : null });
     } catch (err) {
       wrap.append(el("p", "msg err", err.message));
     }
   }
-  const target = card && document.getElementById(cardAnchor(card));
+  const target = card && (item && document.getElementById(`${cardAnchor(card)}-line-${item}`)) || (card && document.getElementById(cardAnchor(card)));
   if (target) target.scrollIntoView({ block: "start" });
 }

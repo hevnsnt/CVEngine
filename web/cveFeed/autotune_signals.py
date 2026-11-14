@@ -15,6 +15,7 @@ Every probe is wrapped: one that fails leaves its numbers out (None), and a rule
 * assessments: queued and running, and the age of the oldest queued one;
 * the work conductor: whether its last round was held back by its depth while targets were due, or had nothing to do;
 * scanner failures that point at load (a timeout, out of memory, a kill) by scanner kind;
+* the kernel's oom kills and the Celery lane restarts of the last day (``maint``, from ``agentapi.maintainer_signals``), which a change is judged against;
 * whether scanning is paused and whether an update is being applied;
 * the facts the targets are sized from (``cveFeed.autotune_policy.size_for``): the CPU cores this container may use (its cgroup quota, else the
   machine's count), the scanning container's total memory, the hosts and targets in the inventory, and the share of free disk.
@@ -46,7 +47,7 @@ def memory(now, interval=INTERVAL_SECONDS):
     since = now - interval
     free, budgets, totals, counted = [], [], [], 0
     waits, running = {}, {}
-    for key in store.r.scan_iter(match='cvengine:heavy:*:state'):
+    for key in store.r.scan_iter(match='cvengine:heavy:*:state', count=1000):
         try:
             state = json.loads(store.r.get(key) or '{}')
         except ValueError:
@@ -233,10 +234,29 @@ def sentinels(now, interval=INTERVAL_SECONDS):
     oldest = queued.order_by('created_at').values_list('created_at', flat=True).first()
     since = at - timedelta(seconds=interval)
     expired = SentinelTask.objects.filter(status='expired', finished_at__gte=since)
+    unclaimed = expired.filter(error__icontains='in time').count()
+    outage = claim_outage(now, unclaimed, slots, in_use)
     return {'live': len(live), 'slots': slots, 'in_use': in_use, 'queued': queued.count(),
             'oldest_queued_s': int((at - oldest).total_seconds()) if oldest else None,
             'timeouts': expired.filter(error__icontains='timed out').count(),
-            'fallbacks': expired.filter(error__icontains='in time').count()}
+            # AM-5: tasks that expired unclaimed while the slots were free, or while the server's limiter refused the Sentinels' claims, say the claims did not
+            # reach the server, not that the Sentinels are too small: they are not counted as waits that ran locally (the policy backs off on those)
+            'fallbacks': 0 if outage else unclaimed, 'unclaimed': unclaimed, 'claims_outage': outage}
+
+
+def claim_outage(now, unclaimed, slots, in_use):
+    """Whether tasks expiring unclaimed are a claim outage and not Sentinel capacity trouble (AM-5): the slots were mostly idle (``maintainer_checks.NOT_CLAIMING_SLOT_SHARE``
+    or less in use) while tasks expired, or the rate limiter refused enough claim calls in the last two clock hours to be a warning
+    (``maintainer_checks.CLAIM_REFUSED_WARN``, the same numbers the ops check uses)."""
+    from cveFeed import maintainer_checks as checks
+    if unclaimed and slots and in_use <= checks.NOT_CLAIMING_SLOT_SHARE * slots:
+        return True
+    try:
+        from agentapi import maintainer_signals
+        refusals = maintainer_signals.claim_refusals(now)
+        return (refusals.get('this_hour', 0) + refusals.get('previous_hour', 0)) >= checks.CLAIM_REFUSED_WARN
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def assessments():
@@ -288,6 +308,37 @@ def capacity_failures(now, interval=INTERVAL_SECONDS):
     return out
 
 
+def maintainer(now):
+    """The kernel's oom kills (every container that publishes them) and the Celery lane restarts of the last 24 hours, from the maintainer's signals
+    (``agentapi.maintainer_signals``): ``{'oom_kills_24h', 'lane_restarts_24h'}``, each None when no source could be read (never 0 for unknown). A
+    change is judged against these (``autotune_policy.verdict``): a kill or a restart that was not there before it is a regression."""
+    from agentapi import maintainer_signals
+    oom, restarts = [], []
+    for entry in (maintainer_signals.containers(now).get('containers') or []):
+        if entry.get('state') == 'known' and isinstance(entry.get('oom_kills_24h'), int):
+            oom.append(entry['oom_kills_24h'])
+    for entry in (maintainer_signals.lanes(now).get('lanes') or []):
+        if isinstance(entry.get('restarts_24h'), int):
+            restarts.append(entry['restarts_24h'])
+    return {'oom_kills_24h': sum(oom) if oom else None, 'lane_restarts_24h': sum(restarts) if restarts else None}
+
+
+def lane_memory(now):
+    """``{lane: {'percent', 'restarts_24h'}}``: each Celery lane's memory as a share of its container's limit (None when not known) and the restarts seen on it in
+    the last 24 hours, the numbers the lane rule of ``autotune_policy._lane_trouble`` reads."""
+    from agentapi import maintainer_signals
+    return {entry['lane']: {'percent': entry.get('percent_of_limit') if entry.get('state') == 'known' else None, 'restarts_24h': entry.get('restarts_24h')}
+            for entry in (maintainer_signals.lanes(now).get('lanes') or []) if entry.get('lane')}
+
+
+def starve(now):
+    """Queued discovery scans: how many, and how long the oldest has waited (None when none waits), for the assessment share (``autotune_policy.STARVE_SECONDS``)."""
+    from startScan.models import ScanHistory
+    queued = ScanHistory.objects.filter(scan_status=-1)
+    since = queued.order_by('start_scan_date').values_list('start_scan_date', flat=True).first()
+    return {'scans_queued': queued.count(), 'scan_age_s': int(max(0, now - since.timestamp())) if since else None}
+
+
 def paused():
     from cveFeed.scan_control import pause_requested
     return bool(pause_requested(fail_closed=True))
@@ -314,6 +365,9 @@ def collect(now=None, boot=''):
         'assess': _probe('assessments', assessments, {}),
         'conductor': _probe('conductor', conductor_state, {}),
         'failures': _probe('failures', lambda: capacity_failures(now), {}),
+        'maint': _probe('maintainer signals', lambda: maintainer(now), {}),
+        'starve': _probe('queued scans', lambda: starve(now), {}),
+        'lanes': _probe('lane memory', lambda: lane_memory(now), {}),
     }
     measured = _probe('load', lambda: load(now))
     if measured:

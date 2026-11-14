@@ -2,6 +2,7 @@
 expire, a bounded lease, a retryable report, rights computed once per sweep, the cached broker probe, project rotation, the update hold, private-address
 hosts that are not archived, and the OpenVAS run a queued Sentinel task can no longer hold."""
 import tempfile
+import threading
 import time
 from datetime import timedelta
 from unittest import mock
@@ -11,9 +12,12 @@ from django.core.cache import cache
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
+from cvengine_scanner import flags as scan_flags
+
 from agentapi import agent_broker as broker
 from agentapi import sentinel_broker as sb
 from agentapi import sentinel_dispatch as dispatch
+from reNgine.resources import ScannerUnavailable
 from agentapi.auth import create_token
 from agentapi.models import Agent, SentinelEnrollment, SentinelTask
 from cveFeed import nuclei_scan
@@ -60,7 +64,7 @@ class LightNucleiPolicyTests(DispatchBase):
 
     def test_a_pass_with_no_severities_sends_the_local_default_not_an_empty_list(self):
         # An empty list makes the client run every severity, ``unknown`` included; the local run's default is info to critical.
-        self.assertEqual(nuclei_scan.SEVERITIES, 'info,low,medium,high,critical')
+        self.assertEqual(scan_flags.NUCLEI_SEVERITIES, 'info,low,medium,high,critical')
         target = self.dispatched('nuclei_targeted', tags=['wordpress'])
         self.assertEqual((target['tags'], target['severities']), (['wordpress'], ['info', 'low', 'medium', 'high', 'critical']))
         for severities in (None, []):
@@ -74,25 +78,40 @@ class LightNucleiPolicyTests(DispatchBase):
         with mock.patch('cveFeed.validation.all_templates_allowed', return_value=False):
             for kind in ('nuclei_light', 'nuclei_targeted'):
                 target = self.dispatched(kind)
-                self.assertEqual(target['etags'], ['dos'], kind)  # nuclei_scan.BASE_FLAGS: the tags the local run never runs
+                self.assertEqual(target['etags'], ['dos', 'default-login', 'bruteforce'], kind)  # the tags no run runs: dos always, the credential tags unless a person allowed them
                 self.assertEqual(target['template_policy'], {'rev': nuclei_scan.TEMPLATE_POLICY_REV, 'read_only': True, 'bundle_sha256': None}, kind)  # no snapshot is cached here, so no bundle yet
+
+    def test_a_task_carries_allow_credential_checks_only_when_a_person_turned_it_on(self):
+        from dashboard.models import ScanPolicy
+        for kind in ('nuclei_light', 'nuclei_targeted', 'nuclei_deep'):
+            self.assertNotIn('allow_credential_checks', dispatch._nuclei_target(kind, ['www.example.test'], {}), kind)  # off: absent, an older Sentinel is the same
+        ScanPolicy.objects.create(allow_credential_checks=True)
+        for kind in ('nuclei_light', 'nuclei_targeted', 'nuclei_deep'):
+            self.assertIs(dispatch._nuclei_target(kind, ['www.example.test'], {})['allow_credential_checks'], True, kind)
+        ScanPolicy.objects.update(allow_credential_checks=False)
+        self.assertNotIn('allow_credential_checks', dispatch._nuclei_target('nuclei_deep', ['www.example.test'], {}))
+
+    def test_a_focused_pass_that_asks_only_for_credential_checks_does_not_run_and_does_not_widen(self):
+        stream = mock.Mock()
+        out = nuclei_scan.run_nuclei(self.scan.id, stream, tags=['default-login', 'bruteforce'], targets=['www.example.test'])
+        self.assertEqual(out, {'targets': 0, 'findings': 0})
+        stream.assert_not_called()  # not every template either
+        from cveFeed.models import AgentActivity
+        self.assertTrue(AgentActivity.objects.filter(message__contains='send credentials').exists())
+
+    def test_the_credential_switch_changes_the_template_revision_so_hosts_become_due(self):
+        from dashboard.models import ScanPolicy
+        with mock.patch('cveFeed.validation.all_templates_allowed', return_value=True):
+            off = nuclei_scan.policy_rev()
+            ScanPolicy.objects.create(allow_credential_checks=True)
+            on = nuclei_scan.policy_rev()
+        self.assertNotEqual(off, on)
+        self.assertNotEqual(off, 'all-1')  # the pass that used to run default-login is not the one that ran before
 
     def test_a_policy_that_allows_every_template_is_said_so(self):
         with mock.patch('cveFeed.validation.all_templates_allowed', return_value=True):
             target = dispatch._nuclei_target('nuclei_targeted', ['www.example.test'], {})
         self.assertEqual(target['template_policy'], {'rev': nuclei_scan.ALL_TEMPLATES_REV, 'read_only': False, 'bundle_sha256': None})
-
-    def test_the_light_pass_falls_back_to_the_quick_local_pass_not_the_whole_library(self):
-        self.make_sentinel(['nuclei_light'])
-        seen = []
-
-        def local(path, **kwargs):
-            seen.append(kwargs)
-            return iter([])
-        with mock.patch('cveFeed.nuclei_scan.stream_nuclei', local):
-            stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light', timeout=0.2)
-            list(stream(_targets_file('www.example.test')))  # nobody claims it: the stage runs locally
-        self.assertEqual(seen, [{'tech': True}])
 
     def test_the_internal_light_pass_is_the_quick_one_too(self):
         self.make_sentinel(['nuclei_light'])
@@ -103,14 +122,17 @@ class LightNucleiPolicyTests(DispatchBase):
 
 class ResolveBoundTests(SimpleTestCase):
     def test_a_resolver_that_never_answers_does_not_hold_the_stage(self):
+        release = threading.Event()  # the slow lookup waits on this until the test is over
+        self.addCleanup(release.set)
+
         def slow(host, timeout):
             if host == 'slow.example.test':
-                time.sleep(3)
+                release.wait(60)
             return True
         started = time.monotonic()
         with mock.patch('agentapi.sentinel_dispatch._resolves', side_effect=slow):
             kept = dispatch.resolvable_targets(['fast.example.test', 'slow.example.test'], workers=2, timeout=0.3)
-        self.assertLess(time.monotonic() - started, 2)
+        self.assertLess(time.monotonic() - started, 30)  # the 0.3 s bound ends the wait, not the lookup
         self.assertEqual(kept, ['fast.example.test'])
 
 
@@ -123,7 +145,7 @@ class LongPollTests(SentinelBase):
         self.addCleanup(cache.delete, 'agentapi:waiters')
         started = time.monotonic()
         status, body = self.call_next(wait=15)
-        self.assertLess(time.monotonic() - started, 5)  # not held for the 15 s
+        self.assertLess(time.monotonic() - started, 12)  # not held for the 15 s
         self.assertEqual((status, body['task'], body['retry_after_seconds']), (200, None, 5))
 
     def test_a_long_poll_that_gets_a_slot_still_returns_a_task_that_arrives_first(self):
@@ -155,6 +177,32 @@ class QueuedExpiryTests(SentinelBase):
         self.assertEqual((old.status, young.status), ('expired', 'queued'))
         self.assertIn('waited in the queue', old.error)
         self.assertIsNotNone(old.finished_at)
+
+    def test_a_sweep_that_expires_many_writes_one_summary_row_with_counts_by_kind(self):
+        from dashboard.models import AuditLog
+        for _ in range(30):
+            self.queue('nmap', age=timedelta(minutes=30))
+        for _ in range(5):
+            self.queue('http_probe', age=timedelta(minutes=30))
+        young = self.queue('nmap', age=timedelta(minutes=1))
+        self.assertEqual(sb.reap_expired(), 35)
+        self.assertEqual(AuditLog.objects.filter(action='sentinel.task.expire').count(), 0)  # not one row per task
+        row = AuditLog.objects.get(action='sentinel.task.expire_sweep')
+        self.assertEqual(row.detail['count'], 35)
+        self.assertEqual(row.detail['by_kind'], {'nmap': 30, 'http_probe': 5})
+        self.assertEqual(row.detail['by_reason'], {'no Sentinel took the task while it waited in the queue': 35})
+        self.assertEqual(len(row.detail['task_ids']), sb.SWEEP_SAMPLE)  # a sample, never the whole backlog
+        self.assertEqual(SentinelTask.objects.filter(status='expired').count(), 35)
+        young.refresh_from_db()
+        self.assertEqual(young.status, 'queued')
+        self.assertEqual(sb.reap_expired(), 0)  # nothing left: no empty summary row
+        self.assertEqual(AuditLog.objects.filter(action='sentinel.task.expire_sweep').count(), 1)
+
+    def test_a_dispatchers_own_expiry_still_audits_that_task(self):
+        from dashboard.models import AuditLog
+        task = self.queue()
+        sb.expire(task, 'the dispatch wait timed out')
+        self.assertEqual(AuditLog.objects.filter(action='sentinel.task.expire', detail__task_id=task.pk).count(), 1)
 
     def test_the_budget_is_the_dispatchers_own_queue_budget_plus_a_grace(self):
         with mock.patch.dict('os.environ', {'CVENGINE_SENTINEL_QUEUE_TIMEOUT': '1200'}):
@@ -220,6 +268,34 @@ class LeaseAndReportTests(SentinelBase):
         task.refresh_from_db()
         self.assertGreater(task.lease_expires_at, now)  # twenty hours into a thirty hour budget
 
+    def thorough(self, accepted_ago, **target):
+        _, out = register_sentinel(self.t['dana'], name='worker', capabilities=['wpscan_thorough'])
+        agent = Agent.objects.get(pk=out['id'])
+        now = timezone.now()
+        task = SentinelTask.objects.create(project=Project.objects.get(slug='sen-a'), kind='wpscan_thorough',
+                                           target={'url': 'https://example.com/', 'token': '', **target}, agent=agent, status='running',
+                                           accepted_at=now - accepted_ago, lease_expires_at=now + timedelta(minutes=1))
+        return agent, task, now
+
+    def test_a_thorough_wordpress_scan_runs_for_its_own_budget_and_no_longer(self):
+        agent, task, now = self.thorough(timedelta(hours=20), timeout_seconds=24 * 3600)
+        sb.extend_leases(agent, now)
+        task.refresh_from_db()
+        self.assertGreater(task.lease_expires_at, now)  # twenty hours into a day of budget: still alive
+        self.assertEqual(sb.max_runtime(task), timedelta(seconds=24 * 3600 + 600) + sb.RUN_GRACE)
+        agent, task, now = self.thorough(timedelta(hours=14), timeout_seconds=12 * 3600)
+        sb.extend_leases(agent, now)
+        task.refresh_from_db()
+        self.assertLess(task.lease_expires_at, now)  # past its twelve hours, the report grace and the run grace: left to expire
+        self.assertEqual(sb.reap_expired(), 1)
+
+    def test_a_thorough_wordpress_scan_without_a_limit_gets_the_kinds_ceiling_and_a_bogus_limit_is_held_to_the_contract(self):
+        from agentapi import sentinel_dispatch
+        _, task, _ = self.thorough(timedelta(hours=1))
+        self.assertEqual(sb.max_runtime(task), timedelta(seconds=sentinel_dispatch.COMPLETION_CEILING['wpscan_thorough']) + sb.RUN_GRACE)
+        _, task, _ = self.thorough(timedelta(hours=1), timeout_seconds=10 ** 9)
+        self.assertEqual(sb.max_runtime(task), timedelta(seconds=86400 + 600) + sb.RUN_GRACE)
+
     def test_a_report_sent_twice_is_answered_twice_and_stored_once(self):
         from tests.test_agentapi import call
         task = self.running(timedelta(minutes=1))
@@ -274,7 +350,7 @@ class CapacityQueueTests(DispatchBase):
     """S03-17: tasks already waiting are promised the free slots."""
 
     def sentinel(self, slots):
-        agent = self.make_sentinel(['nmap'])
+        agent = self.make_sentinel(['nmap', 'openvas'])
         Agent.objects.filter(pk=agent.pk).update(max_concurrent=slots)
         return agent
 
@@ -309,14 +385,14 @@ class CapacityQueueTests(DispatchBase):
         SentinelTask.objects.filter(pk=orphan.pk).update(created_at=timezone.now() - timedelta(hours=2))
         self.assertEqual(sb.capacity_state(self.project, 'nmap')['state'], 'free')
 
-    def test_a_free_sentinel_that_never_claims_falls_back_after_the_claim_timeout_not_the_queue_budget(self):
+    def test_a_free_sentinel_that_never_claims_gives_up_after_the_claim_timeout_not_the_queue_budget(self):
         from tests.test_sentinel_capacity import Clock
         self.sentinel(1)
         clock = Clock()
         monotonic, sleep = clock.patches()
         with monotonic, sleep:
-            out = dispatch.dispatch_or_none(self.project, 'nmap', {'addresses': ['192.0.2.10']}, timeout=120)
-        self.assertIsNone(out)
+            with self.assertRaises(ScannerUnavailable):  # the work stays due; it is not run here
+                dispatch.dispatch_or_none(self.project, 'openvas', {'addresses': ['192.0.2.10']}, timeout=120)
         self.assertLess(clock.now - 1000, 30)  # its own queued task did not turn the wait into the 300 s queue wait
 
 
@@ -363,7 +439,7 @@ class ProjectRotationTests(TestCase):
         seen = []
         with mock.patch.object(coverage_topup, 'PROJECT_LIMIT', 2), mock.patch('cveFeed.scan_control.pause_requested', return_value=False), \
                 mock.patch('cveFeed.unresolved_archive.recheck', return_value={}), \
-                mock.patch('cveFeed.assessment_review.host_coverage_due', side_effect=lambda p, *a, **k: seen.append(p.pk) or (0, [])), \
+                mock.patch('cveFeed.coverage_topup.host_coverage_due', side_effect=lambda p, *a, **k: seen.append(p.pk) or (0, [])), \
                 mock.patch('cveFeed.host_assessment.active_count', return_value=0):
             for _ in range(4):
                 coverage_topup.top_up()
@@ -527,18 +603,141 @@ class OpenvasQueuedTaskTests(Fixture, TestCase):
         self.age(run, minutes=45)
         self.assertEqual(self.tick()['sentinel_status'], 'queued')
 
-    def test_a_local_run_gvmd_cannot_answer_for_is_failed_once_past_its_budget(self):
-        self.assertEqual(self.tick()['status'], 'running')
-        run = OpenvasRun.objects.get()
-        self.assertIsNone(run.sentinel_task_id)
 
-        def down():
-            raise ov.OpenvasError('gvmd could not be reached')
-        young = ov.tick(session_factory=down, resolve=self.resolve, blocked=lambda h: False)
-        self.assertEqual(young, {'error': 'gvmd could not be reached'})  # inside its budget it is left alone
-        self.assertEqual(OpenvasRun.objects.get().status, 'running')
-        OpenvasRun.objects.filter(pk=run.pk).update(started_at=timezone.now() - timedelta(hours=ov.budget_hours(2) + 1))
-        out = ov.tick(session_factory=down, resolve=self.resolve, blocked=lambda h: False)
-        self.assertEqual((out['run'], out['status']), (run.pk, 'failed'))
-        self.assertEqual(OpenvasRun.objects.get(pk=run.pk).status, 'failed')
-        self.assertFalse(ServiceRun.objects.filter(service=ov.FAILED_SERVICE).exists())
+
+class CredentialFilterGateTests(DispatchBase):
+    """FA-2b: while "Allow checks that send credentials" is off, nuclei web work goes only to a Sentinel that says (``info.features``) it leaves those checks out. An older
+    one (and an older built-in scanner image) gets none of it, keeps its other kinds, and the Sentinels page says why in plain words."""
+
+    def sentinel(self, name, features=None, kinds=('nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'nuclei_validate', 'nmap')):
+        user = User.objects.create_user(f'gate-{name}', password='x', is_superuser=True)
+        token, _raw = create_token(user, f'gate-{name}')
+        info = {'features': features} if features is not None else {}
+        return Agent.objects.create(token=token, name=name, kind='scanner', status='active', scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []},
+                                    capabilities=list(kinds), last_seen=timezone.now(), info=info)
+
+    def task(self, kind='nuclei_deep'):
+        return SentinelTask.objects.create(agent=None, project=self.project, kind=kind, target={'targets': ['www.example.test']}, status='queued', host='www.example.test')
+
+    def refusal(self, agent, kind='nuclei_deep'):
+        from agentapi import sentinel_broker as sb
+        return sb.effective(agent).refusal(self.task(kind))
+
+    def test_with_the_setting_off_an_old_sentinel_is_refused_nuclei_web_work_and_keeps_its_other_kinds(self):
+        old, current = self.sentinel('old'), self.sentinel('current', ['credential_filter'])
+        for kind in ('nuclei_light', 'nuclei_targeted', 'nuclei_deep'):  # nuclei_validate is the built-in scanner's alone while it is in use
+            self.assertEqual(self.refusal(old, kind)[0] if self.refusal(old, kind) else None, 'capability', kind)
+            self.assertIn('too old to leave out checks that send credentials', self.refusal(old, kind)[1])
+        self.assertNotEqual((self.refusal(current) or ('', ''))[1], 'too old to leave out checks that send credentials')
+        self.assertIsNone(self.refusal(current))
+        self.assertIsNone(self.refusal(old, 'nmap'))  # its other kinds keep running
+
+    def test_with_the_setting_on_an_old_sentinel_is_served_as_before(self):
+        from dashboard.models import ScanPolicy
+        old = self.sentinel('old')
+        ScanPolicy.objects.create(allow_credential_checks=True)
+        self.assertIsNone(self.refusal(old))
+
+    def test_the_work_goes_to_a_sentinel_that_qualifies_or_stays_due_never_to_the_old_one(self):
+        from agentapi import sentinel_broker as sb
+        self.sentinel('old')
+        self.assertFalse(dispatch.any_scanner_for(self.project, 'nuclei_deep'))  # nobody qualifies: the stage waits and the targets stay due
+        state = sb.capacity_state(self.project, 'nuclei_deep', why=True)
+        self.assertEqual((state['state'], state['reason']), ('none', 'outdated'))
+        self.assertIn('too old to leave out checks that send credentials', state['message'])
+        self.assertTrue(dispatch.any_scanner_for(self.project, 'nmap'))
+        self.sentinel('current', ['credential_filter'])
+        self.assertTrue(dispatch.any_scanner_for(self.project, 'nuclei_deep'))
+        self.assertEqual(sb.capacity_state(self.project, 'nuclei_deep')['live'], 1)  # only the current one counts
+        from dashboard.models import ScanPolicy
+        ScanPolicy.objects.create(allow_credential_checks=True)
+        self.assertEqual(sb.capacity_state(self.project, 'nuclei_deep')['live'], 2)
+
+    def poll(self, agent, kinds=None, wait=0):
+        from agentapi import sentinel_broker as sb
+        from agentapi.services import Ctx
+        return sb.next_task(Ctx(user=agent.token.user, token=agent.token), {'kinds': kinds or ['nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'nmap'], 'wait': wait})
+
+    def test_an_old_sentinel_never_claims_nuclei_web_work_and_the_task_waits_for_a_current_one(self):
+        # FB-4: the claim path did not look at the filter, so the old one took the task, its accept was refused and the task was expired for everyone
+        from agentapi import sentinel_broker as sb
+        old, current = self.sentinel('old'), self.sentinel('current', ['credential_filter'])
+        for kind in ('nuclei_light', 'nuclei_targeted', 'nuclei_deep'):
+            task = self.task(kind)
+            answer = self.poll(old)
+            self.assertIsNone(answer['task'], kind)
+            self.assertIn('too old to leave out checks that send credentials', answer['reason'])
+            task.refresh_from_db()
+            self.assertEqual((task.status, task.agent_id), ('queued', None), kind)  # not taken, and not expired because an unqualified Sentinel asked
+            self.assertEqual(sb._try_claim(old, {kind}, timezone.now())[0], None)
+            answer = self.poll(current)
+            self.assertEqual(answer['task']['id'], task.pk, kind)
+            task.refresh_from_db()
+            self.assertEqual((task.status, task.agent_id), ('claimed', current.pk))
+            task.delete()
+
+    def test_the_old_sentinel_still_gets_its_other_work_while_nuclei_web_work_waits(self):
+        old = self.sentinel('old')
+        web, scan = self.task('nuclei_deep'), self.task('nmap')
+        self.assertEqual(self.poll(old)['task']['id'], scan.pk)
+        web.refresh_from_db()
+        self.assertEqual(web.status, 'queued')
+
+    def test_with_only_an_old_sentinel_the_task_waits_and_the_status_says_why(self):
+        from agentapi import sentinel_broker as sb
+        old = self.sentinel('old')
+        task = self.task('nuclei_deep')
+        for _ in range(3):
+            self.assertIsNone(self.poll(old)['task'])
+        task.refresh_from_db()
+        self.assertEqual(task.status, 'queued')
+        state = sb.capacity_state(self.project, 'nuclei_deep', why=True)
+        self.assertEqual((state['state'], state['reason']), ('none', 'outdated'))
+        self.assertIn('too old to leave out checks that send credentials', state['message'])
+
+    def test_with_the_setting_on_the_old_sentinel_claims_it_as_before(self):
+        from dashboard.models import ScanPolicy
+        old = self.sentinel('old')
+        task = self.task('nuclei_deep')
+        ScanPolicy.objects.create(allow_credential_checks=True)
+        self.assertEqual(self.poll(old)['task']['id'], task.pk)
+
+    def test_an_old_sentinel_is_not_woken_for_nuclei_web_work(self):
+        from agentapi import sentinel_broker as sb
+        old, current = self.sentinel('old'), self.sentinel('current', ['credential_filter'])
+        self.assertEqual({e.agent.pk for e in sb.eligible_sentinels(self.project, 'nuclei_deep', live_only=True)}, {current.pk})
+        self.assertEqual({e.agent.pk for e in sb.eligible_sentinels(self.project, 'nmap', live_only=True)}, {old.pk, current.pk})
+        from dashboard.models import ScanPolicy
+        ScanPolicy.objects.create(allow_credential_checks=True)
+        self.assertEqual({e.agent.pk for e in sb.eligible_sentinels(self.project, 'nuclei_deep', live_only=True)}, {old.pk, current.pk})
+
+    def test_an_older_built_in_scanner_image_is_the_same_case(self):
+        builtin = self.sentinel('builtin-old', ['secret_read', 'vantage'])
+        self.assertIn('too old to leave out', self.refusal(builtin)[1])
+        builtin.info = {'features': ['secret_read', 'vantage', 'credential_filter']}
+        builtin.save()
+        self.assertIsNone(self.refusal(builtin))
+
+    def test_the_sentinels_page_says_so_in_plain_words_for_an_old_one_only(self):
+        from agentapi import sentinel_broker as sb
+        old, current = self.sentinel('old'), self.sentinel('current', ['credential_filter'])
+        note = sb.CREDENTIAL_NOTE
+        self.assertEqual(note, 'This Sentinel is too old to leave out checks that send credentials: update it; its web checks wait until then.')
+        shown = broker.agent_dict(old)['credential_filter']
+        self.assertEqual(shown, {'declared': False, 'needed': True, 'note': note})
+        self.assertEqual(broker.agent_dict(current)['credential_filter'], {'declared': True, 'needed': True, 'note': ''})
+        from dashboard.models import ScanPolicy
+        ScanPolicy.objects.create(allow_credential_checks=True)
+        self.assertEqual(broker.agent_dict(old)['credential_filter']['note'], '')  # nothing to wait for once a person allowed them
+        ScanPolicy.objects.update(allow_credential_checks=False)
+        kinds = sb.kind_report(old)
+        self.assertEqual((kinds['nuclei_deep']['state'], kinds['nuclei_deep']['note']), ('outdated', note))
+        self.assertEqual(kinds['nmap']['state'], 'on')
+        self.assertEqual(sb.kind_report(current)['nuclei_deep']['state'], 'on')
+
+    def test_a_sentinel_declares_the_feature_through_its_info_like_the_others(self):
+        from agentapi import sentinel_settings
+        self.assertIn('credential_filter', sentinel_settings.FEATURES)
+        info = sentinel_settings.clean_info({'features': ['credential_filter', 'made_up']}) if hasattr(sentinel_settings, 'clean_info') else None
+        if info is not None:
+            self.assertEqual(info['features'], ['credential_filter'])

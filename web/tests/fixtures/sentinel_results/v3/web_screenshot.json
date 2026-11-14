@@ -1,0 +1,35 @@
+{
+  "outcome": "done",
+  "sandbox": {
+    "engaged": true,
+    "reason": "",
+    "version": "156.0.8078.4"
+  },
+  "pages": [
+    {
+      "id": "1",
+      "outcome": "ok",
+      "reason": "",
+      "final_url": "https://www.example.com/",
+      "status": 200,
+      "title": "Example Domain",
+      "image": "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAoCAIAAADBrGu+AAAAYklEQVR42u3XwQnAIAwF0F8oncWRHNExXaC52EMVXvAUc3nwCeRK2p28vV70x2bzT44uAAAAgN8BvfgaRX+veRECAAAA+Ao4Y99X8yIEAAAA4B4QIQAAAAD3gAgBAAAALNUEqlAWBN9e40cAAAAASUVORK5CYII="
+    },
+    {
+      "id": "2",
+      "outcome": "unreachable",
+      "reason": "The connection was refused.",
+      "final_url": "",
+      "status": null,
+      "title": ""
+    }
+  ],
+  "touched": [
+    "www.example.com",
+    "fonts.example.net"
+  ],
+  "refused": [
+    "admin.example.com"
+  ],
+  "dropped_requests": 1
+}

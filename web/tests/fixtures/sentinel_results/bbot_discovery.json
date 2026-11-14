@@ -1,0 +1,31 @@
+{
+  "outcome": "done",
+  "partials": 2,
+  "mode": "standard",
+  "incomplete": "",
+  "scan_name": "demonic_jimmy",
+  "web_events": {
+    "URL": 3,
+    "HTTP_RESPONSE": 2
+  },
+  "problems": [
+    {
+      "module": "shodan_dns",
+      "reason": "API key was rejected"
+    }
+  ],
+  "hard_failures": [],
+  "cuts": [
+    {
+      "what": "events",
+      "kind": "items",
+      "limit": 5000,
+      "dropped": 12
+    },
+    {
+      "what": "time_limit",
+      "kind": "time",
+      "limit": 21600
+    }
+  ]
+}

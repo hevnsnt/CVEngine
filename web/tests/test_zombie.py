@@ -1,7 +1,5 @@
 import datetime
 import http.server
-import json
-import threading
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -56,20 +54,6 @@ class HostHandler(http.server.BaseHTTPRequestHandler):
 
 	def log_message(self, *args):
 		pass
-
-
-class AliveProbeTests(SimpleTestCase):
-	def test_any_http_answer_counts_and_the_old_name_is_the_host_header(self):
-		server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), HostHandler)
-		threading.Thread(target=server.serve_forever, daemon=True).start()
-		self.addCleanup(server.server_close)
-		self.addCleanup(server.shutdown)
-		# The probe refuses loopback by design; this fixture is the only loopback server involved.
-		with mock.patch('cveFeed.pinned_transport.is_scannable_ip', return_value=True):
-			self.assertTrue(zombie.http_alive('old.example.test', '127.0.0.1', server.server_address[1], 'http'))
-			self.assertEqual(HostHandler.hosts, ['old.example.test'])
-			self.assertFalse(zombie.http_alive('old.example.test', '127.0.0.1', 1, 'http'))
-		self.assertFalse(zombie.http_alive('old.example.test', '127.0.0.1', server.server_address[1], 'http'))  # gate on: refused
 
 
 class ZombieHostTests(ChangeFixture, TestCase):

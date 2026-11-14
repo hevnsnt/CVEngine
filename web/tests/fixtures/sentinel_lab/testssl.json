@@ -1,0 +1,529 @@
+{
+ "kind": "testssl",
+ "name": "testssl",
+ "payload": {
+  "handshake": true,
+  "items": [
+   {
+    "cve": "",
+    "finding": "HTTP",
+    "id": "service",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "No 128 cipher limit bug",
+    "id": "pre_128cipher",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "not offered",
+    "id": "SSLv2",
+    "severity": "OK"
+   },
+   {
+    "cve": "",
+    "finding": "not offered",
+    "id": "SSLv3",
+    "severity": "OK"
+   },
+   {
+    "cve": "",
+    "finding": "offered (deprecated)",
+    "id": "TLS1",
+    "severity": "LOW"
+   },
+   {
+    "cve": "",
+    "finding": "offered (deprecated)",
+    "id": "TLS1_1",
+    "severity": "LOW"
+   },
+   {
+    "cve": "",
+    "finding": "offered",
+    "id": "TLS1_2",
+    "severity": "OK"
+   },
+   {
+    "cve": "",
+    "finding": "not offered + downgraded to weaker protocol",
+    "id": "TLS1_3",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "not offered",
+    "id": "NPN",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "http/1.1",
+    "id": "ALPN",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "not offered",
+    "id": "cipherlist_NULL",
+    "severity": "OK"
+   },
+   {
+    "cve": "",
+    "finding": "offered",
+    "id": "cipherlist_aNULL",
+    "severity": "CRITICAL"
+   },
+   {
+    "cve": "",
+    "finding": "not offered",
+    "id": "cipherlist_EXPORT",
+    "severity": "OK"
+   },
+   {
+    "cve": "",
+    "finding": "not offered",
+    "id": "cipherlist_LOW",
+    "severity": "OK"
+   },
+   {
+    "cve": "",
+    "finding": "not offered",
+    "id": "cipherlist_3DES_IDEA",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "offered",
+    "id": "cipherlist_OBSOLETED",
+    "severity": "LOW"
+   },
+   {
+    "cve": "",
+    "finding": "offered",
+    "id": "cipherlist_STRONG_NOFS",
+    "severity": "OK"
+   },
+   {
+    "cve": "",
+    "finding": "offered",
+    "id": "cipherlist_STRONG_FS",
+    "severity": "OK"
+   },
+   {
+    "cve": "",
+    "finding": "offered",
+    "id": "FS",
+    "severity": "OK"
+   },
+   {
+    "cve": "",
+    "finding": "ECDHE-RSA-AES256-GCM-SHA384 ECDHE-RSA-AES256-SHA384 ECDHE-RSA-AES256-SHA ECDHE-RSA-CHACHA20-POLY1305 ECDHE-RSA-CAMELLIA256-SHA384 ECDHE-ARIA256-GCM-SHA384 ECDHE-RSA-AES128-GCM-SHA256 ECDHE-RSA-AES128-SHA256 ECDHE-RSA-AES128-SHA ECDHE-RSA-CAMELLIA128-SHA256 ECDHE-ARIA128-GCM-SHA256",
+    "id": "FS_ciphers",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "No KEMs offered",
+    "id": "FS_KEMs",
+    "severity": "LOW"
+   },
+   {
+    "cve": "",
+    "finding": "prime256v1 secp384r1 secp521r1 X25519 X448",
+    "id": "FS_ECDHE_curves",
+    "severity": "OK"
+   },
+   {
+    "cve": "",
+    "finding": "RSA-PSS-RSAE+SHA384 RSA-PSS-RSAE+SHA256 RSA+SHA512 RSA+SHA384 RSA+SHA256 RSA+SHA224 RSA+SHA1",
+    "id": "FS_TLS12_sig_algs",
+    "severity": "LOW"
+   },
+   {
+    "cve": "",
+    "finding": "'server name/#0' 'max fragment length/#1' 'EC point formats/#11' 'application layer protocol negotiation/#16' 'encrypt-then-mac/#22' 'extended master secret/#23' 'session ticket/#35' 'renegotiation info/#65281'",
+    "id": "TLS_extensions",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "valid for 300 seconds only (<daily)",
+    "id": "TLS_session_ticket",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "yes",
+    "id": "SSL_sessionID_support",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "supported",
+    "id": "sessionresumption_ticket",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "not supported",
+    "id": "sessionresumption_ID",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "random",
+    "id": "TLS_timestamp",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "N/A",
+    "id": "cert_compression",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "none",
+    "id": "clientAuth",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "1",
+    "id": "cert_numbers",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "SHA256 with RSA",
+    "id": "cert_signatureAlgorithm",
+    "severity": "OK"
+   },
+   {
+    "cve": "",
+    "finding": "RSA 1024 bits (exponent is 65537)",
+    "id": "cert_keySize",
+    "severity": "MEDIUM"
+   },
+   {
+    "cve": "",
+    "finding": "No server key usage information",
+    "id": "cert_keyUsage",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "No server extended key usage information",
+    "id": "cert_extKeyUsage",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "01",
+    "id": "cert_serialNumber",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "1 is not enough entropy",
+    "id": "cert_serialNumberLen",
+    "severity": "LOW"
+   },
+   {
+    "cve": "",
+    "finding": "1BCA48C6DB631CF5158CD335FCE0A43315244760",
+    "id": "cert_fingerprintSHA1",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "302DADACAF7C9C5B9FC9183CD59F0BE0A0DA44B3208F05BDA8AA7443D3219588",
+    "id": "cert_fingerprintSHA256",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "-----BEGIN CERTIFICATE-----\nMIIBrjCCARegAwIBAgIBATANBgkqhkiG9w0BAQsFADAdMRswGQYDVQQDDBJ3cm9uZy1uYW1lLmludmFsaWQwHhcNMjMxMDI0MDAwMDAwWhcNMjQxMTI3MDAwMDAwWjAdMRswGQYDVQQDDBJ3cm9uZy1uYW1lLmludmFsaWQwgZ8wDQYJKoZIhvcNAQEBBQADgY0AMIGJAoGBANrf9A89XJvY2WnuzQNterEuZ1RnDOzxhNMxP0jXYLkBb18GBhuC1OLYUQSZF9iD1MkKqoyU2R2fKywWZ7XcFhUxNihNOBULdTNNmal2fADZgXO7e0/c7EWgE+91bpXeaeL5nZQbg09hc2MlqIfvZ9n2JCqsH6L/53UzEMcMlz51AgMBAAEwDQYJKoZIhvcNAQELBQADgYEAMu7seEgq6+Fp/UlD++SZZUhB8qqQSWco0hqhnOk0qq1Mn8EqPQx5kI/56UjngecG+p/BriO1ufmxTO9e1x7gQP0HhG7Wuk+eq129uH2n9FWyN2ZCAGNeTGqG6LjjFrgmndlPb2Esx8Kt2Y4mH+KoAg1IYHCBIqGHD1yUNo7T4BA=\n-----END CERTIFICATE-----",
+    "id": "cert",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "wrong-name.invalid",
+    "id": "cert_commonName",
+    "severity": "OK"
+   },
+   {
+    "cve": "",
+    "finding": "wrong-name.invalid",
+    "id": "cert_commonName_wo_SNI",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "No SAN, browsers are complaining",
+    "id": "cert_subjectAltName",
+    "severity": "HIGH"
+   },
+   {
+    "cve": "",
+    "finding": "certificate does not match supplied URI (same w/o SNI)",
+    "id": "cert_trust",
+    "severity": "HIGH"
+   },
+   {
+    "cve": "",
+    "finding": "failed (self signed).",
+    "id": "cert_chain_of_trust",
+    "severity": "CRITICAL"
+   },
+   {
+    "cve": "",
+    "finding": "no",
+    "id": "cert_certificatePolicies_EV",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "expired",
+    "id": "cert_expirationStatus",
+    "severity": "CRITICAL"
+   },
+   {
+    "cve": "",
+    "finding": "2023-10-24 00:00",
+    "id": "cert_notBefore",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "2024-11-27 00:00",
+    "id": "cert_notAfter",
+    "severity": "CRITICAL"
+   },
+   {
+    "cve": "",
+    "finding": "400 > 398 days",
+    "id": "cert_extlifeSpan",
+    "severity": "MEDIUM"
+   },
+   {
+    "cve": "",
+    "finding": "not present",
+    "id": "cert_eTLS",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "--",
+    "id": "cert_crlDistributionPoints",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "--",
+    "id": "cert_ocspURL",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "Neither CRL nor OCSP URI provided",
+    "id": "cert_revocation",
+    "severity": "HIGH"
+   },
+   {
+    "cve": "",
+    "finding": "not offered",
+    "id": "OCSP_stapling",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "--",
+    "id": "cert_mustStapleExtension",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "check skipped as instructed",
+    "id": "DNS_CAArecord",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "--",
+    "id": "certificate_transparency",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "1",
+    "id": "certs_countServer",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "no",
+    "id": "certs_list_ordering_problem",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "wrong-name.invalid",
+    "id": "cert_caIssuers",
+    "severity": "INFO"
+   },
+   {
+    "cve": "",
+    "finding": "intermediate certificate(s) is/are ok",
+    "id": "intermediate_cert_badOCSP",
+    "severity": "OK"
+   },
+   {
+    "cve": "CVE-2014-0160",
+    "finding": "not vulnerable, no heartbeat extension",
+    "id": "heartbleed",
+    "severity": "OK"
+   },
+   {
+    "cve": "CVE-2014-0224",
+    "finding": "not vulnerable",
+    "id": "CCS",
+    "severity": "OK"
+   },
+   {
+    "cve": "CVE-2016-9244",
+    "finding": "not vulnerable",
+    "id": "ticketbleed",
+    "severity": "OK"
+   },
+   {
+    "cve": "CVE-2017-17382 CVE-2017-17427 CVE-2017-17428 CVE-2017-13098 CVE-2017-1000385 CVE-2017-13099 CVE-2016-6883 CVE-2012-5081 CVE-2017-6168",
+    "finding": "not vulnerable",
+    "id": "ROBOT",
+    "severity": "OK"
+   },
+   {
+    "cve": "",
+    "finding": "supported",
+    "id": "secure_renego",
+    "severity": "OK"
+   },
+   {
+    "cve": "CVE-2011-1473",
+    "finding": "not vulnerable",
+    "id": "secure_client_renego",
+    "severity": "OK"
+   },
+   {
+    "cve": "CVE-2012-4929",
+    "finding": "not vulnerable",
+    "id": "CRIME_TLS",
+    "severity": "OK"
+   },
+   {
+    "cve": "CVE-2013-3587",
+    "finding": "not vulnerable, no gzip/deflate/compress/br HTTP compression  - only supplied '/' tested",
+    "id": "BREACH",
+    "severity": "OK"
+   },
+   {
+    "cve": "CVE-2014-3566",
+    "finding": "not vulnerable, no SSLv3",
+    "id": "POODLE_SSL",
+    "severity": "OK"
+   },
+   {
+    "cve": "",
+    "finding": "supported",
+    "id": "fallback_SCSV",
+    "severity": "OK"
+   },
+   {
+    "cve": "CVE-2016-2183 CVE-2016-6329",
+    "finding": "not vulnerable",
+    "id": "SWEET32",
+    "severity": "OK"
+   },
+   {
+    "cve": "CVE-2015-0204",
+    "finding": "not vulnerable",
+    "id": "FREAK",
+    "severity": "OK"
+   },
+   {
+    "cve": "CVE-2016-0800 CVE-2016-0703",
+    "finding": "not vulnerable on this host and port",
+    "id": "DROWN",
+    "severity": "OK"
+   },
+   {
+    "cve": "CVE-2016-0800 CVE-2016-0703",
+    "finding": "Make sure you don't use this certificate elsewhere with SSLv2 enabled services, see https://search.censys.io/search?resource=hosts&virtual_hosts=INCLUDE&q=302DADACAF7C9C5B9FC9183CD59F0BE0A0DA44B3208F05BDA8AA7443D3219588",
+    "id": "DROWN_hint",
+    "severity": "INFO"
+   },
+   {
+    "cve": "CVE-2015-4000",
+    "finding": "not vulnerable, no DH EXPORT ciphers,",
+    "id": "LOGJAM",
+    "severity": "OK"
+   },
+   {
+    "cve": "CVE-2015-4000",
+    "finding": "no DH key with <= TLS 1.2",
+    "id": "LOGJAM-common_primes",
+    "severity": "OK"
+   },
+   {
+    "cve": "CVE-2011-3389",
+    "finding": "ECDHE-RSA-AES256-SHA AECDH-AES256-SHA AES256-SHA CAMELLIA256-SHA ECDHE-RSA-AES128-SHA AECDH-AES128-SHA AES128-SHA CAMELLIA128-SHA",
+    "id": "BEAST_CBC_TLS1",
+    "severity": "MEDIUM"
+   },
+   {
+    "cve": "CVE-2011-3389",
+    "finding": "VULNERABLE -- but also supports higher protocols  TLSv1.1 TLSv1.2 (likely mitigated)",
+    "id": "BEAST",
+    "severity": "LOW"
+   },
+   {
+    "cve": "CVE-2013-0169",
+    "finding": "potentially vulnerable, uses obsolete TLS CBC ciphers",
+    "id": "LUCKY13",
+    "severity": "LOW"
+   },
+   {
+    "cve": "CVE-2014-6321",
+    "finding": "not vulnerable",
+    "id": "winshock",
+    "severity": "OK"
+   },
+   {
+    "cve": "CVE-2013-2566 CVE-2015-2808",
+    "finding": "not vulnerable",
+    "id": "RC4",
+    "severity": "OK"
+   },
+   {
+    "cve": "",
+    "finding": "123",
+    "id": "scanTime",
+    "severity": "INFO"
+   }
+  ],
+  "outcome": "done",
+  "returncode": 0
+ },
+ "sentinel_seconds": 123.0,
+ "target": {
+  "host": "tls.lab.test",
+  "ip": "192.0.2.11",
+  "port": 443,
+  "starttls": ""
+ },
+ "tool_rows": 85
+}

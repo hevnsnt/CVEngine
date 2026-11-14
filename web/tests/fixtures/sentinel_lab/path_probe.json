@@ -1,0 +1,35 @@
+{
+ "kind": "path_probe",
+ "name": "path_probe",
+ "payload": {
+  "outcome": "done",
+  "results": [
+   {
+    "ip": "192.0.2.10",
+    "odd": true,
+    "plain": true,
+    "port": 81
+   },
+   {
+    "ip": "192.0.2.11",
+    "odd": true,
+    "plain": true,
+    "port": 9
+   }
+  ]
+ },
+ "sentinel_seconds": 1.0,
+ "target": {
+  "targets": [
+   {
+    "ip": "192.0.2.10",
+    "port": 81
+   },
+   {
+    "ip": "192.0.2.11",
+    "port": 9
+   }
+  ]
+ },
+ "tool_rows": null
+}

@@ -1,0 +1,165 @@
+{
+ "kind": "ssh_probe",
+ "name": "ssh_probe",
+ "payload": {
+  "hosts": [
+   {
+    "address": "192.0.2.12",
+    "check_hits": [],
+    "observations": [
+     {
+      "evidence": "SSH-2.0-OpenSSH_10.3; software: OpenSSH_10.3",
+      "id": "ssh_banner",
+      "severity": 0,
+      "title": "SSH banner and software version",
+      "verified": true
+     },
+     {
+      "evidence": "ecdsa-sha2-nistp256 256 bits; ssh-ed25519 256 bits; ssh-rsa 3072 bits",
+      "id": "ssh_hostkeys",
+      "severity": 0,
+      "title": "SSH host key algorithms and key sizes",
+      "verified": true
+     },
+     {
+      "evidence": "publickey, password, keyboard-interactive",
+      "id": "ssh_auth_methods",
+      "severity": 0,
+      "title": "SSH authentication methods offered",
+      "verified": true
+     },
+     {
+      "evidence": "mlkem768x25519-sha256, sntrup761x25519-sha512, sntrup761x25519-sha512@openssh.com, curve25519-sha256, curve25519-sha256@libssh.org, ecdh-sha2-nistp256, ecdh-sha2-nistp384, ecdh-sha2-nistp521, ext-info-s, kex-strict-s-v00@openssh.com",
+      "id": "ssh_algorithms_kexalgos",
+      "severity": 0,
+      "title": "SSH key exchange algorithms offered",
+      "verified": true
+     },
+     {
+      "evidence": "ecdsa-sha2-nistp256, ssh-ed25519, rsa-sha2-512, rsa-sha2-256",
+      "id": "ssh_algorithms_hostkeyalgos",
+      "severity": 0,
+      "title": "SSH host key algorithms offered",
+      "verified": true
+     },
+     {
+      "evidence": "chacha20-poly1305@openssh.com, aes128-gcm@openssh.com, aes256-gcm@openssh.com, aes128-ctr, aes192-ctr, aes256-ctr",
+      "id": "ssh_algorithms_cipherc2s",
+      "severity": 0,
+      "title": "SSH ciphers client-to-server algorithms offered",
+      "verified": true
+     },
+     {
+      "evidence": "chacha20-poly1305@openssh.com, aes128-gcm@openssh.com, aes256-gcm@openssh.com, aes128-ctr, aes192-ctr, aes256-ctr",
+      "id": "ssh_algorithms_ciphers2c",
+      "severity": 0,
+      "title": "SSH ciphers server-to-client algorithms offered",
+      "verified": true
+     },
+     {
+      "evidence": "umac-64-etm@openssh.com, umac-128-etm@openssh.com, hmac-sha2-256-etm@openssh.com, hmac-sha2-512-etm@openssh.com, hmac-sha1-etm@openssh.com, umac-64@openssh.com, umac-128@openssh.com, hmac-sha2-256, hmac-sha2-512, hmac-sha1",
+      "id": "ssh_algorithms_macc2s",
+      "severity": 0,
+      "title": "SSH MACs client-to-server algorithms offered",
+      "verified": true
+     },
+     {
+      "evidence": "umac-64-etm@openssh.com, umac-128-etm@openssh.com, hmac-sha2-256-etm@openssh.com, hmac-sha2-512-etm@openssh.com, hmac-sha1-etm@openssh.com, umac-64@openssh.com, umac-128@openssh.com, hmac-sha2-256, hmac-sha2-512, hmac-sha1",
+      "id": "ssh_algorithms_macs2c",
+      "severity": 0,
+      "title": "SSH MACs server-to-client algorithms offered",
+      "verified": true
+     },
+     {
+      "evidence": "none, zlib@openssh.com",
+      "id": "ssh_algorithms_compc2s",
+      "severity": 0,
+      "title": "SSH compression client-to-server algorithms offered",
+      "verified": true
+     },
+     {
+      "evidence": "none, zlib@openssh.com",
+      "id": "ssh_algorithms_comps2c",
+      "severity": 0,
+      "title": "SSH compression server-to-client algorithms offered",
+      "verified": true
+     },
+     {
+      "evidence": "agent-forward, ping@openssh.com, publickey-hostbound@openssh.com, server-sig-algs=ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,sk-ssh-ed25519@openssh.co...",
+      "id": "ssh_extensions",
+      "severity": 0,
+      "title": "SSH protocol extensions offered",
+      "verified": true
+     },
+     {
+      "evidence": "host key blocklist data: not downloaded to this Sentinel yet (it downloads in the background after the Sentinel starts); a compromised host key would not have been found",
+      "id": "badkeys_not_checked",
+      "severity": 0,
+      "title": "Host keys were not checked against the badkeys blocklist",
+      "verified": false
+     }
+    ],
+    "port": 2222,
+    "reached": true
+   },
+   {
+    "address": "192.0.2.10",
+    "check_hits": [],
+    "error": "the tool wrote no result: the address was unreachable, nothing there speaks SSH, or the handshake did not finish; the host key blocklist data is not downloaded yet",
+    "observations": [
+     {
+      "evidence": "the tool wrote no result: the address was unreachable, nothing there speaks SSH, or the handshake did not finish; the host key blocklist data is not downloaded yet",
+      "id": "ssh_not_inspected",
+      "severity": 0,
+      "title": "SSH service could not be inspected",
+      "verified": false
+     },
+     {
+      "evidence": "host key blocklist data: not downloaded to this Sentinel yet (it downloads in the background after the Sentinel starts); a compromised host key would not have been found",
+      "id": "badkeys_not_checked",
+      "severity": 0,
+      "title": "Host keys were not checked against the badkeys blocklist",
+      "verified": false
+     }
+    ],
+    "port": 22,
+    "reached": false
+   }
+  ],
+  "outcome": "done",
+  "refused": [],
+  "touched": [
+   "192.0.2.12",
+   "192.0.2.10"
+  ]
+ },
+ "sentinel_seconds": 1.7,
+ "target": {
+  "scope": {
+   "addresses": [
+    "192.0.2.12",
+    "192.0.2.10"
+   ],
+   "blocked": [],
+   "domains": [],
+   "excluded": [],
+   "excluded_trees": [],
+   "hosts": [
+    "192.0.2.12",
+    "192.0.2.10"
+   ],
+   "private": true
+  },
+  "targets": [
+   {
+    "address": "192.0.2.12",
+    "port": 2222
+   },
+   {
+    "address": "192.0.2.10",
+    "port": 22
+   }
+  ]
+ },
+ "tool_rows": null
+}

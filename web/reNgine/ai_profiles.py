@@ -11,6 +11,61 @@ from urllib.parse import urlsplit
 DEFAULT_REPLY_CAP = 2048  # the reply limit (tokens) of Anthropic and of a self-hosted server when nothing else is set
 STAGE_REPLY_CAPS = {'triage': 400}  # a triage answer is a short JSON object: 300 cut off 14% of them on a local model (issue 209), 400 does not
 
+# ----------------------------------------------------------------------------- Anthropic prompt caching
+
+# The shortest prompt (tokens, tools and system included) Anthropic will cache; a shorter prefix marked with cache_control is processed
+# normally, with no error and no cache write. From Anthropic's prompt caching page (read 2026-11-10): 512 for Fable, Mythos, Opus 5 and 5.5,
+# Sonnet 5.5 and Haiku 5.5; 1024 for Sonnet 5 and 4.x, Opus 4.8, 4.1 and 4; 2048 for Opus 4.7 and Haiku 3.5; 4096 for Opus 4.5 and 4.6
+# and Haiku 4.5. A name that is not a Claude model, or a version not listed, gets the highest figure (4096): caching is then only tried
+# on a prompt that is long under any model.
+CACHE_MIN_DEFAULT = 4096
+
+
+def cache_min_tokens(model):
+	version = claude_version(model)
+	if not version:
+		return CACHE_MIN_DEFAULT
+	family, major, minor = version
+	if family in ('fable', 'mythos'):
+		return 512
+	if family == 'opus':
+		return 512 if (major, minor) >= (5, 0) else 2048 if (major, minor) == (4, 7) else 4096 if (major, minor) in ((4, 5), (4, 6)) else 1024
+	if family == 'sonnet':
+		return 512 if (major, minor) >= (5, 5) else 1024
+	if family == 'haiku':
+		return 512 if (major, minor) >= (5, 5) else 4096 if (major, minor) >= (4, 5) else 2048
+	return CACHE_MIN_DEFAULT
+
+
+CACHE_TTLS = ('5m', '1h')
+# How long Anthropic keeps a cached prefix without a hit (a hit renews it at no charge). A write costs 1.25x the input price for 5m and 2x
+# for 1h; a read costs 0.1x (0.05x on Sonnet 5.5 and Opus 5.5). So 1h pays when the stage's calls come in runs more than 5 minutes apart but
+# less than an hour apart (cve_detection: the authoring task runs every 30 minutes), 5m when they come in bursts (a scan's triage, plans and
+# targeting: seconds apart), and 'off' when calls are rarer than hourly (a write that is never read costs 25% to 100% more than no cache).
+# A stage that is not listed gets DEFAULT_CACHE_TTL. A stage's prefix shorter than cache_min_tokens is never marked, whatever is here.
+STAGE_CACHE_TTL = {
+	'cve_detection': '1h',
+	'finding_triage': '5m', 'finding_triage_repair': '5m', 'validation_plan': '5m', 'nuclei_tag_selection': '5m',
+	'host_review': '5m', 'host_review_repair': '5m', 'local_check_suggestion': '5m', 'template_generation': '5m', 'template_validation': '5m', 'assessment_review': '5m', 'cve_confirmation': '5m',
+	'nuclei_targeting': 'off',  # its system prompt carries the offered tag list, which differs between scans: a write nobody reads costs 25% more
+	'autotune_advisor': 'off', 'connection_test': 'off', 'rdp_screenshot': 'off', 'report_writing': 'off',
+}
+DEFAULT_CACHE_TTL = '5m'
+
+
+def prompt_cache_on():
+	"""False when ``CVENGINE_AI_PROMPT_CACHE`` is ``off``, ``0``, ``false`` or ``no``: every request is then sent as before 1.4, unmarked."""
+	import os
+	return os.environ.get('CVENGINE_AI_PROMPT_CACHE', '').strip().lower() not in ('off', '0', 'false', 'no')
+
+
+def stage_cache_ttl(stage):
+	"""'5m', '1h' or 'off' for a usage stage ('off' for every stage when the switch is off)."""
+	if not prompt_cache_on():
+		return 'off'
+	return STAGE_CACHE_TTL.get(stage, DEFAULT_CACHE_TTL)
+
+
 REASONING_LEVELS = ('off', 'low', 'medium', 'high', 'max')  # CVENGINE_AI_REASONING; unset sends nothing
 MECHANISMS = ('none', 'effort', 'toggle', 'budget', 'adaptive')
 TRANSPORTS = ('anthropic', 'openai_chat', 'ollama')
@@ -201,6 +256,72 @@ def reasoning_plan(provider_id, model, level, max_tokens=None):
 	if budget < BUDGET_MINIMUM:
 		return {}, f'the reply limit ({max_tokens}) leaves no room for a thinking budget of at least {BUDGET_MINIMUM} tokens: raise CVENGINE_AI_MAX_TOKENS'
 	return {'thinking': {'type': 'enabled', 'budget_tokens': budget}}, ''
+
+
+# ----------------------------------------------------------------------------- the reply limit: answer room, thinking room, retry
+
+# Tokens the ANSWER of each pipeline stage needs, with headroom (a limit is a ceiling, not a price: only the tokens written are billed).
+# Used when the operator set no limit of their own. A hosted model (Anthropic) is never sent less than DEFAULT_REPLY_CAP; a self-hosted
+# server is sent exactly the stage's own (see ``reply_cap_by_stage``). A stage that is not listed gets DEFAULT_REPLY_CAP.
+STAGE_ANSWER_CAPS = {
+	'finding_triage': 400, 'finding_triage_repair': 400,  # a short JSON object
+	'local_check_suggestion': 1024, 'rdp_screenshot': 1024, 'validation_plan': 1024, 'operations_check': 4000,
+	'finding_review': 4000, 'host_review': 6000, 'host_review_repair': 6000, 'autotune_advisor': 2000, 'cve_detection': 8192,
+	'template_generation': 6144,  # a whole detection template (YAML with requests, matchers and extractors)
+	'template_validation': 4096,  # the fixture (two short responses) or the critique of an AI-written template: a small JSON object
+}
+# The reasoning of a model (a thinking block, or a local model's reasoning) is paid from the reply limit on Anthropic and on the self-hosted
+# servers. Without room of its own it can take the whole limit before the first word of the answer (stop reason max_tokens, no text), so
+# the limit sent is the answer's room PLUS this reserve; the reserve follows the Reasoning setting and is 0 when no thinking can happen.
+THINKING_RESERVE = {None: 2048, 'off': 0, 'low': 2048, 'medium': 4096, 'high': 8192, 'max': 16384}
+REPLY_CEILING = 32768  # the largest reply limit ever sent: the Settings range's top
+# A reply cut off at its limit is asked once more with RETRY_FACTOR times the answer room, never more than RETRY_CEILING tokens in all (the
+# operator's own limit is the base, the retry may exceed it only up to this ceiling, and a limit already at it is not retried).
+RETRY_FACTOR = 2
+RETRY_CEILING = REPLY_CEILING
+
+
+def thinking_reserve(provider_id, model, level):
+	"""Tokens of the reply limit to keep for the model's reasoning, apart from its answer: 0 for a provider that is sent no limit or a model
+	that does not reason (or has reasoning switched off), else by the Reasoning setting (``level``; None is \"not set\": a model that thinks
+	unless told not to is given the default). Pure."""
+	profile = PROFILES.get(provider_id)
+	if profile is None or not profile.reply_cap:
+		return 0
+	mechanism = profile.reasoning_detect(model)
+	if mechanism == 'none':
+		return 0
+	if mechanism == 'budget':  # thinks only when asked: the budget is the reserve
+		return _BUDGET.get(level, 0)
+	if level == 'off':
+		if provider_id == 'anthropic':
+			return 0 if anthropic_can_disable(model) else THINKING_RESERVE[None]
+		return 0 if profile.reasoning_field else THINKING_RESERVE[None]  # a switch that is not ours to flip: the model may still think
+	return THINKING_RESERVE.get(level, THINKING_RESERVE[None])
+
+
+def answer_room(profile, stage_cap=None):
+	"""The answer room (tokens) a request gets when the operator set none: the stage's own for a self-hosted server, at least
+	DEFAULT_REPLY_CAP for a hosted one, 0 when the provider is sent no limit. Pure."""
+	if not profile.reply_cap:
+		return 0
+	stage = stage_cap if isinstance(stage_cap, int) and not isinstance(stage_cap, bool) and stage_cap > 0 else 0
+	if profile.reply_cap_by_stage:
+		return stage or profile.reply_cap
+	return max(stage, profile.reply_cap)
+
+
+def reply_total(answer, reserve, factor=1):
+	"""The limit to send: ``factor`` times the answer room plus the thinking reserve, never more than REPLY_CEILING. Pure."""
+	return min(REPLY_CEILING, int(answer) * int(factor or 1) + int(reserve or 0)) if answer else 0
+
+
+def retry_total(answer, reserve, sent):
+	"""The limit of the one retry after a reply was cut off at ``sent``, or 0 when asking again with more room is not possible (nothing was
+	sent, or ``sent`` is already at the ceiling). Pure."""
+	bigger = min(RETRY_CEILING, reply_total(answer, reserve, RETRY_FACTOR))
+	return bigger if bigger > (sent or 0) else 0
+
 
 
 # ----------------------------------------------------------------------------- the settings an operator can change

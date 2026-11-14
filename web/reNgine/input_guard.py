@@ -21,7 +21,6 @@ account is disabled, its API tokens are revoked, and a public IP is blocked for 
 and proxy addresses are never IP-banned (that would block a whole site), and superusers are only logged. An admin
 lifts a ban in Django admin (AbuseBan.lifted) and re-enables the user.
 """
-import ipaddress
 import json
 import logging
 import os
@@ -79,14 +78,20 @@ BOUNTY_TEXT_PATH = re.compile(r'^/cve/api/bounty/(reports|engagements)(/|$)')
 # body is not scanned here because it is not free text: cveFeed.inventory_schema allows one fixed shape and cleans every string, and
 # nothing in it reaches a shell, a query or a template. Its address and query string are still checked.
 INVENTORY_PATH = re.compile(r'^/api/v1/projects/[-\w]+/inventory/?$')
-# What a Sentinel reports (the result of a scan-stage task, its heartbeat) is machine data about scanned hosts: a nuclei template's description,
-# a testssl finding, a WPScan report excerpt or a banner is whatever that software or a hostile host says, and backticks, `${...}`, `<script>`
+# What a Sentinel reports (the result of a scan-stage task, the partial batches of a streamed one, its heartbeat) is machine data about scanned hosts: a nuclei template's description,
+# a TLS audit finding, a WordPress scan report excerpt or a banner is whatever that software or a hostile host says, and backticks, `${...}`, `<script>`
 # and SQL fragments appear in it routinely. Counting it against the Sentinel's owner would disable an administrator's account and revoke
 # its tokens for one template with a backtick in its description (and the result would be lost). Its body is not scanned here because it is
-# not free text: ``agentapi.sentinel_broker.clean_result`` and ``sentinel_settings.clean_info`` allow one fixed shape per kind, clip every
+# not free text: ``agentapi.sentinel_broker.clean_result``, ``sentinel_stream.clean_partial`` and ``sentinel_settings.clean_info`` allow one fixed shape per kind, clip every
 # string and cap every list, and nothing in it reaches a shell, a query or a template. Its address and query string are still checked, and
 # so is every other Sentinel route (registration and bootstrap carry what a person typed).
-SENTINEL_MACHINE_PATH = re.compile(r'^/api/v1/sentinel/(?:tasks/\d+/result|heartbeat)/?$')
+SENTINEL_MACHINE_PATH = re.compile(r'^/api/v1/sentinel/(?:tasks/\d+/(?:result|partial)|heartbeat)/?$')
+# The AI reviewer's verdicts and operations report are the same kind of machine data: a model's note about a finding quotes what the scanned
+# host served (a script tag, an SQL fragment, a template expression) as a matter of course. cveFeed.reviewer accepts only enums and one note,
+# which it strips of markup and links and stores as text; nothing in it reaches a shell, a query or a template. An answer to one of the
+# pipeline's AI jobs (cveFeed.ai_jobs) is a model's reply about scanned hosts, a nuclei template among them: it is checked by the stage's own
+# validator, stored as data and never reaches a shell, a query or a template either.
+REVIEWER_MACHINE_PATH = re.compile(r'^/api/v1/reviewer/(?:findings/t\d{1,12}/(?:verdict|refusal)|ops/report|jobs/\d{1,12}/result)/?$')
 BOUNTY_TEXT_FIELDS = frozenset({'title', 'summary', 'steps', 'impact', 'remediation', 'references', 'evidence', 'response', 'request', 'curl',
                                 'note', 'notes', 'location_url', 'cwe', 'cvss_vector'})
 
@@ -188,7 +193,7 @@ def _request_pairs(request):
         length = 0
     data = None
     if request.method in ('POST', 'PUT', 'PATCH', 'DELETE') and 0 < length <= MAX_BODY and not INVENTORY_PATH.match(request.path) \
-            and not SENTINEL_MACHINE_PATH.match(request.path):
+            and not SENTINEL_MACHINE_PATH.match(request.path) and not REVIEWER_MACHINE_PATH.match(request.path):
         if ctype == 'application/json':
             try:
                 data = json.loads(request.body.decode('utf-8', 'replace'))
@@ -298,6 +303,21 @@ def record_and_maybe_ban(request, hits, ip, user):
     return acted
 
 
+def _oversize_api_json(request):
+    """True for a JSON body over ``MAX_BODY`` sent to the REST API or the MCP endpoint (not the machine routes, which carry their own bounds). The guard
+    inspects nothing above ``MAX_BODY``, so a body that large would otherwise reach the handlers uninspected (review 2 F6): it is refused instead."""
+    if request.method not in ('POST', 'PUT', 'PATCH') or not API_PATH.match(request.path):
+        return False
+    if INVENTORY_PATH.match(request.path) or SENTINEL_MACHINE_PATH.match(request.path) or REVIEWER_MACHINE_PATH.match(request.path):
+        return False
+    if (request.META.get('CONTENT_TYPE') or '').split(';')[0].strip().lower() != 'application/json':
+        return False
+    try:
+        return int(request.META.get('CONTENT_LENGTH') or 0) > MAX_BODY
+    except ValueError:
+        return False
+
+
 class InputGuardMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
@@ -305,6 +325,8 @@ class InputGuardMiddleware:
     def __call__(self, request):
         if EXEMPT_PATH.match(request.path):
             return self.get_response(request)
+        if _oversize_api_json(request):
+            return JsonResponse({'error': f'the request body is larger than {MAX_BODY // 1024} KiB'}, status=413)
         try:
             hits = inspect(_request_pairs(request))
         except Exception:  # noqa: BLE001 - never take the app down because inspection failed

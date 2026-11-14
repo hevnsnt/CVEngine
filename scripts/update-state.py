@@ -11,6 +11,7 @@ import uuid
 
 MAX_LEGACY_LOG_BYTES = 8 * 1024 * 1024
 PHASE_VALUES = ('idle', 'draining', 'applying', 'done', 'failed')
+WATCHDOG_ACTIONS = ('restart-celery', 'restart-celery-beat', 'prune-docker')  # what the web container's watchdog may ask the host for
 
 
 def regular_fd(path, *, dir_fd=None):
@@ -192,6 +193,12 @@ def main():
                 destination.flush()
                 os.fsync(destination.fileno())
             os.unlink('.update-requeue.json', dir_fd=web_fd)
+        elif action == 'disk':
+            # `disk FREE_MB NEED_MB`: how much room Docker's directory has and what the next update needs (scripts/update-disk.sh), for the Update screen
+            free, need = int(sys.argv[2]), int(sys.argv[3])
+            if not (0 <= free < 10**9 and 0 <= need < 10**9):
+                raise ValueError('invalid disk figures')
+            publish(web_fd, '.update-disk.json', [json.dumps({'free_mb': free, 'need_mb': need, 'at': time.time()}).encode('ascii') + b'\n'])
         elif action == 'approval':
             with os.fdopen(regular_fd('.update-approved', dir_fd=web_fd), 'rb') as source:
                 value = source.read(256).strip()
@@ -206,6 +213,14 @@ def main():
             except (FileNotFoundError, OSError, ValueError):
                 value = b''
             print('auto' if value == b'auto' else 'manual')
+        elif action == 'wait-scans':
+            # "1" only when an administrator turned on "Wait for scans to finish before updating" in Settings > Updates; a missing, unreadable or odd file is 0
+            try:
+                with os.fdopen(regular_fd('.update-wait-scans', dir_fd=web_fd), 'rb') as source:
+                    value = source.read(8).strip()
+            except (FileNotFoundError, OSError, ValueError):
+                value = b''
+            print('1' if value == b'1' else '0')
         elif action == 'approval-branch':
             # the branch the administrator chose in Settings, or nothing when the file is missing or not a plain branch name
             try:
@@ -250,9 +265,50 @@ def main():
                     or not isinstance(row.get('at'), int)):
                 raise ValueError('invalid OpenVAS answer')
             publish(web_fd, '.openvas-applied', [json.dumps(row).encode('utf-8') + b'\n'])
+        elif action in ('sentinels-choice', 'plan-wanted'):
+            # the answer to "which scanners run" the app handed over: one of internal, both, external, nothing else, read without following a link the
+            # container may have planted. sentinels-choice (it rides with an update approval) is removed once read; plan-wanted stays until plan-done.
+            name = '.update-sentinels' if action == 'sentinels-choice' else '.scanner-plan-wanted'
+            try:
+                with os.fdopen(regular_fd(name, dir_fd=web_fd), 'rb') as source:
+                    value = source.read(16).strip()
+            except (FileNotFoundError, OSError, ValueError):
+                return
+            if action == 'sentinels-choice':
+                try:
+                    os.unlink(name, dir_fd=web_fd)
+                except OSError:
+                    pass
+            if value in (b'internal', b'both', b'external'):
+                print(value.decode('ascii'))
+        elif action == 'plan-done':
+            # PLAN ok|failed NOTE: the answer to .scanner-plan-wanted; the request is removed so it is carried out once
+            plan, outcome, note = sys.argv[2], sys.argv[3], (sys.argv[4] if len(sys.argv) > 4 else '')
+            if plan not in ('internal', 'both', 'external') or outcome not in ('ok', 'failed') or len(note) > 200:
+                raise ValueError('invalid scanner plan answer')
+            publish(web_fd, '.scanner-plan-applied.json', [json.dumps({'plan': plan, 'ok': outcome == 'ok', 'note': note, 'at': time.time()}).encode('utf-8') + b'\n'])
+            try:
+                os.unlink('.scanner-plan-wanted', dir_fd=web_fd)
+            except OSError:
+                pass
+        elif action == 'notice':
+            # what an update that could not ask leaves for the Sentinels page and the update result: `notice scanner_kept LIMIT EXTERNALS`, or `notice clear`
+            if sys.argv[2:3] == ['clear']:
+                try:
+                    os.unlink('.update-notice.json', dir_fd=web_fd)
+                except OSError:
+                    pass
+            else:
+                code, limit, externals = sys.argv[2], sys.argv[3], int(sys.argv[4])
+                if code != 'scanner_kept' or not re.fullmatch(r'\d+[kmg]?', limit) or not 0 <= externals <= 100000:
+                    raise ValueError('invalid update notice')
+                publish(web_fd, '.update-notice.json', [json.dumps({'code': code, 'limit': limit, 'externals': externals, 'at': time.time()}).encode('utf-8') + b'\n'])
         elif action == 'openvas-restarted':
             # the answer to web/.openvas-restart (scripts/openvas-sync.sh restart-gvmd): when the request was carried out, so it runs once
             publish(web_fd, '.openvas-restarted', [json.dumps({'at': int(time.time()), 'ok': sys.argv[2:3] == ['ok']}).encode('ascii') + b'\n'])
+        elif action == 'scanner-update-done':
+            # scripts/update-watch.sh started the scanner update the app asked for (web/.scanner-update-requested): one marker, so one request runs once
+            publish(web_fd, '.scanner-update-done', [json.dumps({'at': int(time.time())}).encode('ascii') + b'\n'])
         elif action == 'openvas-log':
             # the tail of the host-private log of the OpenVAS switch, for the app's "see web/.openvas-log" hint
             with os.fdopen(regular_fd(sys.argv[2]), 'rb') as source:
@@ -282,6 +338,33 @@ def main():
                 'checked_at': now, 'result': result, 'error': error, 'not_after': not_after,
                 'renewed_at': now if result == 'issued' else previous.get('renewed_at'),
             }).encode('utf-8')])
+        elif action == 'watchdog-request':
+            # the request the web container's watchdog left (web/.watchdog-action, docs/WATCHDOG.md): read without following a link, only the three
+            # known actions and a plain id accepted, and removed once read so it is carried out once. Prints `ID ACTION RULE`, or nothing.
+            try:
+                with os.fdopen(regular_fd('.watchdog-action', dir_fd=web_fd), 'rb') as source:
+                    raw = source.read(1025)
+            except (FileNotFoundError, OSError, ValueError):
+                raw = b''
+            try:
+                os.unlink('.watchdog-action', dir_fd=web_fd)
+            except OSError:
+                pass
+            try:
+                row = json.loads(raw) if 0 < len(raw) <= 1024 else None
+            except ValueError:
+                row = None
+            if (isinstance(row, dict) and re.fullmatch(r'[0-9a-f]{12}', str(row.get('id'))) and re.fullmatch(r'R[0-9]{1,2}', str(row.get('rule')))
+                    and row.get('action') in WATCHDOG_ACTIONS):
+                print(row['id'], row['action'], row['rule'])
+        elif action == 'watchdog-result':
+            # `watchdog-result ID ACTION ok|failed|standdown|limit-day|limit-gap DETAIL` (a limit-* answer is a refusal for one of the host's own limits: failed, but not a fault): the host's answer to that request (web/.watchdog-result)
+            wid, name, outcome = sys.argv[2], sys.argv[3], sys.argv[4]
+            detail = sys.argv[5] if len(sys.argv) > 5 else ''
+            if not re.fullmatch(r'[0-9a-f]{12}', wid) or name not in WATCHDOG_ACTIONS or outcome not in ('ok', 'failed', 'standdown', 'limit-day', 'limit-gap') or len(detail) > 300:
+                raise ValueError('invalid watchdog answer')
+            publish(web_fd, '.watchdog-result', [json.dumps({'id': wid, 'action': name, 'ok': outcome == 'ok', 'standdown': outcome == 'standdown', 'limit': outcome[6:] if outcome.startswith('limit-') else '',
+                                                              'detail': detail, 'at': time.time()}).encode('utf-8') + b'\n'])
         elif action == 'phase':
             value = sys.argv[2]
             if value not in PHASE_VALUES:

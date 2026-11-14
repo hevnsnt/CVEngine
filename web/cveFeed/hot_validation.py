@@ -45,6 +45,37 @@ def min_gap_hours():
     return max(0.0, float(tunables.value('validate_min_gap_hours', MIN_GAP_HOURS)))
 
 
+def line_status(job_failed, really_failed):
+    """The status of a validation's activity line. The job is ``failed`` (and retried) also when it was only held: its checks were blocked by scope or
+    policy, or the day's cap was reached. Neither is a failure of the scan, and the status check counts every ``failed`` line of a kind as one
+    (``cveFeed.reviewer.ops_checks``, \"Scans and tasks are failing\"), so only a check or an AI review that really failed makes the line ``failed``."""
+    return 'failed' if job_failed and really_failed else 'done'
+
+
+def outcome_words(job_failed, really_failed, capped_only):
+    """What the line says happened: ``failed``, ``deferred (daily cap reached, retried after the reset)``, ``held (nothing was run: blocked by scope or
+    policy; retried later)`` or ``completed``."""
+    if not job_failed:
+        return 'completed'
+    if really_failed:
+        return 'failed'
+    return 'deferred (daily cap reached, retried after the reset)' if capped_only else 'held (nothing was run: blocked by scope or policy; retried later)'
+
+
+def line_outcome(checks, check_state, ai_state, capped_only):
+    """``(status, words)`` of a validation's activity line. The AI step being put off (``deferred``, or ``queued`` for the reviewer container) after
+    the checks ran and none failed or was blocked is not a failure of anything: the line is ``deferred`` and the status check does not count it. A check or an AI review that
+    really failed is ``failed``, as before, whatever the AI step did; a blocked check is the ``held`` line it always was (policy, not a fault), never ``deferred``."""
+    ai_failed = ai_state == 'failed'
+    broken = bool(checks.get('failed') or checks.get('blocked'))  # a check that failed or was blocked is never "deferred", whatever the AI step does
+    put_off = check_state == 'checked' and ai_state in ('deferred', 'queued') and not capped_only and not broken
+    really = ai_failed or (bool(checks.get('failed')) and not put_off)
+    if put_off:
+        return 'deferred', 'is waiting on its AI step'
+    job_failed = really or any(checks.get(key) for key in ('failed', 'blocked')) or capped_only
+    return line_status(job_failed, really), outcome_words(job_failed, really, capped_only)
+
+
 def retry_after(attempts, capped_only=False):
     """When a failed validation of the same evidence may be queued again. Stopped only by the per-day caps: once the caps reset,
     without spending an attempt. Otherwise an exponential backoff (5 min, doubling, at most 6 h), and None once MAX_ATTEMPTS
@@ -240,8 +271,9 @@ def _inside_min_gap(row, now):
     return bool(keys) and triage.revalidation_key(triage.describe(match)) in keys
 
 
-def enqueue(row, lane):
-    """Idempotent dispatch of this persisted finding. No target argument reaches the broker."""
+def enqueue(row, lane, source='automatic'):
+    """Idempotent dispatch of this persisted finding. No target argument reaches the broker. ``source`` is who asked: ``automatic`` (the sweep) or
+    ``host_review`` (the AI host review's chosen step, ``cveFeed.host_actions``): neither is a person's work, and both run under the unattended gates."""
     from cveFeed.tasks import automatic_validate_finding, validate_match_on_demand
 
     priority = PRIORITY[lane]
@@ -282,7 +314,7 @@ def enqueue(row, lane):
                     attempts = next_attempt_number(carried, row.signature, lambda j: row.signature)
                 else:
                     attempts = next_attempt_number(previous, row.signature, lambda j: j.evidence_signature)
-                job = OnDemandValidation.objects.create(match_id=row.match_id, project_id=row.project_id,
+                job = OnDemandValidation.objects.create(match_id=row.match_id, project_id=row.project_id, source=source,
                     evidence_signature=row.signature, priority=priority, attempts=attempts)
                 task, promoted = validate_match_on_demand, False
         else:
@@ -299,7 +331,7 @@ def enqueue(row, lane):
             else:
                 if _active_count(row.project_id) >= cap:
                     return 'project_cap'
-                job = AutomaticValidation.objects.create(triage=row, project_id=row.project_id,
+                job = AutomaticValidation.objects.create(triage=row, project_id=row.project_id, source=source,
                     signature=row.signature, priority=priority,
                     attempts=next_attempt_number(previous, row.signature, lambda j: j.signature))
                 task, promoted = automatic_validate_finding, False
@@ -335,11 +367,52 @@ def _backfill_projects(limit=2):
     return len(ids)
 
 
+def _active_counts():
+    """``{project id: validations queued or running}``: the two tables ``_active_count`` reads for one project, counted for every project in two queries."""
+    from django.db.models import Count
+    counts = {}
+    for model in (OnDemandValidation, AutomaticValidation):
+        for project_id, n in model.objects.filter(status__in=('queued', 'running')).order_by().values_list('project_id').annotate(n=Count('id')):
+            counts[project_id] = counts.get(project_id, 0) + n
+    return counts
+
+
+def _latest_jobs(rows):
+    """``{row.pk: its newest validation job}`` for a page of candidate rows: one query for the CVE matches' jobs and one for the other findings', where
+    ``enqueue`` looked each one up under a row lock."""
+    out = {}
+    matches = {row.match_id: row.pk for row in rows if row.match_id}
+    if matches:
+        for job in OnDemandValidation.objects.filter(match_id__in=matches).order_by('match_id', '-id').distinct('match_id'):
+            out[matches[job.match_id]] = job
+    others = [row.pk for row in rows if not row.match_id]
+    if others:
+        for job in AutomaticValidation.objects.filter(triage_id__in=others).order_by('triage_id', '-id').distinct('triage_id'):
+            out[job.triage_id] = job
+    return out
+
+
+def _settled(row, lane, jobs, active, now):
+    """The outcome label of a candidate that ``enqueue`` would only turn away, or None when it might queue or promote a job and must be looked at under
+    its lock. Read from the page's jobs and the projects' active counts, so the many candidates a sweep turns away (a project at its cap, a finding whose
+    validation is running or finished a day ago) cost no statement each."""
+    job = jobs.get(row.pk)
+    if job is not None and job.status in ('queued', 'running'):
+        return None if job.status == 'queued' and job.priority > PRIORITY[lane] else 'inflight'
+    if job is not None and _recently_handled(job, row.signature, now):
+        return 'fresh'
+    if active.get(row.project_id, 0) >= (PROJECT_ICE_CAP if lane == ICE else PROJECT_ACTIVE_CAP):
+        return 'project_cap'
+    return None
+
+
 def sweep(page=PAGE, max_jobs=MAX_ENQUEUE):
     page = max(1, min(int(page), PAGE))
     max_jobs = max(1, min(int(max_jobs), MAX_ENQUEUE))
     stats = {'projects': _backfill_projects(), 'fire': 0, 'smoke': 0, 'ice': 0, 'promoted': 0,
              'fresh': 0, 'inflight': 0, 'project_cap': 0, 'failed': 0, 'stale': 0, 'min_gap': 0}
+    active = _active_counts()
+    now = timezone.now()
     for lane in (FIRE, SMOKE, ICE) if validate_all_matches() else (FIRE, SMOKE):
         cursor, _ = HotValidationCursor.objects.get_or_create(lane=lane)
         base = _candidate_rows(lane)
@@ -347,13 +420,18 @@ def sweep(page=PAGE, max_jobs=MAX_ENQUEUE):
         if not rows:
             cursor.last_pk = 0
             rows = list(base[:page])
+        jobs = _latest_jobs(rows)
+        last = None
         for row in rows:
             if stats[FIRE] + stats[SMOKE] + stats[ICE] >= max_jobs:
                 break  # next sweep starts with the first deferred row
-            result = enqueue(row, lane)
+            last = row
+            result = _settled(row, lane, jobs, active, now) or enqueue(row, lane)
             if result in stats:
                 stats[result] += 1
             elif result == 'queued':
                 stats[lane] += 1
-            HotValidationCursor.objects.filter(lane=lane).update(last_pk=row.pk, updated_at=timezone.now())
+                active[row.project_id] = active.get(row.project_id, 0) + 1
+        if last is not None:  # the cursor moves once per lane, to the last row looked at (it was moved after every row)
+            HotValidationCursor.objects.filter(lane=lane).update(last_pk=last.pk, updated_at=timezone.now())
     return stats

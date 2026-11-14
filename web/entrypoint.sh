@@ -14,6 +14,9 @@ case "${DEBUG:-0}" in
         # attempts and a worker recycled by --max-requests does not reset them. The timeout matches the proxy's 300 s read timeout so a bulk add that checks many
         # targets is not cut off. Static files come from the nginx proxy (collectstatic runs in the celery
         # container), not from here.
+        # Only the gunicorn process gets a database statement timeout (30 s, CVENGINE_WEB_STATEMENT_TIMEOUT_MS, 0 = none): the migration above, the management
+        # commands run with `exec` and the workers must not be cut off by it, and a web request that needs more than 30 s for one statement is too big (review 2 F2).
+        export CVENGINE_WEB_STATEMENT_TIMEOUT_MS="${CVENGINE_WEB_STATEMENT_TIMEOUT_MS-30000}"
         exec python3 -m gunicorn reNgine.wsgi:application \
             --bind 0.0.0.0:8000 \
             --worker-class gthread \

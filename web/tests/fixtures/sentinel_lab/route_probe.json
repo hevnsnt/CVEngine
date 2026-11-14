@@ -1,0 +1,189 @@
+{
+ "kind": "route_probe",
+ "name": "route_probe",
+ "payload": {
+  "outcome": "done",
+  "refused": [],
+  "routes": [
+   {
+    "bytes": 437,
+    "content_type": "text/html",
+    "credentials": [],
+    "evidence": {
+     "bytes": 437,
+     "cookies": [],
+     "fingerprint_names": [
+      "nginx:1.31.8",
+      "WordPress:6.4.1",
+      "PHP"
+     ],
+     "fingerprints": [
+      {
+       "name": "nginx:1.31.8",
+       "source": "header:server"
+      },
+      {
+       "name": "WordPress:6.4.1",
+       "source": "meta:generator"
+      },
+      {
+       "name": "PHP",
+       "source": "page:.php link"
+      }
+     ],
+     "headers": {
+      "content-type": "text/html",
+      "server": "nginx/1.31.8"
+     },
+     "markers": [],
+     "provider": "",
+     "redirect_to": "",
+     "script_page": {
+      "capped": false,
+      "inline": [],
+      "inline_unread": 0,
+      "loaders": [],
+      "query_versions": [
+       {
+        "library": "other",
+        "version": "6.4.1"
+       }
+      ],
+      "scripts": 1,
+      "stub": false,
+      "truncated": false,
+      "unread": 0,
+      "url_versions": [
+       "6.4.1"
+      ]
+     },
+     "script_urls": [
+      "http://192.0.2.10/wp-includes/js/wp-embed.min.js"
+     ],
+     "server": "nginx/1.31.8"
+    },
+    "id": "http://192.0.2.10/",
+    "sensitive": {},
+    "sensitive_score": 0,
+    "state": "open",
+    "status": 200,
+    "title": "cvtv lab blog"
+   },
+   {
+    "bytes": 88,
+    "content_type": "application/octet-stream",
+    "credentials": [],
+    "evidence": {
+     "bytes": 88,
+     "cookies": [],
+     "fingerprint_names": [
+      "nginx:1.31.8"
+     ],
+     "fingerprints": [
+      {
+       "name": "nginx:1.31.8",
+       "source": "header:server"
+      }
+     ],
+     "markers": [],
+     "provider": "",
+     "redirect_to": "",
+     "server": "nginx/1.31.8"
+    },
+    "id": "http://192.0.2.10/wp-login.php",
+    "sensitive": {},
+    "sensitive_score": 0,
+    "state": "open",
+    "status": 200,
+    "title": ""
+   },
+   {
+    "bytes": 82,
+    "content_type": "application/json",
+    "credentials": [],
+    "evidence": {
+     "bytes": 82,
+     "cookies": [],
+     "fingerprint_names": [
+      "nginx:1.31.8"
+     ],
+     "fingerprints": [
+      {
+       "name": "nginx:1.31.8",
+       "source": "header:server"
+      }
+     ],
+     "markers": [],
+     "provider": "",
+     "redirect_to": "",
+     "server": "nginx/1.31.8"
+    },
+    "id": "http://192.0.2.10/wp-json/wp/v2/users",
+    "sensitive": {},
+    "sensitive_score": 0,
+    "state": "open",
+    "status": 200,
+    "title": ""
+   },
+   {
+    "bytes": 153,
+    "content_type": "text/html",
+    "credentials": [],
+    "evidence": {
+     "bytes": 153,
+     "cookies": [],
+     "fingerprint_names": [
+      "nginx:1.31.8"
+     ],
+     "fingerprints": [
+      {
+       "name": "nginx:1.31.8",
+       "source": "header:server"
+      }
+     ],
+     "markers": [],
+     "provider": "",
+     "redirect_to": "",
+     "server": "nginx/1.31.8"
+    },
+    "id": "http://192.0.2.10/missing",
+    "sensitive": {},
+    "sensitive_score": 0,
+    "state": "not_found",
+    "status": 404,
+    "title": "404 Not Found"
+   }
+  ],
+  "touched": [
+   "192.0.2.10"
+  ]
+ },
+ "sentinel_seconds": 1.4,
+ "target": {
+  "hosts": [
+   {
+    "host": "192.0.2.10",
+    "urls": [
+     "http://192.0.2.10/",
+     "http://192.0.2.10/wp-login.php",
+     "http://192.0.2.10/wp-json/wp/v2/users",
+     "http://192.0.2.10/missing"
+    ]
+   }
+  ],
+  "scope": {
+   "addresses": [
+    "192.0.2.10"
+   ],
+   "blocked": [],
+   "domains": [],
+   "excluded": [],
+   "excluded_trees": [],
+   "hosts": [
+    "192.0.2.10"
+   ],
+   "private": true
+  }
+ },
+ "tool_rows": null
+}

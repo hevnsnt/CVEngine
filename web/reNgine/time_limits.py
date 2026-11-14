@@ -24,7 +24,7 @@ MIN_SECONDS = 60
 VISIBILITY_MARGIN = 600
 
 # hard limit in seconds per queue (a value above the redelivery window is held to it, see ``_ceiling``); a queue that is not here has no
-# limit. openvas_queue is left out on purpose: a local OpenVAS task has a budget of 24 hours per host (cveFeed.openvas_scan.
+# limit. openvas_queue is left out on purpose: the Sentinel's OpenVAS task has a budget of 24 hours per host (cveFeed.openvas_scan.
 # DEFAULT_MAX_HOURS) and keeps its own deadline.
 SCAN_QUEUE = 24 * HOUR  # "as long as is safe"
 DEFAULTS = {
@@ -33,6 +33,8 @@ DEFAULTS = {
     'validation_priority_queue': SCAN_QUEUE,
     'wpscan_queue': SCAN_QUEUE,
     'testssl_queue': SCAN_QUEUE,
+    'report_queue': 1 * HOUR,  # a PDF takes seconds to minutes; the task keeps its own hour limit
+    'planner_queue': 2 * HOUR,  # a planned batch is one Sentinel task of up to 25 hosts or endpoints, waited for; its own task limit is the same
     'screenshot_queue': 2 * HOUR,  # a drain stops taking batches after 40 minutes; a browser that hangs is killed long before this
     'bucketscan_queue': SCAN_QUEUE,
     'vhost_queue': SCAN_QUEUE,

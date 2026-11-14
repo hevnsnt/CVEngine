@@ -25,6 +25,7 @@ from dashboard.models import Org, Project
 from scanEngine.models import EngineType
 from startScan.models import IpAddress, Port, ScanHistory, Subdomain, Technology, Vulnerability
 from targetApp.models import Domain
+from tests import ai_queue
 
 CLOSING = ('likely_false_positive', 'not_applicable')
 JENKINS_KEV = [{'vendor': 'Jenkins Project', 'product': 'Jenkins', 'ranges': []}]  # a KEV record with no version bound: "version unknown"
@@ -89,7 +90,7 @@ class TenancyFixture(TestCase):
 		return p
 
 	def triage(self, findings, provider=None):
-		return triage.run_triage(triage.track(findings), provider=provider)
+		return ai_queue.run_triage(triage.track(findings), provider=provider)
 
 	def assertOpen(self, match, label=''):
 		match.refresh_from_db()
@@ -660,7 +661,7 @@ class HeldRowTests(Rv392Fixture):
 		row = Triage.objects.get(route=real)
 		self.assertEqual((row.classification, row.reason, row.verdict_id), ('needs_validation', triage.HELD_REASON, None))
 		p = self.provider(answer('likely'))
-		triage.sweep(provider=p)
+		ai_queue.sweep(provider=p)
 		self.assertEqual(p.complete.call_count, 1)
 		self.assertEqual(Triage.objects.get(route=real).classification, 'likely')
 
@@ -1004,7 +1005,7 @@ class LegacyLoweringTests(Rv392Fixture):
 		self.assertEqual((row.status, row.classification, row.verdict_id), ('pending', 'needs_validation', None))  # nothing lowered meanwhile
 		self.assertEqual(Triage.objects.get(route=crafted).status, 'triaged')  # the origin keeps its own
 		p = self.provider(answer('likely'))
-		triage.sweep(provider=p)
+		ai_queue.sweep(provider=p)
 		self.assertEqual((p.complete.call_count, Triage.objects.get(route=real).classification), (1, 'likely'))
 		self.assertEqual(counts.get('requeued'), 1)
 
@@ -1037,7 +1038,7 @@ class LegacyLoweringTests(Rv392Fixture):
 			Triage.objects.filter(pk=row.pk).update(verdict=verdict, status='triaged', classification='needs_validation', reason='r')
 		verdict_tenancy.release_shared_closures(apply=True)
 		p = self.provider(answer('likely'))
-		triage.sweep(provider=p)
+		ai_queue.sweep(provider=p)
 		row = Triage.objects.get(match=theirs)
 		self.assertEqual((p.complete.call_count, row.classification, row.verdict_id, row.reason), (0, 'needs_validation', verdict.pk,
 																								   triage.SHARED_REASON))

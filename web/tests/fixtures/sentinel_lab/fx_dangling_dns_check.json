@@ -1,0 +1,72 @@
+{
+ "kind": "dangling_dns_check",
+ "name": "fx_dangling_dns_check",
+ "payload": {
+  "outcome": "done",
+  "ratings": [
+   {
+    "id": "0",
+    "state": "unknown"
+   },
+   {
+    "id": "1",
+    "state": "unknown"
+   }
+  ],
+  "refused": [],
+  "touched": []
+ },
+ "sentinel_seconds": 0.0,
+ "target": {
+  "checks": [
+   {
+    "host": "app.example.com",
+    "id": "0",
+    "kind": "cname_nxdomain",
+    "triggers": [
+     "app.example.com",
+     "gone.example.net"
+    ]
+   },
+   {
+    "host": "old.example.com",
+    "id": "1",
+    "kind": "ns",
+    "triggers": [
+     "old.example.com"
+    ]
+   }
+  ],
+  "providers": {
+   "cname": [
+    {
+     "service": "Example Cloud",
+     "suffixes": [
+      "cloud.example.net"
+     ]
+    }
+   ],
+   "nameservers": [
+    {
+     "patterns": [
+      "^ns-\\d+\\.dns\\.example\\.net$"
+     ],
+     "service": "Example DNS"
+    }
+   ]
+  },
+  "scope": {
+   "addresses": [],
+   "blocked": [],
+   "domains": [],
+   "excluded": [],
+   "excluded_trees": [],
+   "hosts": [
+    "app.example.com",
+    "old.example.com"
+   ],
+   "private": false
+  }
+ },
+ "tool_rows": null
+}

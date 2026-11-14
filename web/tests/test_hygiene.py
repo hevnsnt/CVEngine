@@ -3,7 +3,7 @@ import datetime
 from unittest import mock
 
 from django.contrib.auth.models import User
-from django.test import SimpleTestCase, TestCase
+from django.test import TestCase
 from django.utils import timezone
 
 from cveFeed import hygiene as hy
@@ -12,39 +12,10 @@ from dashboard.models import Org, Project, ProjectMembership
 from startScan.models import IpAddress, Port, Subdomain
 from targetApp.models import Domain
 from tests.test_agentapi import call, create_token
+from tests import hygiene_harness
 
 UTC = datetime.timezone.utc
 NOW = datetime.datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
-
-
-class PinnedHygieneTests(SimpleTestCase):
-	def test_all_tls_attempts_share_one_admitted_address_set(self):
-		addresses = ((2, ('203.0.113.10', 443)),)
-		with mock.patch.object(hy.pinned_transport, 'resolve', return_value=addresses) as resolve, \
-				mock.patch.object(hy, '_fetch_cert', return_value={'host': 'asset.example.test'}) as fetch, \
-				mock.patch.object(hy, '_chain_error', return_value='') as chain, \
-				mock.patch.object(hy, '_accepts_legacy_tls', return_value=False) as legacy:
-			self.assertIsNotNone(hy.probe_tls('asset.example.test', 443))
-		resolve.assert_called_once_with('asset.example.test', 443)
-		for probe in (fetch, chain, legacy):
-			probe.assert_called_once_with('asset.example.test', 443, addresses=addresses)
-
-	def test_failed_admission_never_opens_tls_socket(self):
-		with mock.patch.object(hy.pinned_transport, 'resolve', side_effect=ValueError('blocked')), \
-				mock.patch.object(hy, '_fetch_cert') as fetch:
-			self.assertIsNone(hy.probe_tls('asset.example.test', 443))
-		fetch.assert_not_called()
-
-	def test_chain_verification_keeps_original_sni(self):
-		addresses = ((2, ('203.0.113.10', 443)),)
-		raw = mock.MagicMock()
-		raw.__enter__.return_value = raw
-		context = mock.MagicMock()
-		with mock.patch.object(hy.pinned_transport, 'open_socket', return_value=raw) as connect, \
-				mock.patch.object(hy.ssl, 'create_default_context', return_value=context):
-			self.assertEqual(hy._chain_error('asset.example.test', 443, addresses=addresses), '')
-		connect.assert_called_once_with(addresses, hy.TLS_TIMEOUT)
-		context.wrap_socket.assert_called_once_with(raw, server_hostname='asset.example.test')
 
 
 def checks(findings):
@@ -124,33 +95,6 @@ class DkimCaaTests(TestCase):
 		self.assertEqual(checks(hy.evaluate_caa('a.com', [])), {'caa_missing'})
 		self.assertEqual(hy.evaluate_caa('a.com', ['0 issue "letsencrypt.org"']), [])
 
-	def test_email_findings_orchestration_with_fake_dns(self):
-		zone = {'a.com': ['v=spf1 mx ~all'], '_dmarc.a.com': ['v=DMARC1; p=none']}
-		findings, has_mx = hy.email_findings('a.com', fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX')
-		self.assertTrue(has_mx)
-		self.assertTrue({'spf_softfail', 'dmarc_none', 'dkim_not_found', 'caa_missing'} <= checks(findings))
-
-	def test_a_subdomain_inherits_the_organizational_domains_dmarc_policy(self):
-		"""S08-7: RFC 7489 6.6.3, a name with no record of its own is held to the apex's (its sp for subdomains): no false HIGH."""
-		zone = {'_dmarc.a.com': ['v=DMARC1; p=reject; rua=mailto:d@a.com']}
-		fetch = lambda n: zone.get(n, [])
-		findings, _ = hy.email_findings('mail.a.com', fetch=fetch, mx=lambda n, t: t == 'MX')
-		self.assertNotIn('dmarc_missing', checks(findings))
-		zone['_dmarc.a.com'] = ['v=DMARC1; p=reject; sp=none; rua=mailto:d@a.com']
-		findings, _ = hy.email_findings('mail.a.com', fetch=fetch, mx=lambda n, t: t == 'MX')
-		inherited = [f for f in findings if f.check == 'dmarc_subdomain_weak']
-		# sp=none is the policy it has, and the cause is the apex's record: the apex's finding, naming the name it covers (1.3.5 item 20)
-		self.assertEqual([(f.severity, f.host, f.evidence['inherited_from'], f.evidence['covers']) for f in inherited],
-						 [(hy.MEDIUM, 'a.com', 'a.com', ['mail.a.com'])])
-		self.assertTrue({'dmarc_none', 'dmarc_no_reports'}.isdisjoint(checks(findings)))  # the record's other details are the apex's own findings
-		zone.clear()
-		findings, _ = hy.email_findings('mail.a.com', fetch=fetch, mx=lambda n, t: t == 'MX')
-		self.assertIn('dmarc_missing', checks(findings))  # neither the name nor its apex publishes one
-		zone['_dmarc.mail.a.com'] = ['v=DMARC1; p=none']
-		zone['_dmarc.a.com'] = ['v=DMARC1; p=reject']
-		findings, _ = hy.email_findings('mail.a.com', fetch=fetch, mx=lambda n, t: t == 'MX')
-		self.assertIn('dmarc_none', checks(findings))  # its own record wins over the apex's
-
 
 class CertTests(TestCase):
 	def test_expiry_bands(self):
@@ -201,7 +145,7 @@ class HygieneRunnerTests(TestCase):
 		ip.ports.add(Port.objects.create(number=8443), Port.objects.create(number=22))
 
 	def run_with(self, probe, emailer):
-		return hy.run_hygiene(self.domain.id, probe=probe, emailer=emailer, mx=lambda n, t: False)
+		return hygiene_harness.run_hygiene(self.domain.id, probe=probe, emailer=emailer, mx=lambda n, t: False)
 
 	def test_targets_are_443_everywhere_plus_other_tls_ports_only(self):
 		self.assertEqual(set(hy.tls_targets(self.domain)), {('example.test', 443), ('www.example.test', 443), ('www.example.test', 8443)})
@@ -227,11 +171,11 @@ class HygieneRunnerTests(TestCase):
 	def test_a_host_only_run_resolves_a_fixed_certificate_finding(self):
 		soon = timezone.now() + datetime.timedelta(days=5)
 		bad = lambda host, port: cert(host=host, port=port, sans=[host], subject=host, not_after=soon) if host == 'www.example.test' and port == 443 else None
-		hy.run_hygiene(self.domain.id, probe=bad, emailer=lambda n: ([], False), mx=lambda n, t: False, hosts=['www.example.test'])
+		hygiene_harness.run_hygiene(self.domain.id, probe=bad, emailer=lambda n: ([], False), mx=lambda n, t: False, hosts=['www.example.test'])
 		row = HygieneFinding.objects.get(domain=self.domain, check_name='tls_expiring')
 		self.assertEqual((row.host, row.status), ('www.example.test:443', 'open'))
 		fixed = lambda host, port: cert(host=host, port=port, sans=[host], subject=host) if host == 'www.example.test' and port == 443 else None
-		hy.run_hygiene(self.domain.id, probe=fixed, emailer=lambda n: ([], False), mx=lambda n, t: False, hosts=['www.example.test'])
+		hygiene_harness.run_hygiene(self.domain.id, probe=fixed, emailer=lambda n: ([], False), mx=lambda n, t: False, hosts=['www.example.test'])
 		row.refresh_from_db()
 		self.assertEqual(row.status, 'resolved')  # S08-14: not left for the next whole-target sweep
 

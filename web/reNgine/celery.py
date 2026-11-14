@@ -29,7 +29,24 @@ broker_acks.install()
 from reNgine import gevent_pidbox
 
 gevent_pidbox.install()
+# A query no longer freezes the whole gevent worker while it waits for Postgres (reNgine/gevent_db.py)
+from reNgine import gevent_db
+
+gevent_db.install()
+
+# The garbage collector runs on a timer, not inside a greenlet switch (reNgine/gevent_gc.py)
+from reNgine import gevent_gc
+
+gevent_gc.install()
 app.autodiscover_tasks()
+# Each lane records its memory and the tasks it held it after (reNgine/lane_memory.py), shown in the system status
+from reNgine import lane_memory
+
+lane_memory.install()
+# Every message carries the time it was published, so the system status can say how long a queue's oldest message has waited (reNgine/queue_age.py)
+from reNgine import queue_age
+
+queue_age.install()
 
 
 @setup_logging.connect()

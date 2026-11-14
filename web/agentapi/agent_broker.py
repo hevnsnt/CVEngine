@@ -22,9 +22,10 @@ from django.utils import timezone
 from agentapi import agent_scope as scope_lib
 from agentapi import agent_tasks
 from agentapi import services as svc
+from agentapi.auth import SCOPE_SENTINEL
 from agentapi.models import ACTIVE_TASK_STATUSES, Agent, AgentTask
 from agentapi.services import ApiError, AssetFilter
-from tenancy import audit, roles, throttle
+from tenancy import audit, roles
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,18 @@ def _without_expiry(name):
         return False
 
 
+def _window_left(name, window):
+    """Whole seconds until the counter ``name`` expires (what a refused caller should wait: ``Retry-After``), ``window`` when the cache cannot say."""
+    try:
+        key = cache.make_key(name)
+        left = cache._cache.get_client(key, write=True).ttl(key)
+        if isinstance(left, int) and left > 0:
+            return min(int(window), left)
+    except Exception:  # noqa: BLE001 - a hint: never let it break the refusal it belongs to
+        pass
+    return int(window)
+
+
 def _hit(name, limit, window):
     """Count one call against a window and say whether it is within ``limit``. One INCR, so concurrent callers cannot all pass the check.
     A counter over its limit is looked at once more (only then, so the common call costs nothing extra): one that has lost its expiry is
@@ -96,6 +109,9 @@ def _hit(name, limit, window):
         return True
     if used > limit and used - limit == 1:  # once per window, at the first refusal
         logger.warning('rate limit reached: %s used %s of %s per %s s', name, used, limit, window)
+    if used > limit:
+        from agentapi import claim_refusals
+        claim_refusals.note(name)  # counted per caller and action in Redis, so the status can tell a refusing limiter from idle Sentinels
     return used <= limit
 
 
@@ -132,6 +148,8 @@ def _agent_of(ctx, usable=True, write=True):
         raise ApiError(404, 'this token has no registered agent: call register_agent first')
     if usable and agent.status == 'revoked':
         raise ApiError(403, 'this agent was revoked by an administrator')
+    if agent.token.user_id == getattr(ctx.user, 'pk', None) and getattr(ctx.user, 'mfa_checked_this_request', False):
+        agent.token.user.mfa_checked_this_request = True  # the request's sign-in check already ran for this very user a moment ago: not asked again (``Eff._problem``)
     return agent
 
 
@@ -400,8 +418,9 @@ class Eff:
             return 'its user is disabled'
         if token.read_only:
             return 'its token is read only'
+        from agentapi import sentinel_policy
         from tenancy.middleware import TenancyMiddleware
-        if TenancyMiddleware.must_enrol_mfa(user):
+        if not getattr(user, 'mfa_checked_this_request', False) and sentinel_policy.shared(('must-enrol-mfa', user.pk), lambda: TenancyMiddleware.must_enrol_mfa(user)):  # once per user for a page of cards
             return 'its user has to set up two-step sign-in first'
         return ''
 
@@ -601,12 +620,9 @@ def release_ineligible(agent):
 
 def prune_tasks(now=None, days=None):
     """Delete finished, failed and cancelled tasks older than the retention. The audit log keeps who did what; the rows would only pile up."""
-    import os
+    from cveFeed import tunables
     now = now or timezone.now()
-    try:
-        days = days or max(1, int(os.environ.get('CVENGINE_AGENT_TASK_RETENTION_DAYS', '')))
-    except ValueError:
-        days = RETENTION_DAYS
+    days = days or max(1, int(tunables.value('sentinel_task_retention_days', RETENTION_DAYS)))  # Settings, else CVENGINE_AGENT_TASK_RETENTION_DAYS, else 30
     old = AgentTask._base_manager.filter(status__in=('completed', 'failed', 'cancelled'), finished_at__lt=now - timedelta(days=days))
     deleted = 0
     while True:
@@ -624,14 +640,20 @@ def release_for_tokens(token_ids):
 # --- claiming ---------------------------------------------------------------------------------------
 
 @contextmanager
-def _waiter_slot(wanted, token):
+def _waiter_slot(wanted, token, per_user=True, exempt_instance=False):
     """Whether this caller may hold a web thread for a long poll: the instance, the token's user and the token each have a cap, so one
-    user cannot take every slot by minting tokens. Yields False when a cap is reached, and the caller answers at once."""
+    user cannot take every slot by minting tokens. Yields False when a cap is reached, and the caller answers at once.
+    A Sentinel's token is not counted against its user (``per_user``): every Sentinel an enrollment makes belongs to the person who made it, and
+    the built-in scanner's belongs to the oldest App Admin, so that person's own Sentinels would otherwise push each other onto short polls. They
+    are bounded by the instance cap and by one poll per token. ``exempt_instance`` (the built-in scanner) skips the instance cap too and takes no
+    slot from it, so the scanner the instance depends on is never turned away because other callers hold every one."""
     if not wanted:
         yield False
         return
-    caps = (('agentapi:waiters', MAX_WAITERS), (f'agentapi:waiters:user:{token.user_id}', MAX_WAITERS_PER_USER),
-            (f'agentapi:waiters:{token.key_hash[:16]}', 1))
+    caps = [] if exempt_instance else [('agentapi:waiters', MAX_WAITERS)]
+    if per_user and token.scope != SCOPE_SENTINEL:
+        caps.append((f'agentapi:waiters:user:{token.user_id}', MAX_WAITERS_PER_USER))
+    caps.append((f'agentapi:waiters:{token.key_hash[:16]}', 1))
     taken, within = [], True
     try:
         for key, cap in caps:
@@ -991,26 +1013,47 @@ def cancel_task(ctx, slug, task_id):
 
 # --- agents: listing and administration ---------------------------------------------------------------
 
-def agent_dict(agent, detail=False, counts=None, viewer=None):
+_UNKNOWN = object()
+
+
+def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOWN, credential_needed=None):
+    """``builtin_id`` is the id of the built-in scanner's Agent (or ``None``), which a caller building many rows reads once; left out, a Sentinel
+    looks it up (one query)."""
     now = timezone.now()
     token = agent.token
     live = bool(agent.last_seen and now - agent.last_seen <= LIVE_WINDOW)
     counts = counts if counts is not None else {}
     out = {'id': agent.pk, 'name': agent.name, 'kind': agent.kind, 'status': agent.status, 'status_note': agent.status_note,
            'status_changed_at': svc._iso(agent.status_changed_at), 'held_by': held_by(agent), 'live': live,
-           'last_seen': svc._iso(agent.last_seen), 'registered': svc._iso(agent.registered_at), 'owner': token.user.username,
+           'builtin': False, 'last_seen': svc._iso(agent.last_seen), 'registered': svc._iso(agent.registered_at), 'owner': token.user.username,
            'token': {'id': token.pk, 'name': token.name, 'prefix': token.prefix}, 'scope': agent.scope, 'capabilities': agent.capabilities,
            'os': agent.os, 'tools': agent.tools, 'max_concurrent': agent.max_concurrent, 'limits': agent.limits,
            'tasks': {'open': counts.get('assigned', 0) + counts.get('running', 0), 'completed': counts.get('completed', 0),
                      'failed': counts.get('failed', 0)}}
     if agent.kind == 'scanner':  # cheap (stored JSON only), so the list shows a Sentinel that cannot update itself
         from agentapi import sentinel_settings
-        out['version'] = (agent.info or {}).get('version')
+        out['builtin'] = _sentinel().is_builtin(agent) if builtin_id is _UNKNOWN else agent.pk == builtin_id  # the install's own scanner (its updater is the server's)
+        out['version'] =(agent.info or {}).get('version')
         out['version_label'] = out['version'] or 'unknown (built without the updater)'  # a Sentinel installed with plain docker compose reports the build's commit; one with neither says so
-        out['self_update'] = sentinel_settings.effective(agent)['self_update']
+        out['self_update'] = sentinel_settings.effective(agent, kinds=False)['self_update']
         out['updater'] = sentinel_settings.updater_state(agent)
         from agentapi import sentinel_version
         out['version_state'] = sentinel_version.state(agent, out['self_update'])  # current, behind or unknown, from the cached check of the latest client
+        from agentapi import sentinel_tools
+        out['tools_state'] = sentinel_tools.state(agent)  # current, behind or unknown: the tool versions it reports against the ones this release ships
+        from agentapi import sentinel_contract
+        reported = (agent.info or {}).get('contract_version')
+        out['contract'] = {'version': reported, 'state': sentinel_contract.state(reported), 'note': sentinel_contract.note(reported)}
+        from agentapi import sentinel_broker
+        declared = sentinel_broker.CREDENTIAL_FEATURE in ((agent.info or {}).get('features') or [])
+        needed = sentinel_broker.credential_work('nuclei_deep') if credential_needed is None else credential_needed  # a list reads the setting once for the page
+        out['credential_filter'] = {'declared': declared, 'needed': needed, 'note': sentinel_broker.CREDENTIAL_NOTE if needed and not declared else ''}  # old client: web checks wait
+        out['version_since'] = (agent.info or {}).get('version_since')  # when it last changed the version it runs
+        from agentapi import sentinel_autoupdate
+        out['auto_update'] = sentinel_autoupdate.view(agent)  # running / newest / update requested / flagged, in plain words
+        out['spool'] = (agent.info or {}).get('spool') or None  # results it holds on disk until cvENGINE takes them ({count, oldest_seconds}): shown during an update
+        out['watchdog'] = sentinel_settings.watchdog_view(agent)  # the Sentinel's own watchdog: what it did lately in plain words, whether it still ticks (None for a build without one)
+        out['waiting'] = (agent.info or {}).get('waiting') or []  # kinds it holds back for lack of memory (and the tasks holding it), tasks still stopping: why a kind is not being taken
         # slots: its concurrency limit, what it holds now and by kind (stored rows only, so the list stays cheap)
         held = counts.get('_held_by_kind', {})
         limit = min(agent.max_concurrent, (agent.limits or {}).get('max_concurrent') or agent.max_concurrent)
@@ -1019,11 +1062,12 @@ def agent_dict(agent, detail=False, counts=None, viewer=None):
         if agent.kind == 'scanner':
             out['settings'] = sentinel_settings.detail(agent)
             out['update'] = {**((agent.info or {}).get('update') or {}), 'requested_at': svc._iso(agent.update_requested_at)}
-        eff = effective(agent, now)
+        eff = _sentinel().effective(agent, now) if agent.kind == 'scanner' else effective(agent, now)  # a Sentinel's rights include its capability policy
         out['effective'] = {'capabilities': sorted(eff.caps), 'projects': sorted(eff.projects), 'max_concurrent': eff.max_concurrent,
                             'can_receive_work': not eff.problem and bool(eff.projects) and bool(eff.caps), 'problem': eff.problem}
         if agent.kind == 'scanner':
             out['queued_for_it'] = _sentinel().queued_for(agent)  # what waits in the queue that this Sentinel could take, by kind
+            out['kinds'] = _sentinel().kind_report(agent, now, eff)  # per kind: declared, effective, mode (allow, deny, prefer), source, cap, held
     return _redacted(out, viewer, agent)
 
 
@@ -1119,7 +1163,12 @@ def list_agents(ctx, params):
         qs = qs.filter(Q(name__icontains=str(params['q'])[:100]) | Q(token__user__username__icontains=str(params['q'])[:100]))
     page = svc.paginate(qs.order_by('name', 'id'), params, lambda a: a)
     counts = _counts([a.pk for a in page['results']])
-    page['results'] = [agent_dict(a, counts=counts.get(a.pk), viewer=ctx.user) for a in page['results']]
+    builtin_id = _sentinel().builtin_pk() if any(a.kind == 'scanner' for a in page['results']) else None  # once for the page, not per row
+    from agentapi import sentinel_policy
+    with sentinel_policy.shared_lookups():  # the instance defaults are read once for the page, not once per Sentinel (four times each)
+        from agentapi import sentinel_broker
+        needed = sentinel_broker.credential_work('nuclei_deep') if any(a.kind == 'scanner' for a in page['results']) else False
+        page['results'] = [agent_dict(a, counts=counts.get(a.pk), viewer=ctx.user, builtin_id=builtin_id, credential_needed=needed) for a in page['results']]
     return page
 
 
@@ -1153,6 +1202,15 @@ def _clean_limits(value):
     return out
 
 
+def _refuse_wider_limits(now, new):
+    """The limits an agent has are replaced as a whole (a key left out is no limit): a token may keep or tighten each one, never drop or loosen one."""
+    for key in ('capabilities', 'projects'):
+        if key in now and not (key in new and set(map(str, new[key])) <= set(map(str, now[key]))):
+            raise ApiError(403, f'limits.{key}: an agent may only tighten what an agent is limited to; a person loosens it in the web interface')
+    if 'max_concurrent' in now and not new.get('max_concurrent', MAX_CONCURRENT_CAP + 1) <= now['max_concurrent']:
+        raise ApiError(403, 'limits.max_concurrent: an agent may only lower it; a person raises it in the web interface')
+
+
 def update_agent(ctx, agent_id, body):
     """An administrator approves, limits, suspends or revokes an agent: ``status`` (active, suspended, revoked), ``note`` and ``limits``.
     A suspended or revoked agent loses its leases at once; a tighter limit releases what it no longer allows."""
@@ -1171,6 +1229,14 @@ def update_agent(ctx, agent_id, body):
     if 'update' in body and body['update'] != 'now':
         raise ApiError(400, 'update must be "now"')
     before = {'status': agent.status, 'limits': agent.limits}
+    if ctx.token is not None:  # an API token or MCP call (FB-5): it may narrow what an agent does, never widen it
+        if body.get('status') == 'active' and agent.status != 'active':
+            raise ApiError(403, 'approving an agent or Sentinel, or reinstating a suspended or revoked one, is a person\'s decision, in the web interface; a token may suspend or revoke')
+        if 'limits' in body:
+            _refuse_wider_limits(agent.limits or {}, _clean_limits(body['limits']))
+        if 'settings' in body:
+            from agentapi import sentinel_settings
+            sentinel_settings.refuse_wider_raw(agent, body['settings'])
     if 'status' in body:
         if body['status'] not in ADMIN_STATUSES:
             raise ApiError(400, f'status must be one of {", ".join(ADMIN_STATUSES)}')

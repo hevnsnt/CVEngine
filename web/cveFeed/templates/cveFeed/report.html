@@ -14,7 +14,10 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
   @page cover { margin: 0; @bottom-left { content: none; } @bottom-right { content: none; } }
   :root { --accent: {{ r.branding.accent }}; --ink: #111827; --mute: #6b7280; --line: #d1d5db; --fire: #b91c1c; --smoke: #b45309; --ice: #1e40af; --ok: #15803d; }
   * { box-sizing: border-box; }
-  body { font: 9.5pt/1.45 "DejaVu Sans", "Liberation Sans", Helvetica, sans-serif; color: var(--ink); margin: 0; overflow-wrap: anywhere; }
+  body { font: 9.5pt/1.45 "DejaVu Sans", "Liberation Sans", Helvetica, sans-serif; color: var(--ink); margin: 0; overflow-wrap: break-word; }
+  /* `anywhere` counts every possible break in the min-content width, which WeasyPrint recomputes per box: only table cells (whose column width
+     comes from it) need it, and on the whole body it made line breaking the dearest part of a 400-page render */
+  table.grid td, table.grid th, .cover td { overflow-wrap: anywhere; }
   .foot { position: running(foot); }
   h1, h2, h3, h4 { margin: 0; line-height: 1.2; }
   h2 { font-size: 16pt; border-bottom: 2px solid var(--accent); padding-bottom: 4pt; margin-bottom: 10pt; }
@@ -63,8 +66,12 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
   .finding h3 { margin: 0 0 3pt; font-size: 11.5pt; break-after: avoid; }
   .finding .meta { margin-bottom: 5pt; }
   .finding h4 { font-size: 8pt; text-transform: uppercase; letter-spacing: 1pt; color: var(--mute); margin: 7pt 0 2pt; break-after: avoid; }
-  dl.kv { margin: 0; display: grid; grid-template-columns: 30mm 1fr; gap: 1.5pt 8pt; font-size: 8.5pt; }
-  dl.kv dt { color: var(--mute); } dl.kv dd { margin: 0; }
+  /* inline blocks, not display:grid: WeasyPrint lays a grid out by measuring every cell's min/max content, which made the ~3000 key/value lists
+     of a 500-host report cost over half of its render time. A label and its value stay one line box, so the text reads in order too. */
+  dl.kv { margin: 0; font-size: 8.5pt; }
+  dl.kv dt { display: inline-block; vertical-align: top; width: 30mm; margin-right: 8mm; color: var(--mute); }
+  dl.kv dd { display: inline-block; vertical-align: top; width: calc(100% - 38.6mm); margin: 0 0 1.5pt; }
+  dl.kv.wide dt { width: 42mm; } dl.kv.wide dd { width: calc(100% - 50.6mm); }
   .cmd { background: #f3f4f6; border: 1px solid #e5e7eb; padding: 3pt 5pt; margin: 2pt 0 4pt; font-family: "DejaVu Sans Mono", "Liberation Mono", monospace; font-size: 7.5pt; white-space: pre-wrap; }
   .proof { margin: 0 0 4pt; font-size: 8.5pt; }
   .track { background: #f9fafb; border: 1px solid #e5e7eb; padding: 4pt 7pt; margin-top: 4pt; }
@@ -141,15 +148,15 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
   <h2>{% if r.host %}Host{% else %}Hosts{% endif %}</h2>
   <p class="small mute">{% if r.host %}The host, its exposed services and why it has its score.{% else %}Highest score first. Score is 0 to 100 and adds up the reasons shown in the host&rsquo;s detail in cvENGINE. {% if r.caps.hosts_omitted %}Showing the top {{ r.scope.hosts_listed }} of {{ r.scope.hosts_total }} hosts; the report limit is {{ r.caps.hosts }}.{% else %}All {{ r.scope.hosts_total }} host{{ r.scope.hosts_total|pluralize }} are listed.{% endif %}{% endif %}</p>
   {% if r.hosts %}
-  <table class="grid">
+  <!--cv:begin--><table class="grid">
     <thead><tr><th>Host</th><th>Heat</th><th class="num">Score</th><th class="num">Findings</th><th>Exposure (open ports)</th><th>Owner</th></tr></thead>
-    <tbody>{% for h in r.hosts %}
+    <tbody>{% for h in r.hosts %}<!--cv:row-->
       <tr><td>{{ h.host }}{% if h.alias %}<br><span class="mute small">{{ h.alias }}</span>{% endif %}{% if h.technologies %}<br><span class="mute small">{{ h.technologies|join:", " }}</span>{% endif %}</td>
         <td><span class="chip c-{{ h.heat }}">{{ h.heat }}</span></td><td class="num">{{ h.score }}</td><td class="num">{{ h.findings }}</td>
         <td>{% if h.port_count %}{{ h.ports|join:", " }}{% if h.ports_more %} +{{ h.ports_more }} more{% endif %}{% else %}<span class="mute">none open</span>{% endif %}<br><span class="mute small">{{ h.addresses }} address{{ h.addresses|pluralize:"es" }}</span></td>
         <td>{{ h.owner|default:"-" }}{% if h.criticality and h.criticality != 'unknown' %}<br><span class="mute small">{{ h.criticality }} criticality</span>{% endif %}</td></tr>{% endfor %}
-    </tbody>
-  </table>
+<!--cv:end-->    </tbody>
+  </table><!--cv:finish-->
   {% else %}<p class="mute">No hosts in the current inventory.</p>{% endif %}
   {% if r.host and r.hosts %}{% with h=r.hosts.0 %}
     {% if h.aliases %}<p class="small" style="margin-top:8pt">Also answers to: {{ h.aliases|join:", " }}</p>{% endif %}
@@ -166,7 +173,7 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
   <h2>Findings</h2>
   <p class="small mute">CVE matches and scanner findings, hottest first.
     {% if r.caps.findings_omitted %}Showing the {{ r.findings|length }} hottest of {{ r.summary.findings }}; the report limit is {{ r.caps.findings }}. The rest are in cvENGINE{% if not r.host %}; a report for one host lists everything on it{% endif %}.{% endif %}</p>
-  {% for f in r.findings %}
+  <!--cv:begin-->{% for f in r.findings %}<!--cv:row-->
   <div class="finding f-{{ f.heat }}">
     <h3>{{ f.title }}</h3>
     <div class="meta"><span class="chip c-{{ f.heat }}">{{ f.heat }}</span> <span class="chip c-{{ f.severity }}">{{ f.severity }}</span>
@@ -194,7 +201,7 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
     <div class="track"><dl class="kv"><dt>Status</dt><dd><b>{{ f.tracking.status }}</b>{% if f.tracking.changed %} (changed {{ f.tracking.changed }}{% if f.tracking.changed_by %} by {{ f.tracking.changed_by }}{% endif %}){% endif %}</dd>
       <dt>Assignee</dt><dd>{{ f.tracking.assignee|default:"unassigned" }}</dd>{% if f.tracking.note %}<dt>{% if f.tracking.closed %}Why it was closed{% else %}Notes{% endif %}</dt><dd class="pre">{{ f.tracking.note }}</dd>{% endif %}</dl></div>
   </div>
-  {% empty %}<p class="mute">No findings to list.</p>{% endfor %}
+  {% empty %}<p class="mute">No findings to list.</p>{% endfor %}<!--cv:end--><!--cv:finish-->
 </section>
 
 <section class="page">
@@ -216,16 +223,32 @@ reads it and fails if any escaping bypass appears). The page has no image, linke
 </section>
 
 <section class="page">
+  <h2>Exposed secrets</h2>
+  <p class="small mute">API keys, tokens and private keys the hosts serve, one row per secret. Values are never stored or printed: only the format
+    prefix and the last four characters. {% if r.secrets_total > r.secrets|length %}Showing the worst {{ r.secrets|length }} of {{ r.secrets_total }}.{% endif %}</p>
+  {% if r.secrets %}
+  <table class="grid">
+    <thead><tr><th>Severity</th><th>Secret</th><th>Hosts</th><th>Status</th></tr></thead>
+    <tbody>{% for s in r.secrets %}
+      <tr><td><span class="chip c-{{ s.severity }}">{{ s.severity }}</span></td>
+        <td>{{ s.label }} <code>{{ s.masked }}</code> ({{ s.class }})<br><span class="mute small">{{ s.basis }}</span><br><span class="small pre"><b>Fix:</b> {{ s.remediation }}</span></td>
+        <td>{{ s.hosts }}</td><td>{{ s.status }}</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="mute">No {% if not r.include_closed %}open {% endif %}exposed secrets.</p>{% endif %}
+</section>
+
+<section class="page">
   <h2>Method and validity</h2>
   <h3>What was scanned, and when</h3>
-  <dl class="kv" style="grid-template-columns: 42mm 1fr">
+  <dl class="kv wide">
     <dt>Completed scans</dt><dd>{{ r.method.scans }}{% if r.method.first_scan %} (first {{ r.method.first_scan }}, latest {{ r.method.last_scan }}){% endif %}</dd>
     <dt>Report generated</dt><dd>{{ r.generated }}</dd>
     <dt>Inventory</dt><dd>{{ r.scope.hosts_total }} host{{ r.scope.hosts_total|pluralize }} in the current inventory{% if not r.host %}, {{ r.scope.targets }} target{{ r.scope.targets|pluralize }}{% endif %}</dd>
   </dl>
   {% if r.method.services %}
   <table class="grid" style="margin-top:8pt">
-    <thead><tr><th>Check</th><th class="num">Assets</th><th>Most recent run</th></tr></thead>
+    <thead><tr><th>Check</th><th class="num">Hosts</th><th>Most recent run</th></tr></thead>
     <tbody>{% for s in r.method.services %}<tr><td>{{ s.name }}</td><td class="num">{{ s.assets }}</td><td>{{ s.last }}</td></tr>{% endfor %}</tbody>
   </table>{% else %}<p class="mute">No scanner runs are recorded for this scope.</p>{% endif %}
 

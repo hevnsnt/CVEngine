@@ -1,6 +1,6 @@
 """Scoped, deduplicated assessments of individual inventoried hosts.
 
-Every host has its own ``HostAssessment`` row (status, history, the Live page, the API), but the feed does not run one pipeline per host: hosts of one
+Every host has its own ``HostAssessment`` row (status, history, the Overview, the API), but the feed does not run one pipeline per host: hosts of one
 target that are due together are carried through one pipeline run (``enqueue_batch`` / ``execute_batch``), so each Sentinel stage is handed many
 targets at once instead of one tiny task per host that the pipeline then waits for. ``CVENGINE_ASSESS_BATCH`` sets how many (default 8, 1 to 64;
 1 is one pipeline per host, as before)."""
@@ -85,6 +85,63 @@ def batch_size():
     except ValueError:
         wanted = DEFAULT_BATCH
     return max(1, min(MAX_BATCH, wanted))
+
+
+SHARE_DEFER_LIMIT = 40  # after this many looks (an hour at 90 seconds) an assessment held back by the share limit runs anyway: it must not wait for ever behind a gate that stays shut, and the reaper only fails a queued row after twelve hours
+SHARE_DEFER_SECONDS = 90  # an assessment held back by the share limit is looked at again after this long (queued again with a delay; its row stays queued)
+
+
+def share_limit():
+    """The most discovery-pool slots host assessments may hold while a scan waits (``assess_share_percent`` of ``discovery_concurrency``, at least 1), or None when
+    the limit is off (100)."""
+    from cveFeed import scan_concurrency
+    percent = scan_concurrency.resolve('assess_share_percent')['value']
+    if percent >= 100:
+        return None
+    return max(1, int(scan_concurrency.resolve('discovery_concurrency')['value'] * percent // 100))
+
+
+def slots_held():
+    """How many discovery-pool slots the running assessments hold: one per running TASK. The rows of one batch share a ``celery_id`` and are one task; every other running row
+    is a task of its own (a project no live Sentinel covers, or one a host-narrowed Sentinel covers, runs one host per task, and so does a person's single request). FC-2:
+    this used to be rows divided by the batch size, which counted eight single-host tasks in a pool of eight as one slot."""
+    rows = list(HostAssessment.objects.filter(status='running').values_list('celery_id', flat=True))
+    return len({c for c in rows if c}) + sum(1 for c in rows if not c)
+
+
+def deferral_count(task_id):
+    """How many times this task has been put off by the share limit (a Redis counter that outlives the re-queued copies and expires after six hours). 0 when it cannot be read."""
+    try:
+        from reNgine import resources
+        client = resources.redis_client()
+        if client is None or not task_id:
+            return 0
+        key = f'cvengine:assess_deferred:{task_id}'
+        n = int(client.incr(key))
+        client.expire(key, 6 * 3600)
+        return n
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def still_queued(ids):
+    """Whether any of these assessment rows is still waiting to start. A message for rows that ended meanwhile (stopped, failed by the reaper, finished, deleted) is not put off again."""
+    return HostAssessment.objects.filter(pk__in=ids, status='queued').exists()
+
+
+def over_share():
+    """Whether a queued assessment must wait now: a discovery scan is waiting for a slot AND the running assessments already hold their share of the pool
+    (``share_limit``). With no scan waiting assessments may use the whole pool, so an instance that is not starved is not slowed. Never raises: a count that
+    cannot be read means no limit."""
+    try:
+        limit = share_limit()
+        if limit is None or slots_held() < limit:
+            return False
+        from startScan.models import ScanHistory
+        return ScanHistory.objects.filter(scan_status=-1).exists()
+    except Exception:  # noqa: BLE001
+        logger.debug('assessment share: could not be checked, so not limited', exc_info=False)
+        return False
 
 
 def batch_size_for(project):
@@ -174,9 +231,27 @@ def caps(project=None):
             max(BASE_PROJECT_CAP, SENTINEL_QUEUE_FACTOR * mine))
 
 
-def _admit(project, sub, unattended=True):
-    """``(target domain, host name)`` for a stored host owned by this project that may be assessed, else ``ValueError``."""
-    from cveFeed.exclusions import is_excluded
+class _Gates:
+    """What every host of one project is held to, read once for a whole batch (``enqueue_batch``): the bug bounty gate, the declared internal networks, the
+    excluded names and which of the batch's hosts are archived. ``_admit`` asked for each of them again for every host: 11 statements a host, 2,100 for a
+    top-up that queues 190 hosts."""
+
+    def __init__(self, project, hosts):
+        from cveFeed.bounty_gate import Gate
+        from cveFeed.exclusions import excluded_names
+        from cveFeed.models import HostState
+        from targetApp.target_types import internal_networks
+        self.gate = Gate()
+        self.networks = internal_networks(project.pk)
+        self.excluded = excluded_names(project.pk)
+        self.archived = set(HostState.objects.filter(project=project, host__in=hosts, archived_at__isnull=False).values_list('host', flat=True))
+        self.active = set(HostAssessment.objects.filter(project=project, host__in=hosts, status__in=ACTIVE).values_list('host', flat=True))
+
+
+def _admit(project, sub, unattended=True, gates=None):
+    """``(target domain, host name)`` for a stored host owned by this project that may be assessed, else ``ValueError``. ``gates``: what a batch read once
+    for all of its hosts (``_Gates``)."""
+    from cveFeed.exclusions import is_excluded, normalize
     from cveFeed.models import HostState
     from targetApp.models import Domain
     from targetApp.target_types import sentinel_only_target
@@ -186,20 +261,20 @@ def _admit(project, sub, unattended=True):
     if not domain or domain.project_id != project.pk or not (host == domain.name.lower() or
             (not domain.is_host_scoped() and host.endswith('.' + domain.name.lower()))):
         raise ValueError('host is outside its stored target scope')
-    if sentinel_only_target(host, project.pk):
+    if sentinel_only_target(host, project.pk, None if gates is None else gates.networks):
         raise ValueError('internal hosts are assessed by an internal Sentinel scan')
     if unattended and domain.discovery_mode == Domain.DISCOVERY_MANUAL:  # "just add them, do not scan yet": only a person's request assesses its hosts
         from cveFeed.manual_only import other_holder
         domain = other_holder(project.pk, host)  # unless a target that is not manual only holds the host too: then it is that target's
         if domain is None:
             raise ValueError('the target is set to manual only; assess its hosts yourself, or pick a discovery mode for it')
-    if is_excluded(project.pk, host):
+    if (bool(normalize(host)) and normalize(host) in gates.excluded) if gates is not None else is_excluded(project.pk, host):
         raise ValueError('host is excluded')
     from cveFeed.bounty_gate import Gate
-    why = Gate().refusal(project.pk, host, unattended=unattended)  # no person behind it: a bug bounty project must have confirmed automated testing; any caller: the host must be in scope
+    why = (gates.gate if gates is not None else Gate()).refusal(project.pk, host, unattended=unattended)  # no person behind it: a bug bounty project must have confirmed automated testing; any caller: the host must be in scope
     if why:
         raise ValueError(f'host is not scanned: {why}')
-    if HostState.objects.filter(project=project, host=host, archived_at__isnull=False).exists():
+    if (host in gates.archived) if gates is not None else HostState.objects.filter(project=project, host=host, archived_at__isnull=False).exists():
         raise ValueError('host is archived; restore it before scanning')
     return domain, host
 
@@ -212,13 +287,36 @@ def _require_capacity(project):
     active_scans = ScanHistory._base_manager.filter(Q(scan_status=-1) | Q(scan_status=1,
                                                                           start_scan_date__gte=timezone.now() - timedelta(hours=11)))
     global_cap, project_cap = caps(project)
-    if active_slots() >= global_cap or active_slots(project) >= project_cap or active_scans.count() >= max(20, global_cap):
-        raise RuntimeError('host assessment queue is at capacity; retry later')
+    held, mine, scans = active_slots(), active_slots(project), active_scans.count()
+    if held >= global_cap or mine >= project_cap or scans >= max(20, global_cap):
+        raise RuntimeError(capacity_message(held, global_cap, mine, project_cap, scans))
 
 
-def enqueue(project, sub, *, source='manual', user=None):
+def capacity_message(held, global_cap, mine, project_cap, scans):
+    """Which limit refused the host, with its numbers, and what an administrator can do about it. It starts with the sentence callers have always
+    matched on. It used to say only "retry later" while the Sentinels showed nothing waiting: a limit that is hit with idle Sentinels is a pool of
+    discovery workers too small to start the work that is queued (``DISCOVERY_CONCURRENCY``), and the text says so when that is the case."""
+    if held >= global_cap:
+        which = f'{held} host assessments are queued or running across the installation (limit {global_cap})'
+    elif mine >= project_cap:
+        which = f'{mine} host assessments of this project are queued or running (limit {project_cap})'
+    else:
+        which = f'{scans} scans are running or starting across the installation (limit {max(20, global_cap)})'
+    text = f'host assessment queue is at capacity: {which}. Retry when some finish.'
+    try:
+        from cveFeed import autotune
+        pin = autotune.discovery_pin()
+    except Exception:  # noqa: BLE001 - the message is never worth a failed request
+        pin = None
+    if pin:
+        text += (f' Only {pin["value"]} can run at once because {pin["env"]} is set in the environment (.env), so the queue drains slowly even when the '
+                 'Sentinels are idle: remove that line, or set it to 4 or more, and restart.')
+    return text
+
+
+def enqueue(project, sub, *, source='manual', user=None, unattended=None):
     """Accept only a stored host owned by this project; a model cannot supply a new target."""
-    domain, host = _admit(project, sub, unattended=user is None)
+    domain, host = _admit(project, sub, unattended=(user is None) if unattended is None else unattended)
     existing = HostAssessment.objects.filter(project=project, host=host, status__in=ACTIVE).order_by('id').first()
     if existing:
         return existing, False
@@ -259,16 +357,17 @@ def enqueue_batch(project, subs, *, source='topup'):
             return [job], []
         return [], [(subs[0], 'already queued' if not created else job.error or job.status)]
     admitted, skipped, domain = [], [], None
+    gates = _Gates(project, {s.name.lower().rstrip('.') for s in subs})
     for sub in subs:
         try:
-            sub_domain, host = _admit(project, sub)
+            sub_domain, host = _admit(project, sub, gates=gates)
         except ValueError as exc:
             skipped.append((sub, str(exc)))
             continue
         if domain is not None and sub_domain.pk != domain.pk:
             skipped.append((sub, 'a batch holds the hosts of one target'))
             continue
-        if HostAssessment.objects.filter(project=project, host=host, status__in=ACTIVE).exists():
+        if host in gates.active:
             skipped.append((sub, 'already queued'))
             continue
         domain = sub_domain
@@ -277,12 +376,17 @@ def enqueue_batch(project, subs, *, source='topup'):
         return [], skipped
     _require_capacity(project)
     created = []  # (sub, row)
-    for sub, host in admitted:
-        try:
-            with transaction.atomic():
-                created.append((sub, HostAssessment.objects.create(project=project, domain=domain, host=host, source=source)))
-        except IntegrityError:  # a second sweep queued it between the check and now
-            skipped.append((sub, 'already queued'))
+    try:  # one INSERT for the batch
+        with transaction.atomic():
+            rows = HostAssessment.objects.bulk_create([HostAssessment(project=project, domain=domain, host=host, source=source) for _, host in admitted])
+        created = [(sub, row) for (sub, _host), row in zip(admitted, rows)]
+    except IntegrityError:  # a second sweep queued one of them between the check and now: one by one, so only that host is left out
+        for sub, host in admitted:
+            try:
+                with transaction.atomic():
+                    created.append((sub, HostAssessment.objects.create(project=project, domain=domain, host=host, source=source)))
+            except IntegrityError:
+                skipped.append((sub, 'already queued'))
     jobs = [job for _, job in created]
     if not jobs:
         return [], skipped
@@ -374,14 +478,50 @@ def execute(job_id, celery_id=None):
         if _unassessable(job):
             result = dict(REFUSED)
         else:
-            result = _diagnosed(job, run_host_pipeline(job.domain_id, [job.host], celery_id=celery_id, retest=True,
-                                                       force=True, hygiene=True, assessment_id=job_id,
-                                                       by_person=job.requested_by_id is not None))
+            outcome = run_host_pipeline(job.domain_id, [job.host], celery_id=celery_id, retest=True, force=True, hygiene=True,
+                                        assessment_id=job_id, by_person=job.requested_by_id is not None,
+                                        then=('host_assessment.one', {'job_id': job_id}))
+            from agentapi import stage_runs
+            if stage_runs.is_waiting(outcome):  # its stages wait on Sentinels without this worker: the callback finishes the assessment
+                return outcome
+            result = _diagnosed(job, outcome)
     except Exception as exc:
         logger.exception('host assessment %s failed', job_id)
         result = _failed(job, exc)
     _finish(job, result)
     return result
+
+
+def _finish_one(result, job_id):
+    """The continuation of an assessment whose stages waited on Sentinels (``agentapi.stage_runs``): what ``execute`` does with the result."""
+    job = HostAssessment.objects.select_related('domain', 'project').filter(pk=job_id).first()
+    if job is not None:
+        _finish(job, _diagnosed(job, result))
+
+
+def _settle_batch(eligible, outcome, statuses):
+    """Give each host of a batch run its own outcome: the one the pipeline named for it, else the run's."""
+    own = outcome.pop('per_host', {}) if isinstance(outcome, dict) else {}
+    for job in eligible:
+        if job.host in own:
+            result = own[job.host]
+        else:  # the host went through the stages: the run's result, with this host's own count of what resolved
+            result = {**outcome, 'batch_hosts': len(eligible), **({'resolved': 1} if 'resolved' in outcome else {})}
+        status = _finish(job, _diagnosed(job, result))
+        statuses[status] = statuses.get(status, 0) + 1
+
+
+def _finish_batch(result, job_ids):
+    """The continuation of a batch whose stages waited on Sentinels: what ``execute_batch`` does with the run's result."""
+    jobs = list(HostAssessment.objects.select_related('domain', 'project').filter(pk__in=job_ids, status='running').order_by('pk'))
+    if jobs:
+        _settle_batch(jobs, dict(result or {}), {})
+
+
+def _register():
+    from agentapi import stage_runs
+    stage_runs.continuation('host_assessment.one')(_finish_one)
+    stage_runs.continuation('host_assessment.batch')(_finish_batch)
 
 
 def execute_batch(job_ids, celery_id=None):
@@ -419,15 +559,13 @@ def execute_batch(job_ids, celery_id=None):
             if not eligible:
                 continue
             outcome = run_host_pipeline(domain_id, [job.host for job in eligible], celery_id=celery_id, retest=True, force=True, hygiene=True,
-                                        assessment_ids=[job.pk for job in eligible], by_person=requested_by is not None)
-            own = outcome.pop('per_host', {}) if isinstance(outcome, dict) else {}
-            for job in eligible:
-                if job.host in own:
-                    result = own[job.host]
-                else:  # the host went through the stages: the run's result, with this host's own count of what resolved
-                    result = {**outcome, 'batch_hosts': len(eligible), **({'resolved': 1} if 'resolved' in outcome else {})}
-                status = _finish(job, _diagnosed(job, result))
-                statuses[status] = statuses.get(status, 0) + 1
+                                        assessment_ids=[job.pk for job in eligible], by_person=requested_by is not None,
+                                        then=('host_assessment.batch', {'job_ids': [job.pk for job in eligible]}))
+            from agentapi import stage_runs
+            if stage_runs.is_waiting(outcome):  # the stages wait on Sentinels without this worker: the callback settles these hosts
+                statuses['waiting'] = statuses.get('waiting', 0) + len(eligible)
+                continue
+            _settle_batch(eligible, outcome, statuses)
         except Exception as exc:
             logger.exception('host assessment batch %s failed', [job.pk for job in group])
             for job in group:
@@ -435,3 +573,6 @@ def execute_batch(job_ids, celery_id=None):
                     status = _finish(job, _failed(job, exc))
                     statuses[status] = statuses.get(status, 0) + 1
     return {'hosts': len(jobs), 'statuses': statuses}
+
+
+_register()

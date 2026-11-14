@@ -12,7 +12,7 @@ What it runs: the host record for the address (no network access), an nmap finge
 technology pass, CVE correlation, then the AI-targeted nuclei pass. Each stage is the external pipeline's own function (same
 parsing, same persistence); only the execution seam differs. ``internal_scope`` makes the stages treat the address as a target and makes
 every local scanner refuse to run, so a seam that was missed fails loudly. Stages that run from this server directly (route checks,
-probes, hygiene, database exposure, screenshots) have no Sentinel path and are not run. WPScan runs through a Sentinel on the sites the Sentinel-run technology
+probes, hygiene, database exposure, screenshots) have no Sentinel path and are not run. The WordPress scan runs through a Sentinel on the sites the Sentinel-run technology
 pass tagged as WordPress (this server sends no probe of its own), and OpenVAS has its own opt-in sweep (``cveFeed.openvas_scan.internal_batch``).
 """
 import logging
@@ -140,7 +140,7 @@ def sweep():
 def _nmap(scan, project, ip, org_id, dispatch):
     """Fingerprint ``ip`` through an internal Sentinel and store what it found; an ``error`` when none answered."""
     from cveFeed import ledger
-    from cveFeed.nmap_scan import persist_inventory
+    from cveFeed.port_inventory import persist_inventory
     result = dispatch(project, 'nmap', {'addresses': [ip]}, host=ip, ips=[ip], scan=scan, internal=True)
     if result is None:
         return {'error': 'no Sentinel inside the network answered (one must declare network:internal and cover this project)'}
@@ -156,27 +156,27 @@ def _nmap(scan, project, ip, org_id, dispatch):
 def _testssl(scan, project, domain, ip, org_id, dispatch):
     """A TLS audit of each TLS port nmap found open on ``ip``, through an internal Sentinel; findings and CVE evidence are stored by the
     same functions the external sweep uses."""
-    from cveFeed import ledger, testssl_scan
+    from cveFeed import ledger, tls_audit
     from startScan.models import IpAddress, Subdomain, open_ports
     sub = Subdomain.objects.filter(scan_history=scan, name=ip).select_related('target_domain').first()
     ip_obj = IpAddress.objects.filter(address=ip, org_id=org_id).first()
     ports = {p.number: p for p in open_ports(ip_obj)} if ip_obj else {}
     tested = failed = issues = 0
-    for number, starttls in testssl_scan.tls_ports(ports):
+    for number, starttls in tls_audit.tls_ports(ports):
         where = f'{ip}:{number}'
         result = dispatch(project, 'testssl', {'host': ip, 'ip': ip, 'port': number, 'starttls': starttls or ''}, host=ip, ips=[ip],
                           scan=scan, internal=True)
-        evaluated = testssl_scan.evaluate((result or {}).get('items') or [], where) if result is not None else None
+        evaluated = tls_audit.evaluate((result or {}).get('items') or [], where) if result is not None else None
         if evaluated is None or not evaluated.tested:
             if result is not None:  # a Sentinel answered and the test did not complete: a failed run; no answer at all is not a run
-                ledger.record(testssl_scan.FAILED_SERVICE, [where], project.id, scan)
+                ledger.record(tls_audit.FAILED_SERVICE, [where], project.id, scan)
             failed += 1
             continue
-        testssl_scan.record_observations(project.id, domain.id, ip, number, evaluated, ip)
-        testssl_scan.store(domain, ip, number, evaluated, where)
+        tls_audit.record_observations(project.id, domain.id, ip, number, evaluated, ip)
+        tls_audit.store(domain, ip, number, evaluated, where)
         if sub is not None:
-            testssl_scan.run_for_host(sub)
-        ledger.record(testssl_scan.SERVICE, [where], project.id, scan)
+            tls_audit.run_for_host(sub)
+        ledger.record(tls_audit.SERVICE, [where], project.id, scan)
         tested += 1
         issues += len(evaluated.findings)
     out = {'tested': tested, 'failed': failed, 'issues': issues}
@@ -186,13 +186,13 @@ def _testssl(scan, project, domain, ip, org_id, dispatch):
 
 
 def _udp(scan, project, ip, org_id, dispatch):
-    """The UDP exposure sweep of ``ip`` through an internal Sentinel; the raw nmap XML is parsed and stored by the external sweep's own functions."""
-    from cveFeed import ledger, nmap_scan, udp_scan
+    """The UDP exposure sweep of ``ip`` through an internal Sentinel; the raw report is parsed and stored by the external sweep's own functions."""
+    from cveFeed import ledger, port_inventory, udp_scan
     from startScan.models import IpAddress
     result = dispatch(project, 'nmap_udp', {'address': ip}, host=ip, ips=[ip], scan=scan, internal=True)
     if result is None:
         return {'error': 'no Sentinel inside the network answered'}
-    host = next((h for h in nmap_scan.parse_xml(result.get('xml') or '') if h.get('ip') == ip), None)
+    host = next((h for h in port_inventory.parse_xml(result.get('xml') or '') if h.get('ip') == ip), None)
     ip_obj = IpAddress.objects.filter(address=ip, org_id=org_id).first()
     if host is None or ip_obj is None:
         if ip_obj is not None:
@@ -205,14 +205,40 @@ def _udp(scan, project, ip, org_id, dispatch):
 
 def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=None):
     """Run the internal pipeline for one queued scan. ``dispatch`` replaces ``sentinel_dispatch.dispatch_or_none`` in tests, ``nuclei_stream``
-    (``kind -> stream``) replaces the Sentinel nuclei streams, and ``provider`` (``False`` = the configured AI, ``None`` = none) the AI planner."""
+    (``kind -> stream``) replaces the Sentinel nuclei streams, and ``provider`` (``False`` = the configured AI, ``None`` = none) the AI planner.
+
+    Every stage of it waits on a Sentinel inside the network: without injected seams it does so without holding its worker (``agentapi.stage_runs``),
+    and returns the ``waiting`` marker while it does; the callback (``_resume``) runs it again from where it stopped."""
+    if dispatch is not None or nuclei_stream is not None or wp_runner is not None:
+        return _run(scan_id, dispatch, nuclei_stream, provider, wp_runner)
+    from agentapi import stage_runs
+    from startScan.models import ScanHistory
+    project_id = ScanHistory.objects.filter(pk=scan_id).values_list('domain__project_id', flat=True).first()
+    return stage_runs.run('pipeline.internal', {'scan_id': scan_id, 'provider': provider}, first=lambda: _run(scan_id, None, None, provider, None),
+                          project=project_id, scan=scan_id)
+
+
+def _resume_internal(context):
+    """The completion callback of an internal scan: the same pipeline again, from where it stopped."""
+    scan_id = context['scan_id']
+    try:
+        return _run(scan_id, None, None, context.get('provider', False), None)
+    except Exception as exc:  # noqa: BLE001 - the scan must end in a visible state
+        from cveFeed.discovery import FAILED
+        from startScan.models import ScanHistory
+        logger.exception('internal scan %s failed in its callback', scan_id)
+        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=str(exc)[:290])
+        return {'scan_id': scan_id, 'status': FAILED, 'error': str(exc)[:290]}
+
+
+def _run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=None):
     from agentapi import sentinel_dispatch
     from cveFeed import activity
-    from cveFeed.discovery import FAILED, RUNNING, SUCCESS, _stage, mark_running
+    from cveFeed.discovery import FAILED, SUCCESS, _stage, mark_running
     from cveFeed.bounty_gate import Gate
     from cveFeed.exclusions import is_excluded
     from reNgine.tasks import persist_bbot_result
-    from reNgine import bbot as bbot_lib
+    from reNgine import discovery_events as bbot_lib
     from startScan.ip_rows import org_id_of_project
     from startScan.models import ScanActivity, ScanHistory
     from targetApp.target_types import sentinel_only_target
@@ -241,8 +267,9 @@ def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=No
     running = activity.log('run_check', f'Internal scan of {ip}: a Sentinel inside the network does the scanning, never this server',
                            project=project.id, status='running', scan_id=scan.id)
     org_id = org_id_of_project(project.id)
-    persist_bbot_result(bbot_lib.BbotResult(subdomains={ip}, resolutions={(ip, ip)}),
-                        ctx={'scan_history_id': scan.id, 'domain_id': domain.id, 'subdomain_id': None, 'subscan_id': None})
+    from agentapi import stage_runs
+    stage_runs.once('persist_address', lambda: (persist_bbot_result(bbot_lib.BbotResult(subdomains={ip}, resolutions={(ip, ip)}), ctx={
+        'scan_history_id': scan.id, 'domain_id': domain.id, 'subdomain_id': None, 'subscan_id': None}), None)[1])
     from cveFeed import nuclei_scan, wpscan_scan
     from targetApp.target_types import internal_scope
     with internal_scope():
@@ -254,7 +281,7 @@ def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=No
             _stage(scan, 'UDP exposure sweep (internal Sentinel)', 'internal_udp_scan', lambda: _udp(scan, project, ip, org_id, dispatch), fallback={'open': 0})
             _stage(scan, 'Nuclei HTTP and technology pass (internal Sentinel)', 'nuclei_light_scan',
                    lambda: nuclei_scan.run_light_nuclei(scan.id, stream=stream('nuclei_light')), fallback={'targets': 0, 'techs': {}})
-            _stage(scan, 'WPScan of WordPress sites (internal Sentinel)', 'internal_wpscan',
+            _stage(scan, 'WordPress scan of WordPress sites (internal Sentinel)', 'internal_wpscan',
                    lambda: wpscan_scan.run_wpscan(scan.id, runner=wp_runner, internal=True), fallback={'sites': 0})
             from cveFeed.tasks import correlate_cves
             _stage(scan, 'CVE correlation', 'cve_correlation', lambda: correlate_cves(scan_history_id=scan.id),
@@ -269,3 +296,11 @@ def run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=No
                     message=(f'Internal scan of {ip} finished: {nmap.get("ports", 0)} service(s) found{("; " + error) if error else ""}' if status == SUCCESS
                              else f'Internal scan of {ip} failed: {error}'))
     return {'scan_id': scan_id, 'status': status, 'error': error or '', 'failed_stages': failed_names, 'nmap': nmap}
+
+
+def _register():
+    from agentapi import stage_runs
+    stage_runs.adapter('pipeline.internal', queue='discovery_queue')(_resume_internal)
+
+
+_register()

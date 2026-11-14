@@ -6,7 +6,13 @@ A ``SentinelTask`` is one unit of scan-stage work (nmap, naabu, a nuclei pass) f
 Agent (a "Sentinel") the same way, but shaped around what a scanner needs rather than a CVE match. A ``SentinelEnrollment``
 is the one-time secret an administrator hands a new Sentinel so its first ``register`` call can create its own ``Agent`` row.
 """
+import uuid
+
 from django.db import models
+from django.db.models.functions import Now
+from django.utils import timezone
+
+from agentapi import sentinel_contract
 
 ACTIVE_TASK_STATUSES = ('queued', 'assigned', 'running')
 SENTINEL_ACTIVE_STATUSES = ('queued', 'claimed', 'running')
@@ -99,11 +105,16 @@ class AgentTask(models.Model):
                                                name='one_active_agent_task_per_match_kind')]
 
 
+def new_trace_id():
+    """The id one SentinelTask carries from the stage that queues it, through the Sentinel that runs it, to the audit rows and activity lines about it."""
+    return uuid.uuid4().hex
+
+
 class SentinelTask(models.Model):
     """One unit of scan-stage work: run this tool against this server-constructed target, leased to a ``kind='scanner'`` Agent (a
     Sentinel) until it reports back. ``target`` and ``result`` are each a small typed, clipped record (see
     ``agentapi.sentinel_broker.TARGET_SCHEMA`` / ``clean_result``); neither is ever built from, or interpreted as, a command."""
-    KINDS = ('nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'nuclei_deep', 'testssl', 'nmap_udp', 'wpscan', 'openvas', 'discover')
+    KINDS = sentinel_contract.KINDS  # one list: the contract's ``kind_since``
     STATUSES = ('queued', 'claimed', 'running', 'done', 'failed', 'expired')
 
     project = models.ForeignKey('dashboard.Project', on_delete=models.CASCADE, related_name='+')
@@ -124,6 +135,15 @@ class SentinelTask(models.Model):
     finished_at = models.DateTimeField(null=True, blank=True)
     result = models.JSONField(default=dict, blank=True)
     error = models.CharField(max_length=300, blank=True, default='')
+    # Signed-in work (docs/SCANNER-ARCHITECTURE.md, decision 4). ``secret_ref`` names the stored credential the task needs ("authcred:<id>", an
+    # ``AuthCredential``), never its value: a task that carries one is offered only to the built-in scanner, which redeems it once through
+    # ``sentinel_broker.read_secret``. ``secret_read_at`` is the compare-and-set that makes that read single use. Nothing sets ``secret_ref`` yet.
+    secret_ref = models.CharField(max_length=40, null=True, blank=True)
+    secret_read_at = models.DateTimeField(null=True, blank=True)
+    trace_id = models.CharField(max_length=32, default=new_trace_id, db_default='', db_index=False)  # rows from before it existed read ''
+    # A streamed kind (``sentinel_contract.STREAMED``: bbot_discovery) posts numbered batches while it runs (``SentinelPartial``): the seq of the last
+    # batch the server took. A batch at or below it is a retry of one already stored; the next must be exactly one more.
+    partial_seq = models.PositiveIntegerField(default=0, db_default=0)
     created_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -132,10 +152,90 @@ class SentinelTask(models.Model):
         ordering = ['-priority', 'created_at', 'id']
         indexes = [models.Index(fields=['status', 'lease_expires_at'], name='sentineltask_lease_idx'),
                    models.Index(fields=['project', 'status'], name='sentineltask_project_idx'),
-                   models.Index(fields=['scan', 'kind'], name='sentineltask_scan_kind_idx')]
+                   models.Index(fields=['scan', 'kind'], name='sentineltask_scan_kind_idx'),
+                   # the Sentinels page's polls (live_overview, activity_metrics): the last five finished tasks of each Sentinel, the day's counts, the hour's
+                   # work and claims. Without them each read the Sentinel's whole history (17 ms per Sentinel, 40 ms for the hour) of a table that holds 30 days of work.
+                   # The first covers the 24 hour counts as an index-only scan; the other two serve the hour's windows.
+                   models.Index(fields=['agent', '-finished_at', '-id'], name='sentineltask_agent_done_idx', include=['status', 'accepted_at', 'claimed_at', 'kind'],
+                                condition=models.Q(status__in=['done', 'failed'])),
+                   models.Index(fields=['finished_at'], name='sentineltask_finished_idx', condition=models.Q(finished_at__isnull=False)),
+                   models.Index(fields=['claimed_at'], name='sentineltask_claimed_idx', condition=models.Q(claimed_at__isnull=False)),
+                   # ``sentinel_broker.scrub_stale_values`` (once a minute): finished secrets and route-probe results whose values are not scrubbed yet. The index holds only
+                   # those rows (a row leaves it when it is scrubbed), so the select reads a handful of entries instead of the result column of every finished task
+                   models.Index(fields=['id'], name='sentineltask_unscrubbed_idx',
+                                condition=models.Q(status='done', kind__in=['secrets_scan', 'route_probe']) & ~models.Q(result__has_key='values_scrubbed'))]
+
+    def save(self, *args, **kwargs):
+        """A new task is checked against the organization's do-not-scan address list before it is written, whoever creates it: the one place a kind added
+        later cannot go around (``agentapi.address_guard``). Raises ``reNgine.resources.AddressExcluded``; nothing is stored."""
+        if self._state.adding and self.project_id:
+            from agentapi import address_guard
+            refusal = address_guard.dispatch_refusal(self.project_id, self.kind, self.target, self.host, self.ips, scan=self.scan if self.scan_id else None)
+            if refusal:
+                from reNgine.resources import AddressExcluded
+                raise AddressExcluded(self.kind, refusal)
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f'sentinel task #{self.pk} {self.kind} ({self.status})'
+
+
+class SentinelPartial(models.Model):
+    """One batch of partial results a streamed task posted while it ran (``sentinel_broker.report_partial``), typed and clipped by
+    ``sentinel_broker.clean_partial``, waiting for the stage that dispatched the task (``sentinel_dispatch.dispatch_stream``) to persist it. That
+    stage reads the batches in ``seq`` order and deletes each once it is stored, so a row lives for seconds; what is left when a stage went away
+    goes with its task (cascade, and the task's retention)."""
+    task = models.ForeignKey(SentinelTask, on_delete=models.CASCADE, related_name='partials')
+    seq = models.PositiveIntegerField()
+    body = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['task', 'seq']
+        constraints = [models.UniqueConstraint(fields=['task', 'seq'], name='sentinelpartial_task_seq_uniq')]
+
+    def __str__(self):
+        return f'partial {self.seq} of sentinel task #{self.task_id}'
+
+
+class StageRun(models.Model):
+    """A scan stage (or a sweep) that handed work to Sentinels and gave its Celery worker back while it waits (``agentapi.stage_runs``, docs/
+    SCANNER-ARCHITECTURE.md, "Asynchronous stages"). ``kind`` is the registered adapter that continues it, ``stage`` the stage it waits in, ``context``
+    what that adapter needs to carry on (JSON: ids and flags, never a credential), ``task_ids`` the SentinelTasks it waits on and ``tasks`` the state of
+    each wait (its budgets, as wall-clock times, and whether its activity line was closed). ``state``: ``running`` (a worker is on it, until
+    ``lease_until``), ``waiting`` (no worker: Sentinels hold its tasks), ``ready`` (every task ended; the completion callback is queued), ``done``,
+    ``failed`` or ``cancelled``. ``deadline`` is when the waiting run must next be looked at (a claim or completion budget ends then)."""
+    STATES = ('running', 'waiting', 'ready', 'done', 'failed', 'cancelled')
+    OPEN_STATES = ('running', 'waiting', 'ready')
+
+    kind = models.CharField(max_length=64, db_default='')
+    stage = models.CharField(max_length=64, blank=True, default='', db_default='')
+    project = models.ForeignKey('dashboard.Project', on_delete=models.CASCADE, null=True, blank=True, related_name='+')
+    scan = models.ForeignKey('startScan.ScanHistory', on_delete=models.CASCADE, null=True, blank=True, related_name='+')
+    context = models.JSONField(default=dict, blank=True, db_default={})
+    task_ids = models.JSONField(default=list, blank=True, db_default=[])
+    tasks = models.JSONField(default=dict, blank=True, db_default={})
+    state = models.CharField(max_length=12, default='running', db_default='running')
+    queue = models.CharField(max_length=40, blank=True, default='', db_default='')
+    rounds = models.PositiveIntegerField(default=0, db_default=0)
+    deadline = models.DateTimeField(null=True, blank=True)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    waiting_since = models.DateTimeField(null=True, blank=True)
+    woke_at = models.DateTimeField(null=True, blank=True)
+    resumed_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    history = models.JSONField(default=list, blank=True, db_default=[])  # per wait: seconds waited and the callback latency, for the metrics
+    error = models.CharField(max_length=300, blank=True, default='', db_default='')
+    created_at = models.DateTimeField(default=timezone.now, db_default=Now())
+    updated_at = models.DateTimeField(auto_now=True, db_default=Now())
+
+    class Meta:
+        ordering = ['created_at', 'id']
+        indexes = [models.Index(fields=['state', 'deadline'], name='stagerun_state_idx'),
+                   models.Index(fields=['scan', 'state'], name='stagerun_scan_idx')]
+
+    def __str__(self):
+        return f'stage run #{self.pk} {self.kind} ({self.state})'
 
 
 class SentinelEnrollment(models.Model):
@@ -153,6 +253,7 @@ class SentinelEnrollment(models.Model):
     network = models.CharField(max_length=10, default='external', db_default='external')  # what the administrator chose when provisioning: external or internal
     used_at = models.DateTimeField(null=True, blank=True)
     used_by_agent = models.ForeignKey(Agent, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    builtin = models.BooleanField(default=False, db_default=False)  # the install's own scanner (agentapi.builtin_scanner): minted by the server, never by a person
     # The API token the redeemed secret minted (scope 'sentinel'): what ties a Sentinel to the scope it was enrolled for, so it can narrow it but
     # never widen it, even after its Agent row was removed and registered again.
     token = models.OneToOneField('dashboard.ApiToken', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
@@ -170,6 +271,14 @@ class SentinelDefaults(models.Model):
     configuration set a value. ``self_update`` is ``off``, ``manual`` (it updates only when an administrator presses Update now) or
     ``automatic``; empty means "follow the instance's own Automatic or Manual update choice" (``cveFeed.updater.read_mode``)."""
     self_update = models.CharField(max_length=10, blank=True, default='')
+    # "Keep Sentinels on the newest version" (``agentapi.sentinel_autoupdate``): on by default. While on, cvENGINE asks a Sentinel that runs a build behind the newest
+    # published one to update (rate limited, never during heavy tasks, never to a build the server cannot run), and a Sentinel that follows the instance default is Automatic.
+    keep_newest = models.BooleanField(default=True, db_default=True)
+    # The capability policy defaults (``agentapi.sentinel_policy``): ``{kind: {'mode': 'allow'|'deny'|'prefer', 'max_concurrent': int|None}}`` applied to a
+    # Sentinel with no policy of its own for a kind. ``builtin_kinds`` is for the install's own scanner (``None``: nothing was ever chosen, so the shipped
+    # default applies: OpenVAS denied; ``{}``: an administrator chose no defaults), ``external_kinds`` for every other Sentinel (empty: all declared kinds allowed).
+    builtin_kinds = models.JSONField(null=True, blank=True, default=None)
+    external_kinds = models.JSONField(blank=True, default=dict, db_default={})  # db_default: the code still running during an update inserts without it
     changed_by = models.CharField(max_length=150, blank=True, default='')
     changed_at = models.DateTimeField(null=True, blank=True)
 

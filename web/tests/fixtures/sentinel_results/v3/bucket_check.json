@@ -1,0 +1,13 @@
+{
+  "outcome": "done",
+  "buckets": [
+    {"id": "s3:example-static", "verdict": {"state": "public", "objects": ["css/site.css", "img/logo.png"], "truncated": true, "region": "us-east-1",
+                                              "object_read": false, "status": 200, "code": "", "request_count": 2}},
+    {"id": "gcs:example-assets", "verdict": {"state": "private", "objects": [], "truncated": false, "region": "", "object_read": null, "status": 401,
+                                               "code": "required", "request_count": 1}},
+    {"id": "azure:examplestore/media", "verdict": {"state": "unknown", "objects": [], "truncated": false, "region": "", "object_read": null,
+                                                     "status": 0, "code": "", "request_count": 0}}
+  ],
+  "touched": ["example-static.s3.amazonaws.com", "storage.googleapis.com"],
+  "refused": []
+}

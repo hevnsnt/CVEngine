@@ -474,6 +474,18 @@ def template_hits(hits, scan=None, project=None):
     return _send(text, 'send_vuln_notif')
 
 
+def fix_not_holding(host, title):
+    """One line: a finding marked fixed was checked again and still reproduces, so it was reopened (``cveFeed.fix_retest``). Never raises."""
+    text = f'CVEngine: {_label(title)} on {_name(host)} was marked fixed, but a retest still reproduces it. It is open again.'
+    return _send(text, 'send_vuln_notif')
+
+
+def host_needs_person(host):
+    """One line: the AI host review could not settle a host's findings and asks a person to look (``cveFeed.host_actions``, ``ask_person``). The
+    host is named, nothing the model wrote is. Never raises."""
+    return _send(f'CVEngine: the AI review of {_name(host)} asks a person to look at it.', 'send_vuln_notif')
+
+
 def scan_finished(scan, results):
     """One line for a finished discovery scan; ``results`` is what the pipeline stages returned."""
     try:

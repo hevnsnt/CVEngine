@@ -1,5 +1,4 @@
 import json
-from unittest import mock
 
 from django.contrib.auth.models import User
 from django.test import TestCase
@@ -7,7 +6,6 @@ from django.utils import timezone
 
 from cveFeed import api_credentials as creds
 from dashboard.models import ApiCredential, AuditLog, Org, Project, ProjectMembership
-from reNgine import bbot as bbot_lib
 from tests.test_admin import api as admin_api_call
 from tests.test_tenancy import client_for
 
@@ -109,33 +107,6 @@ class ResolveAndBbotArgsTests(TestCase):
 		orphan = Project.objects.create(name='O', slug='orphan', insert_date=timezone.now())
 		ApiCredential.objects.create(project=orphan, service='shodan', value={'api_key': 'x'})
 		self.assertEqual(creds.resolve_for_project(orphan), {'shodan': {'api_key': 'x'}})
-
-
-class BbotCommandWiringTests(TestCase):
-	def test_extra_args_reach_the_command_line(self):
-		cmd = bbot_lib.build_command(['example.com'], extra_args=['-c', 'modules.shodan_dns.api_key=sk-1'])
-		self.assertEqual(cmd[-2:], ['-c', 'modules.shodan_dns.api_key=sk-1'])
-
-
-class SecretRedactionTests(TestCase):
-	def test_config_secrets_and_redact_hide_api_keys_in_bbot_stderr(self):
-		args = ['-c', 'modules.shodan_dns.api_key=sk-live-secret', '-c', 'modules.censys_dns.api_key=cid12345:csec67890']
-		secrets = bbot_lib.config_secrets(args)
-		self.assertEqual(secrets, ['sk-live-secret', 'cid12345:csec67890'])
-		line = 'Error: bad key sk-live-secret and cid12345 / csec67890'
-		out = bbot_lib.redact(line, secrets)
-		for leaked in ('sk-live-secret', 'cid12345', 'csec67890'):
-			self.assertNotIn(leaked, out)
-
-	def test_a_failed_bbot_run_does_not_put_the_key_in_the_error(self):
-		import sys
-		script = 'import sys; sys.stderr.write("Traceback\\nValueError: key sk-live-secret rejected\\n"); sys.exit(2)'
-		with mock.patch.object(bbot_lib, 'BBOT_BIN', sys.executable), \
-				mock.patch.object(bbot_lib, 'build_command', lambda *a, **k: [sys.executable, '-c', script]):
-			with self.assertRaises(bbot_lib.BbotProcessError) as ctx:
-				list(bbot_lib.stream_events(['example.com'], extra_args=['-c', 'modules.shodan_dns.api_key=sk-live-secret']))
-		self.assertNotIn('sk-live-secret', str(ctx.exception))
-		self.assertIn('rejected', str(ctx.exception))
 
 
 class ProjectApiKeyEndpointTests(TestCase):

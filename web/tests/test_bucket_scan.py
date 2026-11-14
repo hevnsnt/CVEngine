@@ -1,6 +1,5 @@
 import json
 import os
-import ssl
 from datetime import timedelta
 from unittest import mock
 from urllib.parse import urlsplit
@@ -10,12 +9,13 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from agentapi.auth import create_token
-from cveFeed import bucket_probe as bp, bucket_scan as bs, hygiene
+from cveFeed import bucket_probe as bp, bucket_scan as bs
 from cveFeed.models import BountyEngagement, BountyProgram, HostExclusion, HygieneFinding, ProbeObservation, ServiceRun
 from dashboard.models import Org, Project, ProjectMembership
 from startScan.models import EndPoint, Subdomain, Vulnerability
 from targetApp.models import Domain
 from tests.test_agentapi import call
+from tests import hygiene_harness
 
 Response = bp.Response
 
@@ -245,28 +245,6 @@ class ProbeTests(SimpleTestCase):
         self.assertEqual(bp.check('s3', 'ex-static', fetch=Net(**{S3: xml(503, '<Error><Code>SlowDown</Code></Error>')})).state, 'unknown')
 
 
-class DnsTests(SimpleTestCase):
-    def exists(self, outcome):
-        import dns.resolver
-
-        class Resolver:
-            def resolve(self, host, rtype):
-                if isinstance(outcome, type) and issubclass(outcome, Exception):
-                    raise outcome()
-                return outcome
-        with mock.patch('cveFeed.hygiene._resolver', return_value=Resolver()):
-            return bp.dns_exists('exstore.blob.core.windows.net')
-
-    def test_only_nxdomain_says_the_account_is_gone(self):
-        import dns.exception
-        import dns.resolver
-        self.assertIs(self.exists(dns.resolver.NXDOMAIN), False)
-        self.assertIs(self.exists(['203.0.113.7']), True)
-        self.assertIs(self.exists(dns.resolver.NoAnswer), True)
-        self.assertIsNone(self.exists(dns.exception.Timeout))  # a slow resolver is not a takeover
-        self.assertIsNone(self.exists(dns.resolver.NoNameservers))
-
-
 class ScheduleTests(TestCase):
     def test_the_daily_sweep_is_scheduled_on_its_own_queue_and_the_queue_is_served_and_reported(self):
         from django_celery_beat.models import PeriodicTask
@@ -284,133 +262,13 @@ class ScheduleTests(TestCase):
         sweep.assert_called_once_with()
 
 
-class FetchTests(SimpleTestCase):
-    """The one function that touches the network: what it refuses before anything is sent."""
-
-    def refused(self, method, url):
-        with mock.patch('cveFeed.pinned_transport.resolve') as resolve, mock.patch('cveFeed.pinned_transport.HTTPConnection') as connection:
-            with self.assertRaises(ValueError):
-                bp.http_fetch(method, url, paced=False)
-        resolve.assert_not_called()
-        connection.assert_not_called()
-
-    def test_only_get_and_head(self):
-        for method in ('POST', 'PUT', 'DELETE', 'OPTIONS'):
-            self.refused(method, 'https://ex-static.s3.amazonaws.com/')
-
-    def test_only_https_on_443_to_a_documented_storage_endpoint(self):
-        for url in ('http://ex-static.s3.amazonaws.com/', 'https://ex-static.s3.amazonaws.com:8443/', 'https://www.example.test/', 'https://example.test/s3.amazonaws.com',
-                    'https://ex-static.s3.amazonaws.com.evil.test/', 'https://203.0.113.5/', 'https://user:pw@ex-static.s3.amazonaws.com/',
-                    'https://evil.test@ex-static.s3.amazonaws.com.evil.test/', 'https://ec2-203-0-113-5.compute-1.amazonaws.com/', 'https://x.cloudfront.net/'):
-            self.refused('GET', url)
-
+class EndpointTests(SimpleTestCase):
     def test_the_endpoint_list(self):
         for host in ('s3.amazonaws.com', 'ex-static.s3.amazonaws.com', 's3.eu-west-1.amazonaws.com', 'ex-static.s3.eu-west-1.amazonaws.com', 'storage.googleapis.com',
                      'exstore.blob.core.windows.net'):
             self.assertTrue(bp.endpoint_allowed(host), host)
         for host in ('ex.static.s3.amazonaws.com', 'exstore.z13.web.core.windows.net', 'ex-static.storage.googleapis.com', 'example.test', ''):
             self.assertFalse(bp.endpoint_allowed(host), host)
-
-    def test_a_storage_name_that_resolves_to_a_prohibited_address_is_never_connected_to(self):
-        with mock.patch('cveFeed.pinned_transport.resolve', side_effect=ValueError('probe destination is prohibited')), \
-                mock.patch('cveFeed.pinned_transport.HTTPConnection') as connection:
-            with self.assertRaises(ValueError):
-                bp.http_fetch('GET', 'https://ex-static.s3.amazonaws.com/', paced=False)
-        connection.assert_not_called()
-
-    def test_a_request_goes_to_the_vetted_address_on_443_with_certificate_checks_and_no_credentials(self):
-        addresses = ((2, ('203.0.113.9', 443)),)
-        response = mock.Mock(status=200)
-        response.getheader.side_effect = lambda name: {'x-amz-bucket-region': 'us-east-1'}.get(name)
-        response.read.return_value = b'<ListBucketResult/>'
-        with mock.patch('cveFeed.pinned_transport.resolve', return_value=addresses) as resolve, \
-                mock.patch('cveFeed.pinned_transport.HTTPConnection') as connection, mock.patch.object(bp, 'pacer') as pacer:
-            connection.return_value.getresponse.return_value = response
-            got = bp.http_fetch('GET', 'https://ex-static.s3.amazonaws.com/?max-keys=20')
-        resolve.assert_called_once_with('ex-static.s3.amazonaws.com', 443)
-        args, kwargs = connection.call_args
-        self.assertEqual(args[:3], ('ex-static.s3.amazonaws.com', 443, addresses))
-        self.assertEqual(kwargs['context'].verify_mode, ssl.CERT_REQUIRED)
-        self.assertTrue(kwargs['context'].check_hostname)
-        method, path = connection.return_value.request.call_args[0]
-        self.assertEqual((method, path), ('GET', '/?max-keys=20'))
-        sent = {k.lower() for k in connection.return_value.request.call_args[1]['headers']}
-        self.assertFalse(sent & {'authorization', 'cookie', 'x-amz-security-token', 'x-ms-version'})
-        pacer.return_value.wait.assert_called_once()  # every request waits for its turn at the global rate
-        self.assertEqual((got.status, got.headers['x-amz-bucket-region'], got.body), (200, 'us-east-1', b'<ListBucketResult/>'))
-        connection.return_value.close.assert_called_once()
-
-    def fetch_encoded(self, body, encoding):
-        from tests.test_pinned_transport import FakeResponse
-        response = FakeResponse(body, encoding)
-        response.status = 200
-        with mock.patch('cveFeed.pinned_transport.resolve', return_value=((2, ('203.0.113.9', 443)),)), \
-                mock.patch('cveFeed.pinned_transport.HTTPConnection') as connection:
-            connection.return_value.getresponse.return_value = response
-            return bp.http_fetch('GET', 'https://ex-static.s3.amazonaws.com/?max-keys=20', paced=False)
-
-    def test_a_listing_a_server_sends_gzipped_despite_identity_is_read(self):
-        import gzip
-        listing = b'<ListBucketResult><Name>ex-static</Name><Contents><Key>a.txt</Key></Contents></ListBucketResult>'
-        got = self.fetch_encoded(gzip.compress(listing), 'gzip')
-        self.assertEqual((got.status, got.body), (200, listing))
-
-    def test_a_compressed_body_is_cut_at_the_cap_after_decoding_and_a_bad_one_is_a_network_error(self):
-        import gzip
-        got = self.fetch_encoded(gzip.compress(b'A' * 20_000_000, compresslevel=9), 'gzip')
-        self.assertEqual(len(got.body), bp.MAX_BODY)
-        for body, encoding in ((b'garbage', 'gzip'), (b'<x/>', 'br')):
-            with self.assertRaises(OSError):
-                self.fetch_encoded(body, encoding)
-
-    def test_a_head_reads_no_body(self):
-        response = mock.Mock(status=200)
-        response.getheader.return_value = ''
-        with mock.patch('cveFeed.pinned_transport.resolve', return_value=((2, ('203.0.113.9', 443)),)), \
-                mock.patch('cveFeed.pinned_transport.HTTPConnection') as connection:
-            connection.return_value.getresponse.return_value = response
-            bp.http_fetch('HEAD', 'https://ex-static.s3.amazonaws.com/a.png', paced=False)
-        response.read.assert_not_called()
-
-
-class PacerTests(SimpleTestCase):
-    def test_requests_are_spaced_by_the_rate(self):
-        clock, slept = [100.0], []
-
-        def sleep(seconds):
-            slept.append(seconds)
-            clock[0] += seconds
-        pacer = bp.Pacer(rate=2, clock=lambda: clock[0], sleep=sleep, client=False)
-        pacer._redis = lambda: None  # this process alone
-        for _ in range(5):
-            pacer.wait()
-        self.assertEqual(round(sum(slept), 3), 2.0)  # five requests at two a second: the first at once, then four half-second gaps
-        self.assertEqual(len(slept), 4)
-
-    def test_the_gate_is_shared_through_redis(self):
-        class Redis:
-            def __init__(self):
-                self.taken = 3
-                self.sets = []
-
-            def set(self, key, value, nx, px):
-                self.sets.append((key, px))
-                if self.taken:
-                    self.taken -= 1
-                    return None
-                return True
-
-            def pttl(self, key):
-                return 250
-        redis, slept = Redis(), []
-        bp.Pacer(rate=2, sleep=slept.append, client=redis).wait()
-        self.assertEqual((len(redis.sets), redis.sets[0]), (4, ('cvengine:buckets:pace', 500)))
-        self.assertEqual(len(slept), 3)
-
-    def test_the_rate_is_clamped(self):
-        for value, expected in (('100', 5.0), ('0', 0.1), ('abc', 2.0), ('1', 1.0)):
-            with mock.patch.dict(os.environ, {'CVENGINE_BUCKETS_RPS': value}):
-                self.assertEqual(bp.request_rate(), expected)
 
 
 class Fixture:
@@ -778,7 +636,7 @@ class SweepTests(Fixture, TestCase):
 
     def test_run_hygiene_leaves_these_findings_alone(self):
         self.sweep(self.listing)
-        out = hygiene.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=lambda name: ([], []), mx=lambda n, t: False)
+        out = hygiene_harness.run_hygiene(self.domain.id, probe=lambda host, port: None, emailer=lambda name: ([], []), mx=lambda n, t: False)
         self.assertIsNotNone(out)
         self.assertEqual(self.finding('static.example.test').status, 'open')
 

@@ -138,7 +138,7 @@ def host_archive(ctx, slug, host, action, reason='', pinned=None):
     name = clean_host(host)
     if action not in ('archive', 'restore', 'pin'):
         raise ApiError(400, 'unknown archive action')
-    if is_excluded(project.pk, name) and action == 'restore':
+    if is_excluded(project.pk, name, names_only=True) and action == 'restore':
         raise ApiError(409, 'host is excluded; an organization admin must remove the exclusion first')
     if not isinstance(reason, str) or len(reason.strip()) > MAX_REASON:
         raise ApiError(400, f'reason must be text of at most {MAX_REASON} characters')
@@ -170,6 +170,8 @@ def host_archive(ctx, slug, host, action, reason='', pinned=None):
             raise ApiError(400, 'pinned must be true or false')
         state.pinned = pinned
         state.save(update_fields=['pinned'])
+    from cveFeed import snapshot_cache
+    snapshot_cache.bump_on_commit()  # archive, restore and pin change what the host lists and counts show
     from cveFeed.admin_api import audit
     audit(ctx.user, f'host.{action}', f'{name} in {slug}', project.org, project=slug, host=name,
           reason=reason.strip() if action == 'archive' else '', pinned=state.pinned)
@@ -213,6 +215,8 @@ def _purge(project, name, subtree=False):
                                 RouteAuth, TlsCertificate, Triage)
     from startScan.models import EndPoint, ScanHistory, Subdomain, Vulnerability
     from targetApp.models import Domain
+    from cveFeed import snapshot_cache
+    snapshot_cache.bump_on_commit()  # the host, finding and match counts on the live screen change with this commit
     counts = {}
     subs = Subdomain.objects.filter(target_domain__project=project).filter(_host_q('name', name, subtree))
     sub_ids = list(subs.values_list('id', flat=True))
@@ -388,7 +392,7 @@ def move_host(ctx, slug, host, to_project, discover=True, whole_target=False):
     def purge():
         back = HostMove.objects.filter(project=dest)  # they once left the destination: moving them back lifts that block
         (back.filter(_host_q('host', name, True)) if whole else back.filter(host__in=names)).delete()
-        if is_excluded(dest.pk, name):
+        if is_excluded(dest.pk, name, names_only=True):
             raise ApiError(409, f'{name} is excluded in the destination\'s organization (an organization admin can lift the exclusion)')
         for n in names:
             HostMove.objects.update_or_create(project=source, host=n, defaults={'moved_to': dest, 'moved_by': ctx.user})
@@ -517,11 +521,29 @@ def list_exclusions(ctx, slug):
                          'by': r.created_by.username if r.created_by else None} for r in rows]}
 
 
+def list_excluded_addresses(ctx, slug, host=None):
+    """The do-not-scan address list of this project's organization (read only; any access to the project). With ``host``: whether that name or address is covered, and why."""
+    from agentapi import excluded_addresses
+    from cveFeed import exclusions
+    project, _ = get_one_project(ctx, slug)
+    if project.org_id is None:
+        return {'organization': None, 'results': []}
+    out = {'organization': project.org.slug, **excluded_addresses.list_rows(project.org_id)}
+    if host:
+        if not isinstance(host, str) or len(host) > 500:
+            raise ApiError(400, 'host must be a name or an address')
+        reason = exclusions.address_excluded(project.pk, host)
+        out.update({'host': host, 'excluded': bool(reason), 'reason': str(reason) if reason else ''})
+    return out
+
+
 def remove_exclusion(ctx, slug, host):
     """Let the organization scan a host again (an org admin only: it changes what every project of the org scans). The data that
     was deleted does not come back; the host returns when a scan next finds it."""
     from cveFeed.models import HostExclusion
     project, _ = get_project(ctx, slug, write=True)
+    if ctx.token is not None:  # an API token or MCP call: a person excluded it, so only a person re-includes it
+        raise ApiError(403, 'lifting an exclusion lets the organization scan the host again; a person excluded it, so only a person lifts it, in the web interface')
     if project.org is None or not roles.can_manage_org(ctx.user, project.org_id):
         raise ApiError(403, 'only an organization admin can lift an exclusion')
     name = clean_host(host)

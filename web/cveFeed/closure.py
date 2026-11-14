@@ -6,7 +6,9 @@ have their own statuses (``SUPPLIER_*`` below). A person closes a finding as fix
 note on why (``clean_note``); the note is stored in the finding's own note field with who and when, and the change is written to the
 finding's audit trail. The engine closes CVE matches on its own too (the AI or a correlation rule rules one out, a later scan no longer
 reports a scanner finding, a hygiene check no longer finds one); those keep the reason they already store, and ``closure_of`` reads it
-back as the closure note, marked ``closed_automatically``. An automatic closure is never labelled a false positive.
+back as the closure note, marked ``closed_automatically``. An automatic closure is never labelled a false positive, with one exception: the AI
+reviewer (cveFeed.reviewer) closes a finding it found to be one as ``false_positive`` with no user and a note that starts with ``AUTOMATIC``,
+and only after the server's own checks (no hard evidence, nobody worked it); that reads back as automatic too.
 
 Kept free of Django imports so every layer (models, counts, the API, reports) can import it.
 """
@@ -93,8 +95,8 @@ def closure_of(kind, obj):
         return None, None, None, False
     if obj.remediation_status in CLOSED:
         note = obj.remediation_note or ''
-        # the engine closed it (a later scan read a fixed version): nobody set it, and its note says why
-        automatic = kind != 'match' and obj.remediation_by_id is None and note.startswith(AUTOMATIC)
+        # the engine closed it (a later scan read a fixed version, or the AI reviewer found a false positive): nobody set it, and its note says why
+        automatic = obj.remediation_by_id is None and note.startswith(AUTOMATIC)
         return note, obj.remediation_by, obj.remediation_updated_at, automatic
     if kind == 'match' and obj.ai_verdict == 'not_affected':
         return _clip(obj.ai_reason) or RULED_OUT_NO_REASON, None, getattr(obj, 'updated_at', None), True

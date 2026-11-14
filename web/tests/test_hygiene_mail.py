@@ -1,7 +1,6 @@
 """The email-security checks adapted from MailFail by Black Hills Information Security (cveFeed.mailfail): each rule on plain
 records, the bounded network helpers with fakes (no DNS or HTTP leaves the test), and the credit on the activity card."""
 import base64
-import ssl
 from unittest import mock
 
 from cryptography.hazmat.primitives import serialization
@@ -14,6 +13,7 @@ from cveFeed import mailfail as mf
 from cveFeed.models import AgentActivity
 from dashboard.models import Org, Project
 from targetApp.models import Domain
+from tests import hygiene_harness
 
 
 def checks(findings):
@@ -178,105 +178,13 @@ class TakeoverTests(SimpleTestCase):
 		self.assertIsNone(mf.rdap_registered('gone.invalidtld', session))  # no registry for that TLD
 
 
-class MtaStsFetchTests(SimpleTestCase):
-	ADDRS = ((2, ('203.0.113.10', 443)),)
-
-	def conn(self, status, body=b''):
-		resp = mock.Mock(status=status)
-		resp.read.side_effect = lambda n: body[:n]
-		resp.getheader.return_value = None  # no Content-Encoding
-		connection = mock.Mock()
-		connection.getresponse.return_value = resp
-		return connection
-
-	def test_a_host_resolving_to_a_blocked_address_is_never_fetched(self):
-		with mock.patch('cveFeed.pinned_transport.resolve', side_effect=ValueError('blocked')), \
-				mock.patch('cveFeed.pinned_transport.HTTPConnection') as factory:
-			self.assertIsNone(mf.fetch_mta_sts_policy('acme.example'))
-		factory.assert_not_called()
-
-	def test_fetch_is_the_well_known_path_on_the_admitted_addresses_verified_and_bounded(self):
-		with mock.patch('cveFeed.pinned_transport.resolve', return_value=self.ADDRS) as resolve, \
-				mock.patch('cveFeed.pinned_transport.HTTPConnection') as factory:
-			factory.return_value = self.conn(200, b'version: STSv1\nmode: enforce\n')
-			self.assertIn('mode: enforce', mf.fetch_mta_sts_policy('acme.example'))
-			resolve.assert_called_once_with('mta-sts.acme.example', 443)
-			args, kwargs = factory.call_args
-			self.assertEqual(args[:3], ('mta-sts.acme.example', 443, self.ADDRS))
-			self.assertEqual(kwargs['context'].verify_mode, ssl.CERT_REQUIRED)
-			self.assertEqual(factory.return_value.request.call_args.args[:2], ('GET', '/.well-known/mta-sts.txt'))
-			factory.return_value = self.conn(302)  # redirects are not followed
-			self.assertIsNone(mf.fetch_mta_sts_policy('acme.example'))
-			factory.return_value = self.conn(200, b'x' * (mf.MAX_POLICY_BYTES + 1))
-			self.assertIsNone(mf.fetch_mta_sts_policy('acme.example'))
-
-	POLICY = b'version: STSv1\nmode: enforce\nmx: mail.acme.example\nmax_age: 86400\n'
-
-	def compressed(self, body, encoding='gzip', status=200):
-		from tests.test_pinned_transport import FakeResponse
-		resp = FakeResponse(body, encoding)
-		resp.status = status
-		connection = mock.Mock()
-		connection.getresponse.return_value = resp
-		return connection
-
-	def test_a_policy_a_server_sends_gzipped_despite_identity_is_read(self):
-		import gzip
-		import zlib
-		for body, encoding in ((gzip.compress(self.POLICY), 'gzip'), (zlib.compress(self.POLICY), 'deflate')):
-			with mock.patch('cveFeed.pinned_transport.resolve', return_value=self.ADDRS), \
-					mock.patch('cveFeed.pinned_transport.HTTPConnection') as factory:
-				factory.return_value = self.compressed(body, encoding)
-				text = mf.fetch_mta_sts_policy('acme.example')
-			self.assertIn('mode: enforce', text or '', encoding)
-			self.assertEqual(mf.parse_mta_sts_mode(text), 'enforce')
-
-	def test_a_compressed_policy_past_the_cap_or_in_an_unreadable_encoding_is_no_policy(self):
-		import gzip
-		with mock.patch('cveFeed.pinned_transport.resolve', return_value=self.ADDRS), \
-				mock.patch('cveFeed.pinned_transport.HTTPConnection') as factory:
-			factory.return_value = self.compressed(gzip.compress(b'x' * 10_000_000, compresslevel=9))  # a bomb stops at the cap and is refused
-			self.assertIsNone(mf.fetch_mta_sts_policy('acme.example'))
-			factory.return_value = self.compressed(b'garbage', 'gzip')
-			self.assertIsNone(mf.fetch_mta_sts_policy('acme.example'))
-			factory.return_value = self.compressed(self.POLICY, 'br')
-			self.assertIsNone(mf.fetch_mta_sts_policy('acme.example'))
-
-
-class EmailReviewTests(SimpleTestCase):
-	def test_injected_dns_runs_the_mailfail_checks_without_any_outbound_request(self):
-		zone = {'acme.example': ['v=spf1 include:_spf.example.com -all'], '_dmarc.acme.example': ['v=DMARC1; p=reject; rua=mailto:r@reports.example.com'],
-		        'default._bimi.acme.example': ['v=BIMI1; l=http://acme.example/logo.png'], '_mta-sts.acme.example': ['v=STSv1; id=1'],
-		        'selector1._domainkey.acme.example': [dkim_key(2048) + '; t=y']}
-		with mock.patch('requests.Session.request', side_effect=AssertionError('no HTTP')):  # every requests call goes through it
-			findings, has_mx = hy.email_findings('acme.example', fetch=lambda n: zone.get(n, []), mx=lambda n, t: t == 'MX')
-		found = checks(findings)
-		self.assertTrue(has_mx)
-		self.assertTrue({'dkim_testing_mode', 'bimi_logo_invalid', 'dmarc_report_unauthorized', 'smtp_tlsrpt_missing'} <= found)
-		self.assertTrue({'spf_softfail', 'dmarc_quarantine'}.isdisjoint(found))  # the established checks still run unchanged
-		self.assertNotIn('mta_sts_policy_unreachable', found)  # the policy file is not fetched with injected DNS
-
-	def test_mx_dane_and_dnssec_use_the_records_reader(self):
-		def records(name, rtype):
-			return {('acme.example', 'MX'): ['10 acme-example.mail.protection.outlook.com.'],
-			        ('_25._tcp.acme-example.mail.protection.outlook.com', 'TLSA'): ['1 1 1 ab12'],
-			        ('acme.example', 'DNSKEY'): [dnskey(5)]}.get((name, rtype), [])
-		findings, _ = hy.email_findings('acme.example', fetch=lambda n: [], mx=lambda n, t: t == 'MX', records=records)
-		self.assertTrue({'mx_direct_send', 'dane_misconfigured', 'dnssec_weak_algorithm'} <= checks(findings))
-
-	def test_a_failing_mailfail_check_never_breaks_the_review(self):
-		with mock.patch('cveFeed.mailfail.evaluate_bimi', side_effect=RuntimeError('boom')):
-			findings, _ = hy.email_findings('acme.example', fetch=lambda n: [], mx=lambda n, t: t == 'MX')
-		self.assertIn('spf_missing', checks(findings))
-
-
 class ActivityCreditTests(TestCase):
 	def test_the_activity_card_credits_mailfail_while_and_after_it_runs(self):
 		now = timezone.now()
 		project = Project.objects.create(name='Acme', slug='acme', insert_date=now, org=Org.objects.create(name='Acme', slug='acme-org'))
 		domain = Domain.objects.create(name='acme.example', project=project, insert_date=now)
 		credited = mf.evaluate_mx('acme.example', ['acme-example.mail.protection.outlook.com.'])
-		hy.run_hygiene(domain.id, probe=lambda host, port: None, emailer=lambda name: (credited, True), mx=lambda n, t: False)
+		hygiene_harness.run_hygiene(domain.id, probe=lambda host, port: None, emailer=lambda name: (credited, True), mx=lambda n, t: False)
 		entry = AgentActivity.objects.filter(kind='hygiene', message__contains='MailFail').latest('id')
 		self.assertEqual(entry.status, 'done')
 		self.assertIn('Black Hills Information Security', entry.message)

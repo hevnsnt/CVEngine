@@ -6,9 +6,11 @@ from unittest import mock
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from cveFeed import cms, correlation, fingerprint, js_libraries, kev_freshness, nuclei_scan, range_corrections, template_gates, versions
+from cvengine_scanner import cms, fingerprint, versions
+
+from cveFeed import correlation, js_libraries, kev_freshness, nuclei_scan, range_corrections, template_gates
 from cveFeed.models import CVEEntry, CVEMatch, ProbeObservation, RouteAuth
-from reNgine import bbot as bbot_lib
+from reNgine import discovery_events as bbot_lib
 from startScan.models import ScanHistory, Subdomain, Technology, Vulnerability
 from tests.test_js_libraries_provenance import ReviewScenarioBase
 from tests.test_route_auth import RouteFixture
@@ -77,14 +79,14 @@ SMARTMENUS = '/*! SmartMenus jQuery Plugin - v1.2.1 - November 3, 2022 */\n!func
 
 class BrowserParseTests(SimpleTestCase):
     def test_a_commented_or_swallowed_script_is_not_a_script_the_page_loads(self):
-        every, local = fingerprint.script_sources(WP_PAGE, 'https://www.example.com/', limit=40)
+        every, local = js_libraries.script_sources(WP_PAGE, 'https://www.example.com/', limit=40)
         self.assertNotIn('https://www.example.com/js/jquery-1.8.3.min.js', every)  # inside an HTML comment
         self.assertNotIn('https://www.example.com/js/jquery-1.4.2.min.js', every)  # inside an inline script's text
         self.assertNotIn('https://www.example.com/js/jquery-1.9.1.min.js', every)  # inside the text of a <script> that never closes
         self.assertIn('https://www.example.com/wp-content/themes/acme/js/site.js', every)  # ...whose own src loads
         self.assertEqual(len(every), 6)
         # the file names are hints and the query strings never versions: no jQuery 1.8.3 / 1.4.2 / 3.2.1 / 1.2.1 hint
-        self.assertEqual([n for n, _s in fingerprint.from_script_urls(every)], ['jQuery', 'jQuery Migrate'])
+        self.assertEqual([n for n, _s in js_libraries.from_script_urls(every)], ['jQuery', 'jQuery Migrate'])
 
     def test_the_effective_copy_is_the_one_its_file_states(self):
         entries = js_libraries.parse_page(WP_PAGE, 'https://www.example.com/')

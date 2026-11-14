@@ -33,6 +33,8 @@ export function attachRowMenu(row, label, itemsFn, into = null) {
     title: "Actions",
   });
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("width", "18");
+  svg.setAttribute("height", "18");
   svg.setAttribute("viewBox", "0 0 24 24");
   svg.setAttribute("aria-hidden", "true");
   svg.innerHTML = DOTS;

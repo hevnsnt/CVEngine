@@ -1,0 +1,22 @@
+{
+ "kind": "nuclei_light",
+ "name": "nuclei_down",
+ "payload": {
+  "findings": [],
+  "outcome": "done",
+  "templates_release": "image:v10.5.1",
+  "unreachable": [
+   "http://192.0.2.99"
+  ]
+ },
+ "sentinel_seconds": 4.1,
+ "target": {
+  "tags": [
+   "tech"
+  ],
+  "targets": [
+   "http://192.0.2.99"
+  ]
+ },
+ "tool_rows": 0
+}

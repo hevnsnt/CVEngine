@@ -89,12 +89,14 @@ def move_target(ctx, source, dest, name, discover=True, whole_target=False):
     target_names = [d.name.lower() for d in domains]
     with transaction.atomic():
         HostMove.objects.filter(project=dest, host__in=target_names).delete()  # they once left the destination: moving back lifts that block
-        if is_excluded(dest.pk, name):  # (an organization-wide exclusion is the same for both projects; a block of the destination's own is lifted above)
+        if is_excluded(dest.pk, name, names_only=True):  # (an organization-wide exclusion is the same for both projects; a block of the destination's own is lifted above)
             raise ApiError(409, f'{name} is excluded in the destination\'s organization (an organization admin can lift the exclusion)')
         _stop_scans_under([source], name, ctx.user)
         for n in target_names:  # the old project's other targets must not find the name again and start tracking it
             HostMove.objects.update_or_create(project=source, host=n, defaults={'moved_to': dest, 'moved_by': ctx.user})
         counts = repoint(source, dest, domains, hosts)
+        from cveFeed import snapshot_cache
+        snapshot_cache.bump_on_commit()  # the hosts and findings now count in the other project
     scan_ids = []
     if discover:
         root = [d for d in _not_internal(dest, domains) if d.name.lower() == name]

@@ -12,6 +12,7 @@ shares with the branch, GitHub being unable to say anything about commits it has
 
 Pure helpers take their HTTP function as a parameter so they are testable without a network.
 """
+import hashlib
 import json
 import logging
 import math
@@ -76,6 +77,40 @@ def installed_sha():
     return env if SHA_RE.match(env) else ''
 
 
+_build_seen = None  # the answer, computed when the web process starts (reNgine.middleware.HtmlRevalidateMiddleware); tests put None back
+
+
+def fingerprint(*roots):
+    """12 hex characters over the sorted (relative path, content hash) of every file under ``roots`` (directories). Nothing else goes in: no
+    mtime, no commit file."""
+    seen = []
+    for index, root in enumerate(roots):
+        for folder, dirs, names in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if d != '__pycache__')
+            for name in sorted(names):
+                path = os.path.join(folder, name)
+                try:
+                    with open(path, 'rb') as f:
+                        seen.append((index, os.path.relpath(path, root), hashlib.sha256(f.read()).hexdigest()))
+                except OSError:
+                    continue
+    return hashlib.sha256(repr(sorted(seen)).encode()).hexdigest()[:12]
+
+
+def build_id():
+    """The build this process serves to a browser: a fingerprint of the static ``cve/`` files and the page templates as they were on disk when
+    the process started (stamped into every page as ``<meta name="cvengine-build">``, answered by /cve/api/alive to a signed-in caller). A page
+    rendered by another build can tell, from the poll it makes anyway, that the server was updated (static/cve/sitewatch.js). Computed once,
+    when the web process is built (not at the first call: an old process whose files change under it, ./web is a bind mount, would otherwise
+    fingerprint the new ones), and kept. It does not depend on web/.commit, which the host writes at different moments on different update paths."""
+    global _build_seen
+    if _build_seen is None:
+        roots = [os.path.join(root, 'cve') for root in settings.STATICFILES_DIRS]
+        roots += [os.path.join(settings.BASE_DIR, 'cveFeed', 'templates'), os.path.join(settings.BASE_DIR, 'templates')]
+        _build_seen = fingerprint(*[r for r in roots if os.path.isdir(r)])
+    return _build_seen
+
+
 UPSTREAM_STALE_SECONDS = 3 * 86400  # the host refreshes it every half hour while its updater runs; this is days of silence
 
 
@@ -133,6 +168,32 @@ def host_updater():
         return {'seen': False, 'alive': False, 'age_seconds': None}
     age = int(max(0, age))
     return {'seen': True, 'alive': age <= HEARTBEAT_ALIVE_SECONDS, 'age_seconds': age}
+
+
+DISK_STALE_SECONDS = 15 * 60  # the host measures once a minute; older than this is a host that stopped, and then nothing is said about disk
+
+
+def disk_sentence(need_mb, free_mb):
+    """The one sentence the Update screen and the updater (scripts/update-disk.sh) both say when there is not room for an update."""
+    return (f'This update needs about {-(-int(need_mb) // 1000)} GB of free disk; this server has {int(free_mb) // 1000} GB free. '
+            'Free some space or add disk, then try again.')
+
+
+def disk():
+    """Whether there is room for the next update, as the host measured it (``.update-disk.json``, written by scripts/update-watch.sh; the web container
+    cannot ask Docker where its data is). ``known`` is False when the host has not said or has not said lately: nothing is blocked on a guess.
+    ``short`` is True when free space is under what the update needs; ``text`` is then the sentence to show."""
+    unknown = {'known': False, 'short': False, 'free_mb': None, 'need_mb': None, 'text': ''}
+    try:
+        with open(_file('.update-disk.json')) as f:
+            data = json.load(f)
+        free, need, at = int(data['free_mb']), int(data['need_mb']), float(data['at'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return unknown
+    if free < 0 or need < 0 or not math.isfinite(at) or time.time() - at > DISK_STALE_SECONDS or at - time.time() > 60:
+        return unknown
+    short = free < need
+    return {'known': True, 'short': short, 'free_mb': free, 'need_mb': need, 'text': disk_sentence(need, free) if short else ''}
 
 
 CERT_WARN_DAYS = 30  # the host renews the web interface certificate with this many days left (scripts/renew-certs.sh); a warning at that point means it did not
@@ -210,10 +271,55 @@ def set_mode(mode):
     os.replace(tmp, _file('.update-mode'))
 
 
+def read_wait_scans():
+    """Whether an update waits for scans to finish first (Settings > Updates, "Wait for scans to finish before updating"). Off unless an administrator turned it
+    on: an update then pauses new work and rebuilds within a minute, and the scans that run on Sentinels are not waited for (they hand their results over when the
+    server is back). Kept in ``.update-wait-scans`` beside the approval so the host script reads the same answer; a missing or unreadable file is off."""
+    try:
+        with open(_file('.update-wait-scans')) as f:
+            return f.read(8).strip() == '1'
+    except OSError:
+        return False
+
+
+def set_wait_scans(on):
+    tmp = _file('.update-wait-scans.tmp')
+    with open(tmp, 'w') as f:
+        f.write('1\n' if on else '0\n')
+    os.replace(tmp, _file('.update-wait-scans'))
+
+
+def sentinel_work():
+    """What the Sentinels hold that an update does not wait for: ``(tasks, scans)``, the open Sentinel tasks and the running scans that wait on them only."""
+    try:
+        from agentapi.models import SentinelTask
+        rows = SentinelTask._base_manager.filter(status__in=('claimed', 'running')).values_list('scan_id', flat=True)
+        ids = list(rows)
+        return len(ids), len({i for i in ids if i})
+    except Exception:  # noqa: BLE001 - a status line never fails the screen
+        return 0, 0
+
+
+def held_results():
+    """How many finished results the Sentinels say they hold on disk until cvENGINE answers (the optional ``info.spool`` of their heartbeats)."""
+    try:
+        from agentapi.models import Agent
+        total = 0
+        for info in Agent.objects.filter(kind='scanner').exclude(status='revoked').values_list('info', flat=True):
+            spool = (info or {}).get('spool') if isinstance(info, dict) else None
+            if isinstance(spool, dict) and isinstance(spool.get('count'), int):
+                total += spool['count']
+        return total
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def auto_approve(row):
     """In automatic mode, approve the version the check just found, as the administrator would have. Returns whether it did."""
     if read_mode() != 'auto' or state(row)['status'] != 'available':
         return False
+    if disk()['short']:
+        return False  # nobody is there to read the sentence; the Update screen says it, and the next check tries again
     approve(row, 'automatic')
     return True
 
@@ -290,7 +396,7 @@ def fetch_latest(repo, branch, token='', installed='', get=None):
     commit = data.get('commit') or {}
     date = ((commit.get('committer') or {}).get('date')) or ''
     out = {'sha': sha, 'message': _first_line(commit.get('message')), 'url': str(data.get('html_url', ''))[:300],
-           'date': date, 'behind_by': None, 'commits': [], 'reference_known': True, 'compare_error': ''}
+           'date': date, 'behind_by': None, 'commits': [], 'reference_known': True, 'compare_error': '', 'compare_status': ''}
     if not installed:
         return out
     if installed == sha:
@@ -307,6 +413,7 @@ def fetch_latest(repo, branch, token='', installed='', get=None):
         out['compare_error'] = f'GitHub answered {cmp.status_code} when this build was compared with {branch}, so whether it is behind cannot be told'
     if cmp.status_code == 200:
         body = cmp.json()
+        out['compare_status'] = str(body.get('status') or '')
         if body.get('status') in ('behind', 'identical'):
             out['behind_by'] = 0  # the installation is already at or past the remote head
         else:
@@ -360,7 +467,7 @@ def sync_applied(row):
 
 
 def _remove_flag():
-    for name in ('.update-approved', '.update-branch'):
+    for name in ('.update-approved', '.update-branch', '.update-sentinels'):
         try:
             os.remove(_file(name))
         except OSError:
@@ -373,12 +480,22 @@ def local_commits(row):
     return host['ahead'] if host else 0
 
 
-def approve(row, user):
-    """Record the administrator's approval of the commit currently shown, and hand it to the host updater."""
+def approve(row, user, plan=None):
+    """Record the administrator's approval of the commit currently shown, and hand it to the host updater. ``plan`` (internal, both or external) is the
+    answer to the question the Update button asked about which scanners run (``cveFeed.scanner_plan``); it travels in ``.update-sentinels`` and the host applies
+    it with the update. Without one the host applies its automatic default and never removes a scanner."""
+    from cveFeed import scanner_plan
+    try:
+        wanted = scanner_plan.validate(plan) if plan not in (None, '') else None
+    except scanner_plan.PlanError as exc:
+        raise UpdateError(str(exc))
     if not SHA_RE.match(row.latest_sha or ''):
         raise UpdateError('there is no update to approve; run a check first')
     if not update_available(row, installed_sha()):
         raise UpdateError('this installation is already up to date, or cannot tell whether it is (see its status)')
+    room = disk()
+    if room['short']:
+        raise UpdateError(room['text'])
     own = local_commits(row)
     if own:
         raise UpdateError(f'this server has {own} commit{"s" if own != 1 else ""} of its own, so the update cannot be applied for you (it moves the checkout '
@@ -391,6 +508,10 @@ def approve(row, user):
     with open(branch_tmp, 'w') as f:
         f.write(row.branch + '\n')
     os.replace(branch_tmp, _file('.update-branch'))
+    if wanted:
+        scanner_plan.with_update(wanted)  # before the approval: the host reads it when it sees the approval
+    else:
+        scanner_plan.clear_pending()
     os.replace(tmp, _file('.update-approved'))
     row.approved_sha, row.approved_by, row.approved_at = row.latest_sha, getattr(user, 'username', user), timezone.now()
     row.save(update_fields=['approved_sha', 'approved_by', 'approved_at'])
@@ -442,10 +563,11 @@ def state(row):
     # Read live, not from the phase file: apply-update.sh's own pause/release calls can fail independently of the
     # phase it last wrote, and an admin's manual resume can clear it between runs without rewriting the phase file.
     control = ScanControl.current()
+    sentinel_tasks, sentinel_scans = sentinel_work()
     return {
         'status': status, 'enabled': row.enabled, 'repo': row.repo, 'branch': row.branch, 'branch_warning': branch_warning(row.branch),
         'has_token': bool(row.token),
-        'installed': installed[:7], 'installed_known': bool(installed),
+        'installed': installed[:7], 'installed_known': bool(installed), 'build': build_id(),
         'local_commits': host['ahead'] if host else None, 'common': host['base'][:7] if host else '', 'host_comparison': note,
         'latest': row.latest_sha[:7], 'latest_message': row.latest_message, 'latest_url': row.latest_url,
         'latest_date': row.latest_date.isoformat() if row.latest_date else None, 'behind_by': row.behind_by,
@@ -455,7 +577,10 @@ def state(row):
         'phase': phase['phase'], 'phase_detail': phase['detail'], 'phase_scans_running': phase['scans_running'],
         'phase_changed_at': phase['changed_at'],
         'scans_paused_by_update': bool(control.paused and control.paused_by_update),
+        'wait_for_scans': read_wait_scans(),
+        'sentinel_tasks_open': sentinel_tasks, 'sentinel_scans_running': sentinel_scans, 'sentinel_results_held': held_results(),
         'host_updater': host_updater(),
+        'disk': disk(),
         'certificate': certificate(),
         'mode': read_mode(),
     }

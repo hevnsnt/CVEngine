@@ -1,9 +1,10 @@
+import { foldNav } from "/staticfiles/cve/nav-fold.js";
 import { hostRow, previewHosts, suggestions, syntaxHelp } from "/staticfiles/cve/palette-search.js";
 
 // App shell behaviour: project switcher, mobile "More" sheet, account menu, and the jump palette (Ctrl/Cmd+K or "/").
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
-const SECTIONS = ["targets", "scans", "hosts", "changes", "activity", "vulns", "matches", "hygiene", "suppliers"];
+const SECTIONS = ["targets", "scans", "hosts", "changes", "activity", "vulns", "matches", "hygiene", "secrets", "suppliers", "situations"];
 
 // Where the switcher sends you when the project changes. On the dashboard and the asset graph it stays there (?project= names
 // the project or "_all"); on a section page it keeps the section. The server remembers the choice for pages with no project.
@@ -211,14 +212,7 @@ const slugNow = () => {
 };
 
 function collect() {
-  const seen = new Set();
-  const out = [];
-  $$("[data-nav]").forEach((a) => {
-    const label = a.dataset.nav;
-    if (seen.has(a.getAttribute("href"))) return;
-    seen.add(a.getAttribute("href"));
-    out.push({ label, hint: "Go to", href: a.getAttribute("href"), section: "Go to" });
-  });
+  const out = foldNav($$("[data-nav]").map((a) => ({ label: a.dataset.nav, href: a.getAttribute("href") })));
   if ($("[data-add-targets]")) out.push({ label: "Add targets", hint: "Action", run: () => $("[data-add-targets]").click(), section: "Go to" });
   // commands registered by page scripts (keys.js, saved views): { label, hint, run, when? }
   (window.cveCommands || []).forEach((c) => {
@@ -249,7 +243,7 @@ function collect() {
   return out;
 }
 
-const helpRow = { label: "Search syntax", sub: "port:443 product:nginx -host:test", hint: "Help", run: syntaxHelp, section: "Help" };
+const helpRow = { label: "Search syntax", sub: "port:443 product:nginx -host:test", hint: "Syntax", run: syntaxHelp, section: "Syntax" };
 
 // Everything the palette lists for what is typed, in order, each row tagged with the section it belongs to.
 function rowsFor(raw) {

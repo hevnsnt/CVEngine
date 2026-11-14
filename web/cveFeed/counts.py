@@ -19,6 +19,7 @@ Definitions (also shown to the user as the tooltip of each dashboard tile):
   Findings page, Scanner type, Actionable status, shows the same set.
 * **Scans running**: scans marked running that started within ``running_window()``. An older one is stalled (a casualty of a
   restart) and is never shown as running anywhere.
+* **Hygiene, top checks**: the three checks with the most actionable hygiene findings of medium severity or worse, counted over every finding (``hygiene_top_checks``).
 * **Certs expiring**: certificates that expire within 30 days, including those already expired.
 * **Oldest open**: the age in whole days of the longest-open critical or high item among the exposed CVE matches, actionable scanner
   findings and open hygiene findings (``oldest_open``).
@@ -185,23 +186,60 @@ def host_reps(domain_id=None, domain_ids=None, in_scope=False):
     return _one_per_host(base, per_project=True)
 
 
+def rep_ids(domain_id=None, domain_ids=None, in_scope=False):
+    """The ids of ``host_reps``, read in ONE statement. The collapse is the dearest query CVEngine has (a window over every host's address set), so a request
+    that needs several numbers over the same hosts reads the ids once and derives each number from them (``reps_of``) instead of collapsing again per number."""
+    if domain_id is None and domain_ids is None and not in_scope:  # the whole inventory: worked out in Python from set-based reads (cveFeed.inventory_counts)
+        from cveFeed import inventory_counts
+        return inventory_counts.rep_ids()
+    return list(host_reps(domain_id=domain_id, domain_ids=domain_ids, in_scope=in_scope).values_list('pk', flat=True))
+
+
+def reps_of(ids):
+    """The Subdomain rows with these ids (from ``rep_ids``): what ``host_reps`` returned, without running the collapse again."""
+    from startScan.models import Subdomain
+    return Subdomain.objects.filter(pk__in=ids)
+
+
+HOST_REPS_SECONDS = 5  # how long the live screen's snapshots of one scope share one collapse (the refresher's own beat)
+
+
+def snapshot_rep_ids():
+    """``rep_ids()`` of the caller's scope. Called while a live-screen snapshot is being built (stats, discovery counts, graph: ``snapshot_cache.building``),
+    the ids come from a snapshot of their own that all of them share for ``HOST_REPS_SECONDS``, one collapse for the three where each used to run its own
+    every 5 s. Called any other time (a request that wants the hosts as they are now, a test, a task) it reads the database, exactly as before. A finding
+    closed (``bump_stats_revision``) drops it with the other snapshots."""
+    from cveFeed import snapshot_cache
+    if not snapshot_cache.building():
+        return rep_ids()
+    return snapshot_cache.snapshot('host-reps', snapshot_cache.scope_hash('host-reps'), rep_ids, HOST_REPS_SECONDS, etag_of=lambda _ids: '')['payload']
+
+
 def live_hosts(domain_id=None):
     """The hosts the attack-surface map draws, one row each."""
     from startScan.models import Subdomain
     return Subdomain.objects.filter(pk__in=host_reps(domain_id).filter(LIVE_HOST_Q).values('pk'))
 
 
-def exposure_filter(prefix=''):
-    """A Q over hosts (``prefix`` reaches the host from another model) that holds when the host is exposed."""
+def exposure_sources():
+    """``(matches, findings)``: the CVE matches not ruled out or closed and the open findings of medium or above, each of a host (``subdomain`` set); a host
+    is exposed when any of them names it."""
     from cveFeed.models import CVEMatch
     from startScan.models import Vulnerability
-    matches = CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).exclude(subdomain=None).values('subdomain')
-    findings = Vulnerability.objects.filter(open_status=True, severity__gte=2).exclude(remediation_status__in=CLOSED).exclude(subdomain=None).values('subdomain')
-    return Q(**{prefix + 'pk__in': matches}) | Q(**{prefix + 'pk__in': findings})
+    matches = CVEMatch.objects.exclude(ai_verdict=RULED_OUT).exclude(remediation_status__in=CLOSED).exclude(subdomain=None)
+    findings = Vulnerability.objects.filter(open_status=True, severity__gte=2).exclude(remediation_status__in=CLOSED).exclude(subdomain=None)
+    return matches, findings
 
 
-def exposed_host_count():
-    return exposed_among(host_reps()).count()  # a machine once, however many names point at it
+def exposure_filter(prefix=''):
+    """A Q over hosts (``prefix`` reaches the host from another model) that holds when the host is exposed."""
+    matches, findings = exposure_sources()
+    return Q(**{prefix + 'pk__in': matches.values('subdomain')}) | Q(**{prefix + 'pk__in': findings.values('subdomain')})
+
+
+def exposed_host_count(reps=None):
+    """``reps``: the hosts to count among (``reps_of(rep_ids())``) when the caller already collapsed the inventory; by default it is collapsed here."""
+    return exposed_among(host_reps() if reps is None else reps).count()  # a machine once, however many names point at it
 
 
 def exposed_matches():
@@ -228,6 +266,22 @@ def actionable_hygiene(qs, severity=1):
     """Open hygiene findings of ``severity`` or worse (low by default) that are not closed (fixed, accepted risk, false positive): the Findings page's
     Actionable filter for hygiene findings and the dashboard's Hygiene tile."""
     return qs.filter(status='open', severity__gte=severity).exclude(remediation_status__in=CLOSED)
+
+
+HYGIENE_TOP_CHECKS = 3
+_HYGIENE_SEVERITY_NAMES = {4: 'critical', 3: 'high', 2: 'medium'}
+
+
+def hygiene_top_checks(limit=HYGIENE_TOP_CHECKS):
+    """``[{check, worst, n}]``: the ``limit`` checks with the most actionable hygiene findings of medium severity or worse (``actionable_hygiene``, the
+    Findings page's Actionable filter), worst severity first and then the most findings. One grouped query over every row: the dashboard's Hygiene tile
+    used to count these from the first 100 rows of each severity, so a check with 400 findings said 100."""
+    from django.db.models import Count, Max
+
+    from cveFeed.models import HygieneFinding
+    rows = (actionable_hygiene(HygieneFinding.objects.all(), severity=2).order_by().values('check_name')
+            .annotate(n=Count('id'), worst=Max('severity')).order_by('-worst', '-n', 'check_name')[:limit])
+    return [{'check': r['check_name'], 'worst': _HYGIENE_SEVERITY_NAMES.get(r['worst'], 'medium'), 'n': r['n']} for r in rows]
 
 
 def oldest_open(now=None):
@@ -258,17 +312,24 @@ def oldest_open(now=None):
     first_match = Subquery(CVEMatch.objects.filter(
         cve_entry=OuterRef('cve_entry'), subdomain__target_domain=OuterRef('subdomain__target_domain'),
         subdomain__name=OuterRef('subdomain__name')).order_by('created_at').values('created_at')[:1])
-    row = (exposed_matches().filter(cve_entry__cvss__gte=HIGH_CVSS).annotate(first=first_match).order_by('first').values('id', 'first').first())
+    row = (exposed_matches().filter(cve_entry__cvss__gte=HIGH_CVSS).annotate(first=first_match).order_by('first', 'id').values('id', 'first').first())
     if row:
         consider('cve', row['first'], row['id'])
-    first_finding = Subquery(Vulnerability.objects.filter(
-        name=OuterRef('name'), subdomain__target_domain=OuterRef('subdomain__target_domain'), subdomain__name=OuterRef('subdomain__name'),
-        discovered_date__isnull=False).order_by('discovered_date').values('discovered_date')[:1])
-    row = (actionable_findings(Vulnerability.objects.filter(severity__gte=3, subdomain__isnull=False)).annotate(first=first_finding)
-           .filter(first__isnull=False).order_by('first').values('id', 'first').first())
-    if row:
-        consider('scanner', row['first'], row['id'])
-    row = actionable_hygiene(HygieneFinding.objects.all(), 3).order_by('first_seen').values('id', 'first_seen').first()
+    # The scanner finding that has been open longest, open since the earliest discovery of the same finding (name) on the same host (target and name). It was a
+    # correlated subquery per candidate (0.4 s for 20,000 findings); now the candidates and the earliest discoveries of their names are two reads and the
+    # comparison is made here. Ties are broken by id (the SQL left them to the database).
+    from django.db.models import Min
+    candidates = list(actionable_findings(Vulnerability.objects.filter(severity__gte=3, subdomain__isnull=False, subdomain__target_domain__isnull=False))
+                      .values_list('id', 'name', 'subdomain__target_domain', 'subdomain__name'))  # a host with no target never had its earliest discovery found (NULL is not equal to NULL)
+    if candidates:
+        earliest = {(name, domain, host): first for name, domain, host, first in
+                    Vulnerability.objects.filter(name__in={c[1] for c in candidates}, discovered_date__isnull=False)
+                    .values_list('name', 'subdomain__target_domain', 'subdomain__name').annotate(first=Min('discovered_date')).order_by()}
+        found = [(earliest[(name, domain, host)], row_id) for row_id, name, domain, host in candidates if (name, domain, host) in earliest]
+        if found:
+            first, row_id = min(found)
+            consider('scanner', first, row_id)
+    row = actionable_hygiene(HygieneFinding.objects.all(), 3).order_by('first_seen', 'id').values('id', 'first_seen').first()
     if row:
         consider('hygiene', row['first_seen'], row['id'])
     if best['at'] is None:
@@ -278,3 +339,40 @@ def oldest_open(now=None):
 
 def expiring_certificates(qs, days=CERT_WARNING_DAYS):
     return qs.filter(not_after__lte=timezone.now() + timedelta(days=days))
+
+
+# --- retest on fix (cveFeed.fix_retest) ----------------------------------------------------------------------------------------------------
+# The states of a finding marked fixed: verified fixed (a retest ran the check that proved it and it no longer reproduces), fixed and not verified
+# (queued, could not be told, no check to repeat, or not re-checked yet: never read as verified), and reopened (a retest found it still reproduces).
+
+def retest_q(state, prefix='triage__'):
+    """A filter on a finding's remediation status and its Triage row (``prefix`` is the path to the Triage row, ``triage__`` from a finding)
+    for ``verified_fixed``, ``unverified_fixed`` or ``reopened``."""
+    fixed = Q(remediation_status='fixed')
+    verified = Q(**{f'{prefix}retest_state': 'verified_fixed'})
+    if state == 'verified_fixed':
+        return fixed & verified
+    if state == 'unverified_fixed':
+        return fixed & ~verified  # a row with no Triage row (the join is null) is not verified either
+    if state == 'reopened':
+        return Q(remediation_status__in=('open', 'in_progress')) & Q(**{f'{prefix}retest_state': 'still_reproduces'})
+    raise ValueError('unknown retest state')
+
+
+def retest_counts(project_ids):
+    """``{verified_fixed, unverified_fixed, reopened}``: findings (CVE matches of the current inventory, scanner and hygiene findings) of these
+    projects in each retest state. One grouped query per kind of finding."""
+    from django.db.models import Count
+
+    from cveFeed.correlation import latest_scan_q
+    from cveFeed.models import CVEMatch, HygieneFinding
+    from startScan.models import Vulnerability
+    out = {'verified_fixed': 0, 'unverified_fixed': 0, 'reopened': 0}
+    sources = (CVEMatch.objects.filter(latest_scan_q('subdomain__'), subdomain__target_domain__project_id__in=project_ids),
+               Vulnerability.objects.filter(target_domain__project_id__in=project_ids),
+               HygieneFinding.objects.filter(domain__project_id__in=project_ids))
+    for qs in sources:
+        agg = qs.aggregate(**{state: Count('pk', filter=retest_q(state)) for state in out})
+        for state in out:
+            out[state] += agg[state]
+    return out

@@ -1,6 +1,6 @@
 """Short-lived snapshots of the live screen's expensive answers, shared by every web worker and every viewer of the same scope.
 
-The Live page polls a handful of endpoints every few seconds; two of them (the headline counts and the discovery counts) walk the whole
+The Overview polls a handful of endpoints every few seconds; two of them (the headline counts and the discovery counts) walk the whole
 inventory. They used to be cached in a dict of each gunicorn worker, per user, so W workers x U users recomputed them every ten seconds, and a
 busy moment piled those recomputations on top of each other until the proxy answered 502. They now live in the Django cache (Redis), where:
 
@@ -11,6 +11,12 @@ busy moment piled those recomputations on top of each other until the proxy answ
 * a Redis outage never breaks a view: every cache call is guarded and the answer is computed directly, as it was before the cache existed;
 * ``bump_stats_revision`` (a finding was closed) makes every entry stale at once through the revision stored in each entry.
 
+A snapshot that is dear to compute is also **kept longer**: the snapshots named in ``ADAPTIVE`` stay fresh for ``COST_FACTOR`` times what their last
+computation took (at most ``COST_CEILING`` seconds), never less than the freshness they were asked for. On a fast install nothing changes (ten seconds); on
+one where the headline counts take eight seconds they are served for eighty, so the refresher and the polls do not keep the database computing them all the
+time. A closed finding still drops them at once (the revision), and ``building()`` tells a computation that it runs for a snapshot, so the pieces that
+several snapshots share (the collapsed host list, ``counts.snapshot_rep_ids``) are read once for all of them.
+
 Stage 1 adds a **refresher** (``cveFeed.live_refresh``, a celery beat task on a queue of its own): every request for a scope registers it as *hot*
 for a minute (``mark_hot``: the scope's key, the project ids it runs under and the parameters it was asked with), and the refresher recomputes
 the snapshots of the hot scopes before they go stale, so while it is alive (``refresher_alive``: it leaves a heartbeat every run) a request
@@ -19,6 +25,7 @@ asks for stops being refreshed within a minute. What the refresher stores sits u
 computed under exactly the project ids that key was hashed from, so a scope can never be served another scope's numbers. Hits, stale answers,
 misses and refreshes are counted per hour in the cache (``metrics``), for ``get_system_status``.
 """
+import contextvars
 import hashlib
 import json
 import logging
@@ -45,14 +52,37 @@ MAX_HOT_PER_USER = 24  # one user's share of them (a screen asks for about four 
 BEAT_KEY = 'cve:snap:refresher'  # the refresher's heartbeat: {'at', 'interval', ...}
 METRIC_TTL = 3 * 3600
 # a request: served fresh / served stale / computed / waited for a winner; the refresher: refreshed a snapshot, skipped a run (a stressed worker), overran its budget
-OUTCOMES = ('hit', 'stale', 'miss', 'waited', 'refreshed', 'skipped', 'overran')
-NAMES = ('stats', 'discovery-counts', 'graph-version', 'graph-live', 'refresher')
+OUTCOMES = ('hit', 'stale', 'miss', 'waited', 'refreshed', 'unchanged', 'skipped', 'overran')
+NAMES = ('stats', 'discovery-counts', 'graph-version', 'graph-live', 'search-facets', 'activity-days', 'retest-counts', 'situations', 'refresher')
+
+INTERNAL = ('host-reps',)  # snapshots the others are built from: not counted as polls (the per-hour counters are what people asked for)
+ADAPTIVE = ('stats', 'discovery-counts')  # snapshots whose freshness follows the cost of computing them ('host-reps' is not: the live host count stays at most its own 5 s old)
+COST_FACTOR = 10  # served for this many times the last computation's duration: a computation never takes more than a tenth of the time
+COST_CEILING = 120  # ...and never for more than this many seconds
 
 _hot_seen = {}  # (name, scope) -> when this process last registered it: a poll does not write to the cache each time
+_building = contextvars.ContextVar('cve_snapshot_building', default=False)
+
+
+def building():
+    """True while a snapshot (or the refresher) is computing one: the computation may share what it reads with the other snapshots of the scope."""
+    return _building.get()
+
+
+def fresh_for(name, fresh, entry):
+    """``fresh``, or longer for an ``ADAPTIVE`` snapshot whose last computation (``entry['took']``) was slow: ``COST_FACTOR`` times it, up to ``COST_CEILING``."""
+    if name not in ADAPTIVE or not isinstance(entry, dict):
+        return fresh
+    return max(fresh, min(COST_CEILING, COST_FACTOR * float(entry.get('took') or 0)))
 
 
 def _now():
     return time.time()
+
+
+def _elapsed():
+    """A clock for how long a computation took (``entry['took']``); apart from ``_now`` so a test that scripts the entries' clock is not disturbed."""
+    return time.monotonic()
 
 
 def _clock():
@@ -62,6 +92,8 @@ def _clock():
 
 def count(name, outcome, n=1):
     """Add to this hour's counter of ``outcome`` for the snapshot ``name`` (shared by every worker; a cache that does not answer counts nothing)."""
+    if name in INTERNAL:
+        return
     key = f'cve:snap:m:{int(_clock() // 3600)}:{name}:{outcome}'
     try:
         try:
@@ -186,6 +218,11 @@ def keep_seconds(fresh):
     return max(int(fresh * STALE_FACTOR) or 1, livecache_config.refresh_seconds() * 3)
 
 
+def store_seconds(fresh):
+    """How long the cache keeps a snapshot: ``keep_seconds`` (the 1.4 refresher's window) and at least ``STALE_KEEP_SECONDS`` (the 1.3.6 fix), so a\n    slow count leaves an old copy to serve while one request recomputes it. ``keep_seconds`` alone still decides how stale a refresher's entry may\n    be served as current."""
+    return max(keep_seconds(fresh), STALE_KEEP_SECONDS)
+
+
 def scope_hash(*params):
     """Who may share a snapshot: a hash of the effective allowed project ids of the running request, plus ``params`` (the selected project and
     organization, which already narrowed that set but are kept in the key for clarity). Call it inside ``project_scoped``.
@@ -219,14 +256,65 @@ def bump_revision():
         logger.warning('could not bump the stats revision: the cache is not answering')
 
 
+def bump_on_commit():
+    """``bump_revision`` once the surrounding transaction commits (at once when there is none). Call it from every write that changes a number a
+    person reads on the live screen (a finding closed or reopened, a scan that ended, a host or target removed or restored): the snapshots may be
+    kept for minutes on a slow install, and the revision is the only thing that drops them early. A rolled back write bumps nothing."""
+    from django.db import transaction
+    transaction.on_commit(bump_revision)
+
+
 def token_of(payload):
     """A short stable token of a JSON-able payload: the ETag of a snapshot is computed once, when it is built."""
     return hashlib.sha1(json.dumps(payload, sort_keys=True, default=str, separators=(',', ':')).encode()).hexdigest()[:20]
 
 
-def _build(compute, etag_of, rev, by='request'):
-    payload = compute()
-    return {'payload': payload, 'etag': (etag_of or token_of)(payload), 'at': _now(), 'rev': rev, 'by': by}
+def _build(compute, etag_of, rev, by='request', fingerprint=None):
+    started = _elapsed()
+    seen = fingerprint() if fingerprint is not None else None  # taken before the computation: a write during it makes the next look find a change
+    flag = _building.set(True)
+    try:
+        payload = compute()
+    finally:
+        _building.reset(flag)
+    entry = {'payload': payload, 'etag': (etag_of or token_of)(payload), 'at': _now(), 'rev': rev, 'by': by, 'took': round(_elapsed() - started, 3)}
+    entry['computed_at'] = entry['at']  # a renewal moves ``at`` (how fresh the entry is) but never this (when its payload was worked out)
+    if seen is not None:
+        entry['fp'] = seen
+    return entry
+
+
+UNCHANGED_KEEP_SECONDS = 300  # a snapshot whose inputs did not change is renewed instead of recomputed, for at most this long since it was last COMPUTED (a snapshot may give its own, shorter)
+
+
+_track_counts = {}
+
+
+def _counts_are_tracked(connection):
+    """Whether PostgreSQL keeps the row counters (``track_counts``), read once per process: with it off they never move and every table would look unchanged."""
+    if 'on' not in _track_counts:
+        with connection.cursor() as cursor:
+            cursor.execute('SHOW track_counts')
+            _track_counts['on'] = cursor.fetchone()[0] == 'on'
+    return _track_counts['on']
+
+
+def table_fingerprint(*tables):
+    """A string that changes whenever a row of any of these tables (database table names) is inserted, updated or deleted: PostgreSQL's own counters, one
+    cheap read, no scan of the tables. A change shows up within about ten seconds (a backend reports its counters when it goes idle); a rolled-back write
+    and a statistics reset only cause an extra recomputation. ``None`` when they cannot be read (not PostgreSQL, ``track_counts`` off, a table missing),
+    which is never "unchanged". TRUNCATE moves none of the counters, so a truncated table is not seen until the snapshot's own cap (``UNCHANGED_KEEP_SECONDS``)
+    ends the renewals; nothing in the application truncates a table the snapshots read."""
+    from django.db import connection
+    try:
+        if connection.vendor != 'postgresql' or not _counts_are_tracked(connection):
+            return None
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT relname, n_tup_ins, n_tup_upd, n_tup_del FROM pg_stat_user_tables WHERE relname = ANY(%s) ORDER BY relname', [sorted(tables)])
+            rows = cursor.fetchall()
+        return json.dumps(rows) if len(rows) == len(set(tables)) else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def snapshot(name, scope, compute, fresh, etag_of=None, hot=None):
@@ -250,6 +338,7 @@ def snapshot(name, scope, compute, fresh, etag_of=None, hot=None):
         return _build(compute, etag_of, '')
     if entry is not None and entry['rev'] == rev:
         age = _now() - entry['at']
+        fresh = fresh_for(name, fresh, entry)
         if age < fresh:
             count(name, 'hit')
             return entry
@@ -288,7 +377,7 @@ def snapshot(name, scope, compute, fresh, etag_of=None, hot=None):
         count(name, 'miss')
         entry = _build(compute, etag_of, rev)
         try:
-            cache.set(key, entry, max(int(fresh * STALE_FACTOR) or 1, STALE_KEEP_SECONDS))
+            cache.set(key, entry, store_seconds(fresh))
         except Exception:  # noqa: BLE001
             logger.warning('could not store the %s snapshot: the cache is not answering', name)
         return entry
@@ -299,23 +388,37 @@ def snapshot(name, scope, compute, fresh, etag_of=None, hot=None):
             pass
 
 
-def refresh(name, scope, compute, fresh, etag_of=None, due_age=None):
+def refresh(name, scope, compute, fresh, etag_of=None, due_age=None, fingerprint=None, unchanged_keep=None):
     """What the refresher does for one hot scope: ``(status, entry, previous)`` (``previous`` is the snapshot it replaced, or None). ``'fresh'`` when the stored snapshot is of the current revision and younger
     than ``due_age`` (default ``fresh``), ``'busy'`` when a request or another refresher holds the lock, else ``'refreshed'`` with the new
     snapshot, stored under the key a request would have written (``by: 'refresher'``, so requests know to leave it to us). Raises what
-    ``compute`` raises (the lock is released first)."""
+    ``compute`` raises (the lock is released first).
+
+    ``fingerprint`` (a function returning ``table_fingerprint`` of what ``compute`` reads) lets a snapshot that is due but whose inputs have not
+    changed since it was computed be renewed (``'unchanged'``: the same payload with a new time, for up to ``UNCHANGED_KEEP_SECONDS``) instead of recomputed:
+    a paused instance with a page open used to recompute its headline counts every few seconds for nothing. The renewals stop ``unchanged_keep`` seconds
+    (default ``UNCHANGED_KEEP_SECONDS``) after the payload was last computed (``computed_at``), whatever the fingerprint says: a number that comes from the clock
+    (a certificate's days left, a Sentinel's last-seen) moves without any write."""
     key = f'cve:snap:{name}:{scope}'
     lock = f'{key}:lock'
-    due = fresh if due_age is None else due_age
     entry, rev = cache.get(key), revision()
     previous = entry if isinstance(entry, dict) and 'payload' in entry else None
+    longer = fresh_for(name, fresh, previous)
+    due = longer if due_age is None else due_age + (longer - fresh)  # a slow snapshot is due later by as much as it is kept longer
     if previous is not None and previous['rev'] == rev and _now() - previous['at'] < due:
         return 'fresh', previous, previous
     if not cache.add(lock, 1, LOCK_SECONDS):
         return 'busy', previous, previous
     try:
-        entry = _build(compute, etag_of, rev, by='refresher')
-        cache.set(key, entry, keep_seconds(fresh))
+        if (fingerprint is not None and previous is not None and previous['rev'] == rev and previous.get('fp') is not None
+                and _now() - previous.get('computed_at', previous['at']) < (UNCHANGED_KEEP_SECONDS if unchanged_keep is None else unchanged_keep)
+                and fingerprint() == previous['fp']):
+            renewed = {**previous, 'at': _now(), 'by': 'refresher'}
+            cache.set(key, renewed, store_seconds(fresh))
+            count(name, 'unchanged')
+            return 'unchanged', renewed, previous
+        entry = _build(compute, etag_of, rev, by='refresher', fingerprint=fingerprint)
+        cache.set(key, entry, store_seconds(fresh))
         count(name, 'refreshed')
         return 'refreshed', entry, previous
     finally:

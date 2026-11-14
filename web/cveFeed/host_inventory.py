@@ -136,7 +136,7 @@ def check_excluded(project, host):
     reason would let anyone holding a token probe which host names the organization excluded."""
     from cveFeed.exclusions import is_excluded
     for name in reported_names(host):
-        if is_excluded(project.id, name):
+        if is_excluded(project.id, name, names_only=True):
             raise ReportRefused(NOT_ACCEPTED, 409, why=f'{name} is excluded for the organization')
 
 

@@ -9,12 +9,13 @@
 <title>{% block title %}CVEngine{% endblock %}</title>
 <link rel="preload" href="{% static 'cve/geist.woff2' %}" as="font" type="font/woff2" crossorigin>
 <script src="{% asset 'cve/theme.js' %}"></script>
+{% critical_style %}
 <link rel="stylesheet" href="{% asset 'cve/cve.css' %}">
 </head>
 <body>
 <main class="auth">
   <div class="auth-card">
-    <a class="brand" href="/cve/" aria-label="CVEngine, by FieldCraft Cyber, home"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span><small>FieldCraft Cyber</small></a>
+    <a class="brand" href="/cve/" aria-label="cvENGINE FieldCraft Cyber, home"><span class="logo" aria-hidden="true"><span class="lc">cv</span>ENG<span class="li">I</span>NE</span> <small>FieldCraft Cyber</small></a>
     {% block content %}{% endblock %}
   </div>
 </main>

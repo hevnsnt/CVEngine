@@ -37,7 +37,7 @@ SERVICE_LABELS = {
     'nmap-fast': 'nmap service detection on the common ports', 'nmap-full': 'nmap on every one of the 65,535 ports',
     'nmap': 'nmap service detection', 'naabu': 'naabu full-port discovery', 'bbot': 'bbot discovery of hosts and subdomains',
     'bbot-deep': 'bbot deep discovery', 'nuclei': 'nuclei template checks', 'route_auth': 'web route authentication checks',
-    'hygiene': 'TLS, certificate and email checks', 'ct_watch': 'certificate transparency watch', 'wpscan': 'WPScan of WordPress sites',
+    'hygiene': 'TLS, certificate and email checks', 'ct_watch': 'certificate transparency watch', 'wpscan': 'WordPress scan of WordPress sites',
     'testssl': 'TLS protocol and cipher review',
 }
 
@@ -139,9 +139,13 @@ def _status_counts(sources):
     report's status legend when it includes closed findings."""
     tally = Counter()
     for qs in sources.values():
-        for row in qs.order_by().values('remediation_status').annotate(n=Count('id')):
-            tally[row['remediation_status']] += row['n']
-    return {STATUS_LABELS.get(k, clean(k, 24)): tally[k] for k in (*closure.STATUSES, *sorted(set(tally) - set(closure.STATUSES))) if tally[k]}
+        for row in qs.order_by().values('remediation_status', 'triage__retest_state').annotate(n=Count('id')):
+            # fixed is two rows of the legend: what a retest verified, and what was only marked fixed
+            key = 'verified_fixed' if row['remediation_status'] == 'fixed' and row['triage__retest_state'] == 'verified_fixed' else row['remediation_status']
+            tally[key] += row['n']
+    labels = {**STATUS_LABELS, 'fixed': 'Marked fixed, not verified', 'verified_fixed': 'Verified fixed'}
+    order = (*closure.STATUSES[:2], 'verified_fixed', *closure.STATUSES[2:])
+    return {labels.get(k, clean(k, 24)): tally[k] for k in (*order, *sorted(set(tally) - set(order))) if tally[k]}
 
 
 def _per_host(sources):
@@ -169,10 +173,21 @@ def _proof(triage):
     return out
 
 
+def _status_label(status, triage):
+    """The status a report prints: a finding a retest verified is "Verified fixed", one only marked fixed is "Marked fixed, not verified" (or "... cannot be
+    re-checked" when no check could repeat it), and one a retest reopened says so (``cveFeed.fix_retest``); every other status keeps its name."""
+    from cveFeed import fix_retest
+    state = fix_retest.summary(status, triage)['state']
+    return {fix_retest.VERIFIED: 'Verified fixed', fix_retest.REPRODUCES: 'Open, reopened: a retest still reproduced it',
+            fix_retest.NO_CHECK: 'Marked fixed, cannot be re-checked'}.get(state) or (
+        'Marked fixed, not verified' if status == 'fixed' else STATUS_LABELS.get(status, clean(status, 24)))
+
+
 def _tracking(obj):
     """The remediation state a person or agent recorded: status, assignee, note and when it last changed. ``closed``: the status closes the
     finding (fixed, accepted risk, false positive), so the note is printed as why it was closed."""
-    return {'status': STATUS_LABELS.get(obj.remediation_status, clean(obj.remediation_status, 24)), 'closed': closure.is_closed(obj.remediation_status),
+    from agentapi import services as svc
+    return {'status': _status_label(obj.remediation_status, svc._triage_of(obj)), 'closed': closure.is_closed(obj.remediation_status),
             'assignee': _person(getattr(obj, 'assignee', None)), 'note': clean(obj.remediation_note, 800),
             'changed': _stamp(obj.remediation_updated_at), 'changed_by': _person(getattr(obj, 'remediation_by', None))}
 
@@ -277,7 +292,7 @@ def _findings(sources, cap):
 
 
 def _hygiene_group(check):
-    if check.startswith(('tls_', 'tlsa_', 'cert')):  # tlsa_* are the testssl findings (cveFeed.testssl_scan)
+    if check.startswith(('tls_', 'tlsa_', 'cert')):  # tlsa_* are the TLS audit findings (cveFeed.tls_audit)
         return 'TLS and certificates'
     if check.startswith(('spf_', 'dmarc_', 'dkim_', 'mx_', 'mta_', 'bimi_', 'smtp_')):
         return 'Email'
@@ -405,6 +420,30 @@ def _method(project, names, addresses):
 
 # --- the whole report ----------------------------------------------------------------------------------------------------------
 
+MAX_SECRETS = 100  # inventory rows printed in one report, worst first
+
+
+def _secrets(project, names, include_closed):
+    """``(total, rows)``: the project's exposed secrets (cveFeed.secrets_inventory), worst first, at most MAX_SECRETS. Masked values only: the
+    report never holds a secret. For a host report, the ones that host serves."""
+    from cveFeed import secrets_catalog, secrets_inventory
+    from cveFeed.models import SecretFinding
+    qs = SecretFinding.objects.filter(project=project)
+    if not include_closed:
+        qs = qs.exclude(status__in=secrets_catalog.QUIET_STATUSES)
+    if names is not None:
+        qs = qs.filter(occurrences__host__in=sorted(names), occurrences__retired_at__isnull=True).distinct()
+    total = qs.count()
+    rows = []
+    for s in qs.order_by('-severity', '-last_seen', 'id')[:MAX_SECRETS]:
+        kind = secrets_inventory.kind_of(s)
+        hosts = sorted(set(s.occurrences.filter(retired_at__isnull=True).values_list('host', flat=True)))
+        rows.append({'severity': secrets_catalog.LEVELS[max(0, min(4, s.severity))], 'label': clean(kind.label, 120), 'masked': clean(s.masked, 80),
+                     'class': secrets_catalog.CLASS_WORDS.get(s.klass, ''), 'status': s.status.replace('_', ' '), 'basis': clean(s.severity_basis, 300),
+                     'remediation': clean(kind.remediation, 400), 'hosts': ', '.join(clean(h, 120) for h in hosts[:5]) + (f' and {len(hosts) - 5} more' if len(hosts) > 5 else '')})
+    return total, rows
+
+
 def collect(project, host=None, include_closed=False, now=None):
     """Everything one report prints, for the whole project or for one host (``host``: its exact name). Raises LookupError for a host the
     project's current inventory does not hold."""
@@ -429,6 +468,7 @@ def collect(project, host=None, include_closed=False, now=None):
     detailed = _findings(sources, caps['findings'])
     hygiene = _hygiene(sources['hygiene'], caps['hygiene'])
     _label_hosts(project, hosts, [*detailed, *(item for g in hygiene for item in g['items'])])
+    secrets_total, secrets = _secrets(project, names, include_closed)
     org = project.org
     return {
         'title': 'Host security report' if host else 'Security exposure report', 'subject': clean(host or project.name, 200),
@@ -441,7 +481,7 @@ def collect(project, host=None, include_closed=False, now=None):
                     'hosts_exposed': sum(1 for h in hosts if h['heat'] in ('fire', 'smoke')), 'ruled_out': ruled_out,
                     'status_counts': _status_counts(sources),
                     'top': detailed[:TOP_RISKS]},
-        'hosts': hosts, 'findings': detailed, 'hygiene': hygiene,
+        'hosts': hosts, 'findings': detailed, 'hygiene': hygiene, 'secrets': secrets, 'secrets_total': secrets_total,
         'caps': {**caps, 'findings_omitted': max(0, total - len(detailed)), 'hosts_omitted': max(0, host_total - len(hosts)),
                  'hygiene_omitted': max(0, hygiene_total - sum(len(g['items']) for g in hygiene)),
                  'hygiene_shown': sum(len(g['items']) for g in hygiene)},

@@ -1,0 +1,96 @@
+{
+ "kind": "subdir_probe",
+ "name": "subdir_probe",
+ "payload": {
+  "hosts": [
+   {
+    "answers": [
+     {
+      "fingerprint": {
+       "length": 153,
+       "location": "",
+       "server": "nginx/1.31.8",
+       "status": 403,
+       "title": "403 Forbidden"
+      },
+      "found": null,
+      "path": "/wp-content/",
+      "source": "curated"
+     },
+     {
+      "fingerprint": {
+       "length": 153,
+       "location": "",
+       "server": "nginx/1.31.8",
+       "status": 403,
+       "title": "403 Forbidden"
+      },
+      "found": null,
+      "path": "/wp-json/",
+      "source": "curated"
+     }
+    ],
+    "baseline": {
+     "length": 153,
+     "location": "",
+     "server": "nginx/1.31.8",
+     "status": 404,
+     "title": "404 Not Found"
+    },
+    "id": "h0",
+    "probed": [
+     "/wp-content/",
+     "/wp-json/",
+     "/nothing-here/"
+    ],
+    "requests": 6,
+    "state": "done"
+   }
+  ],
+  "outcome": "done",
+  "refused": [],
+  "touched": [
+   "192.0.2.10"
+  ]
+ },
+ "sentinel_seconds": 1.0,
+ "target": {
+  "gap": 0.1,
+  "hosts": [
+   {
+    "id": "h0",
+    "leads": [],
+    "name": "192.0.2.10",
+    "port": 80,
+    "root": {
+     "length": 400,
+     "location": "",
+     "server": "nginx",
+     "status": 200,
+     "title": "cvtv lab blog"
+    },
+    "scheme": "http"
+   }
+  ],
+  "max_requests": 20,
+  "paths": [
+   "/wp-content/",
+   "/wp-json/",
+   "/nothing-here/"
+  ],
+  "scope": {
+   "addresses": [
+    "192.0.2.10"
+   ],
+   "blocked": [],
+   "domains": [],
+   "excluded": [],
+   "excluded_trees": [],
+   "hosts": [
+    "192.0.2.10"
+   ],
+   "private": true
+  }
+ },
+ "tool_rows": null
+}

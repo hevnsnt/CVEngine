@@ -112,7 +112,7 @@ def has_hard_evidence(source, evidence, template_result='', distro_status='', va
       * a validation hit (the finding's Triage ``validation_status`` hit: one of cvENGINE's own read-only checks reproduced it).
 
     Everything else is *version-only* (for triage: an AI verdict on it stays needs validation): a version read by nmap or a banner, by
-    technology detection (a script name, a page generator), by WPScan, an OpenVAS test below its quality bar, a template that matched a version
+    technology detection (a script name, a page generator), by the WordPress scan, an OpenVAS test below its quality bar, a template that matched a version
     string, or a CVE's version range read against any of those. An AI verdict is not evidence
     (text never confirms), and a version re-read by another tool is the same evidence again."""
     return (template_result == 'vulnerable' or distro_status == 'vulnerable' or source == 'host'
@@ -260,7 +260,7 @@ def version_read_from_component(evidence, distro_status='', template_result=''):
 
     Never proof: a version from a script's file name, CDN path or ``?ver=`` query (``version_source`` filename, 0.4), a copy a later one
     replaces, a fallback or a copy of an unresolved set (their caps, 0.4 and 0.5, are below the bar), a library version another tool read
-    (``version_source`` other), technology detection (Wappalyzer, httpx, a page generator, a header), WPScan, an OpenVAS test below its
+    (``version_source`` other), technology detection (Wappalyzer, httpx, a page generator, a header), the WordPress scan, an OpenVAS test below its
     quality bar, a version inherited from another host or a redirect (correlation records none of those as a file or probe reading), a
     nmap row from before the method was kept, and an AI verdict. To tighten it, drop a clause here (and in ``version_read_from_component_q``):
     the heat, lists, counts, scores, alerts and API all follow."""
@@ -333,7 +333,7 @@ def version_proven(match, validation_status=None):
     a match fire (``threat.match_heat`` needs hard evidence of the flaw, ``has_hard_evidence``): it is shown (``version_proven`` in the API, the
     heat reason) and orders work. The one definition, with its database form ``version_proven_q``:
 
-      * hard evidence about the host (``has_hard_evidence``): a template hit (nuclei, a confirmed OpenVAS test, testssl), the distribution
+      * hard evidence about the host (``has_hard_evidence``): a template hit (nuclei, a confirmed OpenVAS test, a TLS audit result), the distribution
         tracker listing the package as vulnerable, the host's own inventory report, runZero reporting the CVE, a validation hit; or
       * the version read from the component itself at high confidence (``version_read_from_component``): a version-class template hit, a
         JavaScript library's own file (banner 0.9 or code signature 0.8, the copy that runs), or a service banner nmap's probe read from a
@@ -517,7 +517,7 @@ def unversioned_leads(technologies, ports):
     sighting on the same host did give a version, an operating system, or a generic label. Pure, so it is unit tested without a database."""
     from cveFeed.correlation import (_MIN_TOKEN, GENERIC_PRODUCT_TOKENS, _norm, name_matches_token, parse_cpe, parse_version,
                                      split_name_version)
-    seen, candidates = [], []
+    candidates = []
     for source_id, stored in technologies:
         name, version = split_name_version(stored or '')
         candidates.append((name or (stored or '').strip(), parse_version(version) is not None, _lead(name or stored, 'tech', source_id)))

@@ -1,0 +1,10 @@
+{
+  "hosts": {
+    "192.0.2.30": "app.example.com"
+  },
+  "excluded_families": [
+    "Denial of Service"
+  ],
+  "max_hours": 2.5,
+  "preferences": {}
+}

@@ -89,13 +89,30 @@ class AdminMatrixTests(TestCase):
 		self.assertEqual(api(client_for(self.member_a), 'GET', 'activity')[0], 403)
 		self.assertEqual(api(admin, 'GET', 'activity?page_size=201')[0], 400)
 
+	def health(self):
+		"""The worker answer is kept for 30 s (cveFeed.probe_cache): each call of these tests is a fresh look."""
+		from django.core.cache import cache
+		cache.clear()
+		return api(client_for(self.root), 'GET', 'health')
+
+	def confirmed_health(self):
+		"""The answer once the workers have been looked at twice in a row (a worker missing from both is reported; one missing from one is not): the
+		probe runs in full, without the waits between its pings."""
+		from django.core.cache import cache
+		from cveFeed import admin_api
+		cache.clear()
+		with mock.patch.object(admin_api, '_pause'), mock.patch.object(admin_api.probe_cache, 'cached_probe',
+				side_effect=lambda key, compute, **kw: (compute(), 0)):
+			api(client_for(self.root), 'GET', 'health')
+			return api(client_for(self.root), 'GET', 'health')
+
 	def test_scheduler_health_tells_a_running_beat_from_a_silent_or_unknown_one(self):
 		import time
 		inspector = mock.Mock(active_queues=mock.Mock(return_value={}), active=mock.Mock(return_value={}))
 		def beat(value):
 			with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector), \
 					mock.patch('cveFeed.scan_control.beat_heartbeat', return_value=value):
-				return api(client_for(self.root), 'GET', 'health')[1]['beat']
+				return self.health()[1]['beat']
 		self.assertEqual(beat(time.time() - 20)['state'], 'running')
 		self.assertEqual(beat(time.time() - 900)['state'], 'silent')
 		self.assertEqual(beat(None), {'state': 'unknown', 'seconds_since_tick': None})
@@ -112,7 +129,7 @@ class AdminMatrixTests(TestCase):
 			'validation_priority_worker@local': [{'name': 'validation_priority_queue'}]}
 		inspector.active.return_value = {'cve_feed_worker@local': [{'args': 'sk-ant-secret-marker'}]}
 		with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector):
-			status, data = api(client_for(self.root), 'GET', 'health')
+			status, data = self.confirmed_health()
 		self.assertEqual(status, 200)
 		self.assertEqual(data['workers_state'], 'degraded')
 		self.assertIn('Missing or unconfirmed', data['worker_note'])
@@ -125,13 +142,13 @@ class AdminMatrixTests(TestCase):
 		self.assertEqual(api(client_for(self.admin_a), 'GET', 'health')[0], 403)
 		self.assertEqual(api(client_for(self.member_a), 'GET', 'health')[0], 403)
 		with mock.patch('reNgine.celery.app.control.inspect', side_effect=OSError('broker down')):
-			unknown = api(client_for(self.root), 'GET', 'health')[1]
+			unknown = self.health()[1]
 			self.assertEqual(unknown['workers_state'], 'unknown')
 			self.assertIn('broker connection', unknown['worker_note'])
 			self.assertNotIn('broker down', str(unknown))
 		inspector.active_queues.return_value = None
 		with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector):
-			unknown = api(client_for(self.root), 'GET', 'health')[1]
+			unknown = self.confirmed_health()[1]
 			self.assertEqual(unknown['workers_state'], 'unknown')
 			self.assertIn('No worker replied', unknown['worker_note'])
 
@@ -142,11 +159,11 @@ class AdminMatrixTests(TestCase):
 			'classic_worker@local': [{'name': 'celery'}]}  # replied, but not consuming api_queue
 		inspector.active.return_value = {}
 		with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector):
-			data = api(client_for(self.root), 'GET', 'health')[1]
+			data = self.confirmed_health()[1]
 		replies = {w['worker']: w['reply'] for w in data['workers']}
 		self.assertEqual(replies, {'discovery_worker': 'no_reply_within_5s', 'cve_feed_worker': 'consuming',
 								   'validation_priority_worker': 'no_reply_within_5s', 'classic_worker': 'replied_without_queue'})
-		self.assertIn('Did not reply within 5 seconds: discovery_worker, validation_priority_worker.', data['worker_note'])
+		self.assertIn('No reply from: discovery_worker, validation_priority_worker.', data['worker_note'])
 		self.assertIn('Replied without its queue: classic_worker.', data['worker_note'])
 
 	def test_worker_inspection_accepts_celery_at_worker_names(self):
@@ -158,29 +175,12 @@ class AdminMatrixTests(TestCase):
 			'celery@classic_worker': [{'name': 'api_queue'}]}
 		inspector.active.return_value = {'celery@cve_feed_worker': [{'args': 'private-secret-marker'}]}
 		with mock.patch('reNgine.celery.app.control.inspect', return_value=inspector):
-			status, data = api(client_for(self.root), 'GET', 'health')
+			status, data = self.health()
 		self.assertEqual(status, 200)
 		self.assertEqual(data['workers_state'], 'responding')
 		self.assertTrue(all(row['consuming'] for row in data['workers']))
 		self.assertEqual(next(row for row in data['workers'] if row['worker'] == 'cve_feed_worker')['active'], 1)
 		self.assertNotIn('private-secret-marker', str(data))
-
-	def test_assessment_review_status_is_app_admin_only_and_bounded(self):
-		from datetime import timedelta
-		from cveFeed.models import AssessmentReview, AssessmentReviewDecision
-		now = timezone.now()
-		review = AssessmentReview.objects.create(period_start=now-timedelta(hours=3), period_end=now,
-			status='completed', total_projects=2, reviewed_projects=2, queued_actions=1,
-			performance={'status': 'no_change', 'reason': 'Insufficient telemetry'})
-		AssessmentReviewDecision.objects.create(review=review, project=self.pa, action='triage', status='queued',
-			reason='pending findings')
-		with mock.patch('reNgine.celery.app.control.inspect') as inspector:
-			inspector.return_value.active_queues.return_value = {}
-			status, data = api(client_for(self.root), 'GET', 'health')
-		self.assertEqual(status, 200)
-		self.assertEqual(data['assessment_review']['id'], review.id)
-		self.assertEqual(data['assessment_review']['recent_decisions'][0]['project'], self.pa.slug)
-		self.assertEqual(api(client_for(self.admin_a), 'GET', 'health')[0], 403)
 
 	def test_archive_rediscovery_health_reports_real_progress(self):
 		from cveFeed.models import ArchiveRediscovery, HostState
@@ -189,7 +189,7 @@ class AdminMatrixTests(TestCase):
 		run = ArchiveRediscovery.objects.create(day=timezone.now().date(), status='queued', total=3, checked=2, deferred=1)
 		with mock.patch('reNgine.celery.app.control.inspect') as inspector:
 			inspector.return_value.active_queues.return_value = {}
-			status, data = api(client_for(self.root), 'GET', 'health')
+			status, data = self.health()
 		self.assertEqual(status, 200)
 		self.assertEqual(data['archive_rediscovery']['run_id'], run.pk)
 		self.assertEqual((data['archive_rediscovery']['archived_hosts'], data['archive_rediscovery']['checked']), (1, 2))
@@ -472,7 +472,6 @@ class AccountAndPasswordTests(TestCase):
 		self.assertTrue({'account.password_change', 'account.mfa_enable', 'token.create', 'token.revoke'} <= seen, seen)
 		self.assertTrue(all(r.actor_name == 'jane' for r in AuditLog.objects.filter(action__startswith='token.')))
 		self.assertNotIn('zz-token-name', json.dumps(list(AuditLog.objects.values_list('detail', 'target'))))  # no token name or secret
-
 
 
 class ClassicRetiredTests(TestCase):
