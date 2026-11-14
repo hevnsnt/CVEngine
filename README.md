@@ -1,13 +1,12 @@
 <p align="center">
-  <img src="docs/images/cvengine-logo.png" alt="cvENGINE" width="560">
+  <img src="docs/images/cvengine-logo.png" alt="cvENGINE" width="420">
 </p>
 
-<h3 align="center">The most advanced external assessment platform you can run yourself.</h3>
+<h3 align="center">The most advanced external assessment platform.</h3>
 
-<p align="center">
-  Give it your domain. cvENGINE discovers the assets you expose, builds a Shodan-style inventory of them with the best open-source tools,<br>
-  then assesses every host with industry-standard scanners and shows you what to fix first, with the evidence.
-</p>
+<p align="center">Discover the assets you expose and map them in a Shodan-style inventory.</p>
+
+<p align="center">Assess each host with industry-standard scanners and fix what matters first.</p>
 
 <p align="center">
   <a href="CHANGELOG.md"><img alt="Release 1.4.0" src="https://img.shields.io/badge/release-1.4.0-2ea44f"></a>
@@ -15,13 +14,21 @@
   <img alt="Self-hosted with Docker Compose" src="https://img.shields.io/badge/self--hosted-Docker%20Compose-blue">
 </p>
 
+<p align="center">
+  <img src="docs/images/cvengine-tour-1.3.gif" alt="A 35-second tour of cvENGINE on a fictional demo company: the Overview, the Hosts page, the Sentinels that scan from inside a network, and the Settings tabs" width="880">
+</p>
+
+<p align="center"><sub>Tour recorded on 1.3 with demo data. 1.4 has a simpler left rail.</sub></p>
+
 ---
+
+**cvENGINE is a self-hosted external attack surface and vulnerability assessment platform.** Give it your domains and it keeps discovering the subdomains, addresses and certificates you expose, then builds a searchable, Shodan-style inventory of every host, port, service, technology and certificate. Each host is assessed with industry-standard open-source scanners, and what to fix first is ranked by proof, real-world exploitation and exposure, with the evidence one click away. Because discovery keeps running, forgotten and shadow assets come to light, and new hosts, opened ports and version changes land on a timeline as soon as a scan sees them. Issues a check reproduced are marked as proven, so real problems stand apart from the noise.
 
 ## cvENGINE 1.4.0 is here
 
 | | |
 | --- | --- |
-| **Every scan runs on a Sentinel** | The server runs no scans. A built-in scanner ships with every install; add your own [Sentinels](docs/SENTINELS.md) to scale out or to scan inside a private network. |
+| **Scan from wherever you need** | You choose where scanning happens: on your server, with the built-in scanner that ships with every install in its own container; on remote [Sentinels](docs/SENTINELS.md) you place anywhere, in other clouds or regions or inside private networks to reach internal assets; or both. Add Sentinels to scale out. |
 | **Set up in the browser** | `install.sh` is a thin bootstrap. A [setup wizard](docs/DEPLOYMENT.md#setup-wizard) takes your organization, project and first domain, and discovery starts at once. |
 | **What needs you, ranked** | [Situations](docs/SITUATIONS.md) lists the hosts that need a person, most urgent first. Findings a check reproduced show their proof first, and a finding marked fixed is checked again. |
 | **Exposed secrets and SSH** | A project secrets inventory fed by Kingfisher, and SSH inspection with sshamble that checks host keys against a known-bad list and never logs in. |
@@ -45,7 +52,7 @@ flowchart LR
 3. **Assess.** Each host is tested with industry-standard scanners and cvENGINE's own read-only checks, and a CVE is matched to a host only when the product is the same and its version falls inside the affected range.
 4. **Prioritise.** Every CVE is rated [fire, smoke or ice](docs/FIRE-SMOKE-ICE.md) from real exploitation data, each host gets a 0 to 100 score, and AI triage, when you switch it on, sorts findings into confirmed, likely or needs validation. The AI never closes a finding a check proved.
 
-All scanning runs on [Sentinels](docs/SENTINELS.md), never on the server. The [pipeline](docs/PIPELINE.md) describes every stage.
+Scanning runs where you choose: in the built-in scanner on your server, on [Sentinels](docs/SENTINELS.md) you place elsewhere, or both. The [pipeline](docs/PIPELINE.md) describes every stage.
 
 ## The tools behind it
 
@@ -77,11 +84,6 @@ cvENGINE runs the best open-source security tools. The scanner image pins each t
 | | bbot's keyed sources | Optional: Shodan, Censys, VirusTotal, SecurityTrails, GitHub, Chaos and more, with your own API keys ([Configuration](docs/CONFIGURATION.md#api-keys)) |
 | **AI (bring your own, off until you choose)** | [Anthropic](https://www.anthropic.com), [OpenAI](https://openai.com), [OpenRouter](https://openrouter.ai), [Ollama](https://github.com/ollama/ollama), [LM Studio](https://lmstudio.ai), [vLLM](https://github.com/vllm-project/vllm) | Finding triage, Nuclei targeting and the [AI reviewer](docs/AI-REVIEWER.md) in its own container. Without a model cvENGINE still discovers, scans and matches |
 | | [Model Context Protocol](https://modelcontextprotocol.io) | An MCP server and a REST API for your own agents ([Agent API](docs/AGENT-API.md)) |
-
-<p align="center">
-  <img src="docs/images/cvengine-tour-1.3.gif" alt="A 35-second tour of cvENGINE on a fictional demo company: the Overview, the Hosts page, the Sentinels that scan from inside a network, and the Settings tabs" width="900"><br>
-  <sub>Tour recorded on 1.3 with demo data. 1.4 has a simpler left rail of eight entries.</sub>
-</p>
 
 ## Install in minutes
 
