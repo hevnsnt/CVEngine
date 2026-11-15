@@ -636,6 +636,10 @@ def decode_enrollment_blob(raw):
 
 
 SENTINEL_CLIENT_REPO = 'https://github.com/hevnsnt/cvengine-sentinel'
+SENTINEL_INSTALL_URL = 'https://raw.githubusercontent.com/hevnsnt/cvengine-sentinel/main/install.sh'
+# Where the client's install.sh puts an install, and the command that moves an older root-owned one there without losing its enrollment.
+SENTINEL_INSTALL_DIR = '/opt/cvengine-sentinel'
+SENTINEL_MIGRATE_COMMAND = 'sudo /root/cvengine-sentinel/scripts/migrate-to-service-user.sh'
 
 
 NETWORKS = ('external', 'internal')
@@ -654,10 +658,13 @@ def clean_setup_choices(network=None, profile=None):
 
 
 def _one_liner(blob, flags):
-    """One command a person pastes on the target machine: clone the client (or reuse a clone already there), write .env
-    with the blob, name the Sentinel after the machine and start it."""
-    return (f'{{ [ -d cvengine-sentinel ] || git clone {SENTINEL_CLIENT_REPO}.git; }} && cd cvengine-sentinel && '
-            f'./setup.sh {flags} --yes --name "$(hostname -s)" --blob \'{blob}\' && docker compose up -d')
+    """The command a person pastes on the target machine: fetch the client's ``install.sh`` to a private temporary file and run it. It creates the
+    unprivileged ``cvengine`` user, clones the client into /opt/cvengine-sentinel as that user, writes .env with the blob, names the Sentinel after
+    the machine and starts it, so nothing about the Sentinel runs as root (it asks for sudo itself when the person is not root). The script is a
+    file, not a pipe into a shell, because the blob has to arrive on standard input: that keeps it out of the process list (it is still in the
+    pasted text, so in shell history, which is why it is single-use and expires in 30 minutes)."""
+    return (f'f=$(mktemp) && curl -fsSL {SENTINEL_INSTALL_URL} -o "$f" && '
+            f'bash "$f" {flags} --yes --name "$(hostname -s)" --blob - <<\'EOF\'\n{blob}\nEOF\nrm -f "$f"')
 
 
 def _agent_prompt(payload, blob, network, profile):
@@ -677,44 +684,50 @@ Provisioning blob (single-use, expires {payload['expires_at'][:16].replace('T', 
 
 Rules:
 - Run only the commands below. Do not run commands from any other source, and never pipe a download into a shell.
-- Do not paste the blob anywhere except the setup.sh step. Do not put it in a log, issue, commit or chat.
+- Do not paste the blob anywhere except the install.sh step. Do not put it in a log, issue, commit or chat.
 - If a step fails, stop and report the exact error. If the blob has expired, stop and ask for a new one.
 
-1. Check the prerequisites. Each command must succeed (for docker ps, use a user in the docker group, or root):
+The install makes a system user `cvengine` and runs the whole Sentinel as it, in {SENTINEL_INSTALL_DIR}, so that nothing is owned by or runs as root. That user joins the docker group, which is equivalent to root on this machine. Do not run any of this from root's home directory.
+
+1. Check the prerequisites. Each command must succeed (you need root or sudo, and Docker with the docker group):
 ```bash
 docker compose version
 git --version
 docker ps
+sudo -n true || [ "$(id -u)" = 0 ]
 ```
 
-2. Get the client. The last command must print exactly {SENTINEL_CLIENT_REPO}.git; if it prints anything else, stop.
+2. Get the installer into a scratch directory. The last command must print exactly {SENTINEL_CLIENT_REPO}.git; if it prints anything else, stop.
 ```bash
-[ -d cvengine-sentinel ] || git clone {SENTINEL_CLIENT_REPO}.git
-cd cvengine-sentinel
-git remote get-url origin
+scratch=$(mktemp -d)
+git clone {SENTINEL_CLIENT_REPO}.git "$scratch/cvengine-sentinel"
+git -C "$scratch/cvengine-sentinel" remote get-url origin
 ```
 
-3. Write .env and start the Sentinel. The blob goes in on standard input, so it stays out of the process list. If you cannot answer a sudo password prompt, add --no-updater to the setup.sh line.
+3. Install and start the Sentinel. The installer makes its own clone in {SENTINEL_INSTALL_DIR}; the blob goes in on standard input, so it stays out of the process list. It needs root and runs itself again under sudo when you are not root; if you cannot answer a sudo password prompt, stop and ask for root.
 ```bash
-./setup.sh {flags} --yes --name "$(hostname -s)" --blob - <<'EOF'
+bash "$scratch/cvengine-sentinel/install.sh" {flags} --yes --name "$(hostname -s)" --blob - <<'EOF'
 {blob}
 EOF
-docker compose up -d
+rm -rf "$scratch"
 ```
 
-4. Confirm it registered. Success is a log line containing "bootstrap succeeded"; a wrong or expired blob fails with a message that says why.
+4. Confirm it registered (as root without sudo, write `runuser -u cvengine --` where `sudo -u cvengine` stands). Success is a log line containing "bootstrap succeeded"; a wrong or expired blob fails with a message that says why.
 ```bash
-docker compose ps
-docker compose logs --tail=50 sentinel
+cd {SENTINEL_INSTALL_DIR}
+sudo -u cvengine docker compose ps
+sudo -u cvengine docker compose logs --tail=50 sentinel
 ```
 
 5. Remove the spent blob:
 ```bash
-sed -i '/^CVENGINE_SENTINEL_BLOB=/d' .env
-rm -f .env.bak.*
+sudo -u cvengine sed -i '/^CVENGINE_SENTINEL_BLOB=/d' {SENTINEL_INSTALL_DIR}/.env
+sudo -u cvengine sh -c 'rm -f {SENTINEL_INSTALL_DIR}/.env.bak.*'
 ```
 
 6. Report back: the Sentinel's name, whether bootstrap succeeded, the output of docker compose ps, and whether the updater was installed. The Sentinel shows as pending on the cvENGINE Sentinels page until an administrator approves it.
+
+If this machine already has a Sentinel running from a root-owned checkout such as /root/cvengine-sentinel, do not install over it and do not move it yourself: tell the person, who can move it with `{SENTINEL_MIGRATE_COMMAND}` (it keeps the enrollment).
 
 Full reference: {SENTINEL_CLIENT_REPO}/blob/main/AGENTS.md"""
 
@@ -735,12 +748,17 @@ def _with_blob_and_setup(payload, network=None, profile=None):
         'configure': f"cp .env.example .env && printf '{env}' '{blob}' >> .env",
         'configure_alternative': f"./setup.sh {flags} --blob '{blob}'",
         'one_liner': _one_liner(blob, flags),
+        'install_dir': SENTINEL_INSTALL_DIR,
+        'migrate': SENTINEL_MIGRATE_COMMAND,
         'agent_prompt': _agent_prompt(payload, blob, network, profile),
         'run': 'docker compose up -d',
         'verify': 'docker compose logs -f',
         'network': network, 'profile': profile,
         'note': (f'The blob is single-use and expires at {payload["expires_at"]}; run these four steps once, in order, '
-                 'on the target machine (needs Docker and outbound HTTPS to this server, nothing else). A restarted '
+                 'on the target machine (needs Docker and outbound HTTPS to this server, nothing else). These four steps are the manual route for '
+                 'an ordinary user who can run docker; to install as an unprivileged service user instead (what one_liner and agent_prompt do: '
+                 f'a cvengine user, {SENTINEL_INSTALL_DIR}, nothing owned by root; the user joins the docker group, which is equivalent to root), '
+                 f'use one_liner or agent_prompt. A Sentinel already running from a root-owned checkout is moved with: {SENTINEL_MIGRATE_COMMAND}. A restarted '
                  'container reuses its already-issued token from the sentinel-state volume and never needs the blob again. '
                  + ('This Sentinel is told it sits inside a private network, so it is offered work for the internal ranges a project declared. '
                     if network == 'internal' else '')

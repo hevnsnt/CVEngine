@@ -2,6 +2,11 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Changed
+- **A new Sentinel is installed as an unprivileged service user, not as root.** The command the Sentinels page shows (and `setup.one_liner` in the enrollment reply) used to `git clone` into the current directory, so an operator logged in as root got a root-owned `/root/cvengine-sentinel`, and the updater then refused it. It now downloads the client's `install.sh` to a temporary file and runs it with the blob on standard input (no longer on a command line, so not in the process list): that creates a `cvengine` system user (in the `docker` group, which is equivalent to root on that machine), installs the client in `/opt/cvengine-sentinel` owned by it, and runs setup, the stack and the updater as it. The AI agent prompt follows the same path, and `setup` gains `install_dir` and `migrate` (`sudo /root/cvengine-sentinel/scripts/migrate-to-service-user.sh`, for a person to move an older root-owned install without losing its enrollment). The manual steps (`clone`, `configure`, `run`, `verify`) stay for an ordinary user who can run docker. Needs the client change that adds `install.sh` and the migration script (hevnsnt/cvENGINE-sentinel, `feat/service-user-install`).
+
 ## v1.4.1 (2026-11-14)
 
 ### Changed
