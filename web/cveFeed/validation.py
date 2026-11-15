@@ -761,7 +761,7 @@ def run_fact_probe(check):
     entry = {'probe': params['probe'], 'target': params['probe_target']}
     try:
         if probes.BY_ID[entry['probe']]['family'] == 'nmap':
-            found = probes.run_one(params['project_id'], params['domain_id'], sub, entry, fresh=True)  # a service-version scan: the nmap_verify kind, never here
+            found = probes.run_one(params['project_id'], params['domain_id'], sub, entry)  # a service-version scan: the nmap_verify kind, never here (run_one always scans: it has no freshness ledger to skip)
         else:
             project = Project.objects.get(pk=params['project_id'])
             asset = probes.asset_key(sub.name, entry)

@@ -230,7 +230,7 @@ def _unrestricted_billable(meta):
 
 
 def severity(kind, status='unverified', meta=None, row_facts=None, now=None):
-    """``(level, basis)`` for a secret of ``kind`` (a ``Kind``) in ``status``, from the table in docs/SECRETS-PLAN.md section 8.2. ``meta`` is the
+    """``(level, basis)`` for a secret of ``kind`` (a ``Kind``) in ``status`` (``now``: epoch seconds or a datetime, default the present), from the table in docs/SECRETS-PLAN.md section 8.2. ``meta`` is the
     sanitised validation metadata, ``row_facts`` what ``facts`` kept. A person's status (``public_by_design``, ``accepted``, ``false_positive``,
     ``revoked``) does not change the level; it takes the secret out of the host's score (``counts``)."""
     klass = kind.klass
@@ -256,7 +256,7 @@ def severity(kind, status='unverified', meta=None, row_facts=None, now=None):
         return HIGH, f'a {kind.label} served to anyone who asks: a server secret, not meant to leave the server'
     if kind.kind == 'jwt':
         exp = (row_facts or {}).get('exp')
-        now = time.time() if now is None else now
+        now = time.time() if now is None else now.timestamp() if hasattr(now, 'timestamp') else now  # the callers' clock is a datetime; exp is epoch seconds
         if exp is not None and exp < now:
             return LOW, 'a JSON Web Token that has expired (by its exp claim, read without checking the signature)'
         return MEDIUM, ('a JSON Web Token that has not expired (by its exp claim, read without checking the signature)' if exp is not None
