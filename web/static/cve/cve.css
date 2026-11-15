@@ -1780,7 +1780,7 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .dlg-dest .select select{min-height:40px;font-weight:var(--fw-semi)}
 
 /* the map fills its card: tiles are placed by the layout in dashboard.js (--cols, --rows, data-tier) */
-.hx[hidden]{display:none}
+.hx[hidden]{display:none!important} /* beats every tier's display:flex: a tile past the last whole row the card holds is not drawn */
 .hx .hx-details{display:none}
 .map[data-tier="rich"] .hx{flex-direction:column;justify-content:flex-start;align-items:stretch;gap:var(--s-1);padding:var(--s-2) var(--s-3) var(--s-2) var(--s-3)}
 .map[data-tier="rich"][data-size="xl"] .hx .score{position:static;inset:auto;order:1;justify-content:flex-start;padding:0;font:var(--fw-semi) var(--fs-6)/1 var(--mono);color:var(--ink)}
