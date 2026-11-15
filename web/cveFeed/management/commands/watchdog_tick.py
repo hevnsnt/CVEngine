@@ -24,12 +24,20 @@ class Command(BaseCommand):
             'scripts/watchdog.sh every 30 seconds in the web container; it never uses Celery and always ends within a bounded time.')
 
     def handle(self, *args, **options):
-        timer = self_destruct()
+        age = watchdog.process_age_seconds()
+        budget = watchdog.tick_budget(age)
+        if budget is None:  # Django took nearly all of the command's time to load: a tick now would be killed half way and leave no word of why
+            self.stdout.write(json.dumps({'ok': False, 'acted': [], 'startup_seconds': round(age, 1), 'seconds': 0,
+                                          'skipped': f'the web container took {age:.0f} s to start this command (it must end within {watchdog.PROCESS_SECONDS} s), so this tick did nothing'}))
+            return
+        limit, hard = budget
+        timer = self_destruct(hard)
         try:
             if connection.vendor == 'postgresql':
                 with connection.cursor() as cur:
                     cur.execute('SET statement_timeout = 5000')
-            out = watchdog.tick()
+            out = watchdog.tick(limit=limit)
         finally:
             timer.cancel()
+        out['startup_seconds'] = round(age, 1)
         self.stdout.write(json.dumps(out, default=str))
