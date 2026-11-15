@@ -1,6 +1,6 @@
 """Export of every discovered host: a scope list for an external penetration test (REST and MCP).
 
-``GET projects/{slug}/hosts/export`` and ``GET orgs/{org}/hosts/export`` answer a file (CSV or a plain list for ``nmap -iL``) of the hosts
+``GET projects/{slug}/hosts/export`` and ``GET orgs/{org}/hosts/export`` answer a file (CSV or a plain list a scanner reads as its target file) of the hosts
 the Hosts page lists, with what a tester needs to scope the work (names, addresses, open ports and services, web URLs, where each host was
 found) and nothing about the customer's security posture: no findings, CVE matches, heat, score, notes, owners or labels.
 
@@ -226,7 +226,7 @@ class Export:
         self.content_type = 'text/csv; charset=utf-8' if fmt == 'csv' else 'text/plain; charset=utf-8'
 
     def _txt_lines(self):
-        """Every host name, then every address: each once, names in alphabetical order and addresses in numeric order, ready for ``nmap -iL``."""
+        """Every host name, then every address: each once, names in alphabetical order and addresses in numeric order, ready for a scanner's target-list option."""
         if not hasattr(self, '_lines'):
             names, addresses = set(), set()
             for plan in self.plans:

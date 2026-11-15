@@ -402,4 +402,4 @@ class McpTests(Base):
         with mock.patch.object(host_export, 'MCP_MAX_BYTES', 100):
             error, text = tool_call(self.t['boss'], 'export_hosts', {'project': 'hx-web'})
         self.assertTrue(error)
-        self.assertIn('host.export', text)
+        self.assertIn('hosts/export', text)
