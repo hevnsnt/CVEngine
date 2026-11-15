@@ -265,10 +265,11 @@ def main():
                     or not isinstance(row.get('at'), int)):
                 raise ValueError('invalid OpenVAS answer')
             publish(web_fd, '.openvas-applied', [json.dumps(row).encode('utf-8') + b'\n'])
-        elif action in ('sentinels-choice', 'plan-wanted'):
+        elif action in ('sentinels-choice', 'sentinels-peek', 'plan-wanted'):
             # the answer to "which scanners run" the app handed over: one of internal, both, external, nothing else, read without following a link the
-            # container may have planted. sentinels-choice (it rides with an update approval) is removed once read; plan-wanted stays until plan-done.
-            name = '.update-sentinels' if action == 'sentinels-choice' else '.scanner-plan-wanted'
+            # container may have planted. sentinels-choice (it rides with an update approval) is removed once read; sentinels-peek reads the same file and
+            # leaves it (scripts/apply-update.sh reads it once per run and removes it with the approval); plan-wanted stays until plan-done.
+            name = '.scanner-plan-wanted' if action == 'plan-wanted' else '.update-sentinels'
             try:
                 with os.fdopen(regular_fd(name, dir_fd=web_fd), 'rb') as source:
                     value = source.read(16).strip()

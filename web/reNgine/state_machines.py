@@ -125,3 +125,36 @@ STAGE_RUN = register(Machine(
     },
     initial=(RUN_RUNNING, RUN_WAITING),
 ))
+
+
+# An AI job (cveFeed.AIJob.status): one model call the AI reviewer container makes for a pipeline stage (cveFeed.ai_jobs).
+#
+# The container leases a queued job and answers it; a Celery task applies the answer (or queues the stage's one retry). Applied, failed and
+# expired are final: a continuation that finishes after the housekeeping pass gave its job up as lost (``apply_lost``) does not turn it back
+# into applied, and the stage is told of the loss through its ``job_failure`` hook. Leasing a job and taking its answer are made under a row
+# lock (``select_for_update``) that checks the state first; every other move goes through this table.
+AI_QUEUED, AI_LEASED, AI_ANSWERED, AI_APPLYING = 'queued', 'leased', 'answered', 'applying'
+AI_APPLIED, AI_FAILED, AI_EXPIRED = 'applied', 'failed', 'expired'
+AI_JOB = register(Machine(
+    'ai_job', 'status', label='The AI job',
+    doc='One model call the AI reviewer container makes for a pipeline stage (triage, template writing, host reviews...).',
+    states={
+        AI_QUEUED: ('queued', 'Queued', 'Waiting for the AI reviewer container to take it.'),
+        AI_LEASED: ('leased', 'Taken', 'The container holds it for a while and is asking the model; a lease that runs out puts it back.'),
+        AI_ANSWERED: ('answered', 'Answered', 'The answer (or the failure) is in; its stage has not used it yet.'),
+        AI_APPLYING: ('applying', 'Applying', 'Its stage is using the answer now.'),
+        AI_APPLIED: ('applied', 'Applied', 'Its stage used the answer. Final.'),
+        AI_FAILED: ('failed', 'Failed', 'The model call failed, the answer could not be used, or its continuation was lost; the stage was told. Final.'),
+        AI_EXPIRED: ('expired', 'Expired', 'Never answered in time, or dropped before it was asked; the stage was told. Final.'),
+    },
+    moves={
+        AI_QUEUED: (AI_LEASED, AI_EXPIRED),
+        AI_LEASED: (AI_QUEUED, AI_ANSWERED),
+        AI_ANSWERED: (AI_APPLYING,),
+        AI_APPLYING: (AI_QUEUED, AI_APPLIED, AI_FAILED),
+        AI_APPLIED: (),
+        AI_FAILED: (),
+        AI_EXPIRED: (),
+    },
+    initial=(AI_QUEUED,),
+))

@@ -45,6 +45,7 @@ stored values and API field names never change (add a `state` name next to an ol
 | `agent` | `agentapi.Agent.status` | pending, active, suspended, revoked | Created pending, active or suspended (`_initial_status`); after that only a person's `update_agent` moves it, in one conditional UPDATE from the status the decision was made on (409 when another decision landed first). A registration or heartbeat never writes it, and a claim re-reads it under its lock. Revoked is final for the agent, with one exception kept because the web interface offers it: a person's Reinstate (revoked -> active); a token cannot, and revoked -> suspended is refused (409). |
 | `sentinel_task` | `agentapi.SentinelTask.status` | queued, claimed, running, **done**, **failed**, expired | A report is filed only from claimed or running. Expired -> done/failed only through the late-result path (`_adopt_late`), for a task lost or timed out across an update (`LATE_SERVABLE_ERRORS`) whose Sentinel still covers the work; never one a person cancelled or one taken back from a suspended or narrowed Sentinel. |
 | `stage_run` | `agentapi.StageRun.state` | running, waiting, ready, **done**, **failed** | A pass writes (wait, close) only while the run is still in its round (`rounds`): one that outlived its lease and was taken over by another worker writes nothing. `cancelled` is listed by the model but never written, so it is not in the table. |
+| `ai_job` | `cveFeed.AIJob.status` | queued, leased, answered, applying, **applied**, **failed**, **expired** | queued to leased or expired; leased back to queued (lease ran out) or to answered; answered to applying; applying to queued (the stage's one retry), applied or failed. A continuation that ends after the housekeeping pass gave its job up as lost (`apply_lost`) changes nothing, and the lost job's stage is told through its `job_failure` hook. Leasing and taking an answer are made under a row lock that checks the state first. |
 
 ## Implicit machines, and what is wrong with them
 
@@ -56,8 +57,11 @@ Found by a survey of the server and the Sentinel client. Each is moved to an exp
   discovery was overwritten with success or failed; a stage a person stopped was overwritten with its own result; a duplicate delivery of a running
   scan's message replaced its Celery task ids, so the reaper closed the live scan and a Stop revoked the wrong task.
 - **Global pause** (`ScanControl.paused`, `paused_by_update`, update window): one flag shared by a person, the updater and the watchdog's
-  pressure pause. A watchdog pause opens the update window, which freezes Sentinel task expiry for up to 6 hours; the updater's release lifts a
-  watchdog pause while the pressure lasts.
+  pressure pause. Fixed: each has its own owner (`scan_control.pause_owner`: person, update, watchdog; the watchdog's is told apart by the reason
+  it always starts with, so no schema change). The watchdog's pause (`request_pressure_pause`) opens no update window and holds no Sentinel
+  lease, so Sentinel task expiry no longer freezes during a memory or disk pause; each release (`release_update_pause`, `release_pressure_pause`)
+  lifts only its own owner's pause; `scans_paused_by_update` and `get_system_status` (`paused_by_update`, and `paused_by`) no longer call a
+  watchdog pause an update pause.
 - **Stage runs** (`agentapi.StageRun.state`): explicit (above). Fixed while moving it: the close and the wait of a pass that outlived its lease
   overwrote the run another worker had resumed.
 - **Host assessments** (`HostAssessment.status`), archive review runs (`queued/running/partial/completed`, where partial means two things).
@@ -89,11 +93,17 @@ Found by a survey of the server and the Sentinel client. Each is moved to an exp
 ### Operations
 
 - **Update approval** (database row and `web/.update-approved`): the host clears the file but not the row, so the UI says approved while nothing
-  is pending; a check after a failed restart deletes the approval and the retries stop; after a web-side removal the page keeps saying "The approval
-  is kept and retries by itself".
+  is pending (still open). Fixed: the check forgets an approval only when the host reports the deploy finished (phase `done` since the approval;
+  `web/.commit` is written when a deploy starts, so it alone made a check after a failed restart delete the approval and stop the retries), and
+  audits it (`update.applied`); after a web-side removal (the check, Cancel, a factory reset) a failed phase is shown as the last attempt with its
+  time and a drain as idle (`updater.shown_phase`, used by Settings > Updates, the update bar and `get_system_status`), never "The approval is kept
+  and retries by itself"; the host removes the approval file only while it still names the commit it applied, so an approval of a newer commit made
+  during a deploy is kept.
 - **Update phase** (`.update-phase.json`): `failed` is written for refusals that retry; `restarting`/`resuming` are read but never written; a
   phase stays `applying` after a crash.
-- **Scanner plan** (`.update-sentinels`): read once and deleted before the deploy steps that need it, so the choice made in the Approve dialog is dropped.
-- **AI jobs** (`AIJob.status`): a job lost while applying never tells its stage.
+- **Scanner plan** (`.update-sentinels`): fixed. `apply-update.sh` reads it once per run without removing it and hands it to the deploy steps
+  (`CV_UPDATE_SENTINELS`); it is removed with the approval, so a run that waits for work to settle (exit 3) or retries keeps it.
+- **AI jobs** (`AIJob.status`): explicit (`ai_job`, above). Fixed: a job lost while applying tells its stage (`job_failure`), and a late
+  continuation no longer overwrites the loss.
 - **Auto-tuning phase**, **watchdog status**, **OpenVAS add-on switch** (the app never writes the request the host script waits for),
   certificate status (consistent).
