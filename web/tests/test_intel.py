@@ -81,6 +81,13 @@ class ConversionTests(SimpleTestCase):
 						 [{'type': 'SEMVER', 'fixed': '1.4.2'}])
 		self.assertEqual(intel._ranges({'versions': [{'version': '3.1', 'status': 'affected'}]}),
 						 [{'type': 'SEMVER', 'introduced': '3.1', 'lastAffected': '3.1'}])
+		self.assertEqual(intel._ranges({'versions': [{'product': 'Apache HTTP Server', 'version': '2.4.7',
+									'status': 'affected', 'versionType': 'custom',
+									'lessThan': 'Apache HTTP Server 2.4*'}]}), [])
+		self.assertEqual(intel._ranges({'versions': [{'version': '1.0', 'status': 'affected',
+									'lessThan': 'not a version',
+									'changes': [{'at': '2.0', 'status': 'unaffected'}]}]}),
+						 [{'type': 'SEMVER', 'introduced': '1.0', 'fixed': '2.0'}])
 		self.assertEqual(intel._ranges({'versions': [{'version': 'n/a', 'status': 'affected'}, {'version': '2.0', 'status': 'unaffected'}]}), [])
 
 	def test_a_cpe_names_the_product_the_way_scanners_do(self):

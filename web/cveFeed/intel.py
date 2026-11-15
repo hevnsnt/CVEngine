@@ -672,6 +672,7 @@ def _ranges(entry):
                 out += [{"type": kind, **piece} for piece in split]
                 continue
         upper = {}
+        upper_was_supplied = bool(v.get("lessThan") or v.get("lessThanOrEqual"))
         if v.get("lessThan"):
             below = _wildcard_base(v.get("lessThan"))
             bound, exact = (below, True) if below else _bound(v.get("lessThan"))
@@ -699,7 +700,10 @@ def _ranges(entry):
                 affected = False
             elif change.get("status") == "affected" and not affected:
                 seg_start, affected = at, True
-        if affected and (seg_start or upper):
+        # A supplied but unreadable upper bound must not turn the range into
+        # an open-ended match. Keep any bounded segments established by
+        # explicit changes above, but omit the ambiguous final segment.
+        if affected and (seg_start or upper) and (upper or not upper_was_supplied):
             out.append({k: x for k, x in {"type": kind, "introduced": seg_start, **upper}.items() if x})
     return out[:30]
 
