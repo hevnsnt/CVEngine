@@ -148,12 +148,70 @@ def check_lanes(ctx):
     absent = [p for p in silent if p.removesuffix('_worker') not in working]  # the lane table says cve_feed_worker, the memory report cve_feed
     queues = snap.get('queues') or {}
     if not absent:
+        _count_checks(ctx, False)
         if silent:
             return Check(False, f'All four worker lanes answer, except {_lanes_text(silent)}, which missed a ping but is at work ({_work_evidence(silent, finished, running)}): busy, not gone.')
         return Check(False, 'All four worker lanes answer.')
     waiting = {LANE_WORDS.get(p, p): queues.get(status[p]['queue'], 0) for p in absent}
+    _count_checks(ctx, True)
     parts = ', '.join(f'{w}: {n} waiting' for w, n in waiting.items())
-    return Check(True, f'No answer from the {_lanes_text(absent)} lane{"s" if len(absent) != 1 else ""} ({parts}).', {'absent': absent, 'waiting': waiting})
+    evidence = {'absent': absent, 'waiting': waiting, 'answered': sorted(n for p, lane in status.items() if lane['present'] for n in lane['workers']),
+                'ping_seconds': snapshot.PING_SECONDS, 'snapshot_seconds': snap.get('seconds')}
+    evidence.update(_lane_signs(absent))
+    return Check(True, f'No answer from the {_lanes_text(absent)} lane{"s" if len(absent) != 1 else ""} ({parts}).', evidence)
+
+
+def _count_checks(ctx, missed):
+    """R1's own count of the checks in a row that found a lane silent (a check that could not ask, or a tick that was cut off, does not count and does not reset it): the log
+    says how many looks the 3 minutes rest on."""
+    state = ctx.states.get('R1')
+    if state is None:
+        return
+    data = dict(state.data or {})
+    data['silent_checks'] = int(data.get('silent_checks') or 0) + 1 if missed else 0
+    state.data = data
+
+
+def _lane_signs(absent):
+    """What the silent lanes' own records say, for the log: the age of each one's liveness record, what it had in flight, the worst garbage collection it published."""
+    out = {'beat': {}, 'gc_worst_s': {}}
+    try:
+        from reNgine import lane_memory
+        now = time.time()
+        beats = lane_memory.beats(now)
+        for p in absent:
+            lane = p.removesuffix('_worker')
+            if lane in beats:
+                out['beat'][lane] = beats[lane]
+            gc = lane_memory.gc_timing(lane, now)
+            if gc and gc.get('worst_s') is not None:
+                out['gc_worst_s'][lane] = gc['worst_s']
+    except Exception:  # noqa: BLE001 - the signs are for the log; their absence changes nothing
+        logger.debug('watchdog: could not read the lane records', exc_info=True)
+    return out
+
+
+def silence_report(rule_code, chk, silent_seconds, checks=None):
+    """One plain line for every restart request: which lane was silent, for how long, what the ping returned and why the watchdog acted. Goes into the event row, the web log
+    and the notice, so the cause of a restart is read from a record and not inferred afterwards."""
+    ev = chk.evidence or {}
+    absent = ev.get('absent') or []
+    if not absent:
+        return f'{rule_code}: {chk.text}'
+    lanes = ', '.join(f'{p.removesuffix("_worker")} (queue {ev.get("waiting", {}).get(LANE_WORDS.get(p, p), "?")} waiting)' for p in absent)
+    bits = [f'silent lane: {lanes}', f'silent for {int(silent_seconds)} s' + (f' over {checks} checks in a row' if checks else '')]
+    ans = ev.get('answered') or []
+    bits.append(f'ping: no reply within {ev.get("ping_seconds", snapshot.PING_SECONDS)} s from {", ".join(a.split("@")[0] for a in absent)}; replied: {", ".join(a.split("@")[0] for a in ans) or "nobody"}')
+    for p in absent:
+        lane = p.removesuffix('_worker')
+        beat = (ev.get('beat') or {}).get(lane)
+        bits.append(f'{lane} liveness record: ' + (f'{beat["age_seconds"]} s old, {len(beat["running"])} task(s) in flight' if beat else 'none'))
+        if lane in (ev.get('gc_worst_s') or {}):
+            bits.append(f'{lane} worst collection {ev["gc_worst_s"][lane]} s')
+    if ev.get('snapshot_seconds') is not None:
+        bits.append(f'snapshot took {ev["snapshot_seconds"]} s')
+    bits.append('reason: no ping reply for the whole confirm time and no sign of work')
+    return f'{rule_code} restart-celery: ' + '; '.join(bits)
 
 
 def _work_evidence(silent, finished, running):
@@ -954,7 +1012,11 @@ def _act(rule, state, ctx, chk):
         _record_action(state, ctx)
         state.verify = {'action': rule.host_action, 'host_id': req['id'], 'requested_at': now_iso, 'symptom_at': symptom_at, 'acted_at': now_iso}
         _set(state, 'acting', f'Asked the host to {rule.host_action.replace("-", " ")}.')
-        event(rule.code, 'action', observation=chk.text, action=rule.host_action, result='Asked the host to carry it out.', request=req['id'])
+        silent_for = (ctx.now - state.fire_since).total_seconds() if state.fire_since else 0
+        report = silence_report(rule.code, chk, silent_for, (state.data or {}).get('silent_checks')) if rule.code == 'R1' else f'{rule.code} {rule.host_action}: {chk.text} (seen for {int(silent_for)} s)'
+        logger.warning('watchdog %s: %s (request %s)', rule.code, report, req['id'])
+        event(rule.code, 'action', observation=chk.text, action=rule.host_action, result=('Asked the host to carry it out. ' + report)[:500], request=req['id'],
+              silent_seconds=int(silent_for), report=report[:900], evidence={k: v for k, v in (chk.evidence or {}).items() if k in ('absent', 'waiting', 'answered', 'ping_seconds', 'snapshot_seconds', 'beat', 'gc_worst_s', 'hung')})
         notice(rule.code, 'warning', f'{rule.notice_title or rule.title}; the watchdog is {rule.doing or "acting"}', notice_detail)
         return True
     if rule.act:

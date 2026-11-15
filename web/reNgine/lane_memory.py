@@ -309,3 +309,22 @@ def in_flight(now=None, pids=None):
         if ages:
             out[lane] = min(ages)
     return out
+
+
+def beats(now=None):
+    """``{lane: {'age_seconds', 'pid', 'running': [task names]}}`` for every lane that has written a liveness record, whatever its age (``in_flight`` drops a stale
+    one; the watchdog's log wants to say how stale it was). Lanes that never wrote one are absent."""
+    from django.core.cache import cache
+    now = time.time() if now is None else now
+    out = {}
+    for lane in LANES:
+        try:
+            raw = cache.get(RUNNING_PREFIX + lane)
+            data = json.loads(raw) if raw else None
+        except Exception:  # noqa: BLE001
+            data = None
+        if not isinstance(data, dict) or not isinstance(data.get('beat'), (int, float)):
+            continue
+        out[lane] = {'age_seconds': int(max(0, now - data['beat'])), 'pid': data.get('pid'),
+                     'running': [str(t.get('name'))[:60] for t in (data.get('running') or []) if isinstance(t, dict)][:5]}
+    return out
