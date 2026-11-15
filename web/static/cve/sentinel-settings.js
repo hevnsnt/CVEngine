@@ -529,8 +529,8 @@ export function versionBlock(d, { onChange, builtin = false }) {
     "btn sm ghost",
   );
   now.title = MANUAL_NOTE;
-  now.disabled =
-    pending || ["waiting", "draining", "updating"].includes(u.status);
+  // `waiting` is what the updater reports every hour while Manual mode waits for an administrator: exactly when Update now is needed
+  now.disabled = pending || ["draining", "updating"].includes(u.status);
   if (!builtin) actions.append(now);
   if (d.settings)
     actions.append(

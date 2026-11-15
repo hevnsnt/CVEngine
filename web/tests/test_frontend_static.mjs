@@ -281,6 +281,17 @@ test('a Sentinel card has Update now, the built-in scanner does not and says why
   assert.doesNotMatch(sentinelText(external), /follows the newest published/);
 });
 
+test('Update now stays usable while a Manual updater reports waiting for an administrator, and not while it drains or updates', () => {
+  const updateNow = (status, requested_at = null) => {
+    const find = (node) => (node.tag === 'button' && node.text === 'Update now' ? node : node.children.filter((c) => typeof c !== 'string').map(find).find(Boolean));
+    return find(versionBlock({id: 7, name: 'edge-1', version: 'abc1234', update: {status, requested_at}, settings: {}}, {onChange() {}}));
+  };
+  assert.equal(updateNow('waiting').disabled, false);
+  assert.equal(updateNow('idle').disabled, false);
+  assert.equal(updateNow('draining').disabled, true);
+  assert.equal(updateNow('updating').disabled, true);
+});
+
 test('a card says whether the build is the newest the server saw, since when it runs, and the contract message', () => {
   const base = {id: 7, name: 'CVEngine Scanner', version: 'abc1234', update: {requested_at: null}, settings: {}};
   assert.match(sentinelText(newestLine({...base, version_state: {status: 'current'}, version_since: '2026-11-08T01:02:03Z'})), /The newest build the server saw, running since /);
