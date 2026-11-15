@@ -58,6 +58,8 @@ def isolate_redis(worker_id):
 # a bucket drained by one test would change the nmap and naabu command lines another test asserts. Outside tests.test_local_egress (which sets
 # what it needs) they are off, and that module's Redis keys are cleared before every test.
 EGRESS_TEST_ENV = {'CVENGINE_LOCAL_PORT_BUDGETS': ''}
+# cveFeed.tunables.VALUES_KEY, reNgine.resources.SAVED_VALUES_KEY and AUTO_VALUES_KEY (tests.test_hermetic_runner pins that they still match)
+SAVED_SETTINGS_KEYS = ('cvengine:tunables:values', 'cvengine:scanconc:values', 'cvengine:autotune:values')
 
 
 def clear_egress_state():
@@ -72,6 +74,10 @@ def clear_egress_state():
             keys = list(client.scan_iter(pattern, count=1000))
             if keys:
                 client.delete(*keys)
+        # the published copies of saved settings (cveFeed.tunables, reNgine.resources' scan concurrency and auto-tune values): a test that saves
+        # one (a triage cap of 10, say) publishes it to Redis, its database rows roll back but the copy stays, and every later test in this worker read it
+        # (tests.test_triage.CapTests ran 10 triages instead of 100). With no copy, a read falls back to the test's own database and publishes again.
+        client.delete(*SAVED_SETTINGS_KEYS)
     except Exception:  # noqa: BLE001 - a test without Redis has no egress state to clear
         pass
 
