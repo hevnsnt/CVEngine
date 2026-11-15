@@ -19,6 +19,7 @@ import json
 import logging
 import re
 from datetime import datetime
+from datetime import timezone as dt_timezone
 
 from django.utils import timezone
 
@@ -641,6 +642,24 @@ def clean_waiting(raw):
     return out
 
 
+def _failed_since(requested_at, before, update):
+    """Whether ``update`` (the updater state just reported) is a failed attempt made after the administrator's Update now at ``requested_at``. The
+    updater keeps reporting its last ``failed`` on every heartbeat until it runs again, so a failure from before the request does not answer it (it
+    used to clear the request at the next heartbeat). ``at`` is when the updater wrote the state (the Sentinel's clock); without one, only a change
+    into ``failed`` counts as a new attempt."""
+    if not requested_at or (update or {}).get('status') != 'failed':
+        return False
+    try:
+        at = datetime.fromisoformat(str(update.get('at') or '').replace('Z', '+00:00'))
+    except ValueError:
+        at = None
+    if at is not None:
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=dt_timezone.utc)
+        return at > requested_at
+    return (before or {}).get('status') != 'failed'
+
+
 def record_info(agent, raw, now=None):
     """Store what the Sentinel reports. An administrator's pending "update now" is answered, and so cleared, by a different version or a failed attempt."""
     info = clean_info(raw)
@@ -659,7 +678,7 @@ def record_info(agent, raw, now=None):
         sentinel_version.version_changed((agent.info or {}).get('version'), info['version'])  # the old verdict goes at once; the new one is made in the background
     fields = {'info': merged}
     version_changed = 'version' in info and (agent.info or {}).get('version') not in (None, info['version'])
-    failed = (info.get('update') or {}).get('status') == 'failed'
+    failed = _failed_since(agent.update_requested_at, (agent.info or {}).get('update'), info.get('update'))
     if agent.update_requested_at and (version_changed or failed):
         fields['update_requested_at'] = None
     before = (agent.info or {}).get('tool_versions')

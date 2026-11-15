@@ -43,6 +43,9 @@ stored values and API field names never change (add a `state` name next to an ol
 | --- | --- | --- | --- |
 | `scan` | `startScan.ScanHistory.scan_status`, and `ScanActivity.status` for each stage | queued -1, running 1, success 2, failed 0, **aborted 3** | A Stop is final. Failed may still become success (the reaper can close a scan that was still running; its own finish is the truth). REST and MCP scan rows carry `state` (the name) next to `status` (the code). |
 | `remediation` | `remediation_status` of `cveFeed.CVEMatch`, `startScan.Vulnerability` and `cveFeed.HygieneFinding` | open, in_progress, fixed, accepted_risk, false_positive (labels from `cveFeed.closure.LABELS`) | A person may move a finding between any statuses. An automatic actor (retest, agent report, AI reviewer, scanner engine, sweeps) writes only with `REMEDIATION.move(..., only_from=(<the status it read>,))`, so a decision a person made in between stands. An agent's "fixed" applies only from open or in progress (`AGENT_MAY_FIX`). |
+| `agent` | `agentapi.Agent.status` | pending, active, suspended, revoked | Created pending, active or suspended (`_initial_status`); after that only a person's `update_agent` moves it, in one conditional UPDATE from the status the decision was made on (409 when another decision landed first). A registration or heartbeat never writes it, and a claim re-reads it under its lock. Revoked is final for the agent, with one exception kept because the web interface offers it: a person's Reinstate (revoked -> active); a token cannot, and revoked -> suspended is refused (409). |
+| `sentinel_task` | `agentapi.SentinelTask.status` | queued, claimed, running, **done**, **failed**, expired | A report is filed only from claimed or running. Expired -> done/failed only through the late-result path (`_adopt_late`), for a task lost or timed out across an update (`LATE_SERVABLE_ERRORS`) whose Sentinel still covers the work; never one a person cancelled or one taken back from a suspended or narrowed Sentinel. |
+| `stage_run` | `agentapi.StageRun.state` | running, waiting, ready, **done**, **failed** | A pass writes (wait, close) only while the run is still in its round (`rounds`): one that outlived its lease and was taken over by another worker writes nothing. `cancelled` is listed by the model but never written, so it is not in the table. |
 | `ai_job` | `cveFeed.AIJob.status` | queued, leased, answered, applying, **applied**, **failed**, **expired** | queued to leased or expired; leased back to queued (lease ran out) or to answered; answered to applying; applying to queued (the stage's one retry), applied or failed. A continuation that ends after the housekeeping pass gave its job up as lost (`apply_lost`) changes nothing, and the lost job's stage is told through its `job_failure` hook. Leasing and taking an answer are made under a row lock that checks the state first. |
 
 ## Implicit machines, and what is wrong with them
@@ -60,21 +63,24 @@ Found by a survey of the server and the Sentinel client. Each is moved to an exp
   lease, so Sentinel task expiry no longer freezes during a memory or disk pause; each release (`release_update_pause`, `release_pressure_pause`)
   lifts only its own owner's pause; `scans_paused_by_update` and `get_system_status` (`paused_by_update`, and `paused_by`) no longer call a
   watchdog pause an update pause.
-- **Stage runs** (`agentapi.StageRun.state`): `cancelled` is listed but never written; the close is a blind write a second worker can be overwritten by.
+- **Stage runs** (`agentapi.StageRun.state`): explicit (above). Fixed while moving it: the close and the wait of a pass that outlived its lease
+  overwrote the run another worker had resumed.
 - **Host assessments** (`HostAssessment.status`), archive review runs (`queued/running/partial/completed`, where partial means two things).
 - `SubScan.status` is dead (never written).
 
 ### Sentinels and agents
 
-- **Agent status** (`Agent.status`: pending, active, suspended, revoked): registration does a full `save()`, so a revoke made while a Sentinel
-  re-registers is reverted to active; a claim checks a status read before its lock.
-- **Sentinel task** (`SentinelTask.status`: queued, claimed, running, done, failed, expired): a late result moves an expired task (cancelled by a
-  person, or its Sentinel suspended) back to done without checking why it expired; the report write is blind after its check.
+- **Agent status** (`Agent.status`): explicit (above). Fixed while moving it: registration did a full `save()`, so a suspend or revoke made while
+  a Sentinel re-registered was reverted; an administrator's change did a full `save()` over the info and Update now request a heartbeat wrote
+  meanwhile; a claim checked a status read before its lock; a token could turn a revoked agent into a suspended one.
+- **Sentinel task** (`SentinelTask.status`): explicit (above). Fixed while moving it: a late result moved an expired task (cancelled by a person,
+  or its Sentinel suspended or narrowed) back to done without checking why it expired; the report write was blind after its check; every expired
+  task was labelled "lost (the Sentinel stopped answering)", suspensions and queue-wait expiries included.
 - **Agent task** (`AgentTask.status`): consistent (conditional writes throughout).
-- **Sentinel self-update status** (`info.update.status`, `info.auto_update.status`): "Update now" is disabled exactly when Manual mode waits for
-  an admin; "updating" can stay forever; a lingering "failed" clears a fresh Update now request.
-- **Client side** (the Sentinel repository): an active Sentinel whose user or token has a problem gets a 403 the client reads as a revoked token
-  and crash-loops; the spool, task flags and enrollment are consistent.
+- **Sentinel self-update status** (`info.update.status`, `info.auto_update.status`): "updating" can stay forever. (Fixed: "Update now" was
+  disabled exactly when Manual mode waits for an admin; a lingering "failed" cleared a fresh Update now request.)
+- **Client side** (the Sentinel repository): the spool, task flags and enrollment are consistent. (Server side fixed: a 403 now carries `code`,
+  `agent_blocked` or `token_revoked`, so an active Sentinel whose user or token has a problem can be told from a revoked one; the client has to read it.)
 
 ### Findings
 
