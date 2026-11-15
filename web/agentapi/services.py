@@ -20,6 +20,7 @@ from django.utils import timezone
 from cveFeed import match_policy, result_cuts
 from cveFeed.counts import running_window
 from cveFeed.discovery import NUCLEI_SCAN_ACTIVITY_NAMES
+from reNgine.state_machines import SCAN
 from tenancy import roles
 
 logger = logging.getLogger(__name__)
@@ -259,6 +260,12 @@ def me(ctx):
 
 def list_projects(ctx, params=None):
     return {'results': _project_roles(ctx)}
+
+
+def describe_states(ctx, params=None):
+    """Every explicit lifecycle (reNgine.state_machines): states, labels, meanings and allowed moves. The same table the server enforces."""
+    from reNgine import lifecycle
+    return {'results': lifecycle.legends()}
 
 
 def list_engines(ctx, params=None):
@@ -580,7 +587,8 @@ def _scan(s, detail=False, queued=None, stalled_before=None):
     if stalled_before is None:
         stalled_before = timezone.now() - running_window()
     out = {'id': s.id, 'target': s.domain.name, 'target_id': s.domain_id, 'engine': s.scan_type.engine_name,
-           'status': s.scan_status, 'started': _iso(s.start_scan_date), 'finished': _iso(s.stop_scan_date),
+           'status': s.scan_status, 'state': SCAN.key(s.scan_status),  # status: the stored code (kept); state: its name (reNgine.state_machines.SCAN)
+           'started': _iso(s.start_scan_date), 'finished': _iso(s.stop_scan_date),
            'error': s.error_message,
            'stalled': s.scan_status == 1 and s.start_scan_date < stalled_before,  # marked running, but older than any scan can run
            'kind': 'retest' if 'retest' in (s.tasks or []) else 'hosts' if 'host_pipeline' in (s.tasks or []) else 'discovery'}
