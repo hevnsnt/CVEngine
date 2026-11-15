@@ -110,6 +110,24 @@ Off by default: a hosted server without SSO behaves exactly as before. The site 
 
 `docker-compose.hosted.yml` passes the `CVENGINE_SSO*` names to `web` only when `.env` defines them, and has no default that enables anything.
 
+### Combined behaviour (what the two halves do together)
+
+| Mode | `.env` | Browser at the scanner host | Local login |
+| --- | --- | --- | --- |
+| Off (default, and what first boot writes) | `CVENGINE_SSO=0` | the edge's own handoff, then the local login as before | works; cookies are `sessionid` and `csrftoken` |
+| Phase A (SSO, local login kept) | `CVENGINE_SSO=1` | `/_cvl/start` sets the browser nonce and sends the visitor to cvengine.live; the edge exchanges the assertion at `/sso/exchange` and relays the session cookie | works, and the login page also offers "Sign in with cvengine.live" (`/_cvl/start?next=...`) |
+| Phase B (enforced) | `CVENGINE_SSO=1`, `CVENGINE_SSO_ENFORCE=1` | the same | refused: `/login/`, `/admin/login/`, the second-step page and an invite's automatic sign-in answer 302 to `/_cvl/start?next=<validated next>`; `cvl-personalize.sh` leaves the password out of its JSON |
+
+Where the visitor goes: a normal sign-in always goes through `/_cvl/start` (the edge sets the browser nonce there). `/_cvl/sso` is only for a live scanner session: the binding flush of a page request redirects to `/_cvl/sso?next=...`, and the step-up refusal (HTTP 403, JSON `recent_auth_required`) carries `reauth_url` = `/_cvl/sso?prompt=stepup&next=<urlencoded validated path>`. `next` must match `^/(?![/\\])[^\s]{0,2047}$` and Django's own host check, else the landing page `/cve/` is used.
+
+Order of rollout: the site's MFA first; this release with `CVENGINE_SSO=0`; phase A on an internal test server (`cvl-set-sso-keys.sh`, then `cvl-sso-mode.sh --sso on`); link every owner (`cvl-personalize.sh` with `sso_subject`, or `manage.py link_sso_identity --email=E --subject=S` by hand); then phase B per server (`--enforce on`, refused with no key installed).
+
+**Rollback.** Phase B to A: `cvl-sso-mode.sh --enforce off` (the local login works again at once after the web restart). Off: `cvl-sso-mode.sh --sso off` (also clears enforcement and break-glass); or stop the site minting (`sso_enabled=0`), after which the double login resumes. Both change the cookie names, so **every existing session is dropped and everyone signs in once more** (turning SSO on does the same). Phase A keeps the local login, so nobody is locked out while testing.
+
+**Key rotation (every 90 days).** 1. Push a JWKS with the new key as `next` and the current key unchanged to every server (`sso_keys` job, or `cvl-set-sso-keys.sh`). 2. Switch the site's signing key (`current` in `SSO_SIGNING_KEYS`). 3. Push again: new key `current`, old key `retiring`. 4. After at least 24 hours (longer than any assertion or session lifetime that matters) push without the old key. The application re-reads the file when it changes, so no restart. Emergency revoke: push a JWKS without the bad kid and with a trusted key; an empty, half-written or unreadable file refuses every assertion (fail closed) and is read again on the next call, so a read that lands in the middle of the in-place rewrite costs at most that one sign-in.
+
+**Break-glass.** `cvl-sso-mode.sh --breakglass <1-60>` writes `CVENGINE_SSO_BREAKGLASS_UNTIL` = now + minutes as Unix seconds (digits only) into `.env` and recreates `web`; `--breakglass off` removes it. The settings read it as an integer; the application treats it as open only while it is in the future and at most 3600 s ahead of now. While open, under enforcement, the local login works for a request that came through the edge (nginx set `X-CVL-Edge-Verified: 1`), needs the local password and local MFA (an account without MFA is refused), and every step is audited (`sso.breakglass_*`) and logged. A change needs the web restart the script performs; setting the variable by hand has no effect until `web` is recreated.
+
 ### JWKS file `/etc/cvl/sso-keys.json`
 
 ```json
@@ -147,7 +165,7 @@ Optional input `sso_subject` (the site user id, 8 to 64 of `A-Za-z0-9_-`). When 
 
 ### Exchange and headers (nginx side)
 
-The edge calls `POST <origin>/sso/exchange` with `X-CVL-Edge-Auth`, `X-CVL-Client-IP`, `X-CVL-SSO-Exchange: 1`, `Content-Type: application/json`, body `{"assertion":"<jws>"}`; answers: 204 plus `Set-Cookie` (`__Host-cve_s`), 400, 401 `{"error":"invalid_assertion"}`, 403 `{"error":"not_linked"}`, 404 when SSO is off or the edge is not verified, 405 for a non-POST. Back-channel logout: `POST <origin>/sso/backchannel-logout`, body `{"logout_token":"<jws>"}`, 204 or 401. The proxy passes `/sso/*` like any path; it is the edge that never lets a browser reach it.
+The edge calls `POST <origin>/sso/exchange` with `X-CVL-Edge-Auth`, `X-CVL-Client-IP`, `X-CVL-SSO-Exchange: 1`, `Content-Type: application/json`, body `{"assertion":"<jws>"}`; answers: 204 plus `Set-Cookie` (`__Host-cve_s`), 400, 401 `{"error":"invalid_assertion"}`, 403 `{"error":"not_linked"}`, 404 when SSO is off or the edge is not verified, 405 for a non-POST. Back-channel logout: `POST <origin>/sso/backchannel-logout`, body `{"logout_token":"<jws>"}`, 204 or 401. The application requires `X-CVL-Edge-Verified: 1` and `X-CVL-SSO-Exchange: 1` (both exactly `1`, both set only by nginx behind a valid secret) on both endpoints and answers 404 otherwise. The session cookie is `__Host-cve_s` with `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/` and no `Domain`. The proxy passes `/sso/*` like any path; it is the edge that never lets a browser reach it.
 
 `config/nginx/rengine.conf` sets, in every proxied location, headers the application can trust only because nginx wrote them:
 
@@ -159,7 +177,7 @@ The edge calls `POST <origin>/sso/exchange` with `X-CVL-Edge-Auth`, `X-CVL-Clien
 | `X-CVL-SSO-Exchange` | `1` only when the secret matched and the edge sent exactly `1`; otherwise not sent |
 | `X-CVL-Edge-Auth`, `X-CVL-Client-IP` | never sent (for this proxy only) |
 
-A client-supplied copy of any of these is replaced or blanked, and a header with underscores (`X_CVL_...`) is dropped by nginx (`underscores_in_headers off`). nginx cannot clear a wildcard: an `X-CVL-*` name this file does not list is not touched, so every new `X-CVL-*` header the application reads needs a line here and a test in `web/tests/test_hosted_sso.py`. Django flushes an SSO-born session whose stored sub or sid differs from these headers or whose headers are missing.
+A client-supplied copy of any of these is replaced or blanked, and a header with underscores (`X_CVL_...`) is dropped by nginx (`underscores_in_headers off`). nginx cannot clear a wildcard: an `X-CVL-*` name this file does not list is not touched, so every new `X-CVL-*` header the application reads needs a line here and a test in `web/tests/test_hosted_sso_edge.py`. Django flushes an SSO-born session whose stored sub or sid differs from these headers or whose headers are missing.
 
 ## Golden image
 
@@ -178,4 +196,4 @@ Ubuntu 24.04. Build once per release, snapshot, and use the snapshot for the war
 
 ## Tests
 
-`web/tests/test_hosted_mode.py` and `web/tests/test_hosted_sso.py` (Django test runner, no network, no Docker daemon; nginx is run for real when a binary or the `nginx:alpine` image is available, and shellcheck when installed). It proves the default-off behaviour (stock file, base compose, scripts without hosted mode) and each contract above, with stubs for `docker`, `aws`, `age` and the mount tools.
+`web/tests/test_hosted_mode.py`, `web/tests/test_hosted_sso_edge.py` (nginx, compose and scripts), `web/tests/test_hosted_sso.py` (the application) and `web/tests/test_hosted_sso_integration.py` (scripts and application together; see `docs/HOSTED-SSO-REVIEW.md`) (Django test runner, no network, no Docker daemon; nginx is run for real when a binary or the `nginx:alpine` image is available, and shellcheck when installed). It proves the default-off behaviour (stock file, base compose, scripts without hosted mode) and each contract above, with stubs for `docker`, `aws`, `age` and the mount tools.
