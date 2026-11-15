@@ -10,7 +10,7 @@ import time
 from unittest import mock
 
 from django.core.cache import cache
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
 from cveFeed import watchdog as wd
 from cveFeed.models import WatchdogEvent
@@ -187,7 +187,7 @@ class IdleLaneTests(base.WatchdogCase):
         self.assertNotIn('silent lane: classic', report)
 
 
-class IdleBeatTests(SimpleTestCase):
+class IdleBeatTests(TestCase):
     def setUp(self):
         _clear_lane_records()
         self.addCleanup(_clear_lane_records)

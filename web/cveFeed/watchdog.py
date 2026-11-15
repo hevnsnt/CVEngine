@@ -37,6 +37,8 @@ TICK_SECONDS = 40            # a tick ends itself after this long (the command k
 # R1 and R2 may act 16 times a day (not 4): a worker container that crashes every quarter of an hour needs a restart each time it goes silent, and a rule that has
 # used its day leaves a hung lane hung (the owner's server, 2026-11-09: the cap of 4 was spent by 9:28 am and a lane stood silent for 50 minutes). The loop
 # protection is the flap guard (an action that did not fix it holds the rule for an hour), the 15 minute gap and the host's own limit.
+PROCESS_SECONDS = 50         # the whole command, from the moment its process started, ends within this (scripts/watchdog.sh kills it at 55). TICK_SECONDS counts from the start of the tick, not of the process: on 11/12 the web container needed 15 s or more to import Django on the loaded VPS, a full tick then ran past 55 s and was killed ("tick failed (exit 124)", 399 times by 11/15) before it could record or print anything
+MIN_TICK_SECONDS = 5         # less than this left after start-up and the tick would only be cut off: it says so and does nothing
 VERIFY_SECONDS = 120         # R10: the check that follows an action
 HOST_WAIT_SECONDS = 600      # a host request nobody carried out in this long is a watchdog that is not running on the host
 HOLD_SECONDS = 3600          # R10: after an action that did not work, nothing more for this rule for this long
@@ -1247,6 +1249,26 @@ def _expire_open_problem_notice(rule):
 
 def _alarm(signum, frame):
     raise TickTimeout()
+
+
+def process_age_seconds():
+    """Seconds since this process started (0.0 where /proc cannot say): the start-up of Django is part of the command's time."""
+    try:
+        with open('/proc/self/stat') as f:
+            started_ticks = int(f.read().rsplit(')', 1)[1].split()[19])
+        with open('/proc/uptime') as f:
+            uptime = float(f.read().split()[0])
+        return max(0.0, uptime - started_ticks / os.sysconf('SC_CLK_TCK'))
+    except (OSError, ValueError, IndexError):
+        return 0.0
+
+
+def tick_budget(age):
+    """``(tick limit, hard limit)`` in seconds from now for a process that is ``age`` seconds old, or None when too little of ``PROCESS_SECONDS`` is left to be worth a tick."""
+    left = PROCESS_SECONDS - age
+    if left < MIN_TICK_SECONDS:
+        return None
+    return min(TICK_SECONDS, left - 2), min(TICK_SECONDS + 8, left)
 
 
 def tick(now=None, probes=None, limit=TICK_SECONDS, alarm=True):
