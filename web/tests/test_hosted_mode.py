@@ -62,7 +62,7 @@ class Recorder(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self):  # noqa: N802
-        type(self).seen.append({'path': self.path, **{k.lower(): v for k, v in self.headers.items()}})
+        type(self).seen.append({'path': self.path, '_raw': [(k.lower(), v) for k, v in self.headers.items()], **{k.lower(): v for k, v in self.headers.items()}})
         self.send_response(200)
         self.send_header('Content-Length', '2')
         self.end_headers()
@@ -104,7 +104,7 @@ class ProxyBase(SimpleTestCase):
                 self.fail('CI is set but nginx cannot be run: the proxy test must run in CI, not be skipped')
             self.skipTest('needs an nginx binary or docker')
 
-    def run_proxy(self, edge_text=None, trusted_file=None):
+    def run_proxy(self, edge_text=None, trusted_file=None, locations=('    location / {',), access_log=None):
         tmp = tempfile.mkdtemp()
         os.chmod(tmp, 0o755)
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -124,14 +124,17 @@ class ProxyBase(SimpleTestCase):
         head = head.replace('"~^8443:1:.+"', f'"~^{tunnel}:1:.+"')
         refusal = '    if ($cvl_edge_deny) { return 403; }\n'
         self.assertIn(refusal, CONF[CONF.index('\nserver {', CONF.index('listen                                          443 ssl') - 200):])
-        location = CONF[CONF.index('    location / {'):]
-        location = location[:location.index('\n    }') + 6].replace('http://rengine:8000', f'http://127.0.0.1:{upstream.server_port}')
+        location = ''
+        for marker in locations:  # the location blocks to run (the default is the catch-all)
+            block = CONF[CONF.index(marker):]
+            location += block[:block.index('\n    }') + 6].replace('http://rengine:8000', f'http://127.0.0.1:{upstream.server_port}') + '\n'
         location = location.replace('/etc/nginx/state/', f'{etc}/state/')
         scratch = f'{tmp}/scratch' if self.runner == 'local' else '/tmp'
         os.makedirs(scratch, exist_ok=True)
+        self.scratch = scratch
         text = (f'daemon off; pid {scratch}/nginx.pid; error_log stderr;\nevents {{}}\nhttp {{\n'
                 f'client_body_temp_path {scratch}/b; proxy_temp_path {scratch}/p; fastcgi_temp_path {scratch}/f; uwsgi_temp_path {scratch}/u; scgi_temp_path {scratch}/s;\n'
-                f'access_log off;\n{head}\nserver {{ listen 127.0.0.1:{plain}; listen 127.0.0.1:{tunnel};\n{refusal}{location}\n}}\n}}\n')
+                f'{"access_log off;" if access_log is None else access_log.replace("@TMP@", scratch)}\n{head}\nserver {{ listen 127.0.0.1:{plain}; listen 127.0.0.1:{tunnel};\n{refusal}{location}\n}}\n}}\n')
         Path(tmp, 'nginx.conf').write_text(text)
         os.chmod(f'{tmp}/nginx.conf', 0o644)
         if self.runner == 'local':
@@ -647,6 +650,7 @@ case "$*" in
   *"exec -T proxy nginx -t"*) exit "${STUB_NGINX_T_RC:-0}" ;;
   *"exec -T proxy nginx -s reload"*) echo reload >> "$STUB_DIR/events"; exit 0 ;;
   *"exec -T web python3 -c"*) exit "${STUB_WEB_RC:-0}" ;;
+  *"manage.py link_sso_identity"*) echo "link $*" >> "$STUB_DIR/events"; exit "${STUB_LINK_RC:-0}" ;;
   *"manage.py create_admin"*)
     echo "$*" | grep -q -- "--reset" && reset=1 || reset=0
     if [ "${STUB_ADMIN_EXISTS:-0}" = 1 ] && [ "$reset" = 0 ]; then echo 'The account "admin" already exists; nothing was changed.'; exit 0; fi
@@ -676,6 +680,15 @@ case "$1 $2" in
   "s3api head-object") [ -f "$STUB_DIR/uploaded" ] && wc -c < "$STUB_DIR/uploaded" || exit 1 ;;
 esac
 '''
+STUB_TIMEDATECTL = r'''#!/usr/bin/env bash
+echo "timedatectl $*" >> "$STUB_DIR/log"
+if [ -n "${STUB_NTP_AFTER:-}" ]; then  # synchronised only after that many questions
+  n=$(cat "$STUB_DIR/ntp" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$STUB_DIR/ntp"
+  if [ "$n" -gt "$STUB_NTP_AFTER" ]; then echo yes; else echo no; fi
+  exit 0
+fi
+echo "${STUB_NTP:-yes}"
+'''
 STUB_SIMPLE = {
     'mountpoint': '#!/usr/bin/env bash\n[ "${STUB_MOUNTED:-0}" = 1 ]\n',
     'blkid': '#!/usr/bin/env bash\ncase "$*" in *"-s UUID"*) echo 1111-2222; exit 0;; esac\n[ "${STUB_HAS_FS:-0}" = 1 ]\n',
@@ -693,6 +706,7 @@ class ScriptCase(SimpleTestCase):
         self.write_stub('docker', STUB_DOCKER)
         self.write_stub('age', STUB_AGE)
         self.write_stub('aws', STUB_AWS)
+        self.write_stub('timedatectl', STUB_TIMEDATECTL)
         for name, body in STUB_SIMPLE.items():
             self.write_stub(name, body)
         self.etc, self.state, self.data = self.tmp / 'etc', self.tmp / 'state', self.tmp / 'data'

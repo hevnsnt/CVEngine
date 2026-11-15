@@ -9,12 +9,19 @@
 #      the updater, the watchdog and the certificate renewal keep it;
 #   3. the edge secret placeholder: a random value nobody knows, so the proxy refuses everything until the provisioner sets the real one
 #      (hosted/cvl-set-edge-secret.sh); /etc/cvl/edge-secret, mode 600;
+#      Single sign-on is prepared but OFF: /etc/cvl/sso-keys.json holds the empty key set {"keys":[]} (mode 600; the web container mounts it read-only,
+#      so the mount works before the first key push, and an existing file is never overwritten), and .env gets CVENGINE_SSO=0, CVENGINE_SSO_ENFORCE=0,
+#      the issuer, the audience (https://<origin host>) and the two age limits, each only when .env does not already say something (a re-run never
+#      undoes cvl-sso-mode.sh);
 #   4. the stack starts, migrations run, the CVE catalog is seeded, and /var/lib/cvl/ready is written.
 #
 # Settings (environment): CVL_ORIGIN_HOST (default: s-<random>.cvengine.live), CVL_PUBLIC_URL (default https://scanner.cvengine.live),
 # CVL_VOLUME_DEVICE (default: the first /dev/disk/by-id/scsi-0DO_Volume_*), CVL_ALLOW_NO_VOLUME=1 (development only: keep the data on the root disk),
 # CVL_SERVICES (the Compose services to start; default "db redis web celery celery-beat proxy": no built-in scanner and no AI reviewer, a hosted server
-# is scanned by the external fleet), CVL_SKIP_SEED=1 (development only). Prints progress on stderr, nothing on stdout.
+# is scanned by the external fleet), CVL_SKIP_SEED=1 (development only), CVL_NTP_WAIT_SECONDS (how long to wait for the clock to synchronise, default
+# 120), CVL_ALLOW_NO_NTP=1 (development only: skip the clock check), CVL_SSO_KEYS_FILE (default $CVL_ETC/sso-keys.json). The clock is checked first:
+# SSO assertions live 60 seconds and are rejected beyond 30 seconds of skew, so a server whose clock is not synchronised (timedatectl show -p
+# NTPSynchronized --value must say yes) refuses to finish its first boot. Prints progress on stderr, nothing on stdout.
 set -euo pipefail
 # shellcheck source=lib/common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
@@ -56,9 +63,24 @@ userland_proxy_note() {
   cvl_log "warning: Docker's userland proxy is on ($file lacks \"userland-proxy\": false): the proxy container then sees outside clients as the bridge gateway"
 }
 
+ntp_assert() {
+  local deadline=$((SECONDS + ${CVL_NTP_WAIT_SECONDS:-120})) state=''
+  if [ "${CVL_ALLOW_NO_NTP:-0}" = 1 ]; then cvl_log "warning: the clock check is skipped (CVL_ALLOW_NO_NTP=1)"; return 0; fi
+  command -v timedatectl >/dev/null 2>&1 || cvl_die "timedatectl is not installed, so the clock cannot be checked: single sign-on needs a synchronised clock"
+  while :; do
+    state=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)
+    [ "$state" = yes ] && return 0
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep "${CVL_POLL_SECONDS:-5}"
+  done
+  cvl_die "the system clock is not synchronised (timedatectl NTPSynchronized is '${state:-unknown}' after ${CVL_NTP_WAIT_SECONDS:-120} s): fix time sync (systemd-timesyncd or chrony) and run again; assertions are only valid within 30 s of the correct time"
+}
+
 cvl_private_dir "$CVL_ETC"
 cvl_private_dir "$CVL_STATE"
 cd "$CVL_REPO"
+
+ntp_assert
 
 volume_mount
 mkdir -p "$CVL_DATA/postgres" "$CVL_DATA/scan_results"
@@ -84,6 +106,24 @@ cvl_env_set CVENGINE_HOSTED 1
 cvl_env_set CVENGINE_CSRF_TRUSTED_ORIGINS "$public_url"
 cvl_env_set CVENGINE_HSTS_SECONDS 31536000
 cvl_env_set CVENGINE_COMPOSE_FILES docker-compose.yml,docker-compose.hosted.yml
+
+# SSO stays off: only defaults that do not enable anything, and never over a value that is already there
+sso_default() { [ -n "$(cvl_env_get "$1")" ] || cvl_env_set "$1" "$2"; }
+sso_default CVENGINE_SSO 0
+sso_default CVENGINE_SSO_ENFORCE 0
+sso_default CVENGINE_SSO_ISSUER "https://$CVL_PUBLIC_DOMAIN"
+sso_default CVENGINE_SSO_AUDIENCE "https://$origin"
+sso_default CVENGINE_SSO_MAX_AUTH_AGE 43200
+sso_default CVENGINE_SSO_STEPUP_AGE 900
+
+# --- the SSO key set placeholder: the compose overlay mounts this file read-only, and Docker would make a directory of a missing one
+sso_keys=${CVL_SSO_KEYS_FILE:-$CVL_ETC/sso-keys.json}
+[ ! -d "$sso_keys" ] || cvl_die "$sso_keys is a directory (a bind mount made it); remove it and run again"
+if [ ! -s "$sso_keys" ]; then
+  cvl_write_in_place "$sso_keys" '{"keys":[]}'$'\n'
+  cvl_log "wrote the empty SSO key set $sso_keys (nobody can sign in through SSO until cvl-set-sso-keys.sh installs a key)"
+fi
+chmod 600 "$sso_keys"
 
 # --- the edge secret placeholder ---------------------------------------------------------------------------------------------------------------
 if [ ! -s "$CVL_ETC/edge-secret" ]; then

@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 # Hands a booted hosted server (cvl-firstboot.sh done) to one customer. The provisioner runs it over SSH with a JSON object on stdin:
 #
-#   {"customer_slug": "acme", "email": "owner@acme.example", "username": "admin"}      (username is optional, default "admin"; other keys are ignored)
+#   {"customer_slug": "acme", "email": "owner@acme.example", "username": "admin", "sso_subject": "<site user id>"}
+#                                                       (username is optional, default "admin"; sso_subject is optional, 8 to 64 characters of
+#                                                       A-Z a-z 0-9 _ -; other keys are ignored)
 #
 # It sets CVENGINE_PUBLIC_API_URL=https://api-<slug>.cvengine.live (the address the fleet's Sentinels reach this server on; recreates the web service
 # when it changed), creates the first App Admin with a generated one-time password (manage.py create_admin; the account must change it at first sign-in)
 # and issues the scanner fleet's token (manage.py ensure_fleet_token). Stdout is exactly one JSON line and nothing else:
 #
 #   {"username": "...", "password": "...", "fleet_token": "...", "api_base": "https://api-<slug>.cvengine.live"}
+#
+# Single sign-on (off unless .env says so): with sso_subject present AND CVENGINE_SSO truthy in .env, the new admin is linked to that site user with
+# `manage.py link_sso_identity --email=<email> --subject=<sso_subject>` (a failure fails the script); with CVENGINE_SSO_ENFORCE truthy in .env the
+# password is left out of the output JSON (the account keeps the random password create_admin made, which nobody sees), every other key stays. With
+# SSO off, sso_subject is ignored and the output is what it always was.
 #
 # Errors: one line on stderr and a non-zero exit, with nothing on stdout. The password and the token are never written to a log, a file or a command
 # line: they travel in pipes and variables, and appear once, in that JSON line. Run again with the same slug (a retry) and the admin gets a NEW password
@@ -19,7 +26,7 @@ umask 077
 cvl_root_or_die
 cvl_need python3
 
-# The JSON on stdin is validated by Python (no shell parsing of it), which prints "slug<TAB>email<TAB>username" for the three checked values.
+# The JSON on stdin is validated by Python (no shell parsing of it), which prints "slug<TAB>email<TAB>username<TAB>sso_subject" for the checked values.
 input=$(cat)
 fields=$(printf '%s' "$input" | python3 -I -c '
 import json, re, sys
@@ -30,16 +37,19 @@ except ValueError:
 if not isinstance(data, dict):
     sys.exit("stdin must be a JSON object")
 slug, email, user = data.get("customer_slug"), data.get("email"), data.get("username", "admin")
+subject = data.get("sso_subject")
 if not isinstance(slug, str) or not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,56}[a-z0-9])?", slug):
     sys.exit("customer_slug must be a DNS label: lowercase letters, digits and dashes, 1 to 58 characters, starting and ending with a letter or digit")
 if not isinstance(email, str) or len(email) > 254 or not re.fullmatch(r"[^@\s,;<>\"\x00-\x1f]+@[^@\s,;<>\"\x00-\x1f]+", email):
     sys.exit("email must be one address")
 if not isinstance(user, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,149}", user):
     sys.exit("username must be letters, digits, dots, dashes and underscores")
-print("\t".join((slug, email, user)))
+if subject is not None and (not isinstance(subject, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", subject)):
+    sys.exit("sso_subject must be 8 to 64 characters of letters, digits, dashes and underscores")
+print("\t".join((slug, email, user, subject or "")))
 ') || cvl_die "the JSON on stdin was refused (the reason is above)"
 unset input
-IFS=$'\t' read -r slug email username <<<"$fields"
+IFS=$'\t' read -r slug email username sso_subject <<<"$fields"
 
 cd "$CVL_REPO"
 [ -f "$CVL_STATE/ready" ] || cvl_die "this server is not ready: $CVL_STATE/ready is missing (cvl-firstboot.sh has not finished)"
@@ -68,15 +78,26 @@ password=$(printf '%s\n' "$created" | sed -n 's/^ *Password *: //p' | head -n 1)
 unset created
 [ -n "$password" ] || cvl_die "create_admin did not produce a password"
 
+if [ -n "$sso_subject" ] && cvl_env_truthy CVENGINE_SSO; then
+  # --opt=value: a value (a subject may start with a dash) can never be read as another option
+  manage link_sso_identity "--email=$email" "--subject=$sso_subject" >&2 || cvl_die "link_sso_identity failed"
+fi
+
 fleet=$(manage ensure_fleet_token --user "$username" | grep -E '^\{' | tail -n 1) || cvl_die "ensure_fleet_token failed"
 [ -n "$fleet" ] || cvl_die "ensure_fleet_token printed nothing"
 
 printf '%s\n' "$slug" >"$CVL_STATE/personalized"
 
 # The JSON is made by Python from values handed over in the environment (so quoting is never ours to get wrong, and nothing is on a command line).
-CVL_OUT_USERNAME=$username CVL_OUT_PASSWORD=$password CVL_OUT_FLEET=$fleet CVL_OUT_API=$api_base python3 -I -c '
+# With enforcement on the password is left out (SSO is the only way in; the local account keeps the random password nobody was shown).
+omit_password=0
+if cvl_env_truthy CVENGINE_SSO_ENFORCE; then omit_password=1; fi
+CVL_OUT_USERNAME=$username CVL_OUT_PASSWORD=$password CVL_OUT_FLEET=$fleet CVL_OUT_API=$api_base CVL_OUT_OMIT_PASSWORD=$omit_password python3 -I -c '
 import json, os
 fleet = json.loads(os.environ["CVL_OUT_FLEET"])
-print(json.dumps({"username": os.environ["CVL_OUT_USERNAME"], "password": os.environ["CVL_OUT_PASSWORD"],
-                  "fleet_token": fleet["token"], "api_base": os.environ["CVL_OUT_API"]}, separators=(",", ":")))
+out = {"username": os.environ["CVL_OUT_USERNAME"], "password": os.environ["CVL_OUT_PASSWORD"],
+       "fleet_token": fleet["token"], "api_base": os.environ["CVL_OUT_API"]}
+if os.environ["CVL_OUT_OMIT_PASSWORD"] == "1":
+    del out["password"]
+print(json.dumps(out, separators=(",", ":")))
 ' || cvl_die "could not build the result"

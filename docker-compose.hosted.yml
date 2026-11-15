@@ -11,7 +11,11 @@
 #    403 to every request that lacks the Cloudflare Worker's secret and believes the client address the Worker sends (config/nginx/rengine.conf);
 #  * the only published port is 443, on every address (the Worker connects to it from the Internet; the cloud firewall limits who may): the
 #    database's and the web service's loopback ports, and the redirect listener on 8082, are not published at all;
-#  * every long-running service restarts after a crash or a reboot.
+#  * every long-running service restarts after a crash or a reboot;
+#  * single sign-on (hosted/README.md, "Single sign-on"; OFF unless .env turns it on): the web service gets the public keys the site signs assertions
+#    with, read-only at /etc/cvl/sso-keys.json (hosted/cvl-set-sso-keys.sh writes the host file; hosted/cvl-firstboot.sh makes a stock empty one so the
+#    mount works before the first key push), and the CVENGINE_SSO* settings listed below. The settings are passed through only when .env defines
+#    them: there is no default here, so nothing is enabled and nothing is set to an empty string by this file.
 #
 # docker-compose.yml's other services are untouched. Needs Compose 2.24 or newer (the !override and !reset tags), as install.sh already requires.
 #
@@ -32,6 +36,16 @@ services:
   web:
     restart: always
     ports: !reset []
+    environment:  # a bare name is passed from .env when it is set there, and not passed at all otherwise
+      - CVENGINE_SSO
+      - CVENGINE_SSO_ENFORCE
+      - CVENGINE_SSO_ISSUER
+      - CVENGINE_SSO_AUDIENCE
+      - CVENGINE_SSO_MAX_AUTH_AGE
+      - CVENGINE_SSO_STEPUP_AGE
+      - CVENGINE_SSO_BREAKGLASS_UNTIL
+    volumes:
+      - ${CVL_SSO_KEYS_FILE:-/etc/cvl/sso-keys.json}:/etc/cvl/sso-keys.json:ro  # a single file, written in place by hosted/cvl-set-sso-keys.sh so the mount follows
   proxy:
     restart: always
     ports: !override
