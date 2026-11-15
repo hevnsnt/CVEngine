@@ -72,6 +72,26 @@ CSRF_TRUSTED_ORIGINS = [o.strip() for o in env('CVENGINE_CSRF_TRUSTED_ORIGINS', 
 CSRF_FAILURE_VIEW = 'reNgine.csrf.csrf_failure'
 SECRET_KEY = first_run(SECRET_FILE, BASE_DIR)
 
+# Hosted single sign-on (hostedsso/README.md; docs/CONFIGURATION.md). Everything below is inert unless CVENGINE_HOSTED is on as well, and a plain
+# hosted server without CVENGINE_SSO behaves exactly like a normal install: the checks in the app read these effective values.
+_OFF = ('', '0', 'false', 'no', 'off')
+CVENGINE_HOSTED = os.environ.get('CVENGINE_HOSTED', '').strip().lower() not in _OFF  # the same reading as agentapi.fleet_token.hosted_mode_on
+CVENGINE_SSO = CVENGINE_HOSTED and env.bool('CVENGINE_SSO', default=False)
+CVENGINE_SSO_ENFORCE = CVENGINE_SSO and env.bool('CVENGINE_SSO_ENFORCE', default=False)  # refusing local sign-in only makes sense once SSO itself is on
+CVENGINE_SSO_KEYS_FILE = env('CVENGINE_SSO_KEYS_FILE', default='/etc/cvl/sso-keys.json')
+CVENGINE_SSO_ISSUER = env('CVENGINE_SSO_ISSUER', default='https://cvengine.live')
+CVENGINE_SSO_AUDIENCE = env('CVENGINE_SSO_AUDIENCE', default='')  # this server's origin URL; empty: derived from DOMAIN_NAME (https://<DOMAIN_NAME>)
+CVENGINE_SSO_MAX_AUTH_AGE = env.int('CVENGINE_SSO_MAX_AUTH_AGE', default=43200)
+CVENGINE_SSO_STEPUP_AGE = env.int('CVENGINE_SSO_STEPUP_AGE', default=900)
+CVENGINE_SSO_BREAKGLASS_UNTIL = env.int('CVENGINE_SSO_BREAKGLASS_UNTIL', default=0)  # unix seconds, at most one hour ahead of now (hostedsso.gating)
+if CVENGINE_SSO:
+    # __Host- cookies cannot be set by a sibling subdomain or over plain HTTP. Switching this on changes the cookie names, so sessions that exist
+    # at that moment are no longer found and everyone signs in once more.
+    SESSION_COOKIE_NAME = '__Host-cve_s'
+    CSRF_COOKIE_NAME = '__Host-cve_csrf'
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+
 # Rengine version
 # reads current version from a file called .version
 VERSION_FILE = os.path.join(BASE_DIR, '.version')
@@ -144,6 +164,7 @@ INSTALLED_APPS = [
     'recon_note.apps.ReconNoteConfig',
     'cveFeed.apps.CveFeedConfig',
     'agentapi.apps.AgentapiConfig',
+    'hostedsso.apps.HostedssoConfig',
     'django_ace',
     'django_celery_beat',
     'mathfilters',
@@ -156,6 +177,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'hostedsso.middleware.SsoBindingMiddleware',
     'agentapi.auth.AgentTokenMiddleware',
     'reNgine.input_guard.InputGuardMiddleware',
     'login_required.middleware.LoginRequiredMiddleware',
