@@ -35,6 +35,7 @@ Docker's userland proxy should be off (`/etc/docker/daemon.json`: `{"userland-pr
 | `config/nginx/rengine.conf` | `include /etc/nginx/edge-auth.conf;` inside `map $http_x_cvl_edge_auth $cvl_edge_ok` (a `map` is only allowed at the top level, so the hook sits there and the server block reads the result with `if ($cvl_edge_deny) { return 403; }`). |
 | `docker-compose.hosted.yml` | The overlay: bind volumes on `/mnt/cvl-data`, restart policies, only 443 published, the generated edge file mounted over the stock one. |
 | `hosted/gen-edge-auth.sh` | Writes `/etc/cvl/edge-auth.conf` and `/etc/cvl/edge-header` from `/etc/cvl/edge-secret` (and `edge-secret.previous`), in place so the single-file bind mount follows. |
+| `hosted/cvl-set-sso-keys.sh`, `hosted/cvl-sso-mode.sh` | Single sign-on: install the public key set, flip the mode (see "Single sign-on"). |
 | `scripts/hosted-edge.sh` | Sourced by `install.sh` and `scripts/update.sh`: on a hosted server their local readiness checks send `-H @/etc/cvl/edge-header`, so they are not refused. Nothing is added when hosted mode is off. The watchdog and the other updaters work through `docker compose exec` and need nothing. |
 | `web/agentapi/fleet_token.py`, `manage.py ensure_fleet_token` | The scanner fleet's Sentinel identity (below). |
 | `/etc/cvl/` (700) | `edge-secret`, `edge-secret.previous`, `edge-auth.conf`, `edge-header`: all 600. |
@@ -92,6 +93,74 @@ ensure_fleet_token --disable | --enable                 suspend / resume (the pr
 
 stdout: one JSON line `{"state":"created|rotated|disabled|enabled|revoked|absent","agent_id":..,"token":"cve_..." (create and rotate only, shown once),...}`. The identity is an `Agent` (`kind='scanner'`, `network='external'`) with an `ApiToken` of the `sentinel` scope, which can call the Sentinel endpoints and nothing else. Its capabilities are every task kind except the built-in scanner's own (`path_probe`, `nuclei_validate`, `route_probe_signed`), never `network:internal`, and the same list is the administrator's limit on it, so it cannot widen itself by registering. It is found by its token name `fleet:cvl`, so a Sentinel that enrolled itself under the same display name is never adopted. `--disable` revokes the token and suspends the Agent (its tasks go back to the queue); `--enable` undoes exactly that, and refuses when an administrator suspended it or it was revoked.
 
+## Single sign-on
+
+Off by default: a hosted server without SSO behaves exactly as before. The site (cvengine.live) is the one gate in front of every server, so it requires MFA before it will mint an assertion; cvENGINE trusts an assertion only for a site user that was linked to a local account at personalise time. The contracts below are frozen (`docs/SSO-PLAN.md` in cvengine-live, "Interface contract"); change them on both sides together.
+
+### Switches
+
+| Where | Name | Meaning |
+| --- | --- | --- |
+| `.env` (first boot writes the defaults) | `CVENGINE_SSO=0` | accept assertions at `/sso/exchange` (inert unless `CVENGINE_HOSTED` is also on) |
+| | `CVENGINE_SSO_ENFORCE=0` | refuse the local password login (`/login/` POST, `/admin/login/`) |
+| | `CVENGINE_SSO_ISSUER`, `CVENGINE_SSO_AUDIENCE` | `https://cvengine.live`, and this server's origin URL (`https://s-<rand8>.cvengine.live`, exactly the site's `servers.origin_url`) |
+| | `CVENGINE_SSO_MAX_AUTH_AGE`, `CVENGINE_SSO_STEPUP_AGE` | 43200 and 900 seconds |
+| | `CVENGINE_SSO_BREAKGLASS_UNTIL` | Unix seconds; absent normally. Set only by `cvl-sso-mode.sh --breakglass` |
+| host | `/etc/cvl/sso-keys.json` (mode 600) | the key set; mounted read-only at the same path in `web` (`CVL_SSO_KEYS_FILE` moves the host side) |
+
+`docker-compose.hosted.yml` passes the `CVENGINE_SSO*` names to `web` only when `.env` defines them, and has no default that enables anything.
+
+### JWKS file `/etc/cvl/sso-keys.json`
+
+```json
+{"keys":[{"kid":"k-2026-01","kty":"OKP","crv":"Ed25519","x":"<base64url of the 32-byte public key, no padding>","status":"current"}]}
+```
+
+`status` is `current`, `next` or `retiring`; the verifier accepts all three. A revoked key is not listed: it is removed. Only PUBLIC keys ever reach a server. First boot writes `{"keys":[]}` (every assertion then fails closed).
+
+### `hosted/cvl-set-sso-keys.sh`  (JWKS on stdin)
+
+```
+cvl-set-sso-keys.sh           the JWKS on stdin replaces the installed set
+cvl-set-sso-keys.sh --check   nothing on stdin: validate and list what is installed
+```
+
+stdout: `{"ok":true,"kids":["k-2026-01"]}`. Validation is strict and all-or-nothing: `keys` is an array of at most 8 (zero is allowed); each has a `kid` (1 to 128 of `A-Za-z0-9._:-`, unique), `kty` `OKP`, `crv` `Ed25519`, `x` the unpadded canonical base64url of exactly 32 bytes, and `status` current, next or retiring (`revoked`, or anything else, is refused). Other members are dropped. The file is rewritten in place (same inode, so the single-file bind mount follows; an identical set is not touched) and the application re-reads it, so no restart. Only kids are printed or logged. The provisioner runs it at personalise time and for each `sso_keys` job.
+
+**Rotation:** push a JWKS with the new key as `next` to every server; switch the site's signing to it and push again with the new key `current` and the old `retiring`; after 24 hours push without the old key. **Emergency revoke:** push a JWKS without the compromised kid (and with at least one trusted key, or SSO is closed for everyone); assertions signed by it then fail at once.
+
+### `hosted/cvl-sso-mode.sh`  (arguments)
+
+```
+cvl-sso-mode.sh --sso on|off  --enforce on|off  --breakglass <minutes 1-60>|off   (any combination, at least one)
+```
+
+stdout: `{"ok":true,"sso":true,"enforce":false,"breakglass_until":null}` (`breakglass_until` is Unix seconds while the window is open). Edits `.env` in place and recreates only `web`, and only when a value changed. `--enforce on` is refused unless SSO is on (after this command's own `--sso`) and the installed key set has at least one key; `--sso off` also turns enforcement and break-glass off; break-glass needs SSO on. Break-glass lets the local login work again for at most an hour and still needs the edge secret, the local password and the local TOTP.
+
+### `hosted/cvl-personalize.sh` additions
+
+Optional input `sso_subject` (the site user id, 8 to 64 of `A-Za-z0-9_-`). When present and `CVENGINE_SSO` is on, after `create_admin` it runs `manage.py link_sso_identity --email=<email> --subject=<sso_subject>` (a failure fails the script). With `CVENGINE_SSO_ENFORCE` on the `password` key is left out of the JSON; the other keys are unchanged. Retries stay idempotent.
+
+### First boot
+
+`cvl-firstboot.sh` now checks the clock first (`timedatectl show -p NTPSynchronized --value` must say `yes`; it waits up to 120 s, then fails with a message): assertions live 60 seconds and are rejected beyond 30 seconds of skew. It also creates the empty key set and the SSO-off `.env` defaults, never over a value already there.
+
+### Exchange and headers (nginx side)
+
+The edge calls `POST <origin>/sso/exchange` with `X-CVL-Edge-Auth`, `X-CVL-Client-IP`, `X-CVL-SSO-Exchange: 1`, `Content-Type: application/json`, body `{"assertion":"<jws>"}`; answers: 204 plus `Set-Cookie` (`__Host-cve_s`), 400, 401 `{"error":"invalid_assertion"}`, 403 `{"error":"not_linked"}`, 404 when SSO is off or the edge is not verified, 405 for a non-POST. Back-channel logout: `POST <origin>/sso/backchannel-logout`, body `{"logout_token":"<jws>"}`, 204 or 401. The proxy passes `/sso/*` like any path; it is the edge that never lets a browser reach it.
+
+`config/nginx/rengine.conf` sets, in every proxied location, headers the application can trust only because nginx wrote them:
+
+| Header to the application | Value |
+| --- | --- |
+| `X-CVL-Edge-Verified` | `1` when the edge secret matched, else `0` (also `0` on a stock install). Always overwrites a client copy |
+| `X-CVL-SSO-Sub` | the edge's site user id, only when the secret matched and it is 1 to 64 of `A-Za-z0-9_-`; otherwise the header is not sent |
+| `X-CVL-SSO-Sid` | the edge's 32-hex family hash, only when the secret matched and it has that shape; otherwise not sent |
+| `X-CVL-SSO-Exchange` | `1` only when the secret matched and the edge sent exactly `1`; otherwise not sent |
+| `X-CVL-Edge-Auth`, `X-CVL-Client-IP` | never sent (for this proxy only) |
+
+A client-supplied copy of any of these is replaced or blanked, and a header with underscores (`X_CVL_...`) is dropped by nginx (`underscores_in_headers off`). nginx cannot clear a wildcard: an `X-CVL-*` name this file does not list is not touched, so every new `X-CVL-*` header the application reads needs a line here and a test in `web/tests/test_hosted_sso.py`. Django flushes an SSO-born session whose stored sub or sid differs from these headers or whose headers are missing.
+
 ## Golden image
 
 Ubuntu 24.04. Build once per release, snapshot, and use the snapshot for the warm pool and for on-demand builds.
@@ -109,4 +178,4 @@ Ubuntu 24.04. Build once per release, snapshot, and use the snapshot for the war
 
 ## Tests
 
-`web/tests/test_hosted_mode.py` (Django test runner, no network, no Docker daemon; nginx is run for real when a binary or the `nginx:alpine` image is available, and shellcheck when installed). It proves the default-off behaviour (stock file, base compose, scripts without hosted mode) and each contract above, with stubs for `docker`, `aws`, `age` and the mount tools.
+`web/tests/test_hosted_mode.py` and `web/tests/test_hosted_sso.py` (Django test runner, no network, no Docker daemon; nginx is run for real when a binary or the `nginx:alpine` image is available, and shellcheck when installed). It proves the default-off behaviour (stock file, base compose, scripts without hosted mode) and each contract above, with stubs for `docker`, `aws`, `age` and the mount tools.
