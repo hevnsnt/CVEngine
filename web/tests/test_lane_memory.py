@@ -133,13 +133,15 @@ class LivenessTests(SimpleTestCase):
         cache.set(lm.RUNNING_PREFIX + 'classic', lm.json.dumps({'pid': 1, 'running': [{'name': 't', 'since': 990.0}]}), 600)  # the format before the heartbeat
         self.assertEqual(lm.in_flight(now=1000.0), {})
 
-    def test_the_heartbeat_keeps_writing_while_a_task_runs_and_stops_when_none_does(self):
+    def test_the_heartbeat_keeps_writing_while_a_task_runs_and_goes_on_when_none_does(self):
         self._start(1000.0)
         with mock.patch.object(lm, 'lane_name', return_value='cve_feed'):
             self.assertTrue(lm.heartbeat_once(now=1030.0))
             self.assertEqual(lm.in_flight(now=1100.0), {'cve_feed': 100})  # beat at 1030: fresh at 1100
             lm._state['running'].clear()
-            self.assertFalse(lm.heartbeat_once(now=1060.0))
+            self.assertTrue(lm.heartbeat_once(now=1060.0))  # an idle lane beats too (alive), but it is no longer in flight
+            self.assertEqual(lm.in_flight(now=1070.0), {})
+            self.assertEqual(lm.alive(now=1070.0), {'cve_feed': 10})
 
     def test_a_task_that_blocks_the_worker_without_yielding_loses_its_protection(self):
         # the hub is stalled, so the heartbeat greenlet never runs: the last beat is the one written at the start

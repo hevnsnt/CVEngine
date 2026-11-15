@@ -49,7 +49,7 @@ class NamingTests(base.WatchdogCase):
         self.assertIn('silent for 183 s over 4 checks in a row', report)
         self.assertIn('ping: no reply within 3 s from classic_worker', report)
         self.assertIn('replied: cve_feed_worker, discovery_worker, validation_priority_worker', report)
-        self.assertIn('reason: no ping reply for the whole confirm time and no sign of work', report)
+        self.assertIn('reason: no ping reply for the whole confirm time and no sign of life or work', report)
         self.assertEqual(event.detail['silent_seconds'], 183)
         self.assertEqual(event.detail['evidence']['absent'], ['classic_worker'])
         self.assertEqual(event.detail['evidence']['ping_seconds'], 3)
@@ -112,3 +112,112 @@ class BeatsTests(SimpleTestCase):
         cache.set(lm.RUNNING_PREFIX + 'classic', 'not json', 600)
         cache.set(lm.RUNNING_PREFIX + 'discovery', json.dumps({'pid': 1}), 600)
         self.assertEqual(lm.beats(now=5.0), {})
+
+
+class IdleLaneTests(base.WatchdogCase):
+    """R1 must not take a lane that is only slow to answer for a lane that is gone, and must still catch one that is gone."""
+
+    def setUp(self):
+        super().setUp()
+        _clear_lane_records()
+        self.addCleanup(_clear_lane_records)
+        self.break_lanes('classic')
+        self.probes.data['lanes'] = {n: q for n, q in base.LANES.items() if not n.startswith('classic')}
+
+    def beat(self, age=5, lane='classic', running=()):
+        cache.set(lm.RUNNING_PREFIX + lane, json.dumps({'pid': 780, 'beat': time.time() - age, 'running': list(running)}), 600)
+
+    def test_an_idle_lane_that_misses_every_ping_but_beats_is_not_restarted(self):
+        """11/14: the classic lane, queue empty, missed the 3 s ping through a long collection and was recreated 13 times in two days. The longest collection measured stopped a lane 24.6 s."""
+        self.beat(age=25)
+        self.tick()
+        self.tick(400)
+        self.tick(400)
+        self.assertIsNone(self.request())
+        self.assertIn('alive', self.state('R1').status_text)
+        self.assertIn('its own heartbeat is 25 seconds old', self.state('R1').status_text)
+
+    def test_a_lane_that_is_dead_is_still_restarted_on_the_old_schedule(self):
+        """No record at all: a worker that never wrote one, or whose container is gone."""
+        self.tick()
+        self.tick(179)
+        self.assertIsNone(self.request())
+        self.tick(2)
+        self.assertEqual(self.request()['action'], 'restart-celery')
+
+    def test_a_lane_whose_beat_stopped_is_restarted(self):
+        """A worker that stalled or died: its beat is older than ALIVE_SECONDS, so the ping miss stands."""
+        self.beat(age=lm.ALIVE_SECONDS + 30)
+        self.tick()
+        self.tick(181)
+        self.assertEqual(self.request()['action'], 'restart-celery')
+        self.assertIn('classic liveness record: 120 s old', WatchdogEvent.objects.get(rule='R1', level='action').detail['report'])
+
+    def test_a_beat_alone_does_not_excuse_a_lane_that_answers_no_ping_for_fifteen_minutes(self):
+        """Remote control down (a worker that consumes but never replies): the beat is fresh, the restart is what repairs it."""
+        self.beat(age=5)
+        self.tick()
+        self.tick(wd.ALIVE_EXCUSE_SECONDS - 60)
+        self.assertIsNone(self.request())
+        self.tick(61)  # the excuse has run out: the usual three minutes of confirmation start now
+        self.assertIsNone(self.request())
+        self.tick(181)
+        self.assertEqual(self.request()['action'], 'restart-celery')
+        self.assertIn('remote control down', WatchdogEvent.objects.get(rule='R1', level='action').detail['report'])
+
+    def test_the_fifteen_minutes_count_from_the_first_silent_check_of_this_run(self):
+        self.beat(age=5)
+        self.tick()
+        self.tick(600)
+        self.probes.data['lanes'] = dict(base.LANES)  # it answered once
+        self.tick(30)
+        self.assertNotIn('classic_worker', self.state('R1').data['silent_since'])
+        self.probes.data['lanes'] = {n: q for n, q in base.LANES.items() if not n.startswith('classic')}
+        self.tick(30)
+        self.tick(600)  # 600 s into the new run, not 1260 s
+        self.assertIsNone(self.request())
+
+    def test_other_lanes_silent_are_judged_on_their_own_beat(self):
+        self.beat(age=5)  # classic beats
+        self.probes.data['lanes'] = {n: q for n, q in base.LANES.items() if n.startswith('discovery')}  # cve_feed, validation and classic silent
+        self.tick()
+        self.tick(181)
+        report = WatchdogEvent.objects.get(rule='R1', level='action').detail['report']
+        self.assertIn('cve_feed (queue', report)
+        self.assertNotIn('silent lane: classic', report)
+
+
+class IdleBeatTests(SimpleTestCase):
+    def setUp(self):
+        _clear_lane_records()
+        self.addCleanup(_clear_lane_records)
+        lm._state.update(lane=None, running={})
+
+    def test_an_idle_worker_writes_a_record_that_lists_no_task(self):
+        with mock.patch.object(lm, 'lane_name', return_value='classic'):
+            self.assertTrue(lm.heartbeat_once(now=1000.0))
+        self.assertEqual(lm.alive(now=1030.0), {'classic': 30})
+        self.assertEqual(lm.in_flight(now=1030.0), {})
+
+    def test_a_process_that_is_not_a_worker_writes_nothing(self):
+        with mock.patch.object(lm, 'lane_name', return_value=''):
+            self.assertFalse(lm.heartbeat_once(now=1000.0))
+        self.assertEqual(lm.alive(now=1000.0), {})
+
+    def test_alive_stops_at_the_limit_and_covers_the_longest_measured_collection(self):
+        self.assertGreater(lm.ALIVE_SECONDS, lm.HEARTBEAT_SECONDS + 24.6)  # a beat missed during the worst collection seen is still inside the limit
+        cache.set(lm.RUNNING_PREFIX + 'classic', json.dumps({'pid': 1, 'beat': 1000.0, 'running': []}), 600)
+        self.assertEqual(lm.alive(now=1000.0 + lm.ALIVE_SECONDS), {'classic': lm.ALIVE_SECONDS})
+        self.assertEqual(lm.alive(now=1000.0 + lm.ALIVE_SECONDS + 1), {})
+
+    def test_alive_ignores_a_record_of_another_process(self):
+        cache.set(lm.RUNNING_PREFIX + 'classic', json.dumps({'pid': 1, 'beat': 1000.0, 'running': []}), 600)
+        self.assertEqual(lm.alive(now=1010.0, pids={'classic': {2}}), {})
+        self.assertEqual(lm.alive(now=1010.0, pids={'classic': {1}}), {'classic': 10})
+
+    def test_the_beat_starts_when_the_worker_is_ready_not_at_its_first_task(self):
+        from celery.signals import worker_ready
+        lm.install()
+        with mock.patch.object(lm, 'record_start'), mock.patch.object(lm, 'reset'), mock.patch.object(lm, '_ensure_heartbeat') as started:
+            worker_ready.send(sender=None)
+        started.assert_called()

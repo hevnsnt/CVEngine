@@ -132,6 +132,9 @@ def _lanes_text(names):
 
 # R1 ----------------------------------------------------------------------------------------------------------------------------
 
+ALIVE_EXCUSE_SECONDS = 900  # a lane that answers no ping but keeps beating is excused this long; after that its remote control is down and the restart is justified
+
+
 def check_lanes(ctx):
     snap = ctx.snap
     if not snap.get('redis_ok') or snap.get('lanes') is None:
@@ -142,15 +145,24 @@ def check_lanes(ctx):
         from reNgine import lane_memory
         finished = lane_memory.recent_progress()
         running = lane_memory.in_flight()
+        beating = lane_memory.alive()
     except Exception:  # noqa: BLE001 - no evidence of work means the old rule: a silent lane is absent
-        finished, running = {}, {}
-    working = set(finished) | set(running)
+        finished, running, beating = {}, {}, {}
+    since = _silent_since(ctx, silent)
+    # A lane that finished a task lately or has one in flight is working. A lane that is idle is alive while its own beat is fresh: the beat is the worker's own
+    # greenlet, so it answers "is this lane there" through a 25 s collection that a 3 s ping cannot wait for. It stops when the process is dead or stalled for good.
+    # A lane silent to ping for ALIVE_EXCUSE_SECONDS is not excused by its beat alone: its remote control is down, which a restart repairs.
+    beat_ok = {lane: age for lane, age in beating.items() if ctx.epoch - since.get(lane + '_worker', ctx.epoch) <= ALIVE_EXCUSE_SECONDS}
+    working = set(finished) | set(running) | set(beat_ok)
     absent = [p for p in silent if p.removesuffix('_worker') not in working]  # the lane table says cve_feed_worker, the memory report cve_feed
     queues = snap.get('queues') or {}
     if not absent:
         _count_checks(ctx, False)
         if silent:
-            return Check(False, f'All four worker lanes answer, except {_lanes_text(silent)}, which missed a ping but is at work ({_work_evidence(silent, finished, running)}): busy, not gone.')
+            doing = _work_evidence(silent, finished, running)
+            if doing:
+                return Check(False, f'All four worker lanes answer, except {_lanes_text(silent)}, which missed a ping but is at work ({doing}): busy, not gone.')
+            return Check(False, f'All four worker lanes answer, except {_lanes_text(silent)}, which missed a ping but is alive ({_beat_evidence(silent, beat_ok)}): not gone.')
         return Check(False, 'All four worker lanes answer.')
     waiting = {LANE_WORDS.get(p, p): queues.get(status[p]['queue'], 0) for p in absent}
     _count_checks(ctx, True)
@@ -158,7 +170,24 @@ def check_lanes(ctx):
     evidence = {'absent': absent, 'waiting': waiting, 'answered': sorted(n for p, lane in status.items() if lane['present'] for n in lane['workers']),
                 'ping_seconds': snapshot.PING_SECONDS, 'snapshot_seconds': snap.get('seconds')}
     evidence.update(_lane_signs(absent))
+    excused_out = [p for p in absent if p.removesuffix('_worker') in beating]
+    if excused_out:
+        evidence['remote_control_down'] = excused_out
     return Check(True, f'No answer from the {_lanes_text(absent)} lane{"s" if len(absent) != 1 else ""} ({parts}).', evidence)
+
+
+def _silent_since(ctx, silent):
+    """{lane prefix: epoch of the first check of the current run in which it did not answer}, kept in R1's state; a lane that answers is dropped."""
+    state = ctx.states.get('R1')
+    held = dict(((state.data or {}) if state else {}).get('silent_since') or {})
+    since = {p: held.get(p, ctx.epoch) for p in silent}
+    if state is not None:
+        state.data = {**(state.data or {}), 'silent_since': since}
+    return since
+
+
+def _beat_evidence(silent, beat_ok):
+    return '; '.join(dict.fromkeys(f'its own heartbeat is {beat_ok[p.removesuffix("_worker")]} seconds old' for p in silent if p.removesuffix('_worker') in beat_ok))
 
 
 def _count_checks(ctx, missed):
@@ -210,7 +239,7 @@ def silence_report(rule_code, chk, silent_seconds, checks=None):
             bits.append(f'{lane} worst collection {ev["gc_worst_s"][lane]} s')
     if ev.get('snapshot_seconds') is not None:
         bits.append(f'snapshot took {ev["snapshot_seconds"]} s')
-    bits.append('reason: no ping reply for the whole confirm time and no sign of work')
+    bits.append('reason: ' + ('no ping reply for the whole confirm time, and its heartbeat is fresh but the lane has answered no ping for over ' + str(ALIVE_EXCUSE_SECONDS // 60) + ' minutes (remote control down)' if ev.get('remote_control_down') else 'no ping reply for the whole confirm time and no sign of life or work'))
     return f'{rule_code} restart-celery: ' + '; '.join(bits)
 
 
