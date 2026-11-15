@@ -129,13 +129,15 @@ class UpstreamPathTests(NeedsNginx):
         with open(f'{tmp}/trusted-upstreams.conf', 'w') as f:
             f.write(stock)
         os.chmod(f'{tmp}/trusted-upstreams.conf', 0o644)
+        shutil.copy(os.path.join(REPO, 'config', 'nginx', 'edge-auth.conf.example'), f'{tmp}/edge-auth.conf')  # the stock file: hosted mode off
+        os.chmod(f'{tmp}/edge-auth.conf', 0o644)
         upstream = HTTPServer(('127.0.0.1', 0), RawUpstream)
         threading.Thread(target=upstream.serve_forever, daemon=True).start()
         self.addCleanup(upstream.shutdown)
         etc = tmp if self.runner == 'local' else '/t'
         scratch = f'{tmp}/scratch' if self.runner == 'local' else '/tmp'
         os.makedirs(scratch, exist_ok=True)
-        head = conf_text[:conf_text.index('\nserver {')].replace('/etc/nginx/trusted-upstreams.conf', f'{etc}/trusted-upstreams.conf')
+        head = conf_text[:conf_text.index('\nserver {')].replace('/etc/nginx/trusted-upstreams.conf', f'{etc}/trusted-upstreams.conf').replace('/etc/nginx/edge-auth.conf', f'{etc}/edge-auth.conf')
         server = conf_text[conf_text.index('    location / {'):conf_text.index('    location /staticfiles/')]
         server = server.replace('http://rengine:8000', f'http://127.0.0.1:{upstream.server_port}').replace('/etc/nginx/state/', f'{etc}/state/')
         port = free_port()
@@ -241,9 +243,12 @@ class WholeConfTests(NeedsNginx):
         trusted = f'{self.tmp}/trusted-upstreams.conf'
         shutil.copy(os.path.join(REPO, 'config', 'nginx', 'trusted-upstreams.conf'), trusted)
         os.chmod(trusted, 0o644)
+        edge = f'{self.tmp}/edge-auth.conf'
+        shutil.copy(os.path.join(REPO, 'config', 'nginx', 'edge-auth.conf.example'), edge)
+        os.chmod(edge, 0o644)
         certs = self.certs()
         return ['-v', f'{conf}:/etc/nginx/conf.d/rengine.conf:ro', '-v', f'{certs}:/etc/nginx/certs:ro', '-v', f'{state}:/etc/nginx/state:ro',
-                '-v', f'{trusted}:/etc/nginx/trusted-upstreams.conf:ro',
+                '-v', f'{trusted}:/etc/nginx/trusted-upstreams.conf:ro', '-v', f'{edge}:/etc/nginx/edge-auth.conf:ro',
                 '-v', f'{os.path.join(REPO, "web", "static", "cve", "maintenance.html")}:/usr/share/nginx/maintenance/maintenance.html:ro']
 
     def start_proxy(self, conf_text):
