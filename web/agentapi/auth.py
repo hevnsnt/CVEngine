@@ -119,7 +119,7 @@ class AgentTokenMiddleware:
         # /api/v1/ and /mcp/ are exempt from the tenancy MFA redirect, so enforce the same rule here, for
         # sessions and for tokens owned by a user who still has to enrol (tokens work again once they do)
         from tenancy.middleware import TenancyMiddleware
-        if TenancyMiddleware.must_enrol_mfa(request.user):
+        if TenancyMiddleware.must_enrol_mfa(request.user, None if getattr(request, 'api_token', None) else request):
             return JsonResponse({'error': MFA_REQUIRED_MESSAGE}, status=403)
         request.user.mfa_checked_this_request = True  # on this request's user object only (never stored): the agent's own rights check asks the same question again (agent_broker._agent_of)
         return self.get_response(request)

@@ -118,13 +118,15 @@ class BundledProxyTests(SimpleTestCase):
         with open(f'{tmp}/trusted-upstreams.conf', 'w') as f:  # the stock file (comments only) unless the test mounts its own
             f.write(stock if trusted_file is None else trusted_file)
         os.chmod(f'{tmp}/trusted-upstreams.conf', 0o644)
+        shutil.copy(os.path.join(REPO, 'config', 'nginx', 'edge-auth.conf.example'), f'{tmp}/edge-auth.conf')  # the stock file: hosted mode off
+        os.chmod(f'{tmp}/edge-auth.conf', 0o644)
         upstream = HTTPServer(('127.0.0.1', 0), FakeUpstream)
         FakeUpstream.seen = []
         threading.Thread(target=upstream.serve_forever, daemon=True).start()
         self.addCleanup(upstream.shutdown)
         plain, tunnel = free_port(), free_port()
         etc = f'{tmp}' if self.runner == 'local' else '/t'
-        head = CONF[:CONF.index('\nserver {')].replace('/etc/nginx/trusted-upstreams.conf', f'{etc}/trusted-upstreams.conf')
+        head = CONF[:CONF.index('\nserver {')].replace('/etc/nginx/trusted-upstreams.conf', f'{etc}/trusted-upstreams.conf').replace('/etc/nginx/edge-auth.conf', f'{etc}/edge-auth.conf')
         self.assertIn('"~^8443:1:.+"', head)
         head = head.replace('"~^8443:1:.+"', f'"~^{tunnel}:1:.+"')
         server = CONF[CONF.index('    location / {'):]

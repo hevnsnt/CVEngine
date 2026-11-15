@@ -924,9 +924,16 @@ beat_ready() {
 step "Waiting up to ${ready_seconds}s for $ready_url, all worker queues and Celery Beat"
 deadline=$((SECONDS + ready_seconds))
 status=unknown
+# Hosted mode only: the header file that lets this local check past the proxy's edge-secret check (scripts/hosted-edge.sh; nothing is added otherwise)
+CVL_EDGE_CURL=()
+if [[ -f scripts/hosted-edge.sh ]]; then
+    # shellcheck source=hosted-edge.sh
+    . scripts/hosted-edge.sh
+    cvengine_hosted_edge_args
+fi
 while (( SECONDS < deadline )); do
     status=$(curl -k -s --max-time 5 -o /dev/null -w '%{http_code}' \
-        "$ready_url" || true)
+        ${CVL_EDGE_CURL[@]+"${CVL_EDGE_CURL[@]}"} "$ready_url" || true)
     if [[ "$status" =~ ^[23][0-9][0-9]$ ]] && worker_queues_ready && beat_ready; then
         python3 scripts/update-state.py commit "$(git rev-parse HEAD)"
         # The built-in scanner, now that the server answers: recreated after celery (it shares celery's network namespace), kept on the new image
