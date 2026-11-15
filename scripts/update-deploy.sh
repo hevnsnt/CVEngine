@@ -175,7 +175,8 @@ deploy_steps() {
   local fit_plan=''
   if [ -f scripts/host-fit.sh ]; then
     . scripts/host-fit.sh
-    fit_plan=$(python3 scripts/update-state.py sentinels-choice 2>/dev/null) || fit_plan=''
+    load_update_sentinels
+    fit_plan=$CV_UPDATE_SENTINELS
     cvengine_fit_run "$fit_plan" "${compose[@]}" || true
     [ -z "$cv_fit_short" ] || phase applying "build: $cv_fit_short"
   fi
@@ -307,11 +308,20 @@ verify_workers() {
 # removes what is safe to remove (untagged images, the build cache; never a tagged image or a volume) and measures again. If Docker's directory cannot
 # be measured the check says nothing. DEPLOY_WHY is the sentence the Update screen shows when the update ends here.
 DEPLOY_WHY=${DEPLOY_WHY:-}
+# The Approve dialog's answer to "which scanners run" (web/.update-sentinels), needed by the disk check and by the scanner plan below. scripts/apply-update.sh
+# reads it once per run and hands it over in CV_UPDATE_SENTINELS (empty when there is none). An older apply-update.sh does not: then it is read here once,
+# on first use, and kept for the rest of the deploy, so the disk check no longer takes it from the scanner plan.
+load_update_sentinels() {
+  [ -z "${CV_UPDATE_SENTINELS+x}" ] || return 0
+  CV_UPDATE_SENTINELS=$(python3 scripts/update-state.py sentinels-choice 2>/dev/null) || CV_UPDATE_SENTINELS=''
+  export CV_UPDATE_SENTINELS
+}
 check_disk() {
   local plan=''
   if [ ! -f scripts/update-disk.sh ]; then return 0; fi
   . scripts/update-disk.sh
-  plan=$(python3 scripts/update-state.py sentinels-choice 2>/dev/null) || plan=''
+  load_update_sentinels
+  plan=$CV_UPDATE_SENTINELS
   cvengine_disk_check "$plan" && return 0
   DEPLOY_WHY=$cv_disk_sentence
   log "$cv_disk_sentence (nothing was stopped or changed)"

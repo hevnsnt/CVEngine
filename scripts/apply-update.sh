@@ -44,7 +44,21 @@ export GIT_CONFIG_COUNT=$(( ${GIT_CONFIG_COUNT:-0} + 1 ))
 export "GIT_CONFIG_KEY_$((GIT_CONFIG_COUNT - 1))=safe.directory" "GIT_CONFIG_VALUE_$((GIT_CONFIG_COUNT - 1))=$PWD"
 FLAG=web/.update-approved
 BRANCH_FLAG=web/.update-branch  # the branch the administrator chose in Settings; optional
-clear_approval() { rm -f "$FLAG" "$BRANCH_FLAG"; }
+SENTINELS_FLAG=web/.update-sentinels  # the Approve dialog's answer to "which scanners run"; optional (see CV_UPDATE_SENTINELS below)
+# Removes the approval this run applied, with the branch and the scanner choice that came with it, and only that one: an administrator may approve a
+# newer commit while a deploy runs, and that approval (its branch and its choice) stays for the next run. Before the approval was read (SHA not set yet),
+# or when the file no longer holds a commit id, it is removed as it always was.
+clear_approval() {
+  local now=''
+  if [ -n "${SHA:-}" ]; then
+    now=$(python3 "${STATE_HELPER:-scripts/update-state.py}" approval 2>/dev/null) || now=''
+    if [ -n "$now" ] && [ "$now" != "$SHA" ]; then
+      log "a newer approval ($now) arrived while $SHA was being applied; it is kept for the next run"
+      return 0
+    fi
+  fi
+  rm -f "$FLAG" "$BRANCH_FLAG" "$SENTINELS_FLAG"
+}
 [ -e "$FLAG" ] || [ -L "$FLAG" ] || exit 0
 STATE=$(python3 scripts/update-state.py directory)
 LOG="$STATE/update.log"
@@ -453,6 +467,12 @@ if ! SHA=$(python3 "$STATE_HELPER" approval); then
   clear_approval
   exit 1
 fi
+# The Approve dialog's answer to "which scanners run" (web/.update-sentinels): read once for the whole run, without removing it, and handed to the deploy
+# steps (scripts/update-deploy.sh) in CV_UPDATE_SENTINELS. Reading it used to remove it, so the disk check below took it before the deploy that applies
+# it, and a run that waited for work to settle (exit 3) lost it. The file now goes with the approval (clear_approval): a run that waits, or keeps the
+# approval to retry a restart, keeps the choice too.
+CV_UPDATE_SENTINELS=$(python3 "$STATE_HELPER" sentinels-peek 2>/dev/null) || CV_UPDATE_SENTINELS=''
+export CV_UPDATE_SENTINELS
 
 if ! resolve_layout; then
   phase failed "this install's Compose layout is unclear or unusable; the update log says what to set (CVENGINE_COMPOSE_FILES in .env). The approval is kept and retries by itself"
@@ -594,7 +614,7 @@ fi
 # is checked by scripts/update-deploy.sh once the new files are in.
 if [ -f scripts/update-disk.sh ] && ! git merge-base --is-ancestor "$SHA" HEAD; then
   . scripts/update-disk.sh
-  if ! cvengine_disk_check "$(python3 "$STATE_HELPER" sentinels-choice 2>/dev/null || true)"; then
+  if ! cvengine_disk_check "$CV_UPDATE_SENTINELS"; then
     log "refusing: $cv_disk_sentence (nothing was paused, stopped or changed)"
     phase failed "$cv_disk_sentence"
     clear_approval
@@ -807,6 +827,7 @@ elif [ "$DEPLOY_STAGE" = migrated ]; then
   fi
 else
   log "update failed before the database was migrated (at: $DEPLOY_STAGE); returning to $PREV"
+  CV_UPDATE_SENTINELS=''  # the scanner choice rode with the update; putting the previous version back does not apply it
   restore_branch
   git reset --hard "$PREV" >>"$LOG" 2>&1
   restore_env

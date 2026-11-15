@@ -359,6 +359,39 @@ def update_in_progress(max_age_seconds=2 * 3600):
     return (datetime.now(dt_timezone.utc) - datetime.fromisoformat(changed)).total_seconds() <= max_age_seconds
 
 
+# What the host appends to a phase when it keeps the approval and retries by itself (scripts/apply-update.sh). Once the approval is gone that
+# promise is not true any more, so it is not shown with it (``shown_phase``).
+RETRY_PROMISE = re.compile(r'[.;,]?\s*(?:the approval is kept and retries by itself|the update then retries by itself|it keeps retrying)', re.I)
+
+
+def approval_pending():
+    """Whether an approval is waiting for the host: ``.update-approved`` exists. Only then can a failed or waiting phase be retried."""
+    return os.path.lexists(_file('.update-approved'))
+
+
+def shown_phase(phase=None, pending=None):
+    """The phase as every reader presents it (``state``, system_status, the MCP tools): ``read_phase`` plus ``last_attempt``.
+
+    A ``draining`` or ``failed`` phase is written by a run that may keep the approval and try again. Once the approval is gone (an
+    administrator cancelled it, the check forgot it, a factory reset, or the host itself dropped it) nothing retries: a drain is over and
+    shown as idle, and a failure is the result of the last attempt, said with its time and without a promise of a retry. ``last_attempt``
+    is True then."""
+    phase = dict(read_phase() if phase is None else phase)
+    pending = approval_pending() if pending is None else pending
+    phase['last_attempt'] = False
+    if pending or phase['phase'] not in ('draining', 'failed'):
+        return phase
+    if phase['phase'] == 'draining':
+        return {'phase': 'idle', 'detail': '', 'scans_running': None, 'changed_at': phase['changed_at'], 'last_attempt': True}
+    when = ''
+    if phase['changed_at']:
+        when = ' (' + datetime.fromisoformat(phase['changed_at']).strftime('%Y-%m-%d %H:%M UTC') + ')'
+    detail = RETRY_PROMISE.sub('', phase['detail']).strip().rstrip('.,;')
+    phase['detail'] = f'Last attempt{when}: {detail or "it did not finish"}. It is not retried: approve the update again to try again.'
+    phase['last_attempt'] = True
+    return phase
+
+
 def _headers(token):
     headers = {'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'CVEngine-updater'}
     if token:
@@ -458,12 +491,32 @@ def check(row=None, get=None):
     return row
 
 
+def host_finished(row):
+    """Whether the host says the deploy of the approved commit really finished. ``.commit`` alone cannot say it: the host writes it when a
+    deploy STARTS (scripts/update-deploy.sh, apply-update.sh, make up), so a deploy that got that far and then failed, or a restart that failed
+    after migrating (the host keeps the approval on purpose and retries), has it already. scripts/apply-update.sh publishes ``done`` as its
+    phase only after it recorded the deploy as finished (its host-private deployed-commit marker, ``mark_deployed``), so a ``done`` written since
+    the approval is that answer. A host that has never run the host updater (no heartbeat ever: the commit was deployed by hand, make up or
+    scripts/update.sh) has nobody to say it, and the installed commit is all there is, as before."""
+    if not host_updater()['seen']:
+        return True
+    phase = read_phase()
+    if phase['phase'] != 'done' or not phase['changed_at']:
+        return False
+    return row.approved_at is None or datetime.fromisoformat(phase['changed_at']) >= row.approved_at
+
+
 def sync_applied(row):
-    """Forget an approval once the installed commit has caught up with it."""
-    if row.approved_sha and installed_sha() == row.approved_sha:
+    """Forget an approval once the installed commit has caught up with it and the host says that deploy finished (``host_finished``); a
+    failed deploy keeps it, so the host's retries go on. The removal is audited like an administrator's cancel."""
+    if row.approved_sha and installed_sha() == row.approved_sha and host_finished(row):
+        sha, by = row.approved_sha, row.approved_by
         row.approved_sha, row.approved_by, row.approved_at = '', '', None
         row.save(update_fields=['approved_sha', 'approved_by', 'approved_at'])
         _remove_flag()
+        from dashboard.models import AuditLog
+        AuditLog.objects.create(actor=None, actor_name='updater', action='update.applied', target=sha[:7],
+                                detail={'approved_by': by, 'reason': 'the host finished deploying the approved commit'})
 
 
 def _remove_flag():
@@ -534,6 +587,7 @@ def state(row):
     """What the API and the banner show. ``status``: disabled | error | up_to_date | available | approved | dismissed | diverged (the branch has new
     commits and this server has commits of its own, so nothing can fast-forward it) | unknown (GitHub has never seen the build's commit and
     the host has not said which commit it shares with the branch)."""
+    from cveFeed import scan_control
     from cveFeed.models import ScanControl
 
     installed = installed_sha()
@@ -556,10 +610,10 @@ def state(row):
         status = 'error'
     else:
         status = 'up_to_date'
-    phase = read_phase()
+    phase = shown_phase()
     # A phase older than the approval is the result of an earlier update (a failure from last time), not of this one.
     if row.approved_at and phase['changed_at'] and datetime.fromisoformat(phase['changed_at']) < row.approved_at:
-        phase = {'phase': 'idle', 'detail': '', 'scans_running': None, 'changed_at': None}
+        phase = {'phase': 'idle', 'detail': '', 'scans_running': None, 'changed_at': None, 'last_attempt': False}
     # Read live, not from the phase file: apply-update.sh's own pause/release calls can fail independently of the
     # phase it last wrote, and an admin's manual resume can clear it between runs without rewriting the phase file.
     control = ScanControl.current()
@@ -575,8 +629,9 @@ def state(row):
         'last_error': row.last_error, 'approved_by': row.approved_by,
         'approved_at': row.approved_at.isoformat() if row.approved_at else None,
         'phase': phase['phase'], 'phase_detail': phase['detail'], 'phase_scans_running': phase['scans_running'],
-        'phase_changed_at': phase['changed_at'],
-        'scans_paused_by_update': bool(control.paused and control.paused_by_update),
+        'phase_changed_at': phase['changed_at'], 'phase_last_attempt': phase['last_attempt'],
+        # the update's own pause only: a person's, or the watchdog's pause for disk or memory, is not the update's (scan_control.pause_owner)
+        'scans_paused_by_update': scan_control.pause_owner(control) == scan_control.OWNER_UPDATE,
         'wait_for_scans': read_wait_scans(),
         'sentinel_tasks_open': sentinel_tasks, 'sentinel_scans_running': sentinel_scans, 'sentinel_results_held': held_results(),
         'host_updater': host_updater(),
