@@ -640,9 +640,15 @@ def apply_finding_verdict(triage, parsed, key, host_review=None, extra_injection
             text = f"{CLOSE_PREFIX} ({model or 'model not reported'}) found this is a false positive. {note}".strip()
             text = closure.clip_note(text)
             before = finding.remediation_status
+            # only from the status the gate read: the AI reviewer is an automatic actor and never writes over a person's newer decision
+            from reNgine.state_machines import REMEDIATION
+            if not REMEDIATION.move(type(finding)._base_manager.filter(pk=finding.pk), 'false_positive', only_from=(before,),
+                                    remediation_updated_at=now, remediation_by=None, remediation_note=text):
+                outcome, held = 'held', 'a person changed the status meanwhile'
+                FindingReview.objects.filter(pk=review.pk).update(outcome=outcome, held_reason=held)
+        if outcome == 'closed':
             finding.remediation_status, finding.remediation_updated_at, finding.remediation_by = 'false_positive', now, None
             finding.remediation_note = text
-            finding.save(update_fields=['remediation_status', 'remediation_updated_at', 'remediation_by', 'remediation_note'])
             FindingAuditEvent.objects.create(project_id=triage.project_id, finding_kind=AUDIT_KIND[triage.kind], finding_id=finding.pk,
                                              event='status', actor=None, before={'status': before},
                                              after={'status': 'false_positive', 'note': text, 'by': 'ai_reviewer', 'review_id': review.pk,

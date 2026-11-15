@@ -336,8 +336,9 @@ def _file_finding(scan, sub, address, port, row):
 
 
 def _close_finding(scan, sub, address, port):
-    """A complete inspection that read the key as not on the blocklist: the finding of an earlier inspection is gone. A finding a person already dealt with
-    keeps its status."""
+    """A complete inspection that read the key as not on the blocklist: the finding of an earlier inspection is gone, whatever its remediation status
+    (one a person is working on is gone too once the key is replaced). Only the liveness field changes, as ``openvas_scan.resolve_missing`` does: the
+    status a person set is theirs and is kept."""
     from startScan.models import Vulnerability
     Vulnerability.objects.filter(target_domain__project_id=scan.domain.project_id, subdomain__name=sub.name, source=SOURCE, template_id=TEMPLATE_ID,
-                                 http_url=f'ssh://{address}:{port}', open_status=True, remediation_status='open').update(open_status=False)
+                                 http_url=f'ssh://{address}:{port}', open_status=True).update(open_status=False)

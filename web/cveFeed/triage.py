@@ -1731,14 +1731,19 @@ def _released(row, classification, held):
     return was_held and classification not in ('needs_validation', *CLOSING)
 
 
-def _apply(verdict, group, released=None):
+def _apply(verdict, group, released=None, asked=None):
     """Give every row of one signature group the verdict. A row a validation hit already confirmed keeps confirmed. A row of another project
     than the one the answer was reached in gets its classification with ``SHARED_REASON``, never the model's words. A closing verdict
     reached on another tenant or host (``closure_reusable``) does not close a row: it is held at needs_validation, detached and pending,
     and run_triage asks its own answer (``own_signature``). A row whose state does not change is not written. The legacy ``ai_verdict`` of
     a CVE match follows, and a verdict that does not close is stored (MatchVerdict, with ``SHARED_REASON``) for later correlations to
     reuse. No row is classified above the CVE's ``remote_limit`` without a validation hit. Returns the ids of the CVE matches whose legacy
-    verdict was written; ``released`` (a list) gathers those whose triage stopped holding their heat (``_released``)."""
+    verdict was written; ``released`` (a list) gathers those whose triage stopped holding their heat (``_released``).
+
+    ``asked`` (``{match id: ai_verdict}``, as ``_ask`` read them when it queued the question) is given for an answer that waited in the queue.
+    A match that a deterministic rule closed meanwhile (``correlation.close_stale``, ``close_invalid_correlation``, an inventory report that
+    no longer lists it) is left out entirely, its Triage row too: the rule decided after the question was asked, on newer facts than the
+    answer saw."""
     from cveFeed.models import CVEMatch, MatchVerdict, Triage
     now = timezone.now()
     rows = []
@@ -1755,6 +1760,10 @@ def _apply(verdict, group, released=None):
     group = current
     matches_by_id = {m.pk: m for m in CVEMatch.objects.filter(pk__in=[row.match_id for row, _ in group if row.match_id])
                      .select_related('triage')}
+    if asked is not None:
+        closed_meanwhile = {pk for pk, m in matches_by_id.items()
+                            if m.ai_verdict == 'not_affected' and asked.get(str(pk), 'not_affected') != 'not_affected'}
+        group = [(row, d) for row, d in group if row.match_id not in closed_meanwhile]
     held_ids, legacy = set(), {}
     for row, d in group:
         # the model's words only where the answer was reached: another project's finding gets the classification, never the text
@@ -1815,7 +1824,10 @@ def _apply(verdict, group, released=None):
             CVEMatch.objects.filter(pk__in=ids, ai_verdict='not_affected').update(ai_verdict=verdict_for(classification), ai_reason=reason[:2000],
                                                                                  ai_model='', updated_at=now)
             continue
-        CVEMatch.objects.filter(pk__in=ids).update(ai_verdict=legacy_verdict, ai_reason=reason[:2000], ai_model=verdict.model, updated_at=now)
+        # only where the legacy verdict is still the one read above: a rule that closed the match since then decided on newer facts
+        for seen, same in _by_read_verdict(ids, matches_by_id).items():
+            CVEMatch.objects.filter(pk__in=same, ai_verdict=seen).update(ai_verdict=legacy_verdict, ai_reason=reason[:2000], ai_model=verdict.model,
+                                                                       updated_at=now)
     # kept for correlation: a new host with the same evidence starts out judged. Taken from a row the answer was applied to as it stands (not
     # held, no validation hit of its own), never a closing answer (the table has no tenant, so it would close another organization's new
     # match; save_matches does not seed one either, and the same host's own is carried by its twin), and never the model's words: the row
@@ -1829,6 +1841,15 @@ def _apply(verdict, group, released=None):
             version_in_range=m.version_in_range, source=m.source,
             defaults={'ai_verdict': shared_verdict, 'ai_reason': SHARED_REASON, 'ai_model': verdict.model})
     return [row.match_id for row, _ in matches]
+
+
+def _by_read_verdict(ids, matches_by_id):
+    """``ids`` grouped by the legacy verdict their match had when ``_apply`` read it (a match deleted since is left out)."""
+    out = {}
+    for pk in ids:
+        if pk in matches_by_id:
+            out.setdefault(matches_by_id[pk].ai_verdict, []).append(pk)
+    return out
 
 
 def _hold(group):
@@ -1990,10 +2011,13 @@ def _ask(key, group, claim):
     the facts the question was asked on (``apply_rules`` judges the answer against them), where it was asked, and each row with the
     signature it had, so a row whose evidence changes meanwhile is left for the next pass."""
     from cveFeed import ai_jobs
+    from cveFeed.models import CVEMatch
     from reNgine.ai_providers import TRIAGE_OPTIONS, TRIAGE_SYSTEM_PROMPT, triage_parts, triage_schema
     row, d = group[0]
+    # the legacy verdict of each match as the question is asked: a rule that closes one before the answer comes back wins (``_apply``)
+    asked = {str(pk): v for pk, v in CVEMatch.objects.filter(pk__in=[r.match_id for r, _ in group if r.match_id]).values_list('pk', 'ai_verdict')}
     context = {'claim': claim.pk, 'kind': key[0], 'signature': key[1], 'origin': [row.project_id, row.host],
-               'finding_kind': d['kind'], 'facts': d['facts'], 'rows': [[r.pk, rd['signature']] for r, rd in group]}
+               'finding_kind': d['kind'], 'facts': d['facts'], 'rows': [[r.pk, rd['signature']] for r, rd in group], 'asked': asked}
     return ai_jobs.enqueue('triage', 'finding_triage', system=TRIAGE_SYSTEM_PROMPT,
                            parts=triage_parts(d['kind'], d['payload'], d.get('host_context') or None), schema=triage_schema(),
                            options=TRIAGE_OPTIONS, context=context, project=row.project_id, dedupe=f'triage:{key[0]}:{key[1]}', priority=3)
@@ -2073,7 +2097,7 @@ def _triage_answer(job, text):
     if verdict is None:
         return None  # the claim was given up meanwhile: the rows stay pending and the sweep asks again
     released = []
-    _after_apply(_apply(verdict, group, released), released)
+    _after_apply(_apply(verdict, group, released, asked=ctx.get('asked')), released)
     return None
 
 

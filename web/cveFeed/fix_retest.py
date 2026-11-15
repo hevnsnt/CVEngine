@@ -452,7 +452,10 @@ def _finish(job, row, finding, outcome, reason, results, names, progress):
         _audit(row, finding, VERIFIED, names)
         activity.settle(progress, 'done', f'Retest {job.pk}: verified fixed (finding #{row.pk}); the check ran{where}', outcome=VERIFIED, sentinel=names)
         return {'outcome': VERIFIED, 'sentinel': names}
-    _reopen(row, finding, evidence, names, now)
+    if not _reopen(row, finding, evidence, names, now):
+        activity.settle(progress, 'done', f'Retest {job.pk}: still reproduces, but finding #{row.pk} was not reopened: a person changed its status '
+                        f'while the retest ran{where}', outcome=REPRODUCES, sentinel=names, applied=False)
+        return {'outcome': REPRODUCES, 'sentinel': names, 'applied': False}
     activity.settle(progress, 'done', f'Retest {job.pk}: still reproduces, so finding #{row.pk} was reopened{where}', outcome=REPRODUCES, sentinel=names)
     return {'outcome': REPRODUCES, 'sentinel': names}
 
@@ -484,13 +487,18 @@ def _audit(row, finding, outcome, names, extra=None):
 
 def _reopen(row, finding, evidence, names, now):
     """The finding still reproduces: open it again (a status change by the engine, with a note that says why), keep the new exchange as its proof,
-    and tell the people who watch (the activity line is the caller's; the notification channels are told here)."""
+    and tell the people who watch (the activity line is the caller's; the notification channels are told here). Returns False, changing nothing
+    on the finding, when it is no longer marked fixed: ``run`` read it fixed minutes ago, and a person who closed it as a false positive or an
+    accepted risk since then (or reopened it themselves) made a newer decision than this retest."""
     from cveFeed import notify
     from cveFeed.models import FindingAuditEvent
-    note = 'Reopened automatically: a retest after it was marked fixed still reproduces it' + (f' (Sentinel {names})' if names else '') + '.'
-    finding.remediation_status, finding.remediation_updated_at, finding.remediation_by = 'open', now, None
-    finding.remediation_note = note[:2000]
-    finding.save(update_fields=['remediation_status', 'remediation_updated_at', 'remediation_by', 'remediation_note'])
+    from reNgine.state_machines import REMEDIATION
+    note = ('Reopened automatically: a retest after it was marked fixed still reproduces it' + (f' (Sentinel {names})' if names else '') + '.')[:2000]
+    if not REMEDIATION.move(type(finding)._base_manager.filter(pk=finding.pk), 'open', only_from=('fixed',),
+                            remediation_updated_at=now, remediation_by=None, remediation_note=note):
+        _not_applied(row, finding, evidence, names)
+        return False
+    finding.remediation_status, finding.remediation_updated_at, finding.remediation_by, finding.remediation_note = 'open', now, None, note
     fresh = {r['check']: r['evidence'] for r in evidence['results'] if r.get('evidence')}
     if fresh:
         row.validation_evidence = {**(row.validation_evidence or {}), **fresh}
@@ -510,6 +518,16 @@ def _reopen(row, finding, evidence, names, now):
         notify.fix_not_holding(row.host, _title_of(row, finding))
     except Exception:  # noqa: BLE001 - the reopening stands whether or not the channels answered
         logger.warning('retest follow-up failed for %s', finding.pk, exc_info=True)
+    return True
+
+
+def _not_applied(row, finding, evidence, names):
+    """A retest that still reproduces a finding a person changed while it ran: their status stands and the finding's retest state is left as
+    their change set it (``still_reproduces`` would read as "reopened"). The result is kept where it misleads nobody: on the retest itself
+    (``FixRetest.evidence``, written by the caller) and in the audit trail, which says it was not applied and why."""
+    current = type(finding)._base_manager.filter(pk=finding.pk).values_list('remediation_status', flat=True).first()
+    _audit(row, finding, REPRODUCES, names, {'applied': False, 'status': current, 'summary': (evidence.get('summary') or '')[:200],
+                                            'note': 'Not applied: a person changed the status while the retest ran.'})
 
 
 def _title_of(row, finding):

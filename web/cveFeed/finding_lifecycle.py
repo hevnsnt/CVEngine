@@ -224,9 +224,11 @@ def close_fixed_for_host(domain, host, report, seen=None, read_in='', apply=True
         note = _note(f'{FIXED_VERSION} {why}: read by the WordPress scan on {host}' + (f' {read_in}' if read_in else '') + '.')
         close.setdefault(note, []).append(row.pk)
     if apply:
+        from reNgine.state_machines import REMEDIATION
         for note, ids in close.items():
-            Vulnerability._base_manager.filter(pk__in=ids, remediation_status='open', remediation_by__isnull=True).update(
-                remediation_status='fixed', remediation_note=note, remediation_updated_at=now)
+            # only from open with nobody on it, as read above: a person who took the finding up since then keeps it
+            REMEDIATION.move(Vulnerability._base_manager.filter(pk__in=ids, remediation_by__isnull=True), 'fixed', only_from=('open',),
+                             remediation_note=note, remediation_updated_at=now)
         for keeper, ids in folded.items():
             Vulnerability._base_manager.filter(pk__in=ids, remediation_status='open', remediation_by__isnull=True).update(
                 open_status=False, remediation_note=duplicate_note(

@@ -42,6 +42,7 @@ stored values and API field names never change (add a `state` name next to an ol
 | Machine | Field | States (final in bold) | Notes |
 | --- | --- | --- | --- |
 | `scan` | `startScan.ScanHistory.scan_status`, and `ScanActivity.status` for each stage | queued -1, running 1, success 2, failed 0, **aborted 3** | A Stop is final. Failed may still become success (the reaper can close a scan that was still running; its own finish is the truth). REST and MCP scan rows carry `state` (the name) next to `status` (the code). |
+| `remediation` | `remediation_status` of `cveFeed.CVEMatch`, `startScan.Vulnerability` and `cveFeed.HygieneFinding` | open, in_progress, fixed, accepted_risk, false_positive (labels from `cveFeed.closure.LABELS`) | A person may move a finding between any statuses. An automatic actor (retest, agent report, AI reviewer, scanner engine, sweeps) writes only with `REMEDIATION.move(..., only_from=(<the status it read>,))`, so a decision a person made in between stands. An agent's "fixed" applies only from open or in progress (`AGENT_MAY_FIX`). |
 
 ## Implicit machines, and what is wrong with them
 
@@ -73,12 +74,16 @@ Found by a survey of the server and the Sentinel client. Each is moved to an exp
 
 ### Findings
 
-- **Remediation status** (CVE matches, scanner findings, hygiene findings: open, in_progress, fixed, accepted_risk, false_positive): a retest that
-  started before a person closed a finding reopens it over their decision; an agent's "fixed" report overwrites a false positive set meanwhile; an
-  AI verdict already queued reopens a match a rule just closed; "fixed" sticks differently per finding kind.
-- **Secrets** (`status`, `remediation_status`), **supplier findings** (a person's "accepted" is lost when the issue resolves and comes back),
-  **SSH findings** (an in-progress one is never marked gone), **saved searches** (an edit during an evaluation re-alerts the same hosts),
-  triage status, validation status, retest state, generated templates.
+- **Remediation status**: explicit (above). Fixed while moving it: a retest that started before a person closed a finding reopened it over their
+  decision (it now leaves the person's status and notes in the audit trail that its result was not applied); an agent's "fixed" report overwrote a
+  false positive set meanwhile; an AI verdict already queued reopened a match a rule closed while the question waited (and replaced the rule's
+  not-applicable classification); the AI reviewer's close and the WordPress fixed-version close write only from the status they read; the bulk
+  status change overwrote findings changed after it read them (they are now reported as failed). Still open: "fixed" sticks differently per finding kind.
+- **Supplier findings** (`SupplierFinding.status`): fixed here: a person's "accepted" is no longer resolved, so it is not lost when the issue goes
+  away and comes back, and the sweep writes only the fields it changes, conditionally, instead of saving a row read earlier.
+- **SSH findings**: fixed here: an in-progress one is now marked gone (`open_status`) when a complete inspection reads a clean key; its status is kept.
+- **Saved searches**: fixed here: an edit saves only the fields it changes, so an evaluation finishing meanwhile does not re-alert the same hosts.
+- **Secrets** (`status`, `remediation_status`), triage status, validation status, retest state, generated templates.
 
 ### Operations
 

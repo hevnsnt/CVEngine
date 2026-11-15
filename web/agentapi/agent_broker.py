@@ -872,9 +872,12 @@ def _apply_result(task, agent, user, result):
     summary = result['summary'] or 'no summary'
     _comment(task.project, match, user, f'Agent {agent.name} ({task.kind}, {task.mode}): {result["outcome"]}. {summary}')
     if task.kind == 'remediate' and result['outcome'] == 'fixed':
+        # The task ran for a while: a person may have closed the finding meanwhile (a false positive, an accepted risk). Their decision
+        # stands; the comment above still says what the agent reported.
+        from reNgine.state_machines import AGENT_MAY_FIX
         before = match.remediation_status
-        svc._apply_remediation(match, 'fixed', f'Fixed by agent {agent.name}: {summary}', user)
-        svc._record_status_change(task.project, 'match', match.pk, before, 'fixed', user, match.remediation_note)
+        if svc._apply_remediation(match, 'fixed', f'Fixed by agent {agent.name}: {summary}', user, only_from=AGENT_MAY_FIX):
+            svc._record_status_change(task.project, 'match', match.pk, before, 'fixed', user, match.remediation_note)
 
 
 def report_result(ctx, task_id, body):
