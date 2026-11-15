@@ -13,6 +13,7 @@ from django.http.response import HttpResponseBase
 from agentapi import agent_broker as broker
 from agentapi import db_timeout, storage_safe
 from agentapi import host_manage as hosts
+from agentapi import host_export
 from agentapi import host_review_api as hostreview
 from agentapi import saved_search as saved
 from agentapi import inventory
@@ -317,6 +318,10 @@ ROUTES = [
      lambda r, c, slug, host, **k: inventory.get_inventory(c, slug, host=host, params=r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/search', 'Search hosts: words, tech:, port:, product:, service:, os:, cve:, ip: (CIDR), host:, vuln:, sev:, auth:, sensitive:, secret:, zombie:, country:, comma for OR within one filter (port:80,443), -negation; sorted by score (sort=name); heat=fire|smoke|ice|clean|unscanned narrows the page, facets.heat always counts every value; facets=port,product,tech,os,country (facet_size=10) adds the same whole-match counts for those',
      lambda r, c, slug, **k: svc.search_hosts(c, slug, r.GET)),
+    ('GET', r'projects/(?P<slug>[-\w]+)/hosts/export', 'Download every discovered host of the project as a file to hand to a penetration testing company, streamed with no row cap: ?format=csv|txt (default csv: host, IP addresses, open TCP and UDP ports, services, web URLs, project, organization, target, first and last seen; no findings, notes or owners. txt: every host name then every IP address, unique and sorted, for nmap -iL), ?scope=external|all (default external: leaves out hosts and addresses that are internal or private), ?archived=0|1 (default 0). Hosts the organization removed and excluded are never listed. The answer carries X-Export-Hosts (the number of hosts) and is written to the audit log',
+     lambda r, c, slug, **k: host_export.response(c, r.GET, slug=slug)),
+    ('GET', r'orgs/(?P<org>[-\w]+)/hosts/export', 'The same download for every project of the organization that you can access (never a project you cannot see), with the Project and Organization columns telling them apart; ?format, ?scope and ?archived as for projects/{slug}/hosts/export',
+     lambda r, c, org, **k: host_export.response(c, r.GET, org=org)),
     ('GET', r'projects/(?P<slug>[-\w]+)/saved-searches', 'Your saved searches in this project, with the limits and the notification channels Settings has on',
      lambda r, c, slug, **k: saved.list_saved_searches(c, slug)),
     ('POST', r'projects/(?P<slug>[-\w]+)/saved-searches', 'Save a search; body {name, query, enabled, alert_new, alert_gone, threshold, channels, frequency: hourly|daily|weekly}. The query is checked like a live search',

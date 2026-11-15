@@ -2956,3 +2956,10 @@ a.hr-name{text-underline-offset:2px}
   a.hr-name::after{content:"";position:absolute;inset:0}
   a.hr-step-title{display:inline-block;padding:var(--s-3) 0}
 }
+
+/* Hosts: "Export all hosts" is a button in the page head; on a phone the title is read aloud and not drawn, the button stays */
+.page-head>.head-action{flex:none}
+@media (max-width:639px){
+  .wrap:has(#view>.split,#view>.table-page) .page-head:has(>.head-action){position:static;width:auto;height:auto;margin:0 0 var(--s-1);overflow:visible;clip:auto;justify-content:flex-end}
+  .wrap:has(#view>.split,#view>.table-page) .page-head:has(>.head-action)>div{position:absolute;width:1px;height:1px;margin:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+}
