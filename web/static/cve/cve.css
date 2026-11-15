@@ -497,13 +497,11 @@ a.cell{cursor:pointer;transition:background .12s}@media (hover:hover) and (point
 .map{--cols:1;--rows:1;display:grid;gap:var(--s-2);grid-template-columns:repeat(var(--cols),minmax(0,1fr));grid-template-rows:repeat(var(--rows),minmax(0,1fr));flex:1 1 0;min-height:150px}
 #c-map .map{height:auto}
 .map[data-size="xl"]{--hx:92px}
-.map[data-size="l"]{--hx:34px}
 .hx{display:block;min-width:0;min-height:0;border-radius:var(--r-s);background:var(--clean);padding:0;cursor:pointer;position:relative;transition:transform .1s,border-color .1s;
   overflow:hidden;text-decoration:none;color:var(--ink-2)}
 .hx .score{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:var(--fw-semi) var(--fs-2)/1 var(--mono);color:var(--on-solid);opacity:.95}
 .hx.clean .score{color:var(--on-ok)}.hx.ice .score{color:var(--on-ice)}.hx.smoke .score{color:var(--on-smoke)}
-.map[data-size="s"] .hx .score{font-size:var(--fs-1)}
-.map[data-size="xl"] .hx .score,.map[data-size="l"] .hx .score{font-size:var(--fs-4)}
+.map[data-size="xl"] .hx .score{font-size:var(--fs-4)}
 .hx.fire{background:var(--fire)}.hx.smoke{background:var(--smoke)}.hx.ice{background:var(--ice)}.hx.clean{background:var(--ok)}
 /* few hosts: quiet labelled cards with a thin coloured edge; many hosts: compact solid squares */
 .map[data-size="xl"] .hx{padding:var(--s-2) var(--s-3) var(--s-2) var(--s-3);display:flex;align-items:flex-end;font:var(--fw-semi) var(--fs-1)/1.15 var(--mono);letter-spacing:0;border-radius:var(--r);background:var(--surface-2);border:1px solid var(--line-2);color:var(--ink)}
@@ -1782,7 +1780,7 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .dlg-dest .select select{min-height:40px;font-weight:var(--fw-semi)}
 
 /* the map fills its card: tiles are placed by the layout in dashboard.js (--cols, --rows, data-tier) */
-.hx[hidden]{display:none}
+.hx[hidden]{display:none!important} /* beats every tier's display:flex: a tile past the last whole row the card holds is not drawn */
 .hx .hx-details{display:none}
 .map[data-tier="rich"] .hx{flex-direction:column;justify-content:flex-start;align-items:stretch;gap:var(--s-1);padding:var(--s-2) var(--s-3) var(--s-2) var(--s-3)}
 .map[data-tier="rich"][data-size="xl"] .hx .score{position:static;inset:auto;order:1;justify-content:flex-start;padding:0;font:var(--fw-semi) var(--fs-6)/1 var(--mono);color:var(--ink)}
@@ -2963,3 +2961,12 @@ a.hr-name{text-underline-offset:2px}
   .wrap:has(#view>.split,#view>.table-page) .page-head:has(>.head-action){position:static;width:auto;height:auto;margin:0 0 var(--s-1);overflow:visible;clip:auto;justify-content:flex-end}
   .wrap:has(#view>.split,#view>.table-page) .page-head:has(>.head-action)>div{position:absolute;width:1px;height:1px;margin:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 }
+/* the smallest map tier still names the host and its project (dashboard.js MAP_TIERS "mini"): three short lines, tighter than a card */
+.map[data-tier="mini"] .hx{padding:var(--s-1) var(--s-2) var(--s-1) var(--s-3);gap:2px;justify-content:flex-start}
+.map[data-tier="mini"] .hx .score{font:var(--fw-semi) var(--fs-1)/1.2 var(--mono);color:var(--ink)}
+.map[data-tier="mini"] .hx .score::before{content:none}
+.map[data-tier="mini"] .hx .hx-name{font-size:var(--fs-1);line-height:1.25}
+.map[data-tier="mini"] .hx .hx-target,.map[data-tier="mini"] .hx .hx-org{display:none}
+.map[data-tier="mini"] .hx .hx-owner:not(:empty){margin-top:0;line-height:1.25}
+/* a long "Org / Project" ends in an ellipsis inside the tile instead of running past its edge and being cut mid-letter */
+.map[data-size="xl"] .hx .hx-owner{max-width:100%}
