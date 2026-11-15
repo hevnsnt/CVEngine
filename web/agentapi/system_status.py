@@ -44,8 +44,10 @@ def _version():
 
 def _scanning():
     from cveFeed.models import ScanControl
+    from cveFeed import scan_control
     row = ScanControl.current()
-    return {'paused': bool(row.paused), 'paused_by_update': bool(row.paused_by_update), 'reason': row.reason or None,
+    owner = scan_control.pause_owner(row)  # the watchdog's pause for disk or memory is its own, not the update's
+    return {'paused': bool(row.paused), 'paused_by_update': owner == scan_control.OWNER_UPDATE, 'paused_by': owner, 'reason': row.reason or None,
             'by': row.actor or None, 'changed_at': _iso(row.changed_at), 'last_error': row.last_error or None}
 
 
@@ -88,9 +90,9 @@ def _builtin_scanner(admin, problems):
 
 def _update():
     from cveFeed import updater
-    phase = updater.read_phase()
+    phase = updater.shown_phase()  # a failure whose approval is gone is the last attempt, not a retry that is pending
     return {'phase': phase.get('phase'), 'detail': phase.get('detail') or None,
-            'scans_running': phase.get('scans_running'), 'changed_at': phase.get('changed_at')}
+            'scans_running': phase.get('scans_running'), 'changed_at': phase.get('changed_at'), 'last_attempt': phase.get('last_attempt')}
 
 
 STATUS_CACHE_SECONDS = 60  # CVENGINE_STATUS_CACHE_SECONDS: a project's counts are reused this long (0 turns the cache off)
@@ -1013,7 +1015,9 @@ def system_status(ctx):
     scanning['scanner'] = scanner
     scanning['builtin_scanner'] = take('built-in scanner')
     update = take('update')
-    if update.get('phase') not in (None, 'idle', 'done'):
+    if update.get('last_attempt'):
+        notes.append('the last update did not finish and is not retried')
+    elif update.get('phase') not in (None, 'idle', 'done'):
         notes.append(f"an update is in progress ({update['phase']})")
     if not admin:  # who paused, why, and what the whole instance is running describe the server, not the caller's projects
         scanning = {k: scanning.get(k) for k in ('paused', 'paused_by_update', 'error', 'scanner', 'builtin_scanner') if k in scanning}

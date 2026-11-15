@@ -626,13 +626,11 @@ def check_pressure(ctx):
 def act_pressure(ctx, chk):
     """Pause the automatic starting of heavy work (running work carries on), and for disk ask the host for the safe prune."""
     from cveFeed import scan_control
-    from cveFeed.models import ScanControl
     why = 'disk nearly full' if chk.evidence.get('disk') else 'memory nearly full'
     paused = False
     try:
-        if not ScanControl.objects.filter(pk=1, paused=True).exists():
-            scan_control.request_drain_pause(PAUSE_REASON + why)
-            paused = True
+        # its own pause (scan_control.OWNER_WATCHDOG), not an update's: no update window, no held Sentinel leases, and an update's release leaves it
+        paused = scan_control.request_pressure_pause(why)
     except Exception:  # noqa: BLE001
         logger.warning('watchdog: could not pause the starting of work', exc_info=True)
     state = ctx.states['R7']
@@ -647,14 +645,11 @@ def act_pressure(ctx, chk):
 def release_pressure_pause(ctx):
     """Resume what R7 paused, once the pressure has been gone for a while (only a pause the watchdog set, never a person's)."""
     from cveFeed import scan_control
-    from cveFeed.models import ScanControl
     state = ctx.states['R7']
     if not (state.data or {}).get('paused_at'):
         return None
-    row = ScanControl.objects.filter(pk=1).first()
     state.data = {k: v for k, v in (state.data or {}).items() if k not in ('paused_at', 'paused_for')}
-    if row and row.paused and row.paused_by_update and str(row.reason).startswith(PAUSE_REASON):
-        scan_control.release_update_pause()
+    if scan_control.release_pressure_pause():  # its own pause only; it never closes an update's window
         return 'resumed the automatic starting of work'
     return None
 

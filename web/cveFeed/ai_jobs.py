@@ -28,6 +28,8 @@ from importlib import import_module
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from reNgine.state_machines import AI_ANSWERED, AI_APPLIED, AI_APPLYING, AI_EXPIRED, AI_FAILED, AI_JOB, AI_LEASED, AI_QUEUED
+
 logger = logging.getLogger(__name__)
 
 LEASE_MIN = 900                  # seconds a container holds a job at least
@@ -237,7 +239,7 @@ def _admit(job):
 
 def _expire(job, now, category='expired'):
     from cveFeed.models import AIJob
-    if not AIJob.objects.filter(pk=job.pk, status='queued').update(status='expired', finished_at=now, error_category=category):
+    if not AI_JOB.move(AIJob.objects.filter(pk=job.pk), AI_EXPIRED, only_from=(AI_QUEUED,), finished_at=now, error_category=category):
         return False
     hook = getattr(_handler(job.kind), 'job_expired', None)
     if hook is not None:
@@ -285,11 +287,11 @@ def release_expired(now=None):
     stale = list(AIJob.objects.filter(status='leased', lease_until__lt=now).values_list('pk', 'leases'))
     for pk, leases in stale:
         if leases >= MAX_LEASES:
-            if AIJob.objects.filter(pk=pk, status='leased').update(status='answered', result={'error': 'lease_expired'}, lease='',
-                                                                   error_category='lease_expired', answered_at=now):
+            if AI_JOB.move(AIJob.objects.filter(pk=pk), AI_ANSWERED, only_from=(AI_LEASED,), result={'error': 'lease_expired'}, lease='',
+                           error_category='lease_expired', answered_at=now):
                 _schedule(pk)
         else:
-            AIJob.objects.filter(pk=pk, status='leased', lease_until__lt=now).update(status='queued', lease='', lease_until=None)
+            AI_JOB.move(AIJob.objects.filter(pk=pk, lease_until__lt=now), AI_QUEUED, only_from=(AI_LEASED,), lease='', lease_until=None)
     return len(stale)
 
 
@@ -403,11 +405,11 @@ def apply(job_id):
     queues the job again with its new parts; otherwise the raw answer is dropped and the job is finished."""
     from cveFeed.models import AIJob
     now = timezone.now()
-    if not AIJob.objects.filter(pk=job_id, status='answered').update(status='applying', updated_at=now):
+    if not AI_JOB.move(AIJob.objects.filter(pk=job_id), AI_APPLYING, updated_at=now):
         return None
     job = AIJob.objects.get(pk=job_id)
     module = _handler(job.kind)
-    outcome, status = None, 'applied'
+    outcome, status = None, AI_APPLIED
     try:
         if 'text' in job.result:
             from cveFeed.secret_redaction import redact_text
@@ -416,18 +418,24 @@ def apply(job_id):
                 answer = redact_text(answer)
             outcome = module.job_answer(job, answer)
         else:
-            status = 'failed'
+            status = AI_FAILED
             module.job_failure(job, job.result.get('error') or 'unexpected_error', job.result)
     except Exception:  # noqa: BLE001 - a continuation that breaks fails its job, never the worker
         logger.exception('AI job %s (%s): could not apply the answer', job.pk, job.kind)
-        status, job.error_category = 'failed', 'apply_error'
+        status, job.error_category = AI_FAILED, 'apply_error'
+    # Each end is a move from applying only: the housekeeping pass may have given this job up as lost meanwhile (apply_lost, its stage already told),
+    # and a continuation that finishes after that does not overwrite it.
+    mine = AIJob.objects.filter(pk=job.pk)
     if isinstance(outcome, Retry):
-        job.packet = {**job.packet, 'parts': _clean_parts(outcome.parts)}
-        job.status, job.stage, job.attempt, job.result, job.leases = 'queued', str(outcome.stage)[:40], job.attempt + 1, {}, 0
-        job.save(update_fields=['packet', 'status', 'stage', 'attempt', 'result', 'leases', 'updated_at'])
+        if not AI_JOB.move(mine, AI_QUEUED, only_from=(AI_APPLYING,), packet={**job.packet, 'parts': _clean_parts(outcome.parts)},
+                           stage=str(outcome.stage)[:40], attempt=job.attempt + 1, result={}, leases=0, updated_at=timezone.now()):
+            logger.warning('AI job %s: its retry came after the job was given up as lost; it is not asked again', job.pk)
+            return 'lost'
         return 'retry'
-    job.status, job.result, job.packet, job.finished_at = status, {}, {}, timezone.now()  # the question (and any reply in it) goes too
-    job.save(update_fields=['status', 'result', 'packet', 'finished_at', 'error_category', 'updated_at'])
+    now = timezone.now()  # the question (and any reply in it) goes too
+    if not AI_JOB.move(mine, status, only_from=(AI_APPLYING,), result={}, packet={}, finished_at=now, error_category=job.error_category, updated_at=now):
+        logger.warning('AI job %s: it finished (%s) after it was given up as lost; it stays lost', job.pk, status)
+        return 'lost'
     return status
 
 
@@ -440,11 +448,19 @@ def housekeeping(now=None):
     for pk in AIJob.objects.filter(status='answered', answered_at__lt=now - APPLY_GRACE).values_list('pk', flat=True)[:200]:
         apply(pk)
         out['applied'] += 1
-    out['stuck'] = AIJob.objects.filter(status='applying', updated_at__lt=now - APPLY_STUCK).update(
-        status='failed', error_category='apply_lost', result={}, finished_at=now)
+    # A continuation that died (its worker was killed mid-apply): the job fails and its stage is told, as a failed call would be, so a stage that
+    # waits for the answer (a review, a template, a triage claim) does not wait for ever.
+    for job in AIJob.objects.filter(status=AI_APPLYING, updated_at__lt=now - APPLY_STUCK)[:200]:
+        if AI_JOB.move(AIJob.objects.filter(pk=job.pk, updated_at__lt=now - APPLY_STUCK), AI_FAILED, only_from=(AI_APPLYING,),
+                       error_category='apply_lost', result={}, finished_at=now, updated_at=now):
+            out['stuck'] += 1
+            try:
+                _handler(job.kind).job_failure(job, 'apply_lost', {})
+            except Exception:  # noqa: BLE001 - a stage that cannot be told never stops the housekeeping
+                logger.exception('AI job %s: its stage could not be told it was lost', job.pk)
     for job in AIJob.objects.filter(status='queued', created_at__lt=now - TTL)[:500]:
         out['expired'] += _expire(job, now)
-    AIJob.objects.filter(status__in=('applied', 'failed', 'expired'), finished_at__lt=now - KEEP).delete()
+    AIJob.objects.filter(status__in=(AI_APPLIED, AI_FAILED, AI_EXPIRED), finished_at__lt=now - KEEP).delete()
     return out
 
 
