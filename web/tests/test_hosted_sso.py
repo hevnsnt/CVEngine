@@ -30,6 +30,7 @@ from django.utils import timezone
 
 from dashboard.models import AuditLog, Org, OrgMembership, Project, UserProfile
 from hostedsso import gating, middleware as sso_middleware
+from hostedsso.common import sso_url, stepup_url
 from hostedsso.models import SsoIdentity, SsoJti
 from hostedsso.verify import ASSERTION, LOGOUT, SsoError, verify
 from tenancy import mfa
@@ -39,6 +40,7 @@ AUD = 'https://s-ab12cd34.cvengine.live'
 ISS = 'https://cvengine.live'
 SUB = '4711'
 EDGE = {'HTTP_X_CVL_EDGE_VERIFIED': '1'}
+EXCH = {**EDGE, 'HTTP_X_CVL_SSO_EXCHANGE': '1'}  # what nginx forwards on an exchange call behind a valid secret
 WEB = Path(__file__).resolve().parents[1]
 
 
@@ -225,6 +227,39 @@ class VerifyTests(KeyedCase, SimpleTestCase):
         os.utime(self.keys_file, ns=(1, time.time_ns() + 9_000_000_000))
         self.refused(self.token(), 'unknown_kid')
 
+    def test_an_empty_key_file_fails_closed_and_is_read_again_once_it_is_filled(self):
+        """The file is rewritten in place, so a read can land on the truncated, still empty file: nothing verifies, and the failure is not remembered."""
+        good = json.dumps({'keys': [jwk('k1', self.key)]})
+        self.keys_file.write_text('')
+        os.utime(self.keys_file, ns=(1, 4_000_000_000_000_000_000))
+        self.refused(self.token(), 'unknown_kid')
+        self.keys_file.write_text(good)
+        os.utime(self.keys_file, ns=(1, 4_000_000_000_000_000_000))  # the very same mtime as the truncated read
+        self.assertTrue(verify(self.token(), ASSERTION))
+
+    def test_a_half_written_key_file_fails_closed_and_the_failure_is_not_cached(self):
+        good = json.dumps({'keys': [jwk('k1', self.key)]})
+        broken_forms = (good[:len(good) // 2], '{"keys": [', '\x00' * len(good), ' ' * len(good), good[:-1], good.replace('{"keys": [', '{"keys": ', 1)[:-1])
+        for index, broken in enumerate(broken_forms):
+            mtime = 4_100_000_000_000_000_000 + index * 1_000_000_000  # each rewrite has its own mtime; the repair below keeps the broken one's
+            self.keys_file.write_text(broken)
+            os.utime(self.keys_file, ns=(1, mtime))
+            self.refused(self.token(), 'unknown_kid')
+            self.keys_file.write_text(good)
+            os.utime(self.keys_file, ns=(1, mtime))
+            self.assertTrue(verify(self.token(), ASSERTION), broken[:12])
+
+    def test_an_unreadable_key_file_fails_closed(self):
+        with mock.patch('hostedsso.verify.open', side_effect=PermissionError('no'), create=True):
+            self.write_keys([jwk('k1', self.key)])
+            self.refused(self.token(), 'unknown_kid')
+
+    def test_a_key_file_that_is_not_an_object_or_has_no_usable_key_fails_closed(self):
+        for text in ('[]', 'null', '{}', '{"keys": "x"}', '{"keys": [1, "a", null]}', '{"keys": [{"kid": "k1"}]}'):
+            self.keys_file.write_text(text)
+            os.utime(self.keys_file, ns=(1, time.time_ns() + 20_000_000_000 + len(text)))
+            self.refused(self.token(), 'unknown_kid')
+
     def test_jwk_and_other_key_carrying_header_members(self):
         for extra in ({'jwk': {'kty': 'OKP', 'crv': 'Ed25519', 'x': 'AAAA'}}, {'jku': 'https://evil.example/k'}, {'x5u': 'https://evil.example/c'},
                       {'x5c': ['AAAA']}, {'crit': ['exp']}, {'cty': 'JWT'}):
@@ -334,19 +369,18 @@ class VerifyTests(KeyedCase, SimpleTestCase):
 
 class FixedVectorTests(KeyedCase, SimpleTestCase):
     """The site repository publishes a deterministic vector (``test/fixtures/sso/vector.json``: a JWKS, an assertion and a logout token with the
-    time each is valid at). When it is on disk (or CVENGINE_SSO_VECTOR points to it) the verifier is checked against exactly what the signer
-    produces; otherwise these tests skip."""
+    time each is valid at). A copy lives in ``web/tests/fixtures/sso/`` (test data only: its key is the documented test seed, never a real one) and
+    the verifier is checked against exactly what the signer produces. CVENGINE_SSO_VECTOR may name another copy."""
+
+    VECTOR = WEB / 'tests' / 'fixtures' / 'sso' / 'vector.json'
 
     def load(self):
-        candidates = [os.environ.get('CVENGINE_SSO_VECTOR', ''), '/home/user/cvengine-live/test/fixtures/sso/vector.json',
-                      str(WEB.parents[1] / 'cvengine-live' / 'test' / 'fixtures' / 'sso' / 'vector.json')]
-        for candidate in candidates:
-            if candidate and Path(candidate).is_file():
-                data = json.loads(Path(candidate).read_text())
-                self.keys_file.write_text(json.dumps(data['jwks']))
-                os.utime(self.keys_file, ns=(1, time.time_ns() + 7_000_000_000))
-                return data
-        self.skipTest('no fixed SSO vector on disk')
+        path = Path(os.environ.get('CVENGINE_SSO_VECTOR') or self.VECTOR)
+        self.assertTrue(path.is_file(), f'the fixed SSO vector is missing: {path}')  # a failure, not a skip: the vector is part of this repository
+        data = json.loads(path.read_text())
+        self.keys_file.write_text(json.dumps(data['jwks']))
+        os.utime(self.keys_file, ns=(1, time.time_ns() + 7_000_000_000))
+        return data
 
     def test_the_assertion_and_the_logout_token_verify_at_their_time(self):
         data = self.load()
@@ -398,7 +432,7 @@ class SsoCase(KeyedCase, TestCase):
         self.user = User.objects.create_user('owner', 'owner@example.com', 'pw-correct-horse-1')
         self.identity = SsoIdentity.objects.create(user=self.user, issuer=ISS, subject=SUB, email_seen='owner@example.com')
 
-    def exchange(self, assertion=None, client=None, headers=EDGE, method='post', body=None, **claims):
+    def exchange(self, assertion=None, client=None, headers=EXCH, method='post', body=None, **claims):
         client = client or Client()
         if assertion is None:
             assertion = self.token(good_claims(**claims))
@@ -572,7 +606,7 @@ class ExchangeTests(SsoCase):
 
 
 class BackchannelTests(SsoCase):
-    def logout(self, token=None, headers=EDGE, body=None, method='post', **claims):
+    def logout(self, token=None, headers=EXCH, body=None, method='post', **claims):
         token = token or self.token(logout_claims(**claims), purpose=LOGOUT)
         payload = body if body is not None else json.dumps({'logout_token': token})
         client = Client()
@@ -779,6 +813,29 @@ class StepUpTests(SsoCase):
             response = getattr(fresh, method)(url, content_type='application/json', **fresh_headers)
             self.assertNotEqual(response.json().get('error') if response['Content-Type'].startswith('application/json') else '', 'recent_auth_required')
 
+    def test_the_refusal_names_the_step_up_route_with_the_validated_path(self):
+        old, headers = self.client_with_age(3000)
+        response = old.post('/api/v1/tokens', content_type='application/json', **headers)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json(), {'error': 'recent_auth_required', 'message': 'confirm your sign-in again to do this',
+                                           'reauth_url': '/_cvl/sso?prompt=stepup&next=%2Fcve%2F'})  # a POST: the landing page, never the POST target
+        response = old.get('/api/v1/sentinels/enroll?x=1&y=a b', **headers)
+        self.assertEqual(response.json()['reauth_url'], '/_cvl/sso?prompt=stepup&next=%2Fapi%2Fv1%2Fsentinels%2Fenroll%3Fx%3D1%26y%3Da%2520b')
+        self.assertTrue(all(url.startswith('/_cvl/sso?prompt=stepup&next=%2F') for url in
+                            [old.delete(u, content_type='application/json', **headers).json()['reauth_url'] for u in ('/api/v1/tokens/3', '/cve/api/admin/projects/1')]))
+
+    def test_the_reauth_url_never_carries_an_unvalidated_next(self):
+        request = RequestFactory().get('//evil.example/x', HTTP_HOST='testserver')
+        request.session = {'sso_sub': SUB, 'sso_auth_time': 1}
+        self.assertEqual(stepup_url(request, '//evil.example'), '/_cvl/sso?prompt=stepup&next=%2Fcve%2F')
+        self.assertEqual(stepup_url(request, '/\\evil.example'), '/_cvl/sso?prompt=stepup&next=%2Fcve%2F')
+        self.assertEqual(stepup_url(request, 'https://evil.example/'), '/_cvl/sso?prompt=stepup&next=%2Fcve%2F')
+        self.assertEqual(stepup_url(request, '/ok\r\nSet-Cookie: a=b'), '/_cvl/sso?prompt=stepup&next=%2Fcve%2F')
+        self.assertEqual(stepup_url(request, '/cve/p/'), '/_cvl/sso?prompt=stepup&next=%2Fcve%2Fp%2F')
+
+    def test_only_the_step_up_refusal_uses_the_sso_route(self):
+        self.assertTrue(sso_url(RequestFactory().get('/'), '/cve/p/').startswith('/_cvl/start?next='))
+
     def test_reads_and_ordinary_writes_are_not_step_up(self):
         old, headers = self.client_with_age(3000)
         for method, url in (('get', '/cve/api/admin/users'), ('get', '/api/v1/tokens'), ('get', '/cve/api/account/me'), ('patch', '/cve/api/account/profile')):
@@ -800,6 +857,101 @@ class StepUpTests(SsoCase):
         client = Client()
         client.force_login(self.user)
         self.assertNotIn(b'recent_auth_required', client.post('/api/v1/tokens', content_type='application/json').content)
+
+
+class EdgeContractTests(SsoCase):
+    """What nginx forwards (config/nginx/rengine.conf) is exactly what the application accepts, and nothing looser."""
+
+    def post(self, url, body, headers):
+        return Client().post(url, data=json.dumps(body), content_type='application/json', **headers)
+
+    def test_the_exchange_header_must_be_exactly_one_on_both_endpoints(self):
+        token, logout = self.token(), self.token(purpose=LOGOUT)
+        for url, body in (('/sso/exchange', {'assertion': token}), ('/sso/backchannel-logout', {'logout_token': logout})):
+            for value in (None, '', '0', 'true', '11', ' 1', '1 ', 'yes', '01'):
+                headers = dict(EDGE) if value is None else {**EDGE, 'HTTP_X_CVL_SSO_EXCHANGE': value}
+                response = self.post(url, body, headers)
+                self.assertEqual(response.status_code, 404, (url, value))
+                self.assertEqual(response.content, b'', (url, value))
+            self.assertEqual(Client().get(url, **EXCH).status_code, 405)  # with all three in place the method is what is refused
+        self.assertFalse(SsoJti.objects.exists())
+        self.assertFalse(Session.objects.exists())
+
+    def test_the_verified_flag_must_be_exactly_one_even_with_the_exchange_header(self):
+        for value in (None, '0', 'true', '11', ''):
+            headers = {'HTTP_X_CVL_SSO_EXCHANGE': '1'} if value is None else {'HTTP_X_CVL_EDGE_VERIFIED': value, 'HTTP_X_CVL_SSO_EXCHANGE': '1'}
+            self.assertEqual(self.post('/sso/exchange', {'assertion': self.token()}, headers).status_code, 404, value)
+        self.assertFalse(Session.objects.exists())
+
+    def test_both_headers_together_are_accepted(self):
+        self.assertEqual(self.post('/sso/exchange', {'assertion': self.token()}, EXCH).status_code, 204)
+        self.assertEqual(self.post('/sso/backchannel-logout', {'logout_token': self.token(purpose=LOGOUT)}, EXCH).status_code, 204)
+
+    def test_the_exchange_header_alone_does_not_bind_a_session_or_vouch_for_the_edge(self):
+        client = self.signed_in()
+        sid = client.session['sso_sid']
+        headers = {'HTTP_X_CVL_SSO_EXCHANGE': '1', 'HTTP_X_CVL_SSO_SUB': SUB, 'HTTP_X_CVL_SSO_SID': sid}
+        self.assertEqual(client.get('/cve/api/account/me', **headers).status_code, 401)
+
+    def test_uuid_subjects_and_32_hex_sids_travel_end_to_end(self):
+        uuid_sub = '3f2b8c1e-5d4a-4e7b-9a10-6c2d8e4f1a77'  # a site users.id as text: 36 characters, within what nginx forwards
+        self.assertRegex(uuid_sub, r'^[A-Za-z0-9_-]{1,64}$')
+        self.identity.subject = uuid_sub
+        self.identity.save()
+        sid = os.urandom(16).hex()
+        client = Client()
+        self.assertEqual(self.exchange(client=client, sub=uuid_sub, sid=sid).status_code, 204)
+        self.assertEqual((client.session['sso_sub'], client.session['sso_sid']), (uuid_sub, sid))
+        self.assertEqual(client.get('/cve/api/account/me', **self.headers_for(sub=uuid_sub, sid=sid)).status_code, 200)
+        self.assertEqual(client.get('/cve/api/account/me', **self.headers_for(sub=uuid_sub, sid=sid.upper())).status_code, 401)
+
+    def test_a_subject_or_sid_nginx_would_not_forward_is_refused_at_the_exchange(self):
+        for sub in ('a.b', 'a:b', 'a b', 'x' * 65, '', 'a/b'):
+            self.refused_exchange(sub=sub)
+        for sid in ('A' * 32, 'a' * 31, 'a' * 33, 'g' * 32, 'a' * 31 + ' '):
+            self.refused_exchange(sid=sid)
+
+    def refused_exchange(self, **claims):
+        with self.assertLogs('hostedsso.verify', 'WARNING'):
+            response = self.exchange(**claims)
+        self.assertEqual(response.status_code, 401, claims)
+
+
+class SessionCookieTests(SsoCase):
+    """The exchange answer's Set-Cookie header, with the cookie settings a hosted server with SSO really computes (a clean interpreter)."""
+
+    def test_the_set_cookie_header_of_the_exchange(self):
+        got = settings_probe(CVENGINE_HOSTED='1', CVENGINE_SSO='1')
+        self.assertEqual(got['SESSION_COOKIE_NAME'], '__Host-cve_s')
+        with override_settings(SESSION_COOKIE_NAME=got['SESSION_COOKIE_NAME'], SESSION_COOKIE_SECURE=got['SESSION_COOKIE_SECURE'],
+                               SESSION_COOKIE_HTTPONLY=got['SESSION_COOKIE_HTTPONLY'], SESSION_COOKIE_SAMESITE=got['SESSION_COOKIE_SAMESITE'],
+                               SESSION_COOKIE_PATH=got['SESSION_COOKIE_PATH'], SESSION_COOKIE_DOMAIN=got['SESSION_COOKIE_DOMAIN']):
+            response = self.exchange()
+        self.assertEqual(response.status_code, 204)
+        self.assertIn('__Host-cve_s', response.cookies)
+        self.assertNotIn('sessionid', response.cookies)  # the stock name is not used
+        header = response.cookies.output(header='Set-Cookie:').strip()
+        self.assertRegex(header, r'^Set-Cookie: __Host-cve_s=[A-Za-z0-9]{20,}; ')
+        attributes = [part.strip() for part in header.split(';')[1:]]
+        lowered = [a.lower() for a in attributes]
+        self.assertIn('secure', lowered)
+        self.assertIn('httponly', lowered)
+        self.assertIn('samesite=lax', lowered)
+        self.assertIn('path=/', lowered)
+        self.assertFalse([a for a in lowered if a.startswith('domain')], header)  # a __Host- cookie must not carry Domain
+        morsel = response.cookies['__Host-cve_s']
+        self.assertEqual((morsel['domain'], morsel['path'], bool(morsel['secure']), bool(morsel['httponly']), morsel['samesite']), ('', '/', True, True, 'Lax'))
+        self.assertTrue(morsel['max-age'] and 0 < int(morsel['max-age']) <= 43200)
+
+    def test_the_cookie_value_is_a_session_the_next_request_can_use(self):
+        got = settings_probe(CVENGINE_HOSTED='1', CVENGINE_SSO='1')
+        with override_settings(SESSION_COOKIE_NAME=got['SESSION_COOKIE_NAME'], SESSION_COOKIE_SECURE=True):
+            client = Client()
+            sid = os.urandom(16).hex()
+            self.assertEqual(self.exchange(client=client, sid=sid).status_code, 204)
+            self.assertEqual(client.get('/cve/api/account/me', **self.headers_for(sid=sid)).status_code, 200)
+            self.assertIn('__Host-cve_s', client.cookies)
+            self.assertNotIn('sessionid', client.cookies)
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------------------
@@ -825,22 +977,22 @@ class GatingTests(SsoCase):
         self.assertEqual((response.status_code, response['Location']), (302, '/mfa/verify/'))
         page = Client().get('/login/?next=/cve/p/')
         self.assertContains(page, 'Sign in with cvengine.live')
-        self.assertContains(page, '/_cvl/sso?next=%2Fcve%2Fp%2F')
+        self.assertContains(page, '/_cvl/start?next=%2Fcve%2Fp%2F')
 
     def test_enforce_refuses_the_local_post_and_sends_the_visitor_to_the_edge(self):
         with self.enforce:
             client, response = self.login(next='/cve/p/hosts/?x=1')
-            self.assertEqual((response.status_code, response['Location']), (302, '/_cvl/sso?next=%2Fcve%2Fp%2Fhosts%2F%3Fx%3D1'))
+            self.assertEqual((response.status_code, response['Location']), (302, '/_cvl/start?next=%2Fcve%2Fp%2Fhosts%2F%3Fx%3D1'))
             self.assertNotIn(SESSION_KEY, client.session)
             self.assertNotIn('mfa_pending', client.session)
             for headers in (EDGE, {}):
                 _, response = self.login(headers=headers)
                 self.assertEqual(response.status_code, 302)
-                self.assertTrue(response['Location'].startswith('/_cvl/sso?next='))
+                self.assertTrue(response['Location'].startswith('/_cvl/start?next='))
 
     def test_enforce_also_redirects_the_login_page(self):
         with self.enforce:
-            self.assertEqual(Client().get('/login/?next=/cve/p/')['Location'], '/_cvl/sso?next=%2Fcve%2Fp%2F')
+            self.assertEqual(Client().get('/login/?next=/cve/p/')['Location'], '/_cvl/start?next=%2Fcve%2Fp%2F')
 
     def test_enforce_refuses_the_django_admin_login(self):
         admin = User.objects.create_superuser('root', 'r@example.com', self.password)
@@ -848,23 +1000,23 @@ class GatingTests(SsoCase):
             client = Client()
             for method in (client.get, client.post):
                 response = method('/admin/login/?next=/admin/', **({'data': {'username': 'root', 'password': self.password}} if method == client.post else {}))
-                self.assertEqual((response.status_code, response['Location']), (302, '/_cvl/sso?next=%2Fadmin%2F'))
+                self.assertEqual((response.status_code, response['Location']), (302, '/_cvl/start?next=%2Fadmin%2F'))
             self.assertNotIn(SESSION_KEY, client.session)
         self.assertTrue(admin.pk)
 
     def test_the_next_value_is_validated(self):
         with self.enforce:
-            default = '/_cvl/sso?next=%2Fcve%2F'
+            default = '/_cvl/start?next=%2Fcve%2F'
             for bad in ('//evil.example', '/\\evil.example', 'https://evil.example/x', 'javascript:alert(1)', '/ok\r\nSet-Cookie: a=b', '/with space', 'evil',
                         '/' + 'a' * 2100):
                 response = Client().get('/login/', {'next': bad})
                 self.assertEqual(response['Location'], default, bad[:30])
-            self.assertEqual(Client().get('/login/', {'next': '/cve/p/'})['Location'], '/_cvl/sso?next=%2Fcve%2Fp%2F')
+            self.assertEqual(Client().get('/login/', {'next': '/cve/p/'})['Location'], '/_cvl/start?next=%2Fcve%2Fp%2F')
 
     def test_break_glass_needs_the_edge_header(self):
         with self.breakglass(1800):
             _, response = self.login()
-            self.assertTrue(response['Location'].startswith('/_cvl/sso'))
+            self.assertTrue(response['Location'].startswith('/_cvl/start'))
             _, response = self.login(headers=EDGE)
             self.assertEqual(response['Location'], '/mfa/verify/')
 
@@ -887,7 +1039,7 @@ class GatingTests(SsoCase):
         UserProfile.objects.filter(pk=self.profile.pk).update(mfa_enabled=False, mfa_secret='')
         with self.breakglass(1800):
             client, response = self.login(headers=EDGE)
-            self.assertTrue(response['Location'].startswith('/_cvl/sso'))
+            self.assertTrue(response['Location'].startswith('/_cvl/start'))
             self.assertNotIn(SESSION_KEY, client.session)
         self.assertTrue(AuditLog.objects.filter(action='sso.breakglass_refused').exists())
 
@@ -910,14 +1062,14 @@ class GatingTests(SsoCase):
     def test_a_window_longer_than_an_hour_does_not_open_local_login(self):
         with override_settings(CVENGINE_SSO_ENFORCE=True, CVENGINE_SSO_BREAKGLASS_UNTIL=int(time.time()) + 7200):
             _, response = self.login(headers=EDGE)
-            self.assertTrue(response['Location'].startswith('/_cvl/sso'))
+            self.assertTrue(response['Location'].startswith('/_cvl/start'))
 
     def test_an_expired_window_closes_a_started_login(self):
         with self.breakglass(1800):
             client, _ = self.login(headers=EDGE)
         with self.enforce:
             response = client.post('/mfa/verify/', {'code': mfa.totp(self.profile.mfa_secret)}, **EDGE)
-            self.assertTrue(response['Location'].startswith('/_cvl/sso'))
+            self.assertTrue(response['Location'].startswith('/_cvl/start'))
             self.assertNotIn(SESSION_KEY, client.session)
 
     def test_the_window_is_ignored_when_not_enforcing(self):
@@ -935,7 +1087,7 @@ class GatingTests(SsoCase):
         with self.enforce:
             client = Client()
             response = client.post(f'/invite/{token}/', {'password': 'A-long-unusual-pw-9187', 'confirm': 'A-long-unusual-pw-9187'})
-            self.assertTrue(response['Location'].startswith('/_cvl/sso'))
+            self.assertTrue(response['Location'].startswith('/_cvl/start'))
             self.assertNotIn(SESSION_KEY, client.session)
 
 
@@ -948,7 +1100,7 @@ def settings_probe(**env):
     code = ("import json; from django.conf import settings as s; "
             "print(json.dumps({k: getattr(s, k) for k in ('CVENGINE_HOSTED','CVENGINE_SSO','CVENGINE_SSO_ENFORCE','SESSION_COOKIE_NAME','CSRF_COOKIE_NAME',"
             "'SESSION_COOKIE_SECURE','CSRF_COOKIE_SECURE','CVENGINE_SSO_KEYS_FILE','CVENGINE_SSO_ISSUER','CVENGINE_SSO_MAX_AUTH_AGE',"
-            "'CVENGINE_SSO_STEPUP_AGE','CVENGINE_SSO_BREAKGLASS_UNTIL','LOGIN_REQUIRED_IGNORE_PATHS')}))")
+            "'CVENGINE_SSO_STEPUP_AGE','CVENGINE_SSO_BREAKGLASS_UNTIL','LOGIN_REQUIRED_IGNORE_PATHS','SESSION_COOKIE_HTTPONLY','SESSION_COOKIE_SAMESITE','SESSION_COOKIE_PATH','SESSION_COOKIE_DOMAIN')}))")
     base = {k: v for k, v in os.environ.items() if not k.startswith(('CVENGINE_HOSTED', 'CVENGINE_SSO'))}
     base.update(DJANGO_SETTINGS_MODULE='reNgine.settings', DEBUG='0', **env)
     done = subprocess.run([sys.executable, '-I', '-c', 'import sys; sys.path.insert(0, %r); import django; ' % str(WEB) + code], env=base, capture_output=True,
