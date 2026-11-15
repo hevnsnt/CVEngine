@@ -28,7 +28,7 @@ COMPACT = re.compile(r'^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$')
 HEX32 = re.compile(r'^[0-9a-f]{32}$')
 HEX64 = re.compile(r'^[0-9a-f]{64}$')
 KID = re.compile(r'^[A-Za-z0-9._:-]{1,128}$')
-SUBJECT = re.compile(r'^[A-Za-z0-9._:-]{1,64}$')
+SUBJECT = re.compile(r'^[A-Za-z0-9_-]{1,64}$')  # the shape nginx lets through in X-CVL-SSO-Sub: anything else could never be bound
 AMR_MFA = ('otp', 'hwk')
 
 
@@ -112,8 +112,11 @@ def public_keys():
                 try:
                     keys = _load_keys(path)
                 except (OSError, ValueError):
+                    # Empty or half-written (the file is rewritten in place) or unreadable: no keys now, and the failure is NOT remembered, so
+                    # the next call reads the file again instead of waiting for its stat to change.
                     logger.warning('sso: the key file could not be read')
-                    keys = {}
+                    _cache.update(sig=None, keys={})
+                    return {}
             _cache.update(sig=signature, keys=keys)
         return _cache['keys']
 

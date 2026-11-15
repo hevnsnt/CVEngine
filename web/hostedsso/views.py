@@ -1,6 +1,6 @@
 """The two server-to-server endpoints of single sign-on, called by the edge only: the one-time assertion exchange and the back-channel logout.
 
-Both answer 404 unless SSO is on and nginx vouched for the edge secret, 405 to anything but POST, and never say which check failed."""
+Both answer 404 unless SSO is on, nginx vouched for the edge secret (``X-CVL-Edge-Verified: 1``) and the call carries ``X-CVL-SSO-Exchange: 1``, 405 to anything but POST, and never say which check failed."""
 import json
 import logging
 import time
@@ -16,7 +16,7 @@ from django.http import HttpResponse, JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
-from hostedsso.common import edge_verified, sso_active
+from hostedsso.common import edge_verified, exchange_header_ok, sso_active
 from hostedsso.models import SsoIdentity, SsoJti
 from hostedsso.verify import ASSERTION, LOGOUT, SsoError, verify
 from reNgine.client_ip import client_ip
@@ -40,7 +40,7 @@ def _throttle_key(request):
 
 def _gate(request):
     """None to carry on, else the response for a request that must not be served."""
-    if not sso_active() or not edge_verified(request):
+    if not sso_active() or not edge_verified(request) or not exchange_header_ok(request):
         return HttpResponse(status=404)
     if request.method != 'POST':
         response = HttpResponse(status=405)

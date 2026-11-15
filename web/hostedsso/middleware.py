@@ -14,7 +14,7 @@ from django.http import HttpResponseRedirect, JsonResponse
 from django.shortcuts import render
 from django.utils.crypto import constant_time_compare
 
-from hostedsso.common import SSO_START, edge_verified, safe_next, sso_active, sso_url
+from hostedsso.common import SSO_START, edge_verified, safe_next, sso_active, stepup_url
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ def require_recent_auth(request, max_age=None):
     """None when the request may go on, else the refusal response (403, with the address to sign in again)."""
     if has_recent_auth(request, max_age):
         return None
-    reauth = sso_url(request, request.get_full_path() if request.method == 'GET' else None)
+    reauth = stepup_url(request, request.get_full_path() if request.method == 'GET' else None)
     if request.path.startswith(API_PREFIXES):
         return JsonResponse({'error': 'recent_auth_required', 'message': 'confirm your sign-in again to do this', 'reauth_url': reauth}, status=403)
     return render(request, 'error.html', {'code': 403, 'title': 'Confirm your sign-in',

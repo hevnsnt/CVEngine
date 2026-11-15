@@ -6,7 +6,8 @@ from django.conf import settings
 from django.shortcuts import resolve_url
 from django.utils.http import url_has_allowed_host_and_scheme
 
-SSO_START = '/_cvl/sso'
+LOGIN_START = '/_cvl/start'  # the edge sets the browser nonce here, then sends the visitor to cvengine.live (the normal sign-in)
+SSO_START = '/_cvl/sso'  # re-authentication of a live scanner session at the edge (a lapsed session, a step-up)
 NEXT_RE = re.compile(r'^/(?![/\\])[^\s]{0,2047}$')  # the interface contract's rule for ``next``
 
 
@@ -24,6 +25,12 @@ def edge_verified(request):
     return request.META.get('HTTP_X_CVL_EDGE_VERIFIED') == '1'
 
 
+def exchange_header_ok(request):
+    """True only when the edge marked the call as an SSO exchange: nginx forwards ``X-CVL-SSO-Exchange`` as exactly ``1`` and only behind a valid
+    edge secret (any other value, or none, arrives as no header at all)."""
+    return request.META.get('HTTP_X_CVL_SSO_EXCHANGE') == '1'
+
+
 def safe_next(request, candidate):
     """``candidate`` when it is a same-site path the contract allows, else the default landing page."""
     if (isinstance(candidate, str) and NEXT_RE.match(candidate)
@@ -33,4 +40,10 @@ def safe_next(request, candidate):
 
 
 def sso_url(request, candidate=None):
-    return SSO_START + '?' + urlencode({'next': safe_next(request, candidate)})
+    """Where a visitor with no session goes to sign in: the edge's ``/_cvl/start`` with a validated ``next``."""
+    return LOGIN_START + '?' + urlencode({'next': safe_next(request, candidate)})
+
+
+def stepup_url(request, candidate=None):
+    """The ``reauth_url`` of a step-up refusal: ``/_cvl/sso?prompt=stepup&next=<urlencoded validated path>`` (a live session that must sign in again)."""
+    return SSO_START + '?' + urlencode({'prompt': 'stepup', 'next': safe_next(request, candidate)})
