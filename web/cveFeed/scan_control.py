@@ -234,9 +234,11 @@ def close_update_window(row, now):
 
 
 def release_update_pause():
-    """Undo request_drain_pause once the update it was waiting for has finished, but only a pause this module set:
+    """Undo request_drain_pause once the update it was waiting for has finished, but only a pause the update set:
     an operator's own pause (paused_by_update False) is never cleared here, exactly like request_drain_pause never
-    claims one that already exists. Closes the update window and starts the grace after it."""
+    claims one that already exists, and neither is the watchdog's pause for disk or memory (``OWNER_WATCHDOG``): the
+    pressure it was set for may still be there, and the watchdog lifts it itself once it is gone. Closes the update
+    window and starts the grace after it."""
     from django.db import transaction
     from django.utils import timezone as tz
 
@@ -245,11 +247,62 @@ def release_update_pause():
         row = ScanControl.objects.select_for_update().get_or_create(pk=1)[0]
         now = tz.now()
         fields = close_update_window(row, now)
-        if row.paused and row.paused_by_update:
+        if pause_owner(row) == OWNER_UPDATE:
             row.paused, row.paused_by_update, row.reason, row.actor, row.changed_at = False, False, '', '', now
             fields += ['paused', 'paused_by_update', 'reason', 'actor', 'changed_at']
         if fields:
             row.save(update_fields=fields)
+
+
+# Who holds the global pause. Three owners share the one ScanControl row: a person (Pause all scanning: running scans are stopped), an update
+# (request_drain_pause: new dispatch waits, running work finishes, the update window holds Sentinel leases) and the watchdog's pause for disk or
+# memory pressure (request_pressure_pause: new dispatch waits, running work finishes, but no update window and no held leases, so Sentinel tasks
+# still expire as usual). The update's and the watchdog's are both drain pauses (paused_by_update True: never an operator's, never stops running
+# work); the watchdog's is told apart by the reason it always starts with, so no schema change was needed. Each release lifts only its own.
+OWNER_PERSON, OWNER_UPDATE, OWNER_WATCHDOG = 'person', 'update', 'watchdog'
+WATCHDOG_PAUSE_REASON = 'Paused by the watchdog: '  # the same text as cveFeed.watchdog.PAUSE_REASON (a test keeps them equal)
+
+
+def pause_owner(row):
+    """``'person'``, ``'update'``, ``'watchdog'``, or None when ``row`` (a ScanControl, or None) is not paused."""
+    if row is None or not row.paused:
+        return None
+    if not row.paused_by_update:
+        return OWNER_PERSON
+    return OWNER_WATCHDOG if str(row.reason or '').startswith(WATCHDOG_PAUSE_REASON) else OWNER_UPDATE
+
+
+def request_pressure_pause(why):
+    """The watchdog's pause while the host is short of disk or memory (cveFeed.watchdog R7): the starting of new work waits and running work carries
+    on, like an update's drain pause, but it is its own: it opens no update window and holds no Sentinel lease (a memory pause can last for hours, and
+    Sentinel task expiry must not freeze meanwhile). A no-op when scanning is already paused by anyone. Returns True when it paused."""
+    from django.db import transaction
+    from django.utils import timezone as tz
+
+    from cveFeed.models import ScanControl
+    with updater_idle(), transaction.atomic():
+        row = ScanControl.objects.select_for_update().get_or_create(pk=1)[0]
+        if row.paused:
+            return False
+        row.paused, row.paused_by_update, row.reason, row.actor, row.changed_at, row.last_error = \
+            True, True, (WATCHDOG_PAUSE_REASON + why)[:200], '', tz.now(), ''
+        row.save(update_fields=['paused', 'paused_by_update', 'reason', 'actor', 'changed_at', 'last_error'])
+    return True
+
+
+def release_pressure_pause():
+    """Lift the watchdog's pressure pause, and only that one (a person's or an update's pause is left as it is). Returns True when it lifted one."""
+    from django.db import transaction
+    from django.utils import timezone as tz
+
+    from cveFeed.models import ScanControl
+    with transaction.atomic():
+        row = ScanControl.objects.select_for_update().filter(pk=1).first()
+        if pause_owner(row) != OWNER_WATCHDOG:
+            return False
+        row.paused, row.paused_by_update, row.reason, row.actor, row.changed_at = False, False, '', '', tz.now()
+        row.save(update_fields=['paused', 'paused_by_update', 'reason', 'actor', 'changed_at'])
+    return True
 
 
 def abort_running_scans(actor):
