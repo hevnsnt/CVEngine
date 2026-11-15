@@ -43,6 +43,8 @@ from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
 
+from reNgine.state_machines import RUN_DONE, RUN_FAILED, RUN_READY, RUN_RUNNING, RUN_WAITING, STAGE_RUN
+
 logger = logging.getLogger(__name__)
 
 
@@ -155,6 +157,7 @@ class Pass:
     def __init__(self, row, adapter_name):
         self.row = row
         self.adapter = adapter_name
+        self.rounds = row.rounds or 0  # the round this pass runs: the run is this pass's only while it is still in it (``_mine``)
         self.tasks = dict(row.tasks or {})  # str(task id) -> wait state (``sentinel_dispatch._Dispatch.state``)
         engine = (row.context or {}).get('_engine') or {}
         self.memo = dict(engine.get('once') or {})
@@ -280,8 +283,22 @@ class Pass:
         history = list(row.history or [])
         history.append({'waiting_since': now.isoformat()})
         row.history = history[-HISTORY_KEEP:]
-        row.save()
+        if row.pk is None:
+            row.save()  # the first pass: the run's first save
+            return row.deadline
+        # what the full save wrote before, except the state (the move) and the round (the condition)
+        fields = {f.attname: getattr(row, f.attname) for f in row._meta.concrete_fields if f.attname not in ('id', 'state', 'rounds', 'updated_at')}
+        if not STAGE_RUN.move(_mine(self), RUN_WAITING, only_from=(RUN_RUNNING, RUN_READY), updated_at=now, **fields):
+            return None  # this pass outlived its lease and another worker resumed the run: that pass owns it now
+        row.state = RUN_WAITING
         return row.deadline
+
+
+def _mine(p):
+    """The run of pass ``p`` while it is still this pass's: in the round the pass started in. A pass that outlived its lease was taken back by the
+    tick (running -> ready) and, once another worker resumed it, the run is in the next round; nothing this pass writes may then change it."""
+    from agentapi.models import StageRun
+    return StageRun.objects.filter(pk=p.row.pk, rounds=p.rounds)
 
 
 def next_deadline(tasks, now):
@@ -437,17 +454,20 @@ def _execute(row, body, first_pass):
                 return _waiting(p)
             except BaseException as exc:
                 _local.active = previous
-                _close(p, 'failed', f'{type(exc).__name__}: {exc}')
+                _close(p, RUN_FAILED, f'{type(exc).__name__}: {exc}')
                 raise
     finally:
         _local.active = previous
-    _close(p, 'done')
+    _close(p, RUN_DONE)
     return result
 
 
 def _waiting(p):
     deadline = p.save_waiting()
     pk = p.row.pk
+    if deadline is None:  # another worker owns the run now: it schedules its own drive
+        logger.warning('stage run %s: a pass that outlived its lease stopped; the run is another worker\'s now', pk)
+        return {'status': WAITING, 'stage_run': pk, 'stage': p.stage, 'superseded': True, 'scan_id': p.row.scan_id}
     _schedule_drive(pk, deadline)
     _try_ready(pk)  # a task that ended before the run was saved has no run to wake: look now
     return {'status': WAITING, 'stage_run': pk, 'stage': p.stage, 'tasks': len(p.row.task_ids or []), 'scan_id': p.row.scan_id}
@@ -455,14 +475,16 @@ def _waiting(p):
 
 def _close(p, state, error=''):
     """End a run: its leftover running activity lines are closed, its held claims released, and its row (when it was ever saved) says how it ended."""
-    from agentapi.models import StageRun
     if not p.row.pk:
         return  # it never waited: nothing differs from a stage that ran in one go
+    # only while the run is still this pass's (its round, running or taken back by the tick but not resumed): a pass that outlived its lease
+    # must not end the run another worker resumed, nor release the claims and close the activity lines that pass now uses
+    if not STAGE_RUN.move(_mine(p), state, only_from=(RUN_RUNNING, RUN_READY), finished_at=timezone.now(), lease_until=None,
+                          error=(error or '')[:300], tasks=p.tasks, context={**(p.row.context or {}), '_engine': p.engine()}):
+        logger.warning('stage run %s: a pass that outlived its lease ended (%s); the run is another worker\'s now, left as it is', p.row.pk, state)
+        return
     _settle_leftovers(p)
     _release_claims(p.claims)
-    if p.row.pk:
-        StageRun.objects.filter(pk=p.row.pk).update(state=state, finished_at=timezone.now(), lease_until=None, error=(error or '')[:300],
-                                                    tasks=p.tasks, context={**(p.row.context or {}), '_engine': p.engine()})
 
 
 def _settle_leftovers(p):
@@ -571,7 +593,7 @@ def _try_ready(pk, ended=None):
     refill = bool(((row.context or {}).get('_engine') or {}).get('refill'))
     if active and not (refill and ended is not None and ended in (row.task_ids or []) and ended not in active):
         return False
-    if not StageRun.objects.filter(pk=pk, state='waiting').update(state='ready', woke_at=timezone.now()):
+    if not STAGE_RUN.move(StageRun.objects.filter(pk=pk), RUN_READY, only_from=(RUN_WAITING,), woke_at=timezone.now()):
         return False
     _send_resume(pk, row.queue)
     return True
@@ -606,8 +628,7 @@ def resume(pk):
     waiting marker when the stage stops again). A run another worker already took, or that is no longer ready, is left alone."""
     from agentapi.models import StageRun
     now = timezone.now()
-    if not StageRun.objects.filter(pk=pk, state='ready').update(state='running', lease_until=now + LEASE, resumed_at=now,
-                                                                rounds=F('rounds') + 1):
+    if not STAGE_RUN.move(StageRun.objects.filter(pk=pk), RUN_RUNNING, lease_until=now + LEASE, resumed_at=now, rounds=F('rounds') + 1):
         return {'stage_run': pk, 'skipped': 'not ready (another worker has it, or it ended)'}
     row = StageRun.objects.get(pk=pk)
     load_adapters()
@@ -620,7 +641,8 @@ def resume(pk):
         StageRun.objects.filter(pk=pk).update(history=history)
     adapter = ADAPTERS.get(row.kind)
     if adapter is None:
-        StageRun.objects.filter(pk=pk).update(state='failed', finished_at=now, error=f'no adapter {row.kind!r} in this version'[:300])
+        STAGE_RUN.move(StageRun.objects.filter(pk=pk, rounds=row.rounds), RUN_FAILED, only_from=(RUN_RUNNING,), finished_at=now,
+                       error=f'no adapter {row.kind!r} in this version'[:300])
         logger.error('stage run %s: no adapter %r is registered; it cannot be continued', pk, row.kind)
         return {'stage_run': pk, 'error': 'no adapter'}
     context = {k: v for k, v in (row.context or {}).items() if not k.startswith('_')}
@@ -755,7 +777,7 @@ def tick(now=None):
         _send_resume(row.pk, row.queue)
         counts['requeued'] += 1
     for row in StageRun.objects.filter(state='running', lease_until__lt=now).only('pk', 'queue')[:200]:
-        if StageRun.objects.filter(pk=row.pk, state='running', lease_until__lt=now).update(state='ready', woke_at=now, lease_until=None):
+        if STAGE_RUN.move(StageRun.objects.filter(pk=row.pk, lease_until__lt=now), RUN_READY, only_from=(RUN_RUNNING,), woke_at=now, lease_until=None):
             _send_resume(row.pk, row.queue)
             counts['recovered'] += 1
     return {k: v for k, v in counts.items() if v}

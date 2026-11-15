@@ -51,6 +51,7 @@ from agentapi.auth import SCOPE_SENTINEL, create_token
 from agentapi.models import SENTINEL_ACTIVE_STATUSES, Agent, SentinelEnrollment, SentinelTask
 from agentapi.services import ApiError, AssetFilter
 from dashboard.models import AuditLog
+from reNgine.state_machines import SENTINEL_TASK
 from tenancy import audit, roles
 
 logger = logging.getLogger(__name__)
@@ -1678,6 +1679,15 @@ def _scrubbed(task):
     return {'target': {**target, 'token': '***'}} if task.kind in ('wpscan', 'wpscan_thorough') and target.get('token') not in (None, '', '***') else {}
 
 
+def _move_task(queryset, status, only_from=None, target=None, **fields):
+    """``SENTINEL_TASK.move`` for a task row, with the scrubbed ``target`` of ``_scrubbed`` written once the move is made (``Machine.move`` names its
+    own argument ``target``). Returns how many rows moved."""
+    moved = SENTINEL_TASK.move(queryset, status, only_from=only_from, **fields)
+    if moved and target is not None:
+        queryset.update(target=target)
+    return moved
+
+
 def scrub_values(task_id):
     """Drop the secret values (and the context a scanner cut around them) from the stored result of a ``secrets_scan`` or ``route_probe`` task once its
     findings are filed in the inventory (``cveFeed.secrets_inventory``, which fingerprints and masks them there). A result is stored as the scanner sent
@@ -1724,8 +1734,8 @@ def _end_as_expired(task, reason, now):
     # the agent is cleared (nothing may treat the task as still held), but who held it stays in the result: the administrator alert judges each Sentinel
     # on its own tasks, and a Sentinel whose tasks all expire must be named
     result = {**(task.result if isinstance(task.result, dict) else {}), EXPIRED_AGENT: task.agent_id} if task.agent_id else task.result
-    won = SentinelTask._base_manager.filter(pk=task.pk, status__in=SENTINEL_ACTIVE_STATUSES).update(
-        status='expired', agent=None, lease_expires_at=None, error=reason[:300], finished_at=now, result=result, **_scrubbed(task))
+    won = _move_task(SentinelTask._base_manager.filter(pk=task.pk), 'expired', agent=None, lease_expires_at=None, error=reason[:300], finished_at=now,
+                             result=result, **_scrubbed(task))
     if won:
         _ended(task, task.agent_id)
     return bool(won)
@@ -2054,14 +2064,16 @@ def _claim(agent, kinds, now):
     _hint.wake, _hint.other = None, False
     eff = effective(agent, now)
     if eff.problem:
-        raise ApiError(403, f'no work can be assigned: {eff.problem}')
+        raise broker.blocked(eff.problem)
     if _updating(agent, now):
         return None, 'the Sentinel is updating itself and takes no new work'
     from cveFeed import scan_control
     if scan_control.update_hold():  # cvENGINE is updating: the queues wait, the Sentinels keep what they hold and hand it over afterwards
         return None, 'cvENGINE is updating and hands out no new work'
     with transaction.atomic():
-        Agent.objects.select_for_update().get(pk=agent.pk)
+        status = Agent.objects.select_for_update().values_list('status', flat=True).get(pk=agent.pk)
+        if status != 'active':  # suspended or revoked after the check above: re-read under the lock, so the check holds for this claim
+            raise broker.blocked(f'the agent is {status}')
         held_by_kind = _holders([agent.pk])[1]
         held = sum(n for (_, _kind), n in held_by_kind.items())
         if held >= eff.max_concurrent:
@@ -2174,7 +2186,7 @@ def next_task(ctx, body=None):
             _await_work(agent, why, max(0.0, deadline - time.monotonic()))
             agent.refresh_from_db()
             if agent.status != 'active':
-                raise ApiError(403, f'no work can be assigned: the agent is {agent.status}')
+                raise broker.blocked(f'the agent is {agent.status}')
     if not claimed:
         return {'task': None, 'reason': why, 'retry_after_seconds': 5 if wait == 0 or held else 1}
     return {'task': task_payload(claimed), 'reason': ''}
@@ -3217,8 +3229,9 @@ def report_result(ctx, task_id, body):
                          agent_id=agent.pk, agent=agent.name, outcome='dropped', reason=str(dropped))
         elif rejected is None:
             status = 'failed' if result['outcome'] == 'error' else 'done'
-            SentinelTask.objects.filter(pk=task.pk).update(status=status, result=result, finished_at=now, lease_expires_at=None,
-                                                            error=explain_error(result.get('error', '')) if status == 'failed' else '', **_scrubbed(task))
+            if not _move_task(SentinelTask.objects.filter(pk=task.pk), status, only_from=('claimed', 'running'), result=result, finished_at=now,
+                                      lease_expires_at=None, error=explain_error(result.get('error', '')) if status == 'failed' else '', **_scrubbed(task)):
+                return _ended_meanwhile(ctx, agent, task)
             audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
                          agent_id=agent.pk, agent=agent.name, outcome=result['outcome'])
             _note_cuts(task, agent, result)
@@ -3228,8 +3241,9 @@ def report_result(ctx, task_id, body):
         else:
             # A report that does not fit the schema will not fit when sent again: end the task as failed now (its dispatcher falls back at once and
             # the Sentinel's slot is free), instead of leaving it running until the lease cap while heartbeats keep extending it.
-            SentinelTask.objects.filter(pk=task.pk).update(status='failed', finished_at=now, lease_expires_at=None,
-                                                            error=f'the Sentinel\'s result was rejected: {rejected.message}'[:300], **_scrubbed(task))
+            if not _move_task(SentinelTask.objects.filter(pk=task.pk), 'failed', only_from=('claimed', 'running'), finished_at=now, lease_expires_at=None,
+                                      error=f'the Sentinel\'s result was rejected: {rejected.message}'[:300], **_scrubbed(task)):
+                return _ended_meanwhile(ctx, agent, task)
             audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
                          agent_id=agent.pk, agent=agent.name, outcome='rejected')
     _ended(task, agent.pk)
@@ -3287,11 +3301,39 @@ def _adopted(ctx, agent, task, result):
     return outcome
 
 
+# The errors of an expired task a late result may still be filed for (``_adopt_late``): it was lost or timed out (the Sentinel or the server went away,
+# typically for an update) while the Sentinel held it. Every other way a held task expires is a decision a late result must not undo: a person
+# cancelled it ('cancelled by a person'), it was taken back from its Sentinel ('the agent is suspended', 'the agent no longer covers this work', 'agent
+# unregistered'...), a stop or a pause ended its stage, or a newer run took the work over.
+LATE_SERVABLE_ERRORS = ('the lease expired without a report', 'the dispatch wait timed out', 'the Sentinel no longer reports this task')
+
+
+def late_servable(task):
+    """Whether the expired ``task`` ended in a way a late result can still serve (see ``LATE_SERVABLE_ERRORS``)."""
+    return task.status == 'expired' and (task.error or '').startswith(LATE_SERVABLE_ERRORS)
+
+
+def _ended_meanwhile(ctx, agent, task):
+    """The answer to a report whose task ended between the report's check and its write (expired by the reaper, cancelled by a person): the result is
+    not filed, and the answer is the one a report after that end gets (``duplicate``, ``late`` for an expired task)."""
+    task.refresh_from_db()
+    if task.status == 'expired':
+        _record_late(ctx, agent, task)
+        return {'task': task_brief(task), 'duplicate': True, 'late': True}
+    return {'task': task_brief(task), 'duplicate': True}
+
+
 def _adopt_late(ctx, agent, task, body, now):
     """A Sentinel's result for a task the server had already expired (its lease ran out while the server was down, or an update ended its stage), held
     by that Sentinel and with nothing waiting for it: the result is taken and filed, the task becomes ``done``. Returns the answer, or ``None`` when
-    the result does not fit the schema (the caller then treats it as a late report, as before). Called inside the task's row lock."""
+    the result does not fit the schema (the caller then treats it as a late report, as before), and when the task did not expire for a reason a late
+    result can still serve (``late_servable``) or this Sentinel no longer covers it. Called inside the task's row lock."""
     from agentapi import address_guard, sentinel_adopt
+    if not late_servable(task):
+        return None  # a person cancelled it, or it was taken back from this Sentinel (suspended, narrowed, unregistered): the decision stands
+    eff = effective(agent, now)
+    if eff.problem or task.project.slug not in eff.projects or not eff._in_hosts(task) or task.kind not in eff.caps:
+        return None  # suspended, or its scope or capabilities narrowed since the task expired (the kind turned off, the project taken away)
     try:
         result = clean_result(task.kind, body, task)
         if task.kind in sentinel_contract.STREAMED:
@@ -3303,9 +3345,8 @@ def _adopt_late(ctx, agent, task, body, now):
     if address_guard.result_refusal(task, result):  # an address excluded since: as for any report, the result is not filed
         return None
     status = 'failed' if result['outcome'] == 'error' else 'done'
-    won = SentinelTask._base_manager.filter(pk=task.pk, status='expired').update(
-        status=status, agent=agent, result=result, finished_at=now, lease_expires_at=None, error=explain_error(result.get('error', '')) if status == 'failed' else '',
-        **_scrubbed(task))
+    won = _move_task(SentinelTask._base_manager.filter(pk=task.pk), status, only_from=('expired',), agent=agent, result=result, finished_at=now,
+                             lease_expires_at=None, error=explain_error(result.get('error', '')) if status == 'failed' else '', **_scrubbed(task))
     if not won:
         return None
     task.refresh_from_db()
@@ -3636,14 +3677,24 @@ def task_label(task):
 
 def task_outcome(task):
     """How a finished task ended, in words a person can tell apart: ``completed``, ``completed at its time budget (partial)``, ``cancelled by an
-    administrator``, ``stopped before it finished`` (gvmd or the Sentinel stopped the scan), ``lost (the Sentinel stopped answering)`` or ``failed``."""
+    administrator``, ``stopped before it finished`` (gvmd or the Sentinel stopped the scan), ``released by the Sentinel``, ``not taken in time (no Sentinel
+    was free)``, ``taken back (the Sentinel was suspended)`` (or revoked), ``taken back (the Sentinel no longer covers this work)``, ``lost (the Sentinel
+    stopped answering)`` or ``failed``."""
     error = (task.error or '').lower()
     if task.status == 'done':
         return 'completed at its time budget (partial)' if (task.result or {}).get('partial') else 'completed'
     if 'cancelled by a person' in error:
         return 'cancelled by an administrator'
     if task.status == 'expired':
-        return 'lost (the Sentinel stopped answering)' if 'released' not in error else 'released by the Sentinel'
+        if 'released' in error:
+            return 'released by the Sentinel'
+        if error.startswith(tuple(e.lower() for e in WAITING_ERRORS)):
+            return 'not taken in time (no Sentinel was free)'
+        if error.startswith('the agent is '):  # update_agent's release: suspended or revoked
+            return f'taken back (the Sentinel was {error[len("the agent is "):].split(";")[0].strip() or "stopped"})'
+        if 'no longer covers' in error:
+            return 'taken back (the Sentinel no longer covers this work)'
+        return 'lost (the Sentinel stopped answering)'
     if 'stopped' in error:
         return 'stopped before it finished'
     return 'failed'
