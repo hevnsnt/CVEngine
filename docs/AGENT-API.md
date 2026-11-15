@@ -25,6 +25,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | --- | --- | --- |
 | identity | `GET me`, `projects`, `engines` (legacy labels) | `whoami`, `list_projects`, `list_engines` (legacy labels) |
 | instance status | `GET system/status` | `get_system_status` |
+| lifecycles | `GET states` | `describe_states` |
 | this server's outbound connection log (App Admin) | `GET egress/connections` (`?format=csv` downloads it) | `list_egress_connections` |
 | targets | `GET/POST projects/{slug}/targets`, `GET .../targets/{id}` | `list_targets`, `add_target` |
 | bulk add | `POST projects/{slug}/targets/bulk`, `POST targets/bulk-org` | `add_targets`, `add_targets_by_org` |

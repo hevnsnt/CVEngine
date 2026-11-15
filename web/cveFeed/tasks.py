@@ -1531,6 +1531,16 @@ def watch_certificates_all():
             "not_queued": len(candidates) - len(queued), "recently_failed": len(failed)}  # not_queued: already on its way, or past the batch and the cap's room
 
 
+def _add_celery_id(queryset, task_id):
+    """Record ``task_id`` among the scan's Celery task ids, keeping the ones already there. A duplicate delivery of a running scan's
+    message (the queue gave it back after a worker restart) used to replace the list, so the live task's id was lost: the reaper, which
+    keeps a scan whose ids include a live task, then closed it as failed while it still ran, and a Stop revoked the wrong task."""
+    from django.contrib.postgres.fields import ArrayField
+    from django.db.models import CharField, F, Func, Value
+    queryset.exclude(celery_ids__contains=[task_id]).update(
+        celery_ids=Func(F('celery_ids'), Value(task_id), function='array_append', output_field=ArrayField(CharField(max_length=100))))
+
+
 DUPLICATE_RETRIES = 3  # times a discovery message that found its own scan's lock held is asked again (run_bbot_discovery)
 
 
@@ -1539,8 +1549,8 @@ def run_bbot_discovery(self, scan_id, mode="standard"):
     """Discover the scan's target (on a Sentinel), then run the scan stages over what was found (see cveFeed.discovery)."""
     from cveFeed.discovery import run_pipeline
     from startScan.models import ScanHistory
-    if self.request.id:  # a stop revokes this id; a task still queued has none yet and is skipped when it starts
-        ScanHistory.objects.filter(pk=scan_id).update(celery_ids=[self.request.id])
+    if self.request.id:  # a stop revokes these ids; a task still queued has none yet and is skipped when it starts
+        _add_celery_id(ScanHistory.objects.filter(pk=scan_id), self.request.id)
     out = run_pipeline(scan_id, mode)
     if out.get('status') == 'duplicate' and self.request.id and self.request.retries < DUPLICATE_RETRIES:
         # The queue gave this message back after a worker was killed (acks_late), and the dead worker's lock on the target is still alive for up

@@ -21,6 +21,8 @@ from datetime import timedelta
 
 from django.utils import timezone
 
+from reNgine.state_machines import SCAN
+
 logger = logging.getLogger(__name__)
 
 TASK_TAG = 'internal_pipeline'  # ScanHistory.tasks marks a scan that belongs to this driver
@@ -227,7 +229,7 @@ def _resume_internal(context):
         from cveFeed.discovery import FAILED
         from startScan.models import ScanHistory
         logger.exception('internal scan %s failed in its callback', scan_id)
-        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=str(exc)[:290])
+        SCAN.move(ScanHistory.objects.filter(pk=scan_id), FAILED, stop_scan_date=timezone.now(), error_message=str(exc)[:290])
         return {'scan_id': scan_id, 'status': FAILED, 'error': str(exc)[:290]}
 
 
@@ -253,16 +255,16 @@ def _run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=N
         return {'scan_id': scan_id, 'status': 'finished'}
     if not sentinel_only_target(ip, project.id):  # the range was removed (or the operator now allows private targets) since it was queued
         message = f'{ip} is no longer inside an internal range of this project; nothing was scanned'
-        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message)
+        SCAN.move(ScanHistory.objects.filter(pk=scan_id), FAILED, stop_scan_date=timezone.now(), error_message=message)
         return {'scan_id': scan_id, 'status': FAILED, 'error': message}
     if is_excluded(project.id, ip):
         message = f'{ip} is excluded for this organization and is not scanned'
-        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message)
+        SCAN.move(ScanHistory.objects.filter(pk=scan_id), FAILED, stop_scan_date=timezone.now(), error_message=message)
         return {'scan_id': scan_id, 'status': FAILED, 'error': message}
     why = Gate().refusal(project.id, ip, unattended=scan.initiated_by_id is None)
     if why:
         message = f'{ip} is not scanned: {why}'
-        ScanHistory.objects.filter(pk=scan_id).update(scan_status=FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
+        SCAN.move(ScanHistory.objects.filter(pk=scan_id), FAILED, stop_scan_date=timezone.now(), error_message=message[:290])
         return {'scan_id': scan_id, 'status': FAILED, 'error': message}
     running = activity.log('run_check', f'Internal scan of {ip}: a Sentinel inside the network does the scanning, never this server',
                            project=project.id, status='running', scan_id=scan.id)
@@ -291,7 +293,10 @@ def _run(scan_id, dispatch=None, nuclei_stream=None, provider=False, wp_runner=N
     failed_names = list(ScanActivity.objects.filter(scan_of=scan, status=FAILED).order_by('id').values_list('name', flat=True))
     status = FAILED if nmap.get('error') else SUCCESS
     error = nmap.get('error') or (('Failed stages: ' + ', '.join(failed_names)) if failed_names else '')
-    ScanHistory.objects.filter(pk=scan_id).update(scan_status=status, stop_scan_date=timezone.now(), error_message=(error or '')[:290] or None)
+    if not SCAN.move(ScanHistory.objects.filter(pk=scan_id), status, stop_scan_date=timezone.now(), error_message=(error or '')[:290] or None):
+        # a person stopped it while a stage ran (the stop is final: reNgine.state_machines.SCAN); say so instead of a result it no longer has
+        activity.settle(running, 'skipped', message=f'Internal scan of {ip} was stopped')
+        return {'scan_id': scan_id, 'status': 'aborted'}
     activity.settle(running, 'done' if status == SUCCESS else 'failed',
                     message=(f'Internal scan of {ip} finished: {nmap.get("ports", 0)} service(s) found{("; " + error) if error else ""}' if status == SUCCESS
                              else f'Internal scan of {ip} failed: {error}'))

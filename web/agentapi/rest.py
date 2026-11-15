@@ -190,6 +190,7 @@ ROUTES = [
      lambda r, c, **k: egress.connections_csv(c, r.GET) if r.GET.get('format') == 'csv' else egress.list_connections(c, r.GET)),
     ('GET', r'projects', 'Projects visible to the caller', lambda r, c, **k: svc.list_projects(c)),
     ('GET', r'engines', 'Scan engines (legacy labels: every scan runs the same fixed pipeline)', lambda r, c, **k: svc.list_engines(c)),
+    ('GET', r'states', 'Every lifecycle (scans, ...): its states, what each means, and which state may follow which', lambda r, c, **k: svc.describe_states(c)),
     ('GET', r'cves', 'CVE feed (tier, q filters)', lambda r, c, **k: svc.list_cve_feed(c, r.GET)),
     ('GET', r'cves/(?P<cve_id>CVE-[0-9]{4}-[0-9]+|CVE-[A-Za-z0-9-]+)/detection', 'The shared detection strategy of one CVE',
      lambda r, c, cve_id, **k: svc.get_cve_detection(c, cve_id)),
