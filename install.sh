@@ -273,8 +273,10 @@ if ! make up; then show_logs; die "CVEngine did not start. The log lines above s
 
 step "Waiting for CVEngine to answer"
 healthy=1
+CVL_EDGE_CURL=()  # hosted mode only: the header that lets this check past the proxy's edge-secret check (nothing is added otherwise)
+if [ -f scripts/hosted-edge.sh ]; then . scripts/hosted-edge.sh; cvengine_hosted_edge_args; fi
 for attempt in $(seq 1 90); do
-  code=$(curl -ks -m 5 -o /dev/null -w '%{http_code}' "https://127.0.0.1:$https_port/" 2>/dev/null || echo 000)
+  code=$(curl -ks -m 5 -o /dev/null -w '%{http_code}' ${CVL_EDGE_CURL[@]+"${CVL_EDGE_CURL[@]}"} "https://127.0.0.1:$https_port/" 2>/dev/null || echo 000)
   # The proxy answering is not enough (it serves its own 403 maintenance page while the web service is still down, and 401 and 403 are also what a
   # client outside the allowlist gets): the web container must be accepting connections too, which it does only after it has migrated the database.
   case $code in 2??|3??|401|403) compose exec -T web python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8000), 3)' >/dev/null 2>&1 && { healthy=0; break; } ;; esac
