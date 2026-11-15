@@ -75,10 +75,30 @@ cvl_env_set() {
   chmod 600 "$env_file"
 }
 
+# Removes the KEY line(s) from $CVL_REPO/.env (nothing to do when there is none), written in place like cvl_env_set.
+cvl_env_unset() {
+  local key=$1 tmp env_file=$CVL_REPO/.env
+  [ -f "$env_file" ] || return 0
+  grep -q "^${key}=" "$env_file" || return 0
+  tmp=$(mktemp "${TMPDIR:-/tmp}/cvl-env.XXXXXX")
+  grep -v "^${key}=" "$env_file" >"$tmp" || true
+  cat "$tmp" >"$env_file"
+  rm -f "$tmp"
+  chmod 600 "$env_file"
+}
+
 # Whether hosted mode is on in this installation's .env (CVENGINE_HOSTED not empty, 0, false, no or off).
 cvl_hosted_on() {
   local value
   value=$(cvl_env_get CVENGINE_HOSTED | tr '[:upper:]' '[:lower:]')
+  case $value in ''|0|false|no|off) return 1 ;; esac
+  return 0
+}
+
+# Whether KEY in .env is truthy (anything but empty, 0, false, no or off, any case): the same reading cvl_hosted_on gives CVENGINE_HOSTED.
+cvl_env_truthy() {
+  local value
+  value=$(cvl_env_get "$1" | tr '[:upper:]' '[:lower:]')
   case $value in ''|0|false|no|off) return 1 ;; esac
   return 0
 }
