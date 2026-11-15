@@ -47,6 +47,22 @@ class RecordTests(Base):
         self.assertEqual(set(SecretOccurrence.objects.values_list('url', flat=True)),
                          {'https://www.example.com/', 'https://api.example.com/app.js'})  # no query string kept
 
+    def test_a_token_with_an_expiry_is_rated_when_the_clock_is_a_datetime(self):
+        """``record`` passes a datetime clock to ``rate``; the JWT branch of the severity compared the integer exp claim with it:
+        TypeError, the whole secrets stage of the scan failed."""
+        import base64
+        import json
+        from datetime import timedelta
+
+        def jwt(exp):
+            part = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip('=')
+            return f"{part({'alg': 'none'})}.{part({'exp': exp, 'sub': 'x'})}.c2ln"
+        now = timezone.now()
+        old = self.record(value=jwt(int((now - timedelta(days=2)).timestamp())), rule='betterleaks.jwt', now=now)
+        new = self.record(value=jwt(int((now + timedelta(days=2)).timestamp())), rule='betterleaks.jwt', now=now)
+        self.assertIn('has expired', old.severity_basis)
+        self.assertIn('has not expired', new.severity_basis)
+
     def test_the_value_is_stored_nowhere(self):
         self.record()
         self.record(value=GITHUB, rule='betterleaks.github-pat')
