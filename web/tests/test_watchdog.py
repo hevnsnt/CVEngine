@@ -1265,7 +1265,7 @@ class TickSafetyTests(WatchdogCase):
 
         from django.core.management import call_command
         out = StringIO()
-        with mock.patch.object(wd, 'tick', return_value={'ok': True, 'acted': []}):
+        with mock.patch.object(wd, 'tick', return_value={'ok': True, 'acted': []}), mock.patch.object(wd, 'process_age_seconds', return_value=1.0):  # the test runner is minutes old, a real command seconds
             call_command('watchdog_tick', stdout=out)
         self.assertEqual(json.loads(out.getvalue())['ok'], True)
 
