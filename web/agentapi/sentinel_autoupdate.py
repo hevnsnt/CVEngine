@@ -35,7 +35,11 @@ from tenancy import audit
 logger = logging.getLogger(__name__)
 
 MIN_INTERVAL = timedelta(hours=6)  # at most one request per Sentinel in this time
-DEFAULT_GRACE_MINUTES = 90  # the host updater drains for up to 30 minutes, then builds and swaps
+DEFAULT_GRACE_MINUTES = 90  # a request no updater has answered for this long is flagged (see ``working_on``: one that reports progress is not)
+PROGRESS_FRESH = timedelta(hours=2)  # an updater report on the request newer than this means it is still on it (a drain waits up to 70 minutes, then retries hourly)
+MAX_PATIENCE = timedelta(hours=12)  # past this a request is flagged even while its updater still reports progress: something keeps it from finishing
+PROGRESS_STATUSES = ('waiting', 'draining', 'updating')  # what scripts/update.sh reports while it works on a target (built, draining, restarting)
+PROGRESS_PHASES = ('drain', 'build', 'code', 'images', 'restart')  # the phases after it accepted the target ('available' is not: nothing was started)
 HEAVY_KINDS = ('openvas', 'nmap_full', 'nmap_udp', 'wpscan_thorough', 'bbot_discovery', 'nuclei_deep', 'secrets_scan')  # hours, or a long sweep: never interrupted for an update
 BUSY = ('claimed', 'running')
 HOST_REQUEST_FILE = '.scanner-update-requested'
@@ -229,10 +233,37 @@ def settle(agent, now=None):
         return done
     if state.get('status') == 'failed':
         return state
-    asked = _parse(state.get('requested_at'))
-    if asked and now - asked > timedelta(minutes=grace_minutes()):
+    if overdue(agent, state, now):
         return _flag(agent, state, now, flag_text(state))
     return state
+
+
+def working_on(agent, state, now):
+    """Whether the Sentinel's updater says it is still on this request: its last report (``info.update``, from scripts/update.sh) names the requested target,
+    was made after the request and recently (``PROGRESS_FRESH``), and is a step past accepting it (built and draining, waiting for a long task to finish,
+    restarting). A deep scan can outlast a drain, and the updater then tries again an hour later with the image already built: that Sentinel is updating,
+    not lost, and flagging it would stop the request and leave it on the old build for good."""
+    report = (agent.info or {}).get('update') or {}
+    target, to = str(state.get('target') or '').lower(), str(report.get('to') or '').lower()
+    said, asked = _parse(report.get('at')), _parse(state.get('requested_at'))
+    if len(to) < 7 or not target.startswith(to) or not said or not asked:
+        return False
+    return (report.get('status') in PROGRESS_STATUSES and report.get('phase') in PROGRESS_PHASES
+            and said >= asked and now - said <= PROGRESS_FRESH)
+
+
+def overdue(agent, state, now):
+    """Whether an open request has waited too long: ``grace_minutes`` with no progress from the Sentinel's updater, or ``MAX_PATIENCE`` whatever it says."""
+    asked = _parse(state.get('requested_at'))
+    if not asked or now - asked <= timedelta(minutes=grace_minutes()):
+        return False
+    return now - asked > MAX_PATIENCE or not working_on(agent, state, now)
+
+
+def _progress_text(agent):
+    report = (agent.info or {}).get('update') or {}
+    detail = ''.join(c for c in str(report.get('detail') or '') if c.isprintable())[:200]
+    return f'Update requested; its updater is working on it ({detail})' if detail else 'Update requested; its updater is working on it'
 
 
 def flag_text(state):
@@ -296,9 +327,9 @@ def view(agent, now=None, keep=None, instance_update=None):
     code = found['code']
     expired = False
     if open_request:
-        asked = _parse(state.get('requested_at'))
-        expired = bool(asked and now - asked > timedelta(minutes=grace_minutes()))  # nobody settled it yet (a Sentinel that never came back sends no heartbeat); the page still says so
+        expired = overdue(agent, state, now)  # nobody settled it yet (a Sentinel that never came back sends no heartbeat); the page still says so
         code = 'flagged' if expired else 'requested'
-    text = TEXT['requested'] if code == 'requested' else flag_text(state) if expired else found['text']
+    text = (_progress_text(agent) if code == 'requested' and working_on(agent, state, now) else TEXT['requested'] if code == 'requested'
+            else flag_text(state) if expired else found['text'])
     return {'code': code, 'text': text, 'running': verdict.get('version'), 'newest': verdict.get('latest'),
             'requested_at': requested_at, 'flagged': state.get('status') == 'failed' or expired, 'next_after': state.get('next_after')}
