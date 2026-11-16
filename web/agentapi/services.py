@@ -1475,7 +1475,8 @@ def _heat_reasons(sub, capped=True):
         reasons.append({'kind': 'cve', 'label': c.cve_id, 'description': _cve_description(c, 180),
                         'detail': (f'CVSS {c.cvss}' if c.cvss is not None else 'no score') +
                         (', listed as exploited' if c.kev else '') + (', AI confirmed' if m.ai_verdict == 'affected' else '') +
-                        (f', {label_for(m.distro_status, m.distro_fixed_version)}' if m.distro_status in ('patched', 'vulnerable') else '') +
+                        (f', {label_for(m.distro_status, m.distro_fixed_version, (m.evidence or {}).get("distro_fix"))}'
+                         if m.distro_status in ('patched', 'vulnerable', 'backport') else '') +
                         (f': {why}' if why else ''),
                         'temp': temp, 'kev': bool(c.kev), 'heat_capped': held, 'heat_reason': why,
                         'finding': 'match', 'id': m.id, 'classification': _classification_of(m)})
@@ -3545,7 +3546,7 @@ def _match(m):
                                   (m.ai_reason or '').startswith('Closed automatically:')
                                   else 'candidate'),
             'distro_status': m.distro_status, 'distro_fixed_version': m.distro_fixed_version,
-            'distro_label': label_for(m.distro_status, m.distro_fixed_version),
+            'distro_label': label_for(m.distro_status, m.distro_fixed_version, (m.evidence or {}).get('distro_fix')),
             'evidence': m.evidence or {}, 'template_result': m.template_result, 'template_id': m.template_id,
             'template_tested': _iso(m.template_tested_at),
             'remediation_status': m.remediation_status, 'remediation_note': m.remediation_note,
@@ -4812,8 +4813,8 @@ def _how_found_match(m):
         steps.append(_kv('Advisory range', ', '.join(f'{k} {v}' for k, v in rng.items() if v) or 'no usable bound'))
     inside = {True: 'inside the affected range', False: 'outside the affected range', None: 'unknown (no version, or no usable bound to compare)'}
     steps.append(_kv('Version check', inside[m.version_in_range]))
-    if m.distro_status in ('patched', 'vulnerable') or ev.get('distro'):
-        steps.append(_kv('Distribution', label_for(m.distro_status, m.distro_fixed_version)
+    if m.distro_status in ('patched', 'vulnerable', 'backport') or ev.get('distro'):
+        steps.append(_kv('Distribution', label_for(m.distro_status, m.distro_fixed_version, ev.get('distro_fix'))
                          or ', '.join(f'{k} {v}' for k, v in (ev.get('distro') or {}).items() if v)))
     if m.template_result:
         steps.append(_kv('Template check', f'{m.template_result.replace("_", " ")}' + (f' ({m.template_id})' if m.template_id else '')

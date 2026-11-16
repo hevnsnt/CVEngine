@@ -2,6 +2,11 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Added
+- **RHEL, CentOS, Rocky Linux and AlmaLinux hosts are judged against Red Hat's own fix data.** Red Hat backports fixes without changing the upstream version, so a host serving `Apache/2.4.37 (Red Hat Enterprise Linux) OpenSSL/1.1.1k` had about a hundred version-only matches, every one "distro unknown". The daily distribution sync now also reads the Red Hat Security Data API for the CVEs with an open match on a Red Hat family host (at most 300 a run, each answer kept for 24 hours, only the CVE id is sent), and a module stream's fixed rpm build from the advisory's OSV record. A CVE Red Hat lists as not affected on the host's RHEL release is *patched by distro* (ice, the AI may close it), as on Ubuntu and Debian; one it marks Affected, Fix deferred or Will not fix stays open (*vulnerable per distro tracker*). A CVE fixed on that release, on a host whose rpm build is not known (the banner never shows it), gets the new `distro_status` **backport**, labeled "distro fix available, confirm the installed build (fixed in httpd-2.4.37-65.module+el8.10.0+22069+b47f5c72.1, RHSA-2024:4720)": needs validation at most, smoke at most and never fire on its version alone, confidence 0.5 at most, and asked about after the matches with no distribution answer; `evidence.distro_fix` names the release, package, fixed build and advisory. A known build (an `.el8` release, or the host's inventory report) is compared with the fix: older is vulnerable, at or past it is patched (an rpm release without its epoch now takes the fixed build's). The RHEL release comes from nmap's OS CPE, an `.el8` tag or the operating system the host reports, and a technology from the host's web response (Apache, OpenSSL, PHP) is judged against the host's Red Hat family distribution when its services, `Server` header or OS name it. Ubuntu and Debian are unchanged. New column `advisory` on the distribution fix table (migration 0168). See [distro backports](docs/PIPELINE.md#cve-intelligence).
+
 ## v1.4.1 (2026-11-14)
 
 ### Changed

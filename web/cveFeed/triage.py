@@ -135,6 +135,9 @@ def ceiling(kind, facts):
     classification everything else reads (the legacy verdict, heat, paging, standing, score). ``library_rule`` then sets the row's own
     classification on top of it, in ``_apply``, and nothing else."""
     if kind == 'cve_match' and facts.get('version_only'):
+        if facts.get('distro_status') == 'backport':
+            return 'needs_validation', ('the only evidence is a version string inside the affected range, and the distribution ships a fixed '
+                                        'build for the host\'s release: confirm the installed package build')
         return 'needs_validation', 'the only evidence is a version string inside the affected range'
     return '', ''
 
@@ -488,6 +491,9 @@ def describe_cve_match(m):
         'range': _range(evidence.get('range') or {}, names), 'cpe': _s(evidence.get('cpe'), 120, names),
         'service_extra': _s(evidence.get('service_extra'), 120, names),
         'distro_status': facts['distro_status'], 'template_result': facts['template_result'],
+        **({'distro_fix': {k: _s(evidence['distro_fix'].get(k), 120, names) for k in ('release', 'package', 'fixed_build', 'advisory')
+                           if evidence['distro_fix'].get(k)}}
+           if isinstance(evidence.get('distro_fix'), dict) else {}),
         'cve': {'id': _s(cve.cve_id, 40), 'title': _prose(cve.title, 300, names),
                 'description': _prose(cve.original_description or cve.summary, 3000, names), 'cvss': cve.cvss,
                 'kev': bool(getattr(cve, 'kev', False)), 'epss_reached': bool(getattr(cve, 'epss_reached', False)),
@@ -517,8 +523,11 @@ def describe_cve_match(m):
                                                        cve.original_description or cve.summary], sort_keys=True, default=str).encode()).hexdigest()[:16]}
     cvss = cve.cvss
     base = 4 if cvss and cvss >= 9 else 3 if cvss and cvss >= 7 else 2 if cvss and cvss >= 4 else 1 if cvss else 0
+    # a match the distribution has a fixed build for (distro backport) and that rests on its version alone is asked after every match with no
+    # distribution answer: it is likelier patched than not, and only the installed build decides it
+    backport = facts['distro_status'] == 'backport' and facts['version_only']
     return {'kind': 'cve_match', 'facts': facts, 'payload': payload, 'signature_fields': fields, 'severity': base,
-            'priority': (9, 0) if facts['version_unknown'] else (0 if floor else 3, -base)}
+            'priority': (9, 0) if facts['version_unknown'] else (8, -base) if backport else (0 if floor else 3, -base)}
 
 
 OPENVAS_RESULT_LIMIT = 600  # how much of an NVT's result text a prompt quotes

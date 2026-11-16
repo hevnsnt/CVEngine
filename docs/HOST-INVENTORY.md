@@ -250,7 +250,8 @@ report.
    label and "(reported by the host)" in lists. The `local_only` rule is unchanged for everything else: the external correlation never reads the
    local pool, and the sweep that closes scan matches of local-only CVEs leaves host-reported ones alone.
 5. **Distribution backports.** Ubuntu, Debian and RHEL fix CVEs without changing the upstream version, so an upstream range cannot decide a
-   package. When cvENGINE holds the distribution's fixed version for the CVE and package (the tracker data behind `distro_status`), it judges
+   package. When cvENGINE holds the distribution's fixed version for the CVE and package (the tracker data behind `distro_status`; for RHEL,
+   CentOS, Rocky Linux and AlmaLinux, Red Hat's security data), it judges
    the package release against it: patched is kept at confidence 0.2 and labeled, vulnerable is 0.95. Without that data a distribution package
    is at most 0.6 (other ecosystems start from 0.8 for `apk` and the running kernel, 0.85 for `pacman` and anything else, and 0.95 for an operating system build). **The kernel of a backporting distribution is not matched at all** (its version number says nothing about its patches); the
    report says so. The kernel of Arch, Alpine, Fedora and other upstream-tracking systems is matched.
