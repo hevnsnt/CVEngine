@@ -1661,12 +1661,31 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'profile': profile or dict(NO_PROFILE), 'excluded': bool(excluded),
             # what a person calls the host and wrote about it (display only; ``aliases`` above are the other DNS names on its addresses)
             **alias_and_note(sub, others, (shared or {}).get('tags') or {}),
-            'inventory': _host_inventory(sub, others, shared)}
+            'inventory': _host_inventory(sub, others, shared),
+            'validate_plan': _validate_plan(sub, others, ips, techs, reasons)}
     row['scan_blocked'] = _scan_blocked(sub, host_key[0], list(ips), shared)
     if (shared or {}).get('coverage') is not None:
         row['check_coverage'] = _check_coverage(shared['coverage'], sub, others, host_key[0], excluded, hosting_info, reasons, unverified,
                                                  probe_rows, root, shared.get('coverage_rich', False))
     return row
+
+
+def _validate_plan(sub, others, ips, techs, reasons):
+    """The commands for the host's owner that settle the most of its open CVE matches, one group per package that decides them, exploited
+    first (cveFeed.match_explain.validate_plan). Read from what the host row already loaded; [] when it cannot be built, which never costs the
+    host its row."""
+    from cveFeed import match_explain
+    try:
+        parts = [str(row.webserver or '') for row in [sub, *others]] + sorted(techs)
+        for entry in ips.values():
+            parts.append(str(entry['ip'].os_guess or ''))
+            parts += [' '.join(str(x or '') for x in (p.distro, p.product, p.version, p.service_extra, p.cpe)) for p in entry['ports']]
+        heat = {r['id']: r['temp'] for r in reasons if r.get('finding') == 'match' and r.get('id')}
+        return match_explain.validate_plan([m for row in [sub, *others] for m in row.cve_matches.all()], ' '.join(p for p in parts if p), heat)
+    except Exception:  # noqa: BLE001 - help on top of the record
+        import logging
+        logging.getLogger(__name__).warning('could not build the validate plan of host %s', sub.pk, exc_info=True)
+        return []
 
 
 def _scan_blocked(sub, project_id, addresses, shared):
@@ -3456,7 +3475,7 @@ def _detection(c):
         # check of an npm packaging, or an nmap step for a JavaScript file, is never shown), whoever wrote the record
         from cveFeed import detection
         clean, _ = detection.validate_strategy(strategy)
-        strategy = detection.finalize(clean, c.cvss_vector) if clean else strategy
+        strategy = detection.finalize(clean, c.cvss_vector, c.cve_id) if clean else strategy
     return {'source': row.source, 'schema_version': row.schema_version, 'strategy': strategy,
             'ai_model': row.ai_model or None, 'updated': _iso(row.updated_at)}
 
@@ -3556,7 +3575,20 @@ def _match(m):
             **_closure_fields('match', m),
             'first_seen': _iso(_seen(m, 'first_seen', m.created_at)), 'last_seen': _iso(_seen(m, 'last_seen', m.updated_at)),
             'triage': _triage_brief(_triage_of(m)),
-            'retest': _retest_of(m)}
+            'retest': _retest_of(m),
+            'explain': _explain(m)}
+
+
+def _explain(m, hint=None):
+    """What the match means in plain words and how the host's owner settles it (cveFeed.match_explain), or None when it cannot be built; it
+    never fails the row. ``hint`` is what the rest of the host says about its distribution (read from the host's records when not given)."""
+    from cveFeed import match_explain
+    try:
+        return match_explain.explain(m, match_explain.host_hint(m.subdomain) if hint is None else hint)
+    except Exception:  # noqa: BLE001 - help on top of the evidence: a gap in it must not cost the match its row
+        import logging
+        logging.getLogger(__name__).warning('could not explain match %s', m.pk, exc_info=True)
+        return None
 
 
 def _agent_task_of(m):
@@ -3618,6 +3650,8 @@ def list_matches(ctx, slug, params):
         qs = qs.filter(cve_entry__cve_id__iexact=params['cve'].strip()[:40])
     if _kev_only(params):
         qs = qs.filter(cve_entry__kev=True)
+    # what each row's explanation reads about its host's distribution (match_explain.host_hint): a few queries for the page, none per row
+    qs = qs.prefetch_related('subdomain__technologies', 'subdomain__ip_addresses__ports')
     return paginate(qs, params, _tagged(_match, lambda m: m.subdomain.target_domain.project) if _is_all(project) else _match)
 
 
@@ -4557,7 +4591,7 @@ def work_items(ctx, slug, params):
     qs = _matches_qs(project).exclude(ai_verdict='not_affected') \
         .exclude(version_in_range=False) \
         .exclude(remediation_status__in=CLOSED) \
-        .prefetch_related('subdomain__ip_addresses')
+        .prefetch_related('subdomain__ip_addresses__ports', 'subdomain__technologies')  # the ports and technologies: each row's explain reads them
     if params.get('include_fp') == '0':
         qs = qs.exclude(triage__classification__in=FALSE_POSITIVES)
     tier = params.get('tier')
@@ -4969,6 +5003,7 @@ def finding_detail(ctx, slug, kind, finding_id):
         'secrets': _tracked_secrets(obj) if kind == 'vulnerability' else [],  # "Tracked in Secrets": the inventory rows a token finding fed
         'cve': {**_cve_context(obj.cve_entry), 'detection': _detection(obj.cve_entry)} if kind == 'match' else None,
         'confirm': _confirm_guide(obj) if kind == 'match' else None,
+        'explain': _explain(obj) if kind == 'match' else None,
         'validation': {'status': _triage_brief(t)['validation_status'] if t else 'none', 'steps': steps, 'evidence': evidence,
                        'validated': _iso(t.validated_at) if t else None, 'next_attempt': _iso(t.next_attempt_at) if t else None,
                        'confidence_adjust': t.confidence_adjust if t else 0.0},

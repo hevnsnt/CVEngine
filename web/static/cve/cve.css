@@ -1220,6 +1220,21 @@ a.bb-tile{text-decoration:none;color:inherit;display:block}a.bb-tile:focus-visib
 .confirm-guide .untrusted{border-left:3px solid var(--smoke,#b45309)}
 .confirm-guide blockquote.confirm-quote{margin:var(--s-1) 0 0;padding:var(--s-2) var(--s-3);background:var(--surface);border-radius:var(--r-s);font-size:var(--fs-2)}
 .confirm-generic{margin-top:var(--s-4)}.confirm-generic>summary,.confirm-more>summary{cursor:pointer}
+/* a match explains itself (match-explain.js): what was found, how sure, the steps for the host's owner; the host's plan of questions */
+.gl-explain{margin-top:var(--s-3)}
+.gl-explain p{margin:0}
+.gl-explain .x-found{font-size:var(--fs-3);line-height:1.45;color:var(--ink)}
+.gl-explain .x-why{font-size:var(--fs-2);line-height:1.45;color:var(--ink-2)}
+.gl-explain .x-sure{display:flex;align-items:center;gap:var(--s-2);flex-wrap:wrap}
+.x-steps{margin:var(--s-1) 0 0;padding-left:var(--s-5);display:grid;gap:var(--s-3)}
+.x-step-text{margin:0;font-size:var(--fs-2);line-height:1.45}
+.x-outcomes,.x-step-outcomes{margin:var(--s-1) 0 0;padding-left:var(--s-4);display:grid;gap:var(--s-1);font-size:var(--fs-2);line-height:1.45}
+.x-outcomes .badge,.x-step-outcomes .badge{margin-right:var(--s-1)}
+.x-close{gap:var(--s-2);flex-wrap:wrap}
+.validate-plan .x-group{margin-top:var(--s-2);padding:var(--s-2) var(--s-3);border:1px solid var(--line);border-radius:var(--r);background:var(--surface)}
+.validate-plan .x-group>summary{cursor:pointer}
+.validate-plan .x-group>summary .badge{margin-left:var(--s-2)}
+.validate-plan .x-resolves{margin-top:var(--s-2);overflow-wrap:anywhere}
 
 /* ---- polish on develop: targets rows, compact filter groups in list panes, charts ---- */
 .table select{max-width:176px}@media (min-width:900px){.row-actions{flex-wrap:nowrap}.table td:has(.row-actions){white-space:nowrap}}
