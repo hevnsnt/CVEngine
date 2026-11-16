@@ -3997,24 +3997,34 @@ def _clean_note(note):
         raise ApiError(400, str(exc))
 
 
-def _apply_remediation(obj, status, note, user, rescore=True):
+def _apply_remediation(obj, status, note, user, rescore=True, only_from=None):
     """Set and save the remediation fields shared by CVEMatch, Vulnerability and HygieneFinding (the same tuple of
     statuses, cveFeed.closure.STATUSES, enforced here once). ``note`` is a true PATCH field: ``None`` (the default, meaning the caller's
     body left it out) leaves whatever note is already stored; an explicit value, including '', replaces it. Closing with fixed,
     accepted_risk or false_positive makes it the closure note, with who (remediation_by) and when (remediation_updated_at). The note is
     cleaned and cut to 2000 characters here (the request paths refuse a longer one with a 400 first, via _clean_note; an agent's own
     report is cut, as before). Raises on an unrecognized status; never touches whatever auto-managed liveness field (open_status,
-    HygieneFinding.status, ai_verdict) the model also carries, which stays under the scan/check pipeline."""
+    HygieneFinding.status, ai_verdict) the model also carries, which stays under the scan/check pipeline.
+
+    ``only_from`` is for an automatic actor (an agent's report): the change is made only while the stored status is one of those
+    (``REMEDIATION.move``), so a person's decision made since the actor read the finding stands. Returns whether the status was written;
+    when it was not, ``obj`` is left as stored and nothing else happens."""
     from cveFeed import closure
     _check_status(status)
     note = closure.clip_note(note)
-    fields = ['remediation_status', 'remediation_updated_at', 'remediation_by']
+    now = timezone.now()
+    values = {'remediation_updated_at': now, 'remediation_by': user, **({'remediation_note': note} if note is not None else {})}
+    if only_from is not None:
+        from reNgine.state_machines import REMEDIATION
+        if not REMEDIATION.move(type(obj)._base_manager.filter(pk=obj.pk), status, only_from=only_from, **values):
+            obj.refresh_from_db(fields=['remediation_status', 'remediation_updated_at', 'remediation_by', 'remediation_note'])
+            return False
     before = obj.remediation_status
-    obj.remediation_status, obj.remediation_updated_at, obj.remediation_by = status, timezone.now(), user
-    if note is not None:
-        obj.remediation_note = note
-        fields.append('remediation_note')
-    obj.save(update_fields=fields)
+    obj.remediation_status = status
+    for field, value in values.items():
+        setattr(obj, field, value)
+    if only_from is None:
+        obj.save(update_fields=['remediation_status', *values])
     from cveFeed import fix_retest
     fix_retest.status_changed(obj, before, status)  # marked fixed (by a person, the API or an agent): the check that proved it is run again on a Sentinel
     from django.db import transaction
@@ -4024,6 +4034,7 @@ def _apply_remediation(obj, status, note, user, rescore=True):
     host = _host_of(obj) if rescore else None
     if host:
         _rescore_hosts([host])
+    return True
 
 
 UNSET = object()  # a PATCH field the caller's body left out entirely, as opposed to an explicit null/empty value
@@ -4228,6 +4239,8 @@ def _bulk_status_batched(ctx, project, items, status, note):
             ids = [n for k, n in wanted if k == kind]
             if ids:
                 found.update({(kind, o.pk): o for o in _finding_qs(project, kind).filter(pk__in=ids)})
+        # what each finding said when it was read: the write below is made only where it still says so
+        read = {key: (o.remediation_status, o.remediation_updated_at, o.remediation_by_id) for key, o in found.items()}
         now = timezone.now()
         clipped = closure.clip_note(note)  # as ``_apply_remediation`` stores it
         changes, events, written = [], [], {}
@@ -4242,21 +4255,39 @@ def _bulk_status_batched(ctx, project, items, status, note):
                 obj.remediation_status, obj.remediation_updated_at, obj.remediation_by = status, now, ctx.user
                 if note is not None:
                     obj.remediation_note = clipped
-                changes.append((obj, before, position))
+                changes.append((kind, obj, before, position))
                 written.setdefault(kind, {})[obj.pk] = obj
-                events.append(FindingAuditEvent(project=project, finding_kind=kind, finding_id=obj.pk, event='status', actor=ctx.user, before={'status': before},
-                                                after={'status': status, **({'note': note} if note is not None else {})}))
+                events.append((kind, obj.pk, FindingAuditEvent(project=project, finding_kind=kind, finding_id=obj.pk, event='status', actor=ctx.user,
+                                                               before={'status': before},
+                                                               after={'status': status, **({'note': note} if note is not None else {})})))
         fields = ['remediation_status', 'remediation_updated_at', 'remediation_by'] + (['remediation_note'] if note is not None else [])
         with transaction.atomic():
+            # Lock the rows and compare them with what was read: a finding someone else changed in between (another person, a retest
+            # reopening it, an agent's report) keeps that change and is reported as failed, never overwritten from a stale read. One query a kind.
+            moved = set()
+            for kind, objs in written.items():
+                model = type(next(iter(objs.values())))
+                for pk, *now_says in model._base_manager.select_for_update().filter(pk__in=list(objs)).values_list(
+                        'pk', 'remediation_status', 'remediation_updated_at', 'remediation_by_id'):
+                    if tuple(now_says) != read[(kind, pk)]:
+                        moved.add((kind, pk))
+            for kind, pk in moved:
+                del written[kind][pk]
+            for kind, obj, _before, position in changes:
+                if (kind, obj.pk) in moved:
+                    failed[position] = {'kind': items[position]['kind'], 'id': items[position]['id'],
+                                        'error': 'changed by someone else meanwhile; reload it and try again'}
+            changes = [c for c in changes if (c[0], c[1].pk) not in moved]
             for objs in written.values():
-                type(next(iter(objs.values()))).objects.bulk_update(list(objs.values()), fields)
-            FindingAuditEvent.objects.bulk_create(events)
+                if objs:
+                    type(next(iter(objs.values()))).objects.bulk_update(list(objs.values()), fields)
+            FindingAuditEvent.objects.bulk_create([event for kind, pk, event in events if (kind, pk) not in moved])
     except Exception:  # noqa: BLE001 - whatever stopped the batch, the findings are then changed one at a time, each failing on its own
         logger.warning('bulk remediation update could not be written in one go', exc_info=True)
         return None
-    fix_retest.status_changed_many([(o, before) for o, before, _ in changes], status, now)  # marked fixed: the check that proved it is run again on a Sentinel (never raises)
+    fix_retest.status_changed_many([(o, before) for _k, o, before, _ in changes], status, now)  # marked fixed: the check that proved it is run again on a Sentinel (never raises)
     transaction.on_commit(bump_stats_revision)  # the dashboards read a snapshot: whoever closed the findings sees the numbers move now (review 1 F11)
-    hosts = {h for h in (_host_of(o) for o, _, _ in changes) if h}
+    hosts = {h for h in (_host_of(o) for _k, o, _, _ in changes) if h}
     return len(changes), [failed[p] for p in sorted(failed)], hosts
 
 
