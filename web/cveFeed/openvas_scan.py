@@ -757,6 +757,23 @@ def identified(ev):
     return {'product': product, 'cpe': cpe, 'installed_version': installed, 'fixed_version': _version_from(ev.get('result'), 'fixed')}
 
 
+def generic_check(seen, cves):
+    """Whether an NVT checks a behaviour several vendors' advisories share rather than one product: it identified no product and no version
+    (``identified``), and the CVEs it lists name more than one vendor. "HTTP Debugging Methods (TRACE/TRACK) Enabled" (1.3.6.1.4.1.25623.1.0.11213)
+    is one: its result is only "TRACE is enabled", and it lists Solaris, IIS and HP UCMDB advisories. Its QoD says how reliably it saw the behaviour,
+    never whether a CVE about a particular product applies to this host, so those CVE links are not confirmed by it (the scanner finding itself
+    stands either way). A check that tests one product (its CVEs all name the same vendor) is unaffected, whatever its result text says."""
+    if seen.get('product') or seen.get('installed_version'):
+        return False
+    vendors = set()
+    for cve in cves:
+        for item in getattr(cve, 'affected', None) or []:
+            vendor = str(item.get('vendor') or '').strip().lower() if isinstance(item, dict) else ''
+            if vendor and vendor not in ('n/a', '*', '-', 'unknown'):
+                vendors.add(vendor)
+    return len(vendors) > 1
+
+
 def severity_level(score):
     """The Vulnerability severity (0 info .. 4 critical) of a CVSS base score."""
     return 4 if score >= 9.0 else 3 if score >= 7.0 else 2 if score >= 4.0 else 1 if score > 0 else 0
@@ -842,7 +859,7 @@ def apply_observations(sub):
     gone = [o for o in observations if o.outcome == 'absent']
     keep, matches, rows = set(), set(), []
     known = {c.cve_id: c for c in CVEEntry.objects.filter(cve_id__in={c for o in live for c in o.evidence.get('cves', [])})
-             .exclude(status__icontains='reject').exclude(local_only=True).only('id', 'cve_id')}
+             .exclude(status__icontains='reject').exclude(local_only=True).only('id', 'cve_id', 'affected')}
     for obs in live:
         ev = obs.evidence
         where = f'{sub.name}:{ev["port"]}'
@@ -860,6 +877,8 @@ def apply_observations(sub):
         # and the product is not a guess (correlation.invalid_identity_reason never compares an OpenVAS match's name: the NVT tested it).
         product = f'OpenVAS NVT {ev["oid"]} on {ev["port"]}'[:255]
         seen = identified(ev)
+        generic = hard and generic_check(seen, [known[c] for c in ev['cves'] if c in known])
+        linked = hard and not generic  # what this NVT's QoD may confirm: the CVEs of the product it tested, never a vendor list it only shares a behaviour with
         for cve_id in ev['cves']:
             cve = known.get(cve_id)
             if cve is None:
@@ -867,15 +886,15 @@ def apply_observations(sub):
             matches.add((cve.id, product))
             rows.append({'cve_entry_id': cve.id, 'subdomain_id': sub.id, 'source': SOURCE, 'matched_product': product,
                          'matched_version': seen['installed_version'][:100],
-                         'version_in_range': True if hard else None, 'confidence': 0.95 if hard else min(0.5, ev['qod'] / 100),
+                         'version_in_range': True if linked else None, 'confidence': 0.95 if linked else min(0.5, ev['qod'] / 100),
                          'scan_history_id': sub.scan_history_id, 'distro_status': 'no_data', 'distro_fixed_version': '',
                          'evidence': {'source': 'openvas', 'oid': ev['oid'], 'nvt': ev['name'], 'port': ev['port'], 'qod': ev['qod'], 'qod_type': ev['qod_type'],
                                       'severity': ev['severity'], 'result': ev['result'][:RESULT_EVIDENCE], 'tested_at': obs.observed_at.isoformat(),
-                                      **{k: v for k, v in seen.items() if v}}})
+                                      **({'generic_check': True} if generic else {}), **{k: v for k, v in seen.items() if v}}})
     correlation.save_matches(rows)
     now = timezone.now()
     for row in rows:
-        hard = confirmed(row['evidence'])
+        hard = confirmed(row['evidence']) and not row['evidence'].get('generic_check')
         mine = CVEMatch.objects.filter(subdomain_id=sub.id, cve_entry_id=row['cve_entry_id'], source=SOURCE, matched_product=row['matched_product'])
         if hard:
             mine.update(template_result='vulnerable', template_id=('openvas:' + row['evidence']['oid'])[:128], template_tested_at=now)
