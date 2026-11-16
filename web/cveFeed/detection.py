@@ -1098,10 +1098,14 @@ def _script_product(check):
     return _libraries()[key][0] if key in _libraries() else check['params'].get('product', '')
 
 
-def finalize(strategy, cvss_vector=''):
+def finalize(strategy, cvss_vector='', cve_id=''):
     """The strategy with every rendered part recomputed: the remote ``how``, the local ``commands`` and the ``validation`` profile. Run
-    after every write that changes the checks; whatever those fields held before (a model cannot supply them) is discarded."""
-    from cveFeed.detection_commands import render_local, render_remote
+    after every write that changes the checks; whatever those fields held before (a model cannot supply them) is discarded. ``cve_id`` (the
+    record's CVE) lets an OS package check name it in the Red Hat changelog check; a record is re-rendered with it when it is read."""
+    from functools import partial
+
+    from cveFeed.detection_commands import render_local as _render_local, render_remote
+    render_local = partial(_render_local, cve_id=cve_id)
     if not strategy:
         return strategy
     out = {k: v for k, v in strategy.items() if k != 'validation'}

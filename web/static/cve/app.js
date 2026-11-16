@@ -41,6 +41,7 @@ import * as CL from "/staticfiles/cve/closure-logic.js";
 import { changeDetail, authLabel, pathOf } from "/staticfiles/cve/change-text.js";
 import * as RT from "/staticfiles/cve/retest-logic.js";
 import { askClosureNote } from "/staticfiles/cve/closure-note.js";
+import { explainCard, validatePlanCard } from "/staticfiles/cve/match-explain.js";
 import * as LM from "/staticfiles/cve/loadmore-logic.js";
 
 const root = document.getElementById("section");
@@ -1790,9 +1791,10 @@ function renderFinding(d, cfg, row) {
     line.append(el("a", "", "Open Secrets", { href: `/cve/${encodeURIComponent(projectOf(row) || slug)}/secrets/` }));
     fix.append(line);
   });
+  let statusNode = null;
   if (cfg.statusControl) {
     // the status is a change: in the all-projects view it is shown, and set from the finding's own project
-    if (!ALL) fix.append(cfg.statusControl(d));
+    if (!ALL) fix.append((statusNode = cfg.statusControl(d)));
     else {
       const ro = el("div", "tools");
       const chip = badge(CL.statusLabel(d.remediation.status || "open").toLowerCase());
@@ -1853,6 +1855,37 @@ function renderFinding(d, cfg, row) {
   }
 
 
+  // What the match means in plain words, how sure cvENGINE is, the read-only steps for the host's owner and what each answer means
+  // (match-explain.js). A closure it offers opens the usual note dialog with the evidence filled in and saves through the usual route.
+  let explainNode = null;
+  const drawExplain = (x) => explainCard(x, { status: d.remediation.status, readOnly: ALL || !cfg.statusControl, onClose: closeWithEvidence });
+  const closeWithEvidence = async (status, note) => {
+    const answer = await askClosureNote(status, 1, note);
+    if (!answer) return;
+    try {
+      const r = await api("PATCH", `${baseOf(project)}/findings/match/${d.id}`, { status, note: answer.note });
+      Object.assign(d.remediation, {
+        status: r.remediation_status, note: r.remediation_note, closure_note: r.closure_note, closed_by: r.closed_by,
+        closed_at: r.closed_at, closed_automatically: r.closed_automatically,
+      });
+      d.retest = r.retest || null;
+      if (statusNode) {
+        const next = cfg.statusControl(d);
+        statusNode.replaceWith(next);
+        statusNode = next;
+      }
+      const again = drawExplain(r.explain || d.explain);
+      if (explainNode && again) {
+        explainNode.replaceWith(again);
+        explainNode = again;
+      }
+      toast(`Marked ${CL.statusLabel(status).toLowerCase()}`);
+    } catch (err) {
+      toast(err.message, true);
+    }
+  };
+  if (d.kind === "match") explainNode = drawExplain(d.explain);
+
   const checkFold = fold("Confirm it yourself", `${d.validation.steps.length ? `${d.validation.steps.length} check${d.validation.steps.length === 1 ? "" : "s"} run. ` : ""}${d.confirm?.where?.length ? "Where to look on this host, what to look for, " : ""}How to verify it by hand, and every check that ran`);
   const check = checkFold.body;
   const mine = d.kind === "match" ? confirmBox(d.confirm) : null;
@@ -1895,6 +1928,7 @@ function renderFinding(d, cfg, row) {
   if (v.status === "observed") check.append(el("p", "note", "These checks observed host metadata only. They did not validate or rule out this CVE on this host."));
   out.push(
     ...glance(d, { row, aiBadge: aiBadge(d.ai, { project, kind: d.kind, id: d.id }), note: noAssessment[waitingForNobody(d.ai) ? "not_triaged" : d.ai.status] }),
+    ...(explainNode ? [explainNode] : []),
     fix,
     ...[checkFold, advisoryFold, seenFold, aiHasDetail ? aiFold : null, requestFold, jobFold].filter(Boolean).map((x) => x.root),
   );
@@ -3937,6 +3971,9 @@ const pages = {
       );
       pane.append(stats);
       OV.main.append(hostReviewCard({ base: baseOf(projectOf(h)), hostId: h.id, isCurrent: () => current === h.id, ago: fullScanAgo }));
+      // the commands for the host's owner that settle the most of its open matches, one question per package, exploited first
+      const plan = validatePlanCard(h.validate_plan, { host: h.host, project: projectOf(h) });
+      if (plan) OV.main.append(plan);
       OV.side.append(hostOverview(h));
       // why the host has its colour, so the rating can be checked rather than trusted
       const why = el("div", "why");

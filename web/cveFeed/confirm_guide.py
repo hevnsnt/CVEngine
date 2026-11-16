@@ -363,8 +363,9 @@ def _host_version_step(product):
     return None
 
 
-def _os_package_commands(product, hint=''):
-    """Read-only commands that print the installed OS package of ``product`` (its binary package name for each distribution family)."""
+def _os_package_commands(product, hint='', cve_id=''):
+    """Read-only commands that print the installed OS package of ``product`` (its binary package name for each distribution family), and on
+    Red Hat the changelog check for ``cve_id``: Red Hat backports a fix without raising the version, so the build is no verdict there."""
     from cveFeed.detection_classes import os_package_name
     out = []
     families = [t[3] for t in TRACKERS if t[0].search(hint or '')] or ['dpkg', 'rpm']
@@ -377,9 +378,13 @@ def _os_package_commands(product, hint=''):
                         'explain': f'Prints the installed {name} package release (Debian and Ubuntu). Compare it with the fixed release '
                                    'the distribution\'s tracker lists for this CVE, not with the upstream version.'})
         elif eco == 'rpm':
+            if _CVE.match(cve_id or ''):
+                out.append({'platform': 'rhel', 'command': f'rpm -q --changelog {_q(name)} | grep -F -e {_q(cve_id)}',
+                            'explain': f'Prints the changelog lines of the installed {name} package that name {cve_id}: a line means this '
+                                       'build carries the fix, whatever version the banner states (Red Hat backports fixes).'})
             out.append({'platform': 'rhel', 'command': f"rpm -q --qf '%{{NAME}} %{{VERSION}}-%{{RELEASE}}\\n' {_q(name)}",
                         'explain': f'Prints the installed {name} version-release (Red Hat, SUSE). Compare it with the fixed build in the '
-                                   'vendor\'s advisory for this CVE.'})
+                                   'vendor\'s advisory for this CVE, not with the upstream version.'})
         elif eco == 'apk':
             out.append({'platform': 'alpine', 'command': f'apk info -v {_q(name)}', 'explain': f'Prints the installed {name} package.'})
     return out
@@ -657,7 +662,7 @@ def _web_product(match, cve, strategy, host, bases):
     version_cmd = _host_version_step(product)
     if version_cmd:
         local.append({'title': 'On the host: the version of the installed binary', 'commands': [version_cmd]})
-    packages = _os_package_commands(product)
+    packages = _os_package_commands(product, str(getattr(match.subdomain, 'webserver', '') or ''), cve.cve_id)
     if packages:
         local.append({'title': 'On the host: the installed package release (a backported fix keeps the old upstream version)', 'commands': packages})
     verdict = _verdict(product, version, ranges, 'The header (or the page)',
@@ -711,7 +716,7 @@ def _network_service(match, cve, strategy, host):
     version_cmd = _host_version_step(product)
     if version_cmd:
         local.append({'title': 'On the host: the version of the installed binary', 'commands': [version_cmd]})
-    packages = _os_package_commands(product, banner_hint)
+    packages = _os_package_commands(product, banner_hint, cve.cve_id)
     if packages:
         local.append({'title': 'On the host: the installed package release', 'commands': packages})
     from cveFeed.detection_classes import is_distro_build
