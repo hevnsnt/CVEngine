@@ -538,6 +538,11 @@ def openvas_brief(m, evidence, names=()):
            'detected_product': _s(evidence.get('product'), 120, names),  # its CPE is the payload's own ``cpe``
            'installed_version': _s(evidence.get('installed_version'), 100, names), 'fixed_version': _s(evidence.get('fixed_version'), 100, names),
            'result': _s(redact_text(evidence.get('result') or ''), OPENVAS_RESULT_LIMIT, names)}
+    if evidence.get('generic_check'):
+        # cveFeed.openvas_scan.generic_check: the NVT saw a behaviour (TRACE enabled...) that several vendors' advisories share; its QoD is about
+        # the behaviour, so whether this CVE's product runs on the host is the question, not settled by the check
+        out['tested'] = ('a behaviour several vendors\' advisories share, not this CVE\'s product: the check identified no product or version, '
+                         'so its quality of detection does not say this CVE applies')
     return {k: v for k, v in out.items() if v not in (None, '')}
 
 

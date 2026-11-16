@@ -386,6 +386,42 @@ class ImportTests(Fixture, TestCase):
             self.run_scan([{**APACHE, 'qod': qod, 'qod_type': qod_type}])
             self.assertEqual(CVEMatch.objects.get(cve_entry=self.cve).template_result, expected, (qod, qod_type))
 
+    def _trace_cves(self, vendors):
+        return [CVEEntry.objects.create(cve_id=f'CVE-2005-{3398 + i}', title=f'{v} TRACE', published_at=timezone.now(), cvss=4.3,
+                                        affected=[{'vendor': v, 'product': f'{v} web server'}]) for i, v in enumerate(vendors)]
+
+    def test_a_behaviour_check_does_not_confirm_other_vendors_cves(self):
+        # zebra, match 4687: "HTTP Debugging Methods (TRACE/TRACK) Enabled" (QoD 99) on Apache/Red Hat was kept as a confirmed Solaris
+        # Management Console CVE, over an AI "not applicable", and rated fire. The NVT saw TRACE enabled; it never tested a Solaris product.
+        cves = self._trace_cves(('sun', 'microsoft', 'hp'))
+        trace = dict(APACHE, oid='1.3.6.1.4.1.25623.1.0.11213', name='HTTP Debugging Methods (TRACE/TRACK) Enabled', severity=5.8, qod=99,
+                     qod_type='remote_vul', cves=[c.cve_id for c in cves])
+        self.run_scan([trace])
+        for cve in cves:
+            m = CVEMatch.objects.get(cve_entry=cve, source='openvas')
+            self.assertEqual((m.template_result, m.version_in_range), ('', None), cve.cve_id)
+            self.assertLessEqual(m.confidence, 0.5)
+            self.assertTrue(m.evidence['generic_check'])
+        vuln = Vulnerability.objects.get(template_id='openvas:1.3.6.1.4.1.25623.1.0.11213')  # the misconfiguration itself is still a finding
+        self.assertTrue(vuln.open_status)
+        self.assertIn('qod-confirmed', set(vuln.tags.values_list('name', flat=True)))
+        from cveFeed import triage
+        d = triage.describe_cve_match(CVEMatch.objects.select_related('cve_entry', 'subdomain').get(cve_entry=cves[0], source='openvas'))
+        self.assertEqual(triage.hard_evidence('cve_match', d['facts'])[0], '')  # the model may judge whether this product runs here
+        self.assertIn('tested', d['payload']['openvas'])
+
+    def test_a_check_of_one_product_still_confirms_its_cves(self):
+        cves = self._trace_cves(('apache', 'apache'))
+        self.run_scan([dict(APACHE, cves=[c.cve_id for c in cves])])
+        for cve in cves:
+            self.assertEqual(CVEMatch.objects.get(cve_entry=cve, source='openvas').template_result, 'vulnerable')
+
+    def test_a_check_that_identified_the_product_still_confirms_its_cves(self):
+        cves = self._trace_cves(('sun', 'microsoft'))
+        self.run_scan([dict(APACHE, cves=[c.cve_id for c in cves], description='Installed version: 2.4.37\nFixed version: 2.4.51')])
+        for cve in cves:
+            self.assertEqual(CVEMatch.objects.get(cve_entry=cve, source='openvas').template_result, 'vulnerable')
+
     def test_a_cve_the_catalogue_does_not_know_is_a_finding_without_a_match(self):
         self.run_scan([{**APACHE, 'cves': ['CVE-2099-0001']}])
         self.assertEqual(Vulnerability.objects.filter(source='openvas').count(), 1)
