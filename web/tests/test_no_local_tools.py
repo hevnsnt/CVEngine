@@ -249,6 +249,7 @@ ALLOWED = {
         'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing
         'cveFeed/internal_scan.py',
         'cveFeed/ledger.py',
+        'cveFeed/match_explain.py',  # explains a match to a person: reads the stored finding source 'testssl' and writes a sentence, runs nothing
         'cveFeed/migrations/0094_testssl_schedule.py',
         'cveFeed/report_data.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
