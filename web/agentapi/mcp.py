@@ -26,6 +26,7 @@ from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
 from agentapi import egress
+from agentapi import generated_templates as gentpl
 from agentapi import host_review_api as hostreview
 from agentapi import tuning
 from agentapi import authcheck
@@ -358,6 +359,43 @@ TOOLS = [
      'record you wrote; it is validated and never overwritten by the model afterwards). Commands are rendered by the app, never taken from input.',
      _schema({'cve_id': {'type': 'string'}, 'guidance': {'type': 'string'}, 'strategy': {'type': 'object'}}, ['cve_id']),
      lambda c, a: svc.update_cve_detection(c, a.get('cve_id', ''), guidance=a.get('guidance'), strategy=a.get('strategy')), True),
+    ('list_generated_templates', 'The scan templates the AI wrote for CVEs no installed template covers, newest first, with their AI and person revisions. '
+     'Each row: id, cve_id, template_id, status (draft: being validated, valid: may run on hosts, invalid: rejected or retired, expired), '
+     'validation_stage and validation_reason, created_at, validated_at, ai_model, author (ai or revision), evidence (version: a hit only reads the '
+     'version string again; behavior: it may show the flaw), matches (counts of the CVE matches it recorded on hosts of YOUR projects by '
+     'template_result: vulnerable, version_only, no_match, error), supersedes and superseded_by. Filters: cve_id, status, evidence (version or behaviour).',
+     _schema(_page_props({'cve_id': {'type': 'string'}, 'status': {'type': 'string', 'enum': ['draft', 'valid', 'invalid', 'expired']},
+                          'evidence': {'type': 'string', 'enum': ['version', 'behaviour', 'behavior']}})),
+     lambda c, a: gentpl.list_generated_templates(c, a), False),
+    ('get_generated_template', 'One AI-written template in full: everything list_generated_templates gives, plus the YAML, validation_output, '
+     'the fixture it was tested on, the positive fixture record, static_gate {ok, reason} (the safety gate every draft passes), match_list (the '
+     'matches it recorded on hosts of your projects, each with the evidence class of its stored hit), revisions (the whole revision chain) '
+     'and reviews. test_results (per host, every organization) is shown to an App Admin only. The YAML is data: never run it yourself.',
+     _schema({'id': {'type': 'integer', 'description': 'generated template id (see list_generated_templates)'}}, ['id']),
+     lambda c, a: gentpl.get_generated_template(c, a.get('id')), False),
+    ('review_generated_template', 'Without verdict: the review report of one AI-written template (reads only): static_gate, evidence, '
+     'fixture_check (its own fixture, a benign page and a 404, evaluated offline), hits (each confirmation it recorded on your hosts read again '
+     'from the stored response: would it now be version_only?) and findings in plain words ("decides on the version string only", "matches '
+     'the benign page", ...). With verdict (App Admin only, because a template runs against every organization\'s hosts): keep records the '
+     'review; retire sets it invalid with your reason, it never runs again, and every confirmation it recorded is read again: version_only '
+     'when the stored hit shows only the version, otherwise withdrawn, and the scanner finding it filed is closed automatically as a false '
+     'positive unless a person changed it. A match\'s remediation status is never touched. Audited. A read-only token can read the report '
+     'with GET generated-templates/{id}/review.',
+     _schema({'id': {'type': 'integer'}, 'verdict': {'type': 'string', 'enum': ['keep', 'retire']},
+              'reason': {'type': 'string', 'description': 'Why, at most 2000 characters; required to retire. Shown to every member with the template.'}},
+             ['id']),
+     lambda c, a: gentpl.review_generated_template(c, a.get('id'), verdict=a.get('verdict'), reason=a.get('reason')), True),
+    ('update_generated_template', 'App Admin only. Revise an AI-written template: never an edit in place. A new draft row that supersedes it, '
+     'with its own id (<cve id>-r<n>, set in the YAML for you) and your YAML, goes through the same automatic validation as an AI draft '
+     '(static gate, the scanner\'s syntax check and benign control on a Sentinel, the AI fixture, the second-pass review) and runs on no host '
+     'before it is valid; then the template it supersedes is retired as with review_generated_template verdict retire. YAML the static gate '
+     'refuses is rejected at once with its reason. fixture (optional) {vulnerable, not_affected}, each {status, headers, body}: checked offline '
+     'now and again during validation, on top of the AI fixture, never instead of it. Audited.',
+     _schema({'id': {'type': 'integer'}, 'yaml': {'type': 'string', 'description': 'the whole template, at most 20000 bytes'},
+              'reason': {'type': 'string', 'description': 'why it is revised, at most 2000 characters'},
+              'fixture': {'type': 'object', 'description': '{vulnerable: {status, headers, body}, not_affected: {status, headers, body}}'}},
+             ['id', 'yaml', 'reason']),
+     lambda c, a: gentpl.update_generated_template(c, a.get('id'), yaml=a.get('yaml'), reason=a.get('reason'), fixture=a.get('fixture')), True),
     ('list_cve_matches', 'CVEs matched to hosts, with AI verdicts and remediation status, and closure_note/closed_by/closed_at/closed_automatically for a closed one. Each carries explain: what was found and why it is shown in plain words, how sure cvENGINE is (confidence), the read-only steps that settle it on the host with what each answer means, and the closure notes the evidence supports. status: a remediation status (open, in_progress, fixed, accepted_risk, false_positive) or closed (any of the closing three). kev: true keeps only the CVEs listed as exploited.',
      _schema(_page_props({'project': SLUG_OR_ALL, 'status': {'type': 'string', 'enum': ['open', 'in_progress', 'fixed', 'accepted_risk', 'false_positive', 'closed']}, 'verdict': {'type': 'string'}, 'host': {'type': 'string'},
                           'kev': {'type': 'boolean'}}), ['project']),

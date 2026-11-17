@@ -527,7 +527,8 @@ def _drafts_last_day():
     from django.utils import timezone
 
     from cveFeed.models import GeneratedTemplate
-    return GeneratedTemplate.objects.filter(created_at__gte=timezone.now() - datetime.timedelta(days=1)).count()
+    # a revision (``supersedes`` set) is no AI generation: it does not use the budget (templategen._generation_lease)
+    return GeneratedTemplate.objects.filter(created_at__gte=timezone.now() - datetime.timedelta(days=1), supersedes__isnull=True).count()
 
 
 def snapshot():

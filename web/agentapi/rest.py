@@ -24,6 +24,7 @@ from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
 from agentapi import egress
+from agentapi import generated_templates as gentpl
 from agentapi import tuning
 from agentapi import authcheck
 from agentapi import reports
@@ -177,6 +178,19 @@ def _queue_agent_work(request, ctx, slug, **_):
     return out, (201 if out['queued'] else 200)
 
 
+def _review_generated(request, ctx, generated_id):
+    body = _body(request)
+    if body.get('verdict') in (None, ''):
+        raise ApiError(400, 'give a verdict: keep or retire (GET this route for the review report)')
+    return gentpl.review_generated_template(ctx, generated_id, verdict=body.get('verdict'), reason=body.get('reason'))
+
+
+def _revise_generated(request, ctx, generated_id):
+    body = _body(request)
+    _need(body, 'yaml', 'reason')
+    return gentpl.update_generated_template(ctx, generated_id, yaml=body.get('yaml'), reason=body.get('reason'), fixture=body.get('fixture')), 201
+
+
 # --- routes ---------------------------------------------------------------------
 # (method, path regex, summary, handler(request, ctx, **path_kwargs)); handlers return dict or (dict, status)
 
@@ -198,6 +212,16 @@ ROUTES = [
      lambda r, c, cve_id, **k: svc.update_cve_detection(c, cve_id, guidance=_body(r).get('guidance'), strategy=_body(r).get('strategy'))),
     ('GET', r'cves/(?P<cve_id>CVE-[0-9]{4}-[0-9]+|CVE-[A-Za-z0-9-]+)', 'One CVE with affected ranges',
      lambda r, c, cve_id, **k: svc.get_cve(c, cve_id)),
+    ('GET', r'generated-templates', 'AI-written scan templates, newest first (cve_id, status, evidence filters), with the counts of the matches each '
+     'recorded on your hosts', lambda r, c, **k: gentpl.list_generated_templates(c, r.GET)),
+    ('GET', r'generated-templates/(?P<generated_id>\d+)', 'One AI-written template: YAML, validation record, fixture, static gate, its matches on your '
+     'hosts, revision chain and reviews', lambda r, c, generated_id, **k: gentpl.get_generated_template(c, generated_id)),
+    ('GET', r'generated-templates/(?P<generated_id>\d+)/review', 'The review report of an AI-written template (reads only)',
+     lambda r, c, generated_id, **k: gentpl.review_generated_template(c, generated_id)),
+    ('POST', r'generated-templates/(?P<generated_id>\d+)/review', 'Record a verdict on an AI-written template (App Admin); body {verdict: keep|retire, reason}',
+     lambda r, c, generated_id, **k: _review_generated(r, c, generated_id)),
+    ('POST', r'generated-templates/(?P<generated_id>\d+)/revisions', 'Revise an AI-written template as a new draft that supersedes it (App Admin); '
+     'body {yaml, reason, fixture?}', lambda r, c, generated_id, **k: _revise_generated(r, c, generated_id)),
     ('GET', r'projects/(?P<slug>[-\w]+)/targets', 'List targets', lambda r, c, slug, **k: svc.list_targets(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets', 'Add a domain, IP, CIDR or range; body {value, description, discover, mode, scope_mode}. "=example.com" (or scope_mode host) adds exactly that host, no subdomains',
      lambda r, c, slug, **k: (svc.add_target(c, slug, *_need(_body(r), 'value'), description=_body(r).get('description', ''), discover=bool(_body(r).get('discover')),

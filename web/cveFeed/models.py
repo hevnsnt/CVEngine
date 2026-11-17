@@ -428,12 +428,41 @@ class GeneratedTemplate(models.Model):
     validation_reason = models.TextField(blank=True, db_default='', default='')  # the plain-language reason of a rejection, an expiry or a wait
     validated_at = models.DateTimeField(null=True, blank=True)  # when it became valid, invalid or expired
     fixture = models.JSONField(null=True, blank=True)  # {vulnerable, not_affected}: the AI-written responses the matchers were tested on
+    # A revision (cveFeed.template_review.revise): a new row, never an edit in place, because one template_id must always mean one text (the
+    # same-check replacement of templategen.record_outcomes relies on it). It goes through the same automatic lifecycle as an AI draft, and
+    # when it becomes valid the row it supersedes is retired.
+    supersedes = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL, related_name="revisions")
+    revised_by = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    revision_reason = models.TextField(blank=True, db_default='', default='')
+    submitted_fixture = models.JSONField(null=True, blank=True)  # {vulnerable, not_affected} the reviser gave: an extra offline gate
 
     class Meta:
         ordering = ["-created_at"]
 
     def __str__(self):
         return f"{self.template_id} [{self.status}]"
+
+
+class GeneratedTemplateReview(models.Model):
+    """A person's or agent's review of an AI-written template (``cveFeed.template_review``): keep it, retire it (status invalid, never run
+    again, its confirmations read again), or revise it (a new draft row that supersedes it). The system's own retirement of a row a valid
+    revision superseded is recorded here too, with no reviewer."""
+
+    VERDICTS = ("keep", "retire", "revise")
+
+    template = models.ForeignKey(GeneratedTemplate, on_delete=models.CASCADE, related_name="reviews")
+    reviewer = models.ForeignKey("auth.User", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    reviewer_name = models.CharField(max_length=150, blank=True, default="")  # kept when the account is removed; "" for the system
+    verdict = models.CharField(max_length=16)
+    reason = models.TextField(blank=True, default="")
+    outcome = models.JSONField(default=dict, blank=True)  # what the verdict did: matches read again, findings closed, the revision's id
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"{self.template_id} {self.verdict}"
 
 
 class DistroFix(models.Model):

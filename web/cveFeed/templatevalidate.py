@@ -167,11 +167,19 @@ def promote(tmpl, job, now=None):
             return reject(tmpl, 'a different check with the same id is already installed for this CVE')
     except (OSError, RuntimeError, ValueError) as exc:
         return _retry(tmpl, f'the validated check could not be saved ({exc})', now)
-    source = (f'AI fixture and offline matcher test, benign controls, the syntax check on a Sentinel, second-pass critique by {_model(job)}')[:300]
+    source = (f'AI fixture and offline matcher test, benign controls, the syntax check on a Sentinel, second-pass critique by {_model(job)}'
+              + (f'; revision #{tmpl.pk} of #{tmpl.supersedes_id}' + (', with the reviser\'s own fixture' if tmpl.submitted_fixture else '')
+                 if tmpl.supersedes_id else ''))[:300]
     _save(tmpl, template_id=template_id, path=path, status=tmpl.STATUS_VALID, positive_fixture_verified_at=now, positive_fixture_source=source,
           validation_reason='passed every automatic gate', validated_at=now, validation_stage='', validation_next_at=None,
           validation_output=(tmpl.validation_output + '\nautomatic validation: passed every gate').strip()[:6000])
     _say(tmpl, f'The AI-written check for {tmpl.cve_entry.cve_id} passed every automatic gate and may now be run on hosts')
+    if tmpl.supersedes_id:  # a revision is valid: the row it supersedes is retired and its confirmations read again (cveFeed.template_review)
+        try:
+            from cveFeed import template_review
+            template_review.revision_promoted(tmpl)
+        except Exception:  # noqa: BLE001 - the revision stands; resolve_template prefers it, and a person can retire the old row by hand
+            logger.exception('could not retire the template revision #%s superseded', tmpl.pk)
     return 'valid'
 
 
@@ -316,8 +324,31 @@ def _fixture_answer(tmpl, data, now):
         return reject(tmpl, f'it also matches {" and ".join(wrong)}, so it would flag hosts that are not affected')
     if not hit:
         return _retry(tmpl, 'the template did not match the response an affected host gives', now)
+    own = _submitted_fixture_problem(tmpl)  # a revision's own fixture is a gate on top of the AI's, never instead of it
+    if own:
+        return reject(tmpl, own)
     _save(tmpl, fixture={'vulnerable': affected, 'not_affected': fixed}, validation_stage='critique', validation_next_at=None)
     return _ask(tmpl, 'critique', now)
+
+
+def _submitted_fixture_problem(tmpl):
+    """Why the fixture a reviser gave with a revision (``submitted_fixture``) does not hold for the template, or ''. It was checked when the
+    revision was submitted (cveFeed.template_review); this is the same check again, so the gate holds whatever changed in between."""
+    given = tmpl.submitted_fixture
+    if not given:
+        return ''
+    affected = templatefixture.clean_fixture(given.get('vulnerable')) if isinstance(given, dict) else None
+    fixed = templatefixture.clean_fixture(given.get('not_affected')) if isinstance(given, dict) else None
+    if affected is None or fixed is None:
+        return 'the fixture given with the revision is not usable'
+    try:
+        if not templatefixture.matches(tmpl.yaml, affected):
+            return 'it does not match the affected response given with the revision'
+        if templatefixture.matches(tmpl.yaml, fixed):
+            return 'it also matches the fixed response given with the revision'
+    except templatefixture.Unsupported as exc:
+        return f'it uses a matcher that cannot be tested offline ({exc})'
+    return ''
 
 
 def _critique_answer(tmpl, job, data, now):
