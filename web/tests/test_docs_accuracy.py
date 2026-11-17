@@ -9,7 +9,7 @@ from django.test import SimpleTestCase
 
 ROOT = Path(__file__).resolve().parents[2]
 WEB = ROOT / 'web'
-NUMBER_WORDS = {10: 'ten', 11: 'eleven', 12: 'twelve', 15: 'fifteen', 29: 'twenty-nine', 30: 'thirty', 35: 'thirty-five', 36: 'thirty-six', 37: 'thirty-seven'}
+NUMBER_WORDS = {10: 'ten', 11: 'eleven', 12: 'twelve', 15: 'fifteen', 29: 'twenty-nine', 30: 'thirty', 35: 'thirty-five', 36: 'thirty-six', 37: 'thirty-seven', 38: 'thirty-eight', 39: 'thirty-nine'}
 
 # read by a script or a test hook of its own, not an operator setting
 # design records written before 1.4 landed: they say what the plan was, not what runs
