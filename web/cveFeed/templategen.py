@@ -820,14 +820,37 @@ def _template_index(roots):
     if cached and cached[0] == signature:
         return cached[1]
     index = {}
+    generated = os.path.realpath(GENERATED_DIR)
     for root in key:
+        revisions = os.path.realpath(root) == generated  # only an AI-written check's revision is named <cve id>-r<n> (``revision_base``)
         for dirpath, _dirs, files in os.walk(root):
             for name in files:
                 stem, dot, ext = name.rpartition(".")
                 if dot and ext.lower().startswith("y") and ext.lower().endswith("ml"):
-                    index.setdefault(stem.lower(), []).append(os.path.join(dirpath, name))
+                    path = os.path.join(dirpath, name)
+                    index.setdefault(stem.lower(), []).append(path)
+                    base = revision_base(stem) if revisions else ""
+                    if base:
+                        index.setdefault(base, []).append(path)
     _TEMPLATE_INDEX[key] = (signature, index)
     return index
+
+
+# A revision of an AI-written check (cveFeed.template_review) is a new row with a new id, never the old file rewritten: one template id always
+# means one text (the same-check replacement of ``record_outcomes`` and ``recheck_template_hits`` rely on it). Its id and file name are the
+# CVE id and "-r<n>" (cve-2024-38475-r2), so the template index still finds it for its CVE.
+_REVISION_ID = re.compile(r"^(cve-\d{4}-\d{4,})-r(\d{1,4})$")
+
+
+def revision_base(template_id):
+    """The lowercase CVE id a revision's id or file stem (``cve-2024-38475-r2``) names, or '' for anything else."""
+    found = _REVISION_ID.match(str(template_id or "").lower())
+    return found.group(1) if found else ""
+
+
+def revision_id(cve_id, number):
+    """The id of revision ``number`` of a CVE's check: ``cve-2024-38475-r2``."""
+    return f"{str(cve_id).lower()}-r{int(number)}"
 
 
 def find_existing_template(cve_id, roots=None):
@@ -1009,7 +1032,9 @@ def _generation_lease(cve):
         raise TemplateBudgetExceeded(f'an AI check for {cve.cve_id} was already attempted on {last.created_at:%Y-%m-%d} ({last.status})')
     from cveFeed.models import AIJob
     asked = AIJob.objects.filter(kind='template_generation', created_at__gte=now - datetime.timedelta(days=1), status__in=AIJob.OPEN).count()
-    if GeneratedTemplate.objects.filter(created_at__gte=now - datetime.timedelta(days=1)).count() + asked >= generation_limit('TEMPLATE_GEN_MAX_PER_DAY'):
+    # a person's or agent's revision (``supersedes`` set) asked the AI to write nothing: it is not part of the generation budget
+    written = GeneratedTemplate.objects.filter(created_at__gte=now - datetime.timedelta(days=1), supersedes__isnull=True).count()
+    if written + asked >= generation_limit('TEMPLATE_GEN_MAX_PER_DAY'):
         raise TemplateBudgetExceeded('the daily AI template budget is spent')
     if AIJob.objects.filter(kind='template_generation', dedupe=f'template:{cve.pk}', status__in=AIJob.OPEN).exists():
         raise TemplateBudgetExceeded(f'an AI check for {cve.cve_id} is already being written')
@@ -1130,6 +1155,10 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     from startScan.models import Subdomain
     if project is None or not outcomes:
         return 0
+    stale = stale_generated_template(template_id=template_id)
+    if stale is not None:  # retired (or superseded) while it ran: what it found is not recorded, not even a miss
+        discarded_result(cve, stale, project=getattr(project, "pk", project))
+        return 0
     by_host = {}
     for outcome in outcomes:
         by_host.setdefault(_host_key(outcome["host"]), outcome)
@@ -1194,15 +1223,46 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     return saved
 
 
+def stale_generated_template(template_id="", path=""):
+    """The AI-written template (``GeneratedTemplate``) installed under ``template_id`` (or at ``path``) when it may no longer run, else None.
+    A run reads the approved text before it starts (``validation.approved_template``); a review can retire the template, or a valid revision
+    supersede it, while the run is out, and its result must then not be recorded (``record_outcomes``, ``validation.apply_validation``). Stale:
+    every row installed under that id or path is no longer ``valid`` (retired, rejected, expired), or the valid one has a valid revision. A
+    template no AI-written row was installed under (an installed upstream template) is never stale."""
+    from cveFeed.models import GeneratedTemplate
+    if path:
+        rows = GeneratedTemplate.objects.filter(path=str(path))
+    elif template_id:
+        rows = GeneratedTemplate.objects.filter(template_id=str(template_id)[:128]).exclude(path="")
+    else:
+        return None
+    rows = list(rows.select_related("cve_entry").order_by("-id")[:20])
+    if not rows:
+        return None
+    for row in rows:
+        if row.status == GeneratedTemplate.STATUS_VALID and not row.revisions.filter(status=GeneratedTemplate.STATUS_VALID).exists():
+            return None
+    return rows[0]
+
+
+def discarded_result(cve, stale, project=None):
+    """The one activity line for a result of a retired check that was thrown away."""
+    from cveFeed import activity
+    activity.log("validate", f"The result of a retired check ({stale.template_id or '#%d' % stale.pk}) for {cve.cve_id} was discarded: the "
+                             "check was retired or superseded while it ran, so nothing it found is recorded", project=project, cve_id=cve.cve_id,
+                 vulnerable=False)
+
+
 VERSION_HIT_NOTE = ("Closed automatically: the template check only read the version string from the response, which is not proof of the "
                     "flaw (a distribution backports fixes without changing the version it prints). The match stays, on its version.")
 
 
-def close_version_hit_findings(cve, host, project, template_ids):
+def close_version_hit_findings(cve, host, project, template_ids, note=VERSION_HIT_NOTE, by="template_evidence"):
     """Close, automatically and as a false positive, the nuclei-cve findings ``template_ids`` filed for ``cve`` on ``host`` of ``project``,
-    once a hit of that template is known to have read only the version string (``hit_evidence``). Only a finding still open that nobody set
-    is closed (``REMEDIATION.move`` from open, no ``remediation_by``): one a person changed keeps their decision. Each closure is written to
-    the finding's audit trail with no user. Returns the ids closed."""
+    once a hit of that template is known to have read only the version string (``hit_evidence``), or once the template was retired
+    (``note`` RETIRED_NOTE, ``cveFeed.template_review``). Only a finding still open that nobody set is closed (``REMEDIATION.move`` from open,
+    no ``remediation_by``): one a person changed keeps their decision. Each closure is written to the finding's audit trail with no user.
+    Returns the ids closed."""
     from cveFeed.models import FindingAuditEvent
     from reNgine.state_machines import REMEDIATION
     from startScan.models import Vulnerability
@@ -1218,11 +1278,11 @@ def close_version_hit_findings(cve, host, project, template_ids):
     closed = []
     for pk in found:  # one by one, so the audit trail names only the rows that really moved
         if REMEDIATION.move(Vulnerability._base_manager.filter(pk=pk, remediation_by__isnull=True), "false_positive", only_from=("open",),
-                            remediation_note=VERSION_HIT_NOTE, remediation_updated_at=now):
+                            remediation_note=note, remediation_updated_at=now):
             closed.append(pk)
     FindingAuditEvent.objects.bulk_create([
         FindingAuditEvent(project_id=project, finding_kind="vulnerability", finding_id=pk, event="status", actor=None,
-                          before={"status": "open"}, after={"status": "false_positive", "note": VERSION_HIT_NOTE, "by": "template_evidence"})
+                          before={"status": "open"}, after={"status": "false_positive", "note": note, "by": by})
         for pk in closed])
     return closed
 
@@ -1261,6 +1321,48 @@ def version_hit_corrected(cve, host, project, template_ids, match_ids):
                                                            if closed else ""),
                  project=project, cve_id=cve.cve_id, vulnerable=False)
     return closed
+
+
+RETIRED_NOTE = ("Closed automatically: the AI-written template check that confirmed this was retired by a review, so its confirmation no "
+                "longer stands. The match stays, on its version, until another check confirms it.")
+
+
+def retired_check_corrected(cve, host, project, template_ids, match_ids):
+    """What follows once a confirmation a retired AI-written template recorded is withdrawn (``cveFeed.template_review.retire``) and its hit
+    cannot be read as a version hit (no stored response, or ``hit_evidence`` says it showed more): the matches were put back to no template
+    result by the caller; the finding that template filed is closed as a false positive with RETIRED_NOTE (one a person changed is left alone),
+    the matches' triage starts over (``retriage``), the host is rescored and the activity feed says why. The matches' remediation status is
+    never touched. Returns the finding ids closed."""
+    from cveFeed import activity, scoring
+    closed = []
+    try:
+        closed = close_version_hit_findings(cve, host, project, template_ids, note=RETIRED_NOTE, by="template_retired")
+    except Exception:  # noqa: BLE001 - the template result is recorded either way
+        logger.exception("could not close the %s findings of a retired template on %s", cve.cve_id, host)
+    retriage(match_ids)
+    scoring.rescore_quietly(project, [host])
+    activity.log("validate", f"The {cve.cve_id} check that confirmed {host} was retired: the confirmation no longer stands and the match is "
+                             "unconfirmed again" + (f", and finding #{', #'.join(map(str, closed))} was closed as a false positive"
+                                                    if closed else ""),
+                 project=project, cve_id=cve.cve_id, vulnerable=False)
+    return closed
+
+
+def stored_hit(project_id, host, cve_id, template_ids, match_ids):
+    """The response (and request) a confirmed hit of one of ``template_ids`` on ``host`` recorded, or None: the nuclei-cve finding's copy (8
+    KiB), else the validation step's (4 KiB). Read by ``recheck_template_hits`` and by the template review (``cveFeed.template_review``)."""
+    from cveFeed.models import Triage
+    from startScan.models import Vulnerability
+    row = (Vulnerability._base_manager.filter(source='nuclei-cve', subdomain__name=host, target_domain__project_id=project_id,
+                                              template_id__in=[t for t in template_ids if t], cve_ids__name__iexact=cve_id)
+           .exclude(response__isnull=True).exclude(response='').order_by('-id').values('request', 'response').first())
+    if row:
+        return {'request': row['request'] or '', 'response': row['response']}
+    for evidence in Triage.objects.filter(match_id__in=match_ids).order_by('-id').values_list('validation_evidence', flat=True):
+        step = evidence.get('nuclei_template') if isinstance(evidence, dict) else None
+        if isinstance(step, dict) and isinstance(step.get('response'), str) and step['response'].strip():
+            return {'request': step.get('request') or '', 'response': step['response']}
+    return None
 
 
 def run_cve_tests(cve, hosts, ai=False, project=None):

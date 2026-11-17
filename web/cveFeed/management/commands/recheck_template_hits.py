@@ -15,24 +15,9 @@ default; run once by itself after the update (``cveFeed.upgrade_backfills``).
 """
 from django.core.management.base import BaseCommand
 
+from cveFeed.templategen import stored_hit  # noqa: F401 - read here, and kept importable from this command
+
 from ._finding_backfill import add_arguments, line, projects
-
-
-def stored_hit(project_id, host, cve_id, template_ids, match_ids):
-    """The response (and request) a confirmed hit of one of ``template_ids`` on ``host`` recorded, or None: the nuclei-cve finding's copy (8
-    KiB), else the validation step's (4 KiB)."""
-    from cveFeed.models import Triage
-    from startScan.models import Vulnerability
-    row = (Vulnerability._base_manager.filter(source='nuclei-cve', subdomain__name=host, target_domain__project_id=project_id,
-                                              template_id__in=[t for t in template_ids if t], cve_ids__name__iexact=cve_id)
-           .exclude(response__isnull=True).exclude(response='').order_by('-id').values('request', 'response').first())
-    if row:
-        return {'request': row['request'] or '', 'response': row['response']}
-    for evidence in Triage.objects.filter(match_id__in=match_ids).order_by('-id').values_list('validation_evidence', flat=True):
-        step = evidence.get('nuclei_template') if isinstance(evidence, dict) else None
-        if isinstance(step, dict) and isinstance(step.get('response'), str) and step['response'].strip():
-            return {'request': step.get('request') or '', 'response': step['response']}
-    return None
 
 
 def recheck(project, apply=False):

@@ -51,7 +51,7 @@ Ubuntu 26.04, Python 3.14, Django 6.0, PostgreSQL 18, nmap 7.993, and Go 1.27 fo
 | `HostScreenshot` | The newest browser capture of each web page of a host (one row per project, host, scheme and port): the picture and thumbnail paths, hash, final URL, HTTP status, title, and the outcome and reason of the last attempt, including the pages still `queued` and the RDP ports that insist on NLA ([Web screenshots](PIPELINE.md#web-screenshots)) |
 | `CVEEntry`, `CVEMatch` | The CVE store, and which CVEs apply to which hosts |
 | `Triage`, `TriageVerdict` | One triage per finding, and the AI answer shared by findings with the same evidence (a closing answer only within the project, and host, it was reached on) |
-| `GeneratedTemplate`, `AutoFireRun` | AI-drafted nuclei templates and auto-fire runs |
+| `GeneratedTemplate`, `GeneratedTemplateReview`, `AutoFireRun` | AI-drafted nuclei templates (a revision is a new row that supersedes the old one), the reviews of them, and auto-fire runs |
 | `HostState`, `AssetChange` | Each host's snapshot, and the change log built from comparing snapshots |
 | `HostProfile`, `HostLabel`, `HostExclusion`, `HostAssessment` | Owner, criticality, alias and note (one row per project and host name, so they outlast rescans), detection chips, exclusions, and rescans |
 | `HostInventory`, `HostInventoryReport` | What a host reported about itself with the reporter script, one row per machine, and its summarised report history ([HOST-INVENTORY.md](HOST-INVENTORY.md)) |
