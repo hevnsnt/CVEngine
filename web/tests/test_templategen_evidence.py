@@ -457,7 +457,10 @@ class TemplateHitTests(Fixture):
 
     def run_test(self, text, hit, vulnerable=True):
         outcome = [{'host': HOST, 'vulnerable': vulnerable, 'output': '{}' if vulnerable else '', **({'hit': hit} if vulnerable else {})}]
-        with mock.patch('cveFeed.validation.resolve_template', return_value=('/templates/x.yaml', '')), \
+        # each template is its own file, so its own template_id: a version hit of the SAME check replaces that check's confirmation
+        # (templategen.record_outcomes), another template's never does
+        path = f"/templates/{yaml.safe_load(text)['id']}.yaml"
+        with mock.patch('cveFeed.validation.resolve_template', return_value=(path, '')), \
                 mock.patch('cveFeed.validation.approved_template', return_value=(text, '')), \
                 mock.patch.object(templategen, '_test_chunk', return_value=outcome), \
                 mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, **kw: list(hosts)), \

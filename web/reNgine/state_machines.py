@@ -50,7 +50,8 @@ _REMEDIATION_MEANINGS = {
     'in_progress': 'Someone is working on it.',
     'fixed': 'Someone fixed it (a retest checks that on a Sentinel), or a later scan read a fixed version.',
     'accepted_risk': 'A person decided to live with it.',
-    'false_positive': 'It is not real: a person said so, or the AI reviewer did under the server\'s own checks.',
+    'false_positive': 'It is not real: a person said so, the AI reviewer did under the server\'s own checks, or the template check that filed '
+                      'it turned out to have read only a version string.',
 }
 REMEDIATION = register(Machine(
     'remediation', 'remediation_status', label='The finding',

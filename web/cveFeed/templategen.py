@@ -610,17 +610,181 @@ def _template_evidence(text):
     return VERSION_EVIDENCE
 
 
-def evidence_of_template(path):
-    """``template_evidence`` of the approved template at ``path`` (BEHAVIOR_EVIDENCE when it cannot be read: never a downgrade)."""
+def approved_text(path):
+    """The text of the approved template at ``path`` (``validation.approved_template``), or '' when it cannot be read or is not approved."""
     try:
         from cveFeed.validation import approved_template
         text, problem = approved_template(path)
     except Exception:  # noqa: BLE001
-        return BEHAVIOR_EVIDENCE
+        return ''
+    return '' if problem else (text or '')
+
+
+def evidence_of_template(path):
+    """``template_evidence`` of the approved template at ``path`` (BEHAVIOR_EVIDENCE when it cannot be read: never a downgrade)."""
+    text = approved_text(path)
     try:
-        return BEHAVIOR_EVIDENCE if problem else template_evidence(text)
+        return template_evidence(text) if text else BEHAVIOR_EVIDENCE
     except Exception:  # noqa: BLE001 - never downgrade on a template this cannot read
         return BEHAVIOR_EVIDENCE
+
+
+# ----------------------------------------------------------------------------- what one hit showed: the counterfactual
+
+# ``template_evidence`` reads the template alone and is an allowlist, so a version check written in a shape it does not list (a product word
+# its name does not carry, ``Server: Apache``, two request blocks) is read as behaviour: an AI-written check that only read
+# ``Server: Apache/2.4.37`` from the site root was recorded as a confirmed hit (CVE-2024-38475 and CVE-2023-25690 on a RHEL httpd).
+# ``hit_evidence`` asks the hit itself. The offline evaluator (``templatefixture.matches``) must agree with the scanner on the response the hit
+# recorded, and the same response with every version number replaced by one no range covers must NOT match: the version decided the hit, so
+# the hit is the version read again. And what surrounds the version numbers must be enough on its own, so a hit that also needed a marker
+# elsewhere in the response (a file's magic, an error text) stays behaviour.
+# A version number: two or three dotted parts with an optional letter (2.4.37, 1.1.1k), never part of a longer dotted run (10.0.0.1).
+_HIT_VERSION = re.compile(r"(?<![\d.])\d{1,6}(?:\.\d{1,6}){1,2}[a-z]?(?!\.?\d)")
+_NEUTRAL_VERSION = "0.0"  # inside no affected range
+# the stored copies of a hit's response are clipped (the Sentinel's hit at 8000 characters, a finding's at 8 KiB, a validation step's at
+# 4 KiB): a response this long may have lost its tail, where a matcher may have matched in a way the kept part does not show
+_HIT_CLIP_FLOOR = 4000
+_HEADER_NAME = re.compile(r"^[A-Za-z0-9-]{1,60}$")
+_HEADER_END = re.compile(r"\r?\n\r?\n")
+_HIT_STATUS_LINE = re.compile(r"^HTTP/\d(?:\.\d)?\s+(\d{3})(?:\s|$)")
+_CONTEXT_WORDS = 3  # words kept before a version number in the cut-down body ("<title>Apache Tomcat/9.0.1")
+
+
+def _parse_hit_response(text, network):
+    """``(fixture, headers_complete)`` of a hit's raw response: ``{status, headers, body}`` as ``templatefixture`` reads it (a network banner
+    is a body). Raises ValueError for anything that is not a plain HTTP response."""
+    text = str(text)
+    if network:
+        return {"status": 200, "headers": {}, "body": text}, True
+    parts = _HEADER_END.split(text, 1)
+    lines = re.split(r"\r?\n", parts[0])
+    status = _HIT_STATUS_LINE.match(lines[0].strip())
+    if not status:
+        raise ValueError("not an HTTP response")
+    headers = {}
+    for line in lines[1:]:
+        name, colon, value = line.partition(":")
+        if not colon or not _HEADER_NAME.match(name.strip()):
+            raise ValueError("not an HTTP header line")
+        key = next((k for k in headers if k.lower() == name.strip().lower()), name.strip())
+        headers[key] = f"{headers[key]}, {value.strip()}" if key in headers else value.strip()
+    return {"status": int(status.group(1)), "headers": headers, "body": parts[1] if len(parts) > 1 else ""}, len(parts) > 1
+
+
+def _neutralised(fixture):
+    """The same response with every version number replaced by one no range covers."""
+    def swap(value):
+        return _HIT_VERSION.sub(_NEUTRAL_VERSION, value)
+    return {"status": fixture["status"], "headers": {k: swap(v) for k, v in fixture["headers"].items()}, "body": swap(fixture["body"])}
+
+
+def _around_versions(fixture):
+    """Only what surrounds the version numbers: the headers that carry one (and the Content-Type), and in the body each word holding a
+    version with the few words before it. The status stays."""
+    headers = {k: v for k, v in fixture["headers"].items() if _HIT_VERSION.search(v) or k.lower() == "content-type"}
+    words = fixture["body"].split()
+    kept = [" ".join(words[max(0, index - _CONTEXT_WORDS):index + 1]) for index, word in enumerate(words) if _HIT_VERSION.search(word)]
+    return {"status": fixture["status"], "headers": headers, "body": "\n".join(kept)}
+
+
+def _request_blocks(doc):
+    """``[(proto, block)]`` of a template, or None when it holds anything but plain http and network blocks."""
+    if not isinstance(doc, dict) or set(map(str, doc)) - _TEMPLATE_KEYS or doc.get("self-contained"):
+        return None
+    blocks = []
+    for proto in ("http", "requests", "network", "tcp"):
+        found = doc.get(proto) or []
+        if not isinstance(found, list) or not all(isinstance(b, dict) for b in found):
+            return None
+        blocks += [(proto, block) for block in found]
+    return blocks or None
+
+
+def _live_matchers(block):
+    return [m for m in (block.get("matchers") or []) if isinstance(m, dict) and not m.get("internal")]
+
+
+def _version_decided_hit(text, outcome):
+    """Whether (a) to (e) of ``hit_evidence`` hold. Raises on anything it cannot read (the caller reads that as behaviour)."""
+    from cveFeed import templatefixture
+    hit = outcome.get("hit") if isinstance(outcome, dict) else None
+    response = hit.get("response") if isinstance(hit, dict) else None
+    if not isinstance(response, str) or not response.strip():
+        return False
+    blocks = _request_blocks(load_template(text))
+    # (a) every request only reads: nothing the answer could owe to a payload, no page that is itself an exposure
+    if not blocks or not all(_plain_requests(proto, block) for proto, block in blocks):
+        return False
+    network = [proto in ("network", "tcp") for proto, _block in blocks]
+    if any(network) and not all(network):
+        return False  # a banner and a page in one check: one response cannot stand for both
+    network = all(network)
+    matchers = [m for _proto, block in blocks for m in _live_matchers(block)]
+    if not matchers:
+        return False
+    # (b) the hit's response, as the offline evaluator reads one
+    fixture, headers_complete = _parse_hit_response(response, network)
+    clipped = len(response) >= _HIT_CLIP_FLOOR
+    if clipped and (network or not headers_complete):
+        return False  # a stored copy cut inside the headers, or a banner cut short
+    # (c) the offline evaluator agrees with the scanner on the real response
+    if not templatefixture.matches(text, fixture):
+        return False
+    # several requests, or a stored copy that may have lost its tail: the response read here may not be all the scanner matched on (another
+    # request's answer, the lost tail). Every matcher must hold on what is here, so no other route to the match is left unseen
+    requests = sum(len(block.get("path") or []) + len(block.get("raw") or []) if proto in ("http", "requests") else 1 for proto, block in blocks)
+    if requests > 1 or clipped:
+        parts = templatefixture._parts(fixture)
+        if not all(templatefixture._one(m, fixture, parts) for m in matchers):
+            return False
+    # (d) without its version numbers the response no longer matches: the version decided the hit
+    if templatefixture.matches(text, _neutralised(fixture)):
+        return False
+    # (e) what surrounds the version numbers is enough on its own: the hit needed no marker anywhere else in the response
+    return bool(templatefixture.matches(text, _around_versions(fixture)))
+
+
+def hit_evidence(template_text, outcome, static=None):
+    """VERSION_EVIDENCE when this hit (``outcome['hit']``, the matched result line) of the template ``template_text`` shows only a version
+    string, else BEHAVIOR_EVIDENCE. Pure. ``static`` is ``template_evidence(template_text)`` when the caller has it.
+
+    VERSION_EVIDENCE when the static classifier says so, or when all of these hold on the hit:
+
+      (a) every request block only reads (``_plain_requests``: GET or HEAD of a static path that is not itself an exposure, no header but
+          Host, no body; or a network banner read with nothing sent);
+      (b) the hit's raw response parses into ``{status, headers, body}`` (a network banner is a body);
+      (c) the offline evaluator (``templatefixture.matches``) matches it: it agrees with the scanner;
+      (d) it does NOT match the same response with every version number (2 or 3 dotted parts and an optional letter: ``2.4.37``, ``1.1.1k``;
+          never part of an address such as ``10.0.0.1``) replaced by ``0.0``, which no range covers;
+      (e) it still matches the response cut down to what surrounds the version numbers (the headers that carry one, the Content-Type, a few
+          words before each version in the body), so it needed no marker anywhere else.
+
+    A template of several requests, or a response long enough to have been clipped in storage, must also hold on the recorded response with
+    every matcher (another request, or the lost tail, may have matched in a way this response does not show), and a clipped copy must keep
+    the headers whole. Anything the evaluator cannot decide (a dsl, xpath or json matcher: ``templatefixture.Unsupported``), a response that
+    does not parse, a missing hit, or any error is BEHAVIOR_EVIDENCE: a genuine hit is never downgraded on doubt."""
+    try:
+        static = template_evidence(template_text) if static is None else static
+        if static == VERSION_EVIDENCE:
+            return VERSION_EVIDENCE
+        return VERSION_EVIDENCE if template_text and _version_decided_hit(template_text, outcome) else BEHAVIOR_EVIDENCE
+    except Exception:  # noqa: BLE001 - Unsupported, a parse failure, a field of an unexpected shape: never downgrade
+        return BEHAVIOR_EVIDENCE
+
+
+def outcome_evidence(template_text, outcome, static):
+    """What one test outcome of a template shows: ``static`` (its ``template_evidence``) for a miss or an error, ``hit_evidence`` for a hit."""
+    if static == VERSION_EVIDENCE or not template_text or not outcome.get("vulnerable") or outcome.get("error"):
+        return static
+    return hit_evidence(template_text, outcome, static)
+
+
+def evidence_of_hit(path, outcome):
+    """``outcome_evidence`` of one outcome of the approved template at ``path`` (BEHAVIOR_EVIDENCE when it cannot be read)."""
+    text = approved_text(path)
+    if not text:
+        return BEHAVIOR_EVIDENCE
+    return outcome_evidence(text, outcome, template_evidence(text))
 
 
 def is_confirmed(outcome):
@@ -947,16 +1111,19 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     """Persist what the template test found, so it shows in the findings, host heat and graph rather than only in the activity
     log: a vulnerable host gets a Vulnerability (source 'nuclei-cve', linked to the CVE, with the matched request and response as
     evidence), and every tested host's CVEMatch records the result ("vulnerable", "no_match", or "error" when it could not be
-    tested). A hit of a version-class template (``template_evidence``) is recorded as VERSION_ONLY_RESULT and makes no finding: it read
-    the version again, it did not show the flaw. Only a "vulnerable" result ever replaces a "vulnerable" one (from nuclei, OpenVAS or
-    the TLS audit): a version hit, a miss or an error of a later run never lowers a confirmation. Only hosts of ``project`` are touched: without
-    one nothing is guessed.
+    tested). A hit that only read a version string (``template_evidence``, or the hit itself: ``hit_evidence``) is recorded as
+    VERSION_ONLY_RESULT and makes no finding: it read the version again, it did not show the flaw. Only a "vulnerable" result replaces a
+    "vulnerable" one (from nuclei, OpenVAS or the TLS audit): a miss, an error or another template's version hit of a later run never lowers
+    a confirmation. The one exception is the same check read correctly: a version hit of the template that recorded the confirmation
+    (``template_id`` the same) replaces it, the nuclei-cve finding that template filed for the CVE on the host is closed automatically as a
+    false positive (``close_version_hit_findings``; one a person changed is left alone), and the match's triage starts over
+    (``retriage``). The match's remediation status is never touched. Only hosts of ``project`` are touched: without one nothing is guessed.
 
     A version-class hit proves the version is on the host (``match_policy.version_read_from_component``): under the KEV heat policy a KEV or
     exploited match it turns from smoke to fire is rescored and paged once (``scoring.evidence_arrived``, ``notify.fire_confirmed``: once per
     heat rule), the state read before the write (``threat.unproven``) so a match that was already fire is not paged again. It is still no
     confirmed finding (no Vulnerability, no "template test confirmed" message). Returns the number of findings saved."""
-    from django.utils import timezone
+    from django.db.models import Q
 
     from cveFeed.models import CVEMatch
     from reNgine.tasks import parse_nuclei_result, save_vulnerability
@@ -973,19 +1140,27 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     from cveFeed import template_gates, threat
     # a template that matches patched releases too (template_gates.GATES): its hit on a host whose release is patched is no hit
     gated = {name for (name, _d), sub in latest.items() if template_gates.out_of_range({cve.cve_id, template_id or ''}, sub)}
-    now, saved, proved = timezone.now(), 0, []
+    now, saved, proved, corrected = timezone.now(), 0, [], []
+    template_id = (template_id or "")[:128]
     for name, outcome in by_host.items():
         # a version-class template's hit is the version read again (template_evidence): recorded as such, never as "vulnerable"
         result = ("error" if outcome.get("error") else VERSION_ONLY_RESULT if is_version_hit(outcome)
                   else "vulnerable" if outcome["vulnerable"] and name not in gated else "no_match")
         rows = CVEMatch.objects.filter(cve_entry=cve, subdomain__name=name, subdomain__target_domain__project_id=project)
         if result != "vulnerable":
-            # a confirmation stands until a person or a confirming check says otherwise: a version read again, a miss or an error of a later
-            # run (a timeout, a WAF that answered this time, a template that changed) never lowers it, whichever tester made it
-            rows = rows.exclude(template_result="vulnerable")
+            # a confirmation stands until a person or a confirming check says otherwise: a miss or an error of a later run (a timeout, a WAF
+            # that answered this time), or another template's version hit, never lowers it, whichever tester made it. The same template's
+            # version hit does: it is the same check, now read for what it showed (hit_evidence)
+            standing = Q(template_result="vulnerable")
+            if result == VERSION_ONLY_RESULT and template_id:
+                same = list(rows.filter(template_result="vulnerable", template_id=template_id).values_list("pk", flat=True))
+                if same:
+                    corrected.append((name, same, outcome))
+                standing &= ~Q(template_id=template_id)
+            rows = rows.exclude(standing)
         unproven = ({m.pk for m in rows.select_related("cve_entry", "triage") if threat.unproven(m)}
                     if result == VERSION_ONLY_RESULT and threat.heat_policy() != threat.LEGACY_POLICY else set())
-        rows.update(template_result=result, template_id=(template_id or "")[:128], template_tested_at=now)
+        rows.update(template_result=result, template_id=template_id, template_tested_at=now)
         if unproven:  # read before the write: only a real smoke-to-fire change is rescored and paged
             proved += [m.pk for m in CVEMatch.objects.filter(pk__in=unproven).select_related("cve_entry", "triage")
                        if not threat.unproven(m) and threat.match_heat(m) == threat.FIRE]
@@ -1013,7 +1188,79 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     if proved:
         from cveFeed import scoring
         scoring.evidence_arrived(proved, confirmed=proved)
+    for name, ids, outcome in corrected:
+        hit = outcome.get("hit") if isinstance(outcome.get("hit"), dict) else {}
+        version_hit_corrected(cve, name, getattr(project, "pk", project), {template_id, str(hit.get("template-id") or "")[:200]}, ids)
     return saved
+
+
+VERSION_HIT_NOTE = ("Closed automatically: the template check only read the version string from the response, which is not proof of the "
+                    "flaw (a distribution backports fixes without changing the version it prints). The match stays, on its version.")
+
+
+def close_version_hit_findings(cve, host, project, template_ids):
+    """Close, automatically and as a false positive, the nuclei-cve findings ``template_ids`` filed for ``cve`` on ``host`` of ``project``,
+    once a hit of that template is known to have read only the version string (``hit_evidence``). Only a finding still open that nobody set
+    is closed (``REMEDIATION.move`` from open, no ``remediation_by``): one a person changed keeps their decision. Each closure is written to
+    the finding's audit trail with no user. Returns the ids closed."""
+    from cveFeed.models import FindingAuditEvent
+    from reNgine.state_machines import REMEDIATION
+    from startScan.models import Vulnerability
+    ids = [t for t in template_ids if t]
+    if not ids or project is None:
+        return []
+    found = list(Vulnerability._base_manager.filter(source="nuclei-cve", subdomain__name=host, target_domain__project_id=project,
+                                                    template_id__in=ids, cve_ids__name__iexact=cve.cve_id, remediation_status="open",
+                                                    remediation_by__isnull=True).values_list("pk", flat=True).distinct())
+    if not found:
+        return []
+    now = timezone.now()
+    closed = []
+    for pk in found:  # one by one, so the audit trail names only the rows that really moved
+        if REMEDIATION.move(Vulnerability._base_manager.filter(pk=pk, remediation_by__isnull=True), "false_positive", only_from=("open",),
+                            remediation_note=VERSION_HIT_NOTE, remediation_updated_at=now):
+            closed.append(pk)
+    FindingAuditEvent.objects.bulk_create([
+        FindingAuditEvent(project_id=project, finding_kind="vulnerability", finding_id=pk, event="status", actor=None,
+                          before={"status": "open"}, after={"status": "false_positive", "note": VERSION_HIT_NOTE, "by": "template_evidence"})
+        for pk in closed])
+    return closed
+
+
+def retriage(match_ids):
+    """Start the triage of these CVE matches over now that their template result changed (``triage.track``: the row is reset, its
+    classification, verdict and validation record dropped, the legacy verdict cleared and the hosts rescored; the triage then asks again).
+    The signature holds whether a template confirmed the match, but a row that inherited a rescan twin's validation hit, or was never resynced
+    after the hit, may carry a signature that already says no: its stored signature is cleared first, so every row starts over whatever it
+    held. Never raises."""
+    try:
+        from cveFeed import triage
+        from cveFeed.models import CVEMatch, Triage
+        ids = list(match_ids)
+        Triage.objects.filter(match_id__in=ids).update(signature="", evidence_key="")
+        triage.track(triage.with_cves(CVEMatch.objects.filter(pk__in=ids).select_related("subdomain__target_domain")))
+    except Exception:  # noqa: BLE001 - the next scan's triage pass reads the changed signature too
+        logger.exception("could not start the triage of %d corrected matches over", len(match_ids))
+
+
+def version_hit_corrected(cve, host, project, template_ids, match_ids):
+    """What follows once a confirmation a template recorded is read again as a version hit (``record_outcomes``, the one-time
+    ``recheck_template_hits``): its nuclei-cve finding is closed (``close_version_hit_findings``), the matches' triage starts over
+    (``retriage``), the host is rescored and the activity feed says why. The matches' remediation status is never touched. Returns the
+    finding ids closed."""
+    from cveFeed import activity, scoring
+    closed = []
+    try:
+        closed = close_version_hit_findings(cve, host, project, template_ids)
+    except Exception:  # noqa: BLE001 - the template result is recorded either way
+        logger.exception("could not close the %s version-only template findings on %s", cve.cve_id, host)
+    retriage(match_ids)
+    scoring.rescore_quietly(project, [host])
+    activity.log("validate", f"The {cve.cve_id} check on {host} only read the version string: its earlier match is now recorded as a version "
+                             "read, not a confirmation" + (f", and finding #{', #'.join(map(str, closed))} was closed as a false positive"
+                                                           if closed else ""),
+                 project=project, cve_id=cve.cve_id, vulnerable=False)
+    return closed
 
 
 def run_cve_tests(cve, hosts, ai=False, project=None):
@@ -1042,7 +1289,13 @@ def run_cve_tests(cve, hosts, ai=False, project=None):
         return {"source": "candidate", "template": "", "results": [], "job": job.pk,
                 "reason": "an AI draft is being written; it is validated automatically when it lands and is never run on a host until every gate has passed"}
     results = []
-    evidence = evidence_of_template(path)  # what a hit of this template shows: the flaw, or the version string only
+    # what a hit of this template shows: the flaw, or the version string only. The template alone says so for the shapes
+    # ``template_evidence`` lists; for any other, each hit is asked itself (``hit_evidence``)
+    text = approved_text(path)
+    try:
+        static = template_evidence(text) if text else BEHAVIOR_EVIDENCE
+    except Exception:  # noqa: BLE001 - never downgrade on a template this cannot read
+        static = BEHAVIOR_EVIDENCE
     from targetApp.target_types import scannable_hosts
     hosts = scannable_hosts(hosts, project=project)  # whatever called us, nothing that resolves to a blocked address is ever tested
     for start in range(0, len(hosts), CHUNK_HOSTS):
@@ -1052,11 +1305,13 @@ def run_cve_tests(cve, hosts, ai=False, project=None):
                            cve_id=cve.cve_id) as handle:
             outcomes = _test_chunk(path, chunk, project=getattr(project, 'pk', project))
             for outcome in outcomes:
-                outcome['template_evidence'] = evidence
+                outcome['template_evidence'] = outcome_evidence(text, outcome, static)
             errors = sum(bool(o.get('error')) for o in outcomes)
+            versions = sum(is_version_hit(o) for o in outcomes)
             handle.done_message = (f'{errors} of {len(outcomes)} checks failed for {cve.cve_id}' if errors else
                                    f'{sum(o["vulnerable"] for o in outcomes)} of {len(outcomes)} hosts matched {cve.cve_id}'
-                                   + (' (a version check: the version only)' if evidence == VERSION_EVIDENCE else ''))
+                                   + (' (a version check: the version only)' if static == VERSION_EVIDENCE
+                                      else f' ({versions} of them on the version string only)' if versions else ''))
         results.extend(outcomes)
     for outcome in results:
         host = outcome['host']

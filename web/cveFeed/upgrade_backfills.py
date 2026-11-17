@@ -33,6 +33,7 @@ BACKFILLS = (
     'rerate_dangling_dns',                # 1.3.5: dangling-DNS findings rated by what an outsider can claim (read-only DNS and HTTP checks)
     'backfill_secrets_inventory',         # 1.4: the secrets stored token and bbot findings carry, filed in the inventory and masked in place
     'trim_flooded_ports',                 # 1.4: addresses that answer on every port keep the lowest 100 stored ports, as a Sentinel report does (memory)
+    'recheck_template_hits',              # 1.4.2: AI-written checks' confirmations that only read a version string become version reads
     'rerate_findings',                    # 1.3.5: rescore hosts for the new heat rules, clear stale fire marks (last: counts everything above)
 )
 MAX_ATTEMPTS = 3

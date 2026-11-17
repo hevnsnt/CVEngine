@@ -670,7 +670,8 @@ def run_nuclei_template(check):
     from cveFeed import templategen
     outcome = templategen._test_chunk(check['params']['template'], [check['target']], project=check['params'].get('project_id'))[0]
     if outcome.get('vulnerable') and not outcome.get('error'):
-        outcome = {**outcome, 'template_evidence': templategen.evidence_of_template(check['params']['template'])}
+        # what this hit shows: the template alone says so for the shapes it lists, the hit itself for any other (templategen.hit_evidence)
+        outcome = {**outcome, 'template_evidence': templategen.evidence_of_hit(check['params']['template'], outcome)}
     return _result_from_outcome(outcome)
 
 
@@ -1353,6 +1354,9 @@ def apply_validation(row, check, result, now=None, save=True):
             scoring.evidence_arrived([row.match_id], confirmed=[row.match_id] if was_version_only else ())
         elif status == 'reaffirmed' and row.match_id and check['kind'] == 'nuclei_template':
             _record_version_hit(row, check, result)
+            # a version hit of the same check that confirmed the match before resets the row (templategen.record_outcomes): the caller goes
+            # on with this object, so it is read again rather than saved back over the reset
+            row.refresh_from_db()
         if close_reason:
             _close_on_script_read(row, close_reason)
     return row

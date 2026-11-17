@@ -243,8 +243,10 @@ def version_read_from_component(evidence, distro_status='', template_result=''):
     ``version_proven`` (the first, "vulnerability confirmed", is ``has_hard_evidence``). It proves the version is there, not that the flaw is,
     so it never lifts triage, creates a finding or counts as a validation hit; and since 1.3.5 it no longer makes a match fire either. Three readings qualify:
 
-      * a version-class template hit on this host (``template_result`` version_only): a template that only reads a static page or a banner
-        read the version from the service or the file itself and found it inside the range;
+      * a version-class template hit on this host (``template_result`` version_only) and NO distribution packaging read from the banner
+        (``evidence.distro``): a template that only reads a static page or a banner read the version from the service or the file itself and
+        found it inside the range. On a distribution's build that version proves nothing, for the same reason as the service banner below:
+        the distribution backports fixes without changing the version it prints;
       * a JavaScript library whose OWN FILE states the version: ``evidence.source`` tech, ``version_source`` body (the file's comment banner
         or a code signature only the library's file has, ``cveFeed.js_libraries``), ``version_confidence`` at least
         ``PROVEN_LIBRARY_CONFIDENCE`` (0.8), and the copy that runs on the page (``copy_state`` effective, ``copies_unresolved`` not set),
@@ -266,7 +268,7 @@ def version_read_from_component(evidence, distro_status='', template_result=''):
     the heat, lists, counts, scores, alerts and API all follow."""
     if distro_status == 'patched':
         return False
-    if template_result == VERSION_TEMPLATE_RESULT:
+    if template_result == VERSION_TEMPLATE_RESULT and not evidence_flag(evidence, 'distro'):
         return True
     if not isinstance(evidence, dict):
         return False
@@ -318,13 +320,14 @@ def library_read_q(prefix=''):
 
 def version_read_from_component_q(prefix=''):
     """The database form of ``version_read_from_component``. The confidence must be a JSON number (``jsonb_typeof``), as Python's
-    ``isinstance`` test requires: JSONB orders true, arrays and objects above every number."""
+    ``isinstance`` test requires: JSONB orders true, arrays and objects above every number. A version-class template hit counts only off a
+    distribution's build (no ``evidence.distro``), as the service banner does."""
     from django.db.models import Q
     p = prefix
     library = library_read_q(p)
     service = (Q(**{p + 'evidence__source': 'port', p + 'evidence__method': 'probed'}) & evidence_flag_q('vendor_banner', p)
                & ~evidence_flag_q('distro', p))
-    template = Q(**{p + 'template_result': VERSION_TEMPLATE_RESULT})
+    template = Q(**{p + 'template_result': VERSION_TEMPLATE_RESULT}) & ~evidence_flag_q('distro', p)
     return (template | library | service) & ~Q(**{p + 'distro_status': 'patched'})
 
 
@@ -367,7 +370,8 @@ def proof_of(match):
         return 'version proven: runZero reports it'
     if _validation_status(match) == 'hit':
         return 'version proven: a validation check reproduced it'
-    if (getattr(match, 'template_result', '') or '') == VERSION_TEMPLATE_RESULT and getattr(match, 'distro_status', '') != 'patched':
+    if ((getattr(match, 'template_result', '') or '') == VERSION_TEMPLATE_RESULT and getattr(match, 'distro_status', '') != 'patched'
+            and not evidence_flag(evidence, 'distro')):
         return 'version proven: a version check read it on the host'
     if version_read_from_component(evidence, getattr(match, 'distro_status', '') or ''):
         return ('version proven: read from the library file itself' if evidence.get('source') == 'tech'
