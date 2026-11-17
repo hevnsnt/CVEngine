@@ -32,4 +32,12 @@ jobs:
             claude/*) echo "Keeping the session branch $BRANCH"; exit 0 ;;
           esac
           echo "Deleting $BRANCH"
-          gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH"
+          # The repository setting delete_branch_on_merge usually removes the branch first: GitHub then answers 422 "Reference does not exist", which is success here.
+          # Any other error still fails the step.
+          if out=$(gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH" 2>&1); then
+            echo "Deleted $BRANCH"
+          elif [[ $out == *"Reference does not exist"* ]]; then
+            echo "$BRANCH is already gone (deleted at merge by the repository setting): nothing to do"
+          else
+            echo "$out"; exit 1
+          fi
