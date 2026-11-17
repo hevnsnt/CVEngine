@@ -1,6 +1,6 @@
-"""The Java runtime readings of a host (cveFeed.java_runtime): one new table, nothing backfilled here. The readings that need no request (an nmap
-JDWP port, a header the scans stored, the bundled runtime of a product version) are made by the upgrade backfill ``java-runtime-passive`` after the
-update, and the active reads are planned for the existing Java hosts by the work planner."""
+"""The Java runtime readings of a host (cveFeed.java_runtime): one new table, nothing backfilled here. The readings that need no request (a JDWP
+port the fingerprint pass identified, a header the scans stored, the bundled runtime of a product version) are made by the upgrade backfill
+``backfill_java_runtimes`` after the update, and the active reads are planned for the existing Java hosts by the work planner."""
 
 import django.db.models.deletion
 import django.utils.timezone

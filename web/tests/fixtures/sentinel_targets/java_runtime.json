@@ -16,7 +16,7 @@
     }
   ],
   "jdwp": [
-    {"id": "192.0.2.10:5005", "address": "192.0.2.10", "port": 5005}
+    {"id": "jdwp|192.0.2.10|5005", "address": "192.0.2.10", "port": 5005}
   ],
   "scope": {
     "hosts": ["app.example.com", "example.com", "www.example.com", "search.example.com", "192.0.2.10"],

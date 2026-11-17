@@ -463,6 +463,11 @@ def due(project_id, found, force=False, limit=MAX_PER_SCAN):
     return [n for n in names if ledger._norm(n) not in done and ledger._norm(n) not in retry_later][:limit]
 
 
+def jdwp_id(address, port):
+    """The id of one JDWP entry of a task (``jdwp|<address>|<port>``: never read as an address by the do-not-scan guard)."""
+    return f'jdwp|{address}|{port}'
+
+
 def _entries(found, names):
     """The task entries of ``names``: ``([(sub, web entry)], [jdwp entry])`` and which entry ids belong to which host."""
     from cveFeed import probes
@@ -476,7 +481,7 @@ def _entries(found, names):
                               'allowed': sorted(probes.allowed_names(sub))[:20]}))
             owner[('web', ident)] = name
         for address, port, _kind in item['jdwp']:
-            ident = f'{address}:{port}'
+            ident = jdwp_id(address, port)
             if ('jdwp', ident) not in owner:
                 jdwp.append({'id': ident, 'address': address, 'port': port})
                 owner[('jdwp', ident)] = name
@@ -600,13 +605,13 @@ def store_answers(project_id, scan, item, rows):
         for part, ident, row in rows:
             readings = row.get('readings') or [] if part == 'web' else ([row['reading']] if row.get('reading') else [])
             for reading in readings:
-                key = (f'{reading["source"]}:{reading.get("url") or ""}' if part == 'web' else f'jdwp:{ident.rsplit(":", 1)[1]}')[:200]
+                key = (f'{reading["source"]}:{reading.get("url") or ""}' if part == 'web' else f'jdwp:{ident.rsplit("|", 1)[1]}')[:200]
                 before = _current(project_id, host, key)
                 store(project_id, sub.target_domain_id, host, key, reading, now=now)
                 stored += 1
                 changed = changed or before != (reading['version'], reading['vendor'])
             if part == 'jdwp':
-                address, port = ident.rsplit(':', 1)
+                _jdwp, address, port = ident.split('|')
                 if row.get('speaks') is True:
                     exposed += file_jdwp_exposure(scan, sub, address, int(port), (row.get('reading') or {}).get('evidence') or 'JDWP-Handshake echoed')
                 elif row.get('speaks') is False and scan is not None:

@@ -150,12 +150,12 @@ class CleanTests(SimpleTestCase):
         self.assertEqual([(r['speaks'], r['reading']) for r in got['jdwp']], [(None, None), (True, None)])
 
     def test_the_result_is_cut_to_what_the_task_asked(self):
-        task = SentinelTask(kind='java_runtime', target={'web': [{'id': 'a'}], 'jdwp': [{'id': '192.0.2.1:5005'}]})
+        task = SentinelTask(kind='java_runtime', target={'web': [{'id': 'a'}], 'jdwp': [{'id': 'jdwp|192.0.2.1|5005'}]})
         result = broker.clean_result('java_runtime', {'outcome': 'done', 'touched': [], 'refused': [],
                                                       'web': [{'id': 'a', 'readings': []}, {'id': 'b', 'readings': []}],
-                                                      'jdwp': [{'id': '192.0.2.1:5005', 'speaks': False}, {'id': '192.0.2.1:5006', 'speaks': True}]}, task)
+                                                      'jdwp': [{'id': 'jdwp|192.0.2.1|5005', 'speaks': False}, {'id': 'jdwp|192.0.2.1|5006', 'speaks': True}]}, task)
         self.assertEqual([r['id'] for r in result['web']], ['a'])
-        self.assertEqual([r['id'] for r in result['jdwp']], ['192.0.2.1:5005'])
+        self.assertEqual([r['id'] for r in result['jdwp']], ['jdwp|192.0.2.1|5005'])
         self.assertEqual(result['dropped'], 2)
 
 
@@ -231,7 +231,7 @@ class ReadTests(JavaFixture, TestCase):
         scan = self.java_scan(ports=((5005, 'tcpwrapped', '', ''),), web=False)
         with self.sentinel(jdwp=lambda e: {'speaks': True, 'reading': reading('11.0.21', 'jdwp', 'OpenJDK', url='', port=5005)}):
             result = java_runtime.run_for_scan(scan.id)
-        self.assertEqual(self.java_tasks[0]['target']['jdwp'], [{'id': f'{self.ADDRESS}:5005', 'address': self.ADDRESS, 'port': 5005}])
+        self.assertEqual(self.java_tasks[0]['target']['jdwp'], [{'id': f'jdwp|{self.ADDRESS}|5005', 'address': self.ADDRESS, 'port': 5005}])
         self.assertEqual(result['exposed'], 1)
         vuln = Vulnerability.objects.get(source=java_runtime.FINDING_SOURCE)
         self.assertEqual((vuln.severity, vuln.template_id, vuln.http_url), (4, 'jdwp-exposed', f'jdwp://{self.ADDRESS}:5005'))

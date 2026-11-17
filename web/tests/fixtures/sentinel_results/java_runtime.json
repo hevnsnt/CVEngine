@@ -13,7 +13,7 @@
     {"id": "search.example.com|java|https://search.example.com:9200", "readings": [], "asked": [], "error": "TimeoutError: probe exceeded its total time budget"}
   ],
   "jdwp": [
-    {"id": "192.0.2.10:5005", "speaks": true,
+    {"id": "jdwp|192.0.2.10|5005", "speaks": true,
      "reading": {"version": "11.0.21", "major": 11, "vendor": "OpenJDK", "runtime": "OpenJDK 64-Bit Server VM", "build": "", "line_only": false,
                  "source": "jdwp", "confidence": "exact", "url": "", "port": 5005,
                  "evidence": "Java Debug Wire Protocol (Reference Implementation) version 11.0 JVM Debug Interface version 11.0 JVM version 11.0.21 (OpenJDK 64-Bit Server VM, mixed mode) | OpenJDK 64-Bit Server VM"}}

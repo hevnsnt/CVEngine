@@ -62,6 +62,7 @@ Host search (everything above) answers "which of my hosts...". To look up a CVE 
 | `sensitive:` | A route that served sensitive data: `any`, `credentials`, `pii`, `internal` | `sensitive:credentials` |
 | `secret:` | Hosts that serve an exposed secret the inventory counts (docs/SECRETS-PLAN.md): `any`, a class (`s` server secret, `p` browser key, `i` identifier), `live` (validated active) or a provider name | `secret:s`, `secret:google` |
 | `zombie:` | Hosts whose DNS is gone but still answer: `yes` or `no` | `zombie:yes` |
+| `java:` | The Java runtime a host was read to run ([PIPELINE.md](PIPELINE.md#java-runtime)): a line, a release (a dotted prefix finds the releases under it), `any`, a vendor or a source; inferred readings count | `java:17`, `java:17.0.9`, `java:8u392`, `java:temurin`, `java:jdwp` |
 | `country:` | The country of a host's IP address, by ISO code or name | `country:US`, `country:Germany` |
 
 `port:` takes a number only and matches the port over either protocol; add `proto:` to pick one (`proto:udp port:123`). Use `product:` or `service:` for names. A bad value, such as `sev:scary`, returns an error that lists the allowed ones.

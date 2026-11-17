@@ -548,7 +548,8 @@ def plan_java(h, ev):
     from cveFeed.correlation import split_name_version
     if not java_runtime.enabled():
         return 'the Java runtime reads are switched off (CVENGINE_JAVA_RUNTIME=0)'
-    products = [split_name_version(t) for t in h.techs] + [((p.product or '').strip(), p.version or '') for a in h.addresses.values() for p in a.ports]
+    products = [split_name_version(t) for t in h.techs] + [((getattr(p, 'product', '') or '').strip(), getattr(p, 'version', '') or '')
+                                                            for a in h.addresses.values() for p in a.ports]
     jdwp = any(java_runtime.jdwp_kind(p) for a in h.scannable() for p in a.ports)
     if not jdwp and not (h.web and java_runtime.web_checks(products)):
         return 'no Spring, Jolokia, Solr, GeoServer, Druid, Elasticsearch or OpenSearch web service, and no Java debug port'
