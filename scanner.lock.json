@@ -2,8 +2,8 @@
   "image": "ghcr.io/hevnsnt/cvengine-sentinel",
   "tag": "main",
   "floor": {
-    "commit": "f7070755ca81e29096e03544b78a53758784e64a",
-    "version": "f7070755ca81",
+    "commit": "ae172db3faaa9ad57859620847b3e59b722e57d3",
+    "version": "ae172db3faaa",
     "contract_version": 7,
     "digest": null
   },
