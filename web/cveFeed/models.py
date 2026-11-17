@@ -214,7 +214,8 @@ class CVEMatch(models.Model):
     template_id = models.CharField(max_length=128, blank=True, default="")
     template_tested_at = models.DateTimeField(null=True, blank=True)
 
-    # What the distribution says about this host's package release (cveFeed.distro): patched | vulnerable | unknown | no_data.
+    # What the distribution says about this host's package release (cveFeed.distro): patched | vulnerable | unknown | no_data, or backport
+    # (Red Hat ships a fixed build for the host's release, and the installed build is not known: it needs validation, never proof).
     # A patched match is kept (the upstream version is in range, which is a fact) but is not auto-fired and reads as ice.
     distro_status = models.CharField(max_length=12, blank=True, default="no_data")
     distro_fixed_version = models.CharField(max_length=64, blank=True, default="")
@@ -438,9 +439,11 @@ class GeneratedTemplate(models.Model):
 class DistroFix(models.Model):
     """What a distribution says fixes a CVE in one of its packages: the fixed package version per release.
 
-    Filled by ``cveFeed.distro_sync`` (Debian security tracker, OSV for Ubuntu and Debian); read by correlation to tell a
-    host running a patched backport from a vulnerable one. ``status``: fixed (``fixed_version`` is the first fixed package
-    release; "0" means the release was never affected), vulnerable (affected, no fix yet), not_affected, undetermined."""
+    Filled by ``cveFeed.distro_sync`` (Debian security tracker, OSV for Ubuntu and Debian, Red Hat's security data for RHEL); read by
+    correlation to tell a host running a patched backport from a vulnerable one. ``status``: fixed (``fixed_version`` is the first fixed
+    package release; "0" means the release was never affected), vulnerable (affected, no fix yet), not_affected, undetermined.
+    A Red Hat module stream is stored with its stream in ``package`` ("httpd:2.4"), and ``advisory`` names the advisory that shipped
+    the fix (RHSA-2024:4720). A row with no release and no package only records that the CVE was looked up."""
 
     distro = models.CharField(max_length=16)  # ubuntu | debian | rhel | alpine ...
     release = models.CharField(max_length=16)  # 22.04, 12
@@ -448,6 +451,7 @@ class DistroFix(models.Model):
     cve_id = models.CharField(max_length=32)  # CVE-2024-6387
     fixed_version = models.CharField(max_length=128, blank=True, default="")
     status = models.CharField(max_length=16, default="fixed")
+    advisory = models.CharField(max_length=32, blank=True, default="", db_default="")  # RHSA-2024:4720 (Red Hat rows)
     synced_at = models.DateTimeField(default=timezone.now)
 
     class Meta:

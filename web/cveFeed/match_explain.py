@@ -213,12 +213,18 @@ def _packages(key, family, upstream=''):
 
 def _red_hat_fix(match):
     """``{'advisory', 'url', 'fixed_build'}`` of Red Hat's own fix when the match records one, else {}. Read from the match's
-    ``distro_fixed_version`` and, when present, the evidence's ``advisory`` / ``rhsa`` and ``fixed_nvr`` / ``fixed_build`` (top level or under
-    ``evidence['distro']``): every one optional, each validated before it is shown."""
+    ``evidence['distro_fix']`` (the Red Hat row that judged it), the match's ``distro_fixed_version`` and, when present, the evidence's
+    ``advisory`` / ``rhsa`` and ``fixed_nvr`` / ``fixed_build`` (top level or under ``evidence['distro']``): every one optional, each
+    validated before it is shown."""
     ev = _ev(match)
     recorded = ev.get('distro') if isinstance(ev.get('distro'), dict) else {}
+    # cveFeed.correlation.distro_fix_evidence: the Red Hat row that judged the match (its fixed build is "name-version-release", or
+    # "name version" when the fixed version has no epoch, which reads the same with a hyphen)
+    red_hat = ev.get('distro_fix') if isinstance(ev.get('distro_fix'), dict) and ev['distro_fix'].get('source') == 'redhat' else {}
+    if red_hat.get('fixed_build'):
+        red_hat = {**red_hat, 'fixed_build': str(red_hat['fixed_build']).strip().replace(' ', '-', 1)}
     out = {}
-    for source in (recorded, ev):
+    for source in (red_hat, recorded, ev):
         for key in ('advisory', 'rhsa', 'errata'):
             value = str(source.get(key) or '').strip().upper()
             if value and _ADVISORY.match(value) and 'advisory' not in out:
@@ -235,10 +241,10 @@ def _red_hat_fix(match):
 
 
 def _backport_state(match):
-    """Whether the match's distribution state is the "fixed in a backport, confirm the installed build" one a later change adds: any state this
-    module does not know that comes with a fixed build or an advisory."""
+    """Whether the match's distribution state is "fixed in a backport, confirm the installed build" (cveFeed.distro.BACKPORT), or any other
+    state this module does not know that comes with a fixed build or an advisory."""
     state = str(match.distro_status or '')
-    return state not in _KNOWN_STATES and bool(_red_hat_fix(match))
+    return state == distro.BACKPORT or (state not in _KNOWN_STATES and bool(_red_hat_fix(match)))
 
 
 # --- why it is shown, and how sure cvENGINE is --------------------------------------------------------------------------------------------

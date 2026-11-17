@@ -38,6 +38,8 @@ looked for.
 """
 import os
 
+from cveFeed.distro import BACKPORT
+
 FIRE = "fire"
 SMOKE = "smoke"
 ICE = "ice"
@@ -237,6 +239,8 @@ def match_heat(match, capped=True):
             heat = cap
         if heat == FIRE and exploit_db_alone(cve, match.ai_verdict) and match_policy.is_version_only(match):
             heat = SMOKE  # Exploit-DB alone never lifts a version-only match above smoke (1.3.5)
+        if heat == FIRE and match.distro_status == BACKPORT and match_policy.is_version_only(match):
+            heat = SMOKE  # the distribution ships a fixed build for the release: a version alone never makes that fire, whatever the cap
         heat = capped_by_triage(heat, match)
     return heat
 
@@ -333,6 +337,7 @@ def match_heat_rank_expr(capped=True):
         whens.append(When(version_only_q() & (fire if cap == SMOKE else fire | smoke), then=Value(HEAT_RANK[cap])))
     if capped:
         whens.append(When(version_only_q() & fire & ~fire_without_exploit_db_q("cve_entry__"), then=Value(HEAT_RANK[SMOKE])))
+        whens.append(When(version_only_q() & fire & Q(distro_status=BACKPORT), then=Value(HEAT_RANK[SMOKE])))
         whens.append(When(triage_held_q(match=True) & fire, then=Value(HEAT_RANK[SMOKE])))
     whens += [When(fire, then=Value(HEAT_RANK[FIRE])), When(smoke, then=Value(HEAT_RANK[SMOKE]))]
     return Case(*whens, default=Value(HEAT_RANK[ICE]), output_field=IntegerField())

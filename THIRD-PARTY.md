@@ -47,6 +47,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [Metasploit Framework](https://github.com/rapid7/metasploit-framework) (BSD-3-Clause) | Exploit module references |
 | [CVE List V5](https://github.com/CVEProject/cvelistV5) | CVE records |
 | [OSV](https://osv.dev) (Apache-2.0 code) and [Debian security tracker](https://security-tracker.debian.org) | Distribution fix data for backport detection |
+| [Red Hat Security Data API](https://access.redhat.com/security/data) (CC BY 4.0) | RHEL fix states, fixed builds and advisories for backport detection |
 | [crt.sh](https://crt.sh) | Certificate transparency lookups |
 | [IANA RDAP bootstrap](https://data.iana.org/rdap/dns.json) and the registries it names | Registry lookups for the hygiene and dangling-domain checks |
 | [cvENGINE CVE seed](https://github.com/hevnsnt/CVEngine/releases/tag/cve-seed) | The pre-built CVE catalog a new install downloads and verifies on first start |
