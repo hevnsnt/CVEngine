@@ -1,12 +1,18 @@
-"""Fill ``DistroFix``: what Ubuntu and Debian say fixes each CVE, per release and package.
+"""Fill ``DistroFix``: what Ubuntu, Debian and Red Hat say fixes each CVE, per release and package.
 
 Correlation compares a host's package release with these fixed versions to tell a patched backport from a vulnerable
-host (see ``cveFeed.distro``). Two sources, both read-only public data, both optional:
+host (see ``cveFeed.distro``). Three sources, all read-only public data, all optional:
 
 * **Debian security tracker** (``/tracker/data/json``, tens of MB): one file with every package x CVE x release. It is
   stream-parsed one package at a time and only the packages we map and the CVEs that matter are kept.
 * **OSV.dev**: ``querybatch`` asks which CVEs a package release is still listed under (Ubuntu, Debian), and a per-CVE record
   (``UBUNTU-CVE-...``, ``DEBIAN-CVE-...``) carries the fixed package version per release.
+* **Red Hat Security Data API** (``/hydra/rest/securitydata/cve/<CVE>.json``, a few KB each): per RHEL major release, the fix
+  state of each package (Not affected, Affected, Fix deferred, Will not fix) and the fixed build with its advisory (RHSA). It is
+  the one source that also says "not affected". Only CVEs with an open match on a Red Hat family host (RHEL, CentOS, Rocky, Alma)
+  are asked, and each answer is kept for ``TTL``. A fix shipped as a module stream ("httpd:2.4-8100020240712114234.489197e6") names no
+  rpm build, so the advisory's OSV record (``RHSA-...``, which Red Hat publishes to OSV) supplies the fixed rpm version.
+  The requests carry only the CVE or advisory id.
 
 Everything is bounded (CVEs and package queries per run, bytes downloaded, rows written, request timeouts), nothing blocks
 correlation, and a source that cannot be reached is reported and skipped: the run still finishes and the next one retries.
@@ -27,6 +33,7 @@ logger = logging.getLogger(__name__)
 OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
 OSV_VULN_URL = "https://api.osv.dev/v1/vulns/{id}"
 DEBIAN_JSON_URL = "https://security-tracker.debian.org/tracker/data/json"
+REDHAT_CVE_URL = "https://access.redhat.com/hydra/rest/securitydata/cve/{id}.json"
 
 MAX_CVES = 300  # CVEs looked up per run
 MAX_PAIRS = 300  # distinct (package release) OSV questions per run
@@ -37,6 +44,10 @@ MAX_ROWS = 50000
 HTTP_TIMEOUT = 30
 STREAM_TIMEOUT = 180
 TTL = timedelta(hours=24)
+MAX_REDHAT_CVES = 300  # Red Hat CVE records read per run
+MAX_REDHAT_ADVISORIES = 100  # OSV advisory records read per run to name a module stream's fixed rpm build
+MAX_REDHAT_BYTES = 4 * 1024 * 1024  # one Red Hat CVE record or OSV advisory record (a few KB; the kernel's advisories are the largest)
+MAX_SOURCE_FAILURES = 5  # failed Red Hat reads in one run before the source is reported unreachable (the first failure, before any read)
 DEBIAN_RELEASES = {"buster": "10", "bullseye": "11", "bookworm": "12", "trixie": "13", "forky": "14"}
 _CVE_RE = re.compile(r"CVE-\d{4}-\d{4,}")
 
@@ -63,6 +74,16 @@ class Fetcher:
         with requests.get(url, stream=True, timeout=STREAM_TIMEOUT, headers={"User-Agent": "cvengine-distro-sync"}) as resp:
             resp.raise_for_status()
             yield from resp.iter_content(chunk_size=1024 * 1024)
+
+    def get_json_capped(self, url, limit):
+        """A JSON GET read no further than ``limit`` bytes (ValueError past it); None for a 404."""
+        import requests
+        with requests.get(url, stream=True, timeout=HTTP_TIMEOUT, headers={"User-Agent": "cvengine-distro-sync"}) as resp:
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            body = b"".join(limited(resp.iter_content(chunk_size=64 * 1024), limit))
+        return json.loads(body)
 
 
 # --- streaming a big JSON object -----------------------------------------------------------------------------------
@@ -214,6 +235,131 @@ def debian_fixes(members, wanted_cves, max_rows=MAX_ROWS):
                     return
 
 
+# Red Hat's product names for a major release's own channels: "Red Hat Enterprise Linux 8", and the Extended Lifecycle Support that
+# continues RHEL 6 and 7. Minor-release channels (EUS, AUS, TUS, E4S) and layered products (JBoss Core Services) are other builds.
+_RHEL_PRODUCT = re.compile(r"^Red Hat Enterprise Linux (\d+)(?: Extended Lifecycle Support)?$")
+_RPM_NEVR = re.compile(r"^(?P<name>.+?)-(?P<evr>\d+:[^-]+-[^-]+)$")  # httpd-0:2.4.57-11.el9_4
+_RHEL_MODULE = re.compile(r"^(?P<name>[\w.+-]+?):(?P<stream>[\w.]+)-(?P<version>\d+)\.(?P<context>\w+)$")  # httpd:2.4-8100020240712114234.489197e6
+_OSV_RHEL = re.compile(r"^Red Hat:enterprise_linux:(\d+)::")  # Red Hat:enterprise_linux:8::appstream
+_RHEL_OPEN = ("affected", "fix deferred", "will not fix")  # affected in the release with no fix (vulnerable, as the Debian tracker's "open")
+
+
+def _rhel_release(product_name):
+    m = _RHEL_PRODUCT.match((product_name or "").strip())
+    return m.group(1) if m else ""
+
+
+def redhat_package(text):
+    """``(package, stream, fixed rpm version, module build)`` of a Red Hat package field: ``httpd-0:2.4.57-11.el9_4`` is a plain build,
+    ``httpd:2.4-8100020240712114234.489197e6`` a module build (no rpm version), ``httpd:2.4/httpd`` and ``openssl`` a package state's
+    name. The stream is "" for a package outside a module."""
+    text = (text or "").strip()
+    m = _RPM_NEVR.match(text)
+    if m:
+        return m.group("name"), "", m.group("evr"), ""
+    m = _RHEL_MODULE.match(text)
+    if m:
+        return m.group("name"), m.group("stream"), "", text
+    module, _, package = text.partition("/")
+    if package:
+        name, _, stream = module.partition(":")
+        return package, stream if name == package else "", "", ""
+    return text, "", "", ""
+
+
+def redhat_fixes(record):
+    """DistroFix dicts from one Red Hat Security Data API CVE record, one per (RHEL major release, package or module stream), plus the
+    module builds whose rpm version is still to be read from their advisory (``osv_module_fixes``). A shipped fix wins over a package
+    state, and of two fixes for one release the earlier build (an ELS build is later than the release's own). Only packages cvENGINE
+    maps are kept."""
+    cve = record.get("name") or ""
+    if not _CVE_RE.fullmatch(cve):
+        return []
+    rows = {}
+    for item in record.get("package_state") or []:
+        release = _rhel_release(item.get("product_name"))
+        package, stream, _evr, _module = redhat_package(item.get("package_name"))
+        if not release or not distro_lib.is_known_package(package):
+            continue
+        state = (item.get("fix_state") or "").strip().lower()
+        status = "not_affected" if state == "not affected" else "vulnerable" if state in _RHEL_OPEN else "undetermined"
+        key = (release, f"{package}:{stream}" if stream else package)
+        if key not in rows or (rows[key]["status"] == "undetermined" and status != "undetermined"):
+            rows[key] = {"status": status, "fixed_version": "0" if status == "not_affected" else "", "advisory": "", "module": ""}
+    for item in record.get("affected_release") or []:
+        release = _rhel_release(item.get("product_name"))
+        package, stream, evr, module = redhat_package(item.get("package"))
+        if not release or not distro_lib.is_known_package(package) or not (evr or module):
+            continue
+        key = (release, f"{package}:{stream}" if stream else package)
+        fix = {"status": "fixed", "fixed_version": evr, "advisory": (item.get("advisory") or "")[:32], "module": module}
+        old = rows.get(key)
+        if old is None or old["status"] != "fixed" or (evr and old["fixed_version"] and distro_lib.rpm_vercmp(evr, old["fixed_version"]) < 0):
+            rows[key] = fix
+    return [{"distro": "rhel", "release": release, "package": package, "cve_id": cve, **row} for (release, package), row in rows.items()]
+
+
+def osv_module_fixes(record, release, package):
+    """The fixed rpm version an OSV advisory record (``RHSA-...``) gives ``package`` on RHEL ``release``, or ""."""
+    for affected in (record or {}).get("affected") or []:
+        pkg = affected.get("package") or {}
+        m = _OSV_RHEL.match(pkg.get("ecosystem") or "")
+        if not m or m.group(1) != str(release) or pkg.get("name") != package:
+            continue
+        for rng in affected.get("ranges") or []:
+            for event in rng.get("events") or []:
+                if event.get("fixed"):
+                    return str(event["fixed"])
+    return ""
+
+
+def rhel_cves_needing_data(limit=MAX_REDHAT_CVES):
+    """CVE ids with an open match on a Red Hat family host (correlation recorded ``evidence.distro`` of rhel or centos) whose Red Hat
+    record was not read within the TTL (newest CVEs first). Each read leaves a row, so a CVE Red Hat has no record of is not asked again
+    until the TTL passes."""
+    from cveFeed.closure import CLOSED
+    from cveFeed.models import CVEMatch, DistroFix
+    wanted = list(CVEMatch.objects.filter(evidence__distro__distro__in=list(distro_lib.RHEL_FAMILY))
+                  .exclude(remediation_status__in=CLOSED).exclude(ai_verdict="not_affected")
+                  .order_by("-cve_entry__published_at").values_list("cve_entry__cve_id", flat=True).distinct()[:limit * 3])
+    fresh = set(DistroFix.objects.filter(distro="rhel", cve_id__in=wanted, synced_at__gte=timezone.now() - TTL)
+                .values_list("cve_id", flat=True))
+    return [c for c in dict.fromkeys(wanted) if c not in fresh][:limit]
+
+
+def sync_redhat(fetcher, cves):
+    """Red Hat: each CVE's record, then the OSV advisory record of each module build it names (bounded, read once per run). Returns the
+    rows, with one row per CVE read (no release, no package) that records the lookup."""
+    rows, advisories, read, failed = [], {}, 0, 0
+    for cve in cves[:MAX_REDHAT_CVES]:
+        try:
+            record = fetcher.get_json_capped(REDHAT_CVE_URL.format(id=cve), MAX_REDHAT_BYTES)
+        except Exception as exc:  # noqa: BLE001 - one CVE that cannot be read is asked again next run; an unreachable source stops here
+            failed += 1
+            if not read or failed >= MAX_SOURCE_FAILURES:
+                raise
+            logger.warning("distro sync: Red Hat record of %s skipped: %s", cve, exc)
+            continue
+        read += 1
+        rows.append({"distro": "rhel", "release": "", "package": "", "cve_id": cve, "fixed_version": "", "status": "undetermined",
+                     "advisory": "", "module": ""})
+        if isinstance(record, dict):
+            rows += redhat_fixes(record)
+    for row in rows:
+        if not row.get("module"):
+            continue
+        advisory = row["advisory"]
+        if advisory and advisory not in advisories and len(advisories) < MAX_REDHAT_ADVISORIES:
+            try:
+                advisories[advisory] = fetcher.get_json_capped(OSV_VULN_URL.format(id=advisory), MAX_REDHAT_BYTES)
+            except Exception as exc:  # noqa: BLE001 - the module build stays named by its stream; the next run asks again
+                logger.warning("distro sync: OSV advisory %s skipped: %s", advisory, exc)
+                advisories[advisory] = None
+        evr = osv_module_fixes(advisories.get(advisory), row["release"], row["package"].partition(":")[0])
+        row["fixed_version"] = evr or row["module"]  # a stream-named build cannot be compared: distro.judge says backport
+    return rows
+
+
 # --- the run ---------------------------------------------------------------------------------------------------------
 
 def _store(rows):
@@ -223,13 +369,14 @@ def _store(rows):
     now = timezone.now()
     for row in rows:
         key = {k: row[k] for k in ("distro", "release", "package", "cve_id")}
+        advisory = (row.get("advisory") or "")[:32]
         obj, created = DistroFix.objects.get_or_create(**key, defaults={
-            "fixed_version": row["fixed_version"][:128], "status": row["status"], "synced_at": now})
+            "fixed_version": row["fixed_version"][:128], "status": row["status"], "advisory": advisory, "synced_at": now})
         if created:
             changed += 1
-        elif (obj.fixed_version, obj.status) != (row["fixed_version"][:128], row["status"]):
-            obj.fixed_version, obj.status, obj.synced_at = row["fixed_version"][:128], row["status"], now
-            obj.save(update_fields=["fixed_version", "status", "synced_at"])
+        elif (obj.fixed_version, obj.status, obj.advisory) != (row["fixed_version"][:128], row["status"], advisory):
+            obj.fixed_version, obj.status, obj.advisory, obj.synced_at = row["fixed_version"][:128], row["status"], advisory, now
+            obj.save(update_fields=["fixed_version", "status", "advisory", "synced_at"])
             changed += 1
         else:
             DistroFix.objects.filter(pk=obj.pk).update(synced_at=now)
@@ -238,10 +385,15 @@ def _store(rows):
 
 def cves_needing_data(limit=MAX_CVES):
     """CVE ids of matches on hosts with a known distro whose distro data is missing or older than the TTL (newest CVEs first)."""
+    from django.db.models import Q
+
     from cveFeed.models import CVEMatch, DistroFix
-    wanted = list(CVEMatch.objects.exclude(distro_status=distro_lib.NO_DATA).order_by("-cve_entry__published_at")
+    # a match on a Red Hat family host is Red Hat's question (rhel_cves_needing_data): it neither takes a place here nor counts as fresh
+    other = Q(evidence__distro__distro__isnull=True) | ~Q(evidence__distro__distro__in=list(distro_lib.RHEL_FAMILY))
+    wanted = list(CVEMatch.objects.exclude(distro_status=distro_lib.NO_DATA).filter(other).order_by("-cve_entry__published_at")
                   .values_list("cve_entry__cve_id", flat=True).distinct()[:limit * 3])
-    fresh = set(DistroFix.objects.filter(cve_id__in=wanted, synced_at__gte=timezone.now() - TTL).values_list("cve_id", flat=True))
+    fresh = set(DistroFix.objects.filter(cve_id__in=wanted, synced_at__gte=timezone.now() - TTL).exclude(distro="rhel")
+                .values_list("cve_id", flat=True))
     return [c for c in dict.fromkeys(wanted) if c not in fresh][:limit]
 
 
@@ -299,15 +451,20 @@ def sync_debian(fetcher, cves):
 
 
 def sync_distro_fixes(fetcher=None):
-    """One bounded pass over both sources. A source that fails is reported in the result and skipped. Returns
-    ``{"cves", "rows", "changed", "sources": {name: "ok" | error}}``."""
+    """One bounded pass over the sources (Red Hat's only when a Red Hat family host has an open match). A source that fails is reported
+    in the result and skipped. Returns ``{"cves", "rows", "changed", "sources": {name: "ok" | error}}``, and ``redhat_cves`` when Red Hat
+    was asked."""
     fetcher = fetcher or Fetcher()
     cves = cves_needing_data()
+    rhel_cves = rhel_cves_needing_data()
     result = {"cves": len(cves), "rows": 0, "changed": 0, "sources": {}}
-    if not cves:
-        return result
-    sources = (("debian", lambda: sync_debian(fetcher, cves)),
-               ("osv", lambda: sync_osv(fetcher, cves, package_release_pairs())))
+    sources = []
+    if cves:
+        sources += [("debian", lambda: sync_debian(fetcher, cves)),
+                    ("osv", lambda: sync_osv(fetcher, cves, package_release_pairs()))]
+    if rhel_cves:
+        result["redhat_cves"] = len(rhel_cves)
+        sources.append(("redhat", lambda: sync_redhat(fetcher, rhel_cves)))
     for name, run in sources:
         try:
             rows = run()

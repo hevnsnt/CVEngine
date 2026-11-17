@@ -795,21 +795,79 @@ class DbFixLookup:
     def __call__(self, distro, package, cve_id):
         key = (distro, package, cve_id)
         if key not in self.memo:
+            from django.db.models import Q
+
             from cveFeed.models import DistroFix
-            self.memo[key] = [{"release": r.release, "fixed_version": r.fixed_version, "status": r.status}
-                              for r in DistroFix.objects.filter(distro=distro, package=package, cve_id=cve_id)]
+            which = Q(package=package)
+            if distro == "rhel":
+                which |= Q(package__startswith=package + ":")  # Red Hat's module streams of the package ("httpd:2.4"): distro.judge picks one
+            self.memo[key] = [{"release": r.release, "fixed_version": r.fixed_version, "status": r.status, "package": r.package,
+                               "advisory": r.advisory}
+                              for r in DistroFix.objects.filter(which, distro=distro, cve_id=cve_id)]
         return self.memo[key]
 
 
 def port_distro(port):
     """The distro info of a Port row: what nmap persisted, else read from its banner fields now (rows older than the distro
-    columns). The package name is derived, never stored."""
+    columns). The package name is derived, never stored. A Red Hat family row persisted before the OS CPE gave its release reads the
+    release from the CPEs nmap reported (kept in ``extra``)."""
     info = {"distro": getattr(port, "distro", "") or "", "release": getattr(port, "distro_release", "") or "",
             "package_release": getattr(port, "package_release", "") or "", "upstream_version": getattr(port, "upstream_version", "") or ""}
+    cpes = (getattr(port, "extra", None) or {}).get("cpes") or [getattr(port, "cpe", "")]
     if not info["distro"]:
-        info = distro_lib.parse_distro(port.product, port.version, getattr(port, "service_extra", ""), [getattr(port, "cpe", "")])
+        info = distro_lib.parse_distro(port.product, port.version, getattr(port, "service_extra", ""), cpes)
+    if info["distro"] in distro_lib.RHEL_FAMILY and not info["release"]:
+        info["release"] = distro_lib.rhel_release(cpes)
     info["package"] = distro_lib.package_for(port.product, info["distro"], info["upstream_version"]) if info["distro"] else ""
     return info
+
+
+def host_distro(subdomain, ports=None):
+    """The Red Hat family distribution a host runs, as ``{"distro", "release"}``, or ``{}``: what its open services say (the banner and
+    the OS CPE nmap read, ``port_distro``), the Server header it sent (``Apache/2.4.37 (Red Hat Enterprise Linux)``) and the operating
+    system its addresses report (a host inventory's "Red Hat Enterprise Linux 8.9"). A technology seen in the host's web response (Apache,
+    OpenSSL, PHP) carries no distribution of its own, so it is judged against this. Only the Red Hat family is read this way, and any
+    sign of another distribution makes it ``{}``: nothing is guessed. Releases that disagree leave the release unknown."""
+    from startScan.models import open_services
+    families, releases = set(), set()
+    ports = ports if ports is not None else [p for ip in subdomain.ip_addresses.all() for p in open_services(ip)]
+    for port in ports:
+        info = port_distro(port)
+        if info.get("distro"):
+            families.add(info["distro"])
+            if info.get("release"):
+                releases.add(info["release"])
+    for ip in subdomain.ip_addresses.all():
+        family = distro_lib.rhel_family_of_text(getattr(ip, "os_guess", "") or "")
+        if family:
+            families.add(family)
+            release = distro_lib.rhel_release(text=ip.os_guess)
+            if release:
+                releases.add(release)
+    header = getattr(subdomain, "webserver", "") or ""
+    if header:
+        seen = distro_lib.parse_distro("", "", header)
+        if seen.get("distro"):
+            families.add(seen["distro"])
+            if seen.get("release"):
+                releases.add(seen["release"])
+    if not families or not families <= set(distro_lib.RHEL_FAMILY):
+        return {}
+    return {"distro": "centos" if families == {"centos"} else "rhel", "release": releases.pop() if len(releases) == 1 else ""}
+
+
+def tech_distro(host, name, version):
+    """The distro info a technology seen on a Red Hat family host (``host_distro``) is judged by: the package that product is there, its
+    upstream version, no package release (a web response never shows the rpm build). ``None`` when the host has none or the product is
+    not a package cvENGINE maps."""
+    if not host or not version:
+        return None
+    upstream = re.split(r"\s", version.strip())[0]
+    package = distro_lib.package_for(name, host["distro"], upstream)
+    if not package:
+        return None
+    return {"distro": host["distro"], "release": host.get("release", ""), "package": package, "package_release": "",
+            "upstream_version": upstream, "basis": "host"}
 
 
 def _record_matches(subdomain, name, version, token, source, product_index,
@@ -850,17 +908,20 @@ def _record_matches(subdomain, name, version, token, source, product_index,
             if not cve.kev:
                 continue
             unbounded = True
-        status, fixed = distro_lib.NO_DATA, ""
+        status, fixed, fix = distro_lib.NO_DATA, "", None
         if distro and distro.get("distro") and in_range is True:
             # Upstream says in range; the distro may have backported the fix. Never dropped: a patched match is kept,
             # at low confidence and labelled, so a wrong distro reading can only demote it, not hide it.
-            rows_for = fix_lookup(distro["distro"], distro.get("package", ""), getattr(cve, "cve_id", "")) \
+            rows_for = fix_lookup(distro_lib.fix_distro(distro["distro"]), distro.get("package", ""), getattr(cve, "cve_id", "")) \
                 if fix_lookup and distro.get("package") else []
-            status, fixed = distro_lib.judge(distro, rows_for)
+            status, fixed, row = distro_lib.judge_row(distro, rows_for)
+            fix = distro_fix_evidence(distro, row, fixed)
             if status == distro_lib.PATCHED:
                 confidence = 0.2
             elif status == distro_lib.VULNERABLE:
                 confidence = 0.95  # the distro's own tracker lists this package release as affected: the strongest evidence there is
+            elif status == distro_lib.BACKPORT:
+                confidence = min(confidence, BACKPORT_CONFIDENCE)  # a fixed build exists for the release: likelier patched than not
         reported = bool(corroborated) and getattr(cve, "cve_id", "") in corroborated and status != distro_lib.PATCHED
         if reported:  # runZero's own scan reports it too (cveFeed.runzero_sync): more evidence, never a verdict and never a new match
             confidence = runzero.boosted(confidence)
@@ -872,10 +933,28 @@ def _record_matches(subdomain, name, version, token, source, product_index,
             "distro_status": status, "distro_fixed_version": fixed[:64],
             "evidence": {**(evidence or {}), "raw_version": version[:100], **details.get(cve.id, {}), **({"unbounded": True} if unbounded else {}),
                          **({"runzero": True} if reported else {}),
-                         **({"distro": {k: v for k, v in distro.items() if v}} if distro and distro.get("distro") else {})},
+                         **({"distro": {k: v for k, v in distro.items() if v}} if distro and distro.get("distro") else {}),
+                         **({"distro_fix": fix} if fix else {})},
         })
         found += 1
     return found
+
+
+BACKPORT_CONFIDENCE = 0.5  # distro.BACKPORT: a fixed build exists for the host's release and the installed build is not known
+
+
+def distro_fix_evidence(info, row, fixed):
+    """``evidence.distro_fix`` of a match judged by a Red Hat row: the release, the package (a module stream's "httpd:2.4"), the fixed
+    build and the advisory that shipped it, so a person can be told which build fixes it. None for other distributions (their evidence
+    is unchanged) and when no single row decided the verdict."""
+    if not row or distro_lib.fix_distro(info.get("distro", "")) != "rhel":
+        return None
+    out = {"source": "redhat", "release": str(row.get("release") or ""), "package": row.get("package") or info.get("package", ""),
+           "status": row.get("status") or "", "fixed": (fixed or "")[:128], "advisory": (row.get("advisory") or "")[:32]}
+    build = distro_lib.fixed_build(out)
+    if build:
+        out["fixed_build"] = build[:160]
+    return {k: v for k, v in out.items() if v}
 
 
 def signature_of(obj):
@@ -1434,6 +1513,7 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     libraries = js_libraries.HostLibraries.for_subdomain(subdomain) if any(js_libraries.is_library(t.name) for t in technologies) else None
     # a core version that is a number a library's own file on the host states is that library's (jQuery 3.7.1 is not WordPress 3.7.1)
     wrong = cms_evidence.superseded(subdomain, technologies, libraries.file_versions() if libraries is not None else ())
+    host = host_distro(subdomain)  # a Red Hat family host: its technologies are judged against Red Hat's data too
     for tech in technologies:
         name, version = split_name_version(tech.name)
         if wrong and (cms.key(name), version) in wrong:
@@ -1456,7 +1536,7 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
         _record_matches(
             subdomain, name, version, token, "tech",
             product_index, cve_by_id, min_confidence, scan_history, rows, evidence={"source": "tech", "source_id": tech.id, **library},
-            leads=leads, confidence_cap=cap)
+            leads=leads, confidence_cap=cap, distro=tech_distro(host, name, version), fix_lookup=fix_lookup)
 
     # nmap -sV service data on the host's open ports (Shodan-style inventory).
     from startScan.models import open_services
@@ -1467,10 +1547,13 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
             if len(token) < _MIN_TOKEN:
                 continue
             version = (port.version or "").strip()
+            info = port_distro(port)
+            if host and info.get("distro") in distro_lib.RHEL_FAMILY and not info.get("release") and host.get("release"):
+                info["release"] = host["release"]  # the release another service or the host's OS states
             _record_matches(
                 subdomain, name, version, token, "port",
                 product_index, cve_by_id, min_confidence, scan_history, rows, cpe=port.cpe or "",
-                distro=port_distro(port), fix_lookup=fix_lookup, corroborated=runzero.reported_cves(ip, port.number),
+                distro=info, fix_lookup=fix_lookup, corroborated=runzero.reported_cves(ip, port.number),
                 evidence={"source": "port", "source_id": port.id, "ip": ip.address, "port": port.number, "protocol": port.protocol or "tcp",
                           "service_extra": (port.service_extra or "")[:255], "cpe": (port.cpe or "")[:255],
                           "method": ((port.extra or {}).get("method") or ""),

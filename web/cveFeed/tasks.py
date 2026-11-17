@@ -733,8 +733,8 @@ def auto_fire_new_cves(new_cve_pks=None):
 
 @app.task(name="sync_distro_fixes", bind=False, queue="cve_feed_queue")
 def sync_distro_fixes_task():
-    """Daily: refresh what Ubuntu and Debian say fixes the CVEs matched on their hosts (Debian security tracker, OSV), so a
-    match on a patched backport is labelled "patched by distro" instead of exposed. Bounded, and a source that is unreachable
+    """Daily: refresh what Ubuntu, Debian and Red Hat say fixes the CVEs matched on their hosts (Debian security tracker, OSV, Red Hat's
+    security data), so a match on a patched backport is labelled "patched by distro" instead of exposed. Bounded, and a source that is unreachable
     is skipped, never an error. Correlation reads whatever is there; new data triggers one re-correlation."""
     from cveFeed import distro_sync, ledger
     if not ledger.sweep_claim("distro-sync", 3000):
