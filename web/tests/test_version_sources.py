@@ -61,11 +61,12 @@ class CatalogueTests(SimpleTestCase):
     def test_the_specs_are_in_contract(self):
         from jsonschema import Draft202012Validator
         from agentapi import sentinel_contract
-        reads = [{'id': f'h|{s.id}', 'host': 'h.rt.test', 'base': 'https://h.rt.test', 'allowed': ['h.rt.test'],
-                  'requests': catalogue.request_specs(s, '0123456789ab')} for s in catalogue.SOURCES]
         scope = json.loads((Path(__file__).with_name('fixtures') / 'sentinel_targets' / 'version_read.json').read_text())['scope']
-        target = {'reads': reads, 'scope': scope}
-        self.assertEqual(list(Draft202012Validator(sentinel_contract.target_schema('version_read')).iter_errors(target)), [])
+        for kind in ('version_read', catalogue.DIGEST_KIND):  # an entry with a digest read is the version_digest kind's (contract 8)
+            reads = [{'id': f'h|{s.id}', 'host': 'h.rt.test', 'base': 'https://h.rt.test', 'allowed': ['h.rt.test'],
+                      'requests': catalogue.request_specs(s, '0123456789ab')} for s in catalogue.SOURCES if s.task_kind == kind]
+            target = {'reads': reads, 'scope': scope}
+            self.assertEqual(list(Draft202012Validator(sentinel_contract.target_schema(kind)).iter_errors(target)), [], kind)
 
     def test_jira(self):
         good = ok({'version': '9.12.2', 'versionNumbers': {'type': 'array', 'size': 3}, 'buildNumber': 9120002, 'deploymentType': 'Server'})

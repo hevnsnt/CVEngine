@@ -102,6 +102,7 @@ def hard_evidence(kind, facts):
             raise_to('needs_validation', 'the version found is inside the affected range')
         if facts.get('version_unknown'):
             raise_to('needs_validation', match_policy.unknown_why(facts) if facts.get('java_unknown') or facts.get('runtime_unknown')
+                     or facts.get('range_read')
                      else 'the advisory gives no affected version range, so the version of the CVE is not known')
     elif kind == 'nuclei':
         if facts.get('source') == 'nuclei-cve':
@@ -295,12 +296,12 @@ def overridden(verdict, row):
     return bool(said) and (getattr(row, 'classification', '') or '') != said
 
 
-def version_unknown_outcome(java_unknown=False, runtime_unknown=False):
+def version_unknown_outcome(java_unknown=False, runtime_unknown=False, range_read=False):
     """The stored answer for a CVE match whose advisory gives no usable version range, or whose Java runtime's (``java_unknown``) or language
     runtime's (``runtime_unknown``) version was not read: needs validation, with the reason shown to the reader. Not a model answer, so nothing
     of the model is recorded."""
     reason = (match_policy.REASON_JAVA_UNKNOWN if java_unknown else match_policy.REASON_RUNTIME_UNKNOWN if runtime_unknown
-              else match_policy.REASON_VERSION_UNKNOWN)
+              else match_policy.REASON_RANGE_READ if range_read else match_policy.REASON_VERSION_UNKNOWN)
     return {'classification': 'needs_validation', 'reason': reason, 'model_classification': '',
             'model_reason': '', 'overridden': False, 'impact': '', 'severity_adjust': 0, 'severity_reason': '', 'remediation': '',
             'validation_notes': [], 'invalid_output': False}
@@ -488,6 +489,8 @@ def describe_cve_match(m):
         facts['java_unknown'] = True  # the Java runtime's version was not read from outside (cveFeed.java_runtime), not a range the advisory lacks
     if facts['version_unknown'] and match_policy.evidence_flag(evidence, 'runtime_unknown'):
         facts['runtime_unknown'] = True  # a language runtime's version was not read from outside (cveFeed.version_sources)
+    if facts['version_unknown'] and match_policy.evidence_flag(evidence, 'range_read'):
+        facts['range_read'] = True  # only a range of an edge appliance's builds was read from outside (cveFeed.edge_builds)
     facts['version_only'] = match_policy.version_only(getattr(m, 'source', ''), evidence, m.version_in_range, facts['template_result'],
                                                       facts['distro_status'])
     proof = library_proof_of(m, evidence, facts['distro_status'])
@@ -1817,7 +1820,8 @@ def _apply(verdict, group, released=None, asked=None):
                 and not (verdict.model or '').startswith('deterministic')):
             # an earlier model answer stored for this evidence: with no version range to test, the model may not dismiss it
             classification, reason = 'needs_validation', match_policy.unknown_reason({'java_unknown': bool(d['facts'].get('java_unknown')),
-                                                                                       'runtime_unknown': bool(d['facts'].get('runtime_unknown'))})
+                                                                                       'runtime_unknown': bool(d['facts'].get('runtime_unknown')),
+                                                                                       'range_read': bool(d['facts'].get('range_read'))})
         classification, reason = _remote_clamp(d['kind'], d['facts'], classification, reason, row.validation_status)
         legacy[row.pk] = classification  # what the legacy verdict is made from: never the library rule's confirmation below
         rule, rule_text = library_rule(d['kind'], d['facts'])
@@ -2258,7 +2262,8 @@ def run_triage(pairs, provider=False, scan_id=None):
         if verdict is None and group[0][1]['facts'].get('version_unknown'):
             # no version range to test against: a review state decided without the model, so no provider call and no budget is spent
             verdict = known[key] = _store_verdict(key[0], key[1], version_unknown_outcome(bool(group[0][1]['facts'].get('java_unknown')),
-                                                                                    bool(group[0][1]['facts'].get('runtime_unknown'))), 'deterministic-policy',
+                                                                                    bool(group[0][1]['facts'].get('runtime_unknown')),
+                                                                                    bool(group[0][1]['facts'].get('range_read'))), 'deterministic-policy',
                                                   (group[0][0].project_id, group[0][0].host))
         if verdict is not None:
             stats['cached'] += len(group)

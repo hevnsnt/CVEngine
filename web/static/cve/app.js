@@ -1134,7 +1134,9 @@ const technologyTable = (h) => {
     box.append(el("p", "note", "Versions the host states anonymously: a product's own version endpoint, a platform API, a metrics page, a header. Products are matched like any technology (a version, not a test of the flaw). Runtimes (Python, Go, Node.js, PHP, Ruby, .NET Framework, Erlang/OTP) are matched against CVEs in the runtime; one clearly present with no version read waits for review as \"runtime of unknown version\"."));
     versions.forEach((v) => {
       const line = el("div", "find tech-line");
-      line.append(el("strong", "", v.version ? `${v.product} ${v.line_only ? `${v.version} line` : v.version}` : `${v.product} (no version stated)`));
+      // an edge appliance's build read only as a range (cveFeed.edge_builds): the releases it can be, never one of them
+      const range = v.range && Array.isArray(v.range.candidates) ? v.range.candidates.slice(0, 12).join(", ") : "";
+      line.append(el("strong", "", v.version ? `${v.product} ${v.line_only ? `${v.version} line` : v.version}` : range ? `${v.product} (one of: ${range})` : `${v.product} (no version stated)`));
       line.append(el("span", "chip", v.kind));
       line.append(badge(v.confidence, v.confidence === "exact" ? "queued" : "ice"));
       const where = `${(v.source || "").replace(/_/g, " ")}${v.port ? ` on port ${v.port}` : ""}${v.url ? ` (${v.url})` : ""}`;
@@ -1142,6 +1144,7 @@ const technologyTable = (h) => {
       if (v.stale) line.append(badge("not seen for 90 days", "ice"));
       box.append(line);
       if (v.evidence) box.append(el("p", "note", `Seen on the host: ${v.evidence}`));
+      if (range && v.range.basis) box.append(el("p", "note", `Read as a range: ${v.range.basis}. Its CVEs wait for review; the appliance's own version page decides.`));
     });
   }
   if (unverified.length) {

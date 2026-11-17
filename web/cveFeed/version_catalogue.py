@@ -42,6 +42,7 @@ CONTROL_PREFIX = 'cvengine-control-'
 # the headers every request also asks for: the passive readers run over every answer (a Server header names Nexus, X-Jenkins Jenkins ...)
 COMMON_HEADERS = ('server', 'x-powered-by', 'x-aspnet-version', 'x-aspnetmvc-version', 'x-jenkins')
 CONFIDENCES = ('exact', 'inferred', 'weak')
+DIGEST_KIND = 'version_digest'  # the Sentinel kind of an entry with a digest read (contract 8; cveFeed.edge_builds)
 
 _VERSION = re.compile(r'^v?(\d{1,4}(?:\.\d{1,9}){1,3})(?:[-+_.~]([0-9A-Za-z][0-9A-Za-z.+~_-]{0,40}))?$')
 _CONTROL = re.compile(r'[\x00-\x1f\x7f-\x9f  ​-‏‪-‮﻿]+')
@@ -69,12 +70,13 @@ def base_version(text):
 @dataclass(frozen=True)
 class Request:
     path: str
-    read: str = 'json'                 # json | text | metrics | headers (cvengine_scanner.probes.version_read)
+    read: str = 'json'                 # json | text | metrics | headers | digest (cvengine_scanner.probes.version_read; digest: contract 8)
     fields: tuple = ()
     find: str = ''
+    headers: tuple = ()                # the response headers to return instead of COMMON_HEADERS (at most 6: ETag and Last-Modified of an asset)
 
     def spec(self, path=None):
-        out = {'path': path or self.path, 'read': self.read, 'headers': list(COMMON_HEADERS)}
+        out = {'path': path or self.path, 'read': self.read, 'headers': list(self.headers or COMMON_HEADERS)}
         if self.fields:
             out['fields'] = list(self.fields)
         if self.find:
@@ -110,6 +112,11 @@ class Source:
 
     def lead_re(self):
         return re.compile(self.leads, re.I) if self.leads else None
+
+    @property
+    def task_kind(self):
+        """The Sentinel kind that runs this entry: ``version_digest`` (contract 8) when a request reads a digest, else ``version_read``."""
+        return DIGEST_KIND if any(r.read == 'digest' for r in self.requests) else 'version_read'
 
 
 # ----------------------------------------------------------------------------- reading helpers
@@ -574,6 +581,7 @@ SOURCES = (
            verified='https://learn.microsoft.com/en-us/dotnet/framework/migration-guide/versions-and-dependencies (ASP.NET builds per release)',
            note='only a site that shows detailed errors to remote users (customErrors off) prints the block'),
 )
+SOURCES = SOURCES + __import__('cveFeed.edge_builds', fromlist=['sources']).sources()  # the edge appliances' builds (cveFeed.edge_builds)
 BY_ID = {s.id: s for s in SOURCES}
 assert all(len(s.requests) + int(s.control) <= MAX_REQUESTS for s in SOURCES)
 

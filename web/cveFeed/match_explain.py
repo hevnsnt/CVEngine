@@ -383,6 +383,19 @@ def _runtime_assessment(match):
                                               'release may not use the affected package. Not confirmed: nothing tested for the flaw itself.')
 
 
+def _range_assessment(match):
+    """A CVE matched to an edge appliance's build RANGE (cveFeed.edge_builds): never more than a candidate."""
+    ev = _ev(match)
+    cve_id = _cve_id(match) or 'this CVE'
+    rng = ev.get('build_range') if isinstance(ev.get('build_range'), dict) else {}
+    candidates = ', '.join(_plain(c, 30) for c in (rng.get('candidates') or [])[:8])
+    basis = _plain(rng.get('basis'), 200)
+    why = (f'What an outside check read: {basis or "a range of builds"}' + (f' (the releases it can be: {candidates})' if candidates else '')
+           + f'. A release of that range is affected by {cve_id}, but which release this appliance runs was not read. Not confirmed, and it '
+           'never raises the host\'s heat on its own: the appliance\'s own version page or CLI decides it in a minute.')
+    return 'range_read', NOT_CONFIRMED, why
+
+
 def _assessment(match, family, key, package):
     """``(basis, confidence, why)`` from the evidence class of the match."""
     ev = _ev(match)
@@ -408,6 +421,8 @@ def _assessment(match, family, key, package):
         return _java_assessment(match)
     if match.source == 'runtime':
         return _runtime_assessment(match)
+    if match.source == 'build_range':
+        return _range_assessment(match)
     if match.source == 'openvas':
         qod = _qod(ev)
         quality = f' (quality of detection {qod}%)' if qod is not None else ''
@@ -480,6 +495,8 @@ def _found(match, family, key, label, version):
     elif match.source == 'java':
         head = ('This host runs Java, but the version of its runtime was not read from outside.' if ev.get('java_unknown')
                 else f'The Java runtime on this host stated {_plain(ev.get("reading"), 120) or named}.')
+    elif match.source == 'build_range':
+        head = f'This appliance\'s build was read only as a range: {_plain(ev.get("reading"), 160) or named}.'
     elif match.source == 'runtime':
         label = _plain(ev.get('runtime_label'), 40) or 'a language runtime'
         head = (f'This host runs {label}, but its release was not read from outside.' if ev.get('runtime_unknown')
