@@ -1,0 +1,23 @@
+{
+  "outcome": "done",
+  "web": [
+    {
+      "id": "app.example.com|java|https://app.example.com",
+      "readings": [
+        {"version": "17.0.9", "major": 17, "vendor": "Eclipse Temurin", "runtime": "OpenJDK Runtime Environment", "build": "9", "line_only": false,
+         "source": "actuator", "confidence": "exact", "url": "/actuator/info", "port": 0,
+         "evidence": "actuator info: java.version=17.0.9, vendor=Eclipse Adoptium, runtime=17.0.9+9"}
+      ],
+      "asked": [{"path": "/actuator/env/java.version", "status": 401}, {"path": "/actuator/info", "status": 200}, {"path": "/jolokia/version", "status": 404}]
+    },
+    {"id": "search.example.com|java|https://search.example.com:9200", "readings": [], "asked": [], "error": "TimeoutError: probe exceeded its total time budget"}
+  ],
+  "jdwp": [
+    {"id": "192.0.2.10:5005", "speaks": true,
+     "reading": {"version": "11.0.21", "major": 11, "vendor": "OpenJDK", "runtime": "OpenJDK 64-Bit Server VM", "build": "", "line_only": false,
+                 "source": "jdwp", "confidence": "exact", "url": "", "port": 5005,
+                 "evidence": "Java Debug Wire Protocol (Reference Implementation) version 11.0 JVM Debug Interface version 11.0 JVM version 11.0.21 (OpenJDK 64-Bit Server VM, mixed mode) | OpenJDK 64-Bit Server VM"}}
+  ],
+  "touched": ["app.example.com", "search.example.com", "192.0.2.10"],
+  "refused": []
+}

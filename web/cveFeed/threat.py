@@ -267,6 +267,7 @@ def unproven(match, validation_status=None):
 
 REASON_PATCHED = "the host's distribution has patched it"
 REASON_VERSION_UNKNOWN = "the CVE publishes no affected version range: kept for review"
+REASON_JAVA_UNKNOWN = "the Java runtime's version could not be read from outside: kept for review"
 REASON_NOT_HOT = "not on the KEV and no known exploit"
 
 
@@ -284,7 +285,7 @@ def heat_reason(match, heat=None):
     if match.distro_status == "patched":
         return REASON_PATCHED
     if match_policy.version_unknown(match):
-        return REASON_VERSION_UNKNOWN
+        return REASON_JAVA_UNKNOWN if match_policy.evidence_flag(match.evidence, 'java_unknown') else REASON_VERSION_UNKNOWN
     capped_why = triage_cap_reason(match, heat)
     if heat_policy() == LEGACY_POLICY:
         why = "legacy heat policy: KEV, a public exploit, CVSS and EPSS"

@@ -233,6 +233,30 @@ def for_ssh(project_id, addresses):
     return {'hosts': hosts, 'domains': [], 'excluded': [], 'excluded_trees': [], **address_rules(project_id)}
 
 
+
+def for_java(project_id, subs, addresses, unattended=True):
+    """The policy of a java_runtime task: each web host's own name and its redirect group (``probes.allowed_names``), less what is excluded,
+    archived or outside a bug bounty program's scope (listed in ``excluded`` so the Sentinel names the reason), and the JDWP endpoints' addresses,
+    each asked as itself (``java_runtime.plan`` already kept only the ones a scanner may touch, by this server's address rules, which travel along for
+    the scanner to apply again). Nothing else is listed: no script of another host is read."""
+    from cveFeed import probes
+    gate = _Gate(project_id, unattended=unattended)
+    hosts, excluded = [], set()
+    for sub in subs:
+        for name in sorted(probes.allowed_names(sub)):
+            name = (name or '').strip().lower().rstrip('.')
+            if not name or name in hosts:
+                continue
+            if gate.refusal(name):
+                excluded.add(name)
+            elif len(hosts) < MAX_HOSTS:
+                hosts.append(name)
+    for address in addresses:
+        address = str(address).strip().lower()
+        if address and address not in hosts and len(hosts) < MAX_HOSTS:
+            hosts.append(address)
+    return {'hosts': hosts, 'domains': [], 'excluded': sorted(excluded)[:MAX_EXCLUDED], 'excluded_trees': [], **address_rules(project_id)}
+
 def for_buckets(project_id, candidates):
     """The policy of a bucket_check task: the storage platforms' own endpoints, never a project host. An S3 bucket's regional host is learnt
     from the platform's answer, so S3 and GCS are named by their endpoint domain (the scanner also holds every request to the documented

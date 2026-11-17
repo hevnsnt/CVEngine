@@ -1,0 +1,30 @@
+{
+  "web": [
+    {
+      "id": "app.example.com|java|https://app.example.com",
+      "host": "app.example.com",
+      "base": "https://app.example.com",
+      "checks": ["actuator", "jolokia"],
+      "allowed": ["app.example.com", "example.com", "www.example.com"]
+    },
+    {
+      "id": "search.example.com|java|https://search.example.com:9200",
+      "host": "search.example.com",
+      "base": "https://search.example.com:9200",
+      "checks": ["elasticsearch"],
+      "allowed": ["search.example.com"]
+    }
+  ],
+  "jdwp": [
+    {"id": "192.0.2.10:5005", "address": "192.0.2.10", "port": 5005}
+  ],
+  "scope": {
+    "hosts": ["app.example.com", "example.com", "www.example.com", "search.example.com", "192.0.2.10"],
+    "domains": [],
+    "excluded": [],
+    "excluded_trees": [],
+    "private": false,
+    "addresses": [],
+    "blocked": []
+  }
+}

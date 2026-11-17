@@ -390,6 +390,34 @@ def try_ssh_probe(project, keys, scan=None, priority=1):
     return {(row['address'], row['port']): row for row in result.get('hosts') or []}
 
 
+
+MAX_JAVA_WEB_PER_TASK = 50   # the contract's bound (cvengine_scanner.probes.java_runtime.MAX_WEB)
+MAX_JAVA_JDWP_PER_TASK = 25  # the contract's bound (cvengine_scanner.probes.java_runtime.MAX_JDWP)
+
+
+def try_java_runtime(project, web, jdwp, scan=None, priority=1, unattended=True):
+    """``({web id: row}, {jdwp id: row})`` for the Java runtime reads a Sentinel made (``probe_results.clean_java_runtime``, cut to the entries asked).
+    ``web`` is ``[(sub, {'id', 'host', 'base', 'checks', 'allowed'})]`` and ``jdwp`` ``[{'id', 'address', 'port'}]`` (``cveFeed.java_runtime.plan``), each
+    within the contract's bound. The kind has no local path (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can take it. A
+    task that ended without a result, and an entry the result has no row for, are missing from the answer: unknown, the caller leaves them due."""
+    from cveFeed import probe_scope
+    web, jdwp = list(web)[:MAX_JAVA_WEB_PER_TASK], list(jdwp)[:MAX_JAVA_JDWP_PER_TASK]
+    if not (web or jdwp) or not _offered(project, 'java_runtime'):
+        return {}, {}
+    target = {'web': [entry for _sub, entry in web], 'jdwp': jdwp,
+              'scope': probe_scope.for_java(project.pk, [sub for sub, _e in web], [j['address'] for j in jdwp], unattended=unattended)}
+    if not target['web']:
+        del target['web']
+    if not target['jdwp']:
+        del target['jdwp']
+    result = sentinel_dispatch.dispatch_or_none(project, 'java_runtime', target, host=_hosts_label([e['host'] for _s, e in web] + [j['address'] for j in jdwp]),
+                                                ips=[j['address'] for j in jdwp][:64] or None, scan=scan, priority=priority)
+    if result is None:
+        return {}, {}
+    if result.get('refused'):
+        logger.info('java_runtime task for %s: the scanner refused %s host(s) outside the scope policy', project.pk, len(result['refused']))
+    return {row['id']: row for row in result.get('web') or []}, {row['id']: row for row in result.get('jdwp') or []}
+
 MAX_ROUTE_HOSTS_PER_TASK = 25  # the contract's bound (cvengine_scanner.probes.routes.MAX_HOSTS)
 
 

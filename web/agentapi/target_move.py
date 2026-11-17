@@ -46,14 +46,14 @@ def repoint(source, dest, domains, hosts):
     transaction: it is all or nothing."""
     from cveFeed.models import (AssetChange, AutomaticValidation, CVEMatch, DeferredRetest, FindingAuditEvent, FindingComment, HostArchive,
                                 HostAssessment, HostLabel, HostProfile, HostState, HygieneFinding, OnDemandValidation, ProbeObservation,
-                                RdpScreenshot, HostScreenshot, RouteAuth, Triage, AuthCredential)
+                                RdpScreenshot, HostScreenshot, RouteAuth, Triage, AuthCredential, JavaRuntime)
     from cveFeed.models import BountyEngagementTarget
     from startScan.models import Vulnerability
     from targetApp.models import Domain
     ids = [d.pk for d in domains]
     counts = {'targets': Domain.objects.filter(pk__in=ids, project=source).update(project=dest)}  # org stays: the same organization
     for model in (HostLabel, ProbeObservation, HostState, HostArchive, RdpScreenshot, HostScreenshot, HostAssessment, AssetChange, RouteAuth, DeferredRetest,
-                  Triage, AuthCredential):
+                  Triage, AuthCredential, JavaRuntime):
         _repoint(model.objects.filter(project=source, domain_id__in=ids), dest)
     names = sorted(hosts)
     for start in range(0, len(names), HOST_CHUNK):

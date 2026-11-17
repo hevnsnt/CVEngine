@@ -884,6 +884,43 @@ def _host_reported(match, cve, strategy, host):
             'fix': f'Update the package to {_upgrade("the package", ranges)}, then let the host report again.'}
 
 
+# The commands that read which Java a process runs (constants: the reader fills in <PID>). The same list ``match_explain.JAVA_STEPS`` words.
+JAVA_COMMANDS = (
+    {'platform': 'linux', 'command': 'pgrep -a java', 'explain': 'Lists the Java processes and their command lines: note the PID of the application.'},
+    {'platform': 'linux', 'command': 'jcmd <PID> VM.version', 'explain': 'The running JVM states its exact version and vendor (needs the JDK\'s jcmd).'},
+    {'platform': 'linux', 'command': 'readlink -f /proc/<PID>/exe', 'explain': 'The java binary the process runs.'},
+    {'platform': 'linux', 'command': '"$(readlink -f /proc/<PID>/exe)" -version', 'explain': 'That binary\'s version and vendor.'},
+    {'platform': 'linux', 'command': 'cat "$(dirname "$(dirname "$(readlink -f /proc/<PID>/exe)")")/release"',
+     'explain': 'The JDK or JRE release file: JAVA_VERSION and IMPLEMENTOR.'},
+    {'platform': 'container', 'command': 'docker exec <CONTAINER> java -version', 'explain': 'The same question inside a container.'},
+)
+
+
+def _java_runtime(match, cve, strategy, host):
+    """A CVE in the Java runtime (cveFeed.java_runtime): what an outside check could and could not read, then the host owner's commands."""
+    ev = match.evidence if isinstance(match.evidence, dict) else {}
+    unknown = bool(ev.get('java_unknown'))
+    look_for = [{'label': 'Java runtime read from outside', 'quote': _quote(str(r.get('version') or ''), 40) + f" ({_quote(str(r.get('source') or ''), 20)}, "
+                                                                     f"{_quote(str(r.get('confidence') or ''), 10)})"}
+                for r in (ev.get('java') or [])[:6] if isinstance(r, dict)]
+    ranges = _ranges_of(match)
+    version = '' if unknown else _version(match.matched_version)
+    where = [{'label': 'Host', 'text': host}] if host else []
+    port = _port(ev.get('port'))
+    if port:
+        where.append({'label': 'Port', 'text': str(port)})
+    steps = [_step('What an outside check could not see', 'cvENGINE could not read which Java runtime this host runs: no debug port, actuator, '
+                   'Jolokia endpoint, status page, header or error page of it stated the version. The commands below read it on the host.')] if unknown else []
+    return {'class': 'java_runtime', 'class_label': 'Java runtime of unknown version' if unknown else 'Java runtime version',
+            'headline': f'Confirm which Java runtime {host or "the host"} runs' if unknown else f'Confirm Java {version} on {host}',
+            'where': where, 'look_for': look_for, 'steps': steps,
+            'verdict': _verdict('Java', version, ranges, 'jcmd VM.version (or java -version)',
+                                'The Java process or its binary could not be read: ask the application\'s owner, and leave the match open.'),
+            'precondition': _precondition(cve, strategy),
+            'local': [{'title': 'On the host, as the user the application runs as', 'commands': [dict(c) for c in JAVA_COMMANDS]}],
+            'fix': f'Update the Java runtime the application runs on to {_upgrade("Java", ranges)}, restart the application, then let cvENGINE read it again.'}
+
+
 def match_guide(match):
     """The confirm-it-yourself guide for one CVEMatch (its cve_entry and subdomain loaded), or None when the match has no host. Pure but for
     a few bounded reads of what cvENGINE already recorded about the host (route-check pages, probe observations, the nuclei hit)."""
@@ -904,6 +941,8 @@ def match_guide(match):
         guide = _openvas(match, cve, strategy, host)
     elif source == 'host':
         guide = _host_reported(match, cve, strategy, host)
+    elif source == 'java':
+        guide = _java_runtime(match, cve, strategy, host)
     elif source == 'wp-plugin' or ev.get('source') == 'wpscan':
         guide = _cms(match, cve, strategy, host, bases)
     elif source == 'port':

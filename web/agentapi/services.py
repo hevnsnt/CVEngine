@@ -1617,6 +1617,8 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'served_from': [{'address': r.product, 'status': (r.evidence or {}).get('answer', {}).get('status'), 'title': (r.evidence or {}).get('answer', {}).get('title', '')}
                             for r in probe_rows if r.kind == 'vhost' and r.outcome == 'found'][:10],
             'subdirectory_apps': subdir_apps.applications_from_rows(probe_rows),
+            # the Java runtime the host was read to run (cveFeed.java_runtime): version, line, vendor, source, confidence; exact readings first
+            'java_runtimes': ((shared or {}).get('java') or {}).get(host_key) or [],
             'wordpress': host_context.wordpress_summary(probe_rows), 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
             'target': sub.target_domain.name if sub.target_domain else None, 'target_id': sub.target_domain_id,
             'http_status': http['status'], 'title': http['title'], 'score': display_score, 'score_detail': score_detail, 'zombie': False,
@@ -1897,8 +1899,10 @@ def _shared_for(project, subs):
     for row in ProbeObservation.objects.filter(project_id__in=_pids_of(project, subs), probe='vhost-probe', kind='vhost', outcome='found',
                                                product__in=list(addresses)).order_by('host'):
         vhosts.setdefault((row.project_id, row.product), []).append(row)
+    from cveFeed import java_runtime
+    java = java_runtime.runtimes_for(_pids_of(project, subs), {s.name.lower() for s in subs})  # what the host was read to run on (one query)
     return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots, 'shots': shots, 'legacy_shots': legacy_shots,
-            'probes': probe_rows, 'vhosts': vhosts}
+            'probes': probe_rows, 'vhosts': vhosts, 'java': java}
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}
@@ -2171,7 +2175,7 @@ def list_hosts(ctx, slug, params):
 
 
 SEARCH_FIELDS = ('tech', 'banner', 'port', 'proto', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth',
-                  'sensitive', 'zombie', 'country', 'alias', 'note', 'secret')
+                  'sensitive', 'zombie', 'country', 'alias', 'note', 'secret', 'java')
 MAX_SEARCH_QUERY, MAX_SEARCH_TERMS, MAX_SEARCH_VALUE, MAX_SEARCH_VALUES = 1000, 15, 200, 40
 MAX_NEGATED_TERMS = 3  # every negated term is a pass over the whole project's hosts (review 2 F1): three is a real query, fifteen is an abuse
 _SEARCH_TERM = re.compile(r'(-)?(?:([A-Za-z]+):)?(?:"([^"]*)"|(\S+))')
@@ -2392,6 +2396,12 @@ def _term_filter(field, value, project=None):
         if value.lower() not in RouteAuth.STATES:
             raise ApiError(400, f'auth: takes one of {", ".join(RouteAuth.STATES)}')
         return _hosts_named_in(RouteAuth.objects.filter(auth_state=value.lower()), project)
+    if field == 'java':  # the Java runtime the host was read to run (cveFeed.java_runtime): a line, a version, any, a vendor or a source
+        from cveFeed import java_runtime
+        rows = java_runtime.search_rows(value)
+        if rows is None:
+            raise ApiError(400, 'java: takes a line (java:17), a version (java:17.0.9, java:8u392), any, a vendor (java:temurin) or a source (java:jdwp)')
+        return _hosts_named_in(rows, project)
     if field == 'zombie':
         from cveFeed.models import HostState
         if value.lower() not in ('yes', 'no'):
@@ -2556,6 +2566,8 @@ def _why_matched(sub, terms, routes=None, archive=None):
             reasons.append(f'secret {v}')
         if field == 'zombie' and v == 'yes':
             reasons.append('zombie: DNS gone, still answering')
+        if field == 'java':
+            reasons.append(f'Java runtime {v}')
     return list(dict.fromkeys(reasons))[:8]
 
 
@@ -2807,7 +2819,8 @@ def check_search(query):
 def search_hosts(ctx, slug, params):
     """Shodan-style host search. ``q`` is a space-separated list of ANDed terms: a bare word matches hostname, IP, technology,
     port product / service / version / CPE / banner, Server and X-Powered-By headers, cookie names, OS, finding name, CVE id and
-    page title; ``tech:`` (everything a host runs, from any of that), ``banner:`` (service banners and NSE output), ``port:``, ``product:``,
+    page title; ``tech:`` (everything a host runs, from any of that), ``java:`` (the Java runtime it was read to run: ``java:17``, ``java:17.0.9``,
+    ``java:8u392``, ``any``, a vendor such as ``temurin`` or a source such as ``jdwp``), ``banner:`` (service banners and NSE output), ``port:``, ``product:``,
     ``service:``, ``os:``, ``cve:``, ``ip:`` (an address or CIDR), ``host:``, ``vuln:``, ``sev:`` and ``auth:`` (open, login,
     session_required, sso ...) and ``sensitive:`` (any, credentials, pii, internal), ``secret:`` (any, p, s, i, live or a provider such as
     google: hosts that serve an exposed secret the inventory counts), ``zombie:`` (yes, no) and ``country:`` (ISO code

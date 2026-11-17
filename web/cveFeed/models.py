@@ -703,6 +703,44 @@ class ProbeObservation(models.Model):
         return f"{self.host}: {self.probe} {self.product} {self.version}".strip()
 
 
+class JavaRuntime(models.Model):
+    """One reading of the Java runtime a host runs, made from outside (cveFeed.java_runtime): the version (normalised: ``17.0.9``, ``8u392``, a line
+    alone such as ``17``), its major line, the vendor, where it came from (``source``) and how far it can be trusted (``confidence``: ``exact`` when
+    the runtime itself or a page of the product stated it, ``inferred`` when it is what the vendor bundles with the product's version, ``weak`` for a
+    vendor's supported line or a minimum). One row per (project, host, key): ``key`` names the source and where (``jdwp:5005``,
+    ``actuator:/actuator/info``, ``bundled:confluence``); a repeat updates it. ``evidence`` is what the host said, clipped: untrusted text, shown escaped.
+    Correlation matches runtime CVEs against these rows (``java_runtime.collect_matches``); the host payload shows them as ``java_runtimes``."""
+
+    SOURCES = ("jdwp", "actuator", "jolokia", "status_page", "header", "error_page", "bundled_inference", "jenkins_minimum", "tls_fingerprint")
+    CONFIDENCES = ("exact", "inferred", "weak")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500)  # lowercase
+    key = models.CharField(max_length=200)
+    version = models.CharField(max_length=40, blank=True, default="")
+    major = models.IntegerField(default=0)
+    vendor = models.CharField(max_length=40, blank=True, default="unknown")
+    runtime = models.CharField(max_length=200, blank=True, default="")
+    build = models.CharField(max_length=60, blank=True, default="")
+    line_only = models.BooleanField(default=False)  # only the major line is known (a header's "Java/17", a vendor's supported line)
+    source = models.CharField(max_length=24)
+    confidence = models.CharField(max_length=12, default="exact")
+    port = models.IntegerField(default=0)
+    url = models.CharField(max_length=300, blank=True, default="")
+    evidence = models.TextField(blank=True, default="")
+    detail = models.JSONField(default=dict, blank=True)  # the inference's basis and citation, the possible lines, a minimum
+    first_seen = models.DateTimeField(default=timezone.now)
+    last_seen = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "host", "key"], name="uniq_javaruntime_project_host_key")]
+        indexes = [models.Index(fields=["project", "host"], name="javaruntime_proj_host_idx"),
+                   models.Index(fields=["project", "major"], name="javaruntime_proj_major_idx")]
+
+    def __str__(self):
+        return f"{self.host}: Java {self.version or self.major} ({self.source}, {self.confidence})"
+
+
 class HostProfile(models.Model):
     """Editable asset information for one host of a project: who owns it, what it is for and how much it matters, and the alias (a short
     display name) and note a person gave it. One row per (project, host); the host name is stored lowercase. Never read by a scanner.
