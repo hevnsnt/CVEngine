@@ -950,6 +950,29 @@ def _language_runtime(match, cve, strategy, host):
             'fix': f'Update {label} for the application to {_upgrade(label, ranges)}, restart the application, then let cvENGINE read it again.'}
 
 
+def _bundled_component(match, cve, strategy, host):
+    """A component a vendor bundles with the product release the host states (cveFeed.bundled_components): the version is inferred, so the
+    guide reads the component that actually runs."""
+    ev = match.evidence if isinstance(match.evidence, dict) else {}
+    bundled = ev.get('bundled') if isinstance(ev.get('bundled'), dict) else {}
+    label = _quote(str(ev.get('component_label') or match.matched_product or 'the component'), 40)
+    version = _version(ev.get('raw_version') or match.matched_version)
+    product = ' '.join(x for x in (_quote(str(bundled.get('product') or ''), 60), _quote(str(bundled.get('product_version') or ''), 30)) if x)
+    ranges = _ranges_of(match)
+    where = [{'label': 'Host', 'text': host}] if host else []
+    look_for = [{'label': 'Product release the host states', 'quote': product or 'not recorded'},
+                {'label': f'{label} that release bundles', 'quote': f"{version} ({_quote(str(bundled.get('source') or ''), 200)})"}]
+    steps = [_step('What an outside check could not see', f'The host states {product or "its product release"}; the vendor ships it with {label} '
+                   f'{version}. Whether the application still runs that {label} (and not one the owner installed or replaced) is not known.')]
+    return {'class': 'bundled_component', 'class_label': f'{label} bundled with {product}' if product else f'Bundled {label}',
+            'headline': f'Confirm which {label} {host or "the host"} runs', 'where': where, 'look_for': look_for, 'steps': steps,
+            'verdict': _verdict(label, version, ranges, f'the {label} the application runs (its version command, jar or library file name)',
+                                f'The {label} the application runs could not be read: ask the application\'s owner, and leave the match open.'),
+            'precondition': _precondition(cve, strategy), 'local': [],
+            'fix': f'Update {product or "the product"} to a release that bundles {label} {_upgrade(label, ranges)}, or update the bundled {label}, '
+                   'then let cvENGINE read it again.'}
+
+
 def match_guide(match):
     """The confirm-it-yourself guide for one CVEMatch (its cve_entry and subdomain loaded), or None when the match has no host. Pure but for
     a few bounded reads of what cvENGINE already recorded about the host (route-check pages, probe observations, the nuclei hit)."""
@@ -974,6 +997,8 @@ def match_guide(match):
         guide = _java_runtime(match, cve, strategy, host)
     elif source == 'runtime':
         guide = _language_runtime(match, cve, strategy, host)
+    elif source == 'bundled':
+        guide = _bundled_component(match, cve, strategy, host)
     elif source == 'wp-plugin' or ev.get('source') == 'wpscan':
         guide = _cms(match, cve, strategy, host, bases)
     elif source == 'port':
