@@ -18,7 +18,7 @@ from django.utils import timezone
 
 from agentapi.auth import create_token
 from cveFeed import template_review, templatefixture, templategen, templatevalidate, triage, validation
-from cveFeed.models import AIJob, CVEEntry, CVEMatch, GeneratedTemplate, GeneratedTemplateReview, ReviewerSettings
+from cveFeed.models import AgentActivity, AIJob, CVEEntry, CVEMatch, GeneratedTemplate, GeneratedTemplateReview, ReviewerSettings
 from dashboard.models import AuditLog, Org, Project, ProjectMembership
 from scanEngine.models import EngineType
 from startScan.models import ScanHistory, Subdomain, Vulnerability
@@ -233,17 +233,19 @@ class ReviewReportTests(World):
         row = GeneratedTemplate.objects.create(cve_entry=self.cve, template_id='cve-2024-38475-y', yaml=loose, status='invalid')
         self.assertIn('matches the benign page', ' '.join(template_review.report(row, CVEMatch.objects.none())['findings']))
 
-    def test_the_mcp_report_needs_a_write_token_and_rest_serves_a_read_only_one(self):
-        error, data = tool_call(self.t_root, 'review_generated_template', {'id': self.tmpl.pk})
+    def test_the_report_is_a_read_that_a_read_only_token_may_ask_for(self):
+        error, data = tool_call(self.t_root_ro, 'review_generated_template', {'id': self.tmpl.pk})
         self.assertFalse(error, data)
         self.assertEqual(len(data['hits']), 2)
-        self.assertTrue(tool_call(self.t_root_ro, 'review_generated_template', {'id': self.tmpl.pk})[0])
         self.assertEqual(call(self.t_root_ro, 'GET', f'/api/v1/generated-templates/{self.tmpl.pk}/review')[0], 200)
+        error, _ = tool_call(self.t_root, 'review_generated_template', {'id': self.tmpl.pk, 'verdict': 'retire', 'reason': 'x'})
+        self.tmpl.refresh_from_db()
+        self.assertEqual(self.tmpl.status, 'valid')  # the read tool takes no verdict
 
 
 class RetireTests(World):
     def test_retire_reads_the_confirmations_again_and_leaves_remediation_alone(self):
-        error, data = tool_call(self.t_root, 'review_generated_template', {'id': self.tmpl.pk, 'verdict': 'retire',
+        error, data = tool_call(self.t_root, 'set_generated_template_verdict', {'id': self.tmpl.pk, 'verdict': 'retire',
                                                                           'reason': 'reads the Server header version only'})
         self.assertFalse(error, data)
         self.tmpl.refresh_from_db()
@@ -286,7 +288,8 @@ class RetireTests(World):
         url = f'/api/v1/generated-templates/{self.tmpl.pk}/review'
         self.assertEqual(call(self.t_alice, 'POST', url, {'verdict': 'retire', 'reason': 'x'})[0], 403)  # a project admin is not enough
         self.assertEqual(call(self.t_root_ro, 'POST', url, {'verdict': 'retire', 'reason': 'x'})[0], 403)
-        self.assertTrue(tool_call(self.t_alice, 'review_generated_template', {'id': self.tmpl.pk, 'verdict': 'retire', 'reason': 'x'})[0])
+        self.assertTrue(tool_call(self.t_alice, 'set_generated_template_verdict', {'id': self.tmpl.pk, 'verdict': 'retire', 'reason': 'x'})[0])
+        self.assertTrue(tool_call(self.t_root_ro, 'set_generated_template_verdict', {'id': self.tmpl.pk, 'verdict': 'retire', 'reason': 'x'})[0])
         self.assertEqual(call(self.t_root, 'POST', url, {'verdict': 'retire'})[0], 400)  # a reason is required
         self.assertEqual(call(self.t_root, 'POST', url, {'verdict': 'delete', 'reason': 'x'})[0], 400)
         self.assertEqual(call(self.t_root, 'POST', url, {})[0], 400)
@@ -418,6 +421,53 @@ class OneIdOneTextTests(World):
         self.assertFalse(Path(self.tmpl.path).exists())
 
 
+class InFlightTests(World):
+    """A run that started before its template was retired, or before a valid revision superseded it, records nothing it found."""
+
+    def setUp(self):
+        super().setUp()
+        Vulnerability.objects.all().delete()
+        CVEMatch.objects.filter(pk=self.matches['a'].pk).update(template_result='', template_id='')
+
+    def retire_during_the_run(self, response='no response kept'):
+        def run(path, hosts, project=None):
+            template_review.retire(self.tmpl, 'retired while the run was out', self.root)
+            return [{k: v for k, v in outcome(HOST_A, response).items() if k != 'template_evidence'}]
+        return mock.patch.object(templategen, '_test_chunk', side_effect=run)
+
+    def test_the_template_pass_discards_the_result_of_a_check_retired_while_it_ran(self):
+        with mock.patch('cveFeed.validation.resolve_template', return_value=(self.tmpl.path, '')), self.retire_during_the_run(), \
+                mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda hosts, **kw: list(hosts)):
+            templategen.run_cve_tests(self.cve, [HOST_A], project=self.projects['a'])
+        self.assertEqual(self.match('a').template_result, '')
+        self.assertFalse(Vulnerability.objects.exists())
+        self.assertEqual(AgentActivity.objects.filter(message__contains='result of a retired check', cve_id=CVE_ID).count(), 1)
+
+    def test_a_validation_step_discards_the_hit_of_a_check_retired_while_it_ran(self):
+        from cveFeed.models import Triage
+        row = Triage.objects.get(match=self.matches['a'])
+        check = validation._template_check(self.tmpl.path, HOST_A, CVE_ID, row.signature, project_id=self.projects['a'].pk)
+        with self.retire_during_the_run():
+            result = validation.run_nuclei_template(check)
+        self.assertEqual(result['status'], 'hit')  # what the scanner said
+        validation.apply_validation(row, check, result)
+        row.refresh_from_db()
+        self.assertNotEqual(row.validation_status, 'hit')
+        self.assertNotEqual(row.classification, 'confirmed')
+        self.assertEqual(self.match('a').template_result, '')
+        self.assertFalse(Vulnerability.objects.exists())
+        self.assertTrue(AgentActivity.objects.filter(message__contains='result of a retired check').exists())
+
+    def test_a_superseded_template_is_stale_and_an_upstream_one_never_is(self):
+        self.assertIsNone(templategen.stale_generated_template(template_id=TEMPLATE_ID))
+        GeneratedTemplate.objects.create(cve_entry=self.cve, template_id='cve-2024-38475-r2', yaml=REVISION, status='valid',
+                                         supersedes=self.tmpl, path='/x/cve-2024-38475-r2.yaml')
+        self.assertEqual(templategen.stale_generated_template(template_id=TEMPLATE_ID), self.tmpl)
+        self.assertEqual(templategen.stale_generated_template(path=self.tmpl.path), self.tmpl)
+        self.assertIsNone(templategen.stale_generated_template(template_id='CVE-2024-38475'))
+        self.assertIsNone(templategen.stale_generated_template(path='/root/nuclei-templates/http/cves/2024/CVE-2024-38475.yaml'))
+
+
 class IndexTests(TestCase):
     def test_a_revision_file_is_found_for_its_cve_only_in_the_generated_directory(self):
         root = tempfile.mkdtemp()
@@ -441,17 +491,19 @@ class SurfaceTests(TestCase):
 
         from agentapi import capability_review, mcp, rest
         writes = {name: w for name, _d, _s, _f, w in mcp.TOOLS}
-        self.assertEqual({n: writes[n] for n in ('list_generated_templates', 'get_generated_template', 'review_generated_template',
-                                                  'update_generated_template')},
-                         {'list_generated_templates': False, 'get_generated_template': False, 'review_generated_template': True,
-                          'update_generated_template': True})
+        names = ('list_generated_templates', 'get_generated_template', 'review_generated_template', 'set_generated_template_verdict',
+                 'update_generated_template')
+        self.assertEqual({n: writes[n] for n in names},
+                         {'list_generated_templates': False, 'get_generated_template': False, 'review_generated_template': False,
+                          'set_generated_template_verdict': True, 'update_generated_template': True})
         reviewed = {key for _v, _r, keys in capability_review.REVIEW for key in keys}
-        for key in ('review_generated_template', 'update_generated_template', 'POST generated-templates/{generated_id}/review',
+        self.assertNotIn('review_generated_template', reviewed)
+        for key in ('set_generated_template_verdict', 'update_generated_template', 'POST generated-templates/{generated_id}/review',
                     'POST generated-templates/{generated_id}/revisions'):
             self.assertIn(key, reviewed)
         self.assertTrue(any(p == r'generated-templates/(?P<generated_id>\d+)/revisions' for _m, p, *_ in rest.ROUTES))
         here = os.path.dirname(os.path.abspath(__file__))
         with open(os.path.join(here, '..', '..', 'docs', 'AGENT-API.md'), encoding='utf-8') as fh:
             doc = fh.read()
-        for name in ('list_generated_templates', 'get_generated_template', 'review_generated_template', 'update_generated_template'):
+        for name in names:
             self.assertIn(f'`{name}`', doc)

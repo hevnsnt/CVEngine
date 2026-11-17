@@ -1155,6 +1155,10 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     from startScan.models import Subdomain
     if project is None or not outcomes:
         return 0
+    stale = stale_generated_template(template_id=template_id)
+    if stale is not None:  # retired (or superseded) while it ran: what it found is not recorded, not even a miss
+        discarded_result(cve, stale, project=getattr(project, "pk", project))
+        return 0
     by_host = {}
     for outcome in outcomes:
         by_host.setdefault(_host_key(outcome["host"]), outcome)
@@ -1217,6 +1221,36 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
         hit = outcome.get("hit") if isinstance(outcome.get("hit"), dict) else {}
         version_hit_corrected(cve, name, getattr(project, "pk", project), {template_id, str(hit.get("template-id") or "")[:200]}, ids)
     return saved
+
+
+def stale_generated_template(template_id="", path=""):
+    """The AI-written template (``GeneratedTemplate``) installed under ``template_id`` (or at ``path``) when it may no longer run, else None.
+    A run reads the approved text before it starts (``validation.approved_template``); a review can retire the template, or a valid revision
+    supersede it, while the run is out, and its result must then not be recorded (``record_outcomes``, ``validation.apply_validation``). Stale:
+    every row installed under that id or path is no longer ``valid`` (retired, rejected, expired), or the valid one has a valid revision. A
+    template no AI-written row was installed under (an installed upstream template) is never stale."""
+    from cveFeed.models import GeneratedTemplate
+    if path:
+        rows = GeneratedTemplate.objects.filter(path=str(path))
+    elif template_id:
+        rows = GeneratedTemplate.objects.filter(template_id=str(template_id)[:128]).exclude(path="")
+    else:
+        return None
+    rows = list(rows.select_related("cve_entry").order_by("-id")[:20])
+    if not rows:
+        return None
+    for row in rows:
+        if row.status == GeneratedTemplate.STATUS_VALID and not row.revisions.filter(status=GeneratedTemplate.STATUS_VALID).exists():
+            return None
+    return rows[0]
+
+
+def discarded_result(cve, stale, project=None):
+    """The one activity line for a result of a retired check that was thrown away."""
+    from cveFeed import activity
+    activity.log("validate", f"The result of a retired check ({stale.template_id or '#%d' % stale.pk}) for {cve.cve_id} was discarded: the "
+                             "check was retired or superseded while it ran, so nothing it found is recorded", project=project, cve_id=cve.cve_id,
+                 vulnerable=False)
 
 
 VERSION_HIT_NOTE = ("Closed automatically: the template check only read the version string from the response, which is not proof of the "

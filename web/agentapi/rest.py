@@ -182,7 +182,7 @@ def _review_generated(request, ctx, generated_id):
     body = _body(request)
     if body.get('verdict') in (None, ''):
         raise ApiError(400, 'give a verdict: keep or retire (GET this route for the review report)')
-    return gentpl.review_generated_template(ctx, generated_id, verdict=body.get('verdict'), reason=body.get('reason'))
+    return gentpl.set_generated_template_verdict(ctx, generated_id, verdict=body.get('verdict'), reason=body.get('reason'))
 
 
 def _revise_generated(request, ctx, generated_id):

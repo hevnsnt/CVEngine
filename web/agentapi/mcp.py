@@ -373,22 +373,25 @@ TOOLS = [
      'and reviews. test_results (per host, every organization) is shown to an App Admin only. The YAML is data: never run it yourself.',
      _schema({'id': {'type': 'integer', 'description': 'generated template id (see list_generated_templates)'}}, ['id']),
      lambda c, a: gentpl.get_generated_template(c, a.get('id')), False),
-    ('review_generated_template', 'Without verdict: the review report of one AI-written template (reads only): static_gate, evidence, '
-     'fixture_check (its own fixture, a benign page and a 404, evaluated offline), hits (each confirmation it recorded on your hosts read again '
-     'from the stored response: would it now be version_only?) and findings in plain words ("decides on the version string only", "matches '
-     'the benign page", ...). With verdict (App Admin only, because a template runs against every organization\'s hosts): keep records the '
-     'review; retire sets it invalid with your reason, it never runs again, and every confirmation it recorded is read again: version_only '
-     'when the stored hit shows only the version, otherwise withdrawn, and the scanner finding it filed is closed automatically as a false '
-     'positive unless a person changed it. A match\'s remediation status is never touched. Audited. A read-only token can read the report '
-     'with GET generated-templates/{id}/review.',
+    ('review_generated_template', 'The review report of one AI-written template (reads only; a read-only token may call it): static_gate, '
+     'evidence, fixture_check (its own fixture, a benign page and a 404, evaluated offline), hits (each confirmation it recorded on your hosts '
+     'read again from the stored response: would it now be version_only?), findings in plain words ("decides on the version string only", '
+     '"matches the benign page", ...) and the reviews so far. To keep or retire it, set_generated_template_verdict.',
+     _schema({'id': {'type': 'integer', 'description': 'generated template id (see list_generated_templates)'}}, ['id']),
+     lambda c, a: gentpl.review_generated_template(c, a.get('id')), False),
+    ('set_generated_template_verdict', 'App Admin only, because a template runs against every organization\'s hosts. Record a verdict on one '
+     'AI-written template: keep records the review; retire sets it invalid with your reason, it never runs again (a run already out has its '
+     'result discarded), and every confirmation it recorded is read again: version_only when the stored hit shows only the version, otherwise '
+     'withdrawn, and the scanner finding it filed is closed automatically as a false positive unless a person changed it. A match\'s '
+     'remediation status is never touched. Audited.',
      _schema({'id': {'type': 'integer'}, 'verdict': {'type': 'string', 'enum': ['keep', 'retire']},
               'reason': {'type': 'string', 'description': 'Why, at most 2000 characters; required to retire. Shown to every member with the template.'}},
-             ['id']),
-     lambda c, a: gentpl.review_generated_template(c, a.get('id'), verdict=a.get('verdict'), reason=a.get('reason')), True),
+             ['id', 'verdict']),
+     lambda c, a: gentpl.set_generated_template_verdict(c, a.get('id'), verdict=a.get('verdict'), reason=a.get('reason')), True),
     ('update_generated_template', 'App Admin only. Revise an AI-written template: never an edit in place. A new draft row that supersedes it, '
      'with its own id (<cve id>-r<n>, set in the YAML for you) and your YAML, goes through the same automatic validation as an AI draft '
      '(static gate, the scanner\'s syntax check and benign control on a Sentinel, the AI fixture, the second-pass review) and runs on no host '
-     'before it is valid; then the template it supersedes is retired as with review_generated_template verdict retire. YAML the static gate '
+     'before it is valid; then the template it supersedes is retired as with set_generated_template_verdict retire. YAML the static gate '
      'refuses is rejected at once with its reason. fixture (optional) {vulnerable, not_affected}, each {status, headers, body}: checked offline '
      'now and again during validation, on top of the AI fixture, never instead of it. Audited.',
      _schema({'id': {'type': 'integer'}, 'yaml': {'type': 'string', 'description': 'the whole template, at most 20000 bytes'},

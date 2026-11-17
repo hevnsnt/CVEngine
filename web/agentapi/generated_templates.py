@@ -192,19 +192,24 @@ def _refused(exc):
     return ApiError(exc.status, exc.message)
 
 
-def review_generated_template(ctx, generated_id, verdict=None, reason=None):
-    """Without ``verdict``: the review report (reads only). With ``verdict`` keep or retire (App Admin): the review is recorded, and retire
-    sets the template invalid and reads its confirmations again (``cveFeed.template_review.retire``)."""
+def review_generated_template(ctx, generated_id):
+    """The review report of one template (reads only; a read-only token may ask): the static gate, the evidence class, the fixture check,
+    each of the caller's confirmations read again and plain findings (``cveFeed.template_review.report``)."""
     from cveFeed import template_review
     svc._require_member(ctx)
     tmpl = _get(generated_id)
-    if verdict in (None, ''):
-        if reason not in (None, ''):
-            raise ApiError(400, 'a reason goes with a verdict (keep or retire)')
-        out = {'id': tmpl.pk, 'cve_id': tmpl.cve_entry.cve_id, 'template_id': tmpl.template_id, 'status': tmpl.status}
-        out.update(template_review.report(tmpl, _scoped_matches(ctx, template_review.recorded_matches(tmpl))))
-        out['reviews'] = [_review_row(r, _admin(ctx)) for r in tmpl.reviews.all()[:50]]
-        return out
+    out = {'id': tmpl.pk, 'cve_id': tmpl.cve_entry.cve_id, 'template_id': tmpl.template_id, 'status': tmpl.status}
+    out.update(template_review.report(tmpl, _scoped_matches(ctx, template_review.recorded_matches(tmpl))))
+    out['reviews'] = [_review_row(r, _admin(ctx)) for r in tmpl.reviews.all()[:50]]
+    return out
+
+
+def set_generated_template_verdict(ctx, generated_id, verdict=None, reason=None):
+    """A verdict on one template (App Admin, write token): keep records the review; retire sets the template invalid and reads its
+    confirmations again (``cveFeed.template_review.retire``)."""
+    from cveFeed import template_review
+    svc._require_member(ctx)
+    tmpl = _get(generated_id)
     if verdict not in VERDICTS:
         raise ApiError(400, f'verdict must be one of {", ".join(VERDICTS)} (a revision is update_generated_template)')
     _require_admin(ctx, 'review an AI-written template')

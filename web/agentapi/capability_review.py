@@ -75,7 +75,7 @@ REVIEW = [
      'and withdraws what it confirmed; a revision is a new draft that passes every automatic gate an AI draft passes before it may run (its '
      'spend is the two AI calls of that validation, and only while a person has it switched on), and it widens no scope, sends no credentials '
      'and switches nothing on', [
-        'review_generated_template', 'POST generated-templates/{generated_id}/review',
+        'set_generated_template_verdict', 'POST generated-templates/{generated_id}/review',
         'update_generated_template', 'POST generated-templates/{generated_id}/revisions',
     ]),
     ('allow', 'host-reported data, or the protocol of the agent or Sentinel that holds the token (its own registration, heartbeat and tasks); a new agent is pending until a person approves it', [

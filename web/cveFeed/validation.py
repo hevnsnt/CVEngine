@@ -1290,6 +1290,8 @@ def apply_validation(row, check, result, now=None, save=True):
     triaged finding to likely (or to the ceiling, when the match rests on its version string alone), a check that did not reproduce the finding changes nothing but the confidence (so a template that missed
     can never clear a finding with hard evidence), and a failure schedules a retry and is never treated as clean."""
     now = now or timezone.now()
+    if check['kind'] == 'nuclei_template' and result.get('status') in ('hit', 'reaffirmed'):
+        result = _unless_retired(row, check, result)
     close_reason = result.get('close_reason') if check['kind'] == 'script_read' and result.get('status') == 'version_changed' else ''
     if close_reason and save and row.match_id:
         refusal = _closure_refusal(row)
@@ -1486,6 +1488,21 @@ def resync(row):
             row.status, row.verdict = 'pending', None  # the classification stays; the impact text is asked for the new evidence
 
 
+def _unless_retired(row, check, result):
+    """``result`` of a template check, or a ``failed`` one when the AI-written template it ran was retired or superseded while it ran
+    (``templategen.stale_generated_template``): a retired check's hit confirms nothing and files no finding. ``failed`` is never read as
+    clean, and the retry resolves the template again. Installed upstream templates are never touched."""
+    from cveFeed import templategen
+    from cveFeed.models import CVEEntry
+    stale = templategen.stale_generated_template(path=check['params'].get('template') or '')
+    if stale is None:
+        return result
+    cve = CVEEntry.objects.filter(cve_id__iexact=check['params'].get('cve_id') or '').first() or stale.cve_entry
+    templategen.discarded_result(cve, stale, project=getattr(row, 'project_id', None) or check['params'].get('project_id'))
+    why = 'the AI-written check was retired or superseded while it ran; its result was discarded'
+    return {'status': 'failed', 'error': why, 'summary': why}
+
+
 def record_template_outcomes(cve, outcomes, project, template_path):
     """Feed the template tests auto-fire runs (templategen.run_cve_tests) into the same record: each tested host's Triage rows for this
     CVE get the outcome as a validation step. ``record_outcomes`` has already written the Vulnerability and template_result.
@@ -1497,6 +1514,8 @@ def record_template_outcomes(cve, outcomes, project, template_path):
     from cveFeed.models import Triage
     if project is None or not outcomes:
         return 0
+    if templategen.stale_generated_template(path=template_path) is not None:
+        return 0  # retired while it ran: record_outcomes discarded it and said so
     by_host = {templategen._host_key(o['host']): o for o in outcomes}
     done = 0
     rows = (Triage.objects.filter(project_id=project, kind='cve_match', match__cve_entry=cve, host__in=list(by_host))
