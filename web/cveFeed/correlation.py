@@ -1090,8 +1090,8 @@ def invalid_identity_reason(match):
     reason = library_provenance_reason(match)
     if reason:
         return reason
-    if match.source == 'java':
-        # Not a name match either: the CVE's own affected entry names the Java runtime (java_runtime.is_runtime_item) and the host's runtime was
+    if match.source in ('java', 'runtime'):
+        # Not a name match either (runtime: cveFeed.version_sources, the same for a language runtime): the CVE's own affected entry names the Java runtime (java_runtime.is_runtime_item) and the host's runtime was
         # read or is unknown; the stored name is the fixed "Java runtime", which no advisory spells, so a name comparison would close every one
         return ''
     if match.source == OPENVAS_SOURCE:
@@ -1384,7 +1384,7 @@ def save_matches(rows, covered=None):
     return len(unique)
 
 
-_CORRELATED_SOURCES = ("tech", "port", "java")  # java: cveFeed.java_runtime
+_CORRELATED_SOURCES = ("tech", "port", "java", "runtime")  # java: cveFeed.java_runtime; runtime: cveFeed.version_sources
 
 
 def close_rejected():
@@ -1571,6 +1571,12 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     from cveFeed import java_runtime
     java_runtime.collect_matches(subdomain, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence, fix_lookup=fix_lookup,
                                  host_distro=host)
+
+    # The language runtimes the host states (cveFeed.version_sources): Python, Go, Node.js, PHP, Ruby, .NET Framework, Erlang/OTP, matched
+    # against the CVEs whose own record names the runtime by vendor and product, by the Java runtime's rules; a CVE already matched above is not
+    # matched twice.
+    from cveFeed import version_sources
+    version_sources.collect_matches(subdomain, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence, fix_lookup=fix_lookup)
     return rows
 
 
@@ -1725,5 +1731,9 @@ def candidate_subdomains(product_index, base=None):
     if java_runtime.index_has_runtime(product_index):
         # a runtime CVE in the pool: every host where Java is clear is a candidate, whatever its technologies say (cveFeed.java_runtime)
         wanted |= Q(id__in=java_runtime.java_host_ids(Subdomain.objects if base is None else base))
+    from cveFeed import version_sources
+    if version_sources.index_has_runtime(product_index):
+        # a language runtime CVE in the pool: every host with a runtime reading is a candidate (cveFeed.version_sources)
+        wanted |= Q(id__in=version_sources.runtime_host_ids(Subdomain.objects if base is None else base))
     qs = (Subdomain.objects if base is None else base).filter(wanted).filter(latest_scan_q())
     return qs.prefetch_related("technologies", "ip_addresses__ports")

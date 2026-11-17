@@ -1,4 +1,4 @@
-"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``identity_check``, ``hygiene_check``, ``dangling_dns_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe``, ``route_probe``, ``page_read``, ``ssh_probe`` and (contract version 6) ``java_runtime``.
+"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``identity_check``, ``hygiene_check``, ``dangling_dns_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe``, ``route_probe``, ``page_read``, ``ssh_probe``, (contract version 6) ``java_runtime`` and (contract version 7) ``version_read``.
 
 Every result is untrusted. ``clean_*`` keep only the contract's shape, clip every string and cap every list (the bounds are the contract's and
 ``cveFeed.models.ProbeObservation``'s columns); ``bind`` then drops what the task did not ask about (a probe id it did not plan, a name it did
@@ -522,6 +522,75 @@ def clean_java_runtime(body):
     return {'web': [r for r in map(_java_web, web) if r], 'jdwp': [r for r in map(_java_jdwp, jdwp) if r],
             'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
 
+MAX_VERSION_READS = 100  # the contract's bounds (cvengine_scanner.probes.version_read)
+MAX_VERSION_ANSWERS = 4
+MAX_VERSION_FIELDS = 12
+MAX_VERSION_HEADERS = 6
+MAX_VERSION_LINES = 40
+_HEADER_NAME = re.compile(r'^[a-z0-9-]{1,40}$')
+_FIELD_NAME = re.compile(r'^[A-Za-z0-9_-]{1,60}(?:\.[A-Za-z0-9_-]{1,60}){0,5}$')
+NEVER_HEADERS = ('set-cookie', 'cookie', 'authorization', 'proxy-authorization', 'www-authenticate', 'proxy-authenticate')
+
+
+def _version_value(value):
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value if abs(value) < 2 ** 53 else None
+    if isinstance(value, float):
+        return value if value == value and abs(value) != float('inf') else None
+    if isinstance(value, str):
+        return _text(value, 200)
+    if isinstance(value, dict) and value.get('type') in ('object', 'array'):
+        return {'type': value['type'], 'size': _int(value.get('size'), 0, 10 ** 9)}
+    return None
+
+
+def _version_answer(item):
+    """One answer of a version_read result, clipped: never a body, only the parts the contract allows. None when it is not one."""
+    if not isinstance(item, dict) or not isinstance(item.get('path'), str) or not item['path'].startswith('/'):
+        return None
+    out = {'path': _text(item['path'], 200), 'status': _int(item.get('status'), 0, 999)}
+    if isinstance(item.get('error'), str) and item['error']:
+        out['error'] = _text(item['error'], 40)
+    out['content_type'] = _text(item.get('content_type'), 100)
+    out['bytes'] = _int(item.get('bytes'), 0, 10 ** 9)
+    out['truncated'] = item.get('truncated') is True
+    headers = item.get('headers') if isinstance(item.get('headers'), dict) else {}
+    out['headers'] = {k: _text(v, 200) for k, v in list(headers.items())[:MAX_VERSION_HEADERS]
+                      if isinstance(k, str) and _HEADER_NAME.match(k) and k not in NEVER_HEADERS and isinstance(v, str)}
+    if 'json' in item:
+        doc = item['json']
+        out['json'] = ({k: _version_value(v) for k, v in list(doc.items())[:MAX_VERSION_FIELDS] if isinstance(k, str) and _FIELD_NAME.match(k)}
+                       if isinstance(doc, dict) else None)
+    if isinstance(item.get('text'), str):
+        out['text'] = _text(item['text'], 1024)
+    if isinstance(item.get('lines'), list):
+        out['lines'] = _strings(item['lines'], MAX_VERSION_LINES, 400)
+    return out
+
+
+def _version_read(item):
+    if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id'] or not isinstance(item.get('answers'), list):
+        return None
+    row = {'id': _text(item['id'], 200), 'answers': [a for a in map(_version_answer, item['answers'][:MAX_VERSION_ANSWERS]) if a]}
+    if len(row['answers']) != len(item['answers'][:MAX_VERSION_ANSWERS]):
+        row['answers'] = []  # an answer that is not one leaves the order unknown: the whole entry reads as unanswered
+        row['error'] = 'an answer was malformed'
+    if isinstance(item.get('error'), str) and item['error']:
+        row['error'] = _text(item['error'], 200)
+    return row
+
+
+def clean_version_read(body):
+    """The read rows of a ``version_read`` result, clipped (``cveFeed.version_sources`` parses them). A row that is not well formed is dropped:
+    it reads as no answer for that entry, which the caller leaves due."""
+    reads = body.get('reads')
+    if not isinstance(reads, list) or len(reads) > MAX_VERSION_READS:
+        raise ApiError(400, 'a version_read result lists its reads (at most %d)' % MAX_VERSION_READS)
+    return {'reads': [r for r in map(_version_read, reads) if r], 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+
+
 STATES = ('answered', 'no_answer', 'challenged', 'busy')
 MAX_VHOST_ADDRESSES = 10
 MAX_VHOST_NAMES = 200
@@ -998,6 +1067,17 @@ def bind(kind, result, task):
             dropped += len(result[key]) - len(kept)
             out[key] = kept
         result = {**result, **out}
+    elif kind == 'version_read':  # only the read entries the task asked, once each, and only answers to the paths each asked, in order
+        asked = {p.get('id'): [r.get('path') for r in p.get('requests') or [] if isinstance(r, dict)] for p in target.get('reads') or [] if isinstance(p, dict)}
+        seen, kept = set(), []
+        for row in result['reads']:
+            if row['id'] in asked and row['id'] not in seen:
+                seen.add(row['id'])
+                if [a['path'] for a in row['answers']] != asked[row['id']][:len(row['answers'])]:
+                    row = {**row, 'answers': [], 'error': 'the answers do not follow the requests asked'}
+                kept.append(row)
+        dropped = len(result['reads']) - len(kept)
+        result = {**result, 'reads': kept}
     elif kind == 'supplier_check':  # only the names the task listed, once each
         asked = {str(n).strip().lower().rstrip('.') for n in target.get('domains') or [] if isinstance(n, str)}
         kept, seen = [], set()

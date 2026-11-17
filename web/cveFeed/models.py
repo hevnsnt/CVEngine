@@ -711,7 +711,8 @@ class JavaRuntime(models.Model):
     ``actuator:/actuator/info``, ``bundled:confluence``); a repeat updates it. ``evidence`` is what the host said, clipped: untrusted text, shown escaped.
     Correlation matches runtime CVEs against these rows (``java_runtime.collect_matches``); the host payload shows them as ``java_runtimes``."""
 
-    SOURCES = ("jdwp", "actuator", "jolokia", "status_page", "header", "error_page", "bundled_inference", "jenkins_minimum", "tls_fingerprint")
+    SOURCES = ("jdwp", "actuator", "jolokia", "status_page", "header", "error_page", "bundled_inference", "jenkins_minimum", "tls_fingerprint",
+               "metrics")  # metrics: a jvm_info sample a version source read (cveFeed.version_sources)
     CONFIDENCES = ("exact", "inferred", "weak")
     project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
     domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")

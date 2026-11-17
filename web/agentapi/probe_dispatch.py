@@ -418,6 +418,29 @@ def try_java_runtime(project, web, jdwp, scan=None, priority=1, unattended=True)
         logger.info('java_runtime task for %s: the scanner refused %s host(s) outside the scope policy', project.pk, len(result['refused']))
     return {row['id']: row for row in result.get('web') or []}, {row['id']: row for row in result.get('jdwp') or []}
 
+MAX_VERSION_READS_PER_TASK = 100  # the contract's bound (cvengine_scanner.probes.version_read.MAX_READS)
+
+
+def try_version_read(project, reads, scan=None, priority=1, unattended=True):
+    """``{read id: row}`` for the version source reads a Sentinel made (``probe_results.clean_version_read``, cut to the entries asked). ``reads``
+    is ``[(sub, {'id', 'host', 'base', 'allowed', 'requests'})]`` (``cveFeed.version_sources``), within the contract's bound. The kind has no local
+    path (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can take it. A task that ended without a result, and an
+    entry the result has no row for, are missing from the answer: unknown, the caller leaves them due."""
+    from cveFeed import probe_scope
+    reads = list(reads)[:MAX_VERSION_READS_PER_TASK]
+    if not reads or not _offered(project, 'version_read'):
+        return {}
+    subs = list({id(sub): sub for sub, _e in reads}.values())
+    target = {'reads': [entry for _sub, entry in reads], 'scope': probe_scope.for_versions(project.pk, subs, unattended=unattended)}
+    result = sentinel_dispatch.dispatch_or_none(project, 'version_read', target, host=_hosts_label([e['host'] for _s, e in reads]),
+                                                scan=scan, priority=priority)
+    if result is None:
+        return {}
+    if result.get('refused'):
+        logger.info('version_read task for %s: the scanner refused %s host(s) outside the scope policy', project.pk, len(result['refused']))
+    return {row['id']: row for row in result.get('reads') or []}
+
+
 MAX_ROUTE_HOSTS_PER_TASK = 25  # the contract's bound (cvengine_scanner.probes.routes.MAX_HOSTS)
 
 

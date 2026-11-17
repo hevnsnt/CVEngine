@@ -343,6 +343,46 @@ def _java_assessment(match):
                                            'the flaw itself.')
 
 
+# --- a CVE in a language runtime (cveFeed.version_sources) ---------------------------------------------------------------------------
+
+def runtime_question(key):
+    from cveFeed.version_catalogue import RUNTIMES
+    label = RUNTIMES[key].label if key in RUNTIMES else 'language runtime'
+    return {'key': f'runtime:{key}', 'text': f'Which {label} release does this host run?'}
+
+
+def runtime_steps(key):
+    """The host owner's reads of a runtime's release (constants of ``version_catalogue.RUNTIMES``: <PID>, <BINARY> and <CONTAINER> are theirs)."""
+    from cveFeed.version_catalogue import RUNTIMES
+    runtime = RUNTIMES.get(key)
+    if runtime is None:
+        return []
+    outcomes = {'fixed': 'The release printed is outside the affected range: not affected.',
+                'affected': f'The release is inside the affected range: affected. Update {runtime.label} for this application, then restart it.',
+                'cant_tell': 'The command is not there or cannot read the process: run it as the process owner, or inside its container.'}
+    return [_step(what, command, outcomes=outcomes) for _platform, command, what in runtime.commands]
+
+
+def _runtime_assessment(match):
+    ev = _ev(match)
+    cve_id = _cve_id(match) or 'this CVE'
+    label = _plain(ev.get('runtime_label'), 40) or 'the runtime'
+    if ev.get('runtime_unknown'):
+        known = [f"{_plain(r.get('version'), 20) or 'present'} ({_plain(r.get('source'), 30)}, {_plain(r.get('confidence'), 10)})"
+                 for r in (ev.get('readings') or []) if isinstance(r, dict)][:6]
+        note = _plain(ev.get('runtime_note'), 300)
+        why = (f'What an outside check could not see: which {label} release this host runs. The application on it runs on {label}, but nothing '
+               'that answers from outside stated the exact release' + (f'; what is known: {", ".join(known)}' if known else '') + '.'
+               + (f' {note[:1].upper() + note[1:]}.' if note else '')
+               + f' Whether {cve_id} applies depends only on that release, which the host owner can read in a minute with the commands below. '
+               'Not confirmed, and it never raises the host\'s heat on its own.')
+        return 'runtime_unknown', NOT_CONFIRMED, why
+    reading = _plain(ev.get('reading'), 120)
+    return ('runtime_version', NOT_CONFIRMED, f'The host stated its {label} release{": " + reading if reading else ""}. That is a version, not a '
+                                              'test of the flaw; a distribution\'s build may carry a backported fix, and a binary built with a Go '
+                                              'release may not use the affected package. Not confirmed: nothing tested for the flaw itself.')
+
+
 def _assessment(match, family, key, package):
     """``(basis, confidence, why)`` from the evidence class of the match."""
     ev = _ev(match)
@@ -366,6 +406,8 @@ def _assessment(match, family, key, package):
                                              'distribution\'s own word, not just the version.')
     if match.source == 'java':
         return _java_assessment(match)
+    if match.source == 'runtime':
+        return _runtime_assessment(match)
     if match.source == 'openvas':
         qod = _qod(ev)
         quality = f' (quality of detection {qod}%)' if qod is not None else ''
@@ -438,6 +480,10 @@ def _found(match, family, key, label, version):
     elif match.source == 'java':
         head = ('This host runs Java, but the version of its runtime was not read from outside.' if ev.get('java_unknown')
                 else f'The Java runtime on this host stated {_plain(ev.get("reading"), 120) or named}.')
+    elif match.source == 'runtime':
+        label = _plain(ev.get('runtime_label'), 40) or 'a language runtime'
+        head = (f'This host runs {label}, but its release was not read from outside.' if ev.get('runtime_unknown')
+                else f'This host stated {_plain(ev.get("reading"), 120) or named}.')
     else:
         head = f'cvENGINE found {named} on this host.'
     own, every = confirm_guide._ranges_of(match)
@@ -569,6 +615,8 @@ def _other_steps(match, basis, label, cve_id):
     """What to do when no package decides it: text only (the per-match guide under "Confirm it yourself" has the commands for this host)."""
     if basis in ('java_unknown', 'java_version'):
         return java_steps()
+    if basis in ('runtime_unknown', 'runtime_version'):
+        return runtime_steps(str(_ev(match).get('runtime') or ''))
     if basis == 'tls_check':
         return [_step('Change the TLS configuration of the service on that port (turn off the protocol, cipher or renegotiation the test names), '
                       'or update its TLS library, then mark the match fixed: cvENGINE runs the same test again to verify (Retest).')]
@@ -657,7 +705,8 @@ def explain(match, hint=''):
         'basis': basis,
         'platform': {'family': family, 'label': FAMILIES.get(family, {}).get('long', ''), 'package': package, 'query_package': binary},
         'question': ({'key': f'{family or "any"}:{package}', 'text': f'Is the installed {package} package patched?'} if package and cve_id
-                     else dict(JAVA_QUESTION) if basis in ('java_unknown', 'java_version') else None),
+                     else dict(JAVA_QUESTION) if basis in ('java_unknown', 'java_version')
+                     else runtime_question(str(_ev(match).get('runtime') or '')) if basis in ('runtime_unknown', 'runtime_version') else None),
         'who': (f'Someone with a shell on {host or "the host"} (its owner or administrator) can run these. No administrator rights are needed, '
                 'and every command only reads: none installs, changes or restarts anything.') if commands else '',
         'steps': steps,
@@ -698,6 +747,14 @@ def validate_plan(matches, hint='', heat_of=None):
             continue
         seen.add(same)
         cve_id = _cve_id(m)
+        if m.source == 'runtime' and cve_id and not package_decides(m, hint):
+            # one question settles every CVE of one runtime on the host: which release it runs
+            key = str(_ev(m).get('runtime') or '')
+            heat = (heat_of or {}).get(m.id) or match_heat(m)
+            group = groups.setdefault(('runtime', key), {'runtime': key, 'rows': []})
+            group['rows'].append({'match_id': m.id, 'cve_id': cve_id, 'kev': bool(getattr(m.cve_entry, 'kev', False)), 'heat': heat,
+                                  'product': m.matched_product, 'source': m.source})
+            continue
         if m.source == 'java' and cve_id and not package_decides(m, hint):
             # one question settles every Java runtime CVE of the host: which Java it runs
             heat = (heat_of or {}).get(m.id) or match_heat(m)
@@ -720,6 +777,18 @@ def validate_plan(matches, hint='', heat_of=None):
     for (family, package), g in groups.items():
         rows = sorted(g['rows'], key=lambda r: (not r['kev'], -_HEAT_RANK.get(r['heat'], 0), r['cve_id'], r['match_id']))
         cves = sorted({r['cve_id'] for r in rows}, key=lambda c: (not any(r['kev'] for r in rows if r['cve_id'] == c), c))
+        if g.get('runtime') is not None:
+            question = runtime_question(g['runtime'])
+            out.append({'key': question['key'], 'question': question['text'], 'product': rows[0]['product'], 'package': '', 'query_package': '',
+                        'platform': '', 'platform_label': '', 'kev': any(r['kev'] for r in rows),
+                        'heat': max((r['heat'] for r in rows), key=lambda h: _HEAT_RANK.get(h, 0)), 'count': len(rows), 'cves': cves,
+                        'resolves': rows, 'steps': runtime_steps(g['runtime']),
+                        'outcomes': {'fixed': 'The release printed is outside each CVE\'s affected range: close those matches as false positives, '
+                                              'quoting the output and the release.',
+                                     'affected': 'The release is inside a CVE\'s range: update the runtime the application runs on, restart it, then '
+                                                 'close those matches as fixed.',
+                                     'cant_tell': 'The release could not be read: leave the matches open and ask the application\'s owner.'}})
+            continue
         if g.get('java'):
             out.append({'key': JAVA_QUESTION['key'], 'question': JAVA_QUESTION['text'], 'product': 'Java runtime', 'package': '', 'query_package': '',
                         'platform': '', 'platform_label': '', 'kev': any(r['kev'] for r in rows),

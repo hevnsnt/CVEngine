@@ -31,6 +31,7 @@ NO_FIXTURE = {  # kinds with no lab fixture yet (TL-12 of the 1.4.0 tool review)
     'openvas': 'needs a Greenbone (gvmd) instance with its feed, which the container lab does not run',
     'nuclei_deep': 'a deep template pass takes up to an hour over the full template set; no short lab run exists',
     'route_probe_signed': 'needs a site with a sign-in the probe can use; the lab has none',
+    'version_read': 'needs lab targets of the catalogue (Grafana, Vault, a Docker API, an exporter) the container lab does not run yet; every reader is tested on real-shaped answers in tests/test_version_sources.py and the runner in the Sentinel library',
     'java_runtime': 'needs JVM lab targets (a Spring Boot actuator, Jolokia, a JDWP debuggee) the container lab does not run yet; the readers are tested on recorded answers in the Sentinel library',
 }
 KNOWN_DROP_PREFIXES = {('nuclei_test', '.outcomes[].hit.'): 'the raw nuclei line of a hit: the outcome keeps the verdict and the trimmed matched row'}

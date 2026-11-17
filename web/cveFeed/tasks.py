@@ -709,6 +709,11 @@ def auto_fire_new_cves(new_cve_pks=None):
         # a CVE in the Java runtime is correlated the moment it lands, whatever its heat: every host where Java is clear is a candidate
         # (cveFeed.java_runtime), and the version-unknown ones wait for review instead of staying silent
         correlate_hot_cves(runtime)
+    from cveFeed import version_sources
+    languages = version_sources.runtime_cves_among(new_cve_pks, exclude={c.pk for c in cves} | {c.pk for c in runtime})
+    if languages:
+        # a CVE in a language runtime (Python, Go, Node.js ...) likewise: the hosts that state the runtime are candidates (cveFeed.version_sources)
+        correlate_hot_cves(languages)
     if not cves:
         return {"fired": 0} if cfg else {"skipped": "auto-fire disabled"}
     since = timezone.now()

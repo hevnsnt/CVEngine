@@ -1088,7 +1088,8 @@ const technologyTable = (h) => {
   const archived = h.archived_technologies || [];
   const unverified = h.unverified_products || [];
   const javas = h.java_runtimes || [];
-  if (!details.length && !archived.length && !unverified.length && !javas.length) return null;
+  const versions = h.version_sources || [];
+  if (!details.length && !archived.length && !unverified.length && !javas.length && !versions.length) return null;
   const box = el("div", "tech-table");
   if (details.length) {
     box.append(el("h3", "sec", `Technologies (${details.length})`));
@@ -1125,6 +1126,22 @@ const technologyTable = (h) => {
       box.append(line);
       if (j.evidence) box.append(el("p", "note", `Seen on the host: ${j.evidence}`));
       if (j.citation) box.append(el("p", "note", `Source: ${j.citation}`));
+    });
+  }
+  if (versions.length) {
+    // what the host's version sources state (cveFeed.version_sources); evidence is what the host said: text only
+    box.append(el("h3", "sec", `Read from version sources (${versions.length})`));
+    box.append(el("p", "note", "Versions the host states anonymously: a product's own version endpoint, a platform API, a metrics page, a header. Products are matched like any technology (a version, not a test of the flaw). Runtimes (Python, Go, Node.js, PHP, Ruby, .NET Framework, Erlang/OTP) are matched against CVEs in the runtime; one clearly present with no version read waits for review as \"runtime of unknown version\"."));
+    versions.forEach((v) => {
+      const line = el("div", "find tech-line");
+      line.append(el("strong", "", v.version ? `${v.product} ${v.line_only ? `${v.version} line` : v.version}` : `${v.product} (no version stated)`));
+      line.append(el("span", "chip", v.kind));
+      line.append(badge(v.confidence, v.confidence === "exact" ? "queued" : "ice"));
+      const where = `${(v.source || "").replace(/_/g, " ")}${v.port ? ` on port ${v.port}` : ""}${v.url ? ` (${v.url})` : ""}`;
+      line.append(el("span", "note", where));
+      if (v.stale) line.append(badge("not seen for 90 days", "ice"));
+      box.append(line);
+      if (v.evidence) box.append(el("p", "note", `Seen on the host: ${v.evidence}`));
     });
   }
   if (unverified.length) {

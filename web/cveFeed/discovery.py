@@ -890,6 +890,16 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_st
     java_result = _stage(scan, 'Java runtime', 'java_runtime', run_java, fallback={'hosts': 0})
     if stopped(scan_id):
         return gone
+    from cveFeed import version_sources
+
+    def run_versions():  # the versions hosts state at their version sources (stored headers first, then the Sentinel's reads), before correlation
+        try:
+            return version_sources.run_for_scan(scan_id, force=bool(retest or force))
+        except resources.ScannerUnavailable as exc:  # the passive readings are stored; the reads stay due for a scanner
+            return _waiting_for_scanner(scan, 'Version sources', exc, {'hosts': 0})
+    versions_result = _stage(scan, 'Version sources', 'version_sources', run_versions, fallback={'hosts': 0})
+    if stopped(scan_id):
+        return gone
     from cveFeed import subdir_apps
     _once('subdir_apps', lambda: subdir_apps.carry_forward(scan))  # the versioned applications the background subdirectory sweep found, on this scan's fresh host rows
     wp_kwargs = {'runner': wpscan_runner} if wpscan_runner else {}
@@ -973,7 +983,8 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_st
         run_hygiene_task.delay(scan.domain_id)  # certificates and email authentication for what was just found
     result = {**found, 'nmap': nmap_result, 'db_exposure': db_result, 'nuclei_light': light_result, 'route_auth': route_result, 'secrets_scan': secrets_result,
               'correlation': correlation, 'nuclei_targeted': targeted_result, 'triage': triage_result,
-              'asset_changes': changes_result, 'ssh_probe': ssh_result, 'java_runtime': java_result}
+              'asset_changes': changes_result, 'ssh_probe': ssh_result, 'java_runtime': java_result,
+              'version_sources': versions_result}
     if hygiene_result is not None:
         result['hygiene'] = hygiene_result
     if waf_result is not None:
