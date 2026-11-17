@@ -39,6 +39,7 @@ SCOPES = {
     'cveFeed.RouteAuth': 'project_id',
     'cveFeed.HostLabel': 'project_id',
     'cveFeed.ProbeObservation': 'project_id',
+    'cveFeed.JavaRuntime': 'project_id',
     'cveFeed.SavedSearch': 'project_id',
     'cveFeed.HostProfile': 'project_id',
     'cveFeed.TailscaleLink': 'project_id',

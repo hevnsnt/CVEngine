@@ -1,4 +1,4 @@
-"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``identity_check``, ``hygiene_check``, ``dangling_dns_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe``, ``route_probe``, ``page_read`` and ``ssh_probe``.
+"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``identity_check``, ``hygiene_check``, ``dangling_dns_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe``, ``route_probe``, ``page_read``, ``ssh_probe`` and (contract version 6) ``java_runtime``.
 
 Every result is untrusted. ``clean_*`` keep only the contract's shape, clip every string and cap every list (the bounds are the contract's and
 ``cveFeed.models.ProbeObservation``'s columns); ``bind`` then drops what the task did not ask about (a probe id it did not plan, a name it did
@@ -458,6 +458,69 @@ def clean_ssh_probe(body):
     out = [row for row in (_ssh_host(item) for item in hosts) if row is not None]
     return {'hosts': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
 
+
+
+MAX_JAVA_WEB = 50   # the contract's bounds
+MAX_JAVA_JDWP = 25
+MAX_JAVA_READINGS = 10
+MAX_JAVA_ASKED = 20
+JAVA_SOURCES = ('jdwp', 'actuator', 'jolokia', 'status_page', 'header', 'error_page')  # what a Sentinel may report (the server makes the inferences)
+JAVA_CONFIDENCES = ('exact', 'inferred', 'weak')
+
+
+def _java_reading(item):
+    """One reading of a java_runtime result, or None. The version is normalised again here (``cvengine_scanner.java.normalize_version``): what is
+    stored never rests on the Sentinel's spelling, and a version that is not one is dropped."""
+    from cvengine_scanner import java
+    if not isinstance(item, dict) or item.get('source') not in JAVA_SOURCES:
+        return None
+    norm = java.normalize_version(_text(item.get('version'), 40))
+    if norm is None:
+        return None
+    vendor = _text(item.get('vendor'), 40)
+    port = item.get('port', 0)
+    port = port if isinstance(port, int) and not isinstance(port, bool) and 0 <= port <= 65535 else 0
+    return {'version': norm['version'], 'major': norm['major'], 'line_only': norm['line_only'],
+            'vendor': vendor if vendor in java.VENDORS else java.normalize_vendor(vendor),
+            'runtime': _text(item.get('runtime'), 200), 'build': _text(item.get('build'), 60) or norm['build'][:60], 'source': item['source'],
+            'confidence': item.get('confidence') if item.get('confidence') in JAVA_CONFIDENCES else 'weak', 'url': _text(item.get('url'), 300),
+            'port': port, 'evidence': _text(item.get('evidence'), 300)}
+
+
+def _java_web(item):
+    if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id'] or not isinstance(item.get('readings'), list):
+        return None
+    asked = []
+    for a in (item.get('asked') if isinstance(item.get('asked'), list) else [])[:MAX_JAVA_ASKED]:
+        if isinstance(a, dict) and isinstance(a.get('path'), str):
+            asked.append({'path': _text(a['path'], 200), 'status': _int(a.get('status'), 0, 999), **({'error': _text(a['error'], 40)} if a.get('error') else {})})
+    row = {'id': _text(item['id'], 200), 'readings': [r for r in map(_java_reading, item['readings'][:MAX_JAVA_READINGS]) if r], 'asked': asked}
+    if isinstance(item.get('error'), str) and item['error']:
+        row['error'] = _text(item['error'], 200)
+    return row
+
+
+def _java_jdwp(item):
+    if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id']:
+        return None
+    speaks = item.get('speaks') if isinstance(item.get('speaks'), bool) else None
+    reading = _java_reading(item.get('reading')) if speaks else None
+    if reading is not None and reading['source'] != 'jdwp':
+        reading = None
+    row = {'id': _text(item['id'], 200), 'speaks': speaks, 'reading': reading}
+    if isinstance(item.get('error'), str) and item['error']:
+        row['error'] = _text(item['error'], 200)
+    return row
+
+
+def clean_java_runtime(body):
+    """The web and JDWP rows of a ``java_runtime`` result, clipped. A row that is not well formed is dropped: it reads as no answer for that entry,
+    which the caller leaves due. A JDWP row that does not say the handshake was echoed keeps no reading."""
+    web, jdwp = body.get('web'), body.get('jdwp')
+    if not isinstance(web, list) or len(web) > MAX_JAVA_WEB or not isinstance(jdwp, list) or len(jdwp) > MAX_JAVA_JDWP:
+        raise ApiError(400, 'a java_runtime result lists its web hosts (at most %d) and JDWP endpoints (at most %d)' % (MAX_JAVA_WEB, MAX_JAVA_JDWP))
+    return {'web': [r for r in map(_java_web, web) if r], 'jdwp': [r for r in map(_java_jdwp, jdwp) if r],
+            'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
 
 STATES = ('answered', 'no_answer', 'challenged', 'busy')
 MAX_VHOST_ADDRESSES = 10
@@ -922,6 +985,19 @@ def bind(kind, result, task):
                 kept.append(row)
         dropped = len(result['hosts']) - len(kept)
         result = {**result, 'hosts': kept}
+    elif kind == 'java_runtime':  # only the web hosts and JDWP endpoints the task asked, once each
+        dropped = 0
+        out = {}
+        for key in ('web', 'jdwp'):
+            asked = {p.get('id') for p in target.get(key) or [] if isinstance(p, dict)}
+            seen, kept = set(), []
+            for row in result[key]:
+                if row['id'] in asked and row['id'] not in seen:
+                    seen.add(row['id'])
+                    kept.append(row)
+            dropped += len(result[key]) - len(kept)
+            out[key] = kept
+        result = {**result, **out}
     elif kind == 'supplier_check':  # only the names the task listed, once each
         asked = {str(n).strip().lower().rstrip('.') for n in target.get('domains') or [] if isinstance(n, str)}
         kept, seen = [], set()

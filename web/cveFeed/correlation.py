@@ -1090,6 +1090,10 @@ def invalid_identity_reason(match):
     reason = library_provenance_reason(match)
     if reason:
         return reason
+    if match.source == 'java':
+        # Not a name match either: the CVE's own affected entry names the Java runtime (java_runtime.is_runtime_item) and the host's runtime was
+        # read or is unknown; the stored name is the fixed "Java runtime", which no advisory spells, so a name comparison would close every one
+        return ''
     if match.source == OPENVAS_SOURCE:
         # Not a correlation: the NVT that reported the CVE tested this product on this port itself, whatever its confidence. Its stored
         # name is the NVT and port ("OpenVAS NVT <oid> on 22/tcp"), never an advisory product, so a name comparison would close every
@@ -1380,7 +1384,7 @@ def save_matches(rows, covered=None):
     return len(unique)
 
 
-_CORRELATED_SOURCES = ("tech", "port")
+_CORRELATED_SOURCES = ("tech", "port", "java")  # java: cveFeed.java_runtime
 
 
 def close_rejected():
@@ -1561,6 +1565,12 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
                           # packaged, OS-serviced or unknown product's does not); always written, so a row without it predates the rule
                           "vendor_banner": match_policy.vendor_built(name)},
                 leads=leads)
+
+    # The Java runtime the host was read to run (cveFeed.java_runtime): a CVE in the JDK itself names the runtime, not a technology or a port
+    # product, so it is tested against the host's Java runtime readings, and a host where Java is clear but its version unknown is a candidate.
+    from cveFeed import java_runtime
+    java_runtime.collect_matches(subdomain, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence, fix_lookup=fix_lookup,
+                                 host_distro=host)
     return rows
 
 
@@ -1710,5 +1720,10 @@ def candidate_subdomains(product_index, base=None):
     ips = IpAddress.ports.through.objects.filter(port__product__in=products).values("ipaddress_id")
     by_port = Subdomain.ip_addresses.through.objects.filter(ipaddress_id__in=ips).values("subdomain_id")
     matched = CVEMatch.objects.filter(source__in=_CORRELATED_SOURCES).values("subdomain_id")  # re-checked so a stale match closes
-    qs = (Subdomain.objects if base is None else base).filter(Q(id__in=by_tech) | Q(id__in=by_port) | Q(id__in=matched)).filter(latest_scan_q())
+    wanted = Q(id__in=by_tech) | Q(id__in=by_port) | Q(id__in=matched)
+    from cveFeed import java_runtime
+    if java_runtime.index_has_runtime(product_index):
+        # a runtime CVE in the pool: every host where Java is clear is a candidate, whatever its technologies say (cveFeed.java_runtime)
+        wanted |= Q(id__in=java_runtime.java_host_ids(Subdomain.objects if base is None else base))
+    qs = (Subdomain.objects if base is None else base).filter(wanted).filter(latest_scan_q())
     return qs.prefetch_related("technologies", "ip_addresses__ports")

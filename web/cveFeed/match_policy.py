@@ -42,6 +42,21 @@ REASON_VERSION_UNKNOWN = ('Version of the CVE is not known: review when the affe
                           'low priority and is re-evaluated automatically when a range is published; until then only a person '
                           'can decide it.')
 
+# a CVE in the Java runtime on a host where Java is clear and its version could not be read from outside (cveFeed.java_runtime: evidence.java_unknown)
+REASON_JAVA_UNKNOWN = ('Java runtime of unknown version: an outside check could not read which Java this host runs. The application on it runs on '
+                       'Java (its technology, a Java product, or the runtime the vendor bundles), but no part of it that answers from outside states '
+                       'the runtime\'s version, so whether this advisory\'s Java release applies is not known. It is kept for review at very low '
+                       'priority and never fires on its own; it is decided at once when a version is read (a debug port, a status page, a header), and '
+                       'a host owner can settle it in a minute: run jcmd <PID> VM.version, or readlink /proc/<PID>/exe and that java with -version, or '
+                       'read the release file of the JDK it runs.')
+
+
+def unknown_reason(evidence):
+    """The reason a version-unknown match (``is_version_unknown``) shows: the Java runtime's own when the runtime's version was not read
+    (``evidence.java_unknown``), else the advisory's missing range."""
+    return REASON_JAVA_UNKNOWN if evidence_flag(evidence, 'java_unknown') else REASON_VERSION_UNKNOWN
+
+
 # an operating system named by a scanner, as a technology or an nmap product: never a CVE match by name
 _OS_NAME = re.compile(
     r'^(?:(?:microsoft|canonical|gnu)\s+)?(?:windows(?:\s+(?:server|nt|\d[\w.]*|xp|vista|rt|ce|embedded)\b.*)?'
@@ -90,11 +105,12 @@ def evidence_flag_q(key, prefix=''):
 
 
 def is_version_unknown(evidence, version_in_range, template_result='', distro_status=''):
-    """Whether a match stands only on a name and an actively exploited advisory with no version bound (``evidence.unbounded``): kept
+    """Whether a match stands only on a name and an actively exploited advisory with no version bound (``evidence.unbounded``), or on a Java runtime
+    whose version was not read (``evidence.java_unknown``): kept
     for review, never a verdict. Hard evidence that does not depend on a version (a template hit, a distribution tracker, a runZero
     report) is not "unknown": that match is judged on it. A version inside a range cannot be unknown either."""
-    return evidence_flag(evidence, 'unbounded') and version_in_range is None and template_result != 'vulnerable' \
-        and distro_status != 'vulnerable' and not evidence_flag(evidence, 'runzero')
+    return (evidence_flag(evidence, 'unbounded') or evidence_flag(evidence, 'java_unknown')) and version_in_range is None \
+        and template_result != 'vulnerable' and distro_status != 'vulnerable' and not evidence_flag(evidence, 'runzero')
 
 
 # ----------------------------------------------------------------------------- hard evidence: the one definition
@@ -397,7 +413,7 @@ def version_unknown(match):
 def version_unknown_q(prefix=''):
     """The database form of ``is_version_unknown`` over CVEMatch rows (``prefix`` reaches the match from another model)."""
     from django.db.models import Q
-    return (evidence_flag_q('unbounded', prefix) & Q(**{prefix + 'version_in_range__isnull': True})
+    return ((evidence_flag_q('unbounded', prefix) | evidence_flag_q('java_unknown', prefix)) & Q(**{prefix + 'version_in_range__isnull': True})
             & ~Q(**{prefix + 'template_result': 'vulnerable'}) & ~Q(**{prefix + 'distro_status': 'vulnerable'})
             & ~evidence_flag_q('runzero', prefix))
 

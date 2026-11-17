@@ -1,7 +1,7 @@
 """The work planner: keeps the Sentinels busy with checks that are due, without waiting for a whole target to be rescanned.
 
 Why it exists. A Sentinel task has no life of its own: a Celery job creates it, waits for it and files the result (``agentapi.sentinel_dispatch``). Every
-such job came from a scan stage, a host assessment or a sweep. ``secrets_scan`` and ``ssh_probe`` (1.4) were only ever stages of a full scan, so a host
+such job came from a scan stage, a host assessment or a sweep. ``secrets_scan``, ``ssh_probe`` (1.4) and ``java_runtime`` were only ever stages of a full scan, so a host
 scanned before 1.4 got neither until its whole target was scanned again, and with idle Sentinel slots and an empty queue nothing created work.
 ``cveFeed.check_coverage`` knows which checks are due per host but is accounting only. This module turns "due" into Sentinel work.
 
@@ -78,9 +78,10 @@ class Spec:
 
 def specs():
     """The planner-enabled kinds, in the order they take turns."""
-    from cveFeed import secrets_scan, ssh_scan
+    from cveFeed import java_runtime, secrets_scan, ssh_scan
     return {'ssh_probe': Spec('ssh_probe', 'ssh-inspection', ssh_scan.SERVICE, 'SSH check', ssh_scan.MAX_TARGETS_PER_TASK),
-            'secrets_scan': Spec('secrets_scan', 'secrets-scan', secrets_scan.SERVICE, 'secret check', secrets_scan.MAX_HOSTS)}
+            'secrets_scan': Spec('secrets_scan', 'secrets-scan', secrets_scan.SERVICE, 'secret check', secrets_scan.MAX_HOSTS),
+            'java_runtime': Spec('java_runtime', 'java-runtime', java_runtime.SERVICE, 'Java runtime read', java_runtime.MAX_WEB_PER_TASK)}
 
 
 # Every Sentinel task kind is planner-enabled (``specs``) or listed here with the reason and the ``check_coverage`` check it belongs to, if any
@@ -223,6 +224,13 @@ def build_census(now=None):
                             bucket['due'] += 1
                             if len(bucket['units']) < MAX_UNITS_PER_PROJECT_KIND:
                                 bucket['units'].append({'u': unit, 'd': sub.target_domain_id, 's': _sort_key(h, check), 'h': [h.name]})
+                    elif kind == 'java_runtime':  # one unit, the host; its reads need no earlier stage's rows
+                        bucket['applicable'] += 1
+                        if check['state'] != 'due':
+                            continue
+                        bucket['due'] += 1
+                        if len(bucket['units']) < MAX_UNITS_PER_PROJECT_KIND:
+                            bucket['units'].append({'u': h.name, 'd': sub.target_domain_id, 's': _sort_key(h, check)})
                     else:
                         bucket['applicable'] += 1
                         if check['state'] != 'due':
@@ -313,6 +321,8 @@ def _in_flight(kind):
             continue
         if kind == 'ssh_probe':
             held[project_id].update(f"{t.get('address')}:{t.get('port')}" for t in target.get('targets') or [] if isinstance(t, dict))
+        elif kind == 'java_runtime':
+            held[project_id].update(str(t.get('host') or '') for t in target.get('web') or [] if isinstance(t, dict))
         else:
             held[project_id].update(str(t.get('host') or '') for t in target.get('hosts') or [] if isinstance(t, dict))
     return held, sum(pending.values())
@@ -609,6 +619,10 @@ def execute_batch(batch_id, dispatch=None):
             names = sorted({h for u in batch.units or [] for h in u.get('h') or []})
             result = ssh_scan.run_for_hosts(batch.project, names, keys=keys, dispatch=dispatch, priority=_priority())
             detail = f"{result['inspected']} of {result['endpoints']} endpoints inspected, {result['findings']} compromised host keys"
+        elif batch.kind == 'java_runtime':
+            from cveFeed import java_runtime
+            result = java_runtime.run_for_hosts(batch.project, units, dispatch=dispatch, priority=_priority())
+            detail = f"{result['asked']} of {result['hosts']} hosts read, {result['readings']} Java runtime readings, {result['exposed']} open JDWP ports"
         elif batch.kind == 'secrets_scan':
             from cveFeed import secrets_scan
             result = secrets_scan.run_for_hosts(batch.project, batch.domain, units, dispatch=dispatch, priority=_priority())

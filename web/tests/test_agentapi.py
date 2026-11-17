@@ -226,6 +226,29 @@ class AgentApiTests(TestCase):
 		self.assertEqual(host['wordpress']['status']['state'], 'blocked')
 		self.assertNotIn('9.9.9', json.dumps(host))
 
+	def test_the_host_record_carries_its_java_runtimes_over_rest_and_mcp(self):
+		from cveFeed.models import JavaRuntime
+		JavaRuntime.objects.create(project=self.pa, domain=self.da, host='www.a.example', key='actuator:/actuator/info', version='17.0.9', major=17,
+			vendor='Eclipse Temurin', source='actuator', confidence='exact', url='/actuator/info', evidence='java.version=17.0.9')
+		JavaRuntime.objects.create(project=self.pa, domain=self.da, host='www.a.example', key='bundled:confluence', version='17.0.8.1', major=17,
+			vendor='Eclipse Temurin', source='bundled_inference', confidence='inferred', detail={'basis': 'installer', 'source': 'https://confluence.atlassian.com/x'})
+		JavaRuntime.objects.create(project=self.pb, domain=self.db, host='www.a.example', key='jdwp:5005', version='11.0.2', major=11, source='jdwp')
+		host = call(self.t_alice, 'GET', '/api/v1/projects/proj-a/hosts')[1]['results'][0]
+		self.assertEqual([(j['version'], j['source'], j['confidence']) for j in host['java_runtimes']],
+			[('17.0.9', 'actuator', 'exact'), ('17.0.8.1', 'bundled_inference', 'inferred')])  # exact first; never another project's
+		self.assertEqual(host['java_runtimes'][1]['citation'], 'https://confluence.atlassian.com/x')
+		is_error, data = tool_call(self.t_alice, 'list_hosts', {'project': 'proj-a'})
+		self.assertFalse(is_error)
+		self.assertEqual(data['results'][0]['java_runtimes'][0]['version'], '17.0.9')
+		self.assertNotIn('11.0.2', json.dumps(data))
+		found = call(self.t_alice, 'GET', '/api/v1/projects/proj-a/search?q=java:17')[1]
+		self.assertEqual([h['host'] for h in found['results']], ['www.a.example'])
+		self.assertIn('Java runtime 17', found['results'][0]['matched'])
+		for q, n in (('java:17.0.9', 1), ('java:17.0', 1), ('java:21', 0), ('java:temurin', 1), ('java:jdwp', 0), ('java:any', 1), ('-java:17', 0)):
+			self.assertEqual(call(self.t_alice, 'GET', f'/api/v1/projects/proj-a/search?q={q}')[1]['count'], n, q)
+		status, body = call(self.t_alice, 'GET', '/api/v1/projects/proj-a/search?q=java:banana')
+		self.assertEqual(status, 400)
+
 	def test_remediation_workflow(self):
 		base = '/api/v1/projects/proj-a'
 		status, data = call(self.t_alice, 'GET', f'{base}/work')

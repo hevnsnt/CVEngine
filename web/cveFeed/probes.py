@@ -132,6 +132,7 @@ IDENTITY_PROBES = ('error-page', 'nginx-variants')  # the probes that say which 
 LOOKALIKES = {'nginx': {'ingressnginx', 'nginxingress', 'nginxui', 'nginxproxymanager', 'nginxunit', 'nginxrtmpmodule'}}
 LOOKALIKE_VARIANTS = {'nginx': {'nginx-ui', 'nginx-proxy-manager', 'kubernetes-ingress'}}
 PLAIN_VARIANTS = {'nginx': 'nginx', 'express': 'express', 'next.js': 'next.js'}
+JAVA_RUNTIME = 'Java runtime'  # the product of an observation that states the JVM (cvengine_scanner.probes.version_probes.JAVA_RUNTIME)
 
 
 def _compiled():
@@ -501,6 +502,8 @@ def technology_names(observations):
         library = (o.get('evidence') or {}).get('library') if isinstance(o.get('evidence'), dict) else None
         if o['kind'] == 'version' and isinstance(library, dict) and library.get('tech_names'):
             names += [str(n)[:500] for n in library['tech_names'] if ':' in str(n)]  # the effective copy, or each copy of an unresolved set
+        elif o['kind'] == 'version' and o['product'] == JAVA_RUNTIME:
+            continue  # the JVM a page states is a Java runtime reading of its own (cveFeed.java_runtime), never a technology
         elif o['kind'] == 'version' and o['outcome'] == 'found' and o['version']:
             names.append(f"{o['product']}:{o['version']}")
         elif o['kind'] == 'wordpress' and o['outcome'] == 'found':
@@ -739,8 +742,17 @@ def _remote_http(scan, due):
 
 
 def apply_remote(project_id, domain_id, sub, entry, found):
-    """Store and apply what a Sentinel's run of one planned probe found (``run_one``'s second half: the observations are the scanner's)."""
+    """Store and apply what a Sentinel's run of one planned probe found (``run_one``'s second half: the observations are the scanner's). A page
+    that stated the Java runtime (``Java runtime`` observations of the headers and error-page probes) becomes a Java runtime reading of the host."""
     record(project_id, domain_id, sub.name, entry['probe'], found)
-    if apply_to_subdomain(sub, found):
+    added = apply_to_subdomain(sub, found)
+    java = any(o.get('product') == JAVA_RUNTIME and o.get('outcome') == 'found' for o in found)
+    if java:
+        from cveFeed import java_runtime
+        try:
+            java_runtime.refresh_host(sub)
+        except Exception:  # noqa: BLE001 - the probe's own result stands without it
+            logger.exception('could not store the Java runtime a probe read on host %s', sub.pk)
+    if added or java:
         recorrelate(sub)
     return found

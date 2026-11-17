@@ -1087,7 +1087,8 @@ const technologyTable = (h) => {
   const details = h.technology_details || [];
   const archived = h.archived_technologies || [];
   const unverified = h.unverified_products || [];
-  if (!details.length && !archived.length && !unverified.length) return null;
+  const javas = h.java_runtimes || [];
+  if (!details.length && !archived.length && !unverified.length && !javas.length) return null;
   const box = el("div", "tech-table");
   if (details.length) {
     box.append(el("h3", "sec", `Technologies (${details.length})`));
@@ -1106,6 +1107,24 @@ const technologyTable = (h) => {
         const where = copies.map((c) => `${c.version || "version unknown"} (${c.state || "?"}${c.version_source === "filename" ? ", from the file name" : ""}) ${c.path || ""}`).join("; ");
         box.append(el("p", "note", `Copies on the page, in the order they run: ${where}.${t.copies_unresolved ? " Which copy runs cannot be told from the page, so each stays a candidate." : " The last one loaded replaces the others; an earlier copy stays listed as a candidate, since older code may still use it."}`));
       }
+    });
+  }
+  if (javas.length) {
+    // the Java runtime the host was read to run (cveFeed.java_runtime); evidence is what the host said: text only
+    box.append(el("h3", "sec", `Java runtime (${javas.length})`));
+    box.append(el("p", "note", "Exact: the runtime or a page of the product stated it. Inferred: the JDK the vendor ships with this product version, unless it was replaced. Weak: a supported line or a minimum only. Runtime CVEs are matched against these; with no exact reading they wait for review as \"Java runtime of unknown version\"."));
+    javas.forEach((j) => {
+      const line = el("div", "find tech-line");
+      line.append(el("strong", "", j.line_only ? `Java ${j.major}` : `Java ${j.version}`));
+      if (j.vendor && j.vendor !== "unknown") line.append(el("span", "chip", j.vendor));
+      line.append(badge(j.confidence, j.confidence === "exact" ? "queued" : "ice"));
+      const where = `${(j.source || "").replace(/_/g, " ")}${j.port ? ` on port ${j.port}` : ""}${j.url ? ` (${j.url})` : ""}`;
+      line.append(el("span", "note", j.product ? `${where}: ${j.product}` : where));
+      if (j.minimum) line.append(badge(`starts only on Java ${j.minimum}+`, "ice"));
+      if (j.stale) line.append(badge("not seen for 90 days", "ice"));
+      box.append(line);
+      if (j.evidence) box.append(el("p", "note", `Seen on the host: ${j.evidence}`));
+      if (j.citation) box.append(el("p", "note", `Source: ${j.citation}`));
     });
   }
   if (unverified.length) {

@@ -855,6 +855,8 @@ def task_hosts(task):
     raw += [d for d in target.get('domains') or [] if isinstance(d, str)]  # a supplier_check batch
     raw += [r['host'] for r in target.get('reads') or [] if isinstance(r, dict) and isinstance(r.get('host'), str)]  # a page_read batch
     raw += [t['address'] for t in target.get('targets') or [] if isinstance(t, dict) and isinstance(t.get('address'), str)]  # an ssh_probe batch: the address of each endpoint
+    raw += [w['host'] for w in target.get('web') or [] if isinstance(w, dict) and isinstance(w.get('host'), str)]  # a java_runtime batch: its web hosts
+    raw += [j['address'] for j in target.get('jdwp') or [] if isinstance(j, dict) and isinstance(j.get('address'), str)]  # and its JDWP endpoints
     raw += [q.get('name') for q in target.get('dns') or [] if isinstance(q, dict)]  # an identity_check batch: the names and addresses asked about
     raw += [q.get('host') for q in target.get('certs') or [] if isinstance(q, dict)]
     for check in target.get('checks') or []:  # an alive_check batch: the old name and its last known address
@@ -3032,7 +3034,7 @@ _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_l
              'supplier_check': probe_results.clean_supplier_check, 'route_probe': probe_results.clean_route_probe, 'route_probe_signed': probe_results.clean_route_probe_signed, 'page_read': probe_results.clean_page_read,
              'hygiene_check': probe_results.clean_hygiene_check, 'dangling_dns_check': probe_results.clean_dangling_dns_check,
              'identity_check': probe_results.clean_identity_check, 'web_screenshot': web_screenshot_results.clean,
-             'ssh_probe': probe_results.clean_ssh_probe}
+             'ssh_probe': probe_results.clean_ssh_probe, 'java_runtime': probe_results.clean_java_runtime}
 
 
 def _bind_to_task(kind, result, task):
@@ -3043,7 +3045,7 @@ def _bind_to_task(kind, result, task):
         from cveFeed.secrets_scan import clean_result as clean_secrets
         return {'outcome': 'done', **clean_secrets(result, task.target)}
     if task is not None and kind in ('http_probe', 'dns_resolve', 'alive_check', 'bucket_check', 'supplier_check', 'vhost_probe', 'subdir_probe', 'hygiene_check',
-                                       'dangling_dns_check', 'route_probe', 'route_probe_signed', 'identity_check', 'page_read', 'ssh_probe'):
+                                       'dangling_dns_check', 'route_probe', 'route_probe_signed', 'identity_check', 'page_read', 'ssh_probe', 'java_runtime'):
         return probe_results.bind(kind, result, task)
     if task is not None and kind == 'web_screenshot':
         return web_screenshot_results.bind(result, task)

@@ -703,6 +703,12 @@ def auto_fire_new_cves(new_cve_pks=None):
     cves = hot_cves_without_run()
     if not cfg:
         cves = [c for c in cves if c.pk in set(new_cve_pks or ())]  # off: only what this sync brought in, not the whole backlog
+    from cveFeed import java_runtime
+    runtime = java_runtime.runtime_cves_among(new_cve_pks, exclude={c.pk for c in cves})
+    if runtime:
+        # a CVE in the Java runtime is correlated the moment it lands, whatever its heat: every host where Java is clear is a candidate
+        # (cveFeed.java_runtime), and the version-unknown ones wait for review instead of staying silent
+        correlate_hot_cves(runtime)
     if not cves:
         return {"fired": 0} if cfg else {"skipped": "auto-fire disabled"}
     since = timezone.now()

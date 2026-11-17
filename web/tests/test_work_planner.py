@@ -321,7 +321,7 @@ class GateTests(Fleet):
         self.host(self.project, 'ok')
         self.sentinel()
         out = self.tick()
-        self.assertEqual(out['due'], {'ssh_probe': 1, 'secrets_scan': 0})
+        self.assertEqual(out['due'], {'ssh_probe': 1, 'secrets_scan': 0, 'java_runtime': 0})
 
     def test_a_manual_only_target_is_not_planned(self):
         self.host(self.project, 'a')
@@ -498,7 +498,7 @@ class CountersTests(Fleet):
         self.tick()
         view = sentinel_broker._planner_overview(None)
         self.assertIn('line', view)
-        self.assertEqual([k['kind'] for k in view['kinds']], ['ssh_probe', 'secrets_scan'])
+        self.assertEqual([k['kind'] for k in view['kinds']], ['ssh_probe', 'secrets_scan', 'java_runtime'])
 
 
 class RunBatchTests(Fleet):
@@ -600,7 +600,7 @@ class GuardTests(SimpleTestCase):
     def test_a_check_of_a_sentinel_stage_is_never_silently_unplanned(self):
         from cveFeed import check_coverage
         reached = {s.check_id for s in work_planner.specs().values()} | {c for c, _r in work_planner.NOT_PLANNED.values() if c}
-        stages = {'secrets_scan', 'ssh_probe', 'nmap_scan', 'nuclei_light_scan', 'nuclei_targeted_scan', 'wpscan', 'wafw00f', 'route_auth_scan', 'version_probes',
+        stages = {'secrets_scan', 'ssh_probe', 'java_runtime', 'nmap_scan', 'nuclei_light_scan', 'nuclei_targeted_scan', 'wpscan', 'wafw00f', 'route_auth_scan', 'version_probes',
                   'node2shell', 'rdp_screenshot', 'db_exposure_scan'}
         unplaced = {c.id for c in check_coverage.CHECKS if set(c.stages) & stages} - reached
         self.assertFalse(unplaced, f'checks of Sentinel stages that the planner neither runs nor explains: {sorted(unplaced)}')
@@ -608,7 +608,7 @@ class GuardTests(SimpleTestCase):
     def test_the_per_task_size_is_the_contracts_bound(self):
         for spec in work_planner.specs().values():
             props = sentinel_contract.load()['$defs']['targets'][spec.kind]['properties']
-            self.assertEqual(spec.per_task, (props.get('targets') or props['hosts'])['maxItems'], spec.kind)
+            self.assertEqual(spec.per_task, (props.get('targets') or props.get('hosts') or props['web'])['maxItems'], spec.kind)
 
     def test_the_planners_priority_is_below_every_other_dispatch(self):
         self.assertEqual(sentinel_broker.PLANNER_PRIORITY, 0)

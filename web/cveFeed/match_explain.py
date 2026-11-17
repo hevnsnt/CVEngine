@@ -292,6 +292,57 @@ def _backport_words(family, key):
     return ''
 
 
+# --- a CVE in the Java runtime (cveFeed.java_runtime) ---------------------------------------------------------------------------------
+
+# The commands that read which Java a process runs, on the host itself. Constants only: <PID> is the reader's to fill in from the first step.
+JAVA_QUESTION = {'key': 'java:runtime', 'text': 'Which Java runtime does this host run?'}
+JAVA_STEPS = (
+    ('Find the Java process (the application server, Jenkins, Confluence ...) and note its PID.', 'pgrep -a java',
+     {'fixed': '', 'affected': '', 'cant_tell': 'No java process: the application runs in a container. Run the same steps inside it '
+                                                '(docker exec <CONTAINER> ...), or read the image\'s Java version.'}),
+    ('Ask the running JVM its version (jcmd ships with the JDK; run it as the user the process runs as).', 'jcmd <PID> VM.version',
+     {'fixed': 'The JDK version it prints is outside the affected range (or the vendor\'s build names this CVE as fixed): not affected.',
+      'affected': 'The version is inside the affected range: affected. Update the JDK or JRE this application runs on, then restart it.',
+      'cant_tell': 'jcmd is not installed (a JRE has none): use the next step.'}),
+    ('Find the java binary the process runs, and ask it its version.', 'readlink -f /proc/<PID>/exe && "$(readlink -f /proc/<PID>/exe)" -version',
+     {'fixed': 'The version printed is outside the affected range: not affected.', 'affected': 'The version printed is inside the affected range: affected.',
+      'cant_tell': 'Permission denied: run it as the process owner or root.'}),
+    ('Read the release file of that JDK or JRE (its version and vendor).', 'cat "$(dirname "$(dirname "$(readlink -f /proc/<PID>/exe)")")/release"',
+     {'fixed': 'JAVA_VERSION is outside the affected range: not affected.', 'affected': 'JAVA_VERSION is inside the affected range: affected.',
+      'cant_tell': 'No release file: a distribution package; ask the package manager (rpm -qf or dpkg -S on the binary).'}),
+)
+
+
+def java_steps():
+    return [_step(text, command, outcomes=outcomes) for text, command, outcomes in JAVA_STEPS]
+
+
+def _java_tried(ev):
+    rows = [r for r in (ev.get('java') or []) if isinstance(r, dict)][:6]
+    return [f"{_plain(r.get('version'), 20) or 'line ' + str(r.get('major'))} ({_plain(r.get('source'), 20)}, {_plain(r.get('confidence'), 10)})"
+            for r in rows]
+
+
+def _java_assessment(match):
+    ev = _ev(match)
+    cve_id = _cve_id(match) or 'this CVE'
+    if ev.get('java_unknown'):
+        known = _java_tried(ev)
+        note = _plain(ev.get('java_note'), 300)
+        why = ('What an outside check could not see: which Java runtime this host runs. The application on it runs on Java, but none of the '
+               'parts of it that answer from outside (a debug port, an actuator or Jolokia endpoint, a status page, a header or an error page) '
+               'stated the runtime\'s version' + (f'; what is known: {", ".join(known)}' if known else '') + '.'
+               + (f' {note[:1].upper() + note[1:]}.' if note else '')
+               + (f' The host starts only on Java {ev.get("java_floor")} or later.' if ev.get('java_floor') else '')
+               + f' Whether {cve_id} applies depends only on that version, which the host owner can read in a minute with the commands below. '
+               'Not confirmed, and it never raises the host\'s heat on its own.')
+        return 'java_unknown', NOT_CONFIRMED, why
+    reading = _plain(ev.get('reading'), 120)
+    return ('java_version', NOT_CONFIRMED, f'The Java runtime stated its version{": " + reading if reading else ""}. That is a version, not a test of '
+                                           'the flaw; a distribution\'s Java build may carry a backported fix. Not confirmed: nothing tested for '
+                                           'the flaw itself.')
+
+
 def _assessment(match, family, key, package):
     """``(basis, confidence, why)`` from the evidence class of the match."""
     ev = _ev(match)
@@ -313,6 +364,8 @@ def _assessment(match, family, key, package):
         fixed = f'; the fixed build is {fix["fixed_build"]}' if fix.get('fixed_build') else '; no fixed build is listed yet'
         return ('distro_vulnerable', LIKELY, f"{fam}'s security tracker lists the installed {pkg} build as affected{fixed}. That is the "
                                              'distribution\'s own word, not just the version.')
+    if match.source == 'java':
+        return _java_assessment(match)
     if match.source == 'openvas':
         qod = _qod(ev)
         quality = f' (quality of detection {qod}%)' if qod is not None else ''
@@ -382,6 +435,9 @@ def _found(match, family, key, label, version):
         return f'testssl.sh found a TLS weakness{f" on port {port}" if port else ""} that {cve_id} describes.'
     elif match.source == 'wp-plugin':
         head = f'The WordPress site reports {named}.'
+    elif match.source == 'java':
+        head = ('This host runs Java, but the version of its runtime was not read from outside.' if ev.get('java_unknown')
+                else f'The Java runtime on this host stated {_plain(ev.get("reading"), 120) or named}.')
     else:
         head = f'cvENGINE found {named} on this host.'
     own, every = confirm_guide._ranges_of(match)
@@ -511,6 +567,8 @@ def package_steps(family, binary, cve_ids, fix=None, key='', upstream=''):
 
 def _other_steps(match, basis, label, cve_id):
     """What to do when no package decides it: text only (the per-match guide under "Confirm it yourself" has the commands for this host)."""
+    if basis in ('java_unknown', 'java_version'):
+        return java_steps()
     if basis == 'tls_check':
         return [_step('Change the TLS configuration of the service on that port (turn off the protocol, cipher or renegotiation the test names), '
                       'or update its TLS library, then mark the match fixed: cvENGINE runs the same test again to verify (Retest).')]
@@ -598,7 +656,8 @@ def explain(match, hint=''):
         'confidence_label': CONFIDENCE_WORDS[confidence],
         'basis': basis,
         'platform': {'family': family, 'label': FAMILIES.get(family, {}).get('long', ''), 'package': package, 'query_package': binary},
-        'question': ({'key': f'{family or "any"}:{package}', 'text': f'Is the installed {package} package patched?'} if package and cve_id else None),
+        'question': ({'key': f'{family or "any"}:{package}', 'text': f'Is the installed {package} package patched?'} if package and cve_id
+                     else dict(JAVA_QUESTION) if basis in ('java_unknown', 'java_version') else None),
         'who': (f'Someone with a shell on {host or "the host"} (its owner or administrator) can run these. No administrator rights are needed, '
                 'and every command only reads: none installs, changes or restarts anything.') if commands else '',
         'steps': steps,
@@ -609,6 +668,12 @@ def explain(match, hint=''):
     if fix.get('advisory') or fix.get('fixed_build'):
         out['advisory'] = fix
     return out
+
+
+def package_decides(match, hint=''):
+    """Whether a distribution package decides a Java runtime match (a distribution's build read exactly): then its package question asks it."""
+    ev = _ev(match)
+    return bool(isinstance(ev.get('distro'), dict) and ev['distro'].get('package') and not ev.get('java_unknown') and _subject(match, hint)[2])
 
 
 # --- one host: the commands that settle the most matches ----------------------------------------------------------------------------
@@ -633,6 +698,13 @@ def validate_plan(matches, hint='', heat_of=None):
             continue
         seen.add(same)
         cve_id = _cve_id(m)
+        if m.source == 'java' and cve_id and not package_decides(m, hint):
+            # one question settles every Java runtime CVE of the host: which Java it runs
+            heat = (heat_of or {}).get(m.id) or match_heat(m)
+            group = groups.setdefault(('java', 'java-runtime'), {'java': True, 'rows': []})
+            group['rows'].append({'match_id': m.id, 'cve_id': cve_id, 'kev': bool(getattr(m.cve_entry, 'kev', False)), 'heat': heat,
+                                  'product': 'Java runtime', 'source': m.source})
+            continue
         family, key, package, binary = _subject(m, hint)
         if not (package and cve_id):
             continue
@@ -648,6 +720,17 @@ def validate_plan(matches, hint='', heat_of=None):
     for (family, package), g in groups.items():
         rows = sorted(g['rows'], key=lambda r: (not r['kev'], -_HEAT_RANK.get(r['heat'], 0), r['cve_id'], r['match_id']))
         cves = sorted({r['cve_id'] for r in rows}, key=lambda c: (not any(r['kev'] for r in rows if r['cve_id'] == c), c))
+        if g.get('java'):
+            out.append({'key': JAVA_QUESTION['key'], 'question': JAVA_QUESTION['text'], 'product': 'Java runtime', 'package': '', 'query_package': '',
+                        'platform': '', 'platform_label': '', 'kev': any(r['kev'] for r in rows),
+                        'heat': max((r['heat'] for r in rows), key=lambda h: _HEAT_RANK.get(h, 0)), 'count': len(rows), 'cves': cves,
+                        'resolves': rows, 'steps': java_steps(),
+                        'outcomes': {'fixed': 'The Java version printed is outside each CVE\'s affected range: close those matches as false positives, '
+                                              'quoting the output and the version.',
+                                     'affected': 'The version is inside a CVE\'s range: update the Java runtime the application runs on, restart '
+                                                 'it, then close those matches as fixed.',
+                                     'cant_tell': 'The process or its Java could not be read: leave the matches open and ask the application\'s owner.'}})
+            continue
         steps = package_steps(family, g['binary'], cves[:MAX_GROUP_CVES], {}, g['key'], g['upstream'])
         kev = any(r['kev'] for r in rows)
         heat = max((r['heat'] for r in rows), key=lambda h: _HEAT_RANK.get(h, 0))

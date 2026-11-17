@@ -448,6 +448,7 @@ LOCAL_RUNNERS = {
     'node2shell': (),  # likewise
     'identity_check': (),  # likewise
     'ssh_probe': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'java_runtime': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'rdp_shot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'db_probe': (),  # likewise
     'path_probe': (),  # likewise
@@ -488,6 +489,7 @@ HEAVY_KINDS = {
     'path_probe': (),
     'identity_check': (),
     'ssh_probe': (),
+    'java_runtime': (),
     'nuclei_validate': ('template-test',),
 }
 

@@ -72,6 +72,7 @@ ALLOWED = {
         'cveFeed/host_inventory.py',
         'cveFeed/intel.py',
         'cveFeed/internal_scan.py',
+        'cveFeed/java_runtime.py',  # reads the port rows the fingerprint pass stored (the service nmap's jdwp-version named) and says so; runs nothing
         'cveFeed/ledger.py',
         'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
         'cveFeed/management/commands/seed_scale_fixture.py',  # scale fixture: names the ledger services 'nmap' as stored data values (synthetic rows for scripts/scale), runs nothing

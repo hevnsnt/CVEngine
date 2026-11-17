@@ -540,6 +540,23 @@ def plan_ssh(h, ev):
     return [Unit(f'{address}:{number}', ev.ledger_runs(('ssh-probe', 'ssh-probe-failed'), h.project_id, f'{address}:{number}')) for address, number in ports]
 
 
+def plan_java(h, ev):
+    """The Java runtime reads (``cveFeed.java_runtime``, the ``java_runtime`` kind): a web check the host's products warrant (Spring for the actuator
+    and Jolokia, Solr, GeoServer, Druid, Elasticsearch or OpenSearch) on a web host, or a JDWP endpoint on an address a scanner may use. One unit,
+    the host: the reads of a host go in one task."""
+    from cveFeed import java_runtime
+    from cveFeed.correlation import split_name_version
+    if not java_runtime.enabled():
+        return 'the Java runtime reads are switched off (CVENGINE_JAVA_RUNTIME=0)'
+    products = [split_name_version(t) for t in h.techs] + [((getattr(p, 'product', '') or '').strip(), getattr(p, 'version', '') or '')
+                                                            for a in h.addresses.values() for p in a.ports]
+    jdwp = any(java_runtime.jdwp_kind(p) for a in h.scannable() for p in a.ports)
+    if not jdwp and not (h.web and java_runtime.web_checks(products)):
+        return 'no Spring, Jolokia, Solr, GeoServer, Druid, Elasticsearch or OpenSearch web service, and no Java debug port'
+    reason = None if jdwp else _targetable(h)
+    return reason or [Unit(h.name, ev.ledger_runs(('java-runtime', 'java-runtime-failed'), h.project_id, h.name))]
+
+
 def plan_db_exposure(h, ev):
     from cveFeed import db_exposure
     if not any(p.protocol in TCP and db_exposure.checker_for(p)[1] for a in h.scannable() for p in a.ports):
@@ -874,6 +891,8 @@ CHECKS = (
     Check('udp', 'UDP exposure sweep', plan_udp, kinds=('udp-scan', 'udp-scan-failed'), sweeps=('udp-kick',)),
     Check('rdp-screenshot', 'RDP login screen capture', plan_rdp, kinds=('rdp-shot',), stages=('rdp_screenshot',)),
     Check('ssh-inspection', 'SSH inspection (host key and banner, on a Sentinel)', plan_ssh, kinds=('ssh-probe', 'ssh-probe-failed'), stages=('ssh_probe',), ttl_kind='ssh-probe'),
+    Check('java-runtime', 'Java runtime reads (actuator, Jolokia, status pages, JDWP; on a Sentinel)', plan_java,
+          kinds=('java-runtime', 'java-runtime-failed'), stages=('java_runtime',), ttl_kind='java-runtime'),
     Check('db-exposure', 'Unauthenticated database check', plan_db_exposure, stages=('db_exposure_scan',)),
     Check('nuclei-tech', 'Nuclei technology pass', plan_nuclei_tech, kinds=('nuclei-light',), stages=('nuclei_light_scan',)),
     Check('nuclei', 'Nuclei template scan', plan_nuclei, kinds=('nuclei', 'nuclei-nocheck'), stages=('nuclei_targeted_scan',)),
