@@ -154,6 +154,10 @@ def promote(tmpl, job, now=None):
     if not ok:
         return reject(tmpl, f'static check: {why}')
     template_id = tmpl.template_id or str((templategen.load_template(tmpl.yaml) or {}).get('id', ''))
+    # one id, one text: a row installed under this id before (a retired one keeps its record even when a new container lost its file) and with
+    # another text means a match's template id could no longer say which text confirmed it (cveFeed.template_review, recheck_template_hits)
+    if type(tmpl).objects.filter(template_id=template_id).exclude(path='').exclude(pk=tmpl.pk).exclude(yaml=tmpl.yaml).exists():
+        return reject(tmpl, 'a different check with the same id is already installed for this CVE')
     try:
         path = templategen.save_template_file(template_id, tmpl.yaml)
     except FileExistsError:

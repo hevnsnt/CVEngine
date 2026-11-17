@@ -408,6 +408,16 @@ class RevisionTests(World):
             self.assertTrue(templategen._generation_lease(other))
 
 
+class OneIdOneTextTests(World):
+    def test_a_new_text_under_a_retired_templates_id_is_never_installed(self):
+        template_review.retire(self.tmpl, 'reads the version only', self.root)
+        Path(self.tmpl.path).unlink()  # a recreated container lost the retired file
+        draft = GeneratedTemplate.objects.create(cve_entry=self.cve, template_id=TEMPLATE_ID, yaml=VERSION_ONLY, status='draft')
+        job = mock.Mock(provider='', model='test')
+        self.assertEqual(templatevalidate.promote(draft, job), 'invalid')
+        self.assertFalse(Path(self.tmpl.path).exists())
+
+
 class IndexTests(TestCase):
     def test_a_revision_file_is_found_for_its_cve_only_in_the_generated_directory(self):
         root = tempfile.mkdtemp()
