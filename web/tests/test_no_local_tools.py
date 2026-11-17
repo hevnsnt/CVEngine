@@ -145,6 +145,7 @@ ALLOWED = {
         'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
         'cveFeed/ledger.py',
         'cveFeed/management/commands/backfill_secrets_inventory.py',  # 1.4 secrets inventory: names the nuclei findings it files and masks (rule ids, the finding's source), runs nothing
+        'cveFeed/management/commands/recheck_template_hits.py',  # re-reads stored template hits: names the nuclei-cve finding source and the stored nuclei_template step, runs nothing
         'cveFeed/management/commands/seed_scale_fixture.py',  # scale fixture: names the ledger services 'nuclei' as stored data values (synthetic rows for scripts/scale), runs nothing
         'cveFeed/match_policy.py',  # 1.3.2 version-only heat cap (develop): names the confirming tools, runs nothing
         'cveFeed/migrations/0016_nuclei_template_update_schedule.py',

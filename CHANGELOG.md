@@ -2,6 +2,13 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Fixed
+- **A template check that only read the version string is no longer a confirmed finding.** An AI-written check for CVE-2024-38475 (and one for CVE-2023-25690) sent `GET /` to a Red Hat httpd and matched the word `Apache` and a version regex on `Server: Apache/2.4.37 (Red Hat Enterprise Linux)`. The classifier that tells a version check from a behaviour check reads the template alone and only knows certain shapes, so this one counted as proof: triage confirmed the match over the AI's own reasoning (Red Hat backports fixes), the heat went to fire and a confirmed scanner finding was filed. Each hit is now also read for what it showed (`templategen.hit_evidence`): when every request only reads, the offline matcher evaluator matches the response the hit recorded, stops matching once every version number in it is replaced by `0.0` (an address such as `10.0.0.1` is never touched) and still matches on what surrounds the version numbers alone, the hit is a version read (`version_only`). A check the evaluator cannot decide (a `dsl` matcher, as in most official templates), a response that does not parse, and a check of several requests or a response that may have been clipped in storage where any matcher does not hold on the response kept (another request or the lost tail may have matched) stay confirmed hits. A version hit of the same check replaces the confirmation that check recorded, and the finding it filed is closed automatically as a false positive, with a note that says why (one a person changed is left alone); a miss, an error or another check's version hit still never lowers a confirmation. The match's remediation status is never touched; its triage starts over on the corrected evidence.
+- **A version check on a distribution's build no longer proves the version.** A `version_only` template hit counted as "version proven" whatever the banner said; now, as for an nmap banner, it does not when the banner shows distribution packaging (`evidence.distro`), because the distribution backports fixes without changing the version it prints.
+- **The matches already confirmed this way are corrected once, by themselves, after the update** (`recheck_template_hits`, a dry run unless `--apply`, run once by the update backfills). Each confirmation an AI-written check recorded is read again from the response kept on its finding or its validation step; one that only read a version string is corrected as above. A confirmation whose response was not kept stays as it is.
+
 ## v1.4.1 (2026-11-14)
 
 ### Changed
