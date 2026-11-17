@@ -921,6 +921,35 @@ def _java_runtime(match, cve, strategy, host):
             'fix': f'Update the Java runtime the application runs on to {_upgrade("Java", ranges)}, restart the application, then let cvENGINE read it again.'}
 
 
+def _language_runtime(match, cve, strategy, host):
+    """A CVE in a language runtime (cveFeed.version_sources): what an outside check could and could not read, then the host owner's commands."""
+    from cveFeed.version_catalogue import RUNTIMES
+    ev = match.evidence if isinstance(match.evidence, dict) else {}
+    unknown = bool(ev.get('runtime_unknown'))
+    runtime = RUNTIMES.get(str(ev.get('runtime') or ''))
+    label = runtime.label if runtime else 'the runtime'
+    look_for = [{'label': f'{label} read from outside', 'quote': _quote(str(r.get('version') or 'present, no release'), 40)
+                 + f" ({_quote(str(r.get('source') or ''), 30)}, {_quote(str(r.get('confidence') or ''), 10)})"}
+                for r in (ev.get('readings') or [])[:6] if isinstance(r, dict)]
+    ranges = _ranges_of(match)
+    version = '' if unknown else _version(match.matched_version)
+    where = [{'label': 'Host', 'text': host}] if host else []
+    port = _port(ev.get('port'))
+    if port:
+        where.append({'label': 'Port', 'text': str(port)})
+    steps = [_step('What an outside check could not see', f'cvENGINE could not read which {label} release this host runs: its headers, error '
+                   'pages and version sources did not state it. The commands below read it on the host.')] if unknown else []
+    commands = [{'platform': platform, 'command': command, 'explain': what} for platform, command, what in (runtime.commands if runtime else ())]
+    return {'class': 'language_runtime', 'class_label': f'{label} of unknown release' if unknown else f'{label} release',
+            'headline': f'Confirm which {label} release {host or "the host"} runs' if unknown else f'Confirm {label} {version} on {host}',
+            'where': where, 'look_for': look_for, 'steps': steps,
+            'verdict': _verdict(label, version, ranges, 'the runtime\'s own version command',
+                                'The runtime or its process could not be read: ask the application\'s owner, and leave the match open.'),
+            'precondition': _precondition(cve, strategy),
+            'local': [{'title': 'On the host, as the user the application runs as', 'commands': commands}] if commands else [],
+            'fix': f'Update {label} for the application to {_upgrade(label, ranges)}, restart the application, then let cvENGINE read it again.'}
+
+
 def match_guide(match):
     """The confirm-it-yourself guide for one CVEMatch (its cve_entry and subdomain loaded), or None when the match has no host. Pure but for
     a few bounded reads of what cvENGINE already recorded about the host (route-check pages, probe observations, the nuclei hit)."""
@@ -943,6 +972,8 @@ def match_guide(match):
         guide = _host_reported(match, cve, strategy, host)
     elif source == 'java':
         guide = _java_runtime(match, cve, strategy, host)
+    elif source == 'runtime':
+        guide = _language_runtime(match, cve, strategy, host)
     elif source == 'wp-plugin' or ev.get('source') == 'wpscan':
         guide = _cms(match, cve, strategy, host, bases)
     elif source == 'port':

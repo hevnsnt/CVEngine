@@ -63,6 +63,9 @@ Host search (everything above) answers "which of my hosts...". To look up a CVE 
 | `secret:` | Hosts that serve an exposed secret the inventory counts (docs/SECRETS-PLAN.md): `any`, a class (`s` server secret, `p` browser key, `i` identifier), `live` (validated active) or a provider name | `secret:s`, `secret:google` |
 | `zombie:` | Hosts whose DNS is gone but still answer: `yes` or `no` | `zombie:yes` |
 | `java:` | The Java runtime a host was read to run ([PIPELINE.md](PIPELINE.md#java-runtime)): a line, a release (a dotted prefix finds the releases under it), `any`, a vendor or a source; inferred readings count | `java:17`, `java:17.0.9`, `java:8u392`, `java:temurin`, `java:jdwp` |
+| `component:` | A product a version source read on the host ([PIPELINE.md](PIPELINE.md#version-sources)): its name, optionally a release prefix after `@` (`@10.2` finds 10.2.3, never 10.20), or `any` | `component:grafana`, `component:docker@24`, `component:any` |
+| `runtime:` | A language runtime the host states (Python, Go, Node.js, PHP, Ruby, .NET Framework, Erlang/OTP; `dotnet`, `golang`, `node` and `otp` are aliases), optionally a release prefix after `@`, or `any`; present-without-a-version readings count | `runtime:python`, `runtime:go@1.21`, `runtime:dotnet` |
+| `vsource:` | Where a version was read: a catalogue entry, or `header` for the stored headers, or `any` | `vsource:prometheus-metrics`, `vsource:docker-api`, `vsource:header` |
 | `country:` | The country of a host's IP address, by ISO code or name | `country:US`, `country:Germany` |
 
 `port:` takes a number only and matches the port over either protocol; add `proto:` to pick one (`proto:udp port:123`). Use `product:` or `service:` for names. A bad value, such as `sev:scary`, returns an error that lists the allowed ones.

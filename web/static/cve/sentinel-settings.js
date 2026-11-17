@@ -53,6 +53,7 @@ export const SENTINEL_KINDS = [
   "web_screenshot",
   "ssh_probe",
   "java_runtime",
+  "version_read",
   "wpscan_thorough",
 ];
 const KIND_WORDS = {
@@ -91,6 +92,7 @@ const KIND_WORDS = {
   web_screenshot: "web screenshots",
   ssh_probe: "SSH inspection",
   java_runtime: "Java runtime reads",
+  version_read: "version source reads",
   wpscan_thorough: "thorough WordPress scan",
 };
 const MAX_CONCURRENT = 10; // agent_broker.MAX_CONCURRENT_CAP; the server says so in its 400 if this changes

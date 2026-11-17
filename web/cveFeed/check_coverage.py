@@ -557,6 +557,22 @@ def plan_java(h, ev):
     return reason or [Unit(h.name, ev.ledger_runs(('java-runtime', 'java-runtime-failed'), h.project_id, h.name))]
 
 
+def plan_versions(h, ev):
+    """The version source reads (``cveFeed.version_sources``, the ``version_read`` kind): a catalogue entry the host's products warrant (its
+    technologies or port products), or a port of an entry's own (Docker's 2375, etcd's 2379, a Prometheus exporter's 9100 ...). One unit, the
+    host: the reads of a host go in one task."""
+    from cveFeed import version_sources
+    from cveFeed.correlation import split_name_version
+    if not version_sources.enabled():
+        return 'the version source reads are switched off (CVENGINE_VERSION_SOURCES=0)'
+    ports = [p for a in h.scannable() for p in a.ports]
+    products = [split_name_version(t) for t in h.techs] + [((getattr(p, 'product', '') or '').strip(), getattr(p, 'version', '') or '')
+                                                            for a in h.addresses.values() for p in a.ports]
+    if not version_sources.wanted(h.name, products, ports, h.web_bases):
+        return 'no product, platform or port with a known version source (Grafana, Jira, Vault, Docker, Kubernetes, a Prometheus exporter ...)'
+    return _targetable(h) or [Unit(h.name, ev.ledger_runs(('version-source', 'version-source-failed'), h.project_id, h.name))]
+
+
 def plan_db_exposure(h, ev):
     from cveFeed import db_exposure
     if not any(p.protocol in TCP and db_exposure.checker_for(p)[1] for a in h.scannable() for p in a.ports):
@@ -893,6 +909,8 @@ CHECKS = (
     Check('ssh-inspection', 'SSH inspection (host key and banner, on a Sentinel)', plan_ssh, kinds=('ssh-probe', 'ssh-probe-failed'), stages=('ssh_probe',), ttl_kind='ssh-probe'),
     Check('java-runtime', 'Java runtime reads (actuator, Jolokia, status pages, JDWP; on a Sentinel)', plan_java,
           kinds=('java-runtime', 'java-runtime-failed'), stages=('java_runtime',), ttl_kind='java-runtime'),
+    Check('version-sources', 'Version source reads (product version endpoints, platform APIs, metrics; on a Sentinel)', plan_versions,
+          kinds=('version-source', 'version-source-failed'), stages=('version_sources',), ttl_kind='version-source'),
     Check('db-exposure', 'Unauthenticated database check', plan_db_exposure, stages=('db_exposure_scan',)),
     Check('nuclei-tech', 'Nuclei technology pass', plan_nuclei_tech, kinds=('nuclei-light',), stages=('nuclei_light_scan',)),
     Check('nuclei', 'Nuclei template scan', plan_nuclei, kinds=('nuclei', 'nuclei-nocheck'), stages=('nuclei_targeted_scan',)),

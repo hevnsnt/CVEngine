@@ -537,8 +537,11 @@ def apply_known(scan):
     project = scan.domain.project_id
     cutoff = timezone.now() - timedelta(seconds=ledger.ttl(SERVICE) * 4)
     by_host = {}
-    # only what a probe read (not the candidate signals or the WordPress scan's state rows): a hint is never turned into a technology
-    for row in ProbeObservation.objects.filter(project_id=project, outcome='found', observed_at__gte=cutoff, probe__in=list(BY_ID)):
+    # only what a probe read (not the candidate signals or the WordPress scan's state rows): a hint is never turned into a technology; a product a
+    # version source read (cveFeed.version_sources, probe vsrc:<entry>) is one too
+    from django.db.models import Q
+    read = Q(probe__in=list(BY_ID)) | Q(probe__startswith='vsrc:', kind='version')
+    for row in ProbeObservation.objects.filter(read, project_id=project, outcome='found', observed_at__gte=cutoff):
         by_host.setdefault(row.host, []).append({'kind': row.kind, 'product': row.product, 'version': row.version, 'variant': row.variant,
                                                  'outcome': row.outcome, 'evidence': row.evidence or {}})
     added = 0

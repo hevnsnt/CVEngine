@@ -40,7 +40,7 @@ RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 COMPLETION_CEILING = {'nmap': 900, 'naabu': 1020, 'nuclei_light': 900, 'nuclei_targeted': 1800, 'nuclei_deep': 3600, 'testssl': 1020,
                       'nmap_udp': 1560, 'wpscan': 1800, 'wpscan_thorough': 12 * 3600 + 600, 'openvas': 3600, 'discover': 1200, 'waf': 300, 'http_probe': 1500, 'dns_resolve': 300,
                       'secrets_scan': 1800, 'nmap_full': 1800, 'nmap_verify': 300, 'node2shell': 600, 'rdp_shot': 180, 'db_probe': 120, 'path_probe': 300,
-                      'nuclei_validate': 600, 'alive_check': 900, 'bucket_check': 1800, 'vhost_probe': 1800, 'subdir_probe': 1800, 'supplier_check': 1800, 'hygiene_check': 1800, 'dangling_dns_check': 900, 'route_probe': 1800, 'route_probe_signed': 1800, 'page_read': 1260, 'identity_check': 1260, 'web_screenshot': 900, 'ssh_probe': 600, 'java_runtime': 1260,
+                      'nuclei_validate': 600, 'alive_check': 900, 'bucket_check': 1800, 'vhost_probe': 1800, 'subdir_probe': 1800, 'supplier_check': 1800, 'hygiene_check': 1800, 'dangling_dns_check': 900, 'route_probe': 1800, 'route_probe_signed': 1800, 'page_read': 1260, 'identity_check': 1260, 'web_screenshot': 900, 'ssh_probe': 600, 'java_runtime': 1260, 'version_read': 1260,
                       'bbot_discovery': 6 * 3600 + 600}  # a streamed run: its own time limit (the target's timeout_seconds) decides, see sentinel_stream
 # identity_check and page_read: no batch of theirs is bounded by one tool, so the wait is above the Sentinel's hard stop (watchdog 900 s + 300 s grace) and a minute: identity may run
 # 200 DNS questions at 5 s and 50 certificates at 3 s (1150 s), a page read 540 s of reads and one read of up to 600 s (tests.test_sentinel_time_limits).
@@ -99,6 +99,7 @@ NEVER_LOCAL = (
     'supplier_check',  # the supplier posture checks (cveFeed.supplier_scan): a Sentinel's requests, lookups and handshakes
     'ssh_probe',  # the read-only SSH inspection of ports known to speak SSH (cveFeed.ssh_scan): a Sentinel's sshamble run, this server carries no SSH tool
     'java_runtime',  # the Java runtime reads and the JDWP handshake (cveFeed.java_runtime): a Sentinel's requests, this server asks no target anything
+    'version_read',  # the version source catalogue's GETs (cveFeed.version_sources): a Sentinel's requests, this server only parses the answers
 )
 def builtin_scanner_enrolled():
     """Whether the built-in scanner is switched on and has enrolled at least once (one indexed query). Until it has, nothing waits for it: a host whose

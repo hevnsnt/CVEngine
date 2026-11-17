@@ -51,10 +51,32 @@ REASON_JAVA_UNKNOWN = ('Java runtime of unknown version: an outside check could 
                        'read the release file of the JDK it runs.')
 
 
+# a CVE in a language runtime (Python, Go, Node.js, PHP, Ruby, .NET Framework, Erlang/OTP) on a host where the runtime is clear and its version
+# could not be read from outside (cveFeed.version_sources: evidence.runtime_unknown)
+REASON_RUNTIME_UNKNOWN = ('Language runtime of unknown version: an outside check could not read which release of the runtime this host runs. '
+                          'The application on it runs on that runtime (its server header, a line its error page or headers state), but '
+                          'nothing that answers from outside states the exact release, so whether this advisory applies is not known. It is kept '
+                          'for review at very low priority and never fires on its own; it is decided at once when a version is read, and a host '
+                          'owner can settle it in a minute with the runtime\'s own version command (python3 -VV, ruby -v, the .NET Framework '
+                          'Release registry value, erl\'s otp_release).')
+UNKNOWN_FLAGS = ('java_unknown', 'runtime_unknown')  # a runtime whose version was not read: the same treatment as an advisory with no range
+
+
 def unknown_reason(evidence):
     """The reason a version-unknown match (``is_version_unknown``) shows: the Java runtime's own when the runtime's version was not read
-    (``evidence.java_unknown``), else the advisory's missing range."""
-    return REASON_JAVA_UNKNOWN if evidence_flag(evidence, 'java_unknown') else REASON_VERSION_UNKNOWN
+    (``evidence.java_unknown``), a language runtime's (``evidence.runtime_unknown``), else the advisory's missing range."""
+    if evidence_flag(evidence, 'java_unknown'):
+        return REASON_JAVA_UNKNOWN
+    return REASON_RUNTIME_UNKNOWN if evidence_flag(evidence, 'runtime_unknown') else REASON_VERSION_UNKNOWN
+
+
+def unknown_why(facts):
+    """The short reason (a triage note) of a version-unknown match from its triage ``facts`` (``java_unknown``, ``runtime_unknown``)."""
+    if facts.get('java_unknown'):
+        return 'the Java runtime\'s version could not be read from outside'
+    if facts.get('runtime_unknown'):
+        return 'the language runtime\'s version could not be read from outside'
+    return 'the advisory gives no affected version range'
 
 
 # an operating system named by a scanner, as a technology or an nmap product: never a CVE match by name
@@ -109,7 +131,7 @@ def is_version_unknown(evidence, version_in_range, template_result='', distro_st
     whose version was not read (``evidence.java_unknown``): kept
     for review, never a verdict. Hard evidence that does not depend on a version (a template hit, a distribution tracker, a runZero
     report) is not "unknown": that match is judged on it. A version inside a range cannot be unknown either."""
-    return (evidence_flag(evidence, 'unbounded') or evidence_flag(evidence, 'java_unknown')) and version_in_range is None \
+    return (evidence_flag(evidence, 'unbounded') or any(evidence_flag(evidence, f) for f in UNKNOWN_FLAGS)) and version_in_range is None \
         and template_result != 'vulnerable' and distro_status != 'vulnerable' and not evidence_flag(evidence, 'runzero')
 
 
@@ -413,7 +435,8 @@ def version_unknown(match):
 def version_unknown_q(prefix=''):
     """The database form of ``is_version_unknown`` over CVEMatch rows (``prefix`` reaches the match from another model)."""
     from django.db.models import Q
-    return ((evidence_flag_q('unbounded', prefix) | evidence_flag_q('java_unknown', prefix)) & Q(**{prefix + 'version_in_range__isnull': True})
+    return ((evidence_flag_q('unbounded', prefix) | evidence_flag_q('java_unknown', prefix) | evidence_flag_q('runtime_unknown', prefix))
+            & Q(**{prefix + 'version_in_range__isnull': True})
             & ~Q(**{prefix + 'template_result': 'vulnerable'}) & ~Q(**{prefix + 'distro_status': 'vulnerable'})
             & ~evidence_flag_q('runzero', prefix))
 
