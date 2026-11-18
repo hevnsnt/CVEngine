@@ -59,7 +59,21 @@ REASON_RUNTIME_UNKNOWN = ('Language runtime of unknown version: an outside check
                           'for review at very low priority and never fires on its own; it is decided at once when a version is read, and a host '
                           'owner can settle it in a minute with the runtime\'s own version command (python3 -VV, ruby -v, the .NET Framework '
                           'Release registry value, erl\'s otp_release).')
-UNKNOWN_FLAGS = ('java_unknown', 'runtime_unknown')  # a runtime whose version was not read: the same treatment as an advisory with no range
+# a CVE in an edge appliance whose build was read only as a RANGE from outside (cveFeed.edge_builds: evidence.range_read): PAN-OS releases of one
+# build date, FortiOS before 7.2.6, a Pulse Connect Secure release without its service release
+REASON_RANGE_READ = ('Build read only as a range: an outside check placed this appliance\'s software in a range of releases (the build date its '
+                     'static files carry, or a release without its service release), and a release of that range is affected, but which release '
+                     'it runs was not read. It is kept for review at very low priority and never fires on its own; it is decided at once when the '
+                     'exact build is read, and the appliance\'s owner can settle it in a minute from its administration page or CLI (show version, '
+                     'get system status, the About page).')
+# a component a vendor bundles with a product release the host states, inferred inside an affected range (cveFeed.version_sources:
+# evidence.bundled_inferred): the host runs it only if its owner kept the bundled one
+REASON_BUNDLED = ('Bundled component, version inferred: the host states a product release, and the vendor ships that release with this '
+                  'component at a version inside the affected range. It applies only if the bundled component was not replaced (an archive '
+                  'install on the system\'s own copy, a jar swapped after an advisory, an external service), which nothing outside the host can '
+                  'tell. It is kept for review at very low priority and never fires on its own; the host owner settles it by reading the version '
+                  'of the component the application actually runs.')
+UNKNOWN_FLAGS = ('java_unknown', 'runtime_unknown', 'bundled_inferred', 'range_read')  # a version not read, only inferred, or read only as a range: treated as an advisory with no range
 
 
 def unknown_reason(evidence):
@@ -67,6 +81,10 @@ def unknown_reason(evidence):
     (``evidence.java_unknown``), a language runtime's (``evidence.runtime_unknown``), else the advisory's missing range."""
     if evidence_flag(evidence, 'java_unknown'):
         return REASON_JAVA_UNKNOWN
+    if evidence_flag(evidence, 'range_read'):
+        return REASON_RANGE_READ
+    if evidence_flag(evidence, 'bundled_inferred'):
+        return REASON_BUNDLED
     return REASON_RUNTIME_UNKNOWN if evidence_flag(evidence, 'runtime_unknown') else REASON_VERSION_UNKNOWN
 
 
@@ -76,6 +94,10 @@ def unknown_why(facts):
         return 'the Java runtime\'s version could not be read from outside'
     if facts.get('runtime_unknown'):
         return 'the language runtime\'s version could not be read from outside'
+    if facts.get('range_read'):
+        return 'only a range of the appliance\'s builds could be read from outside'
+    if facts.get('bundled_inferred'):
+        return 'the bundled component\'s version is only inferred from the product release'
     return 'the advisory gives no affected version range'
 
 
@@ -435,7 +457,8 @@ def version_unknown(match):
 def version_unknown_q(prefix=''):
     """The database form of ``is_version_unknown`` over CVEMatch rows (``prefix`` reaches the match from another model)."""
     from django.db.models import Q
-    return ((evidence_flag_q('unbounded', prefix) | evidence_flag_q('java_unknown', prefix) | evidence_flag_q('runtime_unknown', prefix))
+    return ((evidence_flag_q('unbounded', prefix) | evidence_flag_q('java_unknown', prefix) | evidence_flag_q('runtime_unknown', prefix)
+             | evidence_flag_q('bundled_inferred', prefix) | evidence_flag_q('range_read', prefix))
             & Q(**{prefix + 'version_in_range__isnull': True})
             & ~Q(**{prefix + 'template_result': 'vulnerable'}) & ~Q(**{prefix + 'distro_status': 'vulnerable'})
             & ~evidence_flag_q('runzero', prefix))

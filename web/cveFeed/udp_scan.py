@@ -26,7 +26,9 @@ What it records: the open UDP ports and their service, product and version (the 
 TCP services, keyed by number and protocol, so UDP 161 and TCP 161 are two rows); product and version a script proved when ``-sV``
 named none (SNMP sysDescr, SSDP server string, NTP readvar); and findings for the services that should not answer the internet
 (memcached, SNMP with the public community, NTP control queries, SSDP, IPMI). Findings are derived from the stored ports of each
-host, never from one run, so a host with two addresses keeps what the other address showed.
+host, never from one run, so a host with two addresses keeps what the other address showed. What an SNMP agent's sysDescr states (a
+Cisco, Juniper, Aruba or Ubiquiti release, an APC card's firmware, a Windows build, a Linux kernel) is also stored as a version reading of
+each host on the address (``cveFeed.version_sources.refresh_snmp``, probe ``vsrc:snmp``), and dropped when a later sweep no longer reads it.
 """
 import json
 import logging
@@ -764,12 +766,14 @@ def scan_ip(ip, pipeline=None):
         activity.settle(running, 'done', message=f'Background UDP scan of {address}: the host did not answer, so no open UDP ports; asked again next week')
         return {'ip': address, 'ok': True, **outcome, 'findings': 0}
     findings = store_findings(ip)
+    from cveFeed import version_sources
+    snmp = version_sources.refresh_snmp(ip)  # the release an SNMP agent's sysDescr states, as a version reading of each host on the address
     activity.settle(running, 'done', message=(
         f'Background UDP scan of {address}: {len(outcome["open"])} port(s) answered'
         + (f' ({", ".join(map(str, outcome["open"]))})' if outcome['open'] else '')
         + (f', {len(outcome["unanswered"])} silent (open or filtered)' if outcome['unanswered'] else '')
         + (f', {findings} finding(s)' if findings else '')), open_ports=len(outcome['open']), findings=findings)
-    result = {'ip': address, 'ok': True, **outcome, 'findings': findings}
+    result = {'ip': address, 'ok': True, **outcome, 'findings': findings, 'snmp_readings': snmp}
     if outcome['changed']:
         try:
             result['retested'] = queue_retests(ip, outcome['changed'], project, pipeline)

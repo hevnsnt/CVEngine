@@ -450,6 +450,7 @@ LOCAL_RUNNERS = {
     'ssh_probe': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'java_runtime': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'version_read': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'version_digest': (),  # the same (contract 8)
     'rdp_shot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
     'db_probe': (),  # likewise
     'path_probe': (),  # likewise
@@ -492,6 +493,7 @@ HEAVY_KINDS = {
     'ssh_probe': (),
     'java_runtime': (),
     'version_read': (),
+    'version_digest': (),
     'nuclei_validate': ('template-test',),
 }
 

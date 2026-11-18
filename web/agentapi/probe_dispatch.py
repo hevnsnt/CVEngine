@@ -441,6 +441,25 @@ def try_version_read(project, reads, scan=None, priority=1, unattended=True):
     return {row['id']: row for row in result.get('reads') or []}
 
 
+def try_version_digest(project, reads, scan=None, priority=1, unattended=True):
+    """``try_version_read`` for the entries with a digest read (``version_digest``, contract 8: ``cveFeed.edge_builds``): offered only to a
+    Sentinel that declares contract 8, so a contract 7 one is never sent a digest read (``version_sources._digest_ready`` leaves them out when
+    none can take them)."""
+    from cveFeed import probe_scope
+    reads = list(reads)[:MAX_VERSION_READS_PER_TASK]
+    if not reads or not _offered(project, 'version_digest'):
+        return {}
+    subs = list({id(sub): sub for sub, _e in reads}.values())
+    target = {'reads': [entry for _sub, entry in reads], 'scope': probe_scope.for_versions(project.pk, subs, unattended=unattended)}
+    result = sentinel_dispatch.dispatch_or_none(project, 'version_digest', target, host=_hosts_label([e['host'] for _s, e in reads]),
+                                                scan=scan, priority=priority)
+    if result is None:
+        return {}
+    if result.get('refused'):
+        logger.info('version_digest task for %s: the scanner refused %s host(s) outside the scope policy', project.pk, len(result['refused']))
+    return {row['id']: row for row in result.get('reads') or []}
+
+
 MAX_ROUTE_HOSTS_PER_TASK = 25  # the contract's bound (cvengine_scanner.probes.routes.MAX_HOSTS)
 
 
