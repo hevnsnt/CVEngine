@@ -65,8 +65,57 @@ def split_name_version(tech_name):
     if ":" in name:
         base, _, ver = name.rpartition(":")
         if ver and ver[0].isdigit():
-            return base.strip(), ver.strip()
+            return base.strip(), stated_version(base, ver.strip())
+    slash = split_slash_version(name)
+    if slash:
+        return slash[0], slash[1]
     return name, ""
+
+
+# A Server-header token stored whole as a product or a technology name ("nginx/1.28.3", "awselb/2.0", "nginx/1.24.0 (Ubuntu)"): nmap's
+# http-server-header script fills an unidentified service's product with the header, so the version sits in the name and the name matches
+# nothing. The product is one word (no space, no "/" or ":", so never a path or a URL) and what follows the "/" is a version (digits and
+# dots, a "v" before it allowed), then the end or a space (a comment, a module). A protocol's own "HTTP/1.1" is not a product.
+_SLASH_VERSION_RE = re.compile(r"^([A-Za-z][A-Za-z0-9._+-]*)/[vV]?(\d+(?:\.\d+)*)(?:\s+(.*))?$", re.DOTALL)
+_PROTOCOL_NAMES = frozenset({"http", "https", "spdy", "quic", "tls", "ssl", "dtls", "sip", "rtsp", "rtp", "ftp", "smtp", "h2", "h3"})
+
+
+def split_slash_version(text):
+    """``(product, version, rest)`` of a ``product/version`` Server-header token stored as a name, or None when the text is not one (a path,
+    a URL, ``foo/bar``, a protocol). ``rest`` is what followed it: the comment without its parentheses ("Ubuntu") or the next tokens. A bare
+    major or a SKU ("Microsoft-Azure-Application-Gateway/v2") is no version (it would sit inside every "before 2.x" range), and a protocol's
+    version (``stated_version``: Microsoft-HTTPAPI/2.0) is never the product's: the product is still split off, without one."""
+    found = _SLASH_VERSION_RE.match(str(text or "").strip()[:500])
+    if not found or found.group(1).lower() in _PROTOCOL_NAMES:
+        return None
+    product, number, rest = found.group(1), found.group(2), (found.group(3) or "").strip()
+    if rest.startswith("(") and rest.endswith(")") and rest.count("(") == 1:
+        rest = rest[1:-1].strip()
+    return product, stated_version(product, number if "." in number else ""), rest
+
+
+def split_port_product(product, version=""):
+    """``(product, version, rest)`` of a stored port product as correlation reads it: a ``product/version`` header token is split
+    (``split_slash_version``), a version the scanner stated in its own column wins, and a protocol's version is dropped."""
+    product, version = str(product or "").strip(), str(version or "").strip()
+    slash = split_slash_version(product)
+    if slash:
+        return slash[0], stated_version(slash[0], version) or slash[1], slash[2]
+    return product, stated_version(product, version), ""
+
+
+def stored_technology_name(name):
+    """A technology name in the stored form ("Name" or "Name:version"): a ``product/version`` header token becomes ``product:version``."""
+    slash = split_slash_version(name)
+    if not slash:
+        return name
+    return f"{slash[0]}:{slash[1]}" if slash[1] else slash[0]
+
+
+def stated_version(name, version):
+    """``version``, or "" when the name's "/x.y" is the version of a protocol or an API, never of the product
+    (``protocol_versions`` in data/product_aliases.json: Microsoft-HTTPAPI/2.0 is the HTTP Server API's version, not a Windows build)."""
+    return "" if version and _norm(name) in PROTOCOL_VERSION_NAMES else version
 
 
 # a technology template named for the product ("Nginx version", "Microsoft IIS Detect"): the technology pass drops the word now, rows an
@@ -75,9 +124,19 @@ _TEMPLATE_WORD_RE = re.compile(r"\s+(?:version|detect|detected|detection|fingerp
 
 
 def tech_name(name):
-    """The product a stored technology name names, as correlation matches it: the name without a trailing template word."""
+    """The product a stored technology name names, as correlation matches it: the name without a trailing template word, and a
+    detector's name for a reading that names another product (``renames`` in data/product_aliases.json: "AspNet Version Disclosure" is
+    the X-AspNet-Version header, read as ASP.NET and then as its CLR line by ``read_technology``)."""
     stripped = _TEMPLATE_WORD_RE.sub("", name or "")
-    return stripped if stripped.strip() else (name or "")
+    stripped = stripped if stripped.strip() else (name or "")
+    return TECH_RENAMES.get(_norm(stripped), stripped)
+
+
+def read_technology(stored):
+    """``(name, version)`` of a stored technology as correlation reads it: split (``split_name_version``), the template word and a
+    detector's name dropped (``tech_name``), and an X-AspNet-Version CLR line read as the .NET Framework's (``versions.legacy_aspnet``)."""
+    name, version = split_name_version(stored or "")
+    return versions.legacy_aspnet(tech_name(name), version)
 
 
 _EPOCH_RE = re.compile(r"^\s*\d+:(?=\d)")  # a dpkg/rpm epoch: "1:8.9p1-3ubuntu0.6"
@@ -331,6 +390,8 @@ ALIAS_VENDORS = {}  # (tech token, product token) -> vendor tokens the record mu
 NAME_VENDORS = {}  # tech token -> (vendor tokens, a record must name one): a bare name another vendor uses for a different product
 AMBIGUOUS_PRODUCTS = set()  # product tokens two vendors use: a record naming no vendor never confirms a name for them
 VENDOR_CLASSES = {}  # vendor token -> the vendor tokens that are the same vendor across renames and acquisitions
+TECH_RENAMES = {}  # normalized detector name -> the product name its reading is read as ("AspNet Version Disclosure" -> "ASP.NET")
+PROTOCOL_VERSION_NAMES = set()  # normalized names whose stated version is a protocol's or an API's, never the product's
 
 
 def _vendor_tokens(values):
@@ -359,11 +420,15 @@ def load_aliases(path=ALIASES_FILE):
         group = frozenset(_vendor_tokens(entry.get("vendors")))
         for vendor in group:
             classes[vendor] = classes.get(vendor, frozenset()) | group
-    for table, value in ((PRODUCT_ALIASES, aliases), (ALIAS_VENDORS, alias_vendors), (NAME_VENDORS, name_vendors), (VENDOR_CLASSES, classes)):
+    renames = {_norm(name): entry["to"] for entry in doc.get("renames", ()) for name in entry.get("names", ()) if entry.get("to")}
+    protocol = {_norm(name) for entry in doc.get("protocol_versions", ()) for name in entry.get("names", ())}
+    for table, value in ((PRODUCT_ALIASES, aliases), (ALIAS_VENDORS, alias_vendors), (NAME_VENDORS, name_vendors), (VENDOR_CLASSES, classes),
+                         (TECH_RENAMES, renames)):
         table.clear()
         table.update(value)
-    AMBIGUOUS_PRODUCTS.clear()
-    AMBIGUOUS_PRODUCTS.update(ambiguous)
+    for table, value in ((AMBIGUOUS_PRODUCTS, ambiguous), (PROTOCOL_VERSION_NAMES, protocol)):
+        table.clear()
+        table.update(value)
     return doc
 
 
@@ -1221,6 +1286,7 @@ def _record_matches(subdomain, name, version, token, source, product_index,
     ``{cve.id: {(domain id, host name)}}`` for the CVEs a product seen without a version could be about."""
     if not version and cpe:  # nmap sometimes names the version only in the CPE
         version = (parse_cpe(cpe) or ("", "", ""))[2]
+    version = stated_version(name, version)  # a protocol's version is no version of the product (Microsoft HTTPAPI httpd 2.0)
     ver = parse_version(version)
     if match_policy.is_os_sighting(name, cpe):
         return 0  # an operating system fingerprint is decided by the host's own report, not by its name
@@ -1870,8 +1936,9 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
         name, version = split_name_version(tech.name)
         if wrong and (cms.key(name), version) in wrong:
             continue
-        name = tech_name(name)
-        name, version = versions.legacy_aspnet(name, version)  # an earlier build stored X-AspNet-Version's CLR line as "ASP.NET"
+        # the template word and a detector's name dropped, and an X-AspNet-Version CLR line (an earlier build's "ASP.NET", the technology template's
+        # "AspNet Version Disclosure") read as the .NET Framework's
+        name, version = read_technology(tech.name)
         token = _norm(name)
         if len(token) < _MIN_TOKEN:
             continue
@@ -1897,11 +1964,11 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     from startScan.models import open_services
     for ip in subdomain.ip_addresses.all():
         for port in open_services(ip):  # a UDP service that identified itself (SNMP, NTP, SSDP, memcached) is evidence like a TCP one
-            name = (port.product or "").strip()
+            # a Server-header token nmap stored whole ("nginx/1.28.3") is the product and its version
+            name, version, _rest = split_port_product(port.product, port.version)
             token = _norm(name)
             if len(token) < _MIN_TOKEN:
                 continue
-            version = (port.version or "").strip()
             info = port_distro(port)
             if host and info.get("distro") in distro_lib.RHEL_FAMILY and not info.get("release") and host.get("release"):
                 info["release"] = host["release"]  # the release another service or the host's OS states
@@ -2115,7 +2182,7 @@ def candidate_subdomains(product_index, base=None):
             tech_ids.append(tech_id)
     products = set()
     for product in Port.objects.exclude(product="").values_list("product", flat=True).distinct():
-        token = _norm(product.strip())
+        token = _norm(split_port_product(product)[0])
         if len(token) >= _MIN_TOKEN and _index_hit(token, product_index):
             products.add(product)
 

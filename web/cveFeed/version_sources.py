@@ -72,8 +72,10 @@ def enabled():
 
 
 def _split(name):
-    from cveFeed.correlation import split_name_version
-    return split_name_version(name or '')
+    """A stored technology as correlation reads it (``correlation.read_technology``): an X-AspNet-Version CLR line stored as "ASP.NET" or
+    by a technology template as "AspNet Version Disclosure" is the .NET Framework CLR's, which ``version_catalogue.from_technology`` reads as a runtime."""
+    from cveFeed.correlation import read_technology
+    return read_technology(name or '')
 
 
 # ----------------------------------------------------------------------------- which entries a host warrants (pure)

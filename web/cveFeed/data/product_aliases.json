@@ -1,12 +1,21 @@
 {
  "schema": 1,
  "updated": "2026-11-18",
- "description": "How a technology name cvENGINE detects reaches the vendor:product a CVE record uses (read by cveFeed.correlation; measured by cveFeed.tech_coverage, manage.py technology_coverage). Every entry names its evidence: the NVD CPE and/or the CVE whose record spells the product that way. 'aliases': a detected name (normalized like correlation normalizes it: case and punctuation dropped) also names these products, and only when the record's vendor is one of 'vendors' (a record with no vendor, or 'n/a', is not contradicted by an exact product). A target is matched exactly, and also by correlation's name rules when the record names one of the vendors ('Microsoft Exchange Server' reaches 'Microsoft Exchange Server 2019 Cumulative Update 12'). 'restrict': a name that may only reach these vendors' records ('require_vendor': a record must name one): a bare name another vendor also uses for a different product. 'ambiguous_products': a product two vendors both use: a record that names no vendor never confirms a name for it. 'vendor_renames': spellings of one vendor across renames and acquisitions, read when a CPE's vendor is compared with a record's and when the coverage report counts vendors. Never add an entry that merges two vendors' different products.",
+ "description": "How a technology name cvENGINE detects reaches the vendor:product a CVE record uses (read by cveFeed.correlation; measured by cveFeed.tech_coverage, manage.py technology_coverage). Every entry names its evidence: the NVD CPE and/or the CVE whose record spells the product that way. 'aliases': a detected name (normalized like correlation normalizes it: case and punctuation dropped) also names these products, and only when the record's vendor is one of 'vendors' (a record with no vendor, or 'n/a', is not contradicted by an exact product). A target is matched exactly, and also by correlation's name rules when the record names one of the vendors ('Microsoft Exchange Server' reaches 'Microsoft Exchange Server 2019 Cumulative Update 12'). 'restrict': a name that may only reach these vendors' records ('require_vendor': a record must name one): a bare name another vendor also uses for a different product. 'ambiguous_products': a product two vendors both use: a record that names no vendor never confirms a name for it. 'vendor_renames': spellings of one vendor across renames and acquisitions, read when a CPE's vendor is compared with a record's and when the coverage report counts vendors. Never add an entry that merges two vendors' different products. 'renames': a detector's name for a reading that names another product ('to'), read as that product (correlation.tech_name). 'protocol_versions': names whose stated version is a protocol's or an API's, never the product's: the version is dropped (correlation.stated_version).",
  "aliases": [
-  {"names": ["Apache httpd", "Apache HTTP Server", "httpd", "Apache", "apache2"],
+  {"names": ["Apache httpd", "Apache HTTP Server", "httpd", "Apache", "apache2", "apachegeneric"],
    "vendors": ["apache"], "products": ["http_server", "Apache HTTP Server", "apache2"],
    "evidence": ["cpe:2.3:a:apache:http_server", "CVE-2024-38475 (Apache Software Foundation: Apache HTTP Server)", "CVE-2020-11984 (n/a: Apache HTTP Server)"],
-   "note": "nmap prints 'Apache httpd', Debian and Ubuntu package it as apache2; Oracle's 'HTTP Server' is not Apache's (vendors)"},
+   "note": "nmap prints 'Apache httpd', Debian and Ubuntu package it as apache2, nuclei's tech-detect template names its generic Apache match 'apachegeneric'; Oracle's 'HTTP Server' is not Apache's (vendors)"},
+  {"names": ["nginxgeneric"], "vendors": ["nginx", "F5", "igor_sysoev"], "products": ["nginx"],
+   "evidence": ["cpe:2.3:a:f5:nginx", "CVE-2017-7529 (nginx: nginx)", "CVE-2026-42945 (F5: NGINX Open Source)"],
+   "note": "nuclei's tech-detect template names its generic nginx match 'nginxgeneric'; the name rules take 'nginx' on to F5's 'NGINX Open Source'"},
+  {"names": ["aspgeneric"], "vendors": ["microsoft"], "products": ["ASP.NET"],
+   "evidence": ["CVE-2018-8171 (Microsoft: ASP.NET, ASP.NET Core, ASP.NET MVC 5.2)"],
+   "note": "nuclei's tech-detect template names its generic ASP.NET match (X-Powered-By: ASP.NET, the ASP.NET session cookie) 'aspgeneric'"},
+  {"names": ["Microsoft-HTTPAPI", "Microsoft HTTPAPI", "Microsoft HTTPAPI httpd", "ms-httpapi"], "vendors": ["microsoft"], "products": ["HTTP.sys"],
+   "evidence": ["CVE-2015-1635 (MS15-034, remote code execution in HTTP.sys)", "CVE-2022-21907 (Microsoft: Windows 10 Version 1809, Windows Server 2019, ...: the HTTP Protocol Stack)"],
+   "note": "the Server header of a service on Windows' kernel HTTP stack (HTTP.sys, the HTTP Server API), nmap's name for it and nuclei's tech-detect match. Its flaws are filed under Windows releases, and '2.0' is the API's version, not a Windows build (protocol_versions): no Windows record is reached from this name, and it is kept as an unversioned product"},
   {"names": ["Microsoft IIS httpd", "Microsoft IIS", "IIS"],
    "vendors": ["microsoft"], "products": ["internet_information_services", "iis"],
    "evidence": ["cpe:2.3:a:microsoft:internet_information_services", "CVE-2017-0055 (Microsoft Corporation: IIS Server)"]},
@@ -100,6 +109,16 @@
    "vendors": ["microsoft"], "require_vendor": true,
    "evidence": ["cpe:2.3:a:microsoft:.net_framework", "CVE-2017-8759 (Microsoft Corporation: Microsoft .NET Framework)",
                 "CVE-2023-45288 (Go standard library: net/http) and CVE-2026-97045 (golang.org/x/net) are Go's net packages, which share the word 'net'"]}
+ ],
+ "renames": [
+  {"names": ["AspNet Version Disclosure"], "to": "ASP.NET",
+   "evidence": ["nuclei's 'AspNet Version Disclosure' technology template reads the X-AspNet-Version header (1.1.4322, 2.0.50727, 4.0.30319)"],
+   "note": "a detector's name for a reading that names another product: read as that product, so its CLR line is read as the .NET Framework's (cvengine_scanner.versions.legacy_aspnet), never as a Windows release or an ASP.NET Core one"}
+ ],
+ "protocol_versions": [
+  {"names": ["Microsoft-HTTPAPI", "Microsoft HTTPAPI", "Microsoft HTTPAPI httpd", "ms-httpapi"],
+   "evidence": ["CVE-2022-21907 (the HTTP Protocol Stack's flaw, filed under Windows releases: no HTTPAPI version names them)"],
+   "note": "'Microsoft-HTTPAPI/2.0' and nmap's 'Microsoft HTTPAPI httpd 2.0' state the version of the HTTP Server API, the same on every Windows release since Vista: never a version of the product (cvengine_scanner.versions.PROTOCOL_VERSIONS reads the Server header the same way)"}
  ],
  "ambiguous_products": [
   {"product": "iOS", "vendors": ["Apple", "Cisco"],

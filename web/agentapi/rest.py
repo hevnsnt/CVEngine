@@ -555,7 +555,7 @@ ROUTES = [
      lambda r, c, **k: tuning.list_decisions(c, r.GET)),
     ('GET', r'tuning/report', 'App Admin: the maintainer report, the last 24 hours in one bounded answer: the tuning mode and what is pinned, a summary of the signals (memory, queues, Sentinels, AI spend), the open alerts (stale marked, with the decision that answered each), and the decisions with their outcomes. Instance health only: no host or tenant data',
      lambda r, c, **k: tuning.get_maintainer_report(c)),
-    ('GET', r'technology-coverage', 'App Admin, read-only: how the technology names on the current hosts connect to the CVE catalogue (cveFeed.tech_coverage): unmatched names with their hosts and near products, unversioned names ranked by CVE count, and ambiguous names that reach more than one vendor; ?project= narrows to one project, ?limit= (default 50, at most 500) caps each list',
+    ('GET', r'technology-coverage', 'App Admin, read-only: how the technology names on the current hosts connect to the CVE catalogue (cveFeed.tech_coverage): unmatched names with their hosts and near products, unversioned names ranked by CVE count, ambiguous names that reach more than one vendor, and services (CDN, hosting, analytics names that are not software); ?project= narrows to one project, ?limit= (default 50, at most 500) caps each list',
      lambda r, c, **k: tech_coverage_api.technology_coverage(c, r.GET)),
     ('PUT', r'tuning/mode', 'App Admin: {mode: off|suggest|auto} and/or {advisor: true|false}; leaving auto drops the tuned numbers at once (saved, environment or default values apply again)',
      lambda r, c, **k: tuning.set_mode(c, _body(r))),
