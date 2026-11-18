@@ -294,7 +294,7 @@ class FullSweepTests(NoRealSleep, FullScanBase):
         with FakeScanner(kinds=['nmap_full', 'nmap_verify']) as fake:
             out = fullscan.sweep_ip(ip, pipeline=lambda domain_id, names: retested.append(names))
         self.assertEqual(fake.served_kinds(), ['nmap_full', 'nmap_verify'])
-        self.assertEqual(fake.served[1]['target'], {'address': '192.0.2.10', 'ports': [22, 443, 8443], 'version_intensity': 5})
+        self.assertEqual(fake.served[1]['target'], {'address': '192.0.2.10', 'ports': [22, 443, 8443], 'version_intensity': 7})
         self.assertEqual((out['ok'], out['open'], out['new']), (True, 3, [22, 443, 8443]))
         ip = IpAddress.objects.get(pk=ip.pk)
         self.assertIsNotNone(ip.full_scanned_at)
