@@ -106,7 +106,7 @@ def parse_version(value, strict=False):
     start with a digit, so a ref like "main" or a hash can never be read as version 3."""
     if not value:
         return None
-    text = _EPOCH_RE.sub("", str(value)).strip()
+    text = _EPOCH_RE.sub("", str(value)).strip().replace("\\", "")  # a CPE escapes "15.2\\(4\\)m7"
     if text[:1] in ("v", "V") and text[1:2].isdigit():
         text = text[1:]
     text = _MARIADB_PREFIX_RE.sub("", text)  # MariaDB's handshake says "5.5.5-10.6.12-MariaDB": the real version follows the prefix
@@ -116,6 +116,13 @@ def parse_version(value, strict=False):
     match = None if dated else (_VER_RE.match(text) if strict else _VER_RE.search(text))
     if not match and not dated:
         return None
+    if match and text[match.end():match.end() + 1] == "(":
+        # a Cisco build ("15.2(4)M7"): never a range bound, and as a host's version it can only equal a listed build (``_Build``)
+        if strict:
+            return None
+        build = _Build(int(part) for part in match.group(1).split("."))
+        build.text = build_key(text[match.start():].split()[0])
+        return build
     try:
         parts = [int(part) for part in dated.groups(default="0")[:3]] if dated else [int(part) for part in match.group(1).split(".")]
     except ValueError:
@@ -138,6 +145,43 @@ def parse_version(value, strict=False):
     return tuple(parts)
 
 
+# A build a vendor names with a parenthesised rebuild: Cisco IOS "15.2(4)M7", NX-OS "9.3(8)" and "7.0(3)I7(5a)", ASA's own "9.16(4)18", Zyxel
+# "2.90(AAHK.2)C0". Read for its first numbers it is 15.2, which would put every 15.2 build (and, as a bound, every 15.x release) inside a
+# range it says nothing about. Such a version is only ever compared for equality with a build an advisory lists (``item_verdict``), the way
+# NVD's CPEs spell it: lower case, the parentheses kept ("15.2(4)m7").
+_BUILD_KEY_RE = re.compile(r"^[0-9][0-9a-z.()_+~-]*$")
+_LEADING_ZEROS_RE = re.compile(r"(?<![0-9])0+(?=[0-9])")  # IOS XE prints 17.09.04a for the build its advisories list as 17.9.4a
+_DIGIT_BUILD_RE = re.compile(r"^(\d+(?:\.\d+)*)\((\d+)\)(\d*)$")  # ASA "9.16(4)18" is the build its advisories list as 9.16.4.18
+MAX_BUILD_LENGTH = 64
+MAX_BUILDS_PER_ITEM = 2000  # Cisco's largest list (CVE-2023-20109, IOS) has 674
+
+
+class _Build(tuple):
+    """A host's version that is a parenthesised build (see ``build_key``): it compares like the release it starts with everywhere outside
+    matching, as it always did, and matching never reads it against a range, only against the exact builds an advisory lists."""
+    text = None
+
+
+def build_key(value):
+    """The normalized text of one exact build, for equality only: lower case, no "v" prefix, no leading zeros in a number, parentheses kept
+    ("15.2(4)M7" -> "15.2(4)m7", "17.09.04a" -> "17.9.4a"). None for text that is not one build (empty, too long, spaces or other words)."""
+    text = str(value or "").strip().lower().replace("\\", "")
+    if text[:1] == "v" and text[1:2].isdigit():
+        text = text[1:]
+    text = _LEADING_ZEROS_RE.sub("", text)
+    return text if len(text) <= MAX_BUILD_LENGTH and _BUILD_KEY_RE.match(text) else None
+
+
+def build_keys(value):
+    """Every key the build ``value`` is listed under: its own, and for a build whose parenthesised part and suffix are numbers (ASA's
+    "9.16(4)18", "9.8(4)") the dotted form the advisories use ("9.16.4.18", "9.8.4")."""
+    key = build_key(value)
+    if not key:
+        return []
+    digits = _DIGIT_BUILD_RE.match(key)
+    return [key] + ([".".join(p for p in digits.groups() if p)] if digits else [])
+
+
 def _vcmp(a, b):
     """Compare two version tuples, zero-padded so (1,18) == (1,18,0)."""
     n = max(len(a), len(b))
@@ -149,8 +193,10 @@ def _vcmp(a, b):
 def version_in_range(ver, rng):
     """Return True / False / None(unknown) for ver within an affected range dict. A range with no usable bound is unknown,
     never "in range": only a real bound can put a version inside it."""
-    if ver is None or isinstance(rng, _Unpaired):
-        return None  # a bound that pairing could not place (``pair_split_ranges``) says nothing certain about any version
+    if ver is None or isinstance(rng, _Unpaired) or isinstance(ver, _Build):
+        # a bound that pairing could not place (``pair_split_ranges``) says nothing certain about any version, and a parenthesised build is
+        # never placed inside a range by its first numbers (``item_verdict`` compares it with the listed builds)
+        return None
     if str(rng.get("type") or "SEMVER").upper() not in ("SEMVER", "ECOSYSTEM"):
         return None  # a GIT range is commit hashes: it cannot be compared with a version
     bounds = [(rng.get(key), parse_version(rng.get(key), strict=True)) for key in ("introduced", "fixed", "lastAffected")]
@@ -445,6 +491,12 @@ def clean_affected(value):
         ranges = item.get("ranges")
         if ranges is not None:
             item = {**item, "ranges": [r for r in ranges[:MAX_RANGES_PER_ITEM] if isinstance(r, dict)] if isinstance(ranges, list) else []}
+        if "builds" in item:  # the exact builds the advisory lists (cveFeed.intel.convert_affected), each a ``build_key``
+            builds = item["builds"]
+            builds = [b for b in (build_key(b) for b in builds[:MAX_BUILDS_PER_ITEM] if isinstance(b, str)) if b] if isinstance(builds, list) else []
+            item = {**item, "builds": list(dict.fromkeys(builds))}
+            if not item["builds"]:
+                del item["builds"]
         out.append(item)
     return out
 
@@ -487,8 +539,42 @@ def _vendor_ok(item, *hints):
     return not vendor or any(h in vendor or vendor in h for h in hints)
 
 
-# alias target -> vendor words that must appear when the item names a vendor (Oracle's "HTTP Server" is not Apache's)
-_ALIAS_VENDOR = {"httpserver": ("apache",), "apache2": ("apache",), "bind9": ("isc",)}
+# alias target -> vendor words that must appear when the item names a vendor (Oracle's "HTTP Server" is not Apache's, Apple's iOS is not
+# Cisco's IOS)
+_ALIAS_VENDOR = {"httpserver": ("apache",), "apache2": ("apache",), "bind9": ("isc",), "ios": ("cisco",)}
+# what a feed writes for a vendor it does not name
+_NO_VENDOR = frozenset({"na", "unknown", "none", "unspecified"})
+
+
+def _named_vendor(tech_token, product_token):
+    """The vendor words a discovered name puts in front of the product it matched, and that the product's own name does not carry: "cisco"
+    for "Cisco IOS" matched to "IOS", nothing for "Cisco IOS XE Software" matched to itself. Empty when the name names no vendor."""
+    product_words = {w for words in _words_for(product_token) for w in words}
+    for words in _words_for(tech_token):
+        lead = []
+        for word in words[:-1]:
+            if word not in VENDOR_PREFIX_WORDS or word in product_words:
+                break
+            lead.append(word)
+        if lead:
+            return tuple(lead)
+    return ()
+
+
+def _named_vendor_ok(tech_token, product_token, item):
+    """Whether the vendor a discovered name gives ("Cisco IOS") agrees with the vendor the affected entry names. A vendor word lets a name
+    match the bare product ("IOS"), so it must be that vendor's product: Apple's iOS is not Cisco's IOS. An entry with no vendor, or whose
+    vendor is the project itself ("nginx" for nginx, "getbootstrap" for bootstrap), is not contradicted."""
+    lead = _named_vendor(tech_token, product_token)
+    if not lead:
+        return True
+    vendor = _norm(item.get("vendor"), True)
+    if not vendor or vendor in _NO_VENDOR:
+        return True
+    named = "".join(lead)
+    if named in vendor or vendor in named or any(len(w) >= 3 and w in vendor for w in lead):
+        return True
+    return product_token in vendor
 
 
 def _item_hits(item, token, aliases=(), cpe_product=None, cpe_vendor=""):
@@ -503,7 +589,7 @@ def _item_hits(item, token, aliases=(), cpe_product=None, cpe_vendor=""):
         if not _vendor_ok(item, cpe_vendor, cpe_vendor[:6]) or not item.get("vendor"):
             return False
     tokens = affected_product_tokens(item)
-    if any(name_matches_token(token, t) for t in tokens):
+    if any(name_matches_token(token, t) and _named_vendor_ok(token, t, item) for t in tokens):
         return True
     for alias in aliases:
         if alias in tokens and (alias not in _ALIAS_VENDOR or _vendor_ok(item, *_ALIAS_VENDOR[alias])):
@@ -635,8 +721,8 @@ def range_verdict(ver, ranges):
     ``no_lower_bound`` is True when the answer came from a fix-only branch list (``fix_only_branch_verdict``). One entry with no usable
     bound is unknown. Main correlation and the WordPress matcher both decide through this, so they cannot read a range list differently."""
     prepared = prepared_ranges(ranges)
-    if not prepared:
-        return None, None, False
+    if not prepared or isinstance(ver, _Build):
+        return None, None, False  # a parenthesised build is compared only with listed builds (``item_verdict``)
     if fix_only_branch_list(prepared):
         # no lower bounds were published: each fix is compared only with the releases of its own line (issue 205)
         result, fixed = fix_only_branch_verdict(ver, prepared)
@@ -648,6 +734,49 @@ def range_verdict(ver, ranges):
             return True, {k: str(v)[:60] for k, v in rng.items() if k in ("introduced", "fixed", "lastAffected")}, False
         unknown = unknown or result is None
     return (None if unknown else False), None, False
+
+
+def range_holds(version, rng):
+    """True / False / None for the version text ``version`` against one range a match was decided on (``evidence['range']``): an exact build
+    (``{"build": ...}``) holds only that build, any other range is read as ``version_in_range`` reads it."""
+    if isinstance(rng, dict) and rng.get("build"):
+        keys = build_keys(version)
+        return (build_key(rng["build"]) in keys) if keys else None
+    return version_in_range(parse_version(version), rng or {})
+
+
+def _exact_single(rng):
+    """A range that is one exact version (``introduced`` == ``lastAffected``, no fix): how one listed build is written as a range."""
+    return isinstance(rng, dict) and bool(rng.get("introduced")) and rng.get("introduced") == rng.get("lastAffected") and not rng.get("fixed")
+
+
+def item_verdict(ver, item, raw=None):
+    """``range_verdict`` for one affected entry, with the exact builds it lists (``builds``, see cveFeed.intel.convert_affected).
+
+    ``raw`` is the version text as read (``ver`` parsed from it). A version that is one of the listed builds is in range. An entry that lists
+    exact builds and no other range is a closed list: a version that is not on it is not in range (15.2(4)M8 against a list holding
+    15.2(4)M7), whatever its numbers. A parenthesised build (``_Build``) is never read against a range: it is in range only as a listed build
+    or a bound of exactly that build, and unknown against any other range. Without ``raw`` text an entry's ranges decide, as before."""
+    ranges = [r for r in item.get("ranges") or [] if isinstance(r, dict)]
+    builds = item.get("builds") if isinstance(item.get("builds"), list) else []
+    keys = build_keys(raw if raw is not None else getattr(ver, "text", None))
+    if keys:
+        listed = set(builds)
+        hit = next((k for k in keys if k in listed), None)
+        if hit:
+            return True, {"build": hit}, False
+        if isinstance(ver, _Build):
+            for rng in ranges:  # a bound that names exactly this build ("through 2.90(AAHK.2)C0")
+                for bound in ("introduced", "lastAffected"):
+                    if rng.get(bound) and build_key(rng[bound]) in keys and str(rng.get("type") or "SEMVER").upper() in ("SEMVER", "ECOSYSTEM"):
+                        return True, {k: str(v)[:60] for k, v in rng.items() if k in ("introduced", "fixed", "lastAffected")}, False
+        if listed:
+            ranges = [r for r in ranges if not (_exact_single(r) and build_key(r["introduced"]) in listed)]
+            if not ranges:
+                return False, None, False  # a closed list of builds, and this version is not on it
+    if isinstance(ver, _Build):
+        return None, None, False
+    return range_verdict(ver, ranges)
 
 
 def _is_branch_range(rng):
@@ -670,6 +799,8 @@ def branch_unlisted(ver, ranges):
     """True when ``ver`` is older than every branch a branch-by-branch advisory lists. Such an advisory names only the branches
     that received a fix; an older branch is not cleared by it (end-of-life releases never get a fix, so are usually still
     exposed), so the answer for it is "unknown", not "not in range"."""
+    if isinstance(ver, _Build):
+        return False  # a parenthesised build is never placed by its first numbers
     lowest = lowest_listed_branch(ranges)
     return bool(lowest and ver and _vcmp(ver[:len(lowest)], lowest) < 0)
 
@@ -713,7 +844,7 @@ def fix_only_branch_verdict(ver, ranges):
     return None, None
 
 
-def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, details=None):
+def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, details=None, raw=None):
     """Yield (cve, matched_product, in_range) for CVEs plausibly affecting a
     discovered product `token` (normalized) at version `ver` (tuple or None).
 
@@ -722,7 +853,8 @@ def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, deta
     product:version') names the product exactly; it is tried first and the name match is the fallback.
 
     ``details``, when given, is a dict that receives ``{cve.id: {"affected_index", "range"}}``: which affected entry and which
-    range decided the result (the evidence stored on the match).
+    range decided the result (the evidence stored on the match). ``raw`` is the version text ``ver`` was read from: with it a version is
+    also compared with the exact builds an entry lists (``item_verdict``).
 
     Reads only the pre-built product_index / cve_by_id; shared by the technology
     fingerprint path and the nmap/Port service path so both score identically.
@@ -751,7 +883,7 @@ def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, deta
         if ver is not None:
             in_range, unknown = False, False
             for index, item in hit:
-                result, rng, no_lower_bound = range_verdict(ver, item.get("ranges") or [])
+                result, rng, no_lower_bound = item_verdict(ver, item, raw)
                 if result is True:
                     in_range = True
                     matched_product = item.get("product") or item.get("package") or name
@@ -891,7 +1023,7 @@ def _record_matches(subdomain, name, version, token, source, product_index,
     found = 0
     details = {}
     for cve, matched_product, in_range in _match_candidates(
-            name, ver, token, product_index, cve_by_id, cpe=cpe, details=details):
+            name, ver, token, product_index, cve_by_id, cpe=cpe, details=details, raw=version):
         confidence = confidence_for(ver, in_range, cve.kev)
         if confidence_cap is not None and confidence > 0.0:
             confidence = min(confidence, confidence_cap)  # how far the version itself can be trusted (a library's file-name hint)
