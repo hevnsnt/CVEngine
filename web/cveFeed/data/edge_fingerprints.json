@@ -1,0 +1,3282 @@
+{
+ "schema": 1,
+ "updated": "2026-11-17",
+ "description": "The fingerprints that pin the build of an internet-facing VPN or edge appliance from outside (cveFeed.version_catalogue, the edge entries): a build string or a header a static asset carries, and the published table that maps it to a release. Every table names its source, the commit or document it was read from, and its licence; every entry cites the line it was read from. An entry whose fingerprint maps to one release gives an exact reading; one that maps to several (a date several releases share, a build line) gives a range, which is an inference and is never matched as a version inside an affected range. Add an entry only from a public source whose licence allows it, and say which. Products left out (no public fingerprint with a compatible licence, or no reliable one): Cisco ASA and FTD, SonicWall SMA and SSL-VPN, F5 BIG-IP, Check Point, MOVEit Transfer, Sophos XG (docs/PIPELINE.md, Edge appliance builds).",
+ "products": {
+  "netscaler": {
+   "labels": [
+    "NetScaler ADC",
+    "NetScaler Gateway"
+   ],
+   "names": [
+    [
+     "citrix",
+     "netscaler adc"
+    ],
+    [
+     "citrix",
+     "netscaler gateway"
+    ],
+    [
+     "citrix",
+     "netscaler application delivery controller"
+    ],
+    [
+     "netscaler",
+     "netscaler adc"
+    ],
+    [
+     "netscaler",
+     "netscaler gateway"
+    ],
+    [
+     "citrix",
+     "application delivery controller"
+    ],
+    [
+     "citrix",
+     "gateway"
+    ]
+   ],
+   "note": "One firmware serves both products: a build is read as both, and each CVE is matched against the product its record names (NVD: citrix:netscaler_application_delivery_controller, citrix:netscaler_gateway; the CNA's records: NetScaler ADC, NetScaler Gateway)."
+  },
+  "pan-os": {
+   "labels": [
+    "PAN-OS"
+   ],
+   "names": [
+    [
+     "palo alto networks",
+     "pan-os"
+    ],
+    [
+     "paloaltonetworks",
+     "pan-os"
+    ]
+   ],
+   "note": "NVD: paloaltonetworks:pan-os; the CNA's records: Palo Alto Networks PAN-OS."
+  },
+  "fortios": {
+   "labels": [
+    "FortiOS"
+   ],
+   "names": [
+    [
+     "fortinet",
+     "fortios"
+    ]
+   ],
+   "note": "NVD and the CNA: fortinet:fortios / Fortinet FortiOS."
+  },
+  "connect-secure": {
+   "labels": [
+    "Pulse Connect Secure"
+   ],
+   "names": [
+    [
+     "ivanti",
+     "connect secure"
+    ],
+    [
+     "ivanti",
+     "pulse connect secure"
+    ],
+    [
+     "pulsesecure",
+     "pulse connect secure"
+    ],
+    [
+     "pulse secure",
+     "pulse connect secure"
+    ],
+    [
+     "",
+     "pulse connect secure"
+    ],
+    [
+     "ivanti",
+     "ivanti connect secure"
+    ]
+   ],
+   "note": "NVD: ivanti:connect_secure, pulsesecure:pulse_connect_secure; the CNA's records: Ivanti Connect Secure, and Pulse Connect Secure with no vendor."
+  }
+ },
+ "tables": {
+  "netscaler_rdx_stamp": {
+   "what": "The gzip header timestamp (MTIME, bytes 4 to 8, little-endian) of /vpn/js/rdx/core/lang/rdx_en.json.gz: the build time of the NetScaler firmware that serves it. One timestamp, one build.",
+   "source": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py",
+   "method": "https://www.fox-it.com/nl/research/cve-2022-27510-cve-2022-27518-measuring-citrix-adc-gateway-version-adoption-on-the-internet/",
+   "licence": "Apache-2.0",
+   "licence_url": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/LICENSE",
+   "notice": "Derived from Fox-IT's citrix-netscaler-triage (Apache License 2.0). Changes: the CSV in the script was converted to JSON, and its rows whose version is 'unknown' were left out.",
+   "entries": [
+    {
+     "stamp": 1535167752,
+     "built": "2018-08-25T03:29:12Z",
+     "version": "12.1-49.23",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L48"
+    },
+    {
+     "stamp": 1539712460,
+     "built": "2018-10-16T17:54:20Z",
+     "version": "12.1-49.37",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L49"
+    },
+    {
+     "stamp": 1543395386,
+     "built": "2018-11-28T08:56:26Z",
+     "version": "12.1-50.28",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L50"
+    },
+    {
+     "stamp": 1547833294,
+     "built": "2019-01-18T17:41:34Z",
+     "version": "12.1-50.31",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L51"
+    },
+    {
+     "stamp": 1551259802,
+     "built": "2019-02-27T09:30:02Z",
+     "version": "12.1-51.16",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L53"
+    },
+    {
+     "stamp": 1553553428,
+     "built": "2019-03-25T22:37:08Z",
+     "version": "12.1-51.19",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L54"
+    },
+    {
+     "stamp": 1557769307,
+     "built": "2019-05-13T17:41:47Z",
+     "version": "13.0-36.27",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L56"
+    },
+    {
+     "stamp": 1568102085,
+     "built": "2019-09-10T07:54:45Z",
+     "version": "13.0-41.20",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L59"
+    },
+    {
+     "stamp": 1570800276,
+     "built": "2019-10-11T13:24:36Z",
+     "version": "13.0-41.28",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L62"
+    },
+    {
+     "stamp": 1572931127,
+     "built": "2019-11-05T05:18:47Z",
+     "version": "12.1-55.13",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L63"
+    },
+    {
+     "stamp": 1574967982,
+     "built": "2019-11-28T19:06:22Z",
+     "version": "13.0-47.22",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L64"
+    },
+    {
+     "stamp": 1579181764,
+     "built": "2020-01-16T13:36:04Z",
+     "version": "11.1-63.15",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L65"
+    },
+    {
+     "stamp": 1579524387,
+     "built": "2020-01-20T12:46:27Z",
+     "version": "12.1-55.18",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L66"
+    },
+    {
+     "stamp": 1579525745,
+     "built": "2020-01-20T13:09:05Z",
+     "version": "13.0-47.24",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L67"
+    },
+    {
+     "stamp": 1582900076,
+     "built": "2020-02-28T14:27:56Z",
+     "version": "12.1-55.24",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L68"
+    },
+    {
+     "stamp": 1584639643,
+     "built": "2020-03-19T17:40:43Z",
+     "version": "13.0-52.24",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L70"
+    },
+    {
+     "stamp": 1585473032,
+     "built": "2020-03-29T09:10:32Z",
+     "version": "12.1-56.22",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L71"
+    },
+    {
+     "stamp": 1590994121,
+     "built": "2020-06-01T06:48:41Z",
+     "version": "13.0-58.30",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L72"
+    },
+    {
+     "stamp": 1591024587,
+     "built": "2020-06-01T15:16:27Z",
+     "version": "12.0-63.21",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L73"
+    },
+    {
+     "stamp": 1591064853,
+     "built": "2020-06-02T02:27:33Z",
+     "version": "11.1-64.14",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L74"
+    },
+    {
+     "stamp": 1591729615,
+     "built": "2020-06-09T19:06:55Z",
+     "version": "12.1-57.18",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L75"
+    },
+    {
+     "stamp": 1593707893,
+     "built": "2020-07-02T16:38:13Z",
+     "version": "13.0-58.32",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L76"
+    },
+    {
+     "stamp": 1595447367,
+     "built": "2020-07-22T19:49:27Z",
+     "version": "13.0-61.48",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L77"
+    },
+    {
+     "stamp": 1596099904,
+     "built": "2020-07-30T09:05:04Z",
+     "version": "13.0-61.48",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L78"
+    },
+    {
+     "stamp": 1597416844,
+     "built": "2020-08-14T14:54:04Z",
+     "version": "12.1-58.14",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L79"
+    },
+    {
+     "stamp": 1598960821,
+     "built": "2020-09-01T11:47:01Z",
+     "version": "12.1-58.15",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L80"
+    },
+    {
+     "stamp": 1598976896,
+     "built": "2020-09-01T16:14:56Z",
+     "version": "13.0-64.35",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L81"
+    },
+    {
+     "stamp": 1599733618,
+     "built": "2020-09-10T10:26:58Z",
+     "version": "11.1-65.12",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L82"
+    },
+    {
+     "stamp": 1600737705,
+     "built": "2020-09-22T01:21:45Z",
+     "version": "12.1-59.16",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L83"
+    },
+    {
+     "stamp": 1602086829,
+     "built": "2020-10-07T16:07:09Z",
+     "version": "13.0-67.39",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L84"
+    },
+    {
+     "stamp": 1602147782,
+     "built": "2020-10-08T09:03:02Z",
+     "version": "12.1-55.190",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L85"
+    },
+    {
+     "stamp": 1604484881,
+     "built": "2020-11-04T10:14:41Z",
+     "version": "12.1-60.16",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L86"
+    },
+    {
+     "stamp": 1605272190,
+     "built": "2020-11-13T12:56:30Z",
+     "version": "13.0-67.43",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L87"
+    },
+    {
+     "stamp": 1606224413,
+     "built": "2020-11-24T13:26:53Z",
+     "version": "13.0-67.43",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L89"
+    },
+    {
+     "stamp": 1606972406,
+     "built": "2020-12-03T05:13:26Z",
+     "version": "13.0-71.40",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L90"
+    },
+    {
+     "stamp": 1609009448,
+     "built": "2020-12-26T19:04:08Z",
+     "version": "13.0-71.44",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L91"
+    },
+    {
+     "stamp": 1609011565,
+     "built": "2020-12-26T19:39:25Z",
+     "version": "12.1-60.19",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L92"
+    },
+    {
+     "stamp": 1609729665,
+     "built": "2021-01-04T03:07:45Z",
+     "version": "12.1-55.210",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L93"
+    },
+    {
+     "stamp": 1612272966,
+     "built": "2021-02-02T13:36:06Z",
+     "version": "12.1-61.18",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L95"
+    },
+    {
+     "stamp": 1613673469,
+     "built": "2021-02-18T18:37:49Z",
+     "version": "13.0-76.29",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L96"
+    },
+    {
+     "stamp": 1615224221,
+     "built": "2021-03-08T17:23:41Z",
+     "version": "12.1-61.19",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L97"
+    },
+    {
+     "stamp": 1615281639,
+     "built": "2021-03-09T09:20:39Z",
+     "version": "13.0-76.31",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L98"
+    },
+    {
+     "stamp": 1615477570,
+     "built": "2021-03-11T15:46:10Z",
+     "version": "12.1-61.19",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L99"
+    },
+    {
+     "stamp": 1617632002,
+     "built": "2021-04-05T14:13:22Z",
+     "version": "13.0-79.64",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L100"
+    },
+    {
+     "stamp": 1620657482,
+     "built": "2021-05-10T14:38:02Z",
+     "version": "12.1-62.21",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L101"
+    },
+    {
+     "stamp": 1621266971,
+     "built": "2021-05-17T15:56:11Z",
+     "version": "12.1-62.23",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L103"
+    },
+    {
+     "stamp": 1622313211,
+     "built": "2021-05-29T18:33:31Z",
+     "version": "11.1-65.20",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L104"
+    },
+    {
+     "stamp": 1622469918,
+     "built": "2021-05-31T14:05:18Z",
+     "version": "13.0-82.41",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L105"
+    },
+    {
+     "stamp": 1623352880,
+     "built": "2021-06-10T19:21:20Z",
+     "version": "13.0-82.42",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L106"
+    },
+    {
+     "stamp": 1623368345,
+     "built": "2021-06-10T23:39:05Z",
+     "version": "12.1-62.25",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L107"
+    },
+    {
+     "stamp": 1625622338,
+     "built": "2021-07-07T01:45:38Z",
+     "version": "12.1-62.27",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L109"
+    },
+    {
+     "stamp": 1625638831,
+     "built": "2021-07-07T06:20:31Z",
+     "version": "11.1-65.22",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L110"
+    },
+    {
+     "stamp": 1626453956,
+     "built": "2021-07-16T16:45:56Z",
+     "version": "13.0-82.45",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L111"
+    },
+    {
+     "stamp": 1631259090,
+     "built": "2021-09-10T07:31:30Z",
+     "version": "13.1-4.43",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L112"
+    },
+    {
+     "stamp": 1632751280,
+     "built": "2021-09-27T14:01:20Z",
+     "version": "13.0-83.27",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L113"
+    },
+    {
+     "stamp": 1633526754,
+     "built": "2021-10-06T13:25:54Z",
+     "version": "13.1-9.52",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L114"
+    },
+    {
+     "stamp": 1634064549,
+     "built": "2021-10-12T18:49:09Z",
+     "version": "11.1-65.23",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L116"
+    },
+    {
+     "stamp": 1634113449,
+     "built": "2021-10-13T08:24:09Z",
+     "version": "12.1-63.22",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L117"
+    },
+    {
+     "stamp": 1636641773,
+     "built": "2021-11-11T14:42:53Z",
+     "version": "13.1-4.44",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L118"
+    },
+    {
+     "stamp": 1636650155,
+     "built": "2021-11-11T17:02:35Z",
+     "version": "13.0-83.29",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L119"
+    },
+    {
+     "stamp": 1636661207,
+     "built": "2021-11-11T20:06:47Z",
+     "version": "12.1-63.23",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L120"
+    },
+    {
+     "stamp": 1637163803,
+     "built": "2021-11-17T15:43:23Z",
+     "version": "13.1-9.60",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L121"
+    },
+    {
+     "stamp": 1637905276,
+     "built": "2021-11-26T05:41:16Z",
+     "version": "13.1-9.107",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L122"
+    },
+    {
+     "stamp": 1638969245,
+     "built": "2021-12-08T13:14:05Z",
+     "version": "13.1-9.112",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L123"
+    },
+    {
+     "stamp": 1639153035,
+     "built": "2021-12-10T16:17:15Z",
+     "version": "13.1-12.50",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L124"
+    },
+    {
+     "stamp": 1639162109,
+     "built": "2021-12-10T18:48:29Z",
+     "version": "13.0-84.10",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L125"
+    },
+    {
+     "stamp": 1639730895,
+     "built": "2021-12-17T08:48:15Z",
+     "version": "13.1-12.103",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L126"
+    },
+    {
+     "stamp": 1640166898,
+     "built": "2021-12-22T09:54:58Z",
+     "version": "12.1-63.24",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L127"
+    },
+    {
+     "stamp": 1640186329,
+     "built": "2021-12-22T15:18:49Z",
+     "version": "13.0-84.11",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L129"
+    },
+    {
+     "stamp": 1640248123,
+     "built": "2021-12-23T08:28:43Z",
+     "version": "13.1-12.51",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L130"
+    },
+    {
+     "stamp": 1642646201,
+     "built": "2022-01-20T02:36:41Z",
+     "version": "12.1-64.16",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L131"
+    },
+    {
+     "stamp": 1643350935,
+     "built": "2022-01-28T06:22:15Z",
+     "version": "12.1-55.265",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L132"
+    },
+    {
+     "stamp": 1645447769,
+     "built": "2022-02-21T12:49:29Z",
+     "version": "13.1-17.42",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L133"
+    },
+    {
+     "stamp": 1646925462,
+     "built": "2022-03-10T15:17:42Z",
+     "version": "13.0-85.15",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L135"
+    },
+    {
+     "stamp": 1648241342,
+     "built": "2022-03-25T20:49:02Z",
+     "version": "13.1-12.117",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L136"
+    },
+    {
+     "stamp": 1648963108,
+     "built": "2022-04-03T05:18:28Z",
+     "version": "12.1-55.276",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L138"
+    },
+    {
+     "stamp": 1649311904,
+     "built": "2022-04-07T06:11:44Z",
+     "version": "13.1-21.50",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L139"
+    },
+    {
+     "stamp": 1650526474,
+     "built": "2022-04-21T07:34:34Z",
+     "version": "12.1-55.278",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L140"
+    },
+    {
+     "stamp": 1650537528,
+     "built": "2022-04-21T10:38:48Z",
+     "version": "12.1-64.17",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L141"
+    },
+    {
+     "stamp": 1650655111,
+     "built": "2022-04-22T19:18:31Z",
+     "version": "12.1-65.15",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L142"
+    },
+    {
+     "stamp": 1652100881,
+     "built": "2022-05-09T12:54:41Z",
+     "version": "13.1-12.130",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L143"
+    },
+    {
+     "stamp": 1652947813,
+     "built": "2022-05-19T08:10:13Z",
+     "version": "13.0-85.19",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L144"
+    },
+    {
+     "stamp": 1653569469,
+     "built": "2022-05-26T12:51:09Z",
+     "version": "13.1-24.38",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L145"
+    },
+    {
+     "stamp": 1655226228,
+     "built": "2022-06-14T17:03:48Z",
+     "version": "13.0-86.17",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L146"
+    },
+    {
+     "stamp": 1656510368,
+     "built": "2022-06-29T13:46:08Z",
+     "version": "12.1-65.17",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L147"
+    },
+    {
+     "stamp": 1657097682,
+     "built": "2022-07-06T08:54:42Z",
+     "version": "12.1-55.282",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L148"
+    },
+    {
+     "stamp": 1657104103,
+     "built": "2022-07-06T10:41:43Z",
+     "version": "13.1-27.59",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L149"
+    },
+    {
+     "stamp": 1657655579,
+     "built": "2022-07-12T19:52:59Z",
+     "version": "13.1-12.131",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L150"
+    },
+    {
+     "stamp": 1659116392,
+     "built": "2022-07-29T17:39:52Z",
+     "version": "13.0-87.9",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L151"
+    },
+    {
+     "stamp": 1661353021,
+     "built": "2022-08-24T14:57:01Z",
+     "version": "13.1-30.52",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L152"
+    },
+    {
+     "stamp": 1662371872,
+     "built": "2022-09-05T09:57:52Z",
+     "version": "13.1-30.103",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L153"
+    },
+    {
+     "stamp": 1662553033,
+     "built": "2022-09-07T12:17:13Z",
+     "version": "13.1-30.105",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L154"
+    },
+    {
+     "stamp": 1663959215,
+     "built": "2022-09-23T18:53:35Z",
+     "version": "13.1-33.47",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L155"
+    },
+    {
+     "stamp": 1664281882,
+     "built": "2022-09-27T12:31:22Z",
+     "version": "13.1-30.108",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L156"
+    },
+    {
+     "stamp": 1664513221,
+     "built": "2022-09-30T04:47:01Z",
+     "version": "13.1-30.109",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L157"
+    },
+    {
+     "stamp": 1664885015,
+     "built": "2022-10-04T12:03:35Z",
+     "version": "13.1-30.111",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L158"
+    },
+    {
+     "stamp": 1664899863,
+     "built": "2022-10-04T16:11:03Z",
+     "version": "12.1-65.21",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L159"
+    },
+    {
+     "stamp": 1665559544,
+     "built": "2022-10-12T07:25:44Z",
+     "version": "12.1-55.289",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L160"
+    },
+    {
+     "stamp": 1665594088,
+     "built": "2022-10-12T17:01:28Z",
+     "version": "13.1-33.49",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L161"
+    },
+    {
+     "stamp": 1665767445,
+     "built": "2022-10-14T17:10:45Z",
+     "version": "13.0-88.12",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L162"
+    },
+    {
+     "stamp": 1667231699,
+     "built": "2022-10-31T15:54:59Z",
+     "version": "13.0-88.13",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L163"
+    },
+    {
+     "stamp": 1667233903,
+     "built": "2022-10-31T16:31:43Z",
+     "version": "13.1-33.51",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L164"
+    },
+    {
+     "stamp": 1667452925,
+     "built": "2022-11-03T05:22:05Z",
+     "version": "13.0-88.14",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L165"
+    },
+    {
+     "stamp": 1667453909,
+     "built": "2022-11-03T05:38:29Z",
+     "version": "13.1-33.52",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L166"
+    },
+    {
+     "stamp": 1668678940,
+     "built": "2022-11-17T09:55:40Z",
+     "version": "13.1-33.54",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L169"
+    },
+    {
+     "stamp": 1668681438,
+     "built": "2022-11-17T10:37:18Z",
+     "version": "13.0-88.16",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L170"
+    },
+    {
+     "stamp": 1669203751,
+     "built": "2022-11-23T11:42:31Z",
+     "version": "13.1-37.38",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L171"
+    },
+    {
+     "stamp": 1669636505,
+     "built": "2022-11-28T11:55:05Z",
+     "version": "12.1-55.291",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L172"
+    },
+    {
+     "stamp": 1669808545,
+     "built": "2022-11-30T11:42:25Z",
+     "version": "12.1-65.25",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L173"
+    },
+    {
+     "stamp": 1669891705,
+     "built": "2022-12-01T10:48:25Z",
+     "version": "13.1-30.114",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L174"
+    },
+    {
+     "stamp": 1671033279,
+     "built": "2022-12-14T15:54:39Z",
+     "version": "13.0-89.7",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L175"
+    },
+    {
+     "stamp": 1674582275,
+     "built": "2023-01-24T17:44:35Z",
+     "version": "13.0-90.7",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L176"
+    },
+    {
+     "stamp": 1677072689,
+     "built": "2023-02-22T13:31:29Z",
+     "version": "13.1-42.47",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L177"
+    },
+    {
+     "stamp": 1680677853,
+     "built": "2023-04-05T06:57:33Z",
+     "version": "12.1-55.296",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L178"
+    },
+    {
+     "stamp": 1681286714,
+     "built": "2023-04-12T08:05:14Z",
+     "version": "13.1-45.61",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L179"
+    },
+    {
+     "stamp": 1681754964,
+     "built": "2023-04-17T18:09:24Z",
+     "version": "13.1-37.150",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L180"
+    },
+    {
+     "stamp": 1681918478,
+     "built": "2023-04-19T15:34:38Z",
+     "version": "13.0-90.11",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L181"
+    },
+    {
+     "stamp": 1682509375,
+     "built": "2023-04-26T11:42:55Z",
+     "version": "13.1-45.62",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L182"
+    },
+    {
+     "stamp": 1682714340,
+     "built": "2023-04-28T20:39:00Z",
+     "version": "12.1-65.35",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L183"
+    },
+    {
+     "stamp": 1682844871,
+     "built": "2023-04-30T08:54:31Z",
+     "version": "13.1-45.63",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L184"
+    },
+    {
+     "stamp": 1683866996,
+     "built": "2023-05-12T04:49:56Z",
+     "version": "13.0-91.12",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L185"
+    },
+    {
+     "stamp": 1683876838,
+     "built": "2023-05-12T07:33:58Z",
+     "version": "13.1-45.64",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L186"
+    },
+    {
+     "stamp": 1684146224,
+     "built": "2023-05-15T10:23:44Z",
+     "version": "13.0-90.12",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L187"
+    },
+    {
+     "stamp": 1685777750,
+     "built": "2023-06-03T07:35:50Z",
+     "version": "13.1-48.47",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L188"
+    },
+    {
+     "stamp": 1688743976,
+     "built": "2023-07-07T15:32:56Z",
+     "version": "13.0-91.13",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L189"
+    },
+    {
+     "stamp": 1688746627,
+     "built": "2023-07-07T16:17:07Z",
+     "version": "13.1-37.159",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L191"
+    },
+    {
+     "stamp": 1688747367,
+     "built": "2023-07-07T16:29:27Z",
+     "version": "12.1-55.297",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L192"
+    },
+    {
+     "stamp": 1688954279,
+     "built": "2023-07-10T01:57:59Z",
+     "version": "13.1-49.101",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L193"
+    },
+    {
+     "stamp": 1689014191,
+     "built": "2023-07-10T18:36:31Z",
+     "version": "13.1-49.13",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L194"
+    },
+    {
+     "stamp": 1689059677,
+     "built": "2023-07-11T07:14:37Z",
+     "version": "13.1-49.102",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L195"
+    },
+    {
+     "stamp": 1689827785,
+     "built": "2023-07-20T04:36:25Z",
+     "version": "13.1-49.106",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L196"
+    },
+    {
+     "stamp": 1690503901,
+     "built": "2023-07-28T00:25:01Z",
+     "version": "14.1-4.42",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L197"
+    },
+    {
+     "stamp": 1693379034,
+     "built": "2023-08-30T07:03:54Z",
+     "version": "13.0-92.18",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L198"
+    },
+    {
+     "stamp": 1694760036,
+     "built": "2023-09-15T06:40:36Z",
+     "version": "14.1-8.50",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L199"
+    },
+    {
+     "stamp": 1695273924,
+     "built": "2023-09-21T05:25:24Z",
+     "version": "13.0-92.19",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L200"
+    },
+    {
+     "stamp": 1695277021,
+     "built": "2023-09-21T06:17:01Z",
+     "version": "13.1-49.15",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L201"
+    },
+    {
+     "stamp": 1695284102,
+     "built": "2023-09-21T08:15:02Z",
+     "version": "12.1-65.37",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L202"
+    },
+    {
+     "stamp": 1695316368,
+     "built": "2023-09-21T17:12:48Z",
+     "version": "12.1-55.300",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L203"
+    },
+    {
+     "stamp": 1695817672,
+     "built": "2023-09-27T12:27:52Z",
+     "version": "13.1-37.164",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L204"
+    },
+    {
+     "stamp": 1697614024,
+     "built": "2023-10-18T07:27:04Z",
+     "version": "13.1-50.23",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L205"
+    },
+    {
+     "stamp": 1700677179,
+     "built": "2023-11-22T18:19:39Z",
+     "version": "14.1-12.30",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L206"
+    },
+    {
+     "stamp": 1701886543,
+     "built": "2023-12-06T18:15:43Z",
+     "version": "14.1-8.120",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L207"
+    },
+    {
+     "stamp": 1702035068,
+     "built": "2023-12-08T11:31:08Z",
+     "version": "14.1-12.34",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L208"
+    },
+    {
+     "stamp": 1702062640,
+     "built": "2023-12-08T19:10:40Z",
+     "version": "13.1-51.14",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L209"
+    },
+    {
+     "stamp": 1702548756,
+     "built": "2023-12-14T10:12:36Z",
+     "version": "13.0-92.21",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L210"
+    },
+    {
+     "stamp": 1702625218,
+     "built": "2023-12-15T07:26:58Z",
+     "version": "13.1-51.15",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L211"
+    },
+    {
+     "stamp": 1702631914,
+     "built": "2023-12-15T09:18:34Z",
+     "version": "14.1-12.35",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L212"
+    },
+    {
+     "stamp": 1702886392,
+     "built": "2023-12-18T07:59:52Z",
+     "version": "12.1-55.302",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L213"
+    },
+    {
+     "stamp": 1702908964,
+     "built": "2023-12-18T14:16:04Z",
+     "version": "12.1-65.39",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L214"
+    },
+    {
+     "stamp": 1704194696,
+     "built": "2024-01-02T11:24:56Z",
+     "version": "14.1-8.122",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L215"
+    },
+    {
+     "stamp": 1704428153,
+     "built": "2024-01-05T04:15:53Z",
+     "version": "13.1-37.176",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L216"
+    },
+    {
+     "stamp": 1707370491,
+     "built": "2024-02-08T05:34:51Z",
+     "version": "14.1-17.38",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L217"
+    },
+    {
+     "stamp": 1709227868,
+     "built": "2024-02-29T17:31:08Z",
+     "version": "13.1-52.19",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L218"
+    },
+    {
+     "stamp": 1713474810,
+     "built": "2024-04-18T21:13:30Z",
+     "version": "14.1-21.57",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L219"
+    },
+    {
+     "stamp": 1714132594,
+     "built": "2024-04-26T11:56:34Z",
+     "version": "12.1-55.304",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L220"
+    },
+    {
+     "stamp": 1714542524,
+     "built": "2024-05-01T05:48:44Z",
+     "version": "12.1-55.304",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L221"
+    },
+    {
+     "stamp": 1715618728,
+     "built": "2024-05-13T16:45:28Z",
+     "version": "13.1-53.17",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L222"
+    },
+    {
+     "stamp": 1715691351,
+     "built": "2024-05-14T12:55:51Z",
+     "version": "13.1-37.183",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L223"
+    },
+    {
+     "stamp": 1717831730,
+     "built": "2024-06-08T07:28:50Z",
+     "version": "14.1-25.53",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L224"
+    },
+    {
+     "stamp": 1718215257,
+     "built": "2024-06-12T18:00:57Z",
+     "version": "12.1-55.307",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L225"
+    },
+    {
+     "stamp": 1718362054,
+     "built": "2024-06-14T10:47:34Z",
+     "version": "13.1-37.188",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L226"
+    },
+    {
+     "stamp": 1719233060,
+     "built": "2024-06-24T12:44:20Z",
+     "version": "14.1-25.107",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L227"
+    },
+    {
+     "stamp": 1720089675,
+     "built": "2024-07-04T10:41:15Z",
+     "version": "13.0-92.31",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L228"
+    },
+    {
+     "stamp": 1720103560,
+     "built": "2024-07-04T14:32:40Z",
+     "version": "13.1-53.24",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L229"
+    },
+    {
+     "stamp": 1720110688,
+     "built": "2024-07-04T16:31:28Z",
+     "version": "14.1-25.56",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L230"
+    },
+    {
+     "stamp": 1720111773,
+     "built": "2024-07-04T16:49:33Z",
+     "version": "13.1-37.190",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L231"
+    },
+    {
+     "stamp": 1720159658,
+     "built": "2024-07-05T06:07:38Z",
+     "version": "14.1-25.108",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L232"
+    },
+    {
+     "stamp": 1720464791,
+     "built": "2024-07-08T18:53:11Z",
+     "version": "13.0-92.31",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L233"
+    },
+    {
+     "stamp": 1720473719,
+     "built": "2024-07-08T21:21:59Z",
+     "version": "12.1-55.309",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L234"
+    },
+    {
+     "stamp": 1721238815,
+     "built": "2024-07-17T17:53:35Z",
+     "version": "13.1-54.29",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L235"
+    },
+    {
+     "stamp": 1723114781,
+     "built": "2024-08-08T10:59:41Z",
+     "version": "14.1-29.63",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L236"
+    },
+    {
+     "stamp": 1723549420,
+     "built": "2024-08-13T11:43:40Z",
+     "version": "13.1-37.199",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L237"
+    },
+    {
+     "stamp": 1726488799,
+     "built": "2024-09-16T12:13:19Z",
+     "version": "13.1-55.29",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L238"
+    },
+    {
+     "stamp": 1728331888,
+     "built": "2024-10-07T20:11:28Z",
+     "version": "13.1-37.207",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L239"
+    },
+    {
+     "stamp": 1728334533,
+     "built": "2024-10-07T20:55:33Z",
+     "version": "12.1-55.321",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L240"
+    },
+    {
+     "stamp": 1728642184,
+     "built": "2024-10-11T10:23:04Z",
+     "version": "14.1-29.72",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L241"
+    },
+    {
+     "stamp": 1729543935,
+     "built": "2024-10-21T20:52:15Z",
+     "version": "12.1-55.321",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L242"
+    },
+    {
+     "stamp": 1729561034,
+     "built": "2024-10-22T01:37:14Z",
+     "version": "14.1-34.42",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L243"
+    },
+    {
+     "stamp": 1729777429,
+     "built": "2024-10-24T13:43:49Z",
+     "version": "13.1-55.34",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L244"
+    },
+    {
+     "stamp": 1730184925,
+     "built": "2024-10-29T06:55:25Z",
+     "version": "14.1-34.101",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L245"
+    },
+    {
+     "stamp": 1730996230,
+     "built": "2024-11-07T16:17:10Z",
+     "version": "13.1-56.18",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L246"
+    },
+    {
+     "stamp": 1732875663,
+     "built": "2024-11-29T10:21:03Z",
+     "version": "13.1-37.219",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L247"
+    },
+    {
+     "stamp": 1734369608,
+     "built": "2024-12-16T17:20:08Z",
+     "version": "14.1-38.53",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L248"
+    },
+    {
+     "stamp": 1737799969,
+     "built": "2025-01-25T10:12:49Z",
+     "version": "13.1-57.26",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L249"
+    },
+    {
+     "stamp": 1739236765,
+     "built": "2025-02-11T01:19:25Z",
+     "version": "12.1-55.325",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L250"
+    },
+    {
+     "stamp": 1739840877,
+     "built": "2025-02-18T01:07:57Z",
+     "version": "12.1-55.325",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L251"
+    },
+    {
+     "stamp": 1740156084,
+     "built": "2025-02-21T16:41:24Z",
+     "version": "14.1-43.50",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L252"
+    },
+    {
+     "stamp": 1741267150,
+     "built": "2025-03-06T13:19:10Z",
+     "version": "14.1-34.105",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L253"
+    },
+    {
+     "stamp": 1741944779,
+     "built": "2025-03-14T09:32:59Z",
+     "version": "14.1-34.107",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L254"
+    },
+    {
+     "stamp": 1743497009,
+     "built": "2025-04-01T08:43:29Z",
+     "version": "13.1-37.232",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L255"
+    },
+    {
+     "stamp": 1744121299,
+     "built": "2025-04-08T14:08:19Z",
+     "version": "13.1-58.21",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L256"
+    },
+    {
+     "stamp": 1744185164,
+     "built": "2025-04-09T07:52:44Z",
+     "version": "14.1-43.109",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L257"
+    },
+    {
+     "stamp": 1747159096,
+     "built": "2025-05-13T17:58:16Z",
+     "version": "14.1-47.40",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L258"
+    },
+    {
+     "stamp": 1747727322,
+     "built": "2025-05-20T07:48:42Z",
+     "version": "14.1-47.43",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L259"
+    },
+    {
+     "stamp": 1747814734,
+     "built": "2025-05-21T08:05:34Z",
+     "version": "14.1-47.44",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L260"
+    },
+    {
+     "stamp": 1749304395,
+     "built": "2025-06-07T13:53:15Z",
+     "version": "14.1-47.46",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L261"
+    },
+    {
+     "stamp": 1749552827,
+     "built": "2025-06-10T10:53:47Z",
+     "version": "14.1-43.56",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L262"
+    },
+    {
+     "stamp": 1749564145,
+     "built": "2025-06-10T14:02:25Z",
+     "version": "12.1-55.328",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L263"
+    },
+    {
+     "stamp": 1749572802,
+     "built": "2025-06-10T16:26:42Z",
+     "version": "13.1-37.235",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L264"
+    },
+    {
+     "stamp": 1749588747,
+     "built": "2025-06-10T20:52:27Z",
+     "version": "13.1-58.32",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L265"
+    },
+    {
+     "stamp": 1750134083,
+     "built": "2025-06-17T04:21:23Z",
+     "version": "12.1-55.328",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L266"
+    },
+    {
+     "stamp": 1750251851,
+     "built": "2025-06-18T13:04:11Z",
+     "version": "13.1-59.19",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L267"
+    },
+    {
+     "stamp": 1755692465,
+     "built": "2025-08-20T12:21:05Z",
+     "version": "12.1-55.330",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L268"
+    },
+    {
+     "stamp": 1755692615,
+     "built": "2025-08-20T12:23:35Z",
+     "version": "14.1-47.48",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L269"
+    },
+    {
+     "stamp": 1755693334,
+     "built": "2025-08-20T12:35:34Z",
+     "version": "13.1-37.241",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L270"
+    },
+    {
+     "stamp": 1755693886,
+     "built": "2025-08-20T12:44:46Z",
+     "version": "13.1-59.22",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L271"
+    },
+    {
+     "stamp": 1756174950,
+     "built": "2025-08-26T02:22:30Z",
+     "version": "12.1-55.330",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L272"
+    },
+    {
+     "stamp": 1756797107,
+     "built": "2025-09-02T07:11:47Z",
+     "version": "14.1-51.72",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L273"
+    },
+    {
+     "stamp": 1756913056,
+     "built": "2025-09-03T15:24:16Z",
+     "version": "13.1-60.26",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L274"
+    },
+    {
+     "stamp": 1756934296,
+     "built": "2025-09-03T21:18:16Z",
+     "version": "13.1-37.246",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L275"
+    },
+    {
+     "stamp": 1758114017,
+     "built": "2025-09-17T13:00:17Z",
+     "version": "13.1-37.247",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L276"
+    },
+    {
+     "stamp": 1758481087,
+     "built": "2025-09-21T18:58:07Z",
+     "version": "13.1-60.29",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L277"
+    },
+    {
+     "stamp": 1758572828,
+     "built": "2025-09-22T20:27:08Z",
+     "version": "14.1-51.80",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L278"
+    },
+    {
+     "stamp": 1760549260,
+     "built": "2025-10-15T17:27:40Z",
+     "version": "14.1-56.71",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L279"
+    },
+    {
+     "stamp": 1761904279,
+     "built": "2025-10-31T09:51:19Z",
+     "version": "13.1-37.250",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L280"
+    },
+    {
+     "stamp": 1761935980,
+     "built": "2025-10-31T18:39:40Z",
+     "version": "13.1-60.32",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L281"
+    },
+    {
+     "stamp": 1762655407,
+     "built": "2025-11-09T02:30:07Z",
+     "version": "14.1-56.74",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L282"
+    },
+    {
+     "stamp": 1762663520,
+     "built": "2025-11-09T04:45:20Z",
+     "version": "13.1-61.23",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L283"
+    },
+    {
+     "stamp": 1762830097,
+     "built": "2025-11-11T03:01:37Z",
+     "version": "12.1-55.333",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L284"
+    }
+   ]
+  },
+  "netscaler_vhash": {
+   "what": "The ?v= value the /vpn/index.html login page appends to its own resources (rdx.css?v=<32 hex>): a value per build. Not every build sends one.",
+   "source": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py",
+   "method": "https://www.fox-it.com/nl/research/cve-2022-27510-cve-2022-27518-measuring-citrix-adc-gateway-version-adoption-on-the-internet/",
+   "licence": "Apache-2.0",
+   "licence_url": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/LICENSE",
+   "notice": "Derived from Fox-IT's citrix-netscaler-triage (Apache License 2.0). Changes: the vhash column of the script's CSV, converted to JSON; rows with no vhash or an 'unknown' version left out.",
+   "entries": [
+    {
+     "vhash": "26df0e65fba681faaeb333058a8b28bf",
+     "version": "12.1-50.28",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L50"
+    },
+    {
+     "vhash": "d3b5c691a4cfcc6769da8dc4e40f511d",
+     "version": "12.1-50.31",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L51"
+    },
+    {
+     "vhash": "995a76005c128f4e89474af12ac0de66",
+     "version": "12.1-51.16",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L53"
+    },
+    {
+     "vhash": "d2bd166fed66cdf035a0778a09fd688c",
+     "version": "12.1-51.19",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L54"
+    },
+    {
+     "vhash": "86b4b2567b05dff896aae46d6e0765bc",
+     "version": "13.0-36.27",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L56"
+    },
+    {
+     "vhash": "43a8abf580ea09a5fa8aa1bd579280b9",
+     "version": "13.0-41.20",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L59"
+    },
+    {
+     "vhash": "7116ed70ec000da9267a019728ed951e",
+     "version": "13.0-41.28",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L62"
+    },
+    {
+     "vhash": "8c62b39f7068ea2f3d3f7d40860c0cd4",
+     "version": "12.1-55.13",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L63"
+    },
+    {
+     "vhash": "fedb4ba86b5edcbc86081f2893dc9fdf",
+     "version": "13.0-47.22",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L64"
+    },
+    {
+     "vhash": "02d30141fd053d5c3448bf04fbedb8d6",
+     "version": "12.1-55.18",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L66"
+    },
+    {
+     "vhash": "fd96bc8977256003de05ed84270b90bb",
+     "version": "13.0-47.24",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L67"
+    },
+    {
+     "vhash": "f787f9a8c05a502cd33f363e1e9934aa",
+     "version": "12.1-55.24",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L68"
+    },
+    {
+     "vhash": "e79f3bbf822c1fede6b5a1a4b6035a41",
+     "version": "13.0-52.24",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L70"
+    },
+    {
+     "vhash": "f2db014a3eb9790a19dfd71331e7f5d0",
+     "version": "12.1-56.22",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L71"
+    },
+    {
+     "vhash": "fdf2235967556bad892fbf29ca69eefd",
+     "version": "13.0-58.30",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L72"
+    },
+    {
+     "vhash": "4ecb5abf6e4b1655c07386a2c958597c",
+     "version": "12.1-57.18",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L75"
+    },
+    {
+     "vhash": "dcb06155d51a0234e9d127658ef9f21f",
+     "version": "13.0-58.32",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L76"
+    },
+    {
+     "vhash": "12c4901ecc3677aad06f678be49cb837",
+     "version": "13.0-61.48",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L77"
+    },
+    {
+     "vhash": "bf898768ad1e1d477fa649711c72c6df",
+     "version": "13.0-61.48",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L78"
+    },
+    {
+     "vhash": "a1494e2e09cb96e424c6c66512224941",
+     "version": "12.1-58.14",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L79"
+    },
+    {
+     "vhash": "b1b38debf0e55c285c72465da3715034",
+     "version": "12.1-58.15",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L80"
+    },
+    {
+     "vhash": "06fbfcf525e47b5538f856965154e28c",
+     "version": "13.0-64.35",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L81"
+    },
+    {
+     "vhash": "7a0c8874e93395c5e4f1ef3e5e600a25",
+     "version": "12.1-59.16",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L83"
+    },
+    {
+     "vhash": "a8e0eb4a1b3e157e0d3a5e57dc46fd35",
+     "version": "13.0-67.39",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L84"
+    },
+    {
+     "vhash": "0aef7f8e9ea2b528aa2073f2875a28b8",
+     "version": "12.1-55.190",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L85"
+    },
+    {
+     "vhash": "f1eb8548a4f1d4e565248d4db456fffe",
+     "version": "12.1-60.16",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L86"
+    },
+    {
+     "vhash": "e2444db11d0fa5ed738aa568c2630704",
+     "version": "13.0-67.43",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L87"
+    },
+    {
+     "vhash": "3a65afd164db6f39aa41f5729001d257",
+     "version": "13.0-67.43",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L89"
+    },
+    {
+     "vhash": "9b545e2e4d153348bce08e3923cdfdc1",
+     "version": "13.0-71.40",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L90"
+    },
+    {
+     "vhash": "25ad60e92a33cbb5dbd7cd8c8380360d",
+     "version": "13.0-71.44",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L91"
+    },
+    {
+     "vhash": "0b516b768edfa45775c4be130c4b96b5",
+     "version": "12.1-60.19",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L92"
+    },
+    {
+     "vhash": "b3deb35b8a990a71acca052fd1e6e6e1",
+     "version": "12.1-55.210",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L93"
+    },
+    {
+     "vhash": "83e486e7ee7eb07ab88328a51466ac28",
+     "version": "12.1-61.18",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L95"
+    },
+    {
+     "vhash": "454d4ccdefa1d802a3f0ca474a2edd73",
+     "version": "13.0-76.29",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L96"
+    },
+    {
+     "vhash": "08ff522057b9422863dbabb104c7cf4b",
+     "version": "12.1-61.19",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L97"
+    },
+    {
+     "vhash": "648767678188e1567b7d15eee5714220",
+     "version": "13.0-76.31",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L98"
+    },
+    {
+     "vhash": "ce5da251414abbb1b6aed6d6141ed205",
+     "version": "12.1-61.19",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L99"
+    },
+    {
+     "vhash": "5e55889d93ff0f13c39bbebb4929a68e",
+     "version": "13.0-79.64",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L100"
+    },
+    {
+     "vhash": "35389d54edd8a7ef46dadbd00c1bc5ac",
+     "version": "12.1-62.21",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L101"
+    },
+    {
+     "vhash": "8e4425455b9da15bdcd9d574af653244",
+     "version": "12.1-62.23",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L103"
+    },
+    {
+     "vhash": "73952bdeead9629442cd391d64c74d93",
+     "version": "13.0-82.41",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L105"
+    },
+    {
+     "vhash": "25169dea48ef0f939d834468f3c626d2",
+     "version": "13.0-82.42",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L106"
+    },
+    {
+     "vhash": "efb9d8994f9656e476e80f9b278c5dae",
+     "version": "12.1-62.25",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L107"
+    },
+    {
+     "vhash": "e1ebdcea7585d24e9f380a1c52a77f5d",
+     "version": "12.1-62.27",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L109"
+    },
+    {
+     "vhash": "eb3f8a7e3fd3f44b70c121101618b80d",
+     "version": "13.0-82.45",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L111"
+    },
+    {
+     "vhash": "98a21b87cc25d486eb4189ab52cbc870",
+     "version": "13.1-4.43",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L112"
+    },
+    {
+     "vhash": "c9e95a96410b8f8d4bde6fa31278900f",
+     "version": "13.0-83.27",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L113"
+    },
+    {
+     "vhash": "394e3fa5ffce140c9dd4bedc38ddefa7",
+     "version": "13.1-9.52",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L114"
+    },
+    {
+     "vhash": "f3d4041188d723fec4547b1942ffea93",
+     "version": "12.1-63.22",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L117"
+    },
+    {
+     "vhash": "158c7182df4973f1f5346e21e9d97a01",
+     "version": "13.1-4.44",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L118"
+    },
+    {
+     "vhash": "a66c02f4d04a1bd32bfdcc1655c73466",
+     "version": "13.0-83.29",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L119"
+    },
+    {
+     "vhash": "5cd6bd7d0aec5dd13a1afb603111733a",
+     "version": "12.1-63.23",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L120"
+    },
+    {
+     "vhash": "645bded68068748e3314ad3e3ec8eb8f",
+     "version": "13.1-9.60",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L121"
+    },
+    {
+     "vhash": "7277ec67fd822b7dae3399aa71786a0a",
+     "version": "13.1-9.107",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L122"
+    },
+    {
+     "vhash": "e8ff095e03a3efcff7ed851bfb9141e5",
+     "version": "13.1-9.112",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L123"
+    },
+    {
+     "vhash": "5112d5394de0cb5f6d474e032a708907",
+     "version": "13.1-12.50",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L124"
+    },
+    {
+     "vhash": "3a316d2de5362e9f76280b3157f48d08",
+     "version": "13.0-84.10",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L125"
+    },
+    {
+     "vhash": "bb71c656f6b4e0e1573c77c6536397c3",
+     "version": "13.1-12.103",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L126"
+    },
+    {
+     "vhash": "ee44bd3bc047aead57bc000097e3d8aa",
+     "version": "12.1-63.24",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L127"
+    },
+    {
+     "vhash": "2b46554c087d2d5516559e9b8bc1875d",
+     "version": "13.0-84.11",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L129"
+    },
+    {
+     "vhash": "cf9d354b261231f6c6121058ba143af7",
+     "version": "13.1-12.51",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L130"
+    },
+    {
+     "vhash": "c6bcd2f119d83d1de762c8c09b482546",
+     "version": "12.1-64.16",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L131"
+    },
+    {
+     "vhash": "b3fb0319d5d2dad8c977b9986cc26bd8",
+     "version": "12.1-55.265",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L132"
+    },
+    {
+     "vhash": "0f3a063431972186f453e07954f34eb8",
+     "version": "13.1-17.42",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L133"
+    },
+    {
+     "vhash": "e42d7b3cf4a6938aecebdae491ba140c",
+     "version": "13.0-85.15",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L135"
+    },
+    {
+     "vhash": "71ad6c771d99d846195b67c30bfb0433",
+     "version": "13.1-12.117",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L136"
+    },
+    {
+     "vhash": "2edf0f445b69b2e322e80dbc3f6f711c",
+     "version": "12.1-55.276",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L138"
+    },
+    {
+     "vhash": "b4ac9c8852a04234f38d73d1d8238d37",
+     "version": "13.1-21.50",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L139"
+    },
+    {
+     "vhash": "9f73637db0e0f987bf7825486bfb5efe",
+     "version": "12.1-55.278",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L140"
+    },
+    {
+     "vhash": "c212a67672ef2da5a74ecd4e18c25835",
+     "version": "12.1-64.17",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L141"
+    },
+    {
+     "vhash": "fbdc5fbaed59f858aad0a870ac4a779c",
+     "version": "12.1-65.15",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L142"
+    },
+    {
+     "vhash": "e24224ce907593aaadd243831b51dbd7",
+     "version": "13.1-12.130",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L143"
+    },
+    {
+     "vhash": "1884e7877a13a991b6d3fac01efbaf79",
+     "version": "13.0-85.19",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L144"
+    },
+    {
+     "vhash": "853edb55246c138c530839e638089036",
+     "version": "13.1-24.38",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L145"
+    },
+    {
+     "vhash": "7a45138b938a54ab056e0c35cf0ae56c",
+     "version": "13.0-86.17",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L146"
+    },
+    {
+     "vhash": "4434db1ec24dd90750ea176f8eab213c",
+     "version": "12.1-65.17",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L147"
+    },
+    {
+     "vhash": "469591a5ef8c69899320a319d5259922",
+     "version": "12.1-55.282",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L148"
+    },
+    {
+     "vhash": "adc1f7c850ca3016b21776467691a767",
+     "version": "13.1-27.59",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L149"
+    },
+    {
+     "vhash": "8f1767a6961f7b797d318d884dbb3a9c",
+     "version": "13.1-12.131",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L150"
+    },
+    {
+     "vhash": "1f63988aa4d3f6d835704be50c56788a",
+     "version": "13.0-87.9",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L151"
+    },
+    {
+     "vhash": "57d9f58db7576d6a194d7dd10888e354",
+     "version": "13.1-30.52",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L152"
+    },
+    {
+     "vhash": "8c6bef3b4f16d6c9bfc2913aae2535d1",
+     "version": "13.1-30.103",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L153"
+    },
+    {
+     "vhash": "f214d9aa6ff8f43fdb17ce81caac723f",
+     "version": "13.1-30.105",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L154"
+    },
+    {
+     "vhash": "7afe87a42140b566a2115d1e232fdc07",
+     "version": "13.1-33.47",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L155"
+    },
+    {
+     "vhash": "8cbccac1a96eee108ae3c85bf9ff845a",
+     "version": "13.1-30.108",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L156"
+    },
+    {
+     "vhash": "212fa0e7b3a5ca540f156caceba507fe",
+     "version": "13.1-30.109",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L157"
+    },
+    {
+     "vhash": "29adf2b509250b780bac083577c92b45",
+     "version": "13.1-30.111",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L158"
+    },
+    {
+     "vhash": "c1b64cea1b80e973580a73b787828daf",
+     "version": "12.1-65.21",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L159"
+    },
+    {
+     "vhash": "4d817946cef53571bc303373fd6b406b",
+     "version": "12.1-55.289",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L160"
+    },
+    {
+     "vhash": "aff0ad8c8a961d7b838109a7ee532bcb",
+     "version": "13.1-33.49",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L161"
+    },
+    {
+     "vhash": "37c10ac513599cf39997d52168432c0e",
+     "version": "13.0-88.12",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L162"
+    },
+    {
+     "vhash": "27292ddd74e24a311e4269de9ecaa6e7",
+     "version": "13.0-88.13",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L163"
+    },
+    {
+     "vhash": "5e939302a9d7db7e35e63a39af1c7bec",
+     "version": "13.1-33.51",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L164"
+    },
+    {
+     "vhash": "6e7b2de88609868eeda0b1baf1d34a7e",
+     "version": "13.0-88.14",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L165"
+    },
+    {
+     "vhash": "56672635f81a1ce1f34f828fef41d2fa",
+     "version": "13.1-33.52",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L166"
+    },
+    {
+     "vhash": "9bf6d5d3131495969deba0f850447947",
+     "version": "13.1-33.54",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L169"
+    },
+    {
+     "vhash": "3bd7940b6425d9d4dba7e8b656d4ba65",
+     "version": "13.0-88.16",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L170"
+    },
+    {
+     "vhash": "0d656200c32bb47c300b81e599260c42",
+     "version": "13.1-37.38",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L171"
+    },
+    {
+     "vhash": "953fae977d4baedf39e83c9d1e134ef1",
+     "version": "12.1-55.291",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L172"
+    },
+    {
+     "vhash": "f063b04477adc652c6dd502ac0c39a75",
+     "version": "12.1-65.25",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L173"
+    },
+    {
+     "vhash": "c0c00b7caed367b1569574e4982294c5",
+     "version": "13.1-30.114",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L174"
+    },
+    {
+     "vhash": "14c6a775edda324764a940cfd3da48cb",
+     "version": "13.0-89.7",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L175"
+    },
+    {
+     "vhash": "c2b8537eb733844f1e0cc4f63210d016",
+     "version": "13.0-90.7",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L176"
+    },
+    {
+     "vhash": "b4c220db03ea18bc2eebb40e9ad3f4f8",
+     "version": "13.1-42.47",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L177"
+    },
+    {
+     "vhash": "0b2a3cb74b5c6adbe28827e8b76a9f64",
+     "version": "12.1-55.296",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L178"
+    },
+    {
+     "vhash": "6925fba74320b9bfb960299f7c3e7cce",
+     "version": "13.1-45.61",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L179"
+    },
+    {
+     "vhash": "cdb72bd7677da8af9942897256782c9b",
+     "version": "13.1-37.150",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L180"
+    },
+    {
+     "vhash": "281b46a105662de06fb259293aa79f2a",
+     "version": "13.0-90.11",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L181"
+    },
+    {
+     "vhash": "1487b55f253ea54b1d3603cc1212f164",
+     "version": "13.1-45.62",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L182"
+    },
+    {
+     "vhash": "a6a783263968040a97e44d7cac55eda6",
+     "version": "12.1-65.35",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L183"
+    },
+    {
+     "vhash": "d72c9f2af7ccded704862da7486cfef2",
+     "version": "13.1-45.63",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L184"
+    },
+    {
+     "vhash": "14195083e08df261613408eb5cf3b212",
+     "version": "13.1-45.64",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L186"
+    },
+    {
+     "vhash": "4d63b52cc99fe712f9be5e4795c854e9",
+     "version": "13.0-90.12",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L187"
+    },
+    {
+     "vhash": "46d83b1a2981c1cfefe8d3063adf78f4",
+     "version": "13.1-37.159",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L191"
+    },
+    {
+     "vhash": "28e592a607e8919cc6ca7dec63590e04",
+     "version": "12.1-55.297",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L192"
+    },
+    {
+     "vhash": "e1aa8ba6d7e558d43f0369d9b81cbb1c",
+     "version": "12.1-65.37",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L202"
+    },
+    {
+     "vhash": "155a75fb7efac3347e7362fd23083aa5",
+     "version": "12.1-55.300",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L203"
+    },
+    {
+     "vhash": "f6beac6ccd073f5f7c1a64c4c7e24c7e",
+     "version": "12.1-55.302",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L213"
+    },
+    {
+     "vhash": "9debca402a9fae56a0d5e0979f685cf2",
+     "version": "12.1-65.39",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L214"
+    },
+    {
+     "vhash": "08604a97f08f6973502adb8ebf78e0b0",
+     "version": "12.1-55.304",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L220"
+    },
+    {
+     "vhash": "fe1071e2b14a5b5016d3eb57ddcfc86d",
+     "version": "12.1-55.304",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L221"
+    },
+    {
+     "vhash": "c9d805972fbf558cf7a229db44632fa7",
+     "version": "12.1-55.307",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L225"
+    },
+    {
+     "vhash": "550d960eff41e3a6342b95c7ad149148",
+     "version": "12.1-55.309",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L234"
+    },
+    {
+     "vhash": "a7c411815373059b33b4d83bed6145a2",
+     "version": "12.1-55.321",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L240"
+    },
+    {
+     "vhash": "0dd3f401dd33679f07e06961db10a298",
+     "version": "12.1-55.321",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L242"
+    },
+    {
+     "vhash": "c624dcce8d3355d555021d2aac5f9715",
+     "version": "12.1-55.325",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L250"
+    },
+    {
+     "vhash": "423fd15327ae1326fd97733652441907",
+     "version": "12.1-55.325",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L251"
+    },
+    {
+     "vhash": "89929af92ff35a042d78e9010b7ec534",
+     "version": "12.1-55.328",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L263"
+    },
+    {
+     "vhash": "f069136a9297a52b6d86a5de987d9323",
+     "version": "12.1-55.328",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L266"
+    },
+    {
+     "vhash": "765c645f7af4a1ef5c11d464fafc6244",
+     "version": "12.1-55.330",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L268"
+    },
+    {
+     "vhash": "a53b1af56a97019171ec39665fedc54a",
+     "version": "12.1-55.330",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L272"
+    },
+    {
+     "vhash": "11ba0524227f5450bc03fb70ed17c3d5",
+     "version": "12.1-55.333",
+     "cite": "https://github.com/fox-it/citrix-netscaler-triage/blob/d12affac98a233a3a1598cd95125bd12ec656b04/scan-citrix-netscaler-version.py#L284"
+    }
+   ]
+  },
+  "panos_release_dates": {
+   "what": "The release date of each PAN-OS version. The GlobalProtect portal's static files carry their build time in Last-Modified and in the last 8 hex digits of their ETag; a build time within two days of a release date makes that release a candidate. A date can match several releases (of several branches), and the table ends in April 2024: a reading is always a range (inferred), and a build time after the table's last date reads nothing.",
+   "source": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt",
+   "method": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/README.md",
+   "licence": "MIT",
+   "licence_url": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/LICENSE.md",
+   "notice": "The MIT License (MIT)\n=====================\n\nCopyright © `2020` `@noperator`\n\nPermission is hereby granted, free of charge, to any person\nobtaining a copy of this software and associated documentation\nfiles (the “Software”), to deal in the Software without\nrestriction, including without limitation the rights to use,\ncopy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the\nSoftware is furnished to do so, subject to the following\nconditions:\n\nThe above copyright notice and this permission notice shall be\nincluded in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND,\nEXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES\nOF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND\nNONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT\nHOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,\nWHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING\nFROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR\nOTHER DEALINGS IN THE SOFTWARE.",
+   "window_days": 2,
+   "entries": [
+    {
+     "version": "6.0.0",
+     "released": "2013-12-23",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L1"
+    },
+    {
+     "version": "6.0.1",
+     "released": "2014-02-26",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L2"
+    },
+    {
+     "version": "6.0.2",
+     "released": "2014-04-18",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L3"
+    },
+    {
+     "version": "6.0.3",
+     "released": "2014-05-29",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L4"
+    },
+    {
+     "version": "6.0.4",
+     "released": "2014-07-30",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L5"
+    },
+    {
+     "version": "6.0.5",
+     "released": "2014-09-04",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L6"
+    },
+    {
+     "version": "6.0.5-h3",
+     "released": "2014-10-07",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L7"
+    },
+    {
+     "version": "6.0.6",
+     "released": "2014-10-07",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L8"
+    },
+    {
+     "version": "6.0.7",
+     "released": "2014-11-18",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L9"
+    },
+    {
+     "version": "6.0.8",
+     "released": "2015-01-13",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L10"
+    },
+    {
+     "version": "6.0.9",
+     "released": "2015-02-27",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L11"
+    },
+    {
+     "version": "6.0.10",
+     "released": "2015-04-22",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L12"
+    },
+    {
+     "version": "6.0.11",
+     "released": "2015-08-12",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L13"
+    },
+    {
+     "version": "6.0.12",
+     "released": "2015-11-19",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L14"
+    },
+    {
+     "version": "6.0.13",
+     "released": "2016-02-13",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L15"
+    },
+    {
+     "version": "6.0.14",
+     "released": "2016-06-28",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L16"
+    },
+    {
+     "version": "6.0.15",
+     "released": "2016-10-05",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L17"
+    },
+    {
+     "version": "6.1.0",
+     "released": "2014-10-17",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L18"
+    },
+    {
+     "version": "6.1.1",
+     "released": "2014-11-13",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L19"
+    },
+    {
+     "version": "6.1.2",
+     "released": "2015-01-23",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L20"
+    },
+    {
+     "version": "6.1.3",
+     "released": "2015-03-10",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L21"
+    },
+    {
+     "version": "6.1.4",
+     "released": "2015-04-22",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L22"
+    },
+    {
+     "version": "6.1.5",
+     "released": "2015-06-17",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L23"
+    },
+    {
+     "version": "6.1.6",
+     "released": "2015-07-23",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L24"
+    },
+    {
+     "version": "6.1.7",
+     "released": "2015-09-10",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L25"
+    },
+    {
+     "version": "6.1.8",
+     "released": "2015-11-04",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L26"
+    },
+    {
+     "version": "6.1.9",
+     "released": "2016-01-08",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L27"
+    },
+    {
+     "version": "6.1.10",
+     "released": "2016-02-12",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L28"
+    },
+    {
+     "version": "6.1.11",
+     "released": "2016-04-02",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L29"
+    },
+    {
+     "version": "6.1.12",
+     "released": "2016-05-21",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L30"
+    },
+    {
+     "version": "6.1.13",
+     "released": "2016-07-15",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L31"
+    },
+    {
+     "version": "6.1.14",
+     "released": "2016-08-10",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L32"
+    },
+    {
+     "version": "6.1.15",
+     "released": "2016-10-05",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L33"
+    },
+    {
+     "version": "6.1.16",
+     "released": "2017-01-10",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L34"
+    },
+    {
+     "version": "6.1.17",
+     "released": "2017-04-14",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L35"
+    },
+    {
+     "version": "6.1.18",
+     "released": "2017-07-14",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L36"
+    },
+    {
+     "version": "6.1.19",
+     "released": "2017-11-05",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L37"
+    },
+    {
+     "version": "6.1.20",
+     "released": "2018-02-13",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L38"
+    },
+    {
+     "version": "6.1.21",
+     "released": "2018-05-25",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L39"
+    },
+    {
+     "version": "6.1.22",
+     "released": "2018-10-15",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L40"
+    },
+    {
+     "version": "7.0.1",
+     "released": "2015-07-03",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L41"
+    },
+    {
+     "version": "7.0.2",
+     "released": "2015-08-21",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L42"
+    },
+    {
+     "version": "7.0.3",
+     "released": "2015-10-08",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L43"
+    },
+    {
+     "version": "7.0.4",
+     "released": "2015-12-12",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L44"
+    },
+    {
+     "version": "7.0.5",
+     "released": "2016-01-30",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L45"
+    },
+    {
+     "version": "7.0.5-h2",
+     "released": "2016-02-17",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L46"
+    },
+    {
+     "version": "7.0.6",
+     "released": "2016-03-12",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L47"
+    },
+    {
+     "version": "7.0.7",
+     "released": "2016-04-19",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L48"
+    },
+    {
+     "version": "7.0.8",
+     "released": "2016-06-11",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L49"
+    },
+    {
+     "version": "7.0.9",
+     "released": "2016-07-27",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L50"
+    },
+    {
+     "version": "7.0.10",
+     "released": "2016-08-29",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L51"
+    },
+    {
+     "version": "7.0.11",
+     "released": "2016-10-20",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L52"
+    },
+    {
+     "version": "7.0.12",
+     "released": "2016-12-06",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L53"
+    },
+    {
+     "version": "7.0.13",
+     "released": "2016-12-29",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L54"
+    },
+    {
+     "version": "7.0.14",
+     "released": "2017-02-08",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L55"
+    },
+    {
+     "version": "7.0.15",
+     "released": "2017-04-12",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L56"
+    },
+    {
+     "version": "7.0.16",
+     "released": "2017-05-30",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L57"
+    },
+    {
+     "version": "7.0.17",
+     "released": "2017-07-10",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L58"
+    },
+    {
+     "version": "7.0.18",
+     "released": "2017-08-16",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L59"
+    },
+    {
+     "version": "7.0.19",
+     "released": "2017-11-10",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L60"
+    },
+    {
+     "version": "7.1.0",
+     "released": "2016-03-16",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L61"
+    },
+    {
+     "version": "7.1.1",
+     "released": "2016-04-06",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L62"
+    },
+    {
+     "version": "7.1.2",
+     "released": "2016-05-03",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L63"
+    },
+    {
+     "version": "7.1.3",
+     "released": "2016-06-21",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L64"
+    },
+    {
+     "version": "7.1.4",
+     "released": "2016-08-02",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L65"
+    },
+    {
+     "version": "7.1.4-h2",
+     "released": "2016-08-12",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L66"
+    },
+    {
+     "version": "7.1.5",
+     "released": "2016-09-24",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L67"
+    },
+    {
+     "version": "7.1.6",
+     "released": "2016-11-09",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L68"
+    },
+    {
+     "version": "7.1.7",
+     "released": "2016-12-17",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L69"
+    },
+    {
+     "version": "7.1.8",
+     "released": "2017-02-14",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L70"
+    },
+    {
+     "version": "7.1.9",
+     "released": "2017-03-27",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L71"
+    },
+    {
+     "version": "7.1.9-h4",
+     "released": "2017-06-16",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L72"
+    },
+    {
+     "version": "7.1.10",
+     "released": "2017-05-05",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L73"
+    },
+    {
+     "version": "7.1.11",
+     "released": "2017-06-29",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L74"
+    },
+    {
+     "version": "7.1.12",
+     "released": "2017-08-18",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L75"
+    },
+    {
+     "version": "7.1.13",
+     "released": "2017-09-28",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L76"
+    },
+    {
+     "version": "7.1.14",
+     "released": "2017-11-13",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L77"
+    },
+    {
+     "version": "7.1.15",
+     "released": "2018-01-05",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L78"
+    },
+    {
+     "version": "7.1.16",
+     "released": "2018-02-20",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L79"
+    },
+    {
+     "version": "7.1.17",
+     "released": "2018-04-11",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L80"
+    },
+    {
+     "version": "7.1.18",
+     "released": "2018-06-06",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L81"
+    },
+    {
+     "version": "7.1.19",
+     "released": "2018-07-16",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L82"
+    },
+    {
+     "version": "7.1.20",
+     "released": "2018-09-07",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L83"
+    },
+    {
+     "version": "7.1.21",
+     "released": "2018-10-31",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L84"
+    },
+    {
+     "version": "7.1.22",
+     "released": "2018-12-17",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L85"
+    },
+    {
+     "version": "7.1.23",
+     "released": "2019-03-09",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L86"
+    },
+    {
+     "version": "7.1.24",
+     "released": "2019-06-14",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L87"
+    },
+    {
+     "version": "7.1.24-h1",
+     "released": "2019-08-15",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L88"
+    },
+    {
+     "version": "7.1.25",
+     "released": "2019-08-30",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L89"
+    },
+    {
+     "version": "7.1.26",
+     "released": "2020-04-21",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L90"
+    },
+    {
+     "version": "8.0.0",
+     "released": "2017-01-25",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L91"
+    },
+    {
+     "version": "8.0.1",
+     "released": "2017-03-09",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L92"
+    },
+    {
+     "version": "8.0.2",
+     "released": "2017-04-25",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L93"
+    },
+    {
+     "version": "8.0.3",
+     "released": "2017-06-08",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L94"
+    },
+    {
+     "version": "8.0.3-h4",
+     "released": "2017-06-22",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L95"
+    },
+    {
+     "version": "8.0.4",
+     "released": "2017-07-21",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L96"
+    },
+    {
+     "version": "8.0.5",
+     "released": "2017-09-10",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L97"
+    },
+    {
+     "version": "8.0.6",
+     "released": "2017-11-04",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L98"
+    },
+    {
+     "version": "8.0.6-h3",
+     "released": "2017-11-16",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L99"
+    },
+    {
+     "version": "8.0.7",
+     "released": "2017-12-24",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L100"
+    },
+    {
+     "version": "8.0.8",
+     "released": "2018-01-31",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L101"
+    },
+    {
+     "version": "8.0.9",
+     "released": "2018-03-23",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L102"
+    },
+    {
+     "version": "8.0.10",
+     "released": "2018-05-04",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L103"
+    },
+    {
+     "version": "8.0.11-h1",
+     "released": "2018-06-29",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L104"
+    },
+    {
+     "version": "8.0.12",
+     "released": "2018-08-04",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L105"
+    },
+    {
+     "version": "8.0.13",
+     "released": "2018-09-18",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L106"
+    },
+    {
+     "version": "8.0.14",
+     "released": "2018-11-17",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L107"
+    },
+    {
+     "version": "8.0.15",
+     "released": "2018-12-08",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L108"
+    },
+    {
+     "version": "8.0.16",
+     "released": "2019-02-12",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L109"
+    },
+    {
+     "version": "8.0.17",
+     "released": "2019-03-22",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L110"
+    },
+    {
+     "version": "8.0.18",
+     "released": "2019-05-13",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L111"
+    },
+    {
+     "version": "8.0.19",
+     "released": "2019-06-20",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L112"
+    },
+    {
+     "version": "8.0.19-h1",
+     "released": "2019-08-15",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L113"
+    },
+    {
+     "version": "8.0.20",
+     "released": "2019-10-18",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L114"
+    },
+    {
+     "version": "8.1.0",
+     "released": "2018-03-01",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L115"
+    },
+    {
+     "version": "8.1.1",
+     "released": "2018-04-23",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L116"
+    },
+    {
+     "version": "8.1.2",
+     "released": "2018-06-06",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L117"
+    },
+    {
+     "version": "8.1.3",
+     "released": "2018-08-08",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L118"
+    },
+    {
+     "version": "8.1.4",
+     "released": "2018-10-05",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L119"
+    },
+    {
+     "version": "8.1.5",
+     "released": "2018-11-21",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L120"
+    },
+    {
+     "version": "8.1.6",
+     "released": "2019-01-17",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L121"
+    },
+    {
+     "version": "8.1.6-h2",
+     "released": "2019-01-23",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L122"
+    },
+    {
+     "version": "8.1.7",
+     "released": "2019-03-13",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L123"
+    },
+    {
+     "version": "8.1.8",
+     "released": "2019-04-30",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L124"
+    },
+    {
+     "version": "8.1.8-h5",
+     "released": "2019-06-17",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L125"
+    },
+    {
+     "version": "8.1.9",
+     "released": "2019-07-03",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L126"
+    },
+    {
+     "version": "8.1.9-h4",
+     "released": "2019-08-15",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L127"
+    },
+    {
+     "version": "8.1.10",
+     "released": "2019-08-21",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L128"
+    },
+    {
+     "version": "8.1.11",
+     "released": "2019-10-12",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L129"
+    },
+    {
+     "version": "8.1.12",
+     "released": "2019-12-10",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L130"
+    },
+    {
+     "version": "8.1.13",
+     "released": "2020-01-25",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L131"
+    },
+    {
+     "version": "8.1.14",
+     "released": "2020-04-01",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L132"
+    },
+    {
+     "version": "8.1.14-h2",
+     "released": "2020-04-18",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L133"
+    },
+    {
+     "version": "8.1.15",
+     "released": "2020-06-13",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L134"
+    },
+    {
+     "version": "8.1.15-h3",
+     "released": "2020-06-23",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L135"
+    },
+    {
+     "version": "8.1.16",
+     "released": "2020-08-12",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L136"
+    },
+    {
+     "version": "8.1.17",
+     "released": "2020-09-23",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L137"
+    },
+    {
+     "version": "8.1.18",
+     "released": "2020-11-17",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L138"
+    },
+    {
+     "version": "9.0.0",
+     "released": "2019-01-29",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L139"
+    },
+    {
+     "version": "9.0.1",
+     "released": "2019-03-26",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L140"
+    },
+    {
+     "version": "9.0.2",
+     "released": "2019-05-07",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L141"
+    },
+    {
+     "version": "9.0.2-h4",
+     "released": "2019-06-21",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L142"
+    },
+    {
+     "version": "9.0.3",
+     "released": "2019-07-10",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L143"
+    },
+    {
+     "version": "9.0.3-h2",
+     "released": "2019-07-18",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L144"
+    },
+    {
+     "version": "9.0.3-h3",
+     "released": "2019-08-14",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L145"
+    },
+    {
+     "version": "9.0.4",
+     "released": "2019-09-10",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L146"
+    },
+    {
+     "version": "9.0.5",
+     "released": "2019-11-07",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L147"
+    },
+    {
+     "version": "9.0.6",
+     "released": "2020-01-24",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L148"
+    },
+    {
+     "version": "9.0.7",
+     "released": "2020-03-13",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L149"
+    },
+    {
+     "version": "9.0.8",
+     "released": "2020-04-07",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L150"
+    },
+    {
+     "version": "9.0.9",
+     "released": "2020-06-20",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L151"
+    },
+    {
+     "version": "9.0.10",
+     "released": "2020-08-20",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L152"
+    },
+    {
+     "version": "9.0.11",
+     "released": "2020-10-07",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L153"
+    },
+    {
+     "version": "9.0.12",
+     "released": "2020-11-24",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L154"
+    },
+    {
+     "version": "9.1.0",
+     "released": "2019-12-11",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L155"
+    },
+    {
+     "version": "9.1.0-h3",
+     "released": "2019-12-21",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L156"
+    },
+    {
+     "version": "9.1.1",
+     "released": "2020-01-24",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L157"
+    },
+    {
+     "version": "9.1.2",
+     "released": "2020-03-30",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L158"
+    },
+    {
+     "version": "9.1.2-h1",
+     "released": "2020-04-09",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L159"
+    },
+    {
+     "version": "9.1.3",
+     "released": "2020-06-20",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L160"
+    },
+    {
+     "version": "9.1.3-h1",
+     "released": "2020-06-26",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L161"
+    },
+    {
+     "version": "9.1.4",
+     "released": "2020-07-27",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L162"
+    },
+    {
+     "version": "9.1.5",
+     "released": "2020-09-16",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L163"
+    },
+    {
+     "version": "9.1.6",
+     "released": "2020-10-23",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L164"
+    },
+    {
+     "version": "9.1.7",
+     "released": "2020-12-15",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L165"
+    },
+    {
+     "version": "9.1.8",
+     "released": "2021-02-05",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L166"
+    },
+    {
+     "version": "10.0.0",
+     "released": "2020-07-16",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L167"
+    },
+    {
+     "version": "10.0.1",
+     "released": "2020-08-28",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L168"
+    },
+    {
+     "version": "10.0.2",
+     "released": "2020-10-27",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L169"
+    },
+    {
+     "version": "10.0.3",
+     "released": "2020-12-07",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L170"
+    },
+    {
+     "version": "10.1.7",
+     "released": "2022-09-06",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L171"
+    },
+    {
+     "version": "10.2.0",
+     "released": "2022-02-26",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L172"
+    },
+    {
+     "version": "10.2.0-h3",
+     "released": "2024-04-18",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L173"
+    },
+    {
+     "version": "10.2.1",
+     "released": "2022-04-13",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L174"
+    },
+    {
+     "version": "10.2.1-h2",
+     "released": "2024-04-18",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L175"
+    },
+    {
+     "version": "10.2.2",
+     "released": "2022-06-02",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L176"
+    },
+    {
+     "version": "10.2.2-h2",
+     "released": "2022-08-08",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L177"
+    },
+    {
+     "version": "10.2.2-h5",
+     "released": "2024-04-18",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L178"
+    },
+    {
+     "version": "10.2.3",
+     "released": "2022-09-27",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L179"
+    },
+    {
+     "version": "10.2.3-h2",
+     "released": "2022-12-09",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L180"
+    },
+    {
+     "version": "10.2.3-h4",
+     "released": "2023-02-08",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L181"
+    },
+    {
+     "version": "10.2.3-h9",
+     "released": "2023-11-03",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L182"
+    },
+    {
+     "version": "10.2.3-h11",
+     "released": "2023-12-19",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L183"
+    },
+    {
+     "version": "10.2.3-h12",
+     "released": "2023-12-19",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L184"
+    },
+    {
+     "version": "10.2.3-h13",
+     "released": "2024-04-18",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L185"
+    },
+    {
+     "version": "10.2.4",
+     "released": "2023-03-26",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L186"
+    },
+    {
+     "version": "10.2.4-h2",
+     "released": "2023-05-12",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L187"
+    },
+    {
+     "version": "10.2.4-h3",
+     "released": "2023-06-29",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L188"
+    },
+    {
+     "version": "10.2.4-h4",
+     "released": "2023-07-25",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L189"
+    },
+    {
+     "version": "10.2.4-h16",
+     "released": "2024-04-18",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L190"
+    },
+    {
+     "version": "10.2.5",
+     "released": "2023-08-15",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L191"
+    },
+    {
+     "version": "10.2.5-h6",
+     "released": "2024-04-16",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L192"
+    },
+    {
+     "version": "10.2.6",
+     "released": "2023-09-20",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L193"
+    },
+    {
+     "version": "10.2.6-h1",
+     "released": "2024-01-03",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L194"
+    },
+    {
+     "version": "10.2.6-h3",
+     "released": "2024-04-16",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L195"
+    },
+    {
+     "version": "10.2.7",
+     "released": "2023-11-02",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L196"
+    },
+    {
+     "version": "10.2.7-h3",
+     "released": "2023-12-16",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L197"
+    },
+    {
+     "version": "10.2.7-h6",
+     "released": "2024-02-28",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L198"
+    },
+    {
+     "version": "10.2.7-h8",
+     "released": "2024-04-15",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L199"
+    },
+    {
+     "version": "10.2.8",
+     "released": "2024-02-08",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L200"
+    },
+    {
+     "version": "10.2.8-h3",
+     "released": "2024-04-15",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L201"
+    },
+    {
+     "version": "10.2.9",
+     "released": "2024-03-30",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L202"
+    },
+    {
+     "version": "10.2.9-h1",
+     "released": "2024-04-14",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L203"
+    },
+    {
+     "version": "11.0.0",
+     "released": "2022-11-17",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L204"
+    },
+    {
+     "version": "11.0.0-h1",
+     "released": "2023-11-03",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L205"
+    },
+    {
+     "version": "11.0.0-h3",
+     "released": "2024-04-18",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L206"
+    },
+    {
+     "version": "11.0.1",
+     "released": "2023-03-26",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L207"
+    },
+    {
+     "version": "11.0.1-h4",
+     "released": "2024-04-18",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L208"
+    },
+    {
+     "version": "11.0.2",
+     "released": "2023-06-23",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L209"
+    },
+    {
+     "version": "11.0.2-h4",
+     "released": "2024-04-16",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L210"
+    },
+    {
+     "version": "11.0.3",
+     "released": "2023-10-26",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L211"
+    },
+    {
+     "version": "11.0.3-h3",
+     "released": "2024-01-13",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L212"
+    },
+    {
+     "version": "11.0.3-h5",
+     "released": "2024-02-20",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L213"
+    },
+    {
+     "version": "11.0.3-h5",
+     "released": "2024-02-20",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L214"
+    },
+    {
+     "version": "11.0.3-h10",
+     "released": "2024-04-16",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L215"
+    },
+    {
+     "version": "11.0.4",
+     "released": "2024-04-07",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L216"
+    },
+    {
+     "version": "11.0.4-h1",
+     "released": "2024-04-14",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L217"
+    },
+    {
+     "version": "11.0.4-h2",
+     "released": "2024-04-17",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L218"
+    },
+    {
+     "version": "11.1.0",
+     "released": "2023-10-31",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L219"
+    },
+    {
+     "version": "11.1.0-h2",
+     "released": "2023-12-22",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L220"
+    },
+    {
+     "version": "11.1.0-h3",
+     "released": "2024-04-16",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L221"
+    },
+    {
+     "version": "11.1.1",
+     "released": "2023-12-22",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L222"
+    },
+    {
+     "version": "11.1.1-h1",
+     "released": "2024-04-16",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L223"
+    },
+    {
+     "version": "11.1.2",
+     "released": "2024-02-23",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L224"
+    },
+    {
+     "version": "11.1.2-h1",
+     "released": "2024-03-09",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L225"
+    },
+    {
+     "version": "11.1.2-h3",
+     "released": "2024-04-14",
+     "cite": "https://github.com/noperator/panos-scanner/blob/6f58127f824cccb6484511f722e6682dc76ded61/version-table.txt#L226"
+    }
+   ]
+  },
+  "fortios_etag": {
+   "what": "FortiOS before 7.2.6, 7.4.0 to 7.4.1, and every 7.0 and 6.4 release, answer the SSL-VPN front page with an ETag whose last 8 hex digits are the build time (CVE-2024-23662, FG-IR-23-224: 'may allow an unauthenticated attacker to fingerprint the device version via HTTP requests'). Such an ETag on a FortiGate's front page puts its release in those ranges: a range (inferred), never a release. The build time is shown as evidence; no public table with a compatible licence maps it to a release.",
+   "source": "https://www.fortiguard.com/psirt/FG-IR-23-224",
+   "method": "https://github.com/projectdiscovery/nuclei-templates/blob/91be390cf10100eb3c418877a857be9a0060b1aa/http/exposed-panels/fortinet/fortinet-fortigate-panel.yaml",
+   "licence": "Vendor advisory (facts, cited); the nuclei template that reads the ETag this way is MIT (ProjectDiscovery). No data is copied from either.",
+   "entries": [
+    {
+     "ranges": [
+      {
+       "introduced": "0",
+       "lastAffected": "7.2.5"
+      },
+      {
+       "introduced": "7.4.0",
+       "lastAffected": "7.4.1"
+      }
+     ],
+     "cve": "CVE-2024-23662",
+     "cite": "https://www.fortiguard.com/psirt/FG-IR-23-224 (affected: 7.4.0 through 7.4.1, 7.2.0 through 7.2.5, 7.0 all versions, 6.4 all versions)"
+    }
+   ]
+  },
+  "connect_secure_lines": {
+   "what": "Pulse Connect Secure states its version in two static files a browser fetches without signing in: /dana-na/nc/nc_gina_ver.txt (8.x: <PARAM NAME=\"ProductVersion\" VALUE=\"8.3.7.61383\">) and the Host Checker installer /dana-cached/hc/HostCheckerInstaller.osx (9.x: <key>version</key><string>9.1.11.12173</string>). The four numbers are the line, the release and the build: 9.1.11.12173 is 9.1R11 build 12173. The build names one of the release's service releases (9.1R11.4), but no public table with a compatible licence maps builds to service releases, so a reading is the range 9.1R11 to 9.1R11.x (inferred). The 22.x Host Checker version does not name the Connect Secure release in that form and reads nothing.",
+   "source": "https://gist.github.com/rxwx/d07495f790d62029b12065c38ac2a86a",
+   "method": "https://censys.com/blog/pulse-connect-secure-a-view-from-the-internet/ ; https://github.com/projectdiscovery/nuclei-templates/blob/91be390cf10100eb3c418877a857be9a0060b1aa/http/exposed-panels/pulse-secure-version.yaml",
+   "licence": "Paths and formats are facts cited from public research; the nuclei template that reads both files is MIT (ProjectDiscovery). No data is copied.",
+   "entries": [
+    {
+     "lines": [
+      "8.0",
+      "8.1",
+      "8.2",
+      "8.3",
+      "9.0",
+      "9.1"
+     ],
+     "cite": "https://censys.com/blog/pulse-connect-secure-a-view-from-the-internet/ (9.1.14.18105 is 9.1R14; 8.3.1.55339 is 8.3R1)"
+    }
+   ]
+  }
+ }
+}

@@ -81,7 +81,15 @@ _MARIADB_PREFIX_RE = re.compile(r"^5\.5\.5-(?=\d)")
 # Junos: 22.4R2-S2 is the second service release of release 2 of 22.4, so 22.4R2 < 22.4R2-S1 < 22.4R2-S2 < 22.4R3 < 23.2R1. The release and the
 # service release become the third and fourth components. Only a two-part version of 8 or later followed by an upper-case R and a number
 # (the form Juniper alone uses), so no other version string is read differently.
-_JUNOS_RELEASE_RE = re.compile(r"^R(\d+)(?:-S(\d+))?(?![0-9A-Za-z])")
+_JUNOS_RELEASE_RE = re.compile(r"^R(\d+)(?:-S(\d+)|\.(\d+))?(?![0-9A-Za-z])")
+# Ivanti and Pulse Connect Secure write a service release the same way with a dot: 22.7R2.5 is the fifth service release of 22.7R2, so
+# 22.7R2 < 22.7R2.4 < 22.7R2.5 < 22.7R3 (the third group above; Junos's own respins, 15.1R7.9, order the same way).
+# NetScaler (Citrix ADC and Gateway) names a build of a release train: 13.1-49.15 is build 49.15 of 13.1, so 13.1-48.47 < 13.1-49.15 < 14.1-4.42.
+# Only a two-part train of 10 or later followed by a dash and a two-part build; it reads as a patched release (an upper bound "13.1" names the
+# whole train, as "8.9" does for 8.9p1).
+_TRAIN_BUILD_RE = re.compile(r"^-(\d{1,3})\.(\d{1,4})(?![\d.A-Za-z])")
+# PAN-OS names a hotfix of a release: 10.2.9-h1 is the first hotfix of 10.2.9, so 10.2.9 < 10.2.9-h1 < 10.2.9-h3 < 10.2.10.
+_HOTFIX_RE = re.compile(r"^-h(\d{1,3})(?![0-9A-Za-z])")
 _DATE_RE = re.compile(r"^(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2}))?(?![\d.])")
 _PRE_RANK = {"dev": -6, "snapshot": -6, "alpha": -5, "a": -5, "beta": -4, "b": -4, "m": -3, "pre": -2, "cr": -1, "rc": -1}
 
@@ -132,7 +140,13 @@ def parse_version(value, strict=False):
     rest = text[match.end():]
     junos = _JUNOS_RELEASE_RE.match(rest) if len(parts) == 2 and parts[0] >= 8 else None
     if junos:
-        return tuple(parts + [int(junos.group(1)), int(junos.group(2) or 0)])
+        return tuple(parts + [int(junos.group(1)), int(junos.group(2) or junos.group(3) or 0)])
+    train = _TRAIN_BUILD_RE.match(rest) if len(parts) == 2 and parts[0] >= 10 else None
+    if train:
+        return _patched(parts, parts + [int(train.group(1)), int(train.group(2))])
+    hotfix = _HOTFIX_RE.match(rest) if len(parts) == 3 else None
+    if hotfix:
+        return _patched(parts, parts + [int(hotfix.group(1))])
     pre = _PRE_RE.match(rest)
     if pre and (pre.group(1) or pre.group(3)):
         parts += [_PRE_RANK[(pre.group(1) or pre.group(2)).lower()], int(pre.group(3) or 0)]
@@ -495,6 +509,8 @@ def clean_affected(value):
         ranges = item.get("ranges")
         if ranges is not None:
             item = {**item, "ranges": [r for r in ranges[:MAX_RANGES_PER_ITEM] if isinstance(r, dict)] if isinstance(ranges, list) else []}
+            if item["ranges"] and _is_netscaler(item):
+                item["ranges"] = [_netscaler_range(r) for r in item["ranges"]]
         if "builds" in item:  # the exact builds the advisory lists (cveFeed.intel.convert_affected), each a ``build_key``
             builds = item["builds"]
             builds = [b for b in (build_key(b) for b in builds[:MAX_BUILDS_PER_ITEM] if isinstance(b, str)) if b] if isinstance(builds, list) else []
@@ -502,6 +518,30 @@ def clean_affected(value):
             if not item["builds"]:
                 del item["builds"]
         out.append(item)
+    return out
+
+
+_NETSCALER_TRAIN_RE = re.compile(r"^(\d{2}\.\d)(?:-[A-Za-z]{2,8})?$")  # 13.1, 13.1-FIPS, 12.1-NDcPP
+_NETSCALER_BUILD_RE = re.compile(r"^\d{1,3}\.\d{1,4}$")
+
+
+def _is_netscaler(item):
+    vendor, product = _norm(item.get("vendor")), _norm(item.get("product"))
+    return product.startswith("netscaler") or (vendor in ("citrix", "netscaler") and product in ("adc", "gateway", "applicationdeliverycontroller"))
+
+
+def _netscaler_range(rng):
+    """A NetScaler record's range read the way Citrix writes it: the release train as ``introduced`` and only the build as the bound
+    (``introduced 13.1, fixed 49.15`` is 13.1 up to build 49.15, so ``fixed`` reads 13.1-49.15). Read literally it would put every later train
+    (14.1) inside it. A range already written with whole builds is unchanged."""
+    train = _NETSCALER_TRAIN_RE.match(str(rng.get("introduced") or "").strip())
+    if not train:
+        return rng
+    out = dict(rng)
+    for key in ("fixed", "lastAffected"):
+        bound = str(rng.get(key) or "").strip()
+        if _NETSCALER_BUILD_RE.match(bound):
+            out[key] = f"{train.group(1)}-{bound}"
     return out
 
 
@@ -1226,7 +1266,7 @@ def invalid_identity_reason(match):
     reason = library_provenance_reason(match)
     if reason:
         return reason
-    if match.source in ('java', 'runtime'):
+    if match.source in ('java', 'runtime', 'build_range'):  # build_range: cveFeed.edge_builds matched the CVE's own vendor and product
         # Not a name match either (runtime: cveFeed.version_sources, the same for a language runtime): the CVE's own affected entry names the Java runtime (java_runtime.is_runtime_item) and the host's runtime was
         # read or is unknown; the stored name is the fixed "Java runtime", which no advisory spells, so a name comparison would close every one
         return ''
@@ -1520,7 +1560,7 @@ def save_matches(rows, covered=None):
     return len(unique)
 
 
-_CORRELATED_SOURCES = ("tech", "port", "java", "runtime", "bundled")  # java: cveFeed.java_runtime; runtime, bundled: cveFeed.version_sources
+_CORRELATED_SOURCES = ("tech", "port", "java", "runtime", "bundled", "build_range")  # java: cveFeed.java_runtime; runtime, bundled: cveFeed.version_sources; build_range: cveFeed.edge_builds
 
 
 def close_rejected():
@@ -1718,6 +1758,10 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     # Lucene and Log4j, the Jetty in jenkins.war ...): named like a technology, but an inferred version is never a version inside a range, so
     # at most a needs-validation candidate; a CVE already matched above is not matched twice.
     version_sources.collect_bundled(subdomain, product_index, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence)
+    # The build RANGE an edge appliance's static files put it in (cveFeed.edge_builds: PAN-OS, FortiOS, Pulse Connect Secure): a CVE whose own
+    # record names the product and that a release of the range can reach is a needs-validation candidate, never a version in range.
+    from cveFeed import edge_builds
+    edge_builds.collect_matches(subdomain, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence)
     return rows
 
 
@@ -1889,5 +1933,9 @@ def candidate_subdomains(product_index, base=None):
     if product_index:
         # a host whose vendor bundle names a component (cveFeed.bundled_components) is a candidate for that component's CVEs
         wanted |= Q(id__in=version_sources.bundled_host_ids(Subdomain.objects if base is None else base))
+    from cveFeed import edge_builds
+    if product_index:
+        # an edge appliance's build range (cveFeed.edge_builds): matched by the CVE's vendor and product, not by a technology token
+        wanted |= Q(id__in=edge_builds.range_host_ids(Subdomain.objects if base is None else base))
     qs = (Subdomain.objects if base is None else base).filter(wanted).filter(latest_scan_q())
     return qs.prefetch_related("technologies", "ip_addresses__ports")

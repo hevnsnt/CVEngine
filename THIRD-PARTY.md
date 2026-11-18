@@ -43,6 +43,8 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [ENISA EUVD](https://euvd.enisa.europa.eu) | European exploited vulnerabilities |
 | [VulnCheck KEV](https://vulncheck.com) | Exploitation data, with a free community key |
 | [FIRST EPSS](https://www.first.org/epss/) | Exploit prediction scores |
+| [Fox-IT citrix-netscaler-triage](https://github.com/fox-it/citrix-netscaler-triage) (Apache-2.0; the NetScaler version table of `scan-citrix-netscaler-version.py` at commit `d12affac`, converted to JSON with its "unknown" rows left out, in `web/cveFeed/data/edge_fingerprints.json`, which keeps the source, the licence and a citation per entry) | The NetScaler build a `rdx_en.json.gz` timestamp or a login page `?v=` value names (`cveFeed.edge_builds`) |
+| [Bishop Fox panos-scanner](https://github.com/noperator/panos-scanner) (MIT, Copyright 2020 @noperator; `version-table.txt` at commit `6f58127f`, its notice kept in `web/cveFeed/data/edge_fingerprints.json`) | The PAN-OS releases a GlobalProtect static file's build date can be (`cveFeed.edge_builds`) |
 | [Exploit-DB](https://gitlab.com/exploit-database/exploitdb) (GPL-2.0 or later) | Public exploit references |
 | [Metasploit Framework](https://github.com/rapid7/metasploit-framework) (BSD-3-Clause) | Exploit module references |
 | [CVE List V5](https://github.com/CVEProject/cvelistV5) | CVE records |

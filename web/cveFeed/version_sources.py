@@ -242,6 +242,9 @@ def run_for_scan(scan_id, force=False, dispatch=None):
     if not enabled():
         return {**summary, 'skipped': 'disabled'}
     found = candidates(scan)
+    send_digest = None if dispatch is None else dispatch
+    if _digest_ready(project, found, send_digest):
+        summary['digest_waiting'] = True  # an edge digest read waits for a contract 8 Sentinel; the host's other reads go ahead
     names = due(project.pk, found, force=force)
     summary['hosts'] = len(found)
     if not names:
@@ -249,7 +252,8 @@ def run_for_scan(scan_id, force=False, dispatch=None):
     if dispatch is None:
         sentinel_dispatch.scanner_or_local(project, KIND)  # raises ScannerUnavailable when none can take it: the kind has no local path
         dispatch = lambda project_, reads: probe_dispatch.try_version_read(project_, reads, scan=scan, unattended=False)  # noqa: E731
-    _ask(project, names, found, lambda name: scan, dispatch, summary)
+        send_digest = lambda project_, reads: probe_dispatch.try_version_digest(project_, reads, scan=scan, unattended=False)  # noqa: E731
+    _ask(project, names, found, lambda name: scan, dispatch, summary, send_digest=send_digest)
     activity.log('run_check', f'Version source reads of {summary["asked"]} of {len(names)} host(s) of {scan.domain.name}: {summary["readings"]} reading(s)'
                  + (f', {summary["exposed"]} exposure(s)' if summary['exposed'] else '')
                  + (f'; {summary["waiting"]} wait for a scanner' if summary['waiting'] else ''), project=project.pk, scan_id=scan.id)
@@ -270,6 +274,9 @@ def run_for_hosts(project, host_names, dispatch=None, priority=1):
     for item in found.values():
         for sub in item['subs']:
             refresh_host(sub)
+    send_digest = None if dispatch is None else dispatch
+    if _digest_ready(project, found, send_digest):
+        summary['digest_waiting'] = True  # an edge digest read waits for a contract 8 Sentinel; the host's other reads go ahead
     names = due(project.pk, found, limit=MAX_READS_PER_TASK)
     summary['hosts'] = len(found)
     if not names:
@@ -277,14 +284,40 @@ def run_for_hosts(project, host_names, dispatch=None, priority=1):
     if dispatch is None:
         sentinel_dispatch.scanner_or_local(project, KIND)
         dispatch = lambda project_, reads: probe_dispatch.try_version_read(project_, reads, priority=priority, unattended=True)  # noqa: E731
-    _ask(project, names, found, lambda name: found[name]['subs'][0].scan_history, dispatch, summary)
+        send_digest = lambda project_, reads: probe_dispatch.try_version_digest(project_, reads, priority=priority, unattended=True)  # noqa: E731
+    _ask(project, names, found, lambda name: found[name]['subs'][0].scan_history, dispatch, summary, send_digest=send_digest)
     if summary['waiting']:
         raise ScannerUnavailable(KIND, f'a Sentinel returned no result for {summary["waiting"]} host(s): they stay due')
     return summary
 
 
-def _ask(project, names, found, scan_for, send, summary):
-    """Claim ``names``, send them in tasks of at most ``MAX_READS_PER_TASK`` read entries through ``send(project, reads)`` and store every answer."""
+def _digest_ready(project, found, send_digest):
+    """Drop the entries that need the ``version_digest`` kind (contract 8, ``Source.task_kind``) from ``found`` when no Sentinel can run it now:
+    a contract 7 Sentinel is never sent one, and the host's other reads go ahead. Returns how many hosts lost an entry."""
+    if send_digest is not None:
+        return 0
+    from agentapi import sentinel_dispatch
+    try:
+        ready = sentinel_dispatch.any_scanner_for(project, catalogue.DIGEST_KIND)
+    except Exception:  # noqa: BLE001 - no answer is no Sentinel for it
+        ready = False
+    if ready:
+        return 0
+    dropped = 0
+    for name in list(found):
+        reads = found[name]['reads']
+        kept = [(source, base) for source, base in reads if source.task_kind != catalogue.DIGEST_KIND]
+        if len(kept) != len(reads):
+            dropped += 1
+            found[name]['reads'] = kept
+            if not kept:
+                del found[name]
+    return dropped
+
+
+def _ask(project, names, found, scan_for, send, summary, send_digest=None):
+    """Claim ``names``, send them in tasks of at most ``MAX_READS_PER_TASK`` read entries through ``send(project, reads)`` (the entries with a
+    digest read through ``send_digest``: the ``version_digest`` kind, contract 8) and store every answer."""
     from cveFeed import ledger
     from cveFeed.exclusions import excluded_names, normalize
     with ledger.claim_many(f'{SERVICE}@{project.pk}', names) as won:
@@ -305,7 +338,12 @@ def _ask(project, names, found, scan_for, send, summary):
             if not chunk:
                 continue
             reads, owner = _entries(found, chunk)
-            rows = send(project, reads)
+            digest = {read_id(name, source, base) for name, source, base in owner.values() if source.task_kind == catalogue.DIGEST_KIND}
+            plain = [item for item in reads if item[1]['id'] not in digest]
+            rows = dict(send(project, plain) or {}) if plain else {}
+            wanted_digest = [item for item in reads if item[1]['id'] in digest]
+            if wanted_digest:
+                rows.update((send_digest or send)(project, wanted_digest) or {})
             by_host = {}
             for ident, (name, source, base) in owner.items():
                 by_host.setdefault(name, []).append((source, base, rows.get(ident)))
@@ -356,6 +394,10 @@ def _observation(r, port):
     evidence = {'confidence': r['confidence'], 'line_only': r['line_only'], 'component': r['component'], 'source': r['source'],
                 'said': r['evidence'], 'version_source': True, **({'cpe': r['cpe']} if r.get('cpe') else {}),
                 **({'bundled': r['bundled']} if isinstance(r.get('bundled'), dict) else {})}
+    if isinstance(r.get('range'), dict):
+        # a build RANGE (cveFeed.edge_builds): never a technology (outcome ``range``, not ``found``), matched by edge_builds.collect_matches
+        from cveFeed import edge_builds
+        outcome, evidence['range'] = edge_builds.RANGE_OUTCOME, r['range']
     return probes._observation(kind, r['label'], r['version'], '', outcome, CONFIDENCE_SCORE.get(r['confidence'], 0.3),
                                f"{'header' if r['source'] in ('header', 'technology') else 'vsrc'}:{r['source']}"[:48], port=port,
                                url=r['url'], evidence=evidence)
@@ -384,10 +426,12 @@ def store_readings(sub, probe_id, readings, port=0, now=None):
             continue
         observations.append(_observation(r, port))
     if observations:
-        before = {(o.kind, o.product, o.port): o.version for o in ProbeObservation.objects.filter(project_id=project_id, host=host, probe=probe_id)}
+        before = {(o.kind, o.product, o.port): (o.version, (o.evidence or {}).get('range') if isinstance(o.evidence, dict) else None)
+                  for o in ProbeObservation.objects.filter(project_id=project_id, host=host, probe=probe_id)}
         probes.record(project_id, sub.target_domain_id, host, probe_id, observations, now=now)
         stored += len(observations)
-        changed = changed or any(before.get((o['kind'], o['product'], o['port'])) != o['version'] for o in observations)
+        changed = changed or any(before.get((o['kind'], o['product'], o['port'])) != (o['version'], o['evidence'].get('range'))
+                                 for o in observations)
         if probes.apply_to_subdomain(sub, observations):
             changed = True
     return stored, changed
@@ -862,7 +906,9 @@ def as_dict(row):
             'matched': row.kind != HINT_KIND or bool(bundled), 'cpe': ev.get('cpe') or '',
             'bundled_with': ({k: bundled.get(k, '') for k in ('product', 'product_version', 'basis', 'source')} if bundled else None),
             'first_seen': row.first_seen.isoformat() if row.first_seen else None, 'last_seen': row.observed_at.isoformat() if row.observed_at else None,
-            'stale': bool(row.observed_at and row.observed_at < timezone.now() - timedelta(days=STALE_DAYS))}
+            'stale': bool(row.observed_at and row.observed_at < timezone.now() - timedelta(days=STALE_DAYS)),
+            # a build RANGE (cveFeed.edge_builds): the releases it can be, and how it was read; never a version
+            **({'range': {k: ev['range'].get(k) for k in ('candidates', 'ranges', 'basis')}} if isinstance(ev.get('range'), dict) else {})}
 
 
 _ORDER = {'exact': 0, 'inferred': 1, 'weak': 2}

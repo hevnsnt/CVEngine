@@ -1,4 +1,4 @@
-"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``identity_check``, ``hygiene_check``, ``dangling_dns_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe``, ``route_probe``, ``page_read``, ``ssh_probe``, (contract version 6) ``java_runtime`` and (contract version 7) ``version_read``.
+"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``identity_check``, ``hygiene_check``, ``dangling_dns_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe``, ``route_probe``, ``page_read``, ``ssh_probe``, (contract version 6) ``java_runtime``, (contract version 7) ``version_read`` and (contract version 8) ``version_digest``.
 
 Every result is untrusted. ``clean_*`` keep only the contract's shape, clip every string and cap every list (the bounds are the contract's and
 ``cveFeed.models.ProbeObservation``'s columns); ``bind`` then drops what the task did not ask about (a probe id it did not plan, a name it did
@@ -546,8 +546,13 @@ def _version_value(value):
     return None
 
 
-def _version_answer(item):
-    """One answer of a version_read result, clipped: never a body, only the parts the contract allows. None when it is not one."""
+_SHA256 = re.compile(r'^[0-9a-f]{64}$')
+_HEAD = re.compile(r'^(?:[0-9a-f]{2}){0,16}$')
+
+
+def _version_answer(item, digest=False):
+    """One answer of a version_read result (``digest``: of a version_digest result, contract 8, whose answer may carry a digest of the body),
+    clipped: never a body, only the parts the contract allows. None when it is not one."""
     if not isinstance(item, dict) or not isinstance(item.get('path'), str) or not item['path'].startswith('/'):
         return None
     out = {'path': _text(item['path'], 200), 'status': _int(item.get('status'), 0, 999)}
@@ -567,13 +572,20 @@ def _version_answer(item):
         out['text'] = _text(item['text'], 1024)
     if isinstance(item.get('lines'), list):
         out['lines'] = _strings(item['lines'], MAX_VERSION_LINES, 400)
+    if digest and item.get('redirected') is True:
+        out['redirected'] = True  # another path's answer: no digest is read from it
+    elif digest and isinstance(item.get('digest'), dict):
+        raw = item['digest']
+        sha, head = str(raw.get('sha256') or '').lower(), str(raw.get('head') or '').lower()
+        out['digest'] = {**({'sha256': sha} if _SHA256.match(sha) and not out['truncated'] else {}), 'head': head if _HEAD.match(head) else ''}
     return out
 
 
-def _version_read(item):
+def _version_read(item, digest=False):
     if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id'] or not isinstance(item.get('answers'), list):
         return None
-    row = {'id': _text(item['id'], 200), 'answers': [a for a in map(_version_answer, item['answers'][:MAX_VERSION_ANSWERS]) if a]}
+    row = {'id': _text(item['id'], 200),
+           'answers': [a for a in (_version_answer(x, digest=digest) for x in item['answers'][:MAX_VERSION_ANSWERS]) if a]}
     if len(row['answers']) != len(item['answers'][:MAX_VERSION_ANSWERS]):
         row['answers'] = []  # an answer that is not one leaves the order unknown: the whole entry reads as unanswered
         row['error'] = 'an answer was malformed'
@@ -589,6 +601,16 @@ def clean_version_read(body):
     if not isinstance(reads, list) or len(reads) > MAX_VERSION_READS:
         raise ApiError(400, 'a version_read result lists its reads (at most %d)' % MAX_VERSION_READS)
     return {'reads': [r for r in map(_version_read, reads) if r], 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+
+
+def clean_version_digest(body):
+    """The read rows of a ``version_digest`` result (contract 8): a version_read result whose answers may also carry a digest of a static asset
+    (its SHA-256 and first bytes, ``cveFeed.edge_builds``), never the asset."""
+    reads = body.get('reads')
+    if not isinstance(reads, list) or len(reads) > MAX_VERSION_READS:
+        raise ApiError(400, 'a version_digest result lists its reads (at most %d)' % MAX_VERSION_READS)
+    return {'reads': [r for r in (_version_read(x, digest=True) for x in reads) if r], 'touched': _hosts(body.get('touched')),
+            'refused': _hosts(body.get('refused'))}
 
 
 STATES = ('answered', 'no_answer', 'challenged', 'busy')
@@ -1067,7 +1089,7 @@ def bind(kind, result, task):
             dropped += len(result[key]) - len(kept)
             out[key] = kept
         result = {**result, **out}
-    elif kind == 'version_read':  # only the read entries the task asked, once each, and only answers to the paths each asked, in order
+    elif kind in ('version_read', 'version_digest'):  # only the read entries the task asked, once each, and only answers to the paths each asked, in order
         asked = {p.get('id'): [r.get('path') for r in p.get('requests') or [] if isinstance(r, dict)] for p in target.get('reads') or [] if isinstance(p, dict)}
         seen, kept = set(), []
         for row in result['reads']:

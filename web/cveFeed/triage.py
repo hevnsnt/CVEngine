@@ -297,11 +297,13 @@ def overridden(verdict, row):
     return bool(said) and (getattr(row, 'classification', '') or '') != said
 
 
-def version_unknown_outcome(java_unknown=False, runtime_unknown=False, bundled_inferred=False):
+def version_unknown_outcome(java_unknown=False, runtime_unknown=False, bundled_inferred=False, range_read=False):
     """The stored answer for a CVE match whose advisory gives no usable version range, whose Java runtime's (``java_unknown``) or language
-    runtime's (``runtime_unknown``) version was not read, or whose bundled component's version is only inferred (``bundled_inferred``): needs
-    validation, with the reason shown to the reader. Not a model answer, so nothing of the model is recorded."""
-    reason = match_policy.unknown_reason({'java_unknown': java_unknown, 'runtime_unknown': runtime_unknown, 'bundled_inferred': bundled_inferred})
+    runtime's (``runtime_unknown``) version was not read, whose bundled component's version is only inferred (``bundled_inferred``), or whose
+    edge appliance build was read only as a range (``range_read``): needs validation, with the reason shown to the reader. Not a model answer,
+    so nothing of the model is recorded."""
+    reason = match_policy.unknown_reason({'java_unknown': java_unknown, 'runtime_unknown': runtime_unknown, 'bundled_inferred': bundled_inferred,
+                                           'range_read': range_read})
     return {'classification': 'needs_validation', 'reason': reason, 'model_classification': '',
             'model_reason': '', 'overridden': False, 'impact': '', 'severity_adjust': 0, 'severity_reason': '', 'remediation': '',
             'validation_notes': [], 'invalid_output': False}
@@ -489,6 +491,8 @@ def describe_cve_match(m):
         facts['java_unknown'] = True  # the Java runtime's version was not read from outside (cveFeed.java_runtime), not a range the advisory lacks
     if facts['version_unknown'] and match_policy.evidence_flag(evidence, 'runtime_unknown'):
         facts['runtime_unknown'] = True  # a language runtime's version was not read from outside (cveFeed.version_sources)
+    if facts['version_unknown'] and match_policy.evidence_flag(evidence, 'range_read'):
+        facts['range_read'] = True  # only a range of an edge appliance's builds was read from outside (cveFeed.edge_builds)
     if facts['version_unknown'] and match_policy.evidence_flag(evidence, 'bundled_inferred'):
         facts['bundled_inferred'] = True  # a bundled component's version was inferred from the product release (cveFeed.bundled_components)
     facts['version_only'] = match_policy.version_only(getattr(m, 'source', ''), evidence, m.version_in_range, facts['template_result'],
@@ -2261,7 +2265,8 @@ def run_triage(pairs, provider=False, scan_id=None):
             # no version range to test against: a review state decided without the model, so no provider call and no budget is spent
             verdict = known[key] = _store_verdict(key[0], key[1], version_unknown_outcome(bool(group[0][1]['facts'].get('java_unknown')),
                                                                                     bool(group[0][1]['facts'].get('runtime_unknown')),
-                                                                                    bool(group[0][1]['facts'].get('bundled_inferred'))), 'deterministic-policy',
+                                                                                    bool(group[0][1]['facts'].get('bundled_inferred')),
+                                                                                    bool(group[0][1]['facts'].get('range_read'))), 'deterministic-policy',
                                                   (group[0][0].project_id, group[0][0].host))
         if verdict is not None:
             stats['cached'] += len(group)
