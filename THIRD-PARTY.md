@@ -66,6 +66,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [runZero Export API](https://help.runzero.com/docs/exporting-asset-data/) | Asset inventory (OS, hardware, tags, CVE reports) read with your own Export API token from `console.runzero.com`; no runZero code is bundled |
 | [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data) (MIT) | Public scope of bug bounty programs, read at run time |
 | [Bugcrowd Vulnerability Rating Taxonomy](https://github.com/bugcrowd/vulnerability-rating-taxonomy) (Apache-2.0) | Bundled as `web/cveFeed/data/vrt.json` for report categories and priority |
+| [Rapid7 Recog](https://github.com/rapid7/recog) (BSD-2-Clause, Copyright (c) 2014-2015, Rapid7; its `LICENSE` and `COPYING` kept beside the data) | Eleven of its XML fingerprint databases, vendored unchanged in `web/cveFeed/data/recog/` at commit `f1191e24332c51d6a3d98457f64fba8dec340784` (`manifest.json` holds the SHA-256 of each file; `scripts/update_recog.py` refreshes them), read on the server over stored banners for the product, version and CPE they state (`cveFeed.recog`). No Recog code is included |
 
 ## AI back ends
 
