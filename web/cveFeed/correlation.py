@@ -1079,66 +1079,138 @@ class DbFixLookup:
 
 
 def port_distro(port):
-    """The distro info of a Port row: what nmap persisted, else read from its banner fields now (rows older than the distro
-    columns). The package name is derived, never stored. A Red Hat family row persisted before the OS CPE gave its release reads the
-    release from the CPEs nmap reported (kept in ``extra``)."""
-    info = {"distro": getattr(port, "distro", "") or "", "release": getattr(port, "distro_release", "") or "",
-            "package_release": getattr(port, "package_release", "") or "", "upstream_version": getattr(port, "upstream_version", "") or ""}
-    cpes = (getattr(port, "extra", None) or {}).get("cpes") or [getattr(port, "cpe", "")]
-    if not info["distro"]:
-        info = distro_lib.parse_distro(port.product, port.version, getattr(port, "service_extra", ""), cpes)
-    if info["distro"] in distro_lib.RHEL_FAMILY and not info["release"]:
-        info["release"] = distro_lib.rhel_release(cpes)
-    info["package"] = distro_lib.package_for(port.product, info["distro"], info["upstream_version"]) if info["distro"] else ""
+    """The distro info of a Port row, read from its banner fields (product, version, extra info, the CPEs nmap reported and kept in
+    ``extra``, the banner's first line) by ``distro.parse_distro``: the same reading ingest persisted on the row, made again so a row stored by
+    an older parser is read by today's (the upgrade backfill ``backfill_distro_readings`` rewrites the columns too). A row whose fields say
+    nothing keeps what its columns hold. The package name is derived, never trusted from storage. Read once per row and banner."""
+    extra = getattr(port, "extra", None) or {}
+    cpes = extra.get("cpes") or [getattr(port, "cpe", "")]
+    key = (port.product, port.version, getattr(port, "service_extra", ""), tuple(cpes), getattr(port, "banner", "") or "",
+           getattr(port, "distro", ""), getattr(port, "distro_release", ""), getattr(port, "package_release", ""))
+    cached = getattr(port, "_cv_distro", None)
+    if cached and cached[0] == key:
+        return dict(cached[1])
+    info = distro_lib.parse_distro(port.product, port.version, getattr(port, "service_extra", ""), cpes, getattr(port, "banner", "") or "")
+    if info["distro"] and info["distro"] == getattr(port, "distro", ""):
+        # the columns may hold more than the fields show (a build another source of the same row stated): the same distribution's build wins
+        if not info["package_release"] and getattr(port, "package_release", ""):
+            info["package_release"], info["reading"] = port.package_release, "package"
+            info["upstream_version"] = getattr(port, "upstream_version", "") or distro_lib.upstream_of(port.package_release)
+            info["package"] = distro_lib.package_for(port.product, info["distro"], info["upstream_version"])
+            info.pop("third_party", None)
+            other = distro_lib.third_party(info["distro"], info["package_release"])
+            if other:
+                info["third_party"] = other
+        if not info["release"] and getattr(port, "distro_release", ""):
+            info["release"], info["release_basis"] = port.distro_release, "stored"
+    if not info["distro"] and getattr(port, "distro", ""):
+        info = {"distro": port.distro, "release": getattr(port, "distro_release", "") or "",
+                "package_release": getattr(port, "package_release", "") or "", "upstream_version": getattr(port, "upstream_version", "") or ""}
+        if info["distro"] in distro_lib.RHEL_FAMILY and not info["release"]:
+            info["release"] = distro_lib.rhel_release(cpes)
+        info["package"] = distro_lib.package_for(port.product, info["distro"], info["upstream_version"])
+    try:
+        port._cv_distro = (key, dict(info))
+    except AttributeError:  # an object that takes no attributes is read again next time
+        pass
     return info
 
 
-def host_distro(subdomain, ports=None):
-    """The Red Hat family distribution a host runs, as ``{"distro", "release"}``, or ``{}``: what its open services say (the banner and
-    the OS CPE nmap read, ``port_distro``), the Server header it sent (``Apache/2.4.37 (Red Hat Enterprise Linux)``) and the operating
-    system its addresses report (a host inventory's "Red Hat Enterprise Linux 8.9"). A technology seen in the host's web response (Apache,
-    OpenSSL, PHP) carries no distribution of its own, so it is judged against this. Only the Red Hat family is read this way, and any
-    sign of another distribution makes it ``{}``: nothing is guessed. Releases that disagree leave the release unknown."""
+def stored_distro(info):
+    """What a Port row keeps of a distro reading beyond its four columns (``Port.extra['distro']``): the source package and what the host page
+    and search read (codename, how the release was read, whether the build is known, another publisher, an unsynced tracker). {} for none."""
+    if not info.get("distro"):
+        return {}
+    keep = ("package", "codename", "release_basis", "reading", "third_party", "tracker")
+    return {k: str(info[k])[:64] for k in keep if info.get(k)}
+
+
+def _host_readings(subdomain, ports=None):
+    """``(families, releases)`` the host's open services, its addresses' OS reports and its Server header name: the distribution families seen,
+    and per family the releases read."""
     from startScan.models import open_services
-    families, releases = set(), set()
+    families, releases = set(), {}
     ports = ports if ports is not None else [p for ip in subdomain.ip_addresses.all() for p in open_services(ip)]
     for port in ports:
         info = port_distro(port)
         if info.get("distro"):
             families.add(info["distro"])
             if info.get("release"):
-                releases.add(info["release"])
+                releases.setdefault(info["distro"], set()).add(info["release"])
     for ip in subdomain.ip_addresses.all():
         family = distro_lib.rhel_family_of_text(getattr(ip, "os_guess", "") or "")
         if family:
             families.add(family)
             release = distro_lib.rhel_release(text=ip.os_guess)
             if release:
-                releases.add(release)
+                releases.setdefault(family, set()).add(release)
     header = getattr(subdomain, "webserver", "") or ""
     if header:
         seen = distro_lib.parse_distro("", "", header)
         if seen.get("distro"):
             families.add(seen["distro"])
             if seen.get("release"):
-                releases.add(seen["release"])
+                releases.setdefault(seen["distro"], set()).add(seen["release"])
+    return families, releases
+
+
+def host_distro(subdomain, ports=None, readings=None):
+    """The Red Hat family distribution a host runs, as ``{"distro", "release"}``, or ``{}``: what its open services say (the banner and
+    the OS CPE nmap read, ``port_distro``), the Server header it sent (``Apache/2.4.37 (Red Hat Enterprise Linux)``) and the operating
+    system its addresses report (a host inventory's "Red Hat Enterprise Linux 8.9"). A technology seen in the host's web response (Apache,
+    OpenSSL, PHP) carries no distribution of its own, so it is judged against this. Only the Red Hat family is read this way, and any
+    sign of another distribution makes it ``{}``: nothing is guessed. Releases that disagree leave the release unknown."""
+    families, by_family = readings or _host_readings(subdomain, ports)
     if not families or not families <= set(distro_lib.RHEL_FAMILY):
         return {}
+    releases = set().union(*by_family.values()) if by_family else set()
     return {"distro": "centos" if families == {"centos"} else "rhel", "release": releases.pop() if len(releases) == 1 else ""}
 
 
-def tech_distro(host, name, version):
-    """The distro info a technology seen on a Red Hat family host (``host_distro``) is judged by: the package that product is there, its
-    upstream version, no package release (a web response never shows the rpm build). ``None`` when the host has none or the product is
-    not a package cvENGINE maps."""
-    if not host or not version:
+def host_debian_hint(subdomain, ports=None, readings=None):
+    """The Debian or Ubuntu distribution a host's services and Server header name (``{"distro", "release"}``), or ``{}``: every reading must
+    name the same one, and the release is kept only when the readings that state one agree. A technology on such a host (the Apache, PHP or
+    OpenSSL a web response names) is judged as a hint by it (``tech_distro``): never shown fixed, because its build is not known."""
+    families, by_family = readings or _host_readings(subdomain, ports)
+    if len(families) != 1 or not families <= {"ubuntu", "debian"}:
+        return {}
+    family = next(iter(families))
+    releases = by_family.get(family) or set()
+    return {"distro": family, "release": releases.pop() if len(releases) == 1 else "", "hint": True}
+
+
+def tech_distro(host, name, version, raw=""):
+    """The distro info a technology is judged by. When the technology's own text is a package build (``PHP:8.1.2-1ubuntu2.14``, a banner token
+    ``OpenSSH_9.6p1 Ubuntu-3ubuntu13.5`` in ``raw``), that build. Otherwise, on a Red Hat family host (``host_distro``) or a host every reading
+    of which names Debian or Ubuntu (``host_debian_hint``): the package that product is there, its upstream version, no package release (a web
+    response never shows the build). ``None`` when there is none or the product is not a package cvENGINE maps."""
+    if not version:
+        return None
+    own = distro_lib.parse_distro(name, version, "", (), raw if raw and "_" in raw else "")
+    if own.get("distro") and own.get("package") and own.get("package_release"):
+        if host and host.get("distro") == own["distro"] and not own.get("release") and host.get("release"):
+            own["release"], own["release_basis"] = host["release"], "host"
+        return {**own, "basis": "own"}
+    if not host:
         return None
     upstream = re.split(r"\s", version.strip())[0]
     package = distro_lib.package_for(name, host["distro"], upstream)
     if not package:
         return None
-    return {"distro": host["distro"], "release": host.get("release", ""), "package": package, "package_release": "",
-            "upstream_version": upstream, "basis": "host"}
+    out = {"distro": host["distro"], "release": host.get("release", ""), "package": package, "package_release": "",
+           "upstream_version": upstream, "basis": "host"}
+    if host.get("hint"):
+        from cveFeed import distro_releases
+        if not out["release"]:
+            out["release"] = distro_releases.release_from_table(host["distro"], package, upstream)
+            if out["release"]:
+                out["release_basis"] = "table"
+        else:
+            out["release_basis"] = "host"
+        if out["release"]:
+            out["codename"] = distro_releases.codename(host["distro"], out["release"])
+        out["reading"] = "marker"
+    return out
 
 
 def _record_matches(subdomain, name, version, token, source, product_index,
@@ -1788,7 +1860,9 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     libraries = js_libraries.HostLibraries.for_subdomain(subdomain) if any(js_libraries.is_library(t.name) for t in technologies) else None
     # a core version that is a number a library's own file on the host states is that library's (jQuery 3.7.1 is not WordPress 3.7.1)
     wrong = cms_evidence.superseded(subdomain, technologies, libraries.file_versions() if libraries is not None else ())
-    host = host_distro(subdomain)  # a Red Hat family host: its technologies are judged against Red Hat's data too
+    readings = _host_readings(subdomain)
+    host = host_distro(subdomain, readings=readings)  # a Red Hat family host: its technologies are judged against Red Hat's data too
+    hint = host or host_debian_hint(subdomain, readings=readings)  # a Debian or Ubuntu host: a hint for its technologies, never a fix
     for tech in technologies:
         name, version = split_name_version(tech.name)
         if wrong and (cms.key(name), version) in wrong:
@@ -1812,7 +1886,7 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
         _record_matches(
             subdomain, name, version, token, "tech",
             product_index, cve_by_id, min_confidence, scan_history, rows, evidence={"source": "tech", "source_id": tech.id, **library},
-            leads=leads, confidence_cap=cap, distro=tech_distro(host, name, version), fix_lookup=fix_lookup)
+            leads=leads, confidence_cap=cap, distro=tech_distro(hint, name, version, tech.name), fix_lookup=fix_lookup)
 
     # nmap -sV service data on the host's open ports (Shodan-style inventory).
     from startScan.models import open_services

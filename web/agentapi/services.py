@@ -1653,6 +1653,8 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
                  'version': p.version, 'cpe': p.cpe, 'os': p.os_guess, 'banner': (p.banner or '')[:500], 'tunnel': (p.extra or {}).get('tunnel') or '',
                  'info': p.service_extra or '', 'scripts': {k: str(v)[:800] for k, v in list(((p.extra or {}).get('scripts') or {}).items())[:12]},
                  'db': (p.extra or {}).get('db') or None,
+                 # the distribution package build the banner names (cveFeed.distro): the release, the source package and its exact build
+                 'distro': _port_distro_field(p),
                  'http': p.http or None, 'tls': p.tls or None,
                  'rdp_screenshot': _rdp_screenshot_field(sub, rdp_shots_by_port.get(p.number), static_rdp.get(p.number))} for p in e['ports']]} for addr, e in ips.items()],
             'vulns': [{'id': v.id, 'name': v.name, 'severity': SEVERITY_NAMES.get(v.severity, str(v.severity)), 'url': v.http_url,
@@ -1672,6 +1674,23 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
         row['check_coverage'] = _check_coverage(shared['coverage'], sub, others, host_key[0], excluded, hosting_info, reasons, unverified,
                                                  probe_rows, root, shared.get('coverage_rich', False))
     return row
+
+
+def _port_distro_field(port):
+    """``{distro, name, release, codename, package, build, release_basis, reading, third_party, tracker}`` of the distribution reading a Port row
+    keeps (written at ingest and by the upgrade backfill: ``cveFeed.port_inventory.store_distro``), or None. ``reading`` is ``package`` when the
+    exact build is known and ``marker`` when only the distribution is (a hint: never judged fixed); ``tracker`` ``not_synced`` says no fix data
+    is kept for that distribution."""
+    if not port.distro:
+        return None
+    from cveFeed.distro import NAMES
+    stored = (port.extra or {}).get('distro') or {}
+    out = {'distro': port.distro, 'name': NAMES.get(port.distro, port.distro), 'release': port.distro_release or '',
+           'package': str(stored.get('package') or ''), 'build': port.package_release or ''}
+    for key in ('codename', 'release_basis', 'reading', 'third_party', 'tracker'):
+        if stored.get(key):
+            out[key] = str(stored[key])
+    return out
 
 
 def _validate_plan(sub, others, ips, techs, reasons):
@@ -2179,7 +2198,7 @@ def list_hosts(ctx, slug, params):
 
 
 SEARCH_FIELDS = ('tech', 'banner', 'port', 'proto', 'product', 'service', 'os', 'cve', 'ip', 'host', 'vuln', 'sev', 'auth',
-                  'sensitive', 'zombie', 'country', 'alias', 'note', 'secret', 'java', 'component', 'runtime', 'vsource')
+                  'sensitive', 'zombie', 'country', 'alias', 'note', 'secret', 'java', 'component', 'runtime', 'vsource', 'distro', 'pkg')
 MAX_SEARCH_QUERY, MAX_SEARCH_TERMS, MAX_SEARCH_VALUE, MAX_SEARCH_VALUES = 1000, 15, 200, 40
 MAX_NEGATED_TERMS = 3  # every negated term is a pass over the whole project's hosts (review 2 F1): three is a real query, fifteen is an abuse
 _SEARCH_TERM = re.compile(r'(-)?(?:([A-Za-z]+):)?(?:"([^"]*)"|(\S+))')
@@ -2415,6 +2434,16 @@ def _term_filter(field, value, project=None):
                                             'runtime:php, runtime:ruby, runtime:erlang), or any',
                                  'vsource': 'vsource: takes a version source of the catalogue (vsource:grafana, vsource:prometheus-metrics), header or any'}[field])
         return _hosts_named_in(rows, project)
+    if field in ('distro', 'pkg'):  # the distribution and package build a service banner names (cveFeed.distro_releases)
+        from cveFeed import distro_releases
+        q = distro_releases.search_q(field, value)
+        if q is None:
+            raise ApiError(400, {'distro': 'distro: takes a distribution (distro:ubuntu, distro:debian, distro:rhel, distro:amzn, distro:suse, '
+                                           'distro:freebsd), a codename (distro:jammy, distro:bookworm), a release after @ (distro:ubuntu@22.04, '
+                                           'distro:debian@12, distro:rhel@9), or any',
+                                 'pkg': 'pkg: takes a source package (pkg:openssh, pkg:apache2, pkg:php8.1), optionally with its build after @ '
+                                        '(pkg:openssh@1:8.9p1-3ubuntu0.6, pkg:openssh@8.9p1-3ubuntu0)'}[field])
+        return q
     if field == 'zombie':
         from cveFeed.models import HostState
         if value.lower() not in ('yes', 'no'):
@@ -2563,6 +2592,8 @@ def _why_matched(sub, terms, routes=None, archive=None):
                     reasons.append(label)
                 elif field in (None, 'tech', 'banner') and (hit := _port_evidence(p, v, field)):
                     reasons.append(f'{label} ({hit})')
+                elif field in ('distro', 'pkg') and (hit := _distro_reason(p, field, value)):
+                    reasons.append(f'{label} ({hit})')
         if field in (None, 'vuln', 'sev'):
             for x in sub.vulnerability_set.all():
                 if (field == 'sev' and SEVERITY_NAMES.get(x.severity) == v) or (field != 'sev' and has(x.name)):
@@ -2584,6 +2615,11 @@ def _why_matched(sub, terms, routes=None, archive=None):
         if field in ('component', 'runtime', 'vsource'):
             reasons.append(f'{ {"component": "component", "runtime": "runtime", "vsource": "version source"}[field]} {v}')
     return list(dict.fromkeys(reasons))[:8]
+
+
+def _distro_reason(port, field, value):
+    from cveFeed import distro_releases
+    return distro_releases.search_reason(port, field, value)
 
 
 def _alias_reasons(row, terms):
