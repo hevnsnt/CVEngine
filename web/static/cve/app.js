@@ -1145,7 +1145,7 @@ const technologyTable = (h) => {
   if (versions.length) {
     // what the host's version sources state (cveFeed.version_sources); evidence is what the host said: text only
     box.append(el("h3", "sec", `Read from version sources (${versions.length})`));
-    box.append(el("p", "note", "Versions the host states anonymously: a product's own version endpoint, a platform API, a metrics page, a header, an SNMP agent's system description. Products are matched like any technology (a version, not a test of the flaw). Runtimes (Python, Go, Node.js, PHP, Ruby, .NET Framework, Erlang/OTP) are matched against CVEs in the runtime; one clearly present with no version read waits for review as \"runtime of unknown version\". A component a vendor bundles with the product release (Tomcat in Jira, Jetty in Jenkins ...) is inferred: it is only ever a candidate to check, since the owner may have replaced it. A Linux kernel or Windows build is shown, never matched."));
+    box.append(el("p", "note", "Versions the host states anonymously: a product's own version endpoint, a platform API, a metrics page, a header, an SNMP agent's system description. Products are matched like any technology (a version, not a test of the flaw). Runtimes (Python, Go, Node.js, PHP, Ruby, .NET Framework, Erlang/OTP) are matched against CVEs in the runtime; one clearly present with no version read waits for review as \"runtime of unknown version\". A component a vendor bundles with the product release (Tomcat in Jira, Jetty in Jenkins ...) is inferred: it is only ever a candidate to check, since the owner may have replaced it. A Linux kernel build is shown, never matched. A Windows release an NTLM challenge states (10.0.20348: Windows Server 2022) is the release, never its patch level: its KEV and critical network CVEs wait for review as \"release known, patch level unknown\" until the host's update revision is read."));
     versions.forEach((v) => {
       const line = el("div", "find tech-line");
       // an edge appliance's build read only as a range (cveFeed.edge_builds): the releases it can be, never one of them
@@ -1157,7 +1157,10 @@ const technologyTable = (h) => {
       line.append(el("span", "note", where));
       if (v.stale) line.append(badge("not seen for 90 days", "ice"));
       if (v.matched === false) line.append(badge("shown, not matched", "ice"));
+      // a Windows release an NTLM challenge states (cveFeed.windows_builds): the release is known, its update revision is not
+      if (v.release_only) line.append(badge("patch level unknown", "ice"));
       box.append(line);
+      if (v.release_only && v.windows && v.windows.ambiguous) box.append(el("p", "note", `The build is shared by ${(v.windows.candidates || []).join(" and ")}; nothing read tells which.`));
       if (v.bundled_with) box.append(el("p", "note", `Inferred: ${v.bundled_with.product} ${v.bundled_with.product_version} bundles it (${v.bundled_with.source})`));
       else if (v.evidence) box.append(el("p", "note", `Seen on the host: ${v.evidence}`));
       if (range && v.range.basis) box.append(el("p", "note", `Read as a range: ${v.range.basis}. Its CVEs wait for review; the appliance's own version page decides.`));

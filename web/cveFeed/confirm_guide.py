@@ -921,6 +921,54 @@ def _java_runtime(match, cve, strategy, host):
             'fix': f'Update the Java runtime the application runs on to {_upgrade("Java", ranges)}, restart the application, then let cvENGINE read it again.'}
 
 
+def _windows_release(match, cve, strategy, host):
+    """A Windows CVE on a host whose NTLM challenge states the release but not its update revision (cveFeed.windows_builds): what an outside check
+    read, then the commands that read the revision on the host and how the answer decides."""
+    from cveFeed import match_explain, windows_builds
+    ev = match.evidence if isinstance(match.evidence, dict) else {}
+    windows = ev.get('windows') if isinstance(ev.get('windows'), dict) else {}
+    release = _quote(str(ev.get('release') or match.matched_product or 'Windows'), 60)
+    build = _quote(str(ev.get('build') or ''), 20)
+    fixed = _quote(str(ev.get('fixed_build') or ''), 30)
+    revision = windows_builds.fix_revision(fixed)
+    eos = ev.get('end_of_support') if isinstance(ev.get('end_of_support'), dict) else {}
+    ranges = _ranges_of(match)
+    where = [{'label': 'Host', 'text': host}] if host else []
+    port = _port(ev.get('port'))
+    if port:
+        where.append({'label': 'Port', 'text': str(port)})
+    look_for = [{'label': 'Windows release read from outside', 'quote': f'{release}, build {build}'},
+                {'label': 'How it was read', 'quote': _quote(str(ev.get('said') or ev.get('reading') or ''), 300) or 'an NTLM challenge'}]
+    if windows.get('ambiguous'):
+        look_for.append({'label': 'The build is shared by', 'quote': _quote(' and '.join(str(c) for c in (windows.get('candidates') or [])[:3]), 200)})
+    steps = [_step('What an outside check could not see', f'The NTLM challenge states {release}, build {build}: the release, never its update revision '
+                   '(UBR), so whether the update that fixes this CVE is installed is not known. The build is not read as revision 0. The commands below '
+                   'read the revision on the host.')]
+    if eos:
+        steps.append(_step('End of support', f'{release} left Microsoft support on {_quote(str(eos.get("date") or ""), 10)}, before this CVE was published. '
+                           'It gets the fix only with a paid Extended Security Updates subscription'
+                           + (f', and that programme ended on {_quote(str(eos.get("esu_until") or ""), 10)}' if eos.get('after_esu') else '')
+                           + ': without one it is very likely unpatched. Upgrade to a supported release.'))
+    commands = [{'platform': 'windows', 'command': command, 'explain': f'{what} {note}'} for what, command, note in match_explain.WINDOWS_COMMANDS]
+    if eos:
+        what, command, note = match_explain.ESU_COMMAND
+        commands.append({'platform': 'windows', 'command': command, 'explain': f'{what} {note}'})
+    decide = (f'The update revision is {revision} or higher: the fix (build {fixed}) is installed, not affected.' if revision is not None
+              else 'The update revision is at or past the advisory\'s fixed build: not affected.')
+    verdict = _verdict(release, build, ranges, 'The full build (ver)',
+                       'The revision could not be read: ask the host\'s administrator for the output of ver, and leave the match open.')
+    verdict['not_affected'] = decide
+    verdict['affected'] = (f'The update revision is lower than {revision}: the fix is not installed, affected.' if revision is not None
+                           else 'The update revision is below the advisory\'s fixed build: affected.')
+    return {'class': 'windows_release', 'class_label': 'Windows release known, patch level unknown',
+            'headline': f'Confirm the update revision {host or "the host"} runs', 'where': where, 'look_for': look_for, 'steps': steps,
+            'verdict': verdict, 'precondition': _precondition(cve, strategy),
+            'local': [{'title': 'On the host, in cmd or PowerShell', 'commands': commands}],
+            'fix': (f'Install the latest cumulative update for {release} (build {fixed} or later), restart, then close the match.' if fixed and not eos
+                    else f'Upgrade {release} to a supported Windows release, or install the update under Extended Security Updates.' if eos
+                    else f'Install the latest cumulative update for {release}, restart, then close the match.')}
+
+
 def _language_runtime(match, cve, strategy, host):
     """A CVE in a language runtime (cveFeed.version_sources): what an outside check could and could not read, then the host owner's commands."""
     from cveFeed.version_catalogue import RUNTIMES
@@ -997,6 +1045,8 @@ def match_guide(match):
         guide = _java_runtime(match, cve, strategy, host)
     elif source == 'runtime':
         guide = _language_runtime(match, cve, strategy, host)
+    elif source == 'windows':
+        guide = _windows_release(match, cve, strategy, host)
     elif source == 'bundled':
         guide = _bundled_component(match, cve, strategy, host)
     elif source == 'wp-plugin' or ev.get('source') == 'wpscan':

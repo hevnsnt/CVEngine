@@ -28,6 +28,12 @@ runtime rules of ``cveFeed.version_sources``):
                  technology already states with a version is left out (``recog_readings``): Recog only adds what nmap and the other readers
                  did not read, and never replaces their version. Derived like ``vsrc:nmap``.
 
+The Windows release (``cveFeed.windows_builds``: kind ``hint``, ``release_only``, never a technology, matched by its own rules as "release known,
+patch level unknown"):
+
+  vsrc:ntlm      the build an NTLM challenge states (``rdp-ntlm-info``, ``ms-sql-ntlm-info`` and the other ``*-ntlm-info`` scripts) or
+                 ``smb-os-discovery`` names, read as the Windows release it is (``data/windows_builds.json``). Never nmap's OS guess.
+
 Third-party readings (kind and outcome ``reported``): passive data another service collected at some earlier time, never a technology:
 
   vsrc:shodan-idb  a versioned CPE bbot's ``shodan_idb`` module (Shodan's InternetDB) gives a discovered host (``cpe:/a:openbsd:openssh:8.9p1``).
@@ -68,9 +74,12 @@ WEBSERVER_PROBE = 'vsrc:webserver'
 SHODAN_PROBE = 'vsrc:shodan-idb'
 RUNZERO_PROBE = 'vsrc:runzero'
 RECOG_PROBE = 'vsrc:recog'
+NTLM_PROBE = 'vsrc:ntlm'  # cveFeed.windows_builds.PROBE: the Windows release an NTLM challenge states
 FIRST_PARTY_PROBES = (NMAP_PROBE, WEBSERVER_PROBE, TESTSSL_PROBE, WPSCAN_PROBE, DB_PROBE, RECOG_PROBE)
 REPORTED_PROBES = (SHODAN_PROBE, RUNZERO_PROBE)
-PROBES = FIRST_PARTY_PROBES + REPORTED_PROBES
+# the Windows release is first-party, but a release with no patch level never makes a third-party reading of the same system give way (a runZero
+# operating system version names the update revision the NTLM challenge does not): it is kept out of FIRST_PARTY_PROBES
+PROBES = FIRST_PARTY_PROBES + REPORTED_PROBES + (NTLM_PROBE,)
 SEARCH = {p[len(PREFIX):]: p for p in PROBES}  # vsource:<name>
 REPORTED = 'reported'               # ProbeObservation kind and outcome of a third-party reading: never a technology, never a first-party read
 REPORTED_MAX_AGE_DAYS = 90          # older than this, a third-party reading is not matched (version_sources.STALE_DAYS, the Java runtime's rule)
@@ -584,7 +593,10 @@ def refresh_host(sub, ports, now=None):
     changed = version_sources._store_derived(sub, NMAP_PROBE, found, now)
     served = webserver_readings(sub, ports)
     changed = version_sources._store_derived(sub, WEBSERVER_PROBE, served, now) or changed
-    found = found + served
+    from cveFeed import windows_builds
+    windows = windows_builds.host_readings(sub, ports)  # the Windows release the NTLM scripts and smb-os-discovery state
+    changed = version_sources._store_derived(sub, NTLM_PROBE, windows, now) or changed
+    found = found + served + windows
     try:
         changed = refresh_runzero(sub, now=now) or changed
     except Exception:  # noqa: BLE001 - a malformed block never stops the host's other readings
