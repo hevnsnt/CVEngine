@@ -639,18 +639,34 @@ def keep_published_ranges(affected, stored):
     from cveFeed.correlation import affected_product_tokens
     out = list(affected or [])
     for i, item in enumerate(out):
-        if not isinstance(item, dict) or item.get("ranges") or not (item.get("product") or item.get("package")):
+        if not isinstance(item, dict) or not (item.get("product") or item.get("package")):
             continue
         wanted = affected_product_tokens(item)
-        old = next((o for o in stored or [] if isinstance(o, dict) and o.get("ranges") and wanted & affected_product_tokens(o)), None)
-        if wanted and old:
-            out[i] = {**item, "ranges": old["ranges"]}
+        if not wanted:
+            continue
+        if not item.get("ranges"):
+            old = next((o for o in stored or [] if isinstance(o, dict) and o.get("ranges") and wanted & affected_product_tokens(o)), None)
+            if old:
+                item = out[i] = {**item, "ranges": old["ranges"], **({"reading": old["reading"]} if old.get("reading") else {})}
+        if not item.get("builds"):  # the exact builds only the CVE List record lists (Cisco): a feed that does not carry them keeps them
+            old = next((o for o in stored or [] if isinstance(o, dict) and o.get("builds") and wanted & affected_product_tokens(o)
+                        and _same_vendor(item, o)), None)
+            if old:
+                out[i] = {**item, "builds": old["builds"]}
     return out
+
+
+def _same_vendor(a, b):
+    """Two affected blocks that do not name different vendors (either may name none)."""
+    from cveFeed.correlation import _norm
+    left, right = _norm(a.get("vendor"), True), _norm(b.get("vendor"), True)
+    return not left or not right or left in right or right in left
 
 
 def _ranges(entry):
     """CVE 5 ``versions`` entries -> correlation ranges ({introduced, fixed | lastAffected}), split at ``changes``. An upper
-    bound that is not an exact version ("below 8.00 Update 5") becomes lastAffected 8.00, so the base release still counts."""
+    bound that is not an exact version ("below 8.00 Update 5") becomes lastAffected 8.00, so the base release still counts. At most 30: a
+    record that lists its builds one by one (Cisco) keeps the whole list in the entry's ``builds`` (``_exact_builds``)."""
     out = []
     kind0 = "GIT" if any(str(v.get("versionType") or "").lower() == "git" for v in entry.get("versions") or [] if isinstance(v, dict)) else "SEMVER"
     out += _default_affected_ranges(entry, kind0)
@@ -704,14 +720,103 @@ def _ranges(entry):
     return out[:30]
 
 
+def _exact_builds(entry):
+    """Every exact build a CVE 5 entry lists as affected (a ``versions`` entry with no upper bound, no wildcard and no range in its text), each as
+    ``correlation.build_key`` writes it, in the record's order. Cisco lists every affected build this way (CVE-2023-20109: 674 IOS builds such
+    as "15.2(4)M7", 364 IOS XE builds such as "17.9.4a"): a parenthesised build cannot be a range bound and the ranges keep 30, so these are
+    the only complete statement of what the advisory covers."""
+    from cveFeed.correlation import MAX_BUILDS_PER_ITEM, build_key
+    out = []
+    for v in _join_split_branches(entry.get("versions") or []):
+        if not isinstance(v, dict) or v.get("status") != "affected" or v.get("lessThan") or v.get("lessThanOrEqual") or v.get("changes"):
+            continue
+        if str(v.get("versionType") or "").lower() == "git":
+            continue
+        text = _version_text(v.get("version"))
+        if _placeholder(text) or text in _ZERO or _text_range(text) or _wildcard_base(text):
+            continue
+        key = build_key(text)
+        if key:
+            out.append(key)
+    return list(dict.fromkeys(out))[:MAX_BUILDS_PER_ITEM]
+
+
+def _builds_beyond(ranges, builds):
+    """``builds`` when the ranges do not already carry every one of them (a parenthesised build is never a range, and the ranges stop at 30),
+    else []: an entry whose few exact versions all fit in its ranges is stored as it always was."""
+    from cveFeed.correlation import _exact_single, build_key
+    kept = {build_key(r["introduced"]) for r in ranges if _exact_single(r)}
+    return builds if set(builds) - kept else []
+
+
 def uses_default_status(entries):
     """Whether any ``affected`` block of a CVE List record states its releases as the unaffected intervals of a ``defaultStatus: affected``
     product (Jenkins), the shape ``_default_affected_ranges`` reads: what a run counts, so the shape can be sized (camstork, issue 210)."""
     return any(isinstance(e, dict) and _default_affected_ranges(e, "SEMVER") for e in entries or [])
 
 
-def convert_affected(entries):
-    """CVE 5 ``affected`` -> the cve.now shape correlation reads: [{vendor, product, package?, ranges}]."""
+ORACLE_READING = "oracle_supported_versions"  # the ``reading`` of a block whose ranges ``_oracle_line_ranges`` gave
+
+
+def _is_oracle(entry, assigner):
+    """Whether a block follows Oracle's Critical Patch Update convention: the record is Oracle's (``assigner`` "oracle", or not known) and the
+    block names Oracle as the vendor."""
+    from cveFeed.correlation import _norm
+    if assigner and str(assigner).strip().lower() != "oracle":
+        return False
+    return _norm(entry.get("vendor")).startswith("oracle")
+
+
+def _oracle_line_ranges(entry):
+    """The ranges of an Oracle block that lists only plain exact versions, read as Oracle writes them, or None for any other block.
+
+    Oracle's Critical Patch Update records say "Supported versions that are affected are Oracle Java SE: 8u511b33-perf, 17.0.21.0.3, ..." and
+    list each as one exact version. It means every supported release of that line up to and including that one: Java 17.0.10 is affected by
+    CVE-2026-114938, not only 17.0.21. So each release line becomes one range, from the start of the line to the highest version listed in it
+    (``lastAffected``). The line of a Java runtime is its feature release (8, 17, 21), with Oracle's spellings read as the runtime reads them
+    (8u511b33-perf is 8.0.511, 17.0.21.0.3 is Oracle's build of 17.0.21); for any other product it is the first two numbers of a version of
+    three or more (WebLogic 12.2.1.4.0: 12.2, GraalVM Enterprise 21.3.20.0.3: 21.3) and the first of a two-part one (PeopleTools 8.61: 8).
+    A block with any other bound (``lessThan``, ``lessThanOrEqual``, as MySQL's are written), a version that is one number ("Solaris 11") or
+    that cannot be read is left to ``_ranges`` as before. Every range has both bounds: never an unbounded match."""
+    from cveFeed.correlation import parse_version
+    versions = [v for v in entry.get("versions") or [] if isinstance(v, dict)]
+    if not versions or str(entry.get("defaultStatus") or "").lower() == "affected":
+        return None
+    runtime = None
+    lines = {}
+    for v in versions:
+        if (v.get("status") != "affected" or v.get("lessThan") or v.get("lessThanOrEqual") or v.get("changes")
+                or str(v.get("versionType") or "").lower() == "git"):
+            return None
+        text = _version_text(v.get("version"))
+        if _placeholder(text) or text in _ZERO or _text_range(text) or _wildcard_base(text):
+            return None
+        if runtime is None:
+            from cveFeed import java_runtime
+            runtime = java_runtime.is_runtime_item(entry)
+        if runtime:
+            from cvengine_scanner import java
+            norm = java.normalize_version(text)
+            if not norm or norm["line_only"]:
+                return None
+            key, start, top = ("java", norm["major"]), f"{norm['major']}.0.0", java.dotted(text)
+        else:
+            bound, exact = _bound(text)
+            parts = parse_version(bound, strict=True) if bound and exact else None
+            if not parts or len(parts) < 2:
+                return None
+            line = parts[:2] if len(parts) >= 3 else parts[:1]
+            key, start, top = line, ".".join(map(str, line)) + ".0", bound
+        if parse_version(top, strict=True) is None:
+            return None
+        if key not in lines or _cmp(top, lines[key][1]) == 1:
+            lines[key] = (start, top)
+    return [{"type": "SEMVER", "introduced": start, "lastAffected": top} for start, top in lines.values()]
+
+
+def convert_affected(entries, assigner=""):
+    """CVE 5 ``affected`` -> the cve.now shape correlation reads: [{vendor, product, package?, ranges, builds?}]. ``assigner`` is the
+    record's ``assignerShortName``: an Oracle record's exact versions are read as Oracle means them (``_oracle_line_ranges``)."""
     from cveFeed.correlation import parse_cpe
     out = []
     for entry in entries or []:
@@ -723,7 +828,17 @@ def convert_affected(entries):
             package = next((p[1] for p in (parse_cpe(c) for c in entry.get("cpes") or []) if p and p[1] and p[1] != "*"), "")
         if package:
             item["package"] = _clean(package, 200)
+        oracle = _oracle_line_ranges(entry) if _is_oracle(entry, assigner) else None
+        if oracle:
+            item["ranges"] = oracle
+            item["reading"] = ORACLE_READING  # says the ranges are Oracle's convention read, not versions the record wrote as bounds
+            if item.get("product") or item.get("package"):
+                out.append(item)
+            continue
         item["ranges"] = _ranges(entry)
+        builds = _builds_beyond(item["ranges"], _exact_builds(entry))
+        if builds:  # the whole list of exact builds (correlation.item_verdict compares a version with it)
+            item["builds"] = builds
         if item.get("product") or item.get("package"):
             out.append(item)
     return out[:50]
@@ -760,6 +875,46 @@ def overlay_branch_ranges(cve_id, affected, get=None):
     return out, overlaid
 
 
+# vendors whose CVE List records state their affected releases as a list of exact versions, which cve.now passes on as ``versions`` with no range
+# (Cisco: every affected build; Oracle: the supported versions of each line, see ``_oracle_line_ranges``)
+EXACT_LIST_VENDORS = ("cisco", "oracle")
+
+
+def _exact_list_block(item):
+    """A cve.now block of an ``EXACT_LIST_VENDORS`` vendor that lists ``versions`` and no range: the record's exact versions were not read."""
+    from cveFeed.correlation import _norm
+    vendor = _norm(item.get("vendor")) if isinstance(item, dict) else ""
+    return (bool(vendor) and vendor.startswith(EXACT_LIST_VENDORS) and not item.get("ranges") and not item.get("builds")
+            and isinstance(item.get("versions"), list) and any(isinstance(v, str) and v.strip() for v in item["versions"]))
+
+
+def overlay_exact_versions(cve_id, affected, get=None):
+    """``(affected, overlaid)``: a cve.now block of Cisco or Oracle that carries the record's exact versions only as ``versions`` (no range)
+    takes the ranges and builds the CVE List V5 record gives the same product, read by ``convert_affected``. cve.now cannot say whether a
+    ``versions`` entry had an upper bound (a Linux block lists its "introduced" releases the same way), so nothing is read from that list
+    itself. A record that cannot be read leaves the feed's blocks as they were (CVE-2026-114938, Oracle Java SE: stored with no range)."""
+    from cveFeed.correlation import affected_product_tokens
+    targets = [i for i, item in enumerate(affected or []) if _exact_list_block(item)]
+    if not targets:
+        return affected, False
+    try:
+        doc = fetch_cve5(cve_id, get=get)
+    except Exception as exc:  # noqa: BLE001 - the feed's blocks stand; a later refresh or the backfill asks again
+        logger.info("CVE List record of %s not read for its exact versions: %s", cve_id, exc)
+        return affected, False
+    fields = entry_from_cve5(doc, {}) if doc else None
+    published = (fields or {}).get("affected") or []
+    out, overlaid = list(affected), False
+    for i in targets:
+        wanted = affected_product_tokens(out[i])
+        match = next((p for p in published if (p.get("ranges") or p.get("builds")) and wanted & affected_product_tokens(p)
+                      and _same_vendor(out[i], p)), None)
+        if match:
+            out[i] = {**out[i], **{k: match[k] for k in ("ranges", "builds", "reading") if match.get(k)}}
+            overlaid = True
+    return out, overlaid
+
+
 CVSS_PREFERENCE = ("cvssV3_1", "cvssV3_0", "cvssV4_0", "cvssV2_0")
 
 
@@ -785,9 +940,10 @@ def entry_from_cve5(doc, intel):
     description = next((d.get("value") for d in cna.get("descriptions") or [] if str(d.get("lang", "")).startswith("en")), "")
     kev_name = next((k.get("name") for k in (intel.get("kev") or {}).values() if isinstance(k, dict) and k.get("name")), "")
     cvss, vector, severity = _metric([cna, *adps])
-    affected = convert_affected(cna.get("affected"))
-    if not any(item["ranges"] for item in affected):  # CISA's ADP enrichment often carries the CPE ranges the CNA left out
-        affected += convert_affected([a for adp in adps for a in adp.get("affected") or []])
+    assigner = meta.get("assignerShortName") or ""
+    affected = convert_affected(cna.get("affected"), assigner)
+    if not any(item["ranges"] or item.get("builds") for item in affected):  # CISA's ADP enrichment often carries the CPE ranges the CNA left out
+        affected += convert_affected([a for adp in adps for a in adp.get("affected") or []], assigner)
     from cveFeed import range_corrections
     affected, _corrected = range_corrections.apply(meta.get("cveId"), affected)  # a sourced correction of a too-narrow bound
     from cveFeed.models import _feed_time
@@ -855,7 +1011,7 @@ RANGES_MARKER = "_ranges_repair"  # the IntelSource row whose ``cves`` is the id
 # a Junos wildcard branch or comma list of fixes: issue 205)
 _REPAIR_SQL = """(
     (sources->0 = '"CVE List V5"'::jsonb AND created_at < %s)
-    OR jsonb_path_exists(affected, '$[*] ? (@.ranges.size() == 0)')
+    OR jsonb_path_exists(affected, '$[*] ? (@.ranges.size() == 0 && !exists(@.builds))')
     OR jsonb_path_exists(affected, '$[*].ranges[*] ? (@.fixed like_regex "^unspecified$" flag "i" || @.introduced like_regex "^unspecified$" flag "i"
         || @.fixed like_regex "[*,]" || @.introduced like_regex "[,]")')
 )"""
@@ -886,7 +1042,7 @@ def repair_ranges(limit=200, get=None, workers=8, scan=1000, now=None):
     plan, last, fetches = [], marker.cves, 0
     for row in rows:
         affected = normalize_feed_ranges(row.affected)
-        empty = any(isinstance(i, dict) and not i.get("ranges") and (i.get("product") or i.get("package")) for i in affected)
+        empty = any(isinstance(i, dict) and not i.get("ranges") and not i.get("builds") and (i.get("product") or i.get("package")) for i in affected)
         reimport = bool(row.sources) and row.sources[0] == "CVE List V5" and row.created_at < marker.last_changed
         if empty or reimport:
             if fetches >= limit:
@@ -939,6 +1095,97 @@ def repair_ranges(limit=200, get=None, workers=8, scan=1000, now=None):
     marker.last_checked = now
     marker.save(update_fields=["cves", "last_checked"])
     return out
+
+
+# ----------------------------------------------------------------------------- the exact builds of stored records
+
+BUILDS_LANE = "exact-builds"  # the BackgroundCursor lane whose ``last_pk`` is the last CVEEntry id the backfill has looked at
+# the stored entries the CVE List conversion may have cut or misread: a block with the 30 ranges the conversion keeps, a Cisco block with none
+# (every build parenthesised, so none was a range, or cve.now's bare ``versions``), and an Oracle block with no range or with exact versions not
+# yet read as Oracle's supported-versions convention (``_oracle_line_ranges``). ``wide`` also takes every other block with no range.
+_ORACLE_SQL = """jsonb_path_exists(affected, '$[*] ? (@.vendor like_regex "^oracle" flag "i" && !exists(@.reading)
+        && (@.ranges.size() == 0 || exists(@.ranges[*] ? (@.introduced == @.lastAffected))))')"""
+_BUILDS_SQL = """(
+    jsonb_path_exists(affected, '$[*] ? (@.ranges.size() >= 30 && !exists(@.builds))')
+    OR jsonb_path_exists(affected, '$[*] ? (@.ranges.size() == 0 && !exists(@.builds)
+        && (@.vendor like_regex "cisco" flag "i" || @.product like_regex "cisco" flag "i"))')
+    OR """ + _ORACLE_SQL + """
+)"""
+_BUILDS_WIDE_SQL = """(jsonb_path_exists(affected, '$[*] ? ((@.ranges.size() >= 30 || @.ranges.size() == 0) && !exists(@.builds))')
+    OR """ + _ORACLE_SQL + ")"
+
+
+def builds_candidates(wide=False):
+    """The stored entries ``backfill_exact_builds`` reads the CVE List record of, from where the last run stopped."""
+    from cveFeed.models import BackgroundCursor, CVEEntry
+    cursor = BackgroundCursor.objects.filter(lane=BUILDS_LANE).values_list("last_pk", flat=True).first() or 0
+    return CVEEntry.objects.extra(where=[_BUILDS_WIDE_SQL if wide else _BUILDS_SQL]).filter(pk__gt=cursor).order_by("pk")
+
+
+def backfill_exact_builds(limit=200, get=None, workers=8, wide=False):
+    """One bounded step of giving stored entries the exact builds their CVE List record lists (``_exact_builds``). Returns the counts.
+
+    Before the ``builds`` list, the conversion kept 30 ranges and no parenthesised build, so a Cisco host whose build was not among the first 30
+    listed (or any IOS or NX-OS build) never matched. Resumable: it reads at most ``limit`` records per call, in id order from the
+    ``exact-builds`` cursor. Only ``builds`` (and the ranges of a block that had none) are taken from the record (``keep_published_ranges``);
+    a changed entry is marked for re-correlation and its cached match verdicts are dropped, as a cve.now refresh does. ``done`` is True once
+    the walk reached the end; a record that could not be read is counted in ``failed`` and the walk goes on."""
+    from cveFeed.models import BackgroundCursor, CVEEntry, MatchVerdict
+    rows = list(builds_candidates(wide)[:max(1, limit)])
+    out = {"scanned": len(rows), "updated": 0, "failed": 0, "failed_ids": [], "done": not rows}
+    if not rows:
+        return out
+
+    def load(row):
+        try:
+            return row, fetch_cve5(row.cve_id, get=get), None
+        except Exception as exc:  # noqa: BLE001 - counted; the command tries the walk again
+            return row, None, exc
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        fetched = list(pool.map(load, rows))
+    for row, doc, error in fetched:
+        if error is not None:
+            out["failed"] += 1
+            out["failed_ids"].append(row.cve_id)
+            logger.warning("exact builds: could not read the CVE List record of %s: %s", row.cve_id, error)
+            continue
+        fields = entry_from_cve5(doc, {}) if doc else None
+        if not fields:
+            continue
+        new = _take_oracle_readings(keep_published_ranges(row.affected, fields["affected"]), fields["affected"])
+        if new != row.affected:
+            sources = list(row.sources or [])
+            if "CVE List V5" not in sources:  # the label is what lets a cve.now refresh keep the builds (``keep_published_ranges``)
+                sources.append("CVE List V5")
+            CVEEntry.objects.filter(pk=row.pk).update(affected=new, sources=sources, needs_recorrelation=True)
+            MatchVerdict.objects.filter(cve_entry_id=row.pk).delete()
+            out["updated"] += 1
+    cursor, _ = BackgroundCursor.objects.get_or_create(lane=BUILDS_LANE)
+    cursor.last_pk = max(cursor.last_pk, rows[-1].pk)
+    cursor.save(update_fields=["last_pk", "updated_at"])
+    return out
+
+
+def _take_oracle_readings(affected, published):
+    """``affected`` with each Oracle block that was stored with the record's exact versions as exact ranges given the per-line ranges the record
+    reads as now (``_oracle_line_ranges``), for the same product. Any other block is returned as it was."""
+    from cveFeed.correlation import affected_product_tokens
+    out = list(affected or [])
+    for i, item in enumerate(out):
+        if not isinstance(item, dict) or item.get("reading"):
+            continue
+        wanted = affected_product_tokens(item)
+        ranges = [r for p in published or [] if p.get("reading") == ORACLE_READING and wanted & affected_product_tokens(p)
+                  and _same_vendor(item, p) for r in p["ranges"]]
+        if wanted and ranges:  # every line the record gives the product (CISA's ADP writes one block per line: java_se 7u311, 8u301, ...)
+            out[i] = {**item, "ranges": [dict(t) for t in dict.fromkeys(tuple(r.items()) for r in ranges)], "reading": ORACLE_READING}
+    return out
+
+
+def reset_exact_builds():
+    """Start the walk of ``backfill_exact_builds`` again from the first stored entry."""
+    from cveFeed.models import BackgroundCursor
+    BackgroundCursor.objects.filter(lane=BUILDS_LANE).delete()
 
 
 # ----------------------------------------------------------------------------- one run

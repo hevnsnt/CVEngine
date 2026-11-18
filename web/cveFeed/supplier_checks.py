@@ -331,7 +331,7 @@ def cve_postures(domain, observations, pool, edge=False, distro=''):
         seen.add((token, version))
         looked_up.append(f'{name}:{version}')
         details, hits = {}, []
-        for cve, _matched, in_range in correlation._match_candidates(name, ver, token, index, cve_by_id, details=details):
+        for cve, _matched, in_range in correlation._match_candidates(name, ver, token, index, cve_by_id, details=details, raw=version):
             # the same evidence rule as owned hosts, and stricter: a version inside a bounded range, never "older than every listed branch"
             if in_range is True and match_policy.hard_version_evidence(in_range, details.get(cve.id)):
                 hits.append(cve)

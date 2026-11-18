@@ -365,3 +365,358 @@ class JenkinsRepairTests(TestCase):
         self.assertIn('repaired', out.getvalue())
         self.assertTrue(self.stored().affected[0]['ranges'])
 
+
+
+# ---------------------------------------------------------------------------------------------- Cisco exact builds
+
+# Trimmed copies of the real records: CVE-2023-20109 (IOS 44 of its 674 builds, IOS XE 97 of its 364) and CVE-2024-20353 (ASA 46 of its 187,
+# FTD 10 of its 80), each build exactly as the CNA wrote it and in its order. The real IOS list also holds 15.2(4)M8; the trimmed one leaves it
+# out so it can stand for a near miss.
+
+ASA_NAME = 'Cisco Adaptive Security Appliance (ASA) Software'
+
+
+def converted(cve_id):
+    return intel.convert_affected(cve5(cve_id)['containers']['cna']['affected'])
+
+
+def listed(cve_id, product):
+    block = next(a for a in cve5(cve_id)['containers']['cna']['affected'] if a['product'] == product)
+    return [v['version'] for v in block['versions']]
+
+
+def read(affected, name, version, cpe=''):
+    """``verdict`` with the version text passed along, as ``_record_matches`` passes it."""
+    cve = SimpleNamespace(id=1, cve_id='CVE-X', affected=affected, kev=True, epss_reached=None, exploit_db=None, cvss=9.8)
+    index = correlation.build_product_index([cve])
+    found = list(correlation._match_candidates(name, parse_version(version), correlation._norm(name), index, {1: cve}, cpe=cpe, raw=version))
+    return found[0][2] if found else 'nomatch'
+
+
+def old_shape(affected):
+    """What the conversion stored before the builds: the same blocks without them."""
+    return [{k: v for k, v in item.items() if k != 'builds'} for item in affected]
+
+
+class CiscoExactBuildTests(SimpleTestCase):
+    def test_every_listed_build_is_kept_in_order(self):
+        ios, xe = converted('CVE-2023-20109')
+        self.assertEqual(ios['builds'], [v.lower() for v in listed('CVE-2023-20109', 'IOS')])
+        self.assertEqual(len(ios['builds']), 44)
+        self.assertEqual(xe['builds'], [v.lower() for v in listed('CVE-2023-20109', 'Cisco IOS XE Software')])
+        self.assertEqual(len(xe['builds']), 97)
+        asa, ftd = converted('CVE-2024-20353')
+        self.assertEqual(asa['builds'], listed('CVE-2024-20353', 'Cisco Adaptive Security Appliance (ASA) Software'))
+        self.assertEqual(len(asa['builds']), 46)
+        self.assertNotIn('builds', ftd)  # its 10 builds all fit in the ranges: stored as it always was
+        self.assertEqual(len(ftd['ranges']), 10)
+
+    def test_the_ranges_are_as_before(self):
+        ios, xe = converted('CVE-2023-20109')
+        self.assertEqual(ios['ranges'], [])  # a parenthesised build is never a range bound
+        self.assertEqual(len(xe['ranges']), 30)
+        self.assertEqual(xe['ranges'][0], {'type': 'SEMVER', 'introduced': '3.7.0S', 'lastAffected': '3.7.0S'})
+
+    def test_parenthesised_builds_are_kept(self):
+        ios, _xe = converted('CVE-2023-20109')
+        for build in ('15.2(4)m7', '15.2(4)m6a', '12.4(24)t', '15.9(3)m7a'):
+            self.assertIn(build, ios['builds'])
+        self.assertTrue(all('(' in b for b in ios['builds']))
+
+    def test_a_build_past_the_thirtieth_matches_exactly(self):
+        xe = converted('CVE-2023-20109')
+        asa = converted('CVE-2024-20353')
+        self.assertGreater(listed('CVE-2024-20353', 'Cisco Adaptive Security Appliance (ASA) Software').index('9.16.4.18'), 30)
+        self.assertGreater(listed('CVE-2023-20109', 'Cisco IOS XE Software').index('17.9.3a'), 30)
+        self.assertIs(read(asa, ASA_NAME, '9.16.4.18'), True)
+        self.assertIs(read(asa, ASA_NAME, '9.16(4)18'), True)  # how the ASA itself prints it
+        self.assertIs(read(xe, 'Cisco IOS XE Software', '17.9.3a'), True)
+        self.assertIs(read(xe, 'Cisco IOS XE Software', '17.09.03a'), True)  # IOS XE 17 prints its version with leading zeros
+        self.assertIs(read(xe, 'Cisco IOS', '15.2(4)M7'), True)
+        self.assertIs(read(xe, 'Cisco IOS', '15.2(4)m7'), True)
+        self.assertIs(read(xe, 'Cisco IOS', '15.2\\(4\\)m7', cpe='cpe:/o:cisco:ios:15.2\\(4\\)m7'), True)  # as a CPE escapes it
+
+    def test_before_the_builds_those_hosts_had_no_match(self):
+        # the shape the conversion stored before: the ASA list cut at 30 and no IOS range at all
+        self.assertIs(read(old_shape(converted('CVE-2024-20353')), ASA_NAME, '9.16.4.18'), False)
+        self.assertIsNone(read(old_shape(converted('CVE-2023-20109')), 'Cisco IOS', '15.2(4)M7'))
+
+    def test_a_near_miss_build_does_not_match(self):
+        xe = converted('CVE-2023-20109')
+        asa = converted('CVE-2024-20353')
+        self.assertIs(read(xe, 'Cisco IOS', '15.2(4)M8'), False)
+        self.assertIs(read(xe, 'Cisco IOS', '15.2(4)'), False)
+        self.assertIs(read(xe, 'Cisco IOS', '15.2'), False)
+        self.assertIs(read(xe, 'Cisco IOS XE Software', '17.9.4a'), False)  # the fixed rebuild of 17.9.4 is not on the list
+        self.assertIs(read(xe, 'Cisco IOS XE Software', '17.9.3b'), False)
+        self.assertIs(read(asa, ASA_NAME, '9.16.4.17'), False)
+
+    def test_a_listed_build_is_not_a_whole_release(self):
+        # a range of one version reads "1.0.2" as the whole release (1.0.2k is inside it); a listed build is that build only
+        affected = [{'vendor': 'Cisco', 'product': 'Cisco IOS XE Software', 'ranges': [{'introduced': '17.9.4', 'lastAffected': '17.9.4'}],
+                     'builds': ['17.9.4', '17.9.3']}]
+        self.assertIs(read(affected, 'Cisco IOS XE Software', '17.9.4'), True)
+        self.assertIs(read(affected, 'Cisco IOS XE Software', '17.9.4a'), False)
+
+    def test_a_parenthesised_build_is_never_a_range_bound_or_a_prefix(self):
+        self.assertIsNone(parse_version('15.2(4)M7', strict=True))
+        host = parse_version('15.2(4)M7')
+        self.assertEqual(host.text, '15.2(4)m7')
+        self.assertIsNone(correlation.version_in_range(host, {'introduced': '15.0', 'fixed': '15.5'}))
+        self.assertIsNone(correlation.version_in_range(parse_version('15.3'), {'introduced': '15.2(4)M7', 'fixed': '15.5'}))
+        # a feed's range around the release says nothing about the build: unknown, never in range
+        wide = [{'vendor': 'Cisco', 'product': 'IOS', 'ranges': [{'introduced': '15.0', 'fixed': '15.5'}]}]
+        self.assertIsNone(read(wide, 'Cisco IOS', '15.2(4)M7'))
+        # nor a fix-only branch list read by major.minor
+        fixes = [{'vendor': 'Cisco', 'product': 'IOS', 'ranges': [{'fixed': '15.2.9'}, {'fixed': '15.5.3'}]}]
+        self.assertIsNone(read(fixes, 'Cisco IOS', '15.2(4)M7'))
+        # a bound that names exactly this build holds it
+        through = [{'vendor': 'Zyxel', 'product': 'GS1900-8 firmware', 'ranges': [{'lastAffected': '2.90(AAHH.2)C0'}]}]
+        self.assertIs(read(through, 'GS1900-8 firmware', '2.90(AAHH.2)C0'), True)
+        self.assertIsNone(read(through, 'GS1900-8 firmware', '2.80(AAHH.1)C0'))
+
+    def test_a_dotted_version_against_a_list_without_its_text_reads_the_ranges_as_before(self):
+        xe = converted('CVE-2023-20109')
+        self.assertIs(verdict(xe, 'Cisco IOS XE Software', '3.7.0S'), True)
+
+    def test_the_evidence_names_the_build_and_the_triage_text_says_so(self):
+        from cveFeed import match_policy, triage
+        asa = converted('CVE-2024-20353')
+        cve = SimpleNamespace(id=1, cve_id='CVE-2024-20353', affected=asa, kev=True, epss_reached=None, exploit_db=None, cvss=8.6)
+
+        class Sub:
+            id, scan_history_id, target_domain_id, name = 5, 7, 3, 'fw.example.test'
+        rows = []
+        correlation._record_matches(Sub, ASA_NAME, '9.16.4.18', correlation._norm(ASA_NAME),
+                                    'tech', correlation.build_product_index([cve]), {1: cve}, 0.0, None, rows)
+        self.assertEqual([(r['version_in_range'], r['evidence']['range']) for r in rows], [(True, {'build': '9.16.4.18'})])
+        self.assertTrue(match_policy.hard_version_evidence(True, rows[0]['evidence']))
+        self.assertEqual(triage.range_text(rows[0]['evidence']['range']), 'the listed build 9.16.4.18')
+        self.assertIs(correlation.range_holds('9.16.4.18', {'build': '9.16.4.18'}), True)
+        self.assertIs(correlation.range_holds('9.16.4.19', {'build': '9.16.4.18'}), False)
+
+    def test_apple_ios_and_cisco_ios_never_match_each_other(self):
+        apple = intel.convert_affected(cve5('CVE-2022-32917')['containers']['cna']['affected'])
+        cisco = converted('CVE-2023-20109')
+        for version in ('15.2(4)M7', '15.1', '12.0'):
+            self.assertEqual(read(apple, 'Cisco IOS', version), 'nomatch', version)
+            self.assertEqual(read(apple, 'Cisco IOS http-config', version), 'nomatch', version)  # nmap's name for it, an alias of "ios"
+        for version in ('15.1', '15.2(4)M7'):
+            self.assertEqual(read(cisco, 'Apple iOS', version), 'nomatch', version)
+        # each still matches its own
+        self.assertIs(read(apple, 'iOS', '15.1'), True)
+        self.assertIs(read(cisco, 'Cisco IOS', '15.2(4)M7'), True)
+        self.assertIs(read(cisco, 'Cisco IOS http-config', '15.2(4)M7'), True)
+
+    def test_a_vendor_word_still_matches_its_own_vendors_product(self):
+        nginx_project = [{'vendor': 'nginx', 'product': 'nginx', 'ranges': [{'introduced': '1.0.0', 'fixed': '1.20.0'}]}]
+        self.assertIs(read(nginx_project, 'F5 NGINX', '1.10.0'), True)  # the project is its own vendor
+        tomcat = [{'vendor': 'Apache Software Foundation', 'product': 'Apache Tomcat', 'ranges': [{'introduced': '9.0.0', 'fixed': '9.0.50'}]}]
+        self.assertIs(read(tomcat, 'Apache Tomcat', '9.0.10'), True)
+        oracle_on_apache = [{'vendor': 'apache', 'product': 'http_server', 'ranges': [{'introduced': '1.0', 'fixed': '9.0'}]}]
+        self.assertEqual(read(oracle_on_apache, 'Oracle HTTP Server', '2.4.52'), 'nomatch')
+
+    def test_a_feed_refresh_keeps_the_builds_the_cve_list_record_gave(self):
+        stored = converted('CVE-2023-20109')
+        feed = old_shape(stored)
+        kept = intel.keep_published_ranges(feed, stored)
+        self.assertEqual([item.get('builds') for item in kept], [item['builds'] for item in stored])
+        other_vendor = [{'vendor': 'Apple', 'product': 'IOS', 'ranges': []}]
+        self.assertNotIn('builds', intel.keep_published_ranges(other_vendor, stored)[0])
+
+    def test_the_seed_carries_the_builds_and_cleans_them(self):
+        from cveFeed import seed
+        affected = converted('CVE-2023-20109')
+        cve = SimpleNamespace(cve_id='CVE-2023-20109', kev=True, epss_reached=None, exploit_db=None, cvss=8.8, affected=affected, references=[],
+                              sources=['CVE List V5'], intel={}, published_at=None, first_seen_at=None,
+                              **{field: '' for field in seed.TEXT_LIMITS})
+        line = json.loads(json.dumps(seed.record_for(cve)))
+        self.assertEqual(seed.clean_record(line)['affected'], affected)
+        line['affected'][0]['builds'] += [7, None, 'x' * 100, 'two words', '15.2(4)M7']
+        self.assertEqual(seed.clean_record(line)['affected'][0]['builds'], affected[0]['builds'])
+
+
+class CiscoExactBuildBackfillTests(TestCase):
+    def store(self, cve_id, **extra):
+        return CVEEntry.objects.create(cve_id=cve_id, affected=old_shape(converted(cve_id)), sources=['CVE List V5'], **extra)
+
+    def records(self, cve_id):
+        return {'CVE-2023-20109': cve5('CVE-2023-20109'), 'CVE-2024-20353': cve5('CVE-2024-20353'),
+                'CVE-2022-32917': cve5('CVE-2022-32917')}[cve_id]
+
+    def test_the_backfill_reingests_the_stored_records_and_marks_them_for_correlation(self):
+        ios = self.store('CVE-2023-20109')
+        asa = self.store('CVE-2024-20353')
+        apple = CVEEntry.objects.create(cve_id='CVE-2022-32917', affected=converted('CVE-2022-32917'), sources=['CVE List V5'])
+        MatchVerdict.objects.create(cve_entry=asa, matched_product='Cisco ASA', matched_version='9.16.4.18', version_in_range=False,
+                                    ai_verdict='uncertain')
+        self.assertEqual(set(intel.builds_candidates().values_list('cve_id', flat=True)), {'CVE-2023-20109', 'CVE-2024-20353'})
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=lambda cve, get=None: self.records(cve)) as fetch:
+            out = intel.backfill_exact_builds(limit=10)
+        self.assertEqual(sorted(c.args[0] for c in fetch.call_args_list), ['CVE-2023-20109', 'CVE-2024-20353'])
+        self.assertEqual((out['scanned'], out['updated'], out['failed']), (2, 2, 0))
+        for row, cve_id in ((ios, 'CVE-2023-20109'), (asa, 'CVE-2024-20353')):
+            row.refresh_from_db()
+            self.assertEqual(row.affected, converted(cve_id))
+            self.assertTrue(row.needs_recorrelation)
+        self.assertFalse(MatchVerdict.objects.filter(cve_entry=asa).exists())  # judged again on the new reading
+        apple.refresh_from_db()
+        self.assertFalse(apple.needs_recorrelation)
+        self.assertIs(read(CVEEntry.objects.get(pk=asa.pk).affected, ASA_NAME, '9.16.4.18'), True)
+        # resumable and done: the next step finds nothing and reads nothing
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=AssertionError('read twice')):
+            self.assertEqual(intel.backfill_exact_builds(limit=10), {'scanned': 0, 'updated': 0, 'failed': 0, 'failed_ids': [], 'done': True})
+
+    def test_the_backfill_is_bounded_per_step_and_continues_where_it_stopped(self):
+        self.store('CVE-2023-20109')
+        self.store('CVE-2024-20353')
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=lambda cve, get=None: self.records(cve)) as fetch:
+            first = intel.backfill_exact_builds(limit=1)
+            second = intel.backfill_exact_builds(limit=1)
+            third = intel.backfill_exact_builds(limit=1)
+        self.assertEqual([first['scanned'], second['scanned'], third['scanned']], [1, 1, 0])
+        self.assertEqual(fetch.call_count, 2)
+        self.assertTrue(third['done'])
+
+    def test_the_update_step_runs_the_command(self):
+        from io import StringIO
+
+        from cveFeed import upgrade_backfills
+        from django.core.management import call_command
+        self.assertIn('backfill_exact_builds', upgrade_backfills.BACKFILLS)
+        self.store('CVE-2024-20353')
+        out = StringIO()
+        call_command('backfill_exact_builds', stdout=out)
+        self.assertIn('1 stored CVEs would', out.getvalue())
+        self.assertNotIn('builds', CVEEntry.objects.get(cve_id='CVE-2024-20353').affected[0])  # a dry run writes nothing
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=lambda cve, get=None: self.records(cve)):
+            self.assertEqual(upgrade_backfills.run_one('backfill_exact_builds'), 'done')
+        self.assertIn('builds', CVEEntry.objects.get(cve_id='CVE-2024-20353').affected[0])
+
+    def test_an_unreadable_record_fails_the_step_so_it_is_tried_again(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+        self.store('CVE-2024-20353')
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=intel.SourceError('HTTP 503')), self.assertRaises(CommandError):
+            call_command('backfill_exact_builds', '--apply')
+        self.assertEqual(intel.builds_candidates().count(), 1)  # the walk starts again
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=lambda cve, get=None: self.records(cve)):
+            call_command('backfill_exact_builds', '--apply')
+        self.assertTrue(CVEEntry.objects.get(cve_id='CVE-2024-20353').needs_recorrelation)
+
+
+# ---------------------------------------------------------------------------------------------- Oracle's supported versions
+
+# CVE-2026-114938 (Oracle Java SE, published 2026-11-17): the CVE List record (cve5/, trimmed) lists each product's supported versions as
+# plain exact versions, and the live cve.now entry (cvenow/) passes them on as a bare ``versions`` list with ``ranges: []``. The other
+# records below are the real ``affected`` blocks of WebLogic (CVE-2024-21182), MySQL Cluster (CVE-2022-21490) and Java SE (CVE-2017-3241).
+WEBLOGIC = [{'vendor': 'Oracle Corporation', 'product': 'WebLogic Server',
+             'versions': [{'version': '12.2.1.4.0', 'status': 'affected'}, {'version': '14.1.1.0.0', 'status': 'affected'}]}]
+MYSQL_CLUSTER = [{'vendor': 'Oracle Corporation', 'product': 'MySQL Cluster',
+                  'versions': [{'status': 'affected', 'version': '7.4.35 and prior'}, {'status': 'affected', 'version': '7.5.25 and prior'},
+                               {'status': 'affected', 'version': '7.6.21 and prior'}, {'status': 'affected', 'version': '8.0.28 and prior'}]}]
+JAVA_2017 = [{'vendor': 'Oracle', 'product': 'Java SE', 'versions': [{'status': 'affected', 'version': '6u131'}, {'status': 'affected', 'version': '7u121'},
+                                                                      {'status': 'affected', 'version': '8u112'}]},
+             {'vendor': 'Oracle', 'product': 'JRockit', 'versions': [{'status': 'affected', 'version': 'R28.3.12'}]}]
+
+
+def oracle_record():
+    return intel.entry_from_cve5(cve5('CVE-2026-114938'), {})['affected']
+
+
+def lines(item):
+    return [(r.get('introduced'), r.get('lastAffected')) for r in item['ranges']]
+
+
+def java_verdict(affected, version):
+    from cveFeed import java_runtime
+    return java_runtime.verdict(version, [item for item in affected if java_runtime.is_runtime_item(item)])[0]
+
+
+class OracleSupportedVersionTests(SimpleTestCase):
+    def test_each_release_line_is_read_up_to_the_listed_version(self):
+        java_se, graal_jdk, graal_ee = oracle_record()
+        self.assertEqual(lines(java_se), [('8.0.0', '8.0.511'), ('17.0.0', '17.0.21'), ('21.0.0', '21.0.13'), ('25.0.0', '25.0.5'),
+                                          ('27.0.0', '27.0.1')])
+        self.assertEqual(lines(graal_jdk), [('17.0.0', '17.0.21'), ('21.0.0', '21.0.13')])
+        self.assertEqual(lines(graal_ee), [('21.3.0', '21.3.20.0.3')])  # not the Java runtime: Oracle's own version, its first two numbers the line
+        for item in (java_se, graal_jdk, graal_ee):
+            self.assertEqual(item['reading'], intel.ORACLE_READING)
+            self.assertNotIn('builds', item)
+            self.assertTrue(all(r.get('introduced') and r.get('lastAffected') for r in item['ranges']))  # never an open range
+
+    def test_the_java_runtime_matcher_reads_older_updates_of_a_line_as_affected(self):
+        affected = oracle_record()
+        table = [('17.0.10', True), ('17.0.21', True), ('17.0.22', False), ('8u401', True), ('1.8.0_511', True), ('8u511', True),
+                 ('8u512', False), ('11.0.20', False), ('21.0.13', True), ('21.0.14', False), ('25.0.5', True), ('25.0.6', False),
+                 ('27.0.1', True), ('27.0.2', False)]
+        self.assertEqual([(v, e, java_verdict(affected, v)) for v, e in table if java_verdict(affected, v) is not e], [])
+
+    def test_an_exact_reading_would_miss_the_older_updates(self):
+        # the record read as it is written (what an exact version means for any other CNA): 17.0.10 is outside
+        plain = intel.convert_affected(cve5('CVE-2026-114938')['containers']['cna']['affected'], assigner='mitre')
+        self.assertIs(java_verdict(plain, '17.0.10'), False)
+        self.assertIs(java_verdict(plain, '17.0.21'), True)
+
+    def test_weblogic_lines_and_mysql_bounds(self):
+        weblogic = intel.convert_affected(WEBLOGIC, assigner='oracle')[0]
+        self.assertEqual(lines(weblogic), [('12.2.0', '12.2.1.4.0'), ('14.1.0', '14.1.1.0.0')])
+        self.assertIs(verdict([weblogic], 'Oracle WebLogic Server', '12.2.1.3.0'), True)
+        self.assertIs(verdict([weblogic], 'Oracle WebLogic Server', '12.2.1.4.0'), True)
+        self.assertIs(verdict([weblogic], 'Oracle WebLogic Server', '14.1.2.0.0'), False)
+        self.assertIs(verdict([weblogic], 'Oracle WebLogic Server', '12.1.3.0.0'), False)
+        # the bounds Oracle wrote itself ("7.4.35 and prior") are read as before, not as lines
+        mysql = intel.convert_affected(MYSQL_CLUSTER, assigner='oracle')[0]
+        self.assertNotIn('reading', mysql)
+        self.assertEqual(mysql['ranges'], intel.convert_affected(MYSQL_CLUSTER, assigner='mitre')[0]['ranges'])
+        self.assertEqual([r.get('lastAffected') for r in mysql['ranges']], ['7.4.35', '7.5.25', '7.6.21', '8.0.28'])
+
+    def test_older_java_records_and_what_cannot_be_read(self):
+        java_se, jrockit = intel.convert_affected(JAVA_2017, assigner='oracle')
+        self.assertEqual(lines(java_se), [('6.0.0', '6.0.131'), ('7.0.0', '7.0.121'), ('8.0.0', '8.0.112')])
+        self.assertNotIn('reading', jrockit)  # "R28.3.12" is no version: left to the plain conversion, which reads nothing from it
+        self.assertEqual(jrockit['ranges'], [])
+        one_number = [{'vendor': 'Oracle', 'product': 'Solaris', 'versions': [{'status': 'affected', 'version': '11'}]}]
+        self.assertNotIn('reading', intel.convert_affected(one_number, assigner='oracle')[0])
+
+    def test_another_cnas_record_of_an_oracle_product_is_read_as_written(self):
+        other = intel.convert_affected(WEBLOGIC, assigner='mitre')[0]
+        self.assertNotIn('reading', other)
+        self.assertEqual(lines(other), [('12.2.1.4.0', '12.2.1.4.0'), ('14.1.1.0.0', '14.1.1.0.0')])
+
+
+class OracleFeedTests(TestCase):
+    def test_the_live_cvenow_entry_had_no_range_and_now_takes_the_records_lines(self):
+        offline = feed_from_api('CVE-2026-114938')
+        self.assertEqual([item['ranges'] for item in offline.affected], [[], [], []])  # what was stored: the feed's bare versions list
+        CVEEntry.objects.all().delete()
+        entry = feed_from_api('CVE-2026-114938', cve5('CVE-2026-114938'))
+        self.assertEqual(lines(entry.affected[0])[1], ('17.0.0', '17.0.21'))
+        self.assertIn('CVE List V5', entry.sources)
+        self.assertIs(java_verdict(entry.affected, '17.0.10'), True)
+        # a refresh keeps them without reading the record again
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=AssertionError('read again')):
+            again, _ = CVEEntry.from_api(cvenow('CVE-2026-114938'))
+        self.assertEqual(CVEEntry.objects.get(pk=again.pk).affected, entry.affected)
+
+    def test_the_backfill_rereads_oracle_records(self):
+        stored = feed_from_api('CVE-2026-114938')
+        exact = CVEEntry.objects.create(cve_id='CVE-2024-21182', sources=['CVE List V5'],
+                                        affected=intel.convert_affected(WEBLOGIC, assigner='mitre'))
+        mysql = CVEEntry.objects.create(cve_id='CVE-2022-21490', sources=['CVE List V5'],
+                                        affected=intel.convert_affected(MYSQL_CLUSTER, assigner='oracle'))
+        self.assertEqual(set(intel.builds_candidates().values_list('cve_id', flat=True)), {'CVE-2026-114938', 'CVE-2024-21182'})
+        records = {'CVE-2026-114938': cve5('CVE-2026-114938'),
+                   'CVE-2024-21182': {'cveMetadata': {'cveId': 'CVE-2024-21182', 'state': 'PUBLISHED', 'assignerShortName': 'oracle'},
+                                      'containers': {'cna': {'affected': WEBLOGIC}}}}
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=lambda cve, get=None: records[cve]):
+            out = intel.backfill_exact_builds(limit=10)
+        self.assertEqual(out['updated'], 2)
+        stored.refresh_from_db()
+        self.assertIs(java_verdict(stored.affected, '17.0.10'), True)
+        self.assertTrue(stored.needs_recorrelation)
+        exact.refresh_from_db()
+        self.assertEqual(lines(exact.affected[0]), [('12.2.0', '12.2.1.4.0'), ('14.1.0', '14.1.1.0.0')])
+        mysql.refresh_from_db()
+        self.assertFalse(mysql.needs_recorrelation)
+        self.assertFalse(intel.builds_candidates().exists())
