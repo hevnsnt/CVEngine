@@ -18,6 +18,15 @@ runtime rules of ``cveFeed.version_sources``):
   vsrc:wpscan    the ``headers`` interesting finding of a WordPress scan (``Server: Apache/2.4.29 (Ubuntu)``, ``X-Powered-By: PHP/7.2.24``).
   vsrc:db-probe  the version a credential-less database probe's reply states (``PONG (redis 7.2.4)``, ``PostgreSQL 15.4``, ``(MySQL 8.0.35)``,
                  ``VERSION 1.6.21``, ``cluster x, version 8.11.1``), per port.
+  vsrc:recog     what Rapid7 Recog's fingerprint databases (``cveFeed.recog``) read in the banners the host's rows already store: SSH, SMTP, FTP,
+                 POP3, IMAP and telnet banners (``Port.banner``), the Server and Set-Cookie lines of the NSE output, ``mysql-info``'s server
+                 version, ``ntp-info``'s readvar variables, an SNMP agent's sysDescr, the host's Server header (``Subdomain.webserver``) and its
+                 live routes' Server headers and cookies. Each service (and its component) Recog names with a version, with Recog's CPE, which
+                 correlation matches first. An operating system Recog names is a hint (shown and searched, never matched: an operating system
+                 is not matched by name) unless it is a network operating system whose CVE records name it (``recog.NETWORK_OS``: Cisco IOS,
+                 IOS XE, IOS XR, NX-OS, FortiOS, Junos OS, PAN-OS, SonicOS, RouterOS). A product a port row, another first-party reading or a
+                 technology already states with a version is left out (``recog_readings``): Recog only adds what nmap and the other readers
+                 did not read, and never replaces their version. Derived like ``vsrc:nmap``.
 
 Third-party readings (kind and outcome ``reported``): passive data another service collected at some earlier time, never a technology:
 
@@ -58,7 +67,8 @@ DB_PROBE = 'vsrc:db-probe'
 WEBSERVER_PROBE = 'vsrc:webserver'
 SHODAN_PROBE = 'vsrc:shodan-idb'
 RUNZERO_PROBE = 'vsrc:runzero'
-FIRST_PARTY_PROBES = (NMAP_PROBE, WEBSERVER_PROBE, TESTSSL_PROBE, WPSCAN_PROBE, DB_PROBE)
+RECOG_PROBE = 'vsrc:recog'
+FIRST_PARTY_PROBES = (NMAP_PROBE, WEBSERVER_PROBE, TESTSSL_PROBE, WPSCAN_PROBE, DB_PROBE, RECOG_PROBE)
 REPORTED_PROBES = (SHODAN_PROBE, RUNZERO_PROBE)
 PROBES = FIRST_PARTY_PROBES + REPORTED_PROBES
 SEARCH = {p[len(PREFIX):]: p for p in PROBES}  # vsource:<name>
@@ -306,6 +316,118 @@ def db_readings(reply):
     return []
 
 
+def _recog_reading(result, database, said, description):
+    """The reading one Recog result (``recog.results``) is, or None: a product reading named as Recog names it, with Recog's CPE; an operating
+    system that is not a network operating system is a ``weak`` hint (``version_sources.kind_of``: never a technology, never matched)."""
+    from cveFeed import recog
+    from cveFeed.correlation import stated_version
+    version = re.split(r'[\s@]', result['version'].strip(), maxsplit=1)[0]  # ntpd's "4.2.8p15@1.3728-o" is 4.2.8p15
+    label = result['label']
+    hint = result['part'] == 'os' and not result['network_os']
+    if hint and result['vendor'] and not label.lower().startswith(result['vendor'].lower()):
+        label = f"{result['vendor']} {label}"  # "Ubuntu Linux", not "Linux"
+    if any(not stated_version(name, version) for name in (label, f"{result['vendor']} {result['product']}")):
+        return None  # a protocol's version, never the product's: Apache-Coyote/1.1, Microsoft-HTTPAPI/2.0 (correlation.stated_version)
+    evidence = f'{said} (Recog {recog.DATABASES.get(database, database)}: {description})'
+    cpe = result['cpe'] if result['cpe'] and not hint else ''
+    got = product_reading(label, version, 'recog', evidence=evidence, cpe=cpe)
+    if got and hint:
+        got = {**got, 'confidence': 'weak'}
+    return got
+
+
+def recog_texts(sub, ports):
+    """``[(port number, database, text, said)]``: the stored banners of ``sub`` Recog reads (``ports``: ``[(address, port)]``, open ones)."""
+    from cveFeed import recog
+    from cveFeed.models import RouteAuth
+    out = []
+    for _address, port in ports:
+        if port.state not in ('', 'open'):
+            continue
+        out += [(port.number, db, text, said) for db, text, said in recog.banner_texts(port) + recog.script_texts(port)]
+    webserver = catalogue.clip(getattr(sub, 'webserver', '') or '', 300)
+    if webserver:
+        out.append((0, 'http_header.server', webserver, f'Server: {webserver}'))
+    if sub.target_domain_id is not None:
+        routes = (RouteAuth.objects.filter(project_id=sub.target_domain.project_id, host=_host(sub), retired_at__isnull=True)
+                  .order_by('-checked_at').values_list('evidence', flat=True)[:50])
+        out += [(0, db, text, said) for db, text, said in recog.route_texts(routes)]
+    seen, unique = set(), []
+    for item in out:
+        if item[:3] not in seen:
+            seen.add(item[:3])
+            unique.append(item)
+    return unique
+
+
+def _stated_products(sub, ports):
+    """``[(product token, CPE product, version)]`` of what the host's ports, its other version readings and its technologies already state:
+    what a Recog reading must not override. Recog's own technologies are left out."""
+    from cveFeed.correlation import _norm, parse_cpe, split_name_version
+    from cveFeed.models import ProbeObservation
+    out = []
+    for _address, port in ports:
+        extra = port.extra if isinstance(port.extra, dict) else {}
+        version = (port.version or '').strip()
+        for cpe in [port.cpe, *(extra.get('cpes') or [])]:
+            parsed = parse_cpe(cpe) if isinstance(cpe, str) else None
+            if parsed:
+                out.append((_norm(port.product or ''), parsed[1], version or parsed[2]))
+        if (port.product or '').strip():
+            out.append((_norm(port.product), '', version))
+    own = set()
+    if sub.target_domain_id is not None:
+        for row in ProbeObservation.objects.filter(project_id=sub.target_domain.project_id, host=_host(sub), probe__startswith=PREFIX).exclude(kind=REPORTED):
+            if row.probe == RECOG_PROBE:
+                own.add(f'{row.product}:{row.version}')
+                continue
+            ev = row.evidence if isinstance(row.evidence, dict) else {}
+            parsed = parse_cpe(ev.get('cpe') or '')
+            out.append((_norm(row.product), parsed[1] if parsed else '', row.version or ''))
+    for tech in sub.technologies.all():
+        if tech.name in own:
+            continue
+        name, version = split_name_version(tech.name or '')
+        out.append((_norm(name), '', version or ''))
+    return [item for item in out if item[0] or item[1]]
+
+
+def _recog_names(reading, stated):
+    """Whether ``stated`` (``_stated_products``) names the product of a Recog reading with a version."""
+    from cveFeed.correlation import _norm, parse_cpe
+    token = _norm(reading['label'])
+    parsed = parse_cpe(reading.get('cpe') or '')
+    cpe_product = parsed[1] if parsed else ''
+    for other, other_cpe, version in stated:
+        if not version:
+            continue
+        if (_same_product(token, {other}) or (cpe_product and other_cpe and cpe_product == other_cpe)
+                or (cpe_product and _same_product(cpe_product, {other})) or (other_cpe and _same_product(token, {other_cpe}))):
+            return True
+    return False
+
+
+def recog_readings(sub, ports):
+    """``[(port number, reading)]`` Recog reads in the host's stored banners (``recog_texts``), less every product something first-party on the
+    host already states with a version (``_stated_products``): a Recog version never overrides nmap's or another reader's."""
+    from cveFeed import recog
+    found, seen = [], set()
+    for number, database, text, said in recog_texts(sub, ports):
+        params = recog.match(database, text)
+        if not params:
+            continue
+        for result in recog.results(params):
+            got = _recog_reading(result, database, said, params.get('fingerprint.description') or '')
+            key = (number, got['component'], got['kind'], got['version']) if got else None
+            if got and key not in seen:
+                seen.add(key)
+                found.append((number, got))
+    if not found:
+        return []
+    stated = _stated_products(sub, ports)
+    return [(number, r) for number, r in found if not _recog_names(r, stated)]
+
+
 def reported_cpe(tech):
     """The third-party reading a technology string bbot reported is, when it is a versioned application CPE (only Shodan's InternetDB hands bbot
     CPEs), else None: anything else is a technology like any other."""
@@ -467,7 +589,23 @@ def refresh_host(sub, ports, now=None):
         changed = refresh_runzero(sub, now=now) or changed
     except Exception:  # noqa: BLE001 - a malformed block never stops the host's other readings
         logger.exception('runZero readings of host %s failed', sub.pk)
+    try:
+        read, moved = refresh_recog(sub, ports, now=now)
+        found, changed = found + read, moved or changed
+    except Exception:  # noqa: BLE001 - a banner Recog cannot read never stops the host's other readings
+        logger.exception('Recog readings of host %s failed', sub.pk)
     return found, changed
+
+
+def refresh_recog(sub, ports=None, now=None):
+    """Store what Recog reads in the host's stored banners (``recog_readings``) under ``vsrc:recog`` and drop what it no longer reads. Runs after
+    the host's other stored-data readings are stored, so those are what it gives way to. Returns ``(readings, whether anything moved)``."""
+    from cveFeed import version_sources
+    if sub.target_domain_id is None:
+        return [], False
+    ports = version_sources._ports(sub) if ports is None else ports
+    found = recog_readings(sub, ports)
+    return found, version_sources._store_derived(sub, RECOG_PROBE, found, now or timezone.now())
 
 
 def store_testssl(sub, port, items):
@@ -716,6 +854,39 @@ def catch_up(apply=False, batch=200):
         out['readings'] += len(readings)
     if moved:
         # every host that gained or lost a reading (or a technology): one that lost its only one is correlated too, so its matches close
+        cve_by_id, index = correlation.cve_pool()
+        ordered = sorted(moved)
+        for start in range(0, len(ordered), batch):
+            subs = list(Subdomain.objects.filter(pk__in=ordered[start:start + batch]).select_related('target_domain', 'scan_history')
+                        .prefetch_related('technologies', 'ip_addresses__ports'))
+            out['matches'] += correlation.correlate_subdomains(subs, index, cve_by_id, min_confidence=0.4)[1]
+    return out
+
+
+def catch_up_recog(apply=False, batch=200):
+    """The one-time catch-up an update runs (``manage.py backfill_recog_readings --apply``): read every current host's stored banners with
+    Recog (``refresh_recog``), then correlate the hosts that gained or lost a reading. Idempotent. Returns ``{'hosts', 'readings', 'matches'}``."""
+    from cveFeed import correlation
+    from startScan.models import Subdomain
+    base = Subdomain.objects.filter(correlation.latest_scan_q()).filter(target_domain__isnull=False)
+    ids = list(base.order_by('id').values_list('id', flat=True))
+    out = {'hosts': len(ids), 'readings': 0, 'matches': 0}
+    if not apply:
+        return out
+    moved = set()
+    for start in range(0, len(ids), batch):
+        subs = list(Subdomain.objects.filter(id__in=ids[start:start + batch]).select_related('target_domain', 'scan_history')
+                    .prefetch_related('technologies', 'ip_addresses__ports'))
+        for sub in subs:
+            try:
+                found, changed = refresh_recog(sub)
+            except Exception:  # noqa: BLE001 - one host's stored data never stops the catch-up
+                logger.exception('Recog catch-up of host %s failed', sub.pk)
+                continue
+            out['readings'] += len(found)
+            if changed:
+                moved.add(sub.pk)
+    if moved:
         cve_by_id, index = correlation.cve_pool()
         ordered = sorted(moved)
         for start in range(0, len(ordered), batch):
