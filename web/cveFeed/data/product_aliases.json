@@ -118,7 +118,10 @@
  "protocol_versions": [
   {"names": ["Microsoft-HTTPAPI", "Microsoft HTTPAPI", "Microsoft HTTPAPI httpd", "ms-httpapi"],
    "evidence": ["CVE-2022-21907 (the HTTP Protocol Stack's flaw, filed under Windows releases: no HTTPAPI version names them)"],
-   "note": "'Microsoft-HTTPAPI/2.0' and nmap's 'Microsoft HTTPAPI httpd 2.0' state the version of the HTTP Server API, the same on every Windows release since Vista: never a version of the product (cvengine_scanner.versions.PROTOCOL_VERSIONS reads the Server header the same way)"}
+   "note": "'Microsoft-HTTPAPI/2.0' and nmap's 'Microsoft HTTPAPI httpd 2.0' state the version of the HTTP Server API, the same on every Windows release since Vista: never a version of the product (cvengine_scanner.versions.PROTOCOL_VERSIONS reads the Server header the same way)"},
+  {"names": ["Apache Tomcat/Coyote JSP engine", "Apache Coyote", "Apache-Coyote"],
+   "evidence": ["cpe:2.3:a:apache:tomcat (Tomcat's releases are 3.x to 11.x: no 1.1 exists)", "CVE-2025-24813 (Apache Software Foundation: Apache Tomcat, 8.5.0 to 11.0.2: a '1.1' sits below every branch it lists)"],
+   "note": "nmap prints Tomcat's HTTP connector as 'Apache Tomcat/Coyote JSP engine 1.1' and the Server header says 'Apache-Coyote/1.1': '1.1' is the HTTP/1.1 connector (Http11Processor), the same on every Tomcat release, never a Tomcat version. Read as one, it sat below every branch an advisory fixes and was taken as an end-of-life release affected by every Tomcat CVE. The name is still Tomcat (aliases), an unversioned lead, and the release notes, error page or a header give the real version (cvengine_scanner.versions.PROTOCOL_VERSIONS reads the Server header the same way)"}
  ],
  "ambiguous_products": [
   {"product": "iOS", "vendors": ["Apple", "Cisco"],
