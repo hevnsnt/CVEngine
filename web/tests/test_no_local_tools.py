@@ -41,7 +41,6 @@ SKIP_DIRS = {'__pycache__', 'tests'}
 # Phase 5 and 8 delete PRs shrink this; the final slice empties it. Paths are relative to web/.
 ALLOWED = {
     'nmap': [
-        'cveFeed/source_versions.py',  # reads the versions stored results already state (the port scan's CPEs and scripts, the TLS audit's banners, the WordPress scan's headers, a discovery's CPEs) and names them as reading sources, runs nothing
         'agentapi/egress.py',  # 1.3.4 outbound connection log (develop): names the tools whose probe plans it records, runs nothing
         'agentapi/mcp.py',
         'agentapi/models.py',
@@ -97,6 +96,7 @@ ALLOWED = {
         'cveFeed/settings_api.py',  # 1.3.2 settings API (develop): setting help text, runs nothing
         'cveFeed/setup_flow.py',  # the setup wizard (1.4): scanner kind names such as nmap or nuclei as the toggles it offers (data values written to the Sentinel settings), runs nothing
         'cveFeed/software.py',  # the About page list of the tools of both images (names, versions, licenses), runs nothing
+        'cveFeed/source_versions.py',  # reads the versions stored results already state (the port scan's CPEs and scripts, the TLS audit's banners, the WordPress scan's headers, a discovery's CPEs) and names them as reading sources, runs nothing
         'cveFeed/tailscale_sync.py',
         'cveFeed/tasks.py',
         'cveFeed/triage.py',  # 1.3.3 triage (develop): docstring naming evidence sources, runs nothing
@@ -216,7 +216,6 @@ ALLOWED = {
         'reNgine/resources.py',
     ],
     'wpscan': [
-        'cveFeed/source_versions.py',  # reads the versions stored results already state (the port scan's CPEs and scripts, the TLS audit's banners, the WordPress scan's headers, a discovery's CPEs) and names them as reading sources, runs nothing
         'agentapi/mcp.py',  # capability list in a tool description names the kind, runs nothing
         'agentapi/rest.py',  # capability and task kind lists in the route help name the kind, runs nothing
         'agentapi/sentinel_broker.py',  # the kind name as a data value: result cleaner and token scrub, runs nothing
@@ -236,6 +235,7 @@ ALLOWED = {
         'cveFeed/scan_concurrency.py',  # T8 leftover: heavy-kind setting key; the lead removes the heavy-kind tunables in the final slice
         'cveFeed/setup_flow.py',  # the setup wizard (1.4): scanner kind names such as nmap or nuclei as the toggles it offers (data values written to the Sentinel settings), runs nothing
         'cveFeed/software.py',  # the About page list of the tools of both images (names, versions, licenses), runs nothing
+        'cveFeed/source_versions.py',  # reads the versions stored results already state (the port scan's CPEs and scripts, the TLS audit's banners, the WordPress scan's headers, a discovery's CPEs) and names them as reading sources, runs nothing
         'cveFeed/threat.py',  # VERSION_READ_SOURCES names the stored finding source, runs nothing
         'cveFeed/work_planner.py',  # 1.4 work planner: the check-to-tool table of the coverage rules, queues Sentinel tasks, runs nothing
         'cveFeed/wp_correlation.py',  # evidence source stored with a correlated finding, runs nothing
@@ -243,7 +243,6 @@ ALLOWED = {
         'reNgine/resources.py',  # T8 leftover: heavy-kind memory and concurrency tables; the lead removes them in the final slice
     ],
     'testssl': [
-        'cveFeed/source_versions.py',  # reads the versions stored results already state (the port scan's CPEs and scripts, the TLS audit's banners, the WordPress scan's headers, a discovery's CPEs) and names them as reading sources, runs nothing
         'agentapi/mcp.py',
         'agentapi/rest.py',
         'agentapi/sentinel_broker.py',
@@ -260,12 +259,12 @@ ALLOWED = {
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/setup_flow.py',  # the setup wizard (1.4): scanner kind names such as nmap or nuclei as the toggles it offers (data values written to the Sentinel settings), runs nothing
         'cveFeed/software.py',  # the About page list of the tools of both images (names, versions, licenses), runs nothing
+        'cveFeed/source_versions.py',  # reads the versions stored results already state (the port scan's CPEs and scripts, the TLS audit's banners, the WordPress scan's headers, a discovery's CPEs) and names them as reading sources, runs nothing
         'cveFeed/tls_audit.py',  # 1.4 TLS audit on a Sentinel: the kind name, the ledger key and the finding source are stored data values, runs nothing
         'cveFeed/work_planner.py',  # 1.4 work planner: the check-to-tool table of the coverage rules, queues Sentinel tasks, runs nothing
         'reNgine/resources.py',
     ],
     'bbot': [
-        'cveFeed/source_versions.py',  # reads the versions stored results already state (the port scan's CPEs and scripts, the TLS audit's banners, the WordPress scan's headers, a discovery's CPEs) and names them as reading sources, runs nothing
         'agentapi/mcp.py',  # 1.4 T8: user-facing tool descriptions that name the discovery tool (share lines with other tool words), runs nothing
         'agentapi/rest.py',  # 1.4 T8: user-facing route descriptions that name the discovery tool (share lines with other tool words), runs nothing
         'agentapi/sentinel_adopt.py',  # the kind name as a data key of the adopter registry and in its docstring: files a Sentinel's result, runs nothing
@@ -296,6 +295,7 @@ ALLOWED = {
         'cveFeed/secrets_inventory.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/setup_flow.py',  # the setup wizard (1.4): scanner kind names such as nmap or nuclei as the toggles it offers (data values written to the Sentinel settings), runs nothing
         'cveFeed/software.py',  # the About page list of the tools of both images (names, versions, licenses), runs nothing
+        'cveFeed/source_versions.py',  # reads the versions stored results already state (the port scan's CPEs and scripts, the TLS audit's banners, the WordPress scan's headers, a discovery's CPEs) and names them as reading sources, runs nothing
         'cveFeed/supplier_scan.py',  # 1.4 T8: docstring line shared with other tool words, runs nothing
         'cveFeed/tasks.py',  # 1.4 T8: ledger key 'bbot-deep' (a stored data value), runs nothing
         'cveFeed/threat.py',  # 1.3.5 heat rules (develop): names the sources whose severity heat is not held back, runs nothing
