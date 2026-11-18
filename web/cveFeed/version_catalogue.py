@@ -476,6 +476,31 @@ def exchange_reading(text, url, source, said):
     return reading('exchange', label, f'{major}.{minor}.{build}.{int(found.group(4))}', url=url, source=source, evidence=f'{said} ({named})')
 
 
+# The product lines a name states. Microsoft's records name SharePoint and Exchange per line ("Microsoft SharePoint Server 2019", "Microsoft
+# SharePoint Enterprise Server 2016", "Microsoft Exchange Server 2019 Cumulative Update 14") and start every SharePoint line at 16.0.0, while name
+# matching reads all of them as one product (the year is an edition word): a 2016 build would sit inside a 2019 range. ``line_conflict`` keeps
+# a host whose name states one line off an affected entry that names another.
+_LINE_FAMILIES = (('sharepoint', re.compile(r'\bsharepoint\b')), ('exchange', re.compile(r'\bexchange server\b')))
+_LINE_NAMES = re.compile(r'\b(subscription edition|2010|2013|2016|2019)\b')
+
+
+def product_line(name):
+    """``(family, line)`` a SharePoint or Exchange name states (``('sharepoint', '2019')``, ``('exchange', 'subscription edition')``), or None."""
+    text = re.sub(r'[_\s]+', ' ', str(name or '').lower())
+    family = next((key for key, pattern in _LINE_FAMILIES if pattern.search(text)), None)
+    found = _LINE_NAMES.search(text) if family else None
+    return (family, found.group(1)) if found else None
+
+
+def line_conflict(line, item):
+    """Whether an affected entry (``item``) names a line of the family ``line`` (``product_line`` of the host's name) other than that one. An
+    entry that names no line conflicts with nothing."""
+    if not line or not isinstance(item, dict):
+        return False
+    other = product_line(item.get('product') or item.get('package'))
+    return bool(other and other[0] == line[0] and other[1] != line[1])
+
+
 _OWA_PATH = re.compile(r'/owa/auth/(1[45]\.\d\.\d{1,4}(?:\.\d{1,4})?)/(?:themes|scripts|resources|current)/', re.I)
 _EXPORTTOOL = re.compile(r'^name="microsoft\.exchange\.ediscovery\.exporttool(?:\.application)?"\s+version="(1[45]\.\d\.\d{1,4}\.\d{1,4})"')
 EXCHANGE_LOGON = '/owa/auth/logon.aspx'

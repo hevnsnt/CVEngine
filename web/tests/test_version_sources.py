@@ -242,6 +242,19 @@ class CatalogueTests(SimpleTestCase):
         self.assertEqual(read('tomcat-release-notes', ok(text='', status=404, content_type='text/html'))['state'], 'absent')
         self.assertEqual(read('tomcat-release-notes', ok(text='Apache Tomcat Version 9 Release Notes', content_type='text/plain'))['readings'], [])
 
+    def test_the_product_line_a_name_states(self):
+        self.assertEqual(catalogue.product_line('Microsoft SharePoint Enterprise Server 2016'), ('sharepoint', '2016'))
+        self.assertEqual(catalogue.product_line('microsoft:sharepoint_server_subscription_edition'), ('sharepoint', 'subscription edition'))
+        self.assertEqual(catalogue.product_line('Microsoft Exchange Server 2019 Cumulative Update 14'), ('exchange', '2019'))
+        self.assertIsNone(catalogue.product_line('Microsoft SharePoint'))
+        self.assertIsNone(catalogue.product_line('Windows Server 2019'))
+        line = catalogue.product_line('Microsoft SharePoint Enterprise Server 2016')
+        self.assertTrue(catalogue.line_conflict(line, {'product': 'Microsoft SharePoint Server 2019'}))
+        self.assertFalse(catalogue.line_conflict(line, {'product': 'Microsoft SharePoint Foundation 2016'}))  # the same line
+        self.assertFalse(catalogue.line_conflict(line, {'product': 'SharePoint Server'}))  # no line named: the version decides
+        self.assertFalse(catalogue.line_conflict(line, {'product': 'Microsoft Exchange Server 2019'}))  # another family
+        self.assertFalse(catalogue.line_conflict(None, {'product': 'Microsoft SharePoint Server 2019'}))
+
     def test_weblogic_console_footer(self):
         got = read('weblogic-console', ok(text=WEBLOGIC_FOOTER, content_type='text/html; charset=UTF-8'))
         self.assertEqual(versions(got), [('weblogic', '12.2.1.4.0', 'product', 'exact')])
@@ -623,19 +636,49 @@ class CorrelationTests(VersionFixture, TestCase):
         version_sources.store_readings(sub, f'vsrc:{source}', [catalogue.reading(component, label, version, kind='runtime', confidence=confidence,
                                                                                   line_only=line_only, source=source)], port=port)
 
-    def test_a_sharepoint_build_is_matched_by_microsofts_record_for_its_line(self):
-        row = cve('CVE-2026-200050', [{'vendor': 'Microsoft', 'product': 'Microsoft SharePoint Server 2019',
-                                       'ranges': [{'type': 'SEMVER', 'introduced': '16.0.0', 'fixed': '16.0.10417.20037'}]}])
-        old = self.host_scan(names=('sp1.rt.test',), address='203.0.113.6')
-        new = self.host_scan(names=('sp2.rt.test',), address='203.0.113.7')
-        for scan, header in ((old, '16.0.0.10337'), (new, '16.0.0.10418')):
-            sub = scan.subdomain_set.get()
-            version_sources.store_readings(sub, 'vsrc:sharepoint', [catalogue.sharepoint_reading(header, '/', 'sharepoint')], port=443)
+    def readings_on_hosts(self, reader, values):
+        """One host per value, each with the reading ``reader(value)`` stored, then correlated."""
+        scans = []
+        for n, value in enumerate(values):
+            scan = self.host_scan(names=(f'h{n}.rt.test',), address=f'203.0.113.{10 + n}')
+            version_sources.store_readings(scan.subdomain_set.get(), 'vsrc:test', [reader(value)], port=443)
+            scans.append(scan)
         cve_by_id, index = correlation.cve_pool()
-        subs = correlation.candidate_subdomains(index).filter(scan_history__in=[old, new])
+        subs = correlation.candidate_subdomains(index).filter(scan_history__in=scans)
         correlation.correlate_subdomains(list(subs), index, cve_by_id, min_confidence=0.4)
-        hits = {(m.subdomain.name, m.matched_version, m.version_in_range) for m in CVEMatch.objects.filter(cve_entry=row)}
-        self.assertEqual(hits, {('sp1.rt.test', '16.0.10337', True)})  # the 16.0.10418 farm is past the fix
+
+    def hits(self, row):
+        return {(m.subdomain.name, m.matched_version, m.version_in_range) for m in CVEMatch.objects.filter(cve_entry=row)}
+
+    def test_a_sharepoint_build_is_matched_by_microsofts_record_for_its_line_only(self):
+        def sp(line, fixed):
+            return {'vendor': 'Microsoft', 'product': f'Microsoft SharePoint {line}', 'ranges': [{'type': 'SEMVER', 'introduced': '16.0.0', 'fixed': fixed}]}
+        only_2019 = cve('CVE-2026-200050', [sp('Server 2019', '16.0.10417.20037')])
+        only_2016 = cve('CVE-2026-200051', [sp('Enterprise Server 2016', '16.0.5520.1000')])
+        both = cve('CVE-2026-200052', [sp('Enterprise Server 2016', '16.0.5520.1000'), sp('Server 2019', '16.0.10417.20037'),
+                                       sp('Server Subscription Edition', '16.0.18526.20508')])
+        unnamed = cve('CVE-2026-200053', [{'vendor': 'Microsoft', 'product': 'SharePoint Server',
+                                           'ranges': [{'type': 'SEMVER', 'introduced': '16.0.0', 'fixed': '16.0.5520.1000'}]}])
+        self.readings_on_hosts(lambda v: catalogue.sharepoint_reading(v, '/', 'sharepoint'), ('16.0.0.10337', '16.0.0.10418', '16.0.0.5513'))
+        # the 2019 farm before the fix matches, the one past it does not, and the 2016 farm (16.0.5513 < 16.0.10417) is no 2019 host
+        self.assertEqual(self.hits(only_2019), {('h0.rt.test', '16.0.10337', True)})
+        self.assertEqual(self.hits(only_2016), {('h2.rt.test', '16.0.5513', True)})  # still matched by the record of its own line
+        self.assertEqual(self.hits(both), {('h0.rt.test', '16.0.10337', True), ('h2.rt.test', '16.0.5513', True)})
+        # an entry that names no line keeps the version rule alone: the 2019 builds are past its bound, the 2016 build inside it
+        self.assertEqual(self.hits(unnamed), {('h2.rt.test', '16.0.5513', True)})
+
+    def test_an_exchange_build_is_matched_by_its_lines_record_only(self):
+        def ex(line, ranges):
+            return {'vendor': 'Microsoft', 'product': f'Microsoft Exchange Server {line}', 'ranges': ranges}
+        # Microsoft's shape: each line starts at its own minor (15.02.0, 15.01.0), so the bounds already keep 2016 and 2019 apart
+        cu14 = cve('CVE-2026-200060', [ex('2019 Cumulative Update 14', [{'type': 'SEMVER', 'introduced': '15.02.0', 'fixed': '15.02.1544.013'}])])
+        # a record with only a fix bound would put a 2016 build inside a 2019 range: the line keeps it off
+        bare = cve('CVE-2026-200061', [ex('2019 Cumulative Update 14', [{'type': 'SEMVER', 'fixed': '15.2.1544.13'}])])
+        cu23 = cve('CVE-2026-200062', [ex('2016 Cumulative Update 23', [{'type': 'SEMVER', 'introduced': '15.01.0', 'fixed': '15.01.2507.044'}])])
+        self.readings_on_hosts(lambda v: catalogue.exchange_reading(v, '/', 'exchange-owa', v), ('15.2.1544.4', '15.1.2507.39'))
+        self.assertEqual(self.hits(cu14), {('h0.rt.test', '15.2.1544.4', True)})
+        self.assertEqual(self.hits(bare), {('h0.rt.test', '15.2.1544.4', True)})
+        self.assertEqual(self.hits(cu23), {('h1.rt.test', '15.1.2507.39', True)})
 
     def test_an_exact_go_release_inside_the_range_is_a_version_match_and_outside_none(self):
         row = cve('CVE-2026-200010', GO_RANGE)
