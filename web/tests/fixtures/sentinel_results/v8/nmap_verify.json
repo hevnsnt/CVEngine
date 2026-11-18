@@ -1,0 +1,4 @@
+{
+  "outcome": "done",
+  "xml": "<?xml version=\"1.0\"?>\n<nmaprun scanner=\"nmap\" args=\"nmap -Pn -n -sV --version-all -p 8443\" version=\"7.95\"><host><status state=\"up\"/><address addr=\"192.0.2.10\" addrtype=\"ipv4\"/><ports><port protocol=\"tcp\" portid=\"8443\"><state state=\"open\"/><service name=\"http\" product=\"nginx\" version=\"1.25.3\" method=\"probed\" conf=\"10\"><cpe>cpe:/a:igor_sysoev:nginx:1.25.3</cpe></service><script id=\"http-server-header\" output=\"nginx/1.25.3\"/></port></ports></host><runstats><finished exit=\"success\"/></runstats></nmaprun>\n"
+}

@@ -1,0 +1,69 @@
+{
+  "reads": [
+    {
+      "id": "www.example.com|vsrc|apache-server-status|https://www.example.com",
+      "host": "www.example.com",
+      "base": "https://www.example.com",
+      "requests": [
+        {
+          "path": "/server-status?auto",
+          "read": "rows",
+          "fields": [
+            "ServerVersion"
+          ],
+          "headers": [
+            "server",
+            "x-powered-by"
+          ]
+        }
+      ],
+      "allowed": [
+        "www.example.com",
+        "example.com"
+      ]
+    },
+    {
+      "id": "shop.example.com|vsrc|phpinfo|https://shop.example.com",
+      "host": "shop.example.com",
+      "base": "https://shop.example.com",
+      "requests": [
+        {
+          "path": "/info.php",
+          "read": "rows",
+          "fields": [
+            "PHP Version",
+            "OpenSSL Library Version",
+            "cURL Information",
+            "libXML Loaded Version",
+            "libXML Compiled Version",
+            "PCRE Library Version",
+            "SQLite Library",
+            "Apache Version"
+          ],
+          "headers": [
+            "server",
+            "x-powered-by"
+          ]
+        }
+      ],
+      "allowed": [
+        "shop.example.com",
+        "example.com",
+        "www.example.com"
+      ]
+    }
+  ],
+  "scope": {
+    "hosts": [
+      "www.example.com",
+      "shop.example.com",
+      "example.com"
+    ],
+    "domains": [],
+    "excluded": [],
+    "excluded_trees": [],
+    "private": false,
+    "addresses": [],
+    "blocked": []
+  }
+}
