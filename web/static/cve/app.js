@@ -985,6 +985,20 @@ const factLine = (facts) => {
   const f = facts || {};
   return [f.os, f.computer_name, f.fqdn || f.dns_domain || f.domain].filter(Boolean).join("  ·  ");
 };
+// The distribution package a service banner names: "Package: openssh 8.9p1-3ubuntu0.6  ·  Ubuntu 22.04 (jammy)". A banner that names only the
+// distribution is a hint ("build not shown"), another publisher's build is said so, and a distribution without synced fix data says that too.
+const distroLine = (d) => {
+  if (!d) return "";
+  const release = [d.name, d.release, d.codename ? `(${d.codename})` : ""].filter(Boolean).join(" ");
+  const how = { table: "release from the build", package: "release from the build", stated: "", host: "release from the host", stored: "" }[d.release_basis] || "";
+  const pkg = d.package ? `${d.package} ${d.build || "(build not shown)"}` : d.build;
+  const notes = [
+    how,
+    d.third_party ? `${d.third_party === "sury" ? "deb.sury.org" : d.third_party === "backports" ? "backports" : "third-party"} build: not judged by the distribution's tracker` : "",
+    d.tracker === "not_synced" ? "no distribution fix data synced" : "",
+  ].filter(Boolean);
+  return `Package: ${[pkg, release].filter(Boolean).join("  ·  ")}${notes.length ? ` (${notes.join("; ")})` : ""}`;
+};
 // What runZero (asset inventory) says about an address, stored by the scheduled sync; blank when it has no record of it.
 const runzeroLine = (rz) => {
   if (!rz) return "";
@@ -4133,6 +4147,8 @@ const pages = {
           );
           card.append(top);
           if (p.info) card.append(el("div", "note", p.info));
+          const pkg = distroLine(p.distro);
+          if (pkg) card.append(el("div", "note", pkg));
           if (p.cpe) card.append(el("div", "note mono", p.cpe));
           if (p.banner) card.append(el("pre", "banner", p.banner));
           Object.entries(p.scripts || {}).forEach(([id, text]) => {

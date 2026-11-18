@@ -183,7 +183,8 @@ def status():
     return out
 
 
-DISTRO_NAMES = {'ubuntu': 'Ubuntu', 'debian': 'Debian', 'rhel': 'Red Hat Enterprise Linux', 'centos': 'CentOS', 'alpine': 'Alpine Linux'}
+DISTRO_NAMES = {'ubuntu': 'Ubuntu', 'debian': 'Debian', 'rhel': 'Red Hat Enterprise Linux', 'centos': 'CentOS', 'alpine': 'Alpine Linux',
+                'amzn': 'Amazon Linux', 'suse': 'SUSE Linux', 'freebsd': 'FreeBSD'}
 _OS_CPE = re.compile(r'cpe:/o:(?P<vendor>[a-z0-9_]+):(?P<product>[a-z0-9_]+)(?::(?P<version>[\w.]+))?', re.IGNORECASE)
 BASIS = 'service detection'
 
