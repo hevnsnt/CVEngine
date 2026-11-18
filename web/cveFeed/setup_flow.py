@@ -49,7 +49,7 @@ FAMILIES = (
     ('discovery', 'Names and addresses', 'Names, addresses and certificates: how cvENGINE learns what you own. The basics are always on.',
      ('bbot_discovery', 'discover', 'dns_resolve', 'alive_check', 'identity_check', 'dangling_dns_check')),
     ('web', 'Websites', 'Web fingerprints, hidden routes, virtual hosts, cloud storage and supplier checks.',
-     ('http_probe', 'java_runtime', 'version_read', 'version_digest', 'waf', 'vhost_probe', 'subdir_probe', 'route_probe', 'route_probe_signed', 'page_read', 'path_probe', 'bucket_check', 'supplier_check')),
+     ('http_probe', 'java_runtime', 'version_read', 'version_digest', 'version_rows', 'waf', 'vhost_probe', 'subdir_probe', 'route_probe', 'route_probe_signed', 'page_read', 'path_probe', 'bucket_check', 'supplier_check')),
     ('network', 'Open ports and services', 'Which ports answer and which service and version is behind them. Includes the heavy full-port and UDP sweeps.',
      ('nmap', 'naabu', 'nmap_full', 'nmap_verify', 'nmap_udp', 'db_probe')),
     ('tls_mail', 'Certificates and email', 'TLS configuration, expiring certificates, SPF, DKIM and DMARC.', ('testssl', 'hygiene_check')),

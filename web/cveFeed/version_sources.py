@@ -86,15 +86,20 @@ def _port_base(host, port):
     return _base('https' if https else 'http', host, port.number)
 
 
-def wanted(host, products, ports, web_bases):
+def wanted(host, products, ports, web_bases, pages=None):
     """``[(source, base)]``: the catalogue entries a host warrants and the base each is asked on. ``products`` is ``[(name, version)]`` of its
     technologies and port products, ``ports`` its open TCP ports (rows with number, service_name, product, extra), ``web_bases`` its web
     bases. An entry is warranted by a product its ``leads`` names (asked on the port that product answers on, else on the host's first web
-    base) or by an open port of its own (``ports``) whose service the port scan left generic or named the product. At most ``MAX_ENTRIES_PER_HOST``."""
+    base) or by an open port of its own (``ports``) whose service the port scan left generic or named the product. A ``discovered`` entry is
+    asked only at a page of ``pages`` (``{entry id: [absolute URL]}``, ``discovered_pages``: what a scan already found on the host), on that
+    page's own base, never at a path of its own. At most ``MAX_ENTRIES_PER_HOST``."""
     host = (host or '').strip().lower().rstrip('.')
     tcp = [p for p in ports if (getattr(p, 'protocol', 'tcp') or 'tcp') in ('tcp', '') and (getattr(p, 'state', 'open') or 'open') == 'open']
     out = []
     for source in catalogue.SOURCES:
+        if source.discovered:
+            out += _at_pages(host, source, (pages or {}).get(source.id) or ())
+            continue
         lead = source.lead_re()
         bases = []
         if lead is not None:
@@ -113,6 +118,54 @@ def wanted(host, products, ports, web_bases):
     return out[:MAX_ENTRIES_PER_HOST]
 
 
+_PAGE_PATH = re.compile(r'^/[A-Za-z0-9._~!$&\'()*+,;=:@%/-]{0,199}$')  # the Sentinel's path rule (no query: a found page is asked as it is)
+
+
+def _at_pages(host, source, urls):
+    """``[(source at the page, base)]`` for the pages ``urls`` a scan found on ``host``: each on the host's own base, its path one the Sentinel
+    takes (no '.' or '..' segment, no query), at most ``MAX_BASES_PER_ENTRY`` and one per base."""
+    from urllib.parse import urlsplit
+    out, bases = [], set()
+    for url in urls:
+        try:
+            parts = urlsplit(str(url or '').strip())
+            parts.port  # noqa: B018 - a bad port raises here
+        except ValueError:
+            continue
+        path = parts.path or '/'
+        if (parts.scheme not in ('http', 'https') or (parts.hostname or '').lower().rstrip('.') != host or parts.username or parts.password
+                or not _PAGE_PATH.match(path) or path.startswith('//') or any(seg in ('.', '..') for seg in path.split('/'))):
+            continue
+        base = f'{parts.scheme}://{parts.netloc.lower()}'
+        if base in bases:
+            continue
+        bases.add(base)
+        out.append((source.at_page(path), base))
+        if len(out) >= MAX_BASES_PER_ENTRY:
+            break
+    return out
+
+
+def discovered_pages(sub):
+    """``{entry id: [URL]}``: the pages a scan already found on ``sub`` that a ``discovered`` entry reads. A phpinfo page is one a template
+    check reported (a finding whose template is one the ``phpinfo`` entry's exposure names as its twin, or this stage's own finding), or one
+    the crawl found answering 200 under phpinfo()'s own title ("PHP 8.2.12 - phpinfo()") or a ``phpinfo`` file name. Never a guessed path."""
+    from startScan.models import EndPoint, Vulnerability
+    source = catalogue.BY_ID.get('phpinfo')
+    if source is None or getattr(sub, 'target_domain_id', None) is None:
+        return {}
+    templates = list(source.exposure.twins) + [source.exposure.template]
+    urls = list(Vulnerability.objects.filter(target_domain__project_id=sub.target_domain.project_id, subdomain__name=sub.name, open_status=True,
+                                             template_id__in=templates).exclude(http_url__isnull=True)
+                .order_by('-id').values_list('http_url', flat=True)[:10])
+    urls += list(EndPoint.objects.filter(subdomain=sub, http_status=200, page_title__iregex=r'phpinfo\(\)\s*$')
+                 .order_by('-id').values_list('http_url', flat=True)[:10])
+    urls += list(EndPoint.objects.filter(subdomain=sub, http_status=200, http_url__iregex=r'/[^/?#]*phpinfo[^/?#]*\.php([?#]|$)')
+                 .order_by('-id').values_list('http_url', flat=True)[:10])
+    urls = [u.split('#', 1)[0].split('?', 1)[0] for u in urls if isinstance(u, str) and u]
+    return {source.id: list(dict.fromkeys(urls))} if urls else {}
+
+
 def host_products(sub, ports):
     out = [_split(t.name) for t in sub.technologies.all() if t.name]
     out += [((p.product or '').strip(), (p.version or '').strip()) for p in ports if (p.product or '').strip()]
@@ -128,7 +181,7 @@ def applies(sub, ports=None):
     """Whether the version source reads apply to ``sub`` (``check_coverage``)."""
     from cveFeed import route_auth
     ports = [p for _a, p in _ports(sub)] if ports is None else ports
-    return bool(wanted(sub.name, host_products(sub, ports), ports, route_auth.web_bases(sub)))
+    return bool(wanted(sub.name, host_products(sub, ports), ports, route_auth.web_bases(sub), discovered_pages(sub)))
 
 
 # ----------------------------------------------------------------------------- plan
@@ -162,7 +215,7 @@ def plan(project_id, subdomains, unattended=False):
         if any(gate.refusal(project_id, a, unattended=unattended, derived=True) for a in addresses):
             continue
         ports = [p for _a, p in _ports(sub)]
-        reads = wanted(name, host_products(sub, ports), ports, route_auth.web_bases(sub))
+        reads = wanted(name, host_products(sub, ports), ports, route_auth.web_bases(sub), discovered_pages(sub))
         if not reads:
             continue
         entry = out.setdefault(name, {'subs': [], 'reads': []})
@@ -242,9 +295,11 @@ def run_for_scan(scan_id, force=False, dispatch=None):
     if not enabled():
         return {**summary, 'skipped': 'disabled'}
     found = candidates(scan)
-    send_digest = None if dispatch is None else dispatch
+    send_digest = send_rows = None if dispatch is None else dispatch
     if _digest_ready(project, found, send_digest):
         summary['digest_waiting'] = True  # an edge digest read waits for a contract 8 Sentinel; the host's other reads go ahead
+    if _kind_ready(project, found, send_rows, catalogue.ROWS_KIND):
+        summary['rows_waiting'] = True  # a status page's rows read waits for a contract 9 Sentinel; the host's other reads go ahead
     names = due(project.pk, found, force=force)
     summary['hosts'] = len(found)
     if not names:
@@ -253,7 +308,8 @@ def run_for_scan(scan_id, force=False, dispatch=None):
         sentinel_dispatch.scanner_or_local(project, KIND)  # raises ScannerUnavailable when none can take it: the kind has no local path
         dispatch = lambda project_, reads: probe_dispatch.try_version_read(project_, reads, scan=scan, unattended=False)  # noqa: E731
         send_digest = lambda project_, reads: probe_dispatch.try_version_digest(project_, reads, scan=scan, unattended=False)  # noqa: E731
-    _ask(project, names, found, lambda name: scan, dispatch, summary, send_digest=send_digest)
+        send_rows = lambda project_, reads: probe_dispatch.try_version_rows(project_, reads, scan=scan, unattended=False)  # noqa: E731
+    _ask(project, names, found, lambda name: scan, dispatch, summary, send_digest=send_digest, send_rows=send_rows)
     activity.log('run_check', f'Version source reads of {summary["asked"]} of {len(names)} host(s) of {scan.domain.name}: {summary["readings"]} reading(s)'
                  + (f', {summary["exposed"]} exposure(s)' if summary['exposed'] else '')
                  + (f'; {summary["waiting"]} wait for a scanner' if summary['waiting'] else ''), project=project.pk, scan_id=scan.id)
@@ -274,9 +330,11 @@ def run_for_hosts(project, host_names, dispatch=None, priority=1):
     for item in found.values():
         for sub in item['subs']:
             refresh_host(sub)
-    send_digest = None if dispatch is None else dispatch
+    send_digest = send_rows = None if dispatch is None else dispatch
     if _digest_ready(project, found, send_digest):
         summary['digest_waiting'] = True  # an edge digest read waits for a contract 8 Sentinel; the host's other reads go ahead
+    if _kind_ready(project, found, send_rows, catalogue.ROWS_KIND):
+        summary['rows_waiting'] = True  # a status page's rows read waits for a contract 9 Sentinel; the host's other reads go ahead
     names = due(project.pk, found, limit=MAX_READS_PER_TASK)
     summary['hosts'] = len(found)
     if not names:
@@ -285,7 +343,8 @@ def run_for_hosts(project, host_names, dispatch=None, priority=1):
         sentinel_dispatch.scanner_or_local(project, KIND)
         dispatch = lambda project_, reads: probe_dispatch.try_version_read(project_, reads, priority=priority, unattended=True)  # noqa: E731
         send_digest = lambda project_, reads: probe_dispatch.try_version_digest(project_, reads, priority=priority, unattended=True)  # noqa: E731
-    _ask(project, names, found, lambda name: found[name]['subs'][0].scan_history, dispatch, summary, send_digest=send_digest)
+        send_rows = lambda project_, reads: probe_dispatch.try_version_rows(project_, reads, priority=priority, unattended=True)  # noqa: E731
+    _ask(project, names, found, lambda name: found[name]['subs'][0].scan_history, dispatch, summary, send_digest=send_digest, send_rows=send_rows)
     if summary['waiting']:
         raise ScannerUnavailable(KIND, f'a Sentinel returned no result for {summary["waiting"]} host(s): they stay due')
     return summary
@@ -294,11 +353,18 @@ def run_for_hosts(project, host_names, dispatch=None, priority=1):
 def _digest_ready(project, found, send_digest):
     """Drop the entries that need the ``version_digest`` kind (contract 8, ``Source.task_kind``) from ``found`` when no Sentinel can run it now:
     a contract 7 Sentinel is never sent one, and the host's other reads go ahead. Returns how many hosts lost an entry."""
-    if send_digest is not None:
+    return _kind_ready(project, found, send_digest, catalogue.DIGEST_KIND)
+
+
+def _kind_ready(project, found, sender, kind):
+    """Drop the entries that need ``kind`` (``version_digest``, contract 8, or ``version_rows``, contract 9: ``Source.task_kind``) from ``found``
+    when no Sentinel can run it now (an older Sentinel is never sent one) and the host's other reads go ahead. ``sender`` given (a caller's own
+    dispatch) asks no Sentinel. Returns how many hosts lost an entry."""
+    if sender is not None:
         return 0
     from agentapi import sentinel_dispatch
     try:
-        ready = sentinel_dispatch.any_scanner_for(project, catalogue.DIGEST_KIND)
+        ready = sentinel_dispatch.any_scanner_for(project, kind)
     except Exception:  # noqa: BLE001 - no answer is no Sentinel for it
         ready = False
     if ready:
@@ -306,7 +372,7 @@ def _digest_ready(project, found, send_digest):
     dropped = 0
     for name in list(found):
         reads = found[name]['reads']
-        kept = [(source, base) for source, base in reads if source.task_kind != catalogue.DIGEST_KIND]
+        kept = [(source, base) for source, base in reads if source.task_kind != kind]
         if len(kept) != len(reads):
             dropped += 1
             found[name]['reads'] = kept
@@ -315,9 +381,10 @@ def _digest_ready(project, found, send_digest):
     return dropped
 
 
-def _ask(project, names, found, scan_for, send, summary, send_digest=None):
+def _ask(project, names, found, scan_for, send, summary, send_digest=None, send_rows=None):
     """Claim ``names``, send them in tasks of at most ``MAX_READS_PER_TASK`` read entries through ``send(project, reads)`` (the entries with a
-    digest read through ``send_digest``: the ``version_digest`` kind, contract 8) and store every answer."""
+    digest read through ``send_digest``: the ``version_digest`` kind, contract 8; with a rows read through ``send_rows``: ``version_rows``,
+    contract 9) and store every answer."""
     from cveFeed import ledger
     from cveFeed.exclusions import excluded_names, normalize
     with ledger.claim_many(f'{SERVICE}@{project.pk}', names) as won:
@@ -339,11 +406,15 @@ def _ask(project, names, found, scan_for, send, summary, send_digest=None):
                 continue
             reads, owner = _entries(found, chunk)
             digest = {read_id(name, source, base) for name, source, base in owner.values() if source.task_kind == catalogue.DIGEST_KIND}
-            plain = [item for item in reads if item[1]['id'] not in digest]
+            by_rows = {read_id(name, source, base) for name, source, base in owner.values() if source.task_kind == catalogue.ROWS_KIND}
+            plain = [item for item in reads if item[1]['id'] not in digest and item[1]['id'] not in by_rows]
             rows = dict(send(project, plain) or {}) if plain else {}
             wanted_digest = [item for item in reads if item[1]['id'] in digest]
             if wanted_digest:
                 rows.update((send_digest or send)(project, wanted_digest) or {})
+            wanted_rows = [item for item in reads if item[1]['id'] in by_rows]
+            if wanted_rows:
+                rows.update((send_rows or send)(project, wanted_rows) or {})
             by_host = {}
             for ident, (name, source, base) in owner.items():
                 by_host.setdefault(name, []).append((source, base, rows.get(ident)))
