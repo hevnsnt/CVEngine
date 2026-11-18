@@ -386,10 +386,12 @@ def range_readings(sub, now=None):
 def collect_matches(subdomain, cve_by_id, rows, scan_history=None, min_confidence=0.0):
     """Append the range matches of ``subdomain`` to ``rows`` (see the module docstring). A CVE ``rows`` already holds for the host (an exact
     build's technology match) is not matched twice. Returns how many."""
+    pool = range_cves(cve_by_id)
+    if not pool:
+        return 0  # no CVE in the pool names an edge product: no query for the host's readings
     readings = range_readings(subdomain)
     if not readings:
         return 0
-    pool = range_cves(cve_by_id)
     taken = {r['cve_entry_id'] for r in rows if r.get('subdomain_id') == subdomain.id}
     found = 0
     for product, rng, label, source, port, said in readings:
