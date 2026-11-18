@@ -318,6 +318,46 @@ def installed_tags(root=None):
 	return installed_index(root).tags
 
 
+PANEL_DIRS = ('http/exposed-panels',)  # nuclei's panel templates (tag ``panel``): cveFeed.panel_versions reads the product they name
+_ID_LINE = re.compile(r'^id:\s*["\']?([A-Za-z0-9_.-]{1,120})', re.MULTILINE)
+_CPE_PART_LINE = re.compile(r'^\s{2,8}cpe:\s*["\']?cpe:2\.3:([aho]):([^:\s"\']+):([^:\s"\']+)', re.MULTILINE)
+_panels = {}  # templates dir -> {template id: product metadata}, read once per process
+
+
+def panel_products(root=None):
+	"""``{template id: {'vendor', 'product', 'part'}}`` of the installed panel templates (``PANEL_DIRS``), read once from the templates directory:
+	the ``vendor`` and ``product`` of a template's ``info.metadata``, else those of its ``classification.cpe``, and the CPE's part (``a``, ``o``,
+	``h``; '' when it states none). A result line from a Sentinel, and a finding stored before, carry no metadata: this is where it is read.
+	Templates with neither are left out."""
+	root = root or TEMPLATES_DIR
+	if root not in _panels:
+		found = {}
+		for sub in PANEL_DIRS:
+			for base, _dirs, files in os.walk(os.path.join(root, sub)):
+				for name in files:
+					if not name.endswith(('.yaml', '.yml')):
+						continue
+					try:
+						with open(os.path.join(base, name), errors='ignore') as f:
+							head = f.read(4096)
+					except OSError:
+						continue
+					ident = _ID_LINE.search(head)
+					if not ident:
+						continue
+					meta = {}
+					for kind, value in _META_LINE.findall(head):
+						meta.setdefault(kind, value.strip().lower())
+					cpe = _CPE_PART_LINE.search(head)
+					part = cpe.group(1) if cpe else ''
+					if cpe and not (meta.get('vendor') and meta.get('product')):
+						meta = {'vendor': cpe.group(2).lower(), 'product': cpe.group(3).lower()}
+					if meta.get('product'):
+						found[ident.group(1)] = {'vendor': meta.get('vendor', ''), 'product': meta['product'], 'part': part}
+		_panels[root] = found
+	return _panels[root]
+
+
 def allowed_tags():
 	"""The closed set of tags: the installed templates', or the built-in list when no templates can be read."""
 	return set(installed_tags()) or set(CANDIDATE_TAGS)

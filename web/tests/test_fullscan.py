@@ -432,3 +432,19 @@ class SurfaceTests(FullScanBase):
 		self.assertTrue(entry['full_scanned_at'].startswith(str(timezone.now().year)))
 		self.ip('192.0.2.2', name='b.fs.test')
 		self.assertIsNone(_host(Subdomain.objects.get(name='b.fs.test'))['ips'][0]['full_scanned_at'])
+
+
+class FingerprintIntensityTests(FullScanBase):
+	def test_the_new_ports_are_fingerprinted_at_nmaps_default_intensity_as_the_pipelines_pass(self):
+		self.assertEqual(fullscan.FINGERPRINT_FLAGS[fullscan.FINGERPRINT_FLAGS.index('--version-intensity') + 1], '7')
+		fast = list(scan_flags._FAST_SCAN_FLAGS)
+		self.assertEqual(fast[fast.index('--version-intensity') + 1], '7')  # the scanner library's fingerprint pass: the two agree
+
+	def test_the_sentinel_verify_task_carries_that_intensity(self):
+		from agentapi import sentinel_dispatch
+		ip = self.ip('192.0.2.1', name='www.fs.test')
+		with mock.patch.object(sentinel_dispatch, 'try_nmap_verify', return_value=[]) as verify:
+			fullscan._sentinel_fingerprint(ip, self.project.id, [6379])
+		target = verify.call_args[0][1]
+		self.assertEqual(target['version_intensity'], 7)
+		self.assertNotIn('version_all', target)
