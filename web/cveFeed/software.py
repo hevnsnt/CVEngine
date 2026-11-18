@@ -240,6 +240,7 @@ DATA_SOURCES = [
     source('GitHub', 'https://docs.github.com/rest', 'The in-app update check (the releases API)', used_by='cveFeed/updater.py'),
     source('bounty-targets-data', 'https://github.com/arkadiyt/bounty-targets-data', 'Public scope of bug bounty programs, read at run time (MIT)', used_by='cveFeed/bounty_data.py'),
     source('Bugcrowd Vulnerability Rating Taxonomy', 'https://github.com/bugcrowd/vulnerability-rating-taxonomy', 'Bundled as cveFeed/data/vrt.json for report categories and priority (Apache-2.0)', used_by='cveFeed/bounty_playbook.py'),
+    source('Rapid7 Recog', 'https://github.com/rapid7/recog', 'Banner fingerprints bundled as cveFeed/data/recog/ (pinned commit, BSD-2-Clause): the product, version and CPE stored banners state', used_by='cveFeed/recog.py'),
     source('HackerOne', 'https://api.hackerone.com', 'Submitting a report you wrote, with your own API token', 'your own HackerOne token', used_by='cveFeed/bounty_submit.py'),
     source('WPScan vulnerability data', 'https://wpscan.com/', 'WordPress vulnerabilities for WPScan', 'your own wpscan.com token', used_by='the Sentinel\'s WPScan'),
     source('runZero Export API', 'https://www.runzero.com', 'Asset inventory (OS, hardware, tags, CVE reports); no runZero code is bundled', 'your own Export API token', used_by='cveFeed/runzero.py'),
