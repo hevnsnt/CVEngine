@@ -319,6 +319,10 @@ PRODUCT_ALIASES = {
     "nodejsexpressframework": {"express"},
     "vmwareesxisoapapi": {"esxi"},
     "ciscoioshttpconfig": {"ios"},
+    # Cisco's ASA under its three names: Cisco's records before and after the Secure Firewall rename, and NVD's CPE product (an SNMP agent
+    # says only "Cisco Adaptive Security Appliance Version 9.16(4)18": cveFeed.version_catalogue.from_sysdescr)
+    "ciscoadaptivesecurityapplianceasasoftware": {"adaptivesecurityappliancesoftware",
+                                                  "ciscosecurefirewalladaptivesecurityapplianceasasoftware"},
     "golangnethttpserver": {"go"},
     "pythonbasehttpserver": {"python"},
     # package names a host's own package manager reports (cveFeed.inventory_match): the feed names the same software differently

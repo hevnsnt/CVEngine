@@ -335,11 +335,11 @@ def _port_of(base):
 def kind_of(r):
     """The ``ProbeObservation.kind`` a reading is stored as: ``version`` for a product the host stated exactly (it also becomes a technology, so
     correlation matches it by name), ``runtime`` for a language runtime, ``hint`` for any other product reading: an inferred bundled component, a
-    weak or inferred operating system hint, or an exact reading whose name correlation cannot yet match safely (``technology`` False). A hint
-    is shown and searched, never a technology: a bundled component is matched by ``collect_bundled`` only, an operating system hint by nothing."""
+    weak or inferred operating system hint. A hint is shown and searched, never a technology: a bundled component is matched by
+    ``collect_bundled`` only, an operating system hint by nothing."""
     if r['kind'] != 'product':
         return RUNTIME_KIND
-    return 'version' if r['confidence'] == 'exact' and r.get('technology', True) else HINT_KIND
+    return 'version' if r['confidence'] == 'exact' else HINT_KIND
 
 
 def expand(readings):

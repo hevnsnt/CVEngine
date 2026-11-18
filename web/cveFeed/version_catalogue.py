@@ -724,7 +724,7 @@ SNMP_FORMATS = {
                'https://learn.microsoft.com/en-us/windows/release-health/windows-server-release-info)',
 }
 SNMP_URL = 'udp/161 sysDescr'
-ASA_NAMES = ('Cisco Adaptive Security Appliance (ASA) Software', 'Cisco Secure Firewall Adaptive Security Appliance (ASA) Software')
+ASA_NAME = 'Cisco Adaptive Security Appliance (ASA) Software'  # correlation's aliases reach the Secure Firewall name and NVD's CPE product
 _IOS_BUILD = r'\d{2}\.\d\(\d{1,3}[a-z]?\)[A-Z]{0,4}\d{0,3}[a-z]?'       # 15.0(2)SE11, 12.2(55)SE5, 15.2(4)M7, 15.2(7)E3
 _XE_IMAGE = re.compile(r'IOSXE|IOS-XE|IOSD', re.I)                       # an IOS XE image, or the IOS daemon inside one, names itself so
 _AFTER = r'(?=[,.\s]|$)'
@@ -768,30 +768,26 @@ def from_sysdescr(text, enterprise=''):
     """The readings an SNMP agent's sysDescr states (``SNMP_FORMATS``), or []. A network operating system or firmware is a product reading,
     ``exact`` (the agent names its own release); a Linux kernel is a ``weak`` hint (a distribution's kernel carries backported fixes its
     version does not show, and a kernel says nothing of the appliance around it); a Windows build is an ``inferred`` line (the release, never
-    its update level). Neither hint is ever matched by version. Cisco IOS and NX-OS builds (``15.2(4)M7``, ``9.3(8)``) are kept as readings
-    with the CPE NVD names them by, but not as technologies (``technology`` False): correlation compares a parenthesised build as its first
-    two numbers, the stored records keep no IOS or NX-OS build list to compare it with, and a bare "IOS" also names Apple's iOS. ``text`` is untrusted: control characters are dropped and it is clipped before
+    its update level). Neither hint is ever matched by version. A Cisco IOS or NX-OS build (``15.2(4)M7``, ``9.3(8)``) keeps the text the
+    device prints and carries the CPE NVD names it by; correlation matches it only to a build an advisory lists (``builds``). ``text`` is untrusted: control characters are dropped and it is clipped before
     any pattern sees it. ``enterprise`` (snmp-info's engine ID vendor) is kept as evidence only."""
     said = clip(text, 400)
     vendor = clip(enterprise, 40)
     evidence = f'sysDescr: {said}' + (f' (SNMP engine of {vendor})' if vendor else '')
 
-    def one(component, label, version, cpe='', technology=True, **kw):
+    def one(component, label, version, cpe='', **kw):
         got = reading(component, label, version, evidence=evidence, url=SNMP_URL, source='snmp', **kw)
-        return [{**got, **({'cpe': cpe} if cpe else {}), **({} if technology else {'technology': False})}]
+        return [{**got, 'cpe': cpe} if cpe else got]
 
     found = _ASA.match(said)
     if found:
         version = '.'.join(x for x in found.groups() if x)  # 9.16(4)18 is 9.16.4.18
-        cpe = _cpe('a', 'cisco', 'adaptive_security_appliance_software', version)
-        # Cisco's records name the product two ways (before and after the Secure Firewall rename), and correlation matches each name only to
-        # itself: one reading per name, the same release
-        return [r for label in ASA_NAMES for r in one('cisco-asa', label, version, cpe)]
+        return one('cisco-asa', ASA_NAME, version, _cpe('a', 'cisco', 'adaptive_security_appliance_software', version))
     found = _NXOS.match(said)
     if found:
         if found.group(1) == 'aci' or found.group(2).startswith('aci'):
             return []  # ACI mode names its own release train, not an NX-OS release
-        return one('cisco-nx-os', 'Cisco NX-OS', found.group(3), _cpe('o', 'cisco', 'nx-os', cisco_cpe_version(found.group(3))), technology=False)
+        return one('cisco-nx-os', 'Cisco NX-OS', found.group(3), _cpe('o', 'cisco', 'nx-os', cisco_cpe_version(found.group(3))))
     found = _IOS_XE_NAMED.match(said) or _IOS_XE.match(said)
     if found:
         version = found.group(found.lastindex)
@@ -804,7 +800,7 @@ def from_sysdescr(text, enterprise=''):
     if found:
         if _XE_IMAGE.search(found.group(2)):
             return []  # the IOS daemon of an IOS XE 3.x release: the build it names is not the IOS XE release
-        return one('cisco-ios', 'Cisco IOS', found.group(3), _cpe('o', 'cisco', 'ios', cisco_cpe_version(found.group(3))), technology=False)
+        return one('cisco-ios', 'Cisco IOS', found.group(3), _cpe('o', 'cisco', 'ios', cisco_cpe_version(found.group(3))))
     found = _JUNOS.match(said)
     if found:
         evo = bool(found.group(4))

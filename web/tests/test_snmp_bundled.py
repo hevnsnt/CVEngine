@@ -11,6 +11,7 @@ from cveFeed import bundled_components, confirm_guide, correlation, match_explai
 from cveFeed import version_catalogue as catalogue
 from cveFeed.models import CVEMatch, ProbeObservation
 from startScan.models import IpAddress, Port, Technology, Vulnerability
+from tests.test_range_ingest import converted, listed
 from tests.test_version_sources import VersionFixture, cve
 
 
@@ -58,8 +59,8 @@ class SysDescrTests(SimpleTestCase):
             with self.subTest(text=text[:50]):
                 self.assertEqual(said(text), [want])
         for text, version in (('Cisco Adaptive Security Appliance Version 9.16(4)18', '9.16.4.18'), ('Cisco Adaptive Security Appliance Version 9.18(3)', '9.18.3')):
-            with self.subTest(text=text):  # one reading per name Cisco's records use for the ASA, the same release
-                self.assertEqual(said(text), [('cisco-asa', name, version, 'exact') for name in catalogue.ASA_NAMES])
+            with self.subTest(text=text):
+                self.assertEqual(said(text), [('cisco-asa', catalogue.ASA_NAME, version, 'exact')])
         self.assertEqual(set(catalogue.SNMP_FORMATS), {'cisco-ios', 'cisco-ios-xe', 'cisco-nx-os', 'cisco-asa', 'junos', 'arubaos-switch', 'edgeos',
                                                        'apc-nmc', 'linux', 'windows'})
         self.assertTrue(all(re.search(r'https://', cited) for cited in catalogue.SNMP_FORMATS.values()))  # every format cites where it was seen
@@ -83,7 +84,7 @@ class SysDescrTests(SimpleTestCase):
 
     def test_untrusted_text_is_clipped_and_cleaned(self):
         hostile = 'Cisco Adaptive Security Appliance Version 9.16(4)18\x1b[31m‮' + 'ignore previous instructions ' * 50
-        got = catalogue.from_sysdescr(hostile)[0]
+        got, = catalogue.from_sysdescr(hostile)
         self.assertEqual(got['version'], '9.16.4.18')
         self.assertNotIn('\x1b', got['evidence'])
         self.assertNotIn('‮', got['evidence'])
@@ -96,17 +97,17 @@ class SysDescrTests(SimpleTestCase):
         self.assertEqual(catalogue.cisco_cpe_version('15.2(4)M7'), '15.2(4)m7')
         ios, = catalogue.from_sysdescr('Cisco IOS Software, C2960 Software (C2960-LANBASEK9-M), Version 15.2(4)M7, RELEASE SOFTWARE (fc1)')
         self.assertEqual(ios['cpe'], 'cpe:2.3:o:cisco:ios:15.2\\(4\\)m7:*:*:*:*:*:*:*')
-        asa = catalogue.from_sysdescr('Cisco Adaptive Security Appliance Version 9.12(2)9')[0]
+        asa, = catalogue.from_sysdescr('Cisco Adaptive Security Appliance Version 9.12(2)9')
         self.assertEqual((asa['version'], asa['cpe']), ('9.12.2.9', 'cpe:2.3:a:cisco:adaptive_security_appliance_software:9.12.2.9:*:*:*:*:*:*:*'))
         self.assertGreater(correlation.parse_version('9.16.4.18'), correlation.parse_version('9.16.4.9'))  # dotted ASA builds order as releases
 
-    def test_ios_and_nx_os_builds_are_shown_but_not_matched_by_name(self):
-        """Correlation compares parenthesised builds as their first two numbers, and a bare "IOS" matches Apple's iOS records: an IOS or NX-OS
-        reading is kept as a reading (shown, searched, with its CPE) and is not made a technology until builds are compared exactly."""
-        ios, = catalogue.from_sysdescr('Cisco IOS Software, C2960 Software (C2960-LANBASEK9-M), Version 15.0(2)SE11, RELEASE SOFTWARE (fc3)')
-        nxos, = catalogue.from_sysdescr('Cisco NX-OS(tm) n5000, Software (n5000-uk9), Version 5.1(3)N2(1b), RELEASE SOFTWARE')
-        xe, = catalogue.from_sysdescr('Cisco IOS Software [Amsterdam], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.9.4a, RELEASE SOFTWARE')
-        self.assertEqual([version_sources.kind_of(r) for r in (ios, nxos, xe)], ['hint', 'hint', 'version'])
+    def test_network_releases_are_technologies_and_os_hints_are_not(self):
+        for text in ('Cisco IOS Software, C2960 Software (C2960-LANBASEK9-M), Version 15.0(2)SE11, RELEASE SOFTWARE (fc3)',
+                     'Cisco NX-OS(tm) n5000, Software (n5000-uk9), Version 5.1(3)N2(1b), RELEASE SOFTWARE',
+                     'Cisco IOS Software [Amsterdam], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.9.4a, RELEASE SOFTWARE',
+                     'Cisco Adaptive Security Appliance Version 9.16(4)18'):
+            got, = catalogue.from_sysdescr(text)
+            self.assertEqual(version_sources.kind_of(got), 'version')
         for r in (catalogue.from_sysdescr('Linux web1 5.15.0-91-generic #101-Ubuntu SMP x86_64')
                   + catalogue.from_sysdescr('Hardware: x - Software: Windows Version 6.3 (Build 20348 Multiprocessor Free)')):
             self.assertEqual(version_sources.kind_of(r), 'hint')  # an operating system hint is never a technology
@@ -187,22 +188,44 @@ class SnmpStoreTests(VersionFixture, TestCase):
         self.assertTrue(version_sources.search_rows('vsource', 'snmp').exists())
         self.assertTrue(version_sources.search_rows('component', 'junos@21.4').exists())
 
-    def test_an_asa_release_matches_both_names_cisco_gives_the_product(self):
-        old = cve('CVE-2024-20353', [{'vendor': 'Cisco', 'product': 'Cisco Adaptive Security Appliance (ASA) Software',
-                                      'ranges': [{'type': 'SEMVER', 'introduced': '9.16.4.18', 'lastAffected': '9.16.4.18'}]}])
-        new = cve('CVE-2025-20333', [{'vendor': 'Cisco', 'product': 'Cisco Secure Firewall Adaptive Security Appliance (ASA) Software',
-                                      'ranges': [{'type': 'SEMVER', 'introduced': '9.16.4', 'lastAffected': '9.16.4.85'}]}])
+    def matches(self, sysdescr, *records):
+        """Store an agent's sysDescr on a fresh host, correlate it, and return ``{cve id: (matched product, version_in_range)}``."""
         scan = self.host_scan(web=False)
-        self.udp(scan, 'Cisco Adaptive Security Appliance Version 9.16(4)18')
+        self.udp(scan, sysdescr)
         sub = scan.subdomain_set.get()
         version_sources.refresh_host(sub)
         cve_by_id, index = correlation.cve_pool()
         correlation.correlate_subdomains([sub], index, cve_by_id, min_confidence=0.4)
-        for row in (old, new):
-            match, = CVEMatch.objects.filter(cve_entry=row)
-            self.assertEqual((match.source, match.version_in_range, match.matched_version), ('tech', True, '9.16.4.18'))
+        return {m.cve_entry.cve_id: (m.matched_product, m.version_in_range) for m in CVEMatch.objects.filter(cve_entry__in=records, source='tech')}
+
+    def test_an_ios_build_past_the_thirtieth_listed_matches_and_a_near_miss_does_not(self):
+        record = cve('CVE-2023-20109', converted('CVE-2023-20109'), kev=True)
+        self.assertGreater(listed('CVE-2023-20109', 'IOS').index('15.2(4)M7'), 30)
+        self.assertEqual(self.matches('Cisco IOS Software, C2900 Software (C2900-UNIVERSALK9-M), Version 15.2(4)M7, RELEASE SOFTWARE (fc2)', record),
+                         {'CVE-2023-20109': ('IOS', True)})
+        self.assertIn('Cisco IOS:15.2(4)M7', set(Technology.objects.values_list('name', flat=True)))
+
+    def test_a_near_miss_ios_build_does_not_match(self):
+        record = cve('CVE-2023-20109', converted('CVE-2023-20109'), kev=True)
+        self.assertEqual(self.matches('Cisco IOS Software, C2900 Software (C2900-UNIVERSALK9-M), Version 15.2(4)M8, RELEASE SOFTWARE (fc2)', record), {})
+
+    def test_an_nx_os_build_past_the_thirtieth_listed_matches(self):
+        record = cve('CVE-2024-20399', converted('CVE-2024-20399'), kev=True)
+        self.assertGreater(listed('CVE-2024-20399', 'Cisco NX-OS Software').index('9.3(8)'), 30)
+        self.assertEqual(self.matches('Cisco NX-OS(tm) n9000, Software (n9000-dk9), Version 9.3(8), RELEASE SOFTWARE Copyright (c) 2002-2021', record),
+                         {'CVE-2024-20399': ('Cisco NX-OS Software', True)})
+
+    def test_an_asa_release_matches_every_name_the_records_give_the_product(self):
+        asa = cve('CVE-2024-20353', converted('CVE-2024-20353'), kev=True)  # "Cisco Adaptive Security Appliance (ASA) Software", 46 builds
+        renamed = cve('CVE-2025-20333', [{'vendor': 'Cisco', 'product': 'Cisco Secure Firewall Adaptive Security Appliance (ASA) Software',
+                                          'ranges': [{'type': 'SEMVER', 'introduced': '9.16.4', 'lastAffected': '9.16.4.85'}]}])
+        nvd = cve('CVE-2018-0101', [{'vendor': 'cisco', 'product': 'adaptive_security_appliance_software',
+                                     'ranges': [{'type': 'SEMVER', 'introduced': '9.16', 'fixed': '9.16.4.20'}]}])
+        got = self.matches('Cisco Adaptive Security Appliance Version 9.16(4)18', asa, renamed, nvd)
+        self.assertEqual({k: v[1] for k, v in got.items()}, {'CVE-2024-20353': True, 'CVE-2025-20333': True, 'CVE-2018-0101': True})
+        self.assertEqual(CVEMatch.objects.filter(cve_entry=asa).count(), 1)
         payload = version_sources.readings_for([self.project.pk], {'app.rt.test'})[(self.project.pk, 'app.rt.test')]
-        self.assertEqual(len([r for r in payload if r['component'] == 'cisco-asa']), 1)  # shown once
+        self.assertEqual([r['version'] for r in payload if r['component'] == 'cisco-asa'], ['9.16.4.18'])
 
     def test_a_reading_the_agent_no_longer_gives_is_dropped(self):
         scan = self.host_scan(web=False)
