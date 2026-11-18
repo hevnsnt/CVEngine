@@ -8,10 +8,12 @@ runtime rules of ``cveFeed.version_sources``):
   vsrc:nmap      what the port scan stored on each port beyond the product and version it already matches: the other application CPEs nmap
                  printed (``extra.cpes``; the first one is ``Port.cpe`` and is matched with the port), the CPE of a port nmap named no
                  product for, the modules nmap's ``extrainfo`` lists (``(CentOS) OpenSSL/1.0.2k-fips PHP/5.4.16``), the Server and generator
-                 lines of ``http-server-header`` and ``http-generator``, and the versions the database scripts read (``mysql-info``,
+                 lines of ``http-server-header``, ``http-headers`` and ``http-generator``, and the versions the database scripts read (``mysql-info``,
                  ``redis-info``, ``memcached-info``, ``mongodb-info``, ``ms-sql-info``) and ``ntp-info``. A reading the port row already states
                  (same product, same version) is not stored twice. Derived from the stored ports: refreshed with the other stored-data
                  readings (``version_sources.refresh_host``), and dropped when the port no longer says it.
+  vsrc:webserver the Server header the web check stored for the host (``Subdomain.webserver``: bbot's HTTP pass, the web route check), its
+                 web server and modules, less what a port of the host states at the same version; derived like ``vsrc:nmap``.
   vsrc:testssl   testssl.sh's ``banner_server`` and ``banner_application`` items (the Server and X-Powered-By headers it read), per tested port.
   vsrc:wpscan    the ``headers`` interesting finding of a WordPress scan (``Server: Apache/2.4.29 (Ubuntu)``, ``X-Powered-By: PHP/7.2.24``).
   vsrc:db-probe  the version a credential-less database probe's reply states (``PONG (redis 7.2.4)``, ``PostgreSQL 15.4``, ``(MySQL 8.0.35)``,
@@ -53,9 +55,10 @@ NMAP_PROBE = 'vsrc:nmap'
 TESTSSL_PROBE = 'vsrc:testssl'
 WPSCAN_PROBE = 'vsrc:wpscan'
 DB_PROBE = 'vsrc:db-probe'
+WEBSERVER_PROBE = 'vsrc:webserver'
 SHODAN_PROBE = 'vsrc:shodan-idb'
 RUNZERO_PROBE = 'vsrc:runzero'
-FIRST_PARTY_PROBES = (NMAP_PROBE, TESTSSL_PROBE, WPSCAN_PROBE, DB_PROBE)
+FIRST_PARTY_PROBES = (NMAP_PROBE, WEBSERVER_PROBE, TESTSSL_PROBE, WPSCAN_PROBE, DB_PROBE)
 REPORTED_PROBES = (SHODAN_PROBE, RUNZERO_PROBE)
 PROBES = FIRST_PARTY_PROBES + REPORTED_PROBES
 SEARCH = {p[len(PREFIX):]: p for p in PROBES}  # vsource:<name>
@@ -181,6 +184,9 @@ def script_readings(scripts):
             out.append(product_reading(product, found.group(1), f'nse:{script}', evidence=f'{script}: {found.group(0).strip()}'))
     for line in str(scripts.get('http-server-header') or '').splitlines()[:4]:
         out += header_readings({'server': line.strip()}, 'nse:http-server-header')
+    headers = catalogue.header_lines(scripts.get('http-headers') or '')
+    if headers:  # the Server, X-Powered-By and version headers of the http-headers dump
+        out += [r for r in header_readings(headers, 'nse:http-headers') if r['kind'] != 'runtime']  # its runtimes: version_sources' vsrc:passive
     for line in str(scripts.get('http-generator') or '').splitlines()[:4]:
         got = versions.parse_generator(line)
         if got and got[1]:
@@ -236,6 +242,23 @@ def nmap_readings(sub, ports):
             if key not in seen:
                 seen.add(key)
                 out.append((port.number, r))
+    return out
+
+
+def webserver_readings(sub, ports):
+    """``[(0, reading)]`` of the Server header the web check stored for the host (``Subdomain.webserver``, from bbot's HTTP pass or the web route
+    check): the web server and the modules it lists, less what a port of the host already states at the same version."""
+    from cveFeed.correlation import _norm
+    text = catalogue.clip(getattr(sub, 'webserver', '') or '', 300)
+    if not text:
+        return []
+    stated = [(_norm(p.product or ''), (p.version or '').strip()) for _a, p in ports if (p.product or '').strip()]
+    out = []
+    for r in header_readings({'server': text}, 'webserver'):
+        if r['kind'] == 'runtime':
+            continue  # the runtime a Server header names is version_sources' (vsrc:passive) reading already
+        if not any(version and _same_version(r['version'], version) and _names_port(r['label'], token) for token, version in stated):
+            out.append((0, r))
     return out
 
 
@@ -437,6 +460,9 @@ def refresh_host(sub, ports, now=None):
     now = now or timezone.now()
     found = nmap_readings(sub, ports)
     changed = version_sources._store_derived(sub, NMAP_PROBE, found, now)
+    served = webserver_readings(sub, ports)
+    changed = version_sources._store_derived(sub, WEBSERVER_PROBE, served, now) or changed
+    found = found + served
     try:
         changed = refresh_runzero(sub, now=now) or changed
     except Exception:  # noqa: BLE001 - a malformed block never stops the host's other readings
@@ -643,12 +669,18 @@ def catch_up(apply=False, batch=200):
                 ports = version_sources._ports(sub)
                 found = nmap_readings(sub, ports)
                 changed = version_sources._store_derived(sub, NMAP_PROBE, found, timezone.now())
+                served = webserver_readings(sub, ports)
+                changed = version_sources._store_derived(sub, WEBSERVER_PROBE, served, timezone.now()) or changed
+                found = found + served
                 changed = refresh_runzero(sub, configured=configured) or changed
             except Exception:  # noqa: BLE001 - one host's stored data never stops the catch-up
                 logger.exception('source version catch-up of host %s failed', sub.pk)
                 continue
             out['readings'] += len(found)
-            if changed:
+            # correlated whether or not this pass wrote anything: the version source backfill before it (or the stage since the update) may
+            # already have stored the same readings through version_sources.refresh_host, without correlating the hosts for them
+            on_runzero = any(isinstance(ip.fingerprint, dict) and ip.fingerprint.get('runzero') for ip in sub.ip_addresses.all())
+            if changed or found or on_runzero:
                 moved.add(sub.pk)
     # the CPEs Shodan's InternetDB handed bbot, as the discovery feed kept them ("<technology> on <host>"), newest first
     seen = set()

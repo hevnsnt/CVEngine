@@ -552,8 +552,8 @@ def refresh_host(sub, now=None):
     now = now or timezone.now()
     changed = _store_derived(sub, PASSIVE_PROBE, found, now)
     changed = _store_derived(sub, SNMP_PROBE, snmp, now) or changed
-    # what the stored ports state beyond their product and version (nmap's other CPEs, extrainfo modules, NSE versions) and the runZero
-    # readings of the host's addresses (cveFeed.source_versions)
+    # what the stored ports and the stored Server header state beyond the port's own product and version (the other CPEs, extrainfo modules,
+    # script versions) and the runZero readings of the host's addresses (cveFeed.source_versions)
     from cveFeed import source_versions
     stated, moved = source_versions.refresh_host(sub, ports, now=now)
     changed = moved or changed
@@ -976,7 +976,7 @@ def search_rows(field, value):
         if text == BUNDLED_SOURCE:
             return rows.filter(evidence__source=BUNDLED_SOURCE)
         from cveFeed import source_versions
-        if text in source_versions.SEARCH:  # nmap, testssl, wpscan, db-probe, shodan-idb, runzero (cveFeed.source_versions)
+        if text in source_versions.SEARCH:  # the sources of data already received (cveFeed.source_versions.SEARCH)
             return rows.filter(probe=source_versions.SEARCH[text])
         if text == source_versions.REPORTED:  # every third-party reading
             return rows.filter(kind=source_versions.REPORTED)

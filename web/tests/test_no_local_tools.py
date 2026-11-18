@@ -41,6 +41,7 @@ SKIP_DIRS = {'__pycache__', 'tests'}
 # Phase 5 and 8 delete PRs shrink this; the final slice empties it. Paths are relative to web/.
 ALLOWED = {
     'nmap': [
+        'cveFeed/source_versions.py',  # reads the versions stored results already state (the port scan's CPEs and scripts, the TLS audit's banners, the WordPress scan's headers, a discovery's CPEs) and names them as reading sources, runs nothing
         'agentapi/egress.py',  # 1.3.4 outbound connection log (develop): names the tools whose probe plans it records, runs nothing
         'agentapi/mcp.py',
         'agentapi/models.py',
@@ -215,6 +216,7 @@ ALLOWED = {
         'reNgine/resources.py',
     ],
     'wpscan': [
+        'cveFeed/source_versions.py',  # reads the versions stored results already state (the port scan's CPEs and scripts, the TLS audit's banners, the WordPress scan's headers, a discovery's CPEs) and names them as reading sources, runs nothing
         'agentapi/mcp.py',  # capability list in a tool description names the kind, runs nothing
         'agentapi/rest.py',  # capability and task kind lists in the route help name the kind, runs nothing
         'agentapi/sentinel_broker.py',  # the kind name as a data value: result cleaner and token scrub, runs nothing
@@ -241,6 +243,7 @@ ALLOWED = {
         'reNgine/resources.py',  # T8 leftover: heavy-kind memory and concurrency tables; the lead removes them in the final slice
     ],
     'testssl': [
+        'cveFeed/source_versions.py',  # reads the versions stored results already state (the port scan's CPEs and scripts, the TLS audit's banners, the WordPress scan's headers, a discovery's CPEs) and names them as reading sources, runs nothing
         'agentapi/mcp.py',
         'agentapi/rest.py',
         'agentapi/sentinel_broker.py',
@@ -262,6 +265,7 @@ ALLOWED = {
         'reNgine/resources.py',
     ],
     'bbot': [
+        'cveFeed/source_versions.py',  # reads the versions stored results already state (the port scan's CPEs and scripts, the TLS audit's banners, the WordPress scan's headers, a discovery's CPEs) and names them as reading sources, runs nothing
         'agentapi/mcp.py',  # 1.4 T8: user-facing tool descriptions that name the discovery tool (share lines with other tool words), runs nothing
         'agentapi/rest.py',  # 1.4 T8: user-facing route descriptions that name the discovery tool (share lines with other tool words), runs nothing
         'agentapi/sentinel_adopt.py',  # the kind name as a data key of the adopter registry and in its docstring: files a Sentinel's result, runs nothing

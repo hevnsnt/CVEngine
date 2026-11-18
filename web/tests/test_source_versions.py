@@ -331,3 +331,15 @@ class BackfillTests(ReportedFixture, TestCase):
         out = StringIO()
         call_command('backfill_source_versions', stdout=out)
         self.assertIn('Dry run', out.getvalue())
+
+
+class WebserverTests(VersionFixture, TestCase):
+    def test_the_stored_server_header_becomes_readings_less_what_a_port_states(self):
+        scan = self.host_scan(web=True, ports=((8443, 'https', 'Apache httpd', '2.4.37'),))
+        sub = scan.subdomain_set.select_related('target_domain').prefetch_related('technologies', 'ip_addresses__ports').get()
+        sub.webserver = 'Apache/2.4.37 (Red Hat Enterprise Linux) OpenSSL/1.1.1k mod_wsgi/4.6.4 Python/3.6'
+        sub.save(update_fields=['webserver'])
+        version_sources.refresh_host(sub)
+        got = {(r.kind, r.product): r.version for r in ProbeObservation.objects.filter(probe=source_versions.WEBSERVER_PROBE)}
+        self.assertEqual(got, {('version', 'OpenSSL'): '1.1.1k', ('version', 'mod_wsgi'): '4.6.4'})  # Apache is the port's; Python is vsrc:passive's
+        self.assertIn('OpenSSL:1.1.1k', names(sub))
