@@ -1499,7 +1499,8 @@ def invalid_identity_reason(match):
     reason = library_provenance_reason(match)
     if reason:
         return reason
-    if match.source in ('java', 'runtime', 'build_range'):  # build_range: cveFeed.edge_builds matched the CVE's own vendor and product
+    if match.source in ('java', 'runtime', 'build_range', 'windows'):  # build_range: cveFeed.edge_builds matched the CVE's own vendor and product;
+        # windows: cveFeed.windows_builds matched the CVE's own entry naming the Windows release
         # Not a name match either (runtime: cveFeed.version_sources, the same for a language runtime): the CVE's own affected entry names the Java runtime (java_runtime.is_runtime_item) and the host's runtime was
         # read or is unknown; the stored name is the fixed "Java runtime", which no advisory spells, so a name comparison would close every one
         return ''
@@ -1793,7 +1794,7 @@ def save_matches(rows, covered=None):
     return len(unique)
 
 
-_CORRELATED_SOURCES = ("tech", "port", "java", "runtime", "bundled", "build_range")  # java: cveFeed.java_runtime; runtime, bundled: cveFeed.version_sources; build_range: cveFeed.edge_builds
+_CORRELATED_SOURCES = ("tech", "port", "java", "runtime", "bundled", "build_range", "windows")  # java: cveFeed.java_runtime; runtime, bundled: cveFeed.version_sources; build_range: cveFeed.edge_builds; windows: cveFeed.windows_builds
 
 
 def close_rejected():
@@ -2009,6 +2010,10 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     # record names the product and that a release of the range can reach is a needs-validation candidate, never a version in range.
     from cveFeed import edge_builds
     edge_builds.collect_matches(subdomain, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence)
+    # The Windows release an NTLM challenge states (cveFeed.windows_builds): the release is known, its update revision is not, so a KEV or
+    # critical network CVE whose own record names the release and whose range covers it is a needs-validation candidate, never a version in range.
+    from cveFeed import windows_builds
+    windows_builds.collect_matches(subdomain, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence)
     return rows
 
 
@@ -2052,7 +2057,8 @@ def correlate_subdomains(subdomains, product_index, cve_by_id, min_confidence=0.
 # One product index per process, rebuilt only when the CVE table changes (a new or re-synced entry moves the key).
 _INDEX_CACHE = {"key": None, "value": None}
 _LOCAL_CACHE = {"key": None, "value": None}
-_CVE_FIELDS = ("id", "cve_id", "affected", "kev", "epss_reached", "exploit_db", "cvss")
+_CVE_FIELDS = ("id", "cve_id", "affected", "kev", "epss_reached", "exploit_db", "cvss", "cvss_vector", "published_at",
+               "local_only")  # the vector, date and locality: cveFeed.windows_builds.eligible
 
 
 def _pool(qs, cache, key):
@@ -2210,5 +2216,8 @@ def candidate_subdomains(product_index, base=None):
     if product_index:
         # an edge appliance's build range (cveFeed.edge_builds): matched by the CVE's vendor and product, not by a technology token
         wanted |= Q(id__in=edge_builds.range_host_ids(Subdomain.objects if base is None else base))
+        # a Windows release an NTLM challenge states (cveFeed.windows_builds): matched by the CVE's own entry naming the release
+        from cveFeed import windows_builds
+        wanted |= Q(id__in=windows_builds.host_ids(Subdomain.objects if base is None else base))
     qs = (Subdomain.objects if base is None else base).filter(wanted).filter(latest_scan_q())
     return qs.prefetch_related("technologies", "ip_addresses__ports")

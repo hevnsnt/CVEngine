@@ -271,6 +271,7 @@ REASON_JAVA_UNKNOWN = "the Java runtime's version could not be read from outside
 REASON_RUNTIME_UNKNOWN = "the language runtime's version could not be read from outside: kept for review"
 REASON_RANGE_READ = "only a range of the appliance's builds could be read from outside: kept for review"
 REASON_BUNDLED = "the bundled component's version is only inferred from the product release: kept for review"
+REASON_WINDOWS_PATCH = "the Windows release is known, but its patch level cannot be read from outside: kept for review"
 REASON_NOT_HOT = "not on the KEV and no known exploit"
 
 
@@ -292,6 +293,8 @@ def heat_reason(match, heat=None):
             return REASON_JAVA_UNKNOWN
         if match_policy.evidence_flag(match.evidence, 'range_read'):
             return REASON_RANGE_READ  # an edge appliance's build read only as a range (cveFeed.edge_builds)
+        if match_policy.evidence_flag(match.evidence, 'windows_patch_unknown'):
+            return REASON_WINDOWS_PATCH  # a Windows release with no update revision (cveFeed.windows_builds)
         if match_policy.evidence_flag(match.evidence, 'bundled_inferred'):
             return REASON_BUNDLED
         return REASON_RUNTIME_UNKNOWN if match_policy.evidence_flag(match.evidence, 'runtime_unknown') else REASON_VERSION_UNKNOWN

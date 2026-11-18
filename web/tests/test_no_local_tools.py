@@ -106,6 +106,7 @@ ALLOWED = {
         'cveFeed/udp_scan.py',
         'cveFeed/validation.py',
         'cveFeed/validation_plan.py',
+        'cveFeed/windows_builds.py',  # reads the NTLM and SMB script output the port scan stored (the Windows build) and says nmap's OS guess is never read, runs nothing
         'cveFeed/work_planner.py',  # 1.4 work planner: the check-to-tool table of the coverage rules, queues Sentinel tasks, runs nothing
         'reNgine/ai_providers.py',
         'reNgine/common_func.py',

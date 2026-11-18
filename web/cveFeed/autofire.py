@@ -56,7 +56,7 @@ def hot_cves_without_run(limit=CANDIDATE_LIMIT):
     # what is looked for is the attention rating (KEV, exploit, CVSS, EPSS) under either heat policy: the policy decides heat, not detection
     return list(CVEEntry.objects.filter(Q(autofire__isnull=True) | retry).filter(attention_hot_q()).only(
         "id", "cve_id", "title", "summary", "original_description", "cvss", "affected", "kev", "epss_reached", "exploit_db",
-        "published_at").order_by("-published_at")[:limit])
+        "published_at", "cvss_vector", "local_only").order_by("-published_at")[:limit])  # vector, locality: cveFeed.windows_builds.eligible
 
 
 def dispatch_template_test(cve_pk, hosts, project_id=None, batch=None):
