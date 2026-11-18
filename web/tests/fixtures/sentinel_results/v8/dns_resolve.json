@@ -1,0 +1,6 @@
+{
+  "outcome": "done",
+  "resolved": {"www.example.com": ["93.184.215.14", "2606:2800:21f:cb07:6820:80da:af6b:8b2c"], "mail.example.com": ["198.51.100.25"]},
+  "errors": {"slow.example.com": "no answer within 10 seconds"},
+  "refused": []
+}
