@@ -552,8 +552,13 @@ def refresh_host(sub, now=None):
     now = now or timezone.now()
     changed = _store_derived(sub, PASSIVE_PROBE, found, now)
     changed = _store_derived(sub, SNMP_PROBE, snmp, now) or changed
+    # what the stored ports state beyond their product and version (nmap's other CPEs, extrainfo modules, NSE versions) and the runZero
+    # readings of the host's addresses (cveFeed.source_versions)
+    from cveFeed import source_versions
+    stated, moved = source_versions.refresh_host(sub, ports, now=now)
+    changed = moved or changed
     sub._version_changed = changed
-    return found + snmp
+    return found + snmp + stated
 
 
 def refresh_snmp(ip):
@@ -907,8 +912,16 @@ def as_dict(row):
             'bundled_with': ({k: bundled.get(k, '') for k in ('product', 'product_version', 'basis', 'source')} if bundled else None),
             'first_seen': row.first_seen.isoformat() if row.first_seen else None, 'last_seen': row.observed_at.isoformat() if row.observed_at else None,
             'stale': bool(row.observed_at and row.observed_at < timezone.now() - timedelta(days=STALE_DAYS)),
+            # a third-party reading (cveFeed.source_versions: Shodan's InternetDB, runZero): who reported it and as of when; matched only under the
+            # freshness rule (source_versions.in_use), never a technology
+            **(_reported_fields(row) if row.kind == 'reported' else {}),
             # a build RANGE (cveFeed.edge_builds): the releases it can be, and how it was read; never a version
             **({'range': {k: ev['range'].get(k) for k in ('candidates', 'ranges', 'basis')}} if isinstance(ev.get('range'), dict) else {})}
+
+
+def _reported_fields(row):
+    from cveFeed import source_versions
+    return source_versions.payload_fields(row)
 
 
 _ORDER = {'exact': 0, 'inferred': 1, 'weak': 2}
@@ -962,6 +975,11 @@ def search_rows(field, value):
             return rows.filter(probe=SNMP_PROBE)
         if text == BUNDLED_SOURCE:
             return rows.filter(evidence__source=BUNDLED_SOURCE)
+        from cveFeed import source_versions
+        if text in source_versions.SEARCH:  # nmap, testssl, wpscan, db-probe, shodan-idb, runzero (cveFeed.source_versions)
+            return rows.filter(probe=source_versions.SEARCH[text])
+        if text == source_versions.REPORTED:  # every third-party reading
+            return rows.filter(kind=source_versions.REPORTED)
         if text not in catalogue.BY_ID:
             return None
         return rows.filter(probe=f'{PROBE_PREFIX}{text}')

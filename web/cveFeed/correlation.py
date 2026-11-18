@@ -1694,6 +1694,9 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     # a core version that is a number a library's own file on the host states is that library's (jQuery 3.7.1 is not WordPress 3.7.1)
     wrong = cms_evidence.superseded(subdomain, technologies, libraries.file_versions() if libraries is not None else ())
     host = host_distro(subdomain)  # a Red Hat family host: its technologies are judged against Red Hat's data too
+    # the CPE a first-party reading named a technology by (nmap's other CPEs on a port, cveFeed.source_versions): matched CPE first like a port's
+    from cveFeed import source_versions
+    tech_cpes = source_versions.technology_cpes(subdomain) if technologies else {}
     for tech in technologies:
         name, version = split_name_version(tech.name)
         if wrong and (cms.key(name), version) in wrong:
@@ -1713,10 +1716,12 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
                            'version_note': 'kept: vouched for on an earlier scan of this host, although its page does not show this version'}
             if skip:
                 continue
+        tech_cpe = tech_cpes.get(tech.name or "", "")
         _record_matches(
             subdomain, name, version, token, "tech",
-            product_index, cve_by_id, min_confidence, scan_history, rows, evidence={"source": "tech", "source_id": tech.id, **library},
-            leads=leads, confidence_cap=cap, distro=tech_distro(host, name, version), fix_lookup=fix_lookup)
+            product_index, cve_by_id, min_confidence, scan_history, rows, evidence={"source": "tech", "source_id": tech.id, **library,
+                                                                                   **({"cpe": tech_cpe[:255]} if tech_cpe else {})},
+            leads=leads, confidence_cap=cap, distro=tech_distro(host, name, version), fix_lookup=fix_lookup, cpe=tech_cpe)
 
     # nmap -sV service data on the host's open ports (Shodan-style inventory).
     from startScan.models import open_services
@@ -1741,6 +1746,11 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
                           # packaged, OS-serviced or unknown product's does not); always written, so a row without it predates the rule
                           "vendor_banner": match_policy.vendor_built(name)},
                 leads=leads)
+
+    # The versions a third party reported for the host (cveFeed.source_versions: Shodan's InternetDB CPEs, runZero's operating system), under the
+    # freshness rule: never when a first-party reading names the product, never older than REPORTED_MAX_AGE_DAYS; CPE first, confidence capped.
+    source_versions.collect_reported(subdomain, product_index, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence,
+                                     fix_lookup=fix_lookup)
 
     # The Java runtime the host was read to run (cveFeed.java_runtime): a CVE in the JDK itself names the runtime, not a technology or a port
     # product, so it is tested against the host's Java runtime readings, and a host where Java is clear but its version unknown is a candidate.
@@ -1783,7 +1793,7 @@ def correlate_subdomains(subdomains, product_index, cve_by_id, min_confidence=0.
     fix_lookup = fix_lookup or DbFixLookup()
     from itertools import islice
 
-    from cveFeed import version_sources
+    from cveFeed import source_versions, version_sources
     walk = iter(subdomains)
     while True:
         chunk = list(islice(walk, batch))
@@ -1791,6 +1801,7 @@ def correlate_subdomains(subdomains, product_index, cve_by_id, min_confidence=0.
             break
         if product_index:
             version_sources.prefetch_bundled(chunk)  # the hosts' bundled component readings in one query, not one per host
+            source_versions.prefetch(chunk)  # their source readings (cveFeed.source_versions) in one query, not one per host
         for sub in chunk:
             hosts += 1
             ids.add(sub.id)
@@ -1933,6 +1944,10 @@ def candidate_subdomains(product_index, base=None):
     if product_index:
         # a host whose vendor bundle names a component (cveFeed.bundled_components) is a candidate for that component's CVEs
         wanted |= Q(id__in=version_sources.bundled_host_ids(Subdomain.objects if base is None else base))
+    if product_index:
+        # a host a third party reported a version for (cveFeed.source_versions): a candidate, the freshness rule decides at correlation
+        from cveFeed import source_versions
+        wanted |= Q(id__in=source_versions.reported_host_ids(Subdomain.objects if base is None else base))
     from cveFeed import edge_builds
     if product_index:
         # an edge appliance's build range (cveFeed.edge_builds): matched by the CVE's vendor and product, not by a technology token

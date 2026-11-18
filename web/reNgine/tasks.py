@@ -23,7 +23,7 @@ from startScan.models import EndPoint, Subdomain, Vulnerability
 from targetApp.models import Domain
 from cvengine_scanner import versions
 
-from cveFeed import js_libraries
+from cveFeed import js_libraries, source_versions
 
 """
 Celery tasks.
@@ -88,10 +88,17 @@ def persist_bbot_result(result, ctx):
 			subdomain = Subdomain.objects.filter(scan_history_id=ctx['scan_history_id'], name=host).first()
 		if not subdomain:
 			continue
+		raw_tech = tech_name
 		tech_name = versions.normalize_technology(tech_name)  # a CPE or a "v3.3.7" would otherwise store a name no advisory matches
 		# a JavaScript library's version is read from its own file (cveFeed.js_libraries), never taken from another tool's guess
 		tech_name = js_libraries.unversioned(tech_name)
 		if not tech_name:
+			continue
+		reported = source_versions.reported_cpe(raw_tech) if tech_name == versions.normalize_technology(raw_tech) else None
+		if reported:
+			# a versioned CPE is what Shodan's InternetDB told bbot (passive, of unknown age): a third-party reading of the host with its CPE,
+			# matched only while nothing first-party names the product (cveFeed.source_versions), never a technology that outlives a fresher scan
+			source_versions.store_bbot_reported(subdomain, [reported])
 			continue
 		tech, _ = get_or_create_first(Technology, name=tech_name[:500])
 		subdomain.technologies.add(tech)

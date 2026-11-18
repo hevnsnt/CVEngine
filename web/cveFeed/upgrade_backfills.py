@@ -38,6 +38,7 @@ BACKFILLS = (
     'backfill_version_sources',           # the versions, runtimes, SNMP releases and bundled components existing hosts already state, and their matches
     'backfill_exact_builds',              # Cisco's exact builds (cut at 30 or dropped) and Oracle's supported versions read per line (re-correlated)
     'backfill_bare_versions',             # blocks cve.now passed on as bare versions (Linux kernel, VulDB, ...) take their record's ranges (re-correlated)
+    'backfill_source_versions',           # the exact versions and CPEs stored ports, runZero, Shodan InternetDB and database replies state (re-correlated)
     'rerate_findings',                    # 1.3.5: rescore hosts for the new heat rules, clear stale fire marks (last: counts everything above)
 )
 MAX_ATTEMPTS = 3
