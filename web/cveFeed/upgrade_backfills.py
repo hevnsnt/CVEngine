@@ -43,6 +43,7 @@ BACKFILLS = (
     'backfill_source_versions',           # the exact versions and CPEs stored ports, runZero, Shodan InternetDB and database replies state (re-correlated)
     'backfill_name_versions',             # Server-header tokens stored as names ("nginx/1.28.3") split into product and version (re-correlated)
     'backfill_protocol_versions',         # a connector's version read as the product's (Tomcat's "Coyote JSP engine 1.1") closes (re-correlated)
+    'backfill_recog_readings',            # the products, versions and CPEs Rapid7 Recog reads in the banners hosts already store (re-correlated)
     'rerate_findings',                    # 1.3.5: rescore hosts for the new heat rules, clear stale fire marks (last: counts everything above)
 )
 MAX_ATTEMPTS = 3

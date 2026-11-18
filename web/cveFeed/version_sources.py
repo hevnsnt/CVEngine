@@ -636,7 +636,8 @@ def refresh_host(sub, now=None):
 
 def refresh_snmp(ip):
     """After a UDP sweep of ``ip``: store what the SNMP agent said for every active host on the address (the hosts that carry its UDP
-    findings), drop what it no longer says, and correlate a host again when that changed. Returns the number of readings. Never fatal."""
+    findings) and what Recog reads in it (``source_versions.refresh_recog``), drop what it no longer says, and correlate a host again when that
+    changed. Returns the number of readings. Never fatal."""
     from cveFeed import probes, udp_scan
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
@@ -646,7 +647,11 @@ def refresh_snmp(ip):
             for sub in (Subdomain.objects.filter(latest_scan_q(), target_domain=domain, name=name).select_related('target_domain', 'scan_history')
                         .prefetch_related('technologies', 'ip_addresses__ports')):
                 snmp = snmp_readings(sub)
-                if _store_derived(sub, SNMP_PROBE, snmp, timezone.now()):
+                moved = _store_derived(sub, SNMP_PROBE, snmp, timezone.now())
+                # what Recog reads in the sysDescr (and the host's other stored banners), after the SNMP readings it gives way to
+                from cveFeed import source_versions
+                moved = source_versions.refresh_recog(sub)[1] or moved
+                if moved:
                     probes.recorrelate(sub)
                 total += len(snmp)
     except Exception:  # noqa: BLE001 - a reading never undoes the sweep
