@@ -107,6 +107,7 @@ ALLOWED = {
         'cveFeed/udp_scan.py',
         'cveFeed/validation.py',
         'cveFeed/validation_plan.py',
+        'cveFeed/windows_builds.py',  # reads the NTLM and SMB script output the port scan stored (the Windows build) and says nmap's OS guess is never read, runs nothing
         'cveFeed/work_planner.py',  # 1.4 work planner: the check-to-tool table of the coverage rules, queues Sentinel tasks, runs nothing
         'reNgine/ai_providers.py',
         'reNgine/common_func.py',
@@ -149,6 +150,7 @@ ALLOWED = {
         'cveFeed/internal_scan.py',
         'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
         'cveFeed/ledger.py',
+        'cveFeed/management/commands/backfill_panel_versions.py',  # re-reads stored panel template findings for the version they extracted, runs nothing
         'cveFeed/management/commands/backfill_secrets_inventory.py',  # 1.4 secrets inventory: names the nuclei findings it files and masks (rule ids, the finding's source), runs nothing
         'cveFeed/management/commands/recheck_template_hits.py',  # re-reads stored template hits: names the nuclei-cve finding source and the stored nuclei_template step, runs nothing
         'cveFeed/management/commands/seed_scale_fixture.py',  # scale fixture: names the ledger services 'nuclei' as stored data values (synthetic rows for scripts/scale), runs nothing
@@ -162,6 +164,7 @@ ALLOWED = {
         'cveFeed/nuclei_fp.py',  # 1.3.5 scanner false positives (develop): judges nuclei results already returned, runs nothing
         'cveFeed/nuclei_scan.py',  # T8 nuclei: ledger service keys (nuclei-light, nuclei-cve) and the finding source/module value, stored data, plus activity text naming the pass; runs nothing
         'cveFeed/nuclei_templates.py',
+        'cveFeed/panel_versions.py',  # reads the result lines and stored findings of panel templates for the version they extracted, runs nothing
         'cveFeed/performance_review.py',
         'cveFeed/reaper.py',
         'cveFeed/report_data.py',

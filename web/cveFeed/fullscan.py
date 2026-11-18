@@ -35,7 +35,9 @@ DEFAULT_INTERVAL_MIN = 10
 FAILURE_BACKOFF_HOURS = 6  # after the first failed sweep; doubles per further failure
 MAX_BACKOFF_HOURS = 7 * 24
 DEFAULT_INVESTIGATE_MAX = 50
-FINGERPRINT_FLAGS = ['-sV', '--version-intensity', '5', '-Pn', '-T4']
+# the default intensity 7, as the pipeline's fingerprint pass (cvengine_scanner.flags): 5 left out the rarer probes that name a less
+# common service. A port named by an early probe costs the same; one that cannot be named is sent 48 probes instead of 27 (rarity 7 or less)
+FINGERPRINT_FLAGS = ['-sV', '--version-intensity', '7', '-Pn', '-T4']
 OPEN = ('', 'open')
 
 

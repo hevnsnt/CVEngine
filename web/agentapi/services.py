@@ -2432,9 +2432,14 @@ def _tech_known_q(spec, named):
     java = None
     if spec.platform is not None and spec.platform.runtime == 'java_runtime':
         java = named(JavaRuntime.objects.filter(version__iregex=release) if spec.state == tech_search.RELEASE else JavaRuntime.objects.all())
+    readings = version_sources.readings_qs().filter(reading).filter(version__iregex=release)
+    if spec.state != tech_search.RELEASE:
+        # a Windows release an NTLM challenge states (cveFeed.windows_builds: ``release_only``) knows the release, never its update revision: the
+        # version is not known (@unknown finds the host, @known does not); a release asked for (@10.0.20348) is stated by it
+        readings = readings.exclude(evidence__has_key='release_only')
     return _any(_tech_technology_q(named_tech & Q(version__iregex=release)) if named_tech else None, _tech_port_q(port) if port else None,
                 _iregex('webserver', spec.header_re(True)), named(RouteAuth.objects.filter(retired_at__isnull=True).filter(route)) if route else None,
-                named(version_sources.readings_qs().filter(reading).filter(version__iregex=release)), java)
+                named(readings), java)
 
 
 def _tech_q(spec, project):
@@ -2728,8 +2733,11 @@ def _tech_reasons(sub, spec, routes=None, archive=None, shared=None):
         product = r.get('product') or ''
         same = spec.matches('name', product) or r.get('component') in comps
         what = f'{"runtime" if r.get("kind") == "runtime" else "version source"} {product} {r.get("version") or ""}'.strip()
+        release_only = bool(r.get('release_only'))  # a Windows release with no update revision (cveFeed.windows_builds): states a release, no patch level
         if same or v in product.lower():
-            add(f'{what} ({r.get("source")})', (spec.matches('stating', product) or r.get('component') in comps) and spec.version_ok(r.get('version')))
+            add(f'{what} ({r.get("source")}{", patch level unknown" if release_only else ""})',
+                (spec.matches('stating', product) or r.get('component') in comps) and spec.version_ok(r.get('version'))
+                and (not release_only or spec.state == tech_search.RELEASE))
         if spec.matches('platform', product):
             runs_on.append(' '.join(x for x in (product, r.get('version')) if x))
     if spec.platform is not None and spec.platform.runtime == 'java_runtime':

@@ -18,6 +18,8 @@ runtime rules of ``cveFeed.version_sources``):
   vsrc:wpscan    the ``headers`` interesting finding of a WordPress scan (``Server: Apache/2.4.29 (Ubuntu)``, ``X-Powered-By: PHP/7.2.24``).
   vsrc:db-probe  the version a credential-less database probe's reply states (``PONG (redis 7.2.4)``, ``PostgreSQL 15.4``, ``(MySQL 8.0.35)``,
                  ``VERSION 1.6.21``, ``cluster x, version 8.11.1``), per port.
+  vsrc:panel     the version an info-level panel template result (tag ``panel``) extracted, under the product the template names, with its
+                 CPE (``cveFeed.panel_versions``), per port. Never stored over a version another source states for the product.
   vsrc:recog     what Rapid7 Recog's fingerprint databases (``cveFeed.recog``) read in the banners the host's rows already store: SSH, SMTP, FTP,
                  POP3, IMAP and telnet banners (``Port.banner``), the Server and Set-Cookie lines of the NSE output, ``mysql-info``'s server
                  version, ``ntp-info``'s readvar variables, an SNMP agent's sysDescr, the host's Server header (``Subdomain.webserver``) and its
@@ -29,6 +31,12 @@ runtime rules of ``cveFeed.version_sources``):
                  did not read, and never replaces their version. Derived like ``vsrc:nmap``.
   vsrc:nuclei    a versioned product a ``network/detection/`` template read on a port (``cveFeed.network_detection``) when the port's own row names another
                  product: nmap's product and version are never overwritten, so a second product the service names is a reading of its own, per port.
+
+The Windows release (``cveFeed.windows_builds``: kind ``hint``, ``release_only``, never a technology, matched by its own rules as "release known,
+patch level unknown"):
+
+  vsrc:ntlm      the build an NTLM challenge states (``rdp-ntlm-info``, ``ms-sql-ntlm-info`` and the other ``*-ntlm-info`` scripts) or
+                 ``smb-os-discovery`` names, read as the Windows release it is (``data/windows_builds.json``). Never nmap's OS guess.
 
 Third-party readings (kind and outcome ``reported``): passive data another service collected at some earlier time, never a technology:
 
@@ -69,11 +77,16 @@ DB_PROBE = 'vsrc:db-probe'
 WEBSERVER_PROBE = 'vsrc:webserver'
 SHODAN_PROBE = 'vsrc:shodan-idb'
 RUNZERO_PROBE = 'vsrc:runzero'
+PANEL_PROBE = 'vsrc:panel'
+PANEL_SOURCE = 'panel'
 RECOG_PROBE = 'vsrc:recog'
+NTLM_PROBE = 'vsrc:ntlm'  # cveFeed.windows_builds.PROBE: the Windows release an NTLM challenge states
 NUCLEI_PROBE = 'vsrc:nuclei'  # cveFeed.network_detection: a versioned product a network detection template read on a port whose own row names another product
-FIRST_PARTY_PROBES = (NMAP_PROBE, WEBSERVER_PROBE, TESTSSL_PROBE, WPSCAN_PROBE, DB_PROBE, RECOG_PROBE, NUCLEI_PROBE)
+FIRST_PARTY_PROBES = (NMAP_PROBE, WEBSERVER_PROBE, TESTSSL_PROBE, WPSCAN_PROBE, DB_PROBE, PANEL_PROBE, RECOG_PROBE, NUCLEI_PROBE)
 REPORTED_PROBES = (SHODAN_PROBE, RUNZERO_PROBE)
-PROBES = FIRST_PARTY_PROBES + REPORTED_PROBES
+# the Windows release is first-party, but a release with no patch level never makes a third-party reading of the same system give way (a runZero
+# operating system version names the update revision the NTLM challenge does not): it is kept out of FIRST_PARTY_PROBES
+PROBES = FIRST_PARTY_PROBES + REPORTED_PROBES + (NTLM_PROBE,)
 SEARCH = {p[len(PREFIX):]: p for p in PROBES}  # vsource:<name>
 REPORTED = 'reported'               # ProbeObservation kind and outcome of a third-party reading: never a technology, never a first-party read
 REPORTED_MAX_AGE_DAYS = 90          # older than this, a third-party reading is not matched (version_sources.STALE_DAYS, the Java runtime's rule)
@@ -587,7 +600,10 @@ def refresh_host(sub, ports, now=None):
     changed = version_sources._store_derived(sub, NMAP_PROBE, found, now)
     served = webserver_readings(sub, ports)
     changed = version_sources._store_derived(sub, WEBSERVER_PROBE, served, now) or changed
-    found = found + served
+    from cveFeed import windows_builds
+    windows = windows_builds.host_readings(sub, ports)  # the Windows release the NTLM scripts and smb-os-discovery state
+    changed = version_sources._store_derived(sub, NTLM_PROBE, windows, now) or changed
+    found = found + served + windows
     try:
         changed = refresh_runzero(sub, now=now) or changed
     except Exception:  # noqa: BLE001 - a malformed block never stops the host's other readings
