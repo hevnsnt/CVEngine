@@ -18,6 +18,8 @@ runtime rules of ``cveFeed.version_sources``):
   vsrc:wpscan    the ``headers`` interesting finding of a WordPress scan (``Server: Apache/2.4.29 (Ubuntu)``, ``X-Powered-By: PHP/7.2.24``).
   vsrc:db-probe  the version a credential-less database probe's reply states (``PONG (redis 7.2.4)``, ``PostgreSQL 15.4``, ``(MySQL 8.0.35)``,
                  ``VERSION 1.6.21``, ``cluster x, version 8.11.1``), per port.
+  vsrc:nuclei    a versioned product a ``network/detection/`` template read on a port (``cveFeed.network_detection``) when the port's own row names another
+                 product: nmap's product and version are never overwritten, so a second product the service names is a reading of its own, per port.
 
 Third-party readings (kind and outcome ``reported``): passive data another service collected at some earlier time, never a technology:
 
@@ -58,7 +60,8 @@ DB_PROBE = 'vsrc:db-probe'
 WEBSERVER_PROBE = 'vsrc:webserver'
 SHODAN_PROBE = 'vsrc:shodan-idb'
 RUNZERO_PROBE = 'vsrc:runzero'
-FIRST_PARTY_PROBES = (NMAP_PROBE, WEBSERVER_PROBE, TESTSSL_PROBE, WPSCAN_PROBE, DB_PROBE)
+NUCLEI_PROBE = 'vsrc:nuclei'  # cveFeed.network_detection: a versioned product a network detection template read on a port whose own row names another product
+FIRST_PARTY_PROBES = (NMAP_PROBE, WEBSERVER_PROBE, TESTSSL_PROBE, WPSCAN_PROBE, DB_PROBE, NUCLEI_PROBE)
 REPORTED_PROBES = (SHODAN_PROBE, RUNZERO_PROBE)
 PROBES = FIRST_PARTY_PROBES + REPORTED_PROBES
 SEARCH = {p[len(PREFIX):]: p for p in PROBES}  # vsource:<name>

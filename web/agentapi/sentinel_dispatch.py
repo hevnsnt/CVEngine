@@ -1197,15 +1197,18 @@ def _nuclei_target(kind, targets, kwargs, scan=None, labels=None):
     # no severities given: the default (``cvengine_scanner.flags.NUCLEI_SEVERITIES``, info to critical), sent as a list, since a client given none
     # would run every severity, ``unknown`` included
     tags, severities = sorted(kwargs.get('tags') or []), list(kwargs.get('severities') or scan_flags.NUCLEI_SEVERITIES.split(','))
+    detection = _network_detection(kind, kwargs)
     if kind == 'nuclei_light':
-        tags, severities = ['tech'], ['info']
+        tags, severities = ([] if detection else ['tech']), ['info']
     etags = list(scan_flags.NUCLEI_EXCLUDED_TAGS)
     if not validation.credential_checks_allowed():  # the Sentinel leaves these out of its own runs too (``flags.NUCLEI_CREDENTIAL_TAGS``): the task says so
         etags += list(scan_flags.NUCLEI_CREDENTIAL_TAGS)
     rev = nuclei_scan.policy_rev()
     target = {'targets': targets, 'tags': tags, 'severities': severities, 'etags': etags,
               'template_policy': {'rev': rev, 'read_only': rev == nuclei_scan.TEMPLATE_POLICY_REV, 'bundle_sha256': template_bundle.sha256_if_ready()},
-              'budget': dict(scan_flags.NUCLEI_SERVICE_BUDGET)}
+              'budget': dict(scan_flags.NUCLEI_DETECTION_BUDGET if detection else scan_flags.NUCLEI_SERVICE_BUDGET)}
+    if detection:  # contract 10: the network/detection templates on the non-web ports (cveFeed.network_detection); the broker hands it only to a Sentinel that runs it
+        target['network_detection'] = True
     if validation.credential_checks_allowed():  # only when an App Admin turned it on: absent means off, and a Sentinel that does not know the field never runs them
         target['allow_credential_checks'] = True
     if labels is None:
@@ -1214,6 +1217,40 @@ def _nuclei_target(kind, targets, kwargs, scan=None, labels=None):
     if services:
         target['services'] = services
     return target
+
+
+def _network_detection(kind, kwargs):
+    """Whether a template stream call is the network detection pass (``cveFeed.network_detection``: ``network_detection=True`` on a light stream)."""
+    return kind == 'nuclei_light' and kwargs.get('network_detection') is True
+
+
+NETWORK_DETECTION_WAIT = ('no live Sentinel runs the network detection pass yet (it needs Sentinel contract {since} or later); update a Sentinel that covers '
+                          'this project')
+
+
+def _require_network_detection(project, kind, kwargs, internal=False):
+    """Raise ``ScannerUnavailable`` when a stream call is the network detection pass and no live Sentinel that covers ``project`` runs it (contract
+    ``NUCLEI_DETECTION_SINCE``): an older one would leave the task queued (the broker never hands it one, ``sentinel_broker.network_detection_task``), so
+    the stage waits and its ports stay due instead."""
+    if not _network_detection(kind, kwargs):
+        return
+    from cvengine_scanner import flags as scan_flags
+
+    from agentapi import sentinel_broker
+    if not sentinel_broker.network_detection_scanner(project, internal=internal):
+        # not ``_no_local``: a light-pass scanner is there, only an older one, so the scanner-wait re-test (``scanner_wait``) would send the hosts through the
+        # pipeline again every few minutes until someone updates it. The ports stay due for the next scan instead.
+        from reNgine.resources import ScannerUnavailable
+        raise ScannerUnavailable(kind, NETWORK_DETECTION_WAIT.format(since=scan_flags.NUCLEI_DETECTION_SINCE))
+
+
+def _stream_chunks(kind, targets, labels, kwargs):
+    """The chunk tasks of one stream call: at most ``MAX_ADDRESSES`` targets, and at most ``MAX_SERVICE_PORTS`` non-web ports a task, or
+    ``NUCLEI_DETECTION_MAX_PORTS`` for the network detection pass (each port's whole budget must fit the light task's time)."""
+    from cvengine_scanner import flags as scan_flags
+
+    from cveFeed import nuclei_services
+    return nuclei_services.chunks(targets, labels, MAX_ADDRESSES, max_ports=scan_flags.NUCLEI_DETECTION_MAX_PORTS if _network_detection(kind, kwargs) else None)
 
 
 def _targets_label(chunk):
@@ -1281,8 +1318,9 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                 targets = []
             internal_stream.unreached = set()
             internal_stream.not_checked = []
+            _require_network_detection(project, kind, kwargs, internal=True)
             labels = nuclei_services.labels_for(scan, targets)  # once for the whole stream, not once per chunk
-            chunks = nuclei_services.chunks(targets, labels, MAX_ADDRESSES)  # every target is sent: a stage that marks its whole list scanned must not have dropped the tail
+            chunks = _stream_chunks(kind, targets, labels, kwargs)  # every target is sent: a stage that marks its whole list scanned must not have dropped the tail
             with contextlib.closing(dispatch_many(project, kind, chunks, prepare=lambda chunk: (_nuclei_target(kind, chunk, kwargs, scan, labels), []), scan=scan,
                                                   internal=True, timeout=timeout, labeler=_targets_label)) as results:
                 for _index, result in results:
@@ -1311,10 +1349,11 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
             targets = []
         if not targets:  # nothing readable to send
             return
+        _require_network_detection(project, kind, kwargs)
         labels = nuclei_services.labels_for(scan, targets)  # what speaks on each host:port, read once for the whole stream
         # one task per chunk of MAX_ADDRESSES targets and at most MAX_SERVICE_PORTS ports that are not web, several at once: the caller marks the whole list
         # scanned, so none may be dropped
-        chunks = nuclei_services.chunks(targets, labels, MAX_ADDRESSES)
+        chunks = _stream_chunks(kind, targets, labels, kwargs)
 
         unresolved = set()  # the chunks (as tuples) nothing of which resolves: never offered to a Sentinel
 

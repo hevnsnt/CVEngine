@@ -834,6 +834,20 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_st
 
     if stopped(scan_id):
         return gone
+    # The services that do not speak HTTP (RDP, Redis, MongoDB, VNC, ActiveMQ, the SSH and FTP variants): nuclei's network/detection templates on the
+    # non-web ports, through a Sentinel that runs the pass (contract 10). Only when the scan has such a port; it fills what nmap did not say, before correlation.
+    from cveFeed import network_detection
+    netdetect_result = None
+    if network_detection.has_work(scan):
+        def run_netdetect():
+            try:
+                stream = sentinel_dispatch.wrap_nuclei_stream(scan, 'nuclei_light')  # a Sentinel's, always (a test's light_stream is the tech pass's)
+                return network_detection.run_for_scan(scan_id, stream, force=bool(retest or force))
+            except resources.ScannerUnavailable as exc:  # no Sentinel runs it (none live, or only older ones): the ports stay due, the stage does not fail
+                return _waiting_for_scanner(scan, network_detection.TITLE, exc, {'targets': 0, 'ports': 0, 'readings': 0})
+        netdetect_result = _stage(scan, network_detection.TITLE, network_detection.STAGE, run_netdetect, fallback={'targets': 0, 'ports': 0, 'readings': 0})
+        if stopped(scan_id):
+            return gone
     from cveFeed import waf_fingerprint
     waf_kwargs = {}
     if retest or force:
@@ -981,7 +995,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_st
     found['failed_stages'] = failed_names
     if hygiene and not hygiene_host:
         run_hygiene_task.delay(scan.domain_id)  # certificates and email authentication for what was just found
-    result = {**found, 'nmap': nmap_result, 'db_exposure': db_result, 'nuclei_light': light_result, 'route_auth': route_result, 'secrets_scan': secrets_result,
+    result = {**found, 'nmap': nmap_result, 'db_exposure': db_result, 'nuclei_light': light_result, 'network_detection': netdetect_result, 'route_auth': route_result, 'secrets_scan': secrets_result,
               'correlation': correlation, 'nuclei_targeted': targeted_result, 'triage': triage_result,
               'asset_changes': changes_result, 'ssh_probe': ssh_result, 'java_runtime': java_result,
               'version_sources': versions_result}
