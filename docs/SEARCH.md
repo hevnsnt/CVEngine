@@ -48,7 +48,7 @@ Host search (everything above) answers "which of my hosts...". To look up a CVE 
 | `proto:` | Hosts with an open port over `tcp` or `udp`. A UDP port counts only when it answered, never when it stayed silent (`open\|filtered`). | `proto:udp` |
 | `product:` | Software nmap saw on a port | `product:openssh` |
 | `service:` | Service name on a port | `service:ssh` |
-| `tech:` | Everything a host runs: technologies, `Server` and `X-Powered-By` headers, product and version, banners, script output, page titles, cookie names, route fingerprints | `tech:php` |
+| `tech:` | Which hosts run a product ([below](#what-a-host-runs)). Every source counts: technologies, open ports (product, version, CPE, banner, script output, HTTP header and title), the stored `Server` header, live routes' `Server` and `X-Powered-By` headers, fingerprints and cookie names, version source readings (first- and third-party, products and runtimes), Java runtime readings, and what runs on a platform (`tech:php` finds WordPress). A name matches as text and as the same product under any of its names (`apache httpd`, `apache http server` and `apachegeneric` are one). After `@`: `unknown` (or `none`) for no version known, `known`, or a release prefix (`@7.1` finds 7.1.4, never 7.10) | `tech:php`, `tech:"apache http server"`, `tech:java@unknown`, `tech:wordpress@7.1` |
 | `banner:` | Service banners and NSE script output on an open port | `banner:"Anonymous FTP login allowed"` |
 | `os:` | Operating system guess | `os:windows` |
 | `ip:` | An address, a prefix, or a CIDR range | `ip:198.51.100.0/24` |
@@ -62,7 +62,7 @@ Host search (everything above) answers "which of my hosts...". To look up a CVE 
 | `sensitive:` | A route that served sensitive data: `any`, `credentials`, `pii`, `internal` | `sensitive:credentials` |
 | `secret:` | Hosts that serve an exposed secret the inventory counts (docs/SECRETS-PLAN.md): `any`, a class (`s` server secret, `p` browser key, `i` identifier), `live` (validated active) or a provider name | `secret:s`, `secret:google` |
 | `zombie:` | Hosts whose DNS is gone but still answer: `yes` or `no` | `zombie:yes` |
-| `java:` | The Java runtime a host was read to run ([PIPELINE.md](PIPELINE.md#java-runtime)): a line, a release (a dotted prefix finds the releases under it), `any`, a vendor or a source; inferred readings count | `java:17`, `java:17.0.9`, `java:8u392`, `java:temurin`, `java:jdwp` |
+| `java:` | The Java runtime a host was read to run ([PIPELINE.md](PIPELINE.md#java-runtime)): a line, a release (a dotted prefix finds the releases under it), a vendor or a source; inferred readings count. `java:any` is `tech:java` and `java:unknown` is `tech:java@unknown` ([below](#what-a-host-runs)) | `java:17`, `java:17.0.9`, `java:8u392`, `java:temurin`, `java:jdwp`, `java:any`, `java:unknown` |
 | `component:` | A product a version source read on the host ([PIPELINE.md](PIPELINE.md#version-sources)), an SNMP agent's release, or a component a vendor bundles with a product release (inferred): its name, optionally a release prefix after `@` (`@10.2` finds 10.2.3 and Junos `@21.4` finds 21.4R3-S2, never 10.20), or `any` | `component:grafana`, `component:docker@24`, `component:tomcat@9.0`, `component:junos@21.4`, `component:any`; an edge appliance's build: `component:netscaler`, `component:pan-os`, `component:fortios`, `component:connect-secure` ([PIPELINE.md](PIPELINE.md#edge-appliance-builds)) |
 | `runtime:` | A language runtime the host states (Python, Go, Node.js, PHP, Ruby, .NET Framework, Erlang/OTP; `dotnet`, `golang`, `node` and `otp` are aliases), optionally a release prefix after `@`, or `any`; present-without-a-version readings count | `runtime:python`, `runtime:go@1.21`, `runtime:dotnet` |
 | `vsource:` | Where a version was read: a catalogue entry, `header` for the stored headers, `snmp` for an SNMP agent's sysDescr, `bundled` for a component inferred from a vendor's bundle, `nmap`, `webserver`, `testssl`, `wpscan` or `db-probe` for [data already received](PIPELINE.md#versions-already-received), `shodan-idb` or `runzero` for a third-party reading (`reported` for every one), or `any` | `vsource:prometheus-metrics`, `vsource:docker-api`, `vsource:header`, `vsource:snmp`, `vsource:bundled` |
@@ -73,6 +73,37 @@ Host search (everything above) answers "which of my hosts...". To look up a CVE 
 `port:` takes a number only and matches the port over either protocol; add `proto:` to pick one (`proto:udp port:123`). Use `product:` or `service:` for names. A bad value, such as `sev:scary`, returns an error that lists the allowed ones.
 
 `tech:` also reads what the Internet Archive saw on the host in the past (a `.php` page, `/wp-content/`). Those hits are labelled **seen in web archive**, because they are history, not what runs today.
+
+A bare word followed by a dotted version is that product at that release: `wordpress 7.1` is `tech:wordpress@7.1`. A version on its own (`7.1`) keeps matching any text that contains it.
+
+### What a host runs
+
+`tech:<name>` answers "which of my hosts run X, at which version, and which ones have no version known", for any product.
+
+- **Every source counts.** A technology row, an open port's product or CPE, the `Server` header the web check stored, a live route's headers and fingerprints, a [version source](PIPELINE.md#version-sources) reading (a product or a language runtime, first-party or [third-party](PIPELINE.md#versions-already-received)), and for Java a [Java runtime](PIPELINE.md#java-runtime) reading. A closed port and a retired route do not count.
+- **Every name of the product counts.** The name is read the way correlation reads a technology (a `Name:version`, a `product/version` header token, a CPE), then compared with the names the stored rows use through the product aliases (`web/cveFeed/data/product_aliases.json`): `tech:"apache httpd"`, `tech:"apache http server"` and `tech:apachegeneric` find the same hosts, a vendor in front or an edition behind is the same product (`tech:tomcat` finds "Apache Tomcat", `tech:grafana` "Grafana OSS"), and a longer name is another product (`tech:php` is not phpMyAdmin by name). Matching as text is kept too, so no search finds fewer hosts than before.
+- **What runs on a platform counts as the platform** (`web/cveFeed/data/runs_on.json`, each entry citing the product's own requirements):
+
+| Platform | `tech:` | Products that run on it |
+| --- | --- | --- |
+| Java | `java`, `jdk`, `jre`, `openjdk`, `jvm` | Tomcat, Jetty, Jenkins, Jira, Confluence, Spring, WebLogic, WildFly, Elasticsearch, Kafka ... (the [Java runtime](PIPELINE.md#java-runtime) list) |
+| PHP | `php` | WordPress, Drupal, Joomla, Magento, Laravel, phpMyAdmin, MediaWiki, Nextcloud |
+| .NET | `dotnet`, `.net`, `asp.net` | SharePoint, Exchange (OWA), Umbraco, DotNetNuke; IIS counts only with ASP.NET's own signal (`X-Powered-By: ASP.NET`, `X-AspNet-Version`), since IIS alone also serves PHP and static files |
+| Node.js | `nodejs`, `node.js`, `node` | Express, Next.js, Nuxt, Ghost, Strapi |
+| Python | `python` | Django, Flask (Werkzeug), Plone, Odoo, Gunicorn |
+| Ruby | `ruby` | Rails, GitLab, Discourse, Redmine |
+
+- **The version state goes after `@`**, as with `component:` and `runtime:`. `@unknown` (or `@none`) is a host that runs it where no source states a version of that product; for a platform found through what runs on it, that means no reading of the platform itself (WordPress 6.4.2 states WordPress's version, not PHP's). `@known` is the opposite. `@<release>` is that release, by prefix: `@7.1` finds 7.1 and 7.1.4, never 7.10. A version a protocol states is never the product's ("Apache Tomcat/Coyote JSP engine 1.1" is Tomcat's HTTP/1.1 connector).
+- **Each result says why**: what showed the product and its version (`technology WordPress:7.1.4`, `port 80 Apache httpd 2.4.58`, `runtime PHP 8.2.12 (passive)`, `Java runtime 17.0.9 (jdwp)`), the product that showed the platform (`runs PHP (WordPress 6.4.2)`, `runs Java (Tomcat 10.1.48)`), or `PHP version not known`.
+
+```text
+tech:java                              every host that runs Java (java:any)
+tech:java@unknown                      Java hosts whose runtime nobody has read (java:unknown)
+tech:php -tech:php@known               the same question for PHP, written the long way
+tech:"apache http server@2.4"          Apache httpd 2.4.x, under any of its names (the qualifier goes inside the quotes)
+tech:wordpress@unknown                 WordPress hosts with no version known
+tech:php,java -tech:nginx              PHP or Java hosts not behind nginx
+```
 
 ## Examples
 

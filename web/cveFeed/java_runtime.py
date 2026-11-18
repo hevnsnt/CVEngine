@@ -67,6 +67,8 @@ SEVERITY_CRITICAL = 4
 MAX_WEB_PER_TASK = 50
 MAX_JDWP_PER_TASK = 25
 MAX_PER_SCAN = 60  # hosts one scan sends; the rest are due on the next pass or the work planner's
+ANY_VALUES = ('any', 'yes', 'all')  # java:any is tech:java: every host that runs Java, its version read or not (cveFeed.tech_search)
+UNKNOWN_VALUES = ('unknown', 'unread', 'none')  # java:unknown is tech:java@unknown: a host that runs Java at a version nothing has read
 STALE_DAYS = 90  # a reading not seen again for this long is not used to match
 UNKNOWN_CONFIDENCE = 0.4  # a Java runtime of unknown version (the correlation floor: correlate_cves keeps matches at 0.4 and above)
 INFERRED_IN_RANGE_CONFIDENCE = 0.5
@@ -889,7 +891,8 @@ def _row(cve, subdomain, scan_history, version, in_range, confidence, evidence, 
 
 def java_host_ids(base_qs):
     """The ids of the Subdomain rows of ``base_qs`` where Java is clear: a stored reading, or a technology or port product that runs on a JVM. For
-    the candidate hosts of a runtime CVE (``correlation.candidate_subdomains``)."""
+    the candidate hosts of a runtime CVE (``correlation.candidate_subdomains``). The host search's ``tech:java`` (and ``java:any``) reads the
+    same products through ``cveFeed.tech_search``'s Java entry (``data/runs_on.json``)."""
     from django.db.models import Exists, OuterRef, Q
     from cveFeed.models import JavaRuntime
     from startScan.models import IpAddress, Subdomain, Technology

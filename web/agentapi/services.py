@@ -2350,6 +2350,131 @@ def _running_q(value, project):
     return q | _hosts_named_in(routes.filter(route_hit), project) | _hosts_named_in(HostArchive.objects.filter(tech_text__icontains=value), project)
 
 
+def _tech_spec(value):
+    """The ``cveFeed.tech_search.Spec`` of a ``tech:`` value, or a 400 naming what it takes."""
+    from cveFeed import tech_search
+    spec = tech_search.parse(value)
+    if spec is None:
+        raise ApiError(400, 'tech: takes a name (tech:php, tech:"apache http server"), optionally a version state after @: tech:php@unknown '
+                            '(or @none), tech:php@known, or a release such as tech:wordpress@7.1')
+    return spec
+
+
+def _techver_value(value):
+    """``wordpress 7.1`` (a bare word and a dotted version) as the ``tech:`` value it means: ``wordpress@7.1``."""
+    product, version = value.rsplit(' ', 1)
+    return f'{product}@{version}'
+
+
+def _java_tech_value(text):
+    """``java:any`` is ``tech:java``, ``java:unknown`` ``tech:java@unknown``."""
+    from cveFeed import java_runtime
+    return 'java@unknown' if text in java_runtime.UNKNOWN_VALUES else 'java'
+
+
+def _tech_hosts(through, column, rows):
+    """A Q matching the Subdomain ids an M2M ``through`` table pairs with ``rows`` (a values('id') subquery): one uncorrelated subquery the
+    database reads once, with no join on the outer query (``java_runtime.java_host_ids``' pattern)."""
+    from django.db.models import Q
+    return Q(id__in=through.objects.filter(**{f'{column}__in': rows}).values('subdomain_id'))
+
+
+def _tech_technology_q(cond):
+    from startScan.models import Subdomain, Technology
+    return _tech_hosts(Subdomain.technologies.through, 'technology_id', Technology.objects.filter(cond).values('id'))
+
+
+def _tech_port_q(cond):
+    """The hosts with an open port that satisfies ``cond`` (a Q over Port: every condition on the same port row)."""
+    from startScan.models import OPEN_PORT_STATES, IpAddress, Port, Subdomain
+    ports = Port.objects.filter(state__in=OPEN_PORT_STATES).filter(cond).values('id')
+    return _tech_hosts(Subdomain.ip_addresses.through, 'ipaddress_id', IpAddress.ports.through.objects.filter(port_id__in=ports).values('ipaddress_id'))
+
+
+def _iregex(lookup, pattern):
+    """``Q(lookup__iregex=pattern)``, or None when the spec has no such pattern (a name too short to compare whole): ``_any`` leaves it out."""
+    from django.db.models import Q
+    return Q(**{f'{lookup}__iregex': pattern}) if pattern else None
+
+
+def _any(*qs):
+    """The OR of the Qs that are not None, or None when none is left."""
+    out = None
+    for q in qs:
+        if q is not None:
+            out = q if out is None else out | q
+    return out
+
+
+def _tech_components(spec):
+    """The version source components a spec names by slug: what was typed (``grafana``, ``dotnet-framework``) and its platform's runtime."""
+    comps = {spec.raw}
+    if spec.platform and spec.platform.runtime and spec.platform.runtime != 'java_runtime':
+        comps.add(spec.platform.runtime)
+    return sorted(comps)
+
+
+def _tech_known_q(spec, named):
+    """The hosts where a source states this product's version (any version, or the spec's release): a technology row, an open port (its version
+    column, a ``product/version`` product, a versioned CPE), the stored Server header, a live route's headers and fingerprints, a version source
+    reading and, for Java, a Java runtime reading. A spelling whose version is a protocol's ("Apache Tomcat/Coyote JSP engine 1.1") states none."""
+    from django.db.models import Q
+
+    from cveFeed import tech_search, version_sources
+    from cveFeed.models import JavaRuntime, RouteAuth
+    release, stating = spec.release_re(), spec.name_re(stating=True)
+    named_tech = _any(_iregex('name', stating), _iregex('name', spec.cpe_re()))
+    port = _any((Q(product__iregex=stating) & Q(version__iregex=release)) if stating else None, _iregex('product', spec.name_re(True)),
+                _iregex('cpe', spec.cpe_re(True)))
+    route = _any(_iregex('evidence__server', spec.header_re(True)), _iregex('evidence__powered_by', spec.header_re(True)),
+                 _iregex('evidence__fingerprint_names', spec.fingerprint_re(True)))
+    reading = _any(_iregex('product', stating), Q(evidence__component__in=_tech_components(spec)))
+    java = None
+    if spec.platform is not None and spec.platform.runtime == 'java_runtime':
+        java = named(JavaRuntime.objects.filter(version__iregex=release) if spec.state == tech_search.RELEASE else JavaRuntime.objects.all())
+    return _any(_tech_technology_q(named_tech & Q(version__iregex=release)) if named_tech else None, _tech_port_q(port) if port else None,
+                _iregex('webserver', spec.header_re(True)), named(RouteAuth.objects.filter(retired_at__isnull=True).filter(route)) if route else None,
+                named(version_sources.readings_qs().filter(reading).filter(version__iregex=release)), java)
+
+
+def _tech_q(spec, project):
+    """The hosts a ``tech:`` spec selects (``cveFeed.tech_search``). Every source a host's software is recorded in counts: technology rows, open
+    ports (product, version, CPE, banner, NSE output, HTTP header and title), the Server header the web check stored, live routes' headers,
+    fingerprints and cookies, the web archive, version source readings (first- and third-party, products and runtimes) and, for Java, the Java
+    runtime readings. A name matches as text (what tech: always did), as the same product through the name normalisation correlation uses
+    (``spec.name_re``: its aliases, a vendor in front, an edition behind) and, for a platform, through a product that runs on it. A state after
+    @ keeps the hosts where a source states the product's version (KNOWN, or that release: ``_tech_known_q``), or where none does (UNKNOWN).
+    Each source is one uncorrelated subquery (no join on the outer query and no per-host work), so a 10,000-host project costs a handful of
+    scans, whatever its size."""
+    from django.db.models import Q
+
+    from cveFeed import tech_search, version_sources
+    from cveFeed.models import HostArchive, JavaRuntime, RouteAuth
+    v, platform = spec.raw, spec.platform
+    named = lambda rows: _hosts_named_in(rows, project)  # noqa: E731 - by (project, name), as component:, java: and auth: are
+    if spec.state in (tech_search.KNOWN, tech_search.RELEASE):
+        return _tech_known_q(spec, named)
+    text = Q()
+    for lookup in ('product', 'version', 'cpe', *_PORT_TEXT):
+        text |= Q(**{f'{lookup}__icontains': v})
+    port = _any(text, _iregex('product', spec.name_re()), _iregex('cpe', spec.cpe_re()))
+    tech = _any(Q(name__icontains=v), _iregex('name', spec.name_re()), _iregex('name', spec.cpe_re()))
+    web = _any(Q(webserver__icontains=v), _iregex('webserver', spec.header_re()))
+    route = _any(*(Q(**{f'evidence__{key}__icontains': v}) for key in _ROUTE_EVIDENCE_KEYS), _iregex('evidence__server', spec.header_re()),
+                 _iregex('evidence__powered_by', spec.header_re()), _iregex('evidence__fingerprint_names', spec.fingerprint_re()))
+    reading = _any(Q(product__icontains=v), _iregex('product', spec.name_re()), Q(evidence__component__in=_tech_components(spec)))
+    if platform is not None:  # a product that runs on it: WordPress for PHP, Tomcat for Java (data/runs_on.json)
+        pattern = platform.pg_pattern
+        port, tech, web, reading = port | Q(product__iregex=pattern), tech | Q(name__iregex=pattern), web | Q(webserver__iregex=pattern), \
+            reading | Q(product__iregex=pattern)
+        route = _any(route, *(Q(**{f'evidence__{key}__iregex': pattern}) for key in ('server', 'powered_by', 'fingerprint_names')))
+    runs = _any(web, _tech_technology_q(tech), _tech_port_q(port), named(RouteAuth.objects.filter(retired_at__isnull=True).filter(route)),
+                named(HostArchive.objects.filter(tech_text__icontains=v)), named(version_sources.readings_qs().filter(reading)))
+    if platform is not None and platform.runtime == 'java_runtime':
+        runs |= named(JavaRuntime.objects.all())
+    return runs & ~_tech_known_q(spec, named) if spec.state == tech_search.UNKNOWN else runs
+
+
 def _banner_q(value):
     """A Q matching hosts with ``value`` in a service banner, an NSE script's output (ssh-hostkey, ssl-cert, ftp-anon,
     rdp-ntlm-info, smb-os-discovery ...) or the extra info nmap printed, on an open port."""
@@ -2373,13 +2498,10 @@ def _term_filter(field, value, project=None):
             q |= Q(**{f'{lookup}__icontains': value})
         q |= Q(**{ports + 'service_name__icontains': value}) & open_port
         return q | _alias_note_q(value, project)
-    if field == 'tech':
-        return _running_q(value, project)
-    if field == 'techver':  # "wordpress 7.1": the product at that release (7.1, 7.1.4), on a technology row or an open port, on the same row
-        product, version = value.rsplit(' ', 1)
-        at_release = lambda prefix: Q(**{prefix + 'version': version}) | Q(**{prefix + 'version__startswith': version + '.'})  # noqa: E731
-        return (Q(technologies__name__icontains=product) & at_release('technologies__')) | \
-            (Q(**{ports + 'product__icontains': product}) & at_release(ports) & open_port)
+    if field == 'tech':  # everything a host runs, by any name of the product, what it runs on, and its version state (cveFeed.tech_search)
+        return _tech_q(_tech_spec(value), project)
+    if field == 'techver':  # "wordpress 7.1": the product at that release (7.1, 7.1.4): tech:wordpress@7.1
+        return _tech_q(_tech_spec(_techver_value(value)), project)
     if field == 'banner':
         return _banner_q(value)
     if field == 'port':
@@ -2421,9 +2543,13 @@ def _term_filter(field, value, project=None):
         return _hosts_named_in(RouteAuth.objects.filter(auth_state=value.lower()), project)
     if field == 'java':  # the Java runtime the host was read to run (cveFeed.java_runtime): a line, a version, any, a vendor or a source
         from cveFeed import java_runtime
+        text = value.strip().lower()
+        if text in java_runtime.ANY_VALUES or text in java_runtime.UNKNOWN_VALUES:  # tech:java and tech:java@unknown
+            return _tech_q(_tech_spec(_java_tech_value(text)), project)
         rows = java_runtime.search_rows(value)
         if rows is None:
-            raise ApiError(400, 'java: takes a line (java:17), a version (java:17.0.9, java:8u392), any, a vendor (java:temurin) or a source (java:jdwp)')
+            raise ApiError(400, 'java: takes a line (java:17), a version (java:17.0.9, java:8u392), any, unknown, a vendor (java:temurin) '
+                                'or a source (java:jdwp)')
         return _hosts_named_in(rows, project)
     if field in ('component', 'runtime', 'vsource'):  # what the host's version sources state (cveFeed.version_sources)
         from cveFeed import version_sources
@@ -2532,19 +2658,112 @@ def _archive_reasons(sub, v, archive=None):
 
 def _matched_for_page(subs, shared, terms):
     """The per-host ``matched`` function of a search page, with the route rows read once for the page when a term can match them."""
-    routes = _routes_for(subs) if any(not neg and field in (None, 'tech') for neg, field, _value, _quoted in terms) and subs else {}
-    return lambda sub: {'matched': _why_matched(sub, terms, routes, shared['archive'])}
+    routes = _routes_for(subs) if any(not neg and field in (None, 'tech', 'techver', 'java') for neg, field, _value, _quoted in terms) and subs else {}
+    return lambda sub: {'matched': _why_matched(sub, terms, routes, shared['archive'], shared)}
 
 
-def _why_matched(sub, terms, routes=None, archive=None):
-    """What each positive term matched on this host, for the results list (read from the page's prefetched rows; ``routes`` and ``archive`` are the
-    page's lookups, see ``_routes_for`` and ``_shared_for``)."""
+def _tech_reasons(sub, spec, routes=None, archive=None, shared=None):
+    """What showed the product of a ``tech:`` spec on this host, and its version, for the results list: each source that names it (a technology,
+    an open port, the Server header, a route's headers and fingerprints, a version source reading, a Java runtime reading) and, for a platform,
+    the product that runs on it (``runs PHP (WordPress 6.4.2)``); ``<name> version not known`` when no source states one. For KNOWN or a release
+    only the sources that state it. Read from the page's prefetched rows and lookups (``shared``: ``_shared_for``), so no query per host."""
+    from cveFeed import tech_search
+    from cveFeed.correlation import split_name_version, split_port_product
+    from startScan.models import open_services
+    v, wants = spec.raw, spec.state in (tech_search.KNOWN, tech_search.RELEASE)
+    shown, stated, runs_on = [], False, []
+
+    def add(text, states):
+        nonlocal stated
+        stated = stated or states
+        if states or not wants:
+            shown.append(text)
+
+    for t in sub.technologies.all():
+        name = t.name or ''
+        same = spec.matches('name', name) or spec.matches('cpe', name)
+        if same or v in name.lower():
+            add(f'technology {name}', (spec.matches('stating', name) or spec.matches('cpe', name)) and spec.version_ok(t.version))
+        if spec.matches('platform', name):
+            runs_on.append(' '.join(x for x in split_name_version(name) if x))
+    if sub.webserver and (v in sub.webserver.lower() or spec.matches('header', sub.webserver)):
+        add(f'web server {sub.webserver}', spec.matches('header_v', sub.webserver))
+    if sub.webserver and spec.matches('platform', sub.webserver):
+        runs_on.append(sub.webserver)
+    for ip in sub.ip_addresses.all():
+        for p in open_services(ip):
+            label = f'port {p.number}{"/udp" if p.protocol == "udp" else ""} {" ".join(x for x in (p.product, p.version) if x) or p.service_name or ""}'.strip()
+            states = (spec.matches('stating', p.product) and spec.version_ok(p.version)) or spec.matches('name_v', p.product) or spec.matches('cpe_v', p.cpe)
+            if spec.matches('name', p.product) or spec.matches('cpe', p.cpe):
+                add(label, states)
+            elif hit := _port_evidence(p, v, 'tech'):
+                add(f'{label} ({hit})', False)
+            if spec.matches('platform', p.product):
+                runs_on.append(' '.join(x for x in split_port_product(p.product, p.version)[:2] if x))
+    key = (sub.target_domain.project_id, sub.name)
+    rows = (routes or {}).get(key, [])
+    for text in _route_reasons(sub, v, routes):
+        add(text, False)
+    for route in rows:
+        evidence = route.evidence or {}
+        for field, label in (('server', 'Server header'), ('powered_by', 'X-Powered-By')):
+            said = str(evidence.get(field) or '')
+            if spec.matches('header', said):
+                add(f'{label} {said}', spec.matches('header_v', said))
+            if spec.matches('platform', said):
+                runs_on.append(said)
+        for found in evidence.get('fingerprints') or []:
+            name = str(found.get('name', ''))
+            quoted = f'"{name}"'
+            if spec.matches('fingerprint', quoted):
+                add(f'{name} ({found.get("source", "route")})', spec.matches('fingerprint_v', quoted))
+            if spec.matches('platform', name):
+                runs_on.append(' '.join(x for x in split_name_version(name) if x))
+    if not wants:
+        for text in _archive_reasons(sub, v, archive):
+            add(text, False)
+    host_key = (sub.target_domain.project_id, sub.name.lower())
+    comps = set(_tech_components(spec))
+    for r in ((shared or {}).get('versions') or {}).get(host_key, []):
+        product = r.get('product') or ''
+        same = spec.matches('name', product) or r.get('component') in comps
+        what = f'{"runtime" if r.get("kind") == "runtime" else "version source"} {product} {r.get("version") or ""}'.strip()
+        if same or v in product.lower():
+            add(f'{what} ({r.get("source")})', (spec.matches('stating', product) or r.get('component') in comps) and spec.version_ok(r.get('version')))
+        if spec.matches('platform', product):
+            runs_on.append(' '.join(x for x in (product, r.get('version')) if x))
+    if spec.platform is not None and spec.platform.runtime == 'java_runtime':
+        for j in ((shared or {}).get('java') or {}).get(host_key, []):
+            add(f'Java runtime {j["version"]} ({j["source"]})', spec.version_ok(j['version']) or spec.state != tech_search.RELEASE)
+    reasons = list(dict.fromkeys(shown))
+    if spec.platform is not None and not wants:
+        reasons += [f'runs {spec.platform.label} ({product})' for product in list(dict.fromkeys(p for p in runs_on if p))[:2]]
+    if reasons and not wants and (spec.state == tech_search.UNKNOWN or not stated):  # nothing shown: another item of a comma list matched
+        reasons.append(f'{spec.label} version not known')
+    return reasons
+
+
+def _why_matched(sub, terms, routes=None, archive=None, shared=None):
+    """What each positive term matched on this host, for the results list (read from the page's prefetched rows; ``routes``, ``archive`` and
+    ``shared`` are the page's lookups, see ``_routes_for`` and ``_shared_for``)."""
     from startScan.models import open_services
     reasons = []
     for neg, field, value, _quoted in terms:
         if neg:
             continue
         v = value.lower()
+        if field in ('tech', 'techver', 'java'):
+            from cveFeed import java_runtime, tech_search
+            if field == 'java' and v not in java_runtime.ANY_VALUES and v not in java_runtime.UNKNOWN_VALUES:
+                reasons.append(f'Java runtime {v}')
+                continue
+            parts = [p.strip() for p in value.split(',') if p.strip()][:MAX_SEARCH_TERMS] if field == 'tech' and not _quoted else [value]
+            for part in parts:  # a comma list is OR: each item says what it found on this host
+                text = {'techver': _techver_value, 'java': _java_tech_value}.get(field, lambda x: x)(part if field != 'java' else v)
+                spec = tech_search.parse(text)
+                if spec is not None:
+                    reasons += _tech_reasons(sub, spec, routes, archive, shared)
+            continue
         has = lambda text: v in (text or '').lower()  # noqa: E731
         if field in (None, 'host') and has(sub.name):
             reasons.append(f'host {sub.name}')
@@ -2559,15 +2778,7 @@ def _why_matched(sub, terms, routes=None, archive=None):
                         hit = False
                     if hit:
                         reasons.append(f'IP {ip.address}')
-        if field == 'techver':
-            product, version = v.rsplit(' ', 1)
-            reasons += [f'technology {t.name}' for t in sub.technologies.all()
-                        if product in (t.name or '').lower() and (t.version == version or (t.version or '').startswith(version + '.'))]
-            for ip in sub.ip_addresses.all():
-                for p in open_services(ip):
-                    if product in (p.product or '').lower() and (p.version == version or (p.version or '').startswith(version + '.')):
-                        reasons.append(f'port {p.number} {p.product} {p.version}')
-        if field in (None, 'tech'):
+        if field is None:
             reasons += [f'technology {t.name}' for t in sub.technologies.all() if has(t.name)]
             if has(sub.webserver):
                 reasons.append(f'web server {sub.webserver}')
@@ -2590,7 +2801,7 @@ def _why_matched(sub, terms, routes=None, archive=None):
                     reasons.append(label)
                 elif field is None and (has(p.version) or has(p.cpe) or str(p.number) == value):
                     reasons.append(label)
-                elif field in (None, 'tech', 'banner') and (hit := _port_evidence(p, v, field)):
+                elif field in (None, 'banner') and (hit := _port_evidence(p, v, field)):
                     reasons.append(f'{label} ({hit})')
                 elif field in ('distro', 'pkg') and (hit := _distro_reason(p, field, value)):
                     reasons.append(f'{label} ({hit})')
@@ -2610,8 +2821,6 @@ def _why_matched(sub, terms, routes=None, archive=None):
             reasons.append(f'secret {v}')
         if field == 'zombie' and v == 'yes':
             reasons.append('zombie: DNS gone, still answering')
-        if field == 'java':
-            reasons.append(f'Java runtime {v}')
         if field in ('component', 'runtime', 'vsource'):
             reasons.append(f'{ {"component": "component", "runtime": "runtime", "vsource": "version source"}[field]} {v}')
     return list(dict.fromkeys(reasons))[:8]
@@ -2870,8 +3079,10 @@ def check_search(query):
 def search_hosts(ctx, slug, params):
     """Shodan-style host search. ``q`` is a space-separated list of ANDed terms: a bare word matches hostname, IP, technology,
     port product / service / version / CPE / banner, Server and X-Powered-By headers, cookie names, OS, finding name, CVE id and
-    page title; ``tech:`` (everything a host runs, from any of that), ``java:`` (the Java runtime it was read to run: ``java:17``, ``java:17.0.9``,
-    ``java:8u392``, ``any``, a vendor such as ``temurin`` or a source such as ``jdwp``), ``component:``, ``runtime:`` and ``vsource:`` (what the
+    page title; ``tech:`` (which hosts run a product, from every source, under any of its names, a platform through what runs on it, and after
+    ``@`` its version state: ``tech:php@unknown``, ``tech:java@known``, ``tech:wordpress@7.1``: ``_tech_q``), ``java:`` (the Java runtime it was read
+    to run: ``java:17``, ``java:17.0.9``, ``java:8u392``, a vendor such as ``temurin`` or a source such as ``jdwp``; ``any`` and ``unknown`` are
+    ``tech:java`` and ``tech:java@unknown``), ``component:``, ``runtime:`` and ``vsource:`` (what the
     host's version sources state: ``component:grafana``, ``runtime:python@3.8``, ``vsource:prometheus-metrics``), ``banner:`` (service banners and
     NSE output), ``port:``, ``product:``,
     ``service:``, ``os:``, ``cve:``, ``ip:`` (an address or CIDR), ``host:``, ``vuln:``, ``sev:`` and ``auth:`` (open, login,

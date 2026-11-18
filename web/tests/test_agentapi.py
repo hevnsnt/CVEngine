@@ -249,6 +249,38 @@ class AgentApiTests(TestCase):
 		status, body = call(self.t_alice, 'GET', '/api/v1/projects/proj-a/search?q=java:banana')
 		self.assertEqual(status, 400)
 
+	def test_java_any_finds_every_host_that_runs_java_and_java_unknown_those_with_no_version_read(self):
+		from cveFeed.models import JavaRuntime
+		from startScan.models import Technology
+		base = '/api/v1/projects/proj-a/search?q='
+		self.assertEqual(call(self.t_alice, 'GET', base + 'java:any')[1]['count'], 0)  # nginx alone runs no Java
+		tomcat = Subdomain.objects.create(name='tomcat.a.example', target_domain=self.da)
+		tomcat.technologies.add(Technology.objects.create(name='Tomcat:10.1.48'))
+		spring = Subdomain.objects.create(name='spring.a.example', target_domain=self.da)
+		ip = IpAddress.objects.create(address='203.0.113.9')
+		spring.ip_addresses.add(ip)
+		ip.ports.add(Port.objects.create(number=8080, product='Apache Tomcat', version='', service_name='http'))
+		JavaRuntime.objects.create(project=self.pa, domain=self.da, host='www.a.example', key='jdwp:5005', version='17.0.9', major=17,
+			source='jdwp', confidence='exact')  # a host whose runtime was read, with no Java product
+		other = Subdomain.objects.create(name='tomcat.b.example', target_domain=self.db)
+		other.technologies.add(Technology.objects.create(name='Apache Tomcat:11.0.25'))  # another project's: never in proj-a's results
+		found = call(self.t_alice, 'GET', base + 'java:any')[1]
+		self.assertEqual(sorted(h['host'] for h in found['results']), ['spring.a.example', 'tomcat.a.example', 'www.a.example'])
+		why = {h['host']: h['matched'] for h in found['results']}
+		self.assertEqual(why['tomcat.a.example'], ['runs Java (Tomcat 10.1.48)', 'Java version not known'])
+		self.assertEqual(why['spring.a.example'], ['runs Java (Apache Tomcat)', 'Java version not known'])
+		self.assertEqual(why['www.a.example'], ['Java runtime 17.0.9 (jdwp)'])
+		unknown = call(self.t_alice, 'GET', base + 'java:unknown')[1]
+		self.assertEqual(sorted(h['host'] for h in unknown['results']), ['spring.a.example', 'tomcat.a.example'])  # a read runtime is known
+		self.assertEqual(call(self.t_alice, 'GET', base + 'java:17')[1]['count'], 1)  # a line still means a read runtime
+		self.assertEqual(call(self.t_alice, 'GET', base + '-java:any')[1]['count'], 0)
+		self.assertEqual(call(self.t_alice, 'GET', base + 'tech:java')[1]['count'], 3)  # java:any is tech:java
+		self.assertEqual(call(self.t_alice, 'GET', base + 'tech:java@unknown')[1]['count'], 2)
+		self.assertEqual(call(self.t_alice, 'GET', '/api/v1/projects/_all/search?q=java:any')[1]['count'], 3)  # alice cannot see project B
+		is_error, data = tool_call(self.t_alice, 'search_hosts', {'project': 'proj-a', 'q': 'java:unknown', 'facets': 'none'})
+		self.assertFalse(is_error)
+		self.assertEqual(data['count'], 2)
+
 	def test_remediation_workflow(self):
 		base = '/api/v1/projects/proj-a'
 		status, data = call(self.t_alice, 'GET', f'{base}/work')
