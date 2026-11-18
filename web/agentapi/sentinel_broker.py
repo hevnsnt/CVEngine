@@ -853,7 +853,7 @@ def task_hosts(task):
     raw += [p['host'] for p in target.get('probes') or [] if isinstance(p, dict) and isinstance(p.get('host'), str)]  # an http_probe batch
     raw += [n for n in target.get('names') or [] if isinstance(n, str)]  # a dns_resolve batch
     raw += [d for d in target.get('domains') or [] if isinstance(d, str)]  # a supplier_check batch
-    raw += [r['host'] for r in target.get('reads') or [] if isinstance(r, dict) and isinstance(r.get('host'), str)]  # a page_read, version_read or version_digest batch
+    raw += [r['host'] for r in target.get('reads') or [] if isinstance(r, dict) and isinstance(r.get('host'), str)]  # a page_read, version_read, version_digest or version_rows batch
     raw += [t['address'] for t in target.get('targets') or [] if isinstance(t, dict) and isinstance(t.get('address'), str)]  # an ssh_probe batch: the address of each endpoint
     raw += [w['host'] for w in target.get('web') or [] if isinstance(w, dict) and isinstance(w.get('host'), str)]  # a java_runtime batch: its web hosts
     raw += [j['address'] for j in target.get('jdwp') or [] if isinstance(j, dict) and isinstance(j.get('address'), str)]  # and its JDWP endpoints
@@ -3035,7 +3035,8 @@ _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_l
              'hygiene_check': probe_results.clean_hygiene_check, 'dangling_dns_check': probe_results.clean_dangling_dns_check,
              'identity_check': probe_results.clean_identity_check, 'web_screenshot': web_screenshot_results.clean,
              'ssh_probe': probe_results.clean_ssh_probe, 'java_runtime': probe_results.clean_java_runtime,
-             'version_read': probe_results.clean_version_read, 'version_digest': probe_results.clean_version_digest}
+             'version_read': probe_results.clean_version_read, 'version_digest': probe_results.clean_version_digest,
+             'version_rows': probe_results.clean_version_rows}
 
 
 def _bind_to_task(kind, result, task):
@@ -3046,7 +3047,7 @@ def _bind_to_task(kind, result, task):
         from cveFeed.secrets_scan import clean_result as clean_secrets
         return {'outcome': 'done', **clean_secrets(result, task.target)}
     if task is not None and kind in ('http_probe', 'dns_resolve', 'alive_check', 'bucket_check', 'supplier_check', 'vhost_probe', 'subdir_probe', 'hygiene_check',
-                                       'dangling_dns_check', 'route_probe', 'route_probe_signed', 'identity_check', 'page_read', 'ssh_probe', 'java_runtime', 'version_read', 'version_digest'):
+                                       'dangling_dns_check', 'route_probe', 'route_probe_signed', 'identity_check', 'page_read', 'ssh_probe', 'java_runtime', 'version_read', 'version_digest', 'version_rows'):
         return probe_results.bind(kind, result, task)
     if task is not None and kind == 'web_screenshot':
         return web_screenshot_results.bind(result, task)
