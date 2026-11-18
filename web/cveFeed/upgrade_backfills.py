@@ -35,7 +35,7 @@ BACKFILLS = (
     'trim_flooded_ports',                 # 1.4: addresses that answer on every port keep the lowest 100 stored ports, as a Sentinel report does (memory)
     'recheck_template_hits',              # 1.4.2: AI-written checks' confirmations that only read a version string become version reads
     'backfill_java_runtimes',             # the Java runtime existing hosts give away without a request, and their runtime CVE matches
-    'backfill_version_sources',           # the versions and runtimes existing hosts' stored headers state, and their runtime CVE matches
+    'backfill_version_sources',           # the versions, runtimes, SNMP releases and bundled components existing hosts already state, and their matches
     'backfill_exact_builds',              # Cisco's exact builds (cut at 30 or dropped) and Oracle's supported versions read per line (re-correlated)
     'rerate_findings',                    # 1.3.5: rescore hosts for the new heat rules, clear stale fire marks (last: counts everything above)
 )

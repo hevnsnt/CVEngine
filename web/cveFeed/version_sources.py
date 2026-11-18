@@ -51,7 +51,11 @@ MATCH_SOURCE = 'runtime'                  # CVEMatch.source of a runtime match
 FINDING_SOURCE = 'version-source'         # Vulnerability.source of an exposure
 PROBE_PREFIX = 'vsrc:'
 PASSIVE_PROBE = 'vsrc:passive'
+SNMP_PROBE = 'vsrc:snmp'                  # the readings a UDP sweep's SNMP sysDescr gave (version_catalogue.from_sysdescr)
 RUNTIME_KIND = 'runtime'
+HINT_KIND = 'hint'                        # a product reading that is not a technology: inferred (a bundled component), weak, or not matched by name
+BUNDLED_SOURCE = 'bundled'                # CVEMatch.source of a bundled component's candidate
+SNMP_PORT = 161
 MAX_READS_PER_TASK = 100                  # the contract's bound
 MAX_ENTRIES_PER_HOST = 6
 MAX_BASES_PER_ENTRY = 2
@@ -328,20 +332,39 @@ def _port_of(base):
         return 0
 
 
+def kind_of(r):
+    """The ``ProbeObservation.kind`` a reading is stored as: ``version`` for a product the host stated exactly (it also becomes a technology, so
+    correlation matches it by name), ``runtime`` for a language runtime, ``hint`` for any other product reading: an inferred bundled component, a
+    weak or inferred operating system hint. A hint is shown and searched, never a technology: a bundled component is matched by
+    ``collect_bundled`` only, an operating system hint by nothing."""
+    if r['kind'] != 'product':
+        return RUNTIME_KIND
+    return 'version' if r['confidence'] == 'exact' else HINT_KIND
+
+
+def expand(readings):
+    """``readings`` and the components the vendor bundles with each exact product among them (``cveFeed.bundled_components``)."""
+    from cveFeed import bundled_components
+    readings = list(readings)
+    return readings + [r for r in bundled_components.infer_from(readings) if r['kind'] in ('product', 'runtime')]
+
+
 def _observation(r, port):
     from cveFeed import probes
-    kind = 'version' if r['kind'] == 'product' else RUNTIME_KIND
+    kind = kind_of(r)
     outcome = 'found' if r['version'] else 'hidden'
     evidence = {'confidence': r['confidence'], 'line_only': r['line_only'], 'component': r['component'], 'source': r['source'],
-                'said': r['evidence'], 'version_source': True}
+                'said': r['evidence'], 'version_source': True, **({'cpe': r['cpe']} if r.get('cpe') else {}),
+                **({'bundled': r['bundled']} if isinstance(r.get('bundled'), dict) else {})}
     return probes._observation(kind, r['label'], r['version'], '', outcome, CONFIDENCE_SCORE.get(r['confidence'], 0.3),
                                f"{'header' if r['source'] in ('header', 'technology') else 'vsrc'}:{r['source']}"[:48], port=port,
                                url=r['url'], evidence=evidence)
 
 
 def store_readings(sub, probe_id, readings, port=0, now=None):
-    """Store ``readings`` of one host: products and runtimes as ``ProbeObservation`` rows (a product is also added to the host's
-    technologies), a Java runtime reading in ``JavaRuntime``. Returns ``(rows stored, whether something new or changed was stored)``."""
+    """Store ``readings`` of one host: products and runtimes as ``ProbeObservation`` rows (a product the host stated exactly is also added to
+    its technologies), a Java runtime reading in ``JavaRuntime``. The components the vendor bundles with an exact product reading are inferred and
+    stored with it (``expand``). Returns ``(rows stored, whether something new or changed was stored)``."""
     from cveFeed import java_runtime, probes
     from cveFeed.models import ProbeObservation
     from cvengine_scanner import java
@@ -349,7 +372,7 @@ def store_readings(sub, probe_id, readings, port=0, now=None):
     host = sub.name.lower().rstrip('.')
     now = now or timezone.now()
     observations, changed, stored = [], False, 0
-    for r in readings:
+    for r in expand(readings):
         if r['kind'] == 'java':
             got = java.reading(r['version'], 'metrics', (r.get('vendor') or '',), runtime=r.get('runtime') or '', url=r['url'], port=port,
                                evidence=r['evidence'])
@@ -421,11 +444,14 @@ def passive_readings(sub, ports=None):
             out += [(port.number, r) for r in catalogue.from_headers(catalogue.header_lines(text), url=f'port {port.number}')]
     if getattr(sub, 'webserver', ''):
         out += [(0, r) for r in catalogue.from_headers({'server': sub.webserver}, url='/')]
+    from cveFeed import bundled_components
     for tech in sub.technologies.all():
         name, version = _split(tech.name)
         got = catalogue.from_technology(name, version)
         if got:
             out.append((0, got))
+        if version:  # the components the vendor bundles with a product release the host shows (GitLab, Keycloak, Elasticsearch ...)
+            out += [(0, r) for r in bundled_components.infer(name, version, said=f'technology {catalogue.clip(name, 40)} {catalogue.clip(version, 40)}')]
     seen, unique = set(), []
     for port, r in out:
         key = (port, r['component'], r['kind'])
@@ -435,23 +461,75 @@ def passive_readings(sub, ports=None):
     return unique
 
 
-def refresh_host(sub, now=None):
-    """Store the readings ``sub`` gives away in stored data (``passive_readings``) and drop the ones it no longer gives. Returns them."""
+def _store_derived(sub, probe_id, found, now):
+    """Store ``found`` (``[(port, reading)]``) under ``probe_id`` and drop that probe's rows the host no longer gives. Returns whether a reading
+    is new, changed or gone."""
     from cveFeed.models import ProbeObservation
-    found = passive_readings(sub)
-    now = now or timezone.now()
-    by_port = {}
+    by_port, kept, changed = {}, set(), False
     for port, r in found:
         by_port.setdefault(port, []).append(r)
-    kept = set()
     for port, readings in by_port.items():
-        store_readings(sub, PASSIVE_PROBE, readings, port=port, now=now)
-        kept |= {(port, 'version' if r['kind'] == 'product' else RUNTIME_KIND, r['label']) for r in readings if r['kind'] != 'java'}
-    project_id = sub.target_domain.project_id
-    for row in ProbeObservation.objects.filter(project_id=project_id, host=sub.name.lower().rstrip('.'), probe=PASSIVE_PROBE):
+        changed = store_readings(sub, probe_id, readings, port=port, now=now)[1] or changed
+        kept |= {(port, kind_of(r), r['label']) for r in expand(readings) if r['kind'] != 'java'}
+    for row in ProbeObservation.objects.filter(project_id=sub.target_domain.project_id, host=sub.name.lower().rstrip('.'), probe=probe_id):
         if (row.port, row.kind, row.product) not in kept:
             row.delete()  # derived from what the host shows now: gone when that is gone
-    return found
+            changed = True
+    return changed
+
+
+def snmp_readings(sub, ports=None):
+    """``[(161, reading)]`` the SNMP agents of a host stated: the sysDescr the UDP sweep's snmp-sysdescr script stored on each UDP 161 port that
+    answered (``version_catalogue.from_sysdescr``), no request made. The engine vendor snmp-info read is kept as evidence."""
+    ports = _ports(sub) if ports is None else ports
+    out, seen = [], set()
+    for _address, port in ports:
+        if (port.protocol or '') != 'udp' or port.number != SNMP_PORT or port.state != 'open':
+            continue
+        scripts = ((port.extra or {}).get('scripts') or {}) if isinstance(port.extra, dict) else {}
+        text = scripts.get('snmp-sysdescr') if isinstance(scripts, dict) else None
+        if not isinstance(text, str) or not text.strip():
+            continue
+        info = scripts.get('snmp-info') if isinstance(scripts.get('snmp-info'), str) else ''
+        enterprise = re.search(r'enterprise:\s*([A-Za-z0-9 .,&-]{1,40})', info or '')
+        for r in catalogue.from_sysdescr(text, enterprise.group(1).strip() if enterprise else ''):
+            if (r['component'], r['label'], r['version']) not in seen:
+                seen.add((r['component'], r['label'], r['version']))
+                out.append((SNMP_PORT, r))
+    return out
+
+
+def refresh_host(sub, now=None):
+    """Store the readings ``sub`` gives away in stored data (``passive_readings``, and what its SNMP agent said: ``snmp_readings``) and drop
+    the ones it no longer gives. Returns them; ``sub._version_changed`` says whether any is new, changed or gone."""
+    ports = _ports(sub)
+    found = passive_readings(sub, ports)
+    snmp = snmp_readings(sub, ports)
+    now = now or timezone.now()
+    changed = _store_derived(sub, PASSIVE_PROBE, found, now)
+    changed = _store_derived(sub, SNMP_PROBE, snmp, now) or changed
+    sub._version_changed = changed
+    return found + snmp
+
+
+def refresh_snmp(ip):
+    """After a UDP sweep of ``ip``: store what the SNMP agent said for every active host on the address (the hosts that carry its UDP
+    findings), drop what it no longer says, and correlate a host again when that changed. Returns the number of readings. Never fatal."""
+    from cveFeed import probes, udp_scan
+    from cveFeed.correlation import latest_scan_q
+    from startScan.models import Subdomain
+    total = 0
+    try:
+        for domain, name in udp_scan.finding_hosts(ip):
+            for sub in (Subdomain.objects.filter(latest_scan_q(), target_domain=domain, name=name).select_related('target_domain', 'scan_history')
+                        .prefetch_related('technologies', 'ip_addresses__ports')):
+                snmp = snmp_readings(sub)
+                if _store_derived(sub, SNMP_PROBE, snmp, timezone.now()):
+                    probes.recorrelate(sub)
+                total += len(snmp)
+    except Exception:  # noqa: BLE001 - a reading never undoes the sweep
+        logger.exception('could not store the SNMP readings of %s', getattr(ip, 'address', ip))
+    return total
 
 
 # ----------------------------------------------------------------------------- exposures
@@ -640,6 +718,8 @@ def collect_matches(subdomain, cve_by_id, rows, scan_history=None, min_confidenc
                 inside = [r for r in (possible or []) if not r[3] and verdict(r[1], items)[0] is True]
                 if inside:
                     confidence, note = INFERRED_IN_RANGE_CONFIDENCE, f'inferred {_text(runtime, inside[0])} is inside the affected range'
+                    if inside[0][4] == BUNDLED_SOURCE:
+                        note += f': affected only if the bundled {runtime.label} was not replaced'
                 elif possible:
                     note = f'the line read, {_text(runtime, possible[0])}, can be inside the affected range'
                 evidence = {**base, 'runtime_unknown': True, 'raw_version': '', **({'runtime_note': note} if note else {}),
@@ -662,6 +742,83 @@ def _row(cve, subdomain, scan_history, label, version, in_range, confidence, evi
             'matched_version': (version or '')[:100], 'version_in_range': in_range, 'confidence': confidence,
             'scan_history_id': scan_history.id if scan_history else subdomain.scan_history_id, 'distro_status': status,
             'distro_fixed_version': (fixed or '')[:64], 'evidence': evidence}
+
+
+def host_bundled(sub):
+    """The fresh bundled component readings of a host (``hint`` rows a vendor's bundle gave, ``cveFeed.bundled_components``), one per
+    component and version: ``[(label, version, bundled detail, port)]``."""
+    rows = getattr(sub, '_bundled_rows', None)
+    if rows is None:
+        from cveFeed.models import ProbeObservation
+        if sub.target_domain_id is None:
+            return []
+        rows = list(ProbeObservation.objects.filter(project_id=sub.target_domain.project_id, host=sub.name.lower().rstrip('.'), kind=HINT_KIND,
+                                                    outcome='found', evidence__source=BUNDLED_SOURCE))
+    out, seen = [], set()
+    for row in _fresh_rows(rows):
+        ev = row.evidence if isinstance(row.evidence, dict) else {}
+        if ev.get('source') != BUNDLED_SOURCE or ev.get('confidence') != 'inferred' or not row.version or (row.product, row.version) in seen:
+            continue
+        seen.add((row.product, row.version))
+        out.append((row.product, row.version, ev.get('bundled') if isinstance(ev.get('bundled'), dict) else {}, row.port or 0))
+    return out
+
+
+def prefetch_bundled(subs):
+    """Give each of ``subs`` its bundled component rows (``_bundled_rows``, read by ``host_bundled``) in one query."""
+    from cveFeed.models import ProbeObservation
+    subs = [s for s in subs if getattr(s, 'target_domain_id', None)]
+    if not subs:
+        return
+    from targetApp.models import Domain
+    project_of = dict(Domain.objects.filter(id__in={s.target_domain_id for s in subs}).values_list('id', 'project_id'))
+    by_key = {}
+    rows = ProbeObservation.objects.filter(project_id__in=set(project_of.values()), host__in={s.name.lower().rstrip('.') for s in subs},
+                                           kind=HINT_KIND, outcome='found', evidence__source=BUNDLED_SOURCE)
+    for row in rows:
+        by_key.setdefault((row.project_id, row.host), []).append(row)
+    for sub in subs:
+        sub._bundled_rows = by_key.get((project_of.get(sub.target_domain_id), sub.name.lower().rstrip('.')), [])
+
+
+def collect_bundled(subdomain, product_index, cve_by_id, rows, scan_history=None, min_confidence=0.0):
+    """Append the candidates of the components a vendor bundles on ``subdomain`` (``host_bundled``) to ``rows``: the product named like any
+    technology (``correlation._match_candidates``), but its version is an inference, so a version inside an affected range is never
+    ``version_in_range`` True. It is a needs-validation candidate (``evidence.bundled_inferred``: ice, never fire, with the owner's check of the
+    component that actually runs), affected only if the bundled component was not replaced. A version outside every range, or a CVE with no
+    usable range, gives nothing. A CVE ``rows`` already holds for the host is not matched twice. Returns how many."""
+    from cveFeed.correlation import _match_candidates, _norm, parse_version
+    readings = host_bundled(subdomain)
+    if not readings or not product_index:
+        return 0
+    taken = {r['cve_entry_id'] for r in rows if r.get('subdomain_id') == subdomain.id}
+    found = 0
+    for label, version, detail, port in readings:
+        ver = parse_version(version)
+        if ver is None:
+            continue
+        details = {}
+        for cve, matched, in_range in _match_candidates(label, ver, _norm(label), product_index, cve_by_id, details=details):
+            if in_range is not True or cve.id in taken or INFERRED_IN_RANGE_CONFIDENCE < min_confidence:
+                continue
+            product = f"{detail.get('product') or 'its product'} {detail.get('product_version') or ''}".strip()
+            note = (f'inferred {label} {version}, which {product} bundles, is inside the affected range: affected only if the bundled {label} was '
+                    'not replaced')
+            evidence = {'source': BUNDLED_SOURCE, 'bundled_inferred': True, 'component_label': label, 'raw_version': version, 'port': port,
+                        'range': (details.get(cve.id) or {}).get('range') or {}, 'bundled': detail, 'bundled_note': note}
+            rows.append(_row(cve, subdomain, scan_history, matched or label, version, None, INFERRED_IN_RANGE_CONFIDENCE, evidence) | {'source': BUNDLED_SOURCE})
+            taken.add(cve.id)
+            found += 1
+    return found
+
+
+def bundled_host_ids(base_qs):
+    """The ids of the Subdomain rows of ``base_qs`` with a bundled component reading (``correlation.candidate_subdomains``)."""
+    from django.db.models import Exists, OuterRef
+    from cveFeed.models import ProbeObservation
+    readings = ProbeObservation.objects.filter(project_id=OuterRef('target_domain__project_id'), host=OuterRef('name'), kind=HINT_KIND,
+                                               evidence__source=BUNDLED_SOURCE)
+    return base_qs.filter(Exists(readings)).values('id')
 
 
 def index_has_runtime(product_index):
@@ -698,9 +855,12 @@ def as_dict(row):
     """One reading as the host payload (REST and MCP ``version_sources``) and the host page show it. ``evidence`` is what the host said."""
     ev = row.evidence if isinstance(row.evidence, dict) else {}
     source = row.probe[len(PROBE_PREFIX):] if row.probe.startswith(PROBE_PREFIX) else row.probe
+    bundled = ev.get('bundled') if isinstance(ev.get('bundled'), dict) else None
     return {'component': ev.get('component') or '', 'product': row.product, 'kind': 'runtime' if row.kind == RUNTIME_KIND else 'product',
             'version': row.version, 'confidence': ev.get('confidence') or 'weak', 'line_only': bool(ev.get('line_only')),
             'source': source, 'read_by': ev.get('source') or '', 'port': row.port or None, 'url': row.url, 'evidence': ev.get('said') or '',
+            'matched': row.kind != HINT_KIND or bool(bundled), 'cpe': ev.get('cpe') or '',
+            'bundled_with': ({k: bundled.get(k, '') for k in ('product', 'product_version', 'basis', 'source')} if bundled else None),
             'first_seen': row.first_seen.isoformat() if row.first_seen else None, 'last_seen': row.observed_at.isoformat() if row.observed_at else None,
             'stale': bool(row.observed_at and row.observed_at < timezone.now() - timedelta(days=STALE_DAYS))}
 
@@ -722,8 +882,17 @@ def readings_for(project_ids, hosts):
     rows = readings_qs().filter(project_id__in=list(project_ids), host__in=list(hosts)).order_by('host', '-observed_at')
     for row in rows:
         out.setdefault((row.project_id, row.host), []).append(row)
-    return {key: [as_dict(r) for r in sorted(rs, key=lambda r: (_ORDER.get((r.evidence or {}).get('confidence'), 3), r.product))][:30]
-            for key, rs in out.items()}
+    result = {}
+    for key, rs in out.items():
+        listed, seen = [], set()
+        for r in sorted(rs, key=lambda r: (_ORDER.get((r.evidence or {}).get('confidence'), 3), r.product)):
+            item = as_dict(r)
+            same = (item['component'], item['version'], item['kind'], item['confidence'])
+            if same not in seen:  # a bundle inferred from a reading and again from the technology that reading made: shown once
+                seen.add(same)
+                listed.append(item)
+        result[key] = listed[:30]
+    return result
 
 
 def search_rows(field, value):
@@ -732,7 +901,7 @@ def search_rows(field, value):
     ``component:<name>`` (a product or runtime read from a version source: ``component:grafana``, ``component:docker``; ``component:any``),
     ``runtime:<name>`` (a language runtime: ``runtime:python``, ``runtime:go``, ``runtime:dotnet``; ``runtime:any``), each optionally with a
     version prefix after ``@`` (``runtime:python@3.8`` finds 3.8.10, never 3.80); ``vsource:<entry>`` (where it was read: ``vsource:prometheus-metrics``,
-    ``vsource:header``)."""
+    ``vsource:header``, ``vsource:snmp`` for an SNMP agent's sysDescr, ``vsource:bundled`` for a component inferred from a vendor's bundle)."""
     from django.db.models import Q
     text = (value or '').strip().lower()
     if not text or len(text) > 80:
@@ -743,6 +912,10 @@ def search_rows(field, value):
             return rows
         if text in ('header', 'passive', 'technology'):
             return rows.filter(probe=PASSIVE_PROBE)
+        if text == 'snmp':
+            return rows.filter(probe=SNMP_PROBE)
+        if text == BUNDLED_SOURCE:
+            return rows.filter(evidence__source=BUNDLED_SOURCE)
         if text not in catalogue.BY_ID:
             return None
         return rows.filter(probe=f'{PROBE_PREFIX}{text}')
@@ -761,7 +934,7 @@ def search_rows(field, value):
     if version:
         if not re.fullmatch(r'\d{1,4}(?:\.\d{1,9}){0,3}', version):
             return None
-        rows = rows.filter(Q(version=version) | Q(version__startswith=version + '.'))
+        rows = rows.filter(version__regex=rf'^{re.escape(version)}(?:$|[^0-9])')  # 3.8 finds 3.8.10, Junos 21.4 finds 21.4R3-S2, never 3.80
     return rows
 
 
@@ -770,7 +943,9 @@ def search_rows(field, value):
 def catch_up(apply=False, batch=200):
     """The one-time catch-up an update runs (``manage.py backfill_version_sources --apply``, an upgrade backfill): for every current host,
     store the readings it already gives away in stored data (``refresh_host``: the headers the port scan's http-headers script read, the Server header, the
-    runtime a technology is), then correlate the hosts that gained a runtime reading against the runtime CVEs. The active reads are the work
+    runtime a technology is, what its SNMP agent's sysDescr states, and the components the vendor bundles with an exact product release), then
+    correlate the hosts that gained a runtime reading against the runtime CVEs, and the hosts that gained an SNMP release or a bundled component
+    against every CVE. The active reads are the work
     planner's (the ``version-sources`` check is due on every host it applies to). Idempotent. Returns ``{'hosts', 'readings', 'matches'}``."""
     from cveFeed import correlation
     from startScan.models import Subdomain
@@ -779,22 +954,26 @@ def catch_up(apply=False, batch=200):
     out = {'hosts': len(ids), 'readings': 0, 'matches': 0}
     if not apply or not ids:
         return out
-    cve_by_id, _index = correlation.cve_pool()
+    cve_by_id, full_index = correlation.cve_pool()
     pool = {cve.id: cve for entries in runtime_cves(cve_by_id).values() for cve, _items in entries}
     index = correlation.build_product_index(pool.values())
     for start in range(0, len(ids), batch):
         subs = list(Subdomain.objects.filter(id__in=ids[start:start + batch]).select_related('target_domain', 'scan_history')
                     .prefetch_related('technologies', 'ip_addresses__ports'))
-        gained = []
+        gained, whole = [], []
         for sub in subs:
             try:
-                found = refresh_host(sub)
+                found = expand(r for _p, r in refresh_host(sub))
             except Exception:  # noqa: BLE001 - one host's stored data never stops the catch-up
                 logger.exception('version source catch-up of host %s failed', sub.pk)
                 continue
             out['readings'] += len(found)
-            if any(r['kind'] == 'runtime' for _p, r in found):
+            if any(kind_of(r) == 'version' and r['source'] == 'snmp' or r['source'] == BUNDLED_SOURCE and r['kind'] == 'product' for r in found):
+                whole.append(sub)  # an SNMP agent's release (a technology now) or a bundled component: matched against every CVE
+            elif any(r['kind'] == 'runtime' for r in found):
                 gained.append(sub)
         if pool and gained:
             out['matches'] += correlation.correlate_subdomains(gained, index, pool, min_confidence=0.4)[1]
+        if whole:
+            out['matches'] += correlation.correlate_subdomains(whole, full_index, cve_by_id, min_confidence=0.4)[1]
     return out
