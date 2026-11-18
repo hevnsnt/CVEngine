@@ -66,6 +66,8 @@ export function explainCard(x, { status = "open", readOnly = false, onClose = nu
   const sure = el("div", "x-sure");
   sure.append(el("h3", "gl-h", "Why we show it, and how sure we are"), badge(x.confidence_label || x.confidence || "", EX.confidenceTone(x.confidence)));
   card.append(sure, el("p", "x-why", x.why || ""));
+  // how the distribution's own data judged it: "Judged by Ubuntu 22.04 (jammy)'s own fixed build 1:8.9p1-3ubuntu0.10: ..."
+  if (x.distro && x.distro.text) card.append(el("p", "note x-distro", x.distro.text));
   if (x.advisory && (x.advisory.advisory || x.advisory.fixed_build)) {
     const line = el("p", "note");
     line.append(document.createTextNode(`Red Hat's fix: ${[x.advisory.advisory, x.advisory.fixed_build].filter(Boolean).join(", ")} `));

@@ -67,7 +67,7 @@ _UBUNTU_REV = re.compile(r"\d+ubuntu[\d.]+")
 _DEBIAN_REV = re.compile(r"[\w.+~]*[+~]deb(\d+)u\d+")
 _RHEL_REV = re.compile(r"[.+]el(\d+)(?:_\d+)?")  # "-61.el8_9", and a module build's "-65.module+el8.10.0+22069+b47f5c72.1"
 _ALPINE_REV = re.compile(r"-r\d+$")
-_NMAP_FORM = re.compile(r"^(?P<up>\S+)\s+(?:Ubuntu|Debian)[-\s]+(?P<rev>\S+)", re.IGNORECASE)  # "8.9p1 Ubuntu 3ubuntu0.6"
+_NMAP_FORM = re.compile(r"^(?P<up>\d[\w.+~]{0,40})\s+(?:Ubuntu|Debian)[-\s]+(?P<rev>[\w.+~]{1,60})(?:\s|$)", re.IGNORECASE)  # "8.9p1 Ubuntu 3ubuntu0.6"
 _DPKG_FORM = re.compile(r"^(?:\d+:)?\d[\w.+~]*-[\w.+~]+$")  # "2.4.57-2", "1:8.9p1-3ubuntu0.10", "2.4.62-1~deb12u2"
 _OS_CPE = re.compile(r"cpe:/o:(?P<vendor>[a-z_]+):(?P<product>[a-z_]+)(?::(?P<ver>[\w.]+))?", re.IGNORECASE)
 # the OS CPE vendors whose version is a Red Hat family major release ("cpe:/o:redhat:enterprise_linux:8", "cpe:/o:centos:centos:7")
@@ -81,8 +81,10 @@ _RHEL_OS_TEXT = re.compile(r"\b(?P<name>red\s*hat\s+enterprise\s+linux(?:\s+serv
 # upstream version (mysql-8.0, postgresql-14, php8.1).
 PACKAGES = {
     "openssh": {"*": "openssh"},
-    "apachehttpd": {"debian": "apache2", "ubuntu": "apache2", "rhel": "httpd", "centos": "httpd", "*": "apache2"},
-    "apachehttpserver": {"debian": "apache2", "ubuntu": "apache2", "rhel": "httpd", "centos": "httpd", "*": "apache2"},
+    "apachehttpd": {"debian": "apache2", "ubuntu": "apache2", "rhel": "httpd", "centos": "httpd", "amzn": "httpd", "freebsd": "apache24",
+                    "*": "apache2"},
+    "apachehttpserver": {"debian": "apache2", "ubuntu": "apache2", "rhel": "httpd", "centos": "httpd", "amzn": "httpd", "freebsd": "apache24",
+                         "*": "apache2"},
     "nginx": {"*": "nginx"},
     "mysql": {"ubuntu": "mysql-{mm}", "debian": "mysql-{mm}", "*": "mysql"},
     "mariadb": {"debian": "mariadb", "ubuntu": "mariadb-{mm}", "*": "mariadb"},
@@ -129,57 +131,204 @@ def upstream_of(package_release):
     return re.sub(r"[+~](?:dfsg|ds|git|really)[\w.]*$", "", text)
 
 
+# --- untrusted text -------------------------------------------------------------------------------------------------
+
+MAX_TEXT = 512  # a banner field is read no further than this: a host decides what it sends
+MAX_BUILD = 64  # Port.package_release and upstream_version: a longer reading is dropped, never clipped
+_UNSAFE = re.compile("[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]")
+
+
+def clean_text(value, limit=MAX_TEXT):
+    """A banner field made safe to read: clipped, control and invisible characters (escape sequences, NUL, bidirectional overrides) turned
+    into spaces and runs of spaces folded. Every field a scanned host controls passes through this before a pattern reads it."""
+    text = value if isinstance(value, str) else str(value or "")
+    return re.sub(r"\s+", " ", _UNSAFE.sub(" ", text[:limit * 2]))[:limit].strip()
+
+
+# --- which distribution -----------------------------------------------------------------------------------------------
+
+# the distributions whose fixed builds cvENGINE syncs (cveFeed.distro_sync: Ubuntu and Debian from the Debian security tracker and OSV,
+# Red Hat from its Security Data API, which CentOS, Rocky Linux and AlmaLinux follow). Any other distribution is read and shown, and its
+# matches stay version-only: there is no tracker data to judge them by.
+TRACKED = ("ubuntu", "debian", "rhel", "centos")
+NAMES = {"ubuntu": "Ubuntu", "debian": "Debian", "rhel": "Red Hat Enterprise Linux", "centos": "CentOS", "alpine": "Alpine Linux",
+         "amzn": "Amazon Linux", "suse": "SUSE Linux", "freebsd": "FreeBSD"}
+
+_AMZN_TEXT = re.compile(r"\(amazon(?: linux)?\)|\bamazon linux\b|\.amzn(?:2023|\d)\b", re.IGNORECASE)  # never "AmazonS3", "Amazon CloudFront"
+_AMZN_RELEASE = re.compile(r"\bamazon linux (2023|2)\b", re.IGNORECASE)
+_SUSE_TEXT = re.compile(r"\b(?:open)?suse\b|\bsles\b|\bsle(?:s|d)?[ _]?1[25]\b", re.IGNORECASE)
+_SUSE_BUILD = re.compile(r"^\d[\w.+~]*-1[25]0\d00\.\d[\w.]*$")  # 2.4.51-150400.6.11.1
+_FREEBSD_TEXT = re.compile(r"\bfreebsd\b", re.IGNORECASE)
+_FREEBSD_BUILD = re.compile(r"\bfreebsd[- ](\d{8})\b", re.IGNORECASE)  # OpenSSH's FreeBSD-20230316: the date of the base system's last patch
+_UBUNTU_STATED = re.compile(r"\bubuntu[ -]?(\d\d\.\d\d)(?:\.\d+)?\b", re.IGNORECASE)  # "Ubuntu 22.04.3 LTS"
+# "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6": the identification string an SSH server sends first (RFC 4253 4.2), read from its start only
+# (a technology stored as the banner token, "OpenSSH_9.6p1 Ubuntu-3ubuntu13.5", is the same string without the protocol prefix)
+_SSH_IDENT = re.compile(r"^(?:SSH-[12]\.\d{1,2}-)?(?P<soft>[A-Za-z][\w.-]{0,40}?)_(?P<up>\d[\w.]{0,30})"
+                        r"(?: (?P<os>Ubuntu|Debian|Raspbian|FreeBSD)-(?P<rev>[\w.+~]{1,60}))?(?: |$)", re.IGNORECASE)
+_DISTRO_SUFFIX = re.compile(r"-(?:Ubuntu|Debian)$", re.IGNORECASE)  # BIND's version.bind: "9.18.18-0ubuntu0.22.04.2-Ubuntu"
+# the revisions Ubuntu and Debian themselves give a build; anything else (deb.sury.org's "+ubuntu22.04.1+deb.sury.org+1", nginx.org's
+# "1~jammy", MariaDB's "+maria~ubu2204", a PPA) is another publisher's build, which the distribution's tracker says nothing about
+_UBUNTU_OWN = re.compile(r"^\d+(?:\.\d+)*(?:build\d+)?(?:ubuntu\d+(?:\.\d+)*)?(?:~\d\d\.\d\d(?:\.\d+)*)?(?:build\d+)?(?:\+esm\d+)?$")
+_DEBIAN_OWN = re.compile(r"^\d+(?:\.\d+)*(?:[+~]deb\d+u\d+)?(?:\+b\d+)?$")
+_DEBIAN_BPO = re.compile(r"~bpo\d+\+\d+$")
+_SURY = re.compile(r"\+deb\.sury\.org\+\d+$")  # the build suffix deb.sury.org gives its packages ("1+ubuntu22.04.1+deb.sury.org+1")
+
+
+def _families(text, version, cpe_product):
+    """The distribution families ``text`` (and the OS CPE's product) name."""
+    lowered = text.lower()
+    found = set()
+    if "ubuntu" in lowered or "ubuntu" in cpe_product:
+        found.add("ubuntu")
+    if _DEBIAN_REV.search(text) or re.search(r"\bdebian\b", lowered) or cpe_product == "debian_linux":
+        found.add("debian")
+    if "red hat" in lowered or "centos" in lowered or "rocky" in lowered or "almalinux" in lowered or _RHEL_REV.search(version) \
+            or cpe_product in ("enterprise_linux", "centos", "rhel", "linux_enterprise", "rocky", "rocky_linux", "almalinux"):
+        found.add("centos" if "centos" in lowered or cpe_product == "centos" else "rhel")
+    if re.search(r"\balpine\b", lowered) or cpe_product == "alpine_linux":
+        found.add("alpine")
+    if _AMZN_TEXT.search(text) or cpe_product in ("linux_2", "amazon_linux", "linux_2023"):
+        found.add("amzn")
+    if _SUSE_TEXT.search(text) or _SUSE_BUILD.match(version.split(" ")[0] if version else "") \
+            or cpe_product in ("linux_enterprise_server", "opensuse", "leap", "opensuse_leap", "suse_linux"):
+        found.add("suse")
+    if _FREEBSD_TEXT.search(text) or cpe_product == "freebsd":
+        found.add("freebsd")
+    if "ubuntu" in found:
+        found.discard("debian")  # Ubuntu is built from Debian and says so ("Debian-3ubuntu0.6" is an Ubuntu build)
+    return found
+
+
+def third_party(distro, package_release):
+    """Who else built a package the banner shows on a Debian or Ubuntu host, "" when the distribution did: ``sury`` (deb.sury.org's PHP,
+    nginx and Apache), ``backports`` (Debian's backports suite: not covered by the security tracker), ``vendor`` for any other revision
+    the distribution would never give a build (nginx.org's ``1~jammy``, MariaDB's ``+maria~ubu2204``, a PPA)."""
+    if distro not in ("ubuntu", "debian") or not package_release:
+        return ""
+    revision = _strip_epoch(package_release).rpartition("-")[2] if "-" in package_release else ""
+    if _SURY.search(package_release):
+        return "sury"
+    if not revision:
+        return ""
+    if distro == "debian" and _DEBIAN_BPO.search(revision):
+        return "backports"
+    own = _UBUNTU_OWN if distro == "ubuntu" else _DEBIAN_OWN
+    return "" if own.match(revision) else "vendor"
+
+
 def parse_distro(product="", version="", extrainfo="", cpes=(), banner=""):
     """Read the distribution and package release out of one scanner service record.
 
     Returns {"distro", "release", "package", "package_release", "upstream_version"}; every value is "" when it cannot be
     told (an empty ``distro`` means "no distro information at all"). ``package_release`` is a dpkg/rpm version string:
-    nmap's "8.9p1 Ubuntu 3ubuntu0.6" becomes "8.9p1-3ubuntu0.6". Ubuntu, Debian, RHEL/CentOS and Alpine are recognised."""
+    nmap's "8.9p1 Ubuntu 3ubuntu0.6" (and an SSH server's own "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6") becomes "8.9p1-3ubuntu0.6".
+    Ubuntu, Debian, RHEL/CentOS (Rocky, Alma), Alpine, Amazon Linux, SUSE and FreeBSD are recognised; a record that names two
+    distributions names none.
+
+    It also returns, when they are known: ``codename`` (jammy), ``release_basis`` (``stated`` by the banner or the OS CPE, read from the
+    ``package`` build, or from the ``table`` of what each release published: cveFeed.distro_releases), ``reading`` (``package`` when the
+    exact package build is known, ``marker`` when only the distribution is: such a reading is a hint and never shows a build as fixed),
+    ``third_party`` (cveFeed.distro.third_party) and ``tracker`` (``not_synced`` for a distribution cvENGINE has no fix data for).
+
+    Every field is untrusted (a scanned host chose it): each is clipped and cleaned (``clean_text``) and every pattern is anchored, so a
+    long or hostile banner costs nothing and cannot place text in the result that is not a version. Only the banner's first line is read
+    (an SSH server's identification string, an SMTP greeting): what a page or a later line says is not about the service's build."""
+    from cveFeed import distro_releases as releases
     out = {"distro": "", "release": "", "package": "", "package_release": "", "upstream_version": ""}
-    version = (version or "").strip()
-    text = " ".join([version, extrainfo or "", banner or ""])
-    lowered = text.lower()
-    cpes = [c for c in (cpes or ()) if c]
+    banner = (banner if isinstance(banner, str) else str(banner or ""))[:MAX_TEXT * 2]
+    banner = banner.splitlines()[0] if banner.strip() else ""
+    product, version, extrainfo, banner = (clean_text(x) for x in (product, version, extrainfo, banner))
+    cpes = [clean_text(c, 255) for c in (cpes or ())[:16] if c]
+    text = " ".join([version, extrainfo, banner])
     os_cpe = next((m for m in (_OS_CPE.search(c) for c in cpes) if m), None)
     cpe_product = os_cpe.group("product").lower() if os_cpe else ""
 
-    if "ubuntu" in lowered or "ubuntu" in cpe_product:
-        out["distro"] = "ubuntu"
-    elif _DEBIAN_REV.search(text) or re.search(r"\bdebian\b", lowered) or cpe_product == "debian_linux":
-        out["distro"] = "debian"
-    elif "red hat" in lowered or "centos" in lowered or "rocky" in lowered or "almalinux" in lowered or _RHEL_REV.search(version) \
-            or cpe_product in ("enterprise_linux", "centos", "rhel", "linux_enterprise", "rocky", "rocky_linux", "almalinux"):
-        out["distro"] = "centos" if "centos" in lowered or cpe_product == "centos" else "rhel"
-    elif re.search(r"\balpine\b", lowered) or cpe_product == "alpine_linux":
-        out["distro"] = "alpine"
-    if not out["distro"]:
-        return out
+    families = _families(text, version, cpe_product)
+    if len(families) != 1:
+        return out  # nothing, or two distributions at once: nothing is guessed
+    out["distro"] = families.pop()
+    distro = out["distro"]
 
-    if os_cpe and os_cpe.group("ver") and out["distro"] in ("ubuntu", "debian"):
-        out["release"] = os_cpe.group("ver").split(".")[0] if out["distro"] == "debian" else ".".join(os_cpe.group("ver").split(".")[:2])
-    if out["distro"] in RHEL_FAMILY:
-        out["release"] = rhel_release(cpes)
-    m = _NMAP_FORM.match(version)
-    if m:
-        out["package_release"] = f'{m.group("up")}-{m.group("rev")}'
+    stated = ""
+    if os_cpe and os_cpe.group("ver") and distro in ("ubuntu", "debian"):
+        stated = os_cpe.group("ver").split(".")[0] if distro == "debian" else ".".join(os_cpe.group("ver").split(".")[:2])
+    elif distro in RHEL_FAMILY:
+        stated = rhel_release(cpes)
+    elif distro == "ubuntu":
+        m = _UBUNTU_STATED.search(text)
+        stated = m.group(1) if m and m.group(1) in releases.UBUNTU_CODENAMES else ""
+    elif distro == "amzn":
+        m = _AMZN_RELEASE.search(text)
+        stated = m.group(1) if m else ""
+
+    out["package_release"] = _package_release(distro, version, extrainfo, banner)
+    if len(out["package_release"]) > MAX_BUILD:
+        out["package_release"] = ""  # never cut short: a clipped build would compare as another one
+    token = version.split(" ")[0] if version else ""
+    if out["package_release"] and distro != "freebsd":
+        out["upstream_version"] = upstream_of(out["package_release"])
     else:
-        token = version.split()[0] if version.split() else ""
-        if _DPKG_FORM.match(token) and (out["distro"] in ("ubuntu", "debian")):
-            out["package_release"] = token
-        elif out["distro"] in ("rhel", "centos") and _RHEL_REV.search(token):
-            out["package_release"] = token
-        elif out["distro"] == "alpine" and _ALPINE_REV.search(token):
-            out["package_release"] = token
-    release_text = out["package_release"]
-    if not out["release"] and out["distro"] == "debian":
-        deb = re.search(r"deb(\d+)u", release_text or text)
-        out["release"] = deb.group(1) if deb else ""
-    if not out["release"] and out["distro"] in ("rhel", "centos"):
-        el = _RHEL_REV.search(release_text or version)
-        out["release"] = el.group(1) if el else ""
-    out["upstream_version"] = upstream_of(release_text) if release_text else (re.split(r"\s", version)[0] if version else "")
-    out["package"] = package_for(product, out["distro"], out["upstream_version"])
+        out["upstream_version"] = _DISTRO_SUFFIX.sub("", token)
+        if not out["upstream_version"]:
+            ident = _SSH_IDENT.match(banner)
+            out["upstream_version"] = ident.group("up") if ident else ""
+    if len(out["upstream_version"]) > MAX_BUILD:
+        out["upstream_version"] = ""
+    out["package"] = package_for(product, distro, out["upstream_version"])
+
+    # the release: what the record states, else what the build's own versioning names, else the table of what each release published
+    built = releases.release_from_build(distro, out["package_release"])
+    if stated and built and stated != built:
+        out["release"], basis = "", ""  # the record contradicts itself: neither is believed
+    elif stated or built:
+        out["release"], basis = (stated, releases.STATED) if stated else (built, releases.PACKAGE)
+    else:
+        revision = _strip_epoch(out["package_release"]).rpartition("-")[2] if "-" in out["package_release"] else ""
+        found = releases.release_from_table(distro, out["package"], out["upstream_version"], revision) if out["package"] else ""
+        out["release"], basis = found, (releases.TABLE if found else "")
+    if out["release"]:
+        out["release_basis"] = basis
+        name = releases.codename(distro, out["release"])
+        if name:
+            out["codename"] = name
+    out["reading"] = "package" if out["package_release"] else "marker"
+    other = third_party(distro, out["package_release"])
+    if other:
+        out["third_party"] = other
+    if distro not in TRACKED:
+        out["tracker"] = "not_synced"
     return out
+
+
+def _package_release(distro, version, extrainfo, banner):
+    """The exact package build a record shows, as the distribution writes it ("8.9p1-3ubuntu0.6", "2.4.57-2", "8.7p1-38.el9_4.4",
+    "1.24.0-r16"), or "". nmap's "8.9p1 Ubuntu 3ubuntu0.6" is joined with a hyphen; an SSH identification string in the banner is read
+    when the version names no build (a raw banner from another source); FreeBSD's OpenSSH patch date is kept as "FreeBSD-20230316"."""
+    m = _NMAP_FORM.match(version)
+    if m and distro in ("ubuntu", "debian"):
+        return f'{m.group("up")}-{m.group("rev")}'
+    token = _DISTRO_SUFFIX.sub("", version.split(" ")[0]) if version else ""
+    if distro in ("ubuntu", "debian") and _DPKG_FORM.match(token):
+        return token
+    if distro in RHEL_FAMILY and _RHEL_REV.search(token) and is_rpm_evr(token):
+        return token
+    if distro == "alpine" and _ALPINE_REV.search(token):
+        return token
+    if distro == "amzn" and re.search(r"\.amzn(?:2023|\d)", token) and is_rpm_evr(token):
+        return token
+    if distro == "suse" and _SUSE_BUILD.match(token):
+        return token
+    ident = _SSH_IDENT.match(banner)
+    same = ident and (not token or token == ident.group("up"))
+    if same and ident.group("rev") and ident.group("os").lower() == distro and distro in ("ubuntu", "debian"):
+        return f'{ident.group("up")}-{ident.group("rev")}'
+    if distro == "freebsd":
+        if same and ident.group("rev") and ident.group("os").lower() == "freebsd" and re.fullmatch(r"\d{8}", ident.group("rev")):
+            return f'FreeBSD-{ident.group("rev")}'
+        m = _FREEBSD_BUILD.search(extrainfo) or _FREEBSD_BUILD.search(version)
+        if m:
+            return f"FreeBSD-{m.group(1)}"
+    return ""
 
 
 def rhel_release(cpes=(), text=""):
@@ -357,9 +506,28 @@ def judge(info, rows):
 
 
 def judge_row(info, rows):
-    """``judge``, with the DistroFix row (a dict) the verdict came from, or None when no single row decided it."""
+    """``judge``, with the DistroFix row (a dict) the verdict came from, or None when no single row decided it.
+
+    Two readings are never judged by a tracker, and keep the version-only answer (NO_DATA) a host with no distribution reading gets: a
+    distribution cvENGINE syncs no fix data for (Alpine, Amazon Linux, SUSE, FreeBSD: ``TRACKED``), and a build another publisher made
+    (``third_party``: deb.sury.org's PHP on Ubuntu is not Ubuntu's php8.2). A Debian or Ubuntu reading without the package build (a banner's
+    ``(Ubuntu)`` alone: ``basis`` marker) is a hint: it can show the release's tracker says "no fix yet", never that the host is fixed."""
+    status, fixed, row = _judge_row_raw(info, rows)
+    if status == PATCHED and _marker_only(info):
+        return UNKNOWN, "", None
+    return status, fixed, row
+
+
+def _marker_only(info):
+    """A Debian or Ubuntu reading that names the distribution (and perhaps the release) but not the installed build."""
+    return info.get("distro") in ("ubuntu", "debian") and not info.get("package_release")
+
+
+def _judge_row_raw(info, rows):
     if not info.get("distro"):
         return NO_DATA, "", None
+    if info["distro"] not in TRACKED or info.get("third_party"):
+        return NO_DATA, "", None  # no synced tracker speaks for this build
     if not info.get("package"):
         return UNKNOWN, "", None  # the distro is known, but not which of its packages this product is
     rows = _stream_rows(info, rows)

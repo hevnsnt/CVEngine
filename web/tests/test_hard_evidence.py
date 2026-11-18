@@ -55,7 +55,10 @@ class NmapRecordTests(TestCase):
 		port_inventory.persist_inventory(port_inventory.parse_xml(xml))
 		ip = IpAddress.objects.get(address='198.51.100.40')
 		ssh, guessed = ip.ports.get(number=22), ip.ports.get(number=8080)
-		self.assertEqual(ssh.extra, {'cpes': ['cpe:/a:openbsd:openssh:8.9p1', 'cpe:/o:canonical:ubuntu_linux:22.04'], 'ostype': 'Linux', 'method': 'probed'})
+		extra = dict(ssh.extra)
+		distro_reading = extra.pop('distro', {})  # the distro reading of the banner (distro.parse_distro), kept beside the nmap fields
+		self.assertEqual(extra, {'cpes': ['cpe:/a:openbsd:openssh:8.9p1', 'cpe:/o:canonical:ubuntu_linux:22.04'], 'ostype': 'Linux', 'method': 'probed'})
+		self.assertEqual((distro_reading.get('package'), distro_reading.get('codename')), ('openssh', 'jammy'))
 		self.assertEqual((ssh.distro, ssh.distro_release, ssh.service_extra), ('ubuntu', '22.04', 'Ubuntu Linux; protocol 2.0'))
 		self.assertEqual(guessed.extra['method'], 'table')  # named from the port number, not probed
 		self.assertEqual(nmap_service.extract_nmap_inventory({'nmaprun': {'host': []}}), [])

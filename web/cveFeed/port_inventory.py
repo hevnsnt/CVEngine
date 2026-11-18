@@ -108,7 +108,7 @@ def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
                 if rec.get(field):
                     setattr(port, field, rec[field])
             info = distro_lib.parse_distro(rec.get('product', ''), rec.get('version', ''), rec.get('service_extra', ''),
-                                           rec.get('cpes') or [rec.get('cpe', '')])
+                                           rec.get('cpes') or [rec.get('cpe', '')], rec.get('banner') or port.banner or '')
             # everything the scanner said, not just the first CPE: the OS CPE carries the distro release, and "table" means the service
             # name was guessed from the port number, not probed (a weak signal for any conclusion drawn from it)
             port.extra = {**(port.extra or {}), 'cpes': (rec.get('cpes') or [])[:8], 'ostype': rec.get('ostype', ''),
@@ -126,8 +126,9 @@ def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
                 port.extra['script_text'] = '\n'.join(kept_scripts.values())  # flat text for search, without the script ids
             if rec.get('banner'):
                 port.banner = rec['banner']
-            port.distro, port.distro_release = info['distro'], info['release']
-            port.package_release, port.upstream_version = info['package_release'], info['upstream_version']
+            # the distro reading: the four columns, and the rest of it (source package, codename, how the release was read, another publisher's build)
+            # for the host page and search
+            store_distro(port, info)
             port.source = source
             port.last_seen = now
             fit_columns(port)
@@ -140,6 +141,23 @@ def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
             ports_written += 1
         close_unreported_ports(ip_obj, host)
     return {'ports': ports_written, 'hosts_with_os': hosts_with_os}
+
+
+def store_distro(port, info):
+    """Write a distro reading (``distro.parse_distro``) onto a Port row in memory: the four columns and ``extra['distro']``
+    (``correlation.stored_distro``). Returns whether anything changed; the caller saves."""
+    from cveFeed.correlation import stored_distro
+    before = (port.distro, port.distro_release, port.package_release, port.upstream_version, (port.extra or {}).get('distro') or {})
+    port.distro, port.distro_release = info['distro'][:16], info['release'][:16]
+    port.package_release, port.upstream_version = info['package_release'][:64], info['upstream_version'][:64]
+    extra = dict(port.extra or {})
+    kept = stored_distro(info)
+    if kept:
+        extra['distro'] = kept
+    else:
+        extra.pop('distro', None)
+    port.extra = extra
+    return before != (port.distro, port.distro_release, port.package_release, port.upstream_version, kept)
 
 
 def _unprobed(rec):
@@ -155,10 +173,14 @@ def _cpe_version(rec):
 
 
 def fit_columns(instance):
-    """Clip every text value to its column, so a banner or product string a scanned host controls cannot make a save fail."""
+    """Clip every text value to its column, and drop the NUL characters PostgreSQL refuses to store, so a banner or product string a scanned
+    host controls cannot make a save fail."""
     for field in instance._meta.concrete_fields:
         limit = getattr(field, 'max_length', None)
         value = getattr(instance, field.attname, None)
+        if isinstance(value, str) and '\x00' in value:
+            value = value.replace('\x00', '')
+            setattr(instance, field.attname, value)
         if limit and isinstance(value, str) and len(value) > limit:
             setattr(instance, field.attname, value[:limit])
 
