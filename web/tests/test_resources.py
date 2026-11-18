@@ -262,6 +262,8 @@ class WatchdogTests(unittest.TestCase):
     def test_celery_gevent_timeout_stops_scanner_tree_before_releasing_capacity(self):
         # Celery's gevent timeout is a BaseException. Run it in a child interpreter
         # because monkey.patch_all() must not alter the Django test runner.
+        # The timeout must fire while the scanner child runs (it sleeps 30 s; communicate waits 20 s). 0.3 s could
+        # expire before heavy_job started the child on a loaded CI runner, leaving `children` empty (IndexError).
         script = textwrap.dedent('''
             from gevent import monkey
             monkey.patch_all()
@@ -283,7 +285,7 @@ class WatchdogTests(unittest.TestCase):
             try:
                 with patch.object(resources, 'global_pause_requested', return_value=False), \\
                      patch.object(resources.Job, 'start_watchdog'):
-                    result = apply_timeout(task, timeout=0.3, getpid=os.getpid,
+                    result = apply_timeout(task, timeout=2.0, getpid=os.getpid,
                                            timeout_callback=lambda *args: 'celery timed out')
                 proc = children[0]
                 print(json.dumps({'result': result, 'child_stopped': proc.poll() is not None,
