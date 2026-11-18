@@ -9,7 +9,9 @@ which is what makes exposure precise rather than noisy.
 The version/name helpers are pure Python (no Django import) so they are unit
 testable on their own.
 """
+import json
 import logging
+import os
 import re
 from functools import cmp_to_key
 
@@ -65,6 +67,17 @@ def split_name_version(tech_name):
         if ver and ver[0].isdigit():
             return base.strip(), ver.strip()
     return name, ""
+
+
+# a technology template named for the product ("Nginx version", "Microsoft IIS Detect"): the technology pass drops the word now, rows an
+# earlier build stored still carry it
+_TEMPLATE_WORD_RE = re.compile(r"\s+(?:version|detect|detected|detection|fingerprint)\s*$", re.IGNORECASE)
+
+
+def tech_name(name):
+    """The product a stored technology name names, as correlation matches it: the name without a trailing template word."""
+    stripped = _TEMPLATE_WORD_RE.sub("", name or "")
+    return stripped if stripped.strip() else (name or "")
 
 
 _EPOCH_RE = re.compile(r"^\s*\d+:(?=\d)")  # a dpkg/rpm epoch: "1:8.9p1-3ubuntu0.6"
@@ -309,41 +322,52 @@ def affected_product_tokens(affected_item):
     return tokens
 
 
-# Names scanners report that differ from the feed's product naming: normalized tech token -> product tokens naming the
-# same software. Dropping the vendor token must not create false negatives for these. Aliases are the only widening.
-PRODUCT_ALIASES = {
-    # "httpserver" is the NVD-style product ("http_server"); "apachehttpserver" is how the CNA's own record names it ("Apache HTTP Server")
-    "apachehttpd": {"httpserver", "apachehttpserver", "apache2"},
-    "apachehttpserver": {"httpserver", "apache2"},
-    "httpd": {"httpserver", "apachehttpserver", "apache2"},
-    "apache": {"httpserver", "apachehttpserver", "apache2"},
-    "microsoftiishttpd": {"internetinformationservices", "iis"},
-    "microsoftiis": {"internetinformationservices", "iis"},
-    "iis": {"internetinformationservices"},
-    "eximsmtpd": {"exim"},
-    "phpfpm": {"php"},  # PHP's FastCGI process manager is PHP, and its advisories are PHP's
-    "iscbind": {"bind", "bind9"},
-    "bind": {"bind9"},  # ISC's CPE calls the daemon bind; some advisories call it BIND9
-    "bind9": {"bind"},
-    "nextjs": {"next"},  # the npm package of Next.js is named "next"
-    # product strings nmap's service detection really prints, which name the product with extra words the advisory's name lacks: a version seen
-    # for one of these is the product's (validation.interpret needs the pair to agree before it reaffirms a CVE from a version)
-    "apachetomcatcoyotejspengine": {"tomcat"},
-    "apachecoyote": {"tomcat"},
-    "nodejsexpressframework": {"express"},
-    "vmwareesxisoapapi": {"esxi"},
-    "ciscoioshttpconfig": {"ios"},
-    # Cisco's ASA under its three names: Cisco's records before and after the Secure Firewall rename, and NVD's CPE product (an SNMP agent
-    # says only "Cisco Adaptive Security Appliance Version 9.16(4)18": cveFeed.version_catalogue.from_sysdescr)
-    "ciscoadaptivesecurityapplianceasasoftware": {"adaptivesecurityappliancesoftware",
-                                                  "ciscosecurefirewalladaptivesecurityapplianceasasoftware"},
-    "golangnethttpserver": {"go"},
-    "pythonbasehttpserver": {"python"},
-    # package names a host's own package manager reports (cveFeed.inventory_match): the feed names the same software differently
-    "apache2": {"httpserver", "apachehttpserver"},
-    "opensshserver": {"openssh"},
-    "linuxkernel": {"linux"},
-}
+# Names scanners report that differ from the feed's product naming, read from data/product_aliases.json (every entry cites the CPE or CVE
+# record that spells the product that way; cveFeed.tech_coverage measures what is still unmatched). Dropping the vendor token must not create
+# false negatives for these. Aliases are the only widening, and each is held to its vendors.
+ALIASES_FILE = os.path.join(os.path.dirname(__file__), "data", "product_aliases.json")
+PRODUCT_ALIASES = {}  # normalized tech token -> product tokens naming the same software
+ALIAS_VENDORS = {}  # (tech token, product token) -> vendor tokens the record must name, when it names one
+NAME_VENDORS = {}  # tech token -> (vendor tokens, a record must name one): a bare name another vendor uses for a different product
+AMBIGUOUS_PRODUCTS = set()  # product tokens two vendors use: a record naming no vendor never confirms a name for them
+VENDOR_CLASSES = {}  # vendor token -> the vendor tokens that are the same vendor across renames and acquisitions
+
+
+def _vendor_tokens(values):
+    return tuple(t for t in (_norm(v, True) for v in values or ()) if t)
+
+
+def load_aliases(path=ALIASES_FILE):
+    """Read the alias data into the tables above (replacing what they held). Returns the parsed document."""
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    aliases, alias_vendors, name_vendors, ambiguous, classes = {}, {}, {}, set(), {}
+    for entry in doc.get("aliases", ()):
+        vendors = _vendor_tokens(entry.get("vendors"))
+        products = {t for t in (_norm(p, True) for p in entry.get("products", ())) if len(t) >= _MIN_TOKEN}
+        for name in entry.get("names", ()):
+            token = _norm(name)
+            for product in products - {token}:
+                aliases.setdefault(token, set()).add(product)
+                alias_vendors[(token, product)] = vendors
+    for entry in doc.get("restrict", ()):
+        for name in entry.get("names", ()):
+            name_vendors[_norm(name)] = (_vendor_tokens(entry.get("vendors")), bool(entry.get("require_vendor")))
+    for entry in doc.get("ambiguous_products", ()):
+        ambiguous.add(_norm(entry.get("product"), True))
+    for entry in doc.get("vendor_renames", ()):
+        group = frozenset(_vendor_tokens(entry.get("vendors")))
+        for vendor in group:
+            classes[vendor] = classes.get(vendor, frozenset()) | group
+    for table, value in ((PRODUCT_ALIASES, aliases), (ALIAS_VENDORS, alias_vendors), (NAME_VENDORS, name_vendors), (VENDOR_CLASSES, classes)):
+        table.clear()
+        table.update(value)
+    AMBIGUOUS_PRODUCTS.clear()
+    AMBIGUOUS_PRODUCTS.update(ambiguous)
+    return doc
+
+
+load_aliases()
 
 
 def parse_cpe(cpe):
@@ -577,17 +601,54 @@ def _fuzzy_ids(token, product_index):
     return ids
 
 
-def _vendor_ok(item, *hints):
-    """True when the item names no vendor, or its vendor contains one of the (normalized) hints."""
-    vendor = _norm(item.get("vendor"), True)
-    return not vendor or any(h in vendor or vendor in h for h in hints)
-
-
-# alias target -> vendor words that must appear when the item names a vendor (Oracle's "HTTP Server" is not Apache's, Apple's iOS is not
-# Cisco's IOS)
-_ALIAS_VENDOR = {"httpserver": ("apache",), "apache2": ("apache",), "bind9": ("isc",), "ios": ("cisco",)}
 # what a feed writes for a vendor it does not name
 _NO_VENDOR = frozenset({"na", "unknown", "none", "unspecified"})
+
+
+def _real_vendor(item):
+    """The item's normalized vendor, or '' when it names none (or writes a placeholder such as "n/a" or "[UNKNOWN]")."""
+    vendor = _norm(item.get("vendor"), True)
+    return "" if vendor in _NO_VENDOR else vendor
+
+
+def _with_renames(hints):
+    """The hints with every other spelling of the same vendor (data/product_aliases.json vendor_renames: nmap's igor_sysoev is F5's nginx)."""
+    out = []
+    for hint in hints:
+        out.append(hint)
+        out.extend(VENDOR_CLASSES.get(hint, ()))
+    return out
+
+
+def _vendor_ok(item, *hints):
+    """True when the item names no vendor, or its vendor contains one of the (normalized) hints or another spelling of it."""
+    vendor = _real_vendor(item)
+    return not vendor or any(h and (h in vendor or vendor in h) for h in _with_renames(hints))
+
+
+def _vendor_led(token):
+    """``(lead, rest token)`` for each way a discovered name may start with its vendor: "Ivanti Connect Secure" is ("ivanti", "connectsecure"),
+    "Palo Alto Networks GlobalProtect" also ("paloaltonetworks", "globalprotect"). The rest must still name a product on its own, and a record
+    reached this way must name that vendor (``_led_by``)."""
+    out = []
+    for words in _words_for(token):
+        for k in range(1, min(3, len(words) - 1) + 1):
+            lead, rest = words[:k], words[k:]
+            if len("".join(lead)) >= _MIN_TOKEN and _word_run_ok(rest):
+                out.append((lead, _norm(" ".join(rest))))
+    return out
+
+
+def _led_by(item, lead):
+    """Whether the item's vendor is the vendor a name leads with: the same token ("paloaltonetworks"), its first words ("Progress Software
+    Corporation" for "Progress"), or another spelling of it."""
+    vendor = _real_vendor(item)
+    if not vendor:
+        return False
+    joined = "".join(lead)
+    if vendor == joined or vendor in VENDOR_CLASSES.get(joined, ()):
+        return True
+    return tuple(_WORD_RE.findall(str(item.get("vendor") or "").lower()))[:len(lead)] == tuple(lead)
 
 
 def _named_vendor(tech_token, product_token):
@@ -621,24 +682,40 @@ def _named_vendor_ok(tech_token, product_token, item):
     return product_token in vendor
 
 
-def _item_hits(item, token, aliases=(), cpe_product=None, cpe_vendor=""):
+def _item_hits(item, token, aliases=(), cpe_product=None, cpe_vendor="", led=()):
     """Whether one affected entry names the discovered product. With a CPE the product must equal it (and the vendor,
-    when the entry has one, must agree); otherwise fuzzy token containment, plus exact alias names."""
+    when the entry has one, must agree); otherwise fuzzy token containment, plus the aliases of data/product_aliases.json held to their
+    vendors, plus a name that leads with the entry's own vendor (``led``, from ``_vendor_led``)."""
+    restrict = NAME_VENDORS.get(token)
+    if restrict:  # a bare name another vendor also uses for a different product ("Express", ".NET")
+        vendors, required = restrict
+        if (required and not _real_vendor(item)) or not _vendor_ok(item, *vendors):
+            return False
     own = {_norm(item.get(k), True) for k in ("product", "package")} - {""}
     if cpe_product:
         if cpe_product in own:
             return _vendor_ok(item, cpe_vendor, cpe_vendor[:6])
         # an entry named some other way (the CNA's own "Apache HTTP Server" next to NVD's "http_server") still counts when it is the same
-        # vendor's: the CPE must not hide the records that do not use its spelling
-        if not _vendor_ok(item, cpe_vendor, cpe_vendor[:6]) or not item.get("vendor"):
+        # vendor's: the CPE must not hide the records that do not use its spelling. An entry that names no vendor counts only when its own
+        # product name starts with the CPE's vendor ("Apache Tomcat" for cpe:/a:apache:tomcat)
+        if not _vendor_ok(item, cpe_vendor, cpe_vendor[:6]):
+            return False
+        if not _real_vendor(item) and not (len(cpe_vendor) >= _MIN_TOKEN and any(
+                o.startswith(v) for o in own for v in _with_renames((cpe_vendor,)) if len(v) >= _MIN_TOKEN)):
             return False
     tokens = affected_product_tokens(item)
-    if any(name_matches_token(token, t) and _named_vendor_ok(token, t, item) for t in tokens):
+    unvouched = not _real_vendor(item) and bool(tokens & AMBIGUOUS_PRODUCTS)  # "iOS" with no vendor: Apple's or Cisco's?
+    if any(name_matches_token(token, t) and _named_vendor_ok(token, t, item) for t in tokens) and not unvouched:
         return True
     for alias in aliases:
-        if alias in tokens and (alias not in _ALIAS_VENDOR or _vendor_ok(item, *_ALIAS_VENDOR[alias])):
+        vendors = ALIAS_VENDORS.get((token, alias), ())
+        if alias in tokens and _vendor_ok(item, *vendors) and not unvouched:
             return True
-    return False
+        # the alias read as a name ("Microsoft Exchange Server" for "Microsoft Exchange Server 2019 Cumulative Update 12"), only for an entry
+        # that names one of the alias's vendors
+        if vendors and _real_vendor(item) and _vendor_ok(item, *vendors) and any(name_matches_token(alias, t) for t in tokens):
+            return True
+    return any(_led_by(item, lead) and any(name_matches_token(rest, t) for t in tokens) for lead, rest in led)
 
 
 def _bounded(rng):
@@ -888,6 +965,35 @@ def fix_only_branch_verdict(ver, ranges):
     return None, None
 
 
+def named_hits(token, product_index, cve_by_id, cpe=None):
+    """Yield ``(cve, [(affected index, item), ...])`` for every CVE with an affected entry that names the discovered product ``token``
+    (normalized): its CPE's vendor and product first, then the name itself and its aliases (``PRODUCT_ALIASES``, ``ALIAS_VENDORS``). The one
+    place that decides whether a name connects to a CVE record: ``_match_candidates`` judges versions on these entries and
+    ``cveFeed.tech_coverage`` counts them."""
+    cpe_parts = parse_cpe(cpe)
+    candidate_ids, cpe_product, cpe_vendor = set(), None, ""
+    if cpe_parts:
+        cpe_vendor, cpe_product, _ = cpe_parts
+        candidate_ids = set(product_index.get(cpe_product, ()))
+        if not candidate_ids:
+            cpe_product = None
+    aliases = tuple(sorted(PRODUCT_ALIASES.get(token, ())))
+    led = _vendor_led(token)
+    # the name match is always added: a CPE names the product exactly, but CVEs whose own record spells it differently are still about it
+    candidate_ids |= set(_fuzzy_ids(token, product_index))
+    for alias in aliases:
+        candidate_ids |= product_index.get(alias, set())
+        if ALIAS_VENDORS.get((token, alias)):
+            candidate_ids |= _fuzzy_ids(alias, product_index)
+    for _lead, rest in led:
+        candidate_ids |= _fuzzy_ids(rest, product_index)
+    for cid in candidate_ids:
+        cve = cve_by_id[cid]
+        hit = [(i, item) for i, item in enumerate(cve.affected or []) if _item_hits(item, token, aliases, cpe_product, cpe_vendor, led)]
+        if hit:
+            yield cve, hit
+
+
 def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, details=None, raw=None):
     """Yield (cve, matched_product, in_range) for CVEs plausibly affecting a
     discovered product `token` (normalized) at version `ver` (tuple or None).
@@ -903,24 +1009,7 @@ def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, deta
     Reads only the pre-built product_index / cve_by_id; shared by the technology
     fingerprint path and the nmap/Port service path so both score identically.
     """
-    cpe_parts = parse_cpe(cpe)
-    candidate_ids, cpe_product, cpe_vendor = set(), None, ""
-    if cpe_parts:
-        cpe_vendor, cpe_product, _ = cpe_parts
-        candidate_ids = set(product_index.get(cpe_product, ()))
-        if not candidate_ids:
-            cpe_product = None
-    aliases = tuple(sorted(PRODUCT_ALIASES.get(token, ())))
-    # the name match is always added: a CPE names the product exactly, but CVEs whose own record spells it differently are still about it
-    candidate_ids |= set(_fuzzy_ids(token, product_index))
-    for alias in aliases:
-        candidate_ids |= product_index.get(alias, set())
-
-    for cid in candidate_ids:
-        cve = cve_by_id[cid]
-        hit = [(i, item) for i, item in enumerate(cve.affected or []) if _item_hits(item, token, aliases, cpe_product, cpe_vendor)]
-        if not hit:
-            continue
+    for cve, hit in named_hits(token, product_index, cve_by_id, cpe):
         # Every hit names the same product (see name_matches_token): a wrapper or repackaging with its own version numbers
         # ("jquery-rails", "ingress-nginx") is another product and was never a hit, so its ranges are never compared.
         in_range, matched_product = None, name
@@ -1772,6 +1861,7 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
         name, version = split_name_version(tech.name)
         if wrong and (cms.key(name), version) in wrong:
             continue
+        name = tech_name(name)
         name, version = versions.legacy_aspnet(name, version)  # an earlier build stored X-AspNet-Version's CLR line as "ASP.NET"
         token = _norm(name)
         if len(token) < _MIN_TOKEN:
@@ -1922,7 +2012,28 @@ def local_pool():
 def _index_hit(token, product_index):
     """Whether any product of the index can be ``token``: by name, or by an alias (nmap's "Apache httpd" is the advisory's "HTTP Server")."""
     return (any(name_matches_token(token, product_token) for product_token in _candidate_tokens(token, product_index))
-            or any(alias in product_index for alias in PRODUCT_ALIASES.get(token, ())))
+            or any(alias in product_index or (ALIAS_VENDORS.get((token, alias)) and _fuzzy_ids(alias, product_index))
+                   for alias in PRODUCT_ALIASES.get(token, ()))
+            or any(_fuzzy_ids(rest, product_index) for _lead, rest in _vendor_led(token)))
+
+
+def names_rules_touch(name, product_index, cpe="", source="tech"):
+    """Whether the name rules of data/product_aliases.json and ``_vendor_led`` can change what a stored name connects to: an alias or a
+    restriction names it, its template word is dropped (``tech_name``), it leads with a vendor whose product is in the index, a product two
+    vendors use is among its candidates, or its CPE is one the vendor renames or the no-vendor rule read differently. The update backfill
+    (manage.py backfill_name_aliases) correlates again the hosts carrying such a name."""
+    base = tech_name(name) if source == "tech" else (name or "")
+    token = _norm(base)
+    if len(token) < _MIN_TOKEN:
+        return False
+    if base != (name or "") or token in PRODUCT_ALIASES or token in NAME_VENDORS:
+        return True
+    if any(_fuzzy_ids(rest, product_index) for _lead, rest in _vendor_led(token)):
+        return True
+    if any(t in product_index and name_matches_token(token, t) for t in AMBIGUOUS_PRODUCTS):
+        return True
+    parts = parse_cpe(cpe)
+    return bool(parts and parts[1] in product_index)
 
 
 def latest_scan_q(prefix=""):
@@ -1977,8 +2088,8 @@ def candidate_subdomains(product_index, base=None):
     from startScan.models import IpAddress, Port, Subdomain, Technology
 
     tech_ids, tokens = [], {}
-    for tech_id, tech_name in Technology.objects.values_list("id", "name").iterator():
-        token = _norm(split_name_version(tech_name)[0])
+    for tech_id, stored in Technology.objects.values_list("id", "name").iterator():
+        token = _norm(tech_name(split_name_version(stored)[0]))
         if len(token) < _MIN_TOKEN:
             continue
         if token not in tokens:
