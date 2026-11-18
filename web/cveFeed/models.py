@@ -147,7 +147,8 @@ class CVEEntry(models.Model):
                 defaults["sources"] = [*defaults["sources"], "CVE List V5"]
         # a branch-by-branch fix list the feed gave with no lower bounds takes the CNA's own bounds from the CVE List record (issue 205)
         defaults["affected"], overlaid = overlay_branch_ranges(str(entry["id"])[:64], defaults["affected"])
-        # Cisco's and Oracle's exact versions, which the feed passes on as a bare ``versions`` list, read from the CVE List record
+        # a block the feed passes on as a bare ``versions`` list (Cisco's builds, Oracle's supported versions, the kernel CNA's releases, VulDB's
+        # exact versions) takes the ranges the CVE List record states for it, when every one of them can be read (intel.record_ranges_for)
         defaults["affected"], exact = overlay_exact_versions(str(entry["id"])[:64], defaults["affected"])
         overlaid = overlaid or exact
         if overlaid and "CVE List V5" not in defaults["sources"]:
