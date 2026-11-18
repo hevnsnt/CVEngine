@@ -127,6 +127,12 @@ def run_db_exposure_checks(scan_id, checks=None):
             if created:
                 activity.log('validate', f'{label} on {host}:{number} has no authentication required'
                              + (f' (reply: {reply})' if reply else ''), project=project, severity='critical')
+            if reply:  # the version the reply states (redis 7.2.4, PostgreSQL 15.4, MySQL 8.0.35) as a version reading of the host
+                try:
+                    from cveFeed import source_versions
+                    source_versions.store_db(sub, number, reply)
+                except Exception:  # noqa: BLE001 - the finding stands without the reading
+                    logger.exception('could not store the database version %s:%s states', host, number)
 
     def in_scope(host, subs):
         # Exclusion is organization-wide even when its author could not purge this project's records. Recheck at dispatch, not only while planning.

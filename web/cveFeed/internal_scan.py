@@ -178,6 +178,7 @@ def _testssl(scan, project, domain, ip, org_id, dispatch):
         tls_audit.store(domain, ip, number, evaluated, where)
         if sub is not None:
             tls_audit.run_for_host(sub)
+            tls_audit.store_banners(sub, number, (result or {}).get('items') or [])
         ledger.record(tls_audit.SERVICE, [where], project.id, scan)
         tested += 1
         issues += len(evaluated.findings)

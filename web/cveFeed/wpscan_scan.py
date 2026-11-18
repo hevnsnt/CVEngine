@@ -443,6 +443,11 @@ def persist_report(scan, sub, url, report):
         if not sub.technologies.filter(pk=tech.pk).exists():
             sub.technologies.add(tech)
             added += 1
+    try:  # the headers the scan read (its "headers" interesting finding: Server, X-Powered-By) as version readings (cveFeed.source_versions)
+        from cveFeed import source_versions
+        source_versions.store_wpscan(sub, url, report)
+    except Exception:  # noqa: BLE001 - the report's own findings and technologies stand without them
+        logger.exception('could not store the WordPress scan headers of %s', getattr(sub, 'name', ''))
     return new, added
 
 

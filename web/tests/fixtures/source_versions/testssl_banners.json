@@ -1,0 +1,13 @@
+{
+  "outcome": "done",
+  "items": [
+    {"id": "service", "severity": "INFO", "finding": "HTTP", "cve": ""},
+    {"id": "banner_server", "severity": "INFO", "finding": "nginx/1.18.0 (Ubuntu)", "cve": ""},
+    {"id": "banner_application", "severity": "INFO", "finding": "X-Powered-By: PHP/7.4.3", "cve": ""},
+    {"id": "banner_reverseproxy", "severity": "INFO", "finding": "--", "cve": ""},
+    {"id": "TLS1_2", "severity": "OK", "finding": "offered", "cve": ""},
+    {"id": "heartbleed", "severity": "OK", "finding": "not vulnerable, no heartbeat extension", "cve": "CVE-2014-0160"}
+  ],
+  "returncode": 0,
+  "handshake": true
+}

@@ -220,6 +220,7 @@ def _enrich(project, by_ip, reports, partial=False):
         mine = by_address.get(ip.address, [])
         kept += len(mine)
         block = _block(by_ip[ip.address], mine)
+        block['project_id'] = project.pk  # whose sync wrote it: the version readings it gives belong to this project's hosts (cveFeed.source_versions)
         if partial:
             block['vulns'] = ((ip.fingerprint or {}).get('runzero') or {}).get('vulns', []) if not mine else block['vulns']
         updated += _store(ip, block)
@@ -227,6 +228,12 @@ def _enrich(project, by_ip, reports, partial=False):
     if not partial and by_ip:
         forgotten = _forget_absent(project, by_ip)
         _retract_matches(project)
+    if updated or forgotten:
+        try:  # the operating system readings the blocks state, as third-party readings of the project's hosts (cveFeed.source_versions)
+            from cveFeed import source_versions
+            source_versions.refresh_runzero_project(project)
+        except Exception:  # noqa: BLE001 - the sync's own facts stand without the readings
+            logger.exception('could not store the runZero version readings of project %s', project.pk)
     return len(known), updated + forgotten, kept, _corroborate_matches(project, known)
 
 
