@@ -73,6 +73,7 @@ def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
         for rec in host.get('ports', []):
             if not rec.get('number'):
                 continue
+            rec = split_header_product(rec)
             protocol = 'udp' if rec.get('protocol') == 'udp' else 'tcp'  # UDP 161 and TCP 161 are two services: two rows
             same_protocol = ('udp',) if protocol == 'udp' else TCP_PROTOCOLS
             port = ip_obj.ports.filter(number=rec['number'], protocol__in=same_protocol).order_by('id').first()
@@ -141,6 +142,24 @@ def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
             ports_written += 1
         close_unreported_ports(ip_obj, host)
     return {'ports': ports_written, 'hosts_with_os': hosts_with_os}
+
+
+def split_header_product(rec):
+    """``rec`` with a Server-header token nmap stored as the product ("nginx/1.24.0 (Ubuntu)", "awselb/2.0": its http-server-header script
+    fills an unidentified service's product with the header) split into the product, its version (when the scanner stated none) and the
+    comment (when it stated no extra info), as nmap's own fingerprint would have stored them (``correlation.split_port_product``). A path, a
+    URL or a protocol's version (Microsoft-HTTPAPI/2.0) is not split into a version. Returns a new dict; anything else unchanged."""
+    from cveFeed.correlation import split_port_product
+    product = rec.get('product') or ''
+    if '/' not in product:
+        return rec
+    name, version, rest = split_port_product(product, rec.get('version') or '')
+    if name == product.strip():
+        return rec
+    out = {**rec, 'product': name, 'version': version}
+    if rest and not rec.get('service_extra'):
+        out['service_extra'] = rest[:255]
+    return out
 
 
 def store_distro(port, info):

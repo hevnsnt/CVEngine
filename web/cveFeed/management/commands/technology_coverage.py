@@ -17,8 +17,8 @@ from cveFeed import correlation, tech_coverage
 
 
 class Command(BaseCommand):
-    help = ("Report the technology names that connect to no CVE record, the unversioned ones with the most CVEs, and the names that reach more "
-            "than one vendor's products (read-only).")
+    help = ("Report the technology names that connect to no CVE record, the unversioned ones with the most CVEs, the names that reach more "
+            "than one vendor's products, and the names that are not software (read-only).")
 
     def add_arguments(self, parser):
         parser.add_argument("--seed", help="a CVE seed file (.jsonl.gz) to read instead of the stored catalogue")
@@ -70,5 +70,9 @@ class Command(BaseCommand):
         w(f"\nAmbiguous ({r['ambiguous_count']}): names that reach more than one vendor's products")
         for row in r["ambiguous"]:
             w(f"  {row['name']}: " + "; ".join(f"{v['vendor']} ({v['cves']})" for v in row["vendors"]))
+        w(f"\nServices ({r['services_count']}): names that are not software a host runs (CDN, hosting, analytics), never a CVE")
+        for row in r["services"]:
+            w(f"  {row['hosts']:>5}  {row['name']}  [{row['kind']}]")
         self.stdout.write(self.style.SUCCESS(
-            f"\n{r['unmatched_count']} unmatched, {r['unversioned_count']} unversioned leads, {r['ambiguous_count']} ambiguous"))
+            f"\n{r['unmatched_count']} unmatched, {r['unversioned_count']} unversioned leads, {r['ambiguous_count']} ambiguous, "
+            f"{r['services_count']} services"))

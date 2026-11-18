@@ -24,6 +24,7 @@ from targetApp.models import Domain
 from cvengine_scanner import versions
 
 from cveFeed import js_libraries, source_versions
+from cveFeed.correlation import stored_technology_name
 
 """
 Celery tasks.
@@ -90,6 +91,7 @@ def persist_bbot_result(result, ctx):
 			continue
 		raw_tech = tech_name
 		tech_name = versions.normalize_technology(tech_name)  # a CPE or a "v3.3.7" would otherwise store a name no advisory matches
+		tech_name = stored_technology_name(tech_name)  # a Server-header token ("nginx/1.28.3") is the product and its version
 		# a JavaScript library's version is read from its own file (cveFeed.js_libraries), never taken from another tool's guess
 		tech_name = js_libraries.unversioned(tech_name)
 		if not tech_name:

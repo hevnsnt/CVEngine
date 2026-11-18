@@ -8,6 +8,8 @@ module measures that, with the matcher correlation itself uses (``correlation.na
 * ``unmatched``: names (with the hosts they are seen on) that connect to no affected entry of any stored CVE. Some name no software at all
   (a CDN, a header check); the rest are naming gaps. ``near`` lists the catalogue products that share a word with the name, the usual fix.
 * ``unversioned``: names seen without a version that do connect, ranked by how many CVEs exist for the product: leads for a version source.
+* ``services``: names that are not software a host runs (a CDN, a load balancer, a hosting platform, an analytics script, a protocol:
+  ``data/service_names.json``), with the hosts they are seen on. They never carry a CVE, so they are kept out of ``unmatched``.
 * ``ambiguous``: names that connect to products of more than one vendor ("IOS" reaches Cisco's IOS and Apple's iOS). A vendor named after
   the product itself ("nginx" for nginx) and spellings of one vendor ("apache", "apachesoftwarefoundation") count once.
 
@@ -17,6 +19,7 @@ current hosts' technologies and port products. Over the API it is an App Admin r
 are counted across every tenant, so no other role may see them.
 """
 import json
+import os
 from collections import Counter
 
 from cveFeed import correlation
@@ -27,6 +30,33 @@ MAX_LIMIT = 500
 MAX_NEAR = 3
 MAX_PRODUCTS = 5
 MAX_NAME = 200
+
+
+SERVICES_FILE = os.path.join(os.path.dirname(__file__), "data", "service_names.json")
+SERVICE_NAMES = {}  # normalized name -> kind ("cdn", "hosting", ...)
+
+
+def load_services(path=SERVICES_FILE):
+    """Read the names that are not software (``data/service_names.json``) into ``SERVICE_NAMES``. Returns the parsed document."""
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    SERVICE_NAMES.clear()
+    SERVICE_NAMES.update({correlation._norm(name): entry.get("kind") or "service"
+                          for entry in doc.get("services", ()) for name in entry.get("names", ())})
+    return doc
+
+
+load_services()
+
+
+def service_kind(name, raw=""):
+    """The kind of service a name is ("cdn", "hosting", ...) when it is not software a host runs, else "". ``raw`` is the name as stored,
+    before a ``product/version`` token was split ("awselb/2.0", "http/3")."""
+    for text in (name, raw):
+        kind = SERVICE_NAMES.get(correlation._norm(text)) if text else None
+        if kind:
+            return kind
+    return ""
 
 
 def _key_vendor(vendor):
@@ -105,16 +135,21 @@ def _near(token, product_index, labels):
 
 
 def normalise_sighting(name, version="", source="tech", cpe="", hosts=1):
-    """One sighting as correlation reads it: a technology stored as ``Name:version``, a CPE or a banner token is split the same way
-    (``correlation.split_name_version``), and an earlier build's "ASP.NET" CLR line is read as correlation reads it."""
+    """One sighting as correlation reads it: a technology stored as ``Name:version``, a CPE, a banner token or a ``product/version``
+    Server-header token is split the same way (``correlation.read_technology``: an earlier build's "ASP.NET" CLR line and the technology template's "AspNet
+    Version Disclosure" are read as the .NET Framework's CLR line), a port product the same way (``correlation.split_port_product``), and a
+    protocol's version (Microsoft-HTTPAPI/2.0) is no version. ``raw`` keeps the name as stored, for ``service_kind``."""
     from cvengine_scanner import versions
-    base, ver = correlation.split_name_version(str(name or "")[:MAX_NAME]) if source == "tech" else (str(name or "").strip()[:MAX_NAME], "")
-    ver = ver or str(version or "").strip()
+    raw = str(name or "").strip()[:MAX_NAME]
     if source == "tech":
-        base, ver = versions.legacy_aspnet(correlation.tech_name(base), ver)
+        base, ver = correlation.split_name_version(raw)
+        ver = ver or correlation.stated_version(base, str(version or "").strip())
+        base, ver = versions.legacy_aspnet(correlation.tech_name(base), ver)  # correlation.read_technology, with the version given apart
+    else:
+        base, ver, _rest = correlation.split_port_product(raw, version)
     if not ver and cpe:
-        ver = (correlation.parse_cpe(cpe) or ("", "", ""))[2]
-    return {"name": base.strip(), "version": ver, "source": source, "cpe": (cpe or "").strip(), "hosts": int(hosts or 0)}
+        ver = correlation.stated_version(base, (correlation.parse_cpe(cpe) or ("", "", ""))[2])
+    return {"name": base.strip(), "version": ver, "source": source, "cpe": (cpe or "").strip(), "hosts": int(hosts or 0), "raw": raw}
 
 
 def _merge(sightings):
@@ -125,8 +160,9 @@ def _merge(sightings):
             continue
         key = (s["name"], s.get("cpe") or "")
         row = merged.setdefault(key, {"name": s["name"], "cpe": key[1], "sources": set(), "hosts": 0, "versioned": 0, "unversioned": 0,
-                                      "versions": Counter()})
+                                      "versions": Counter(), "raw": set()})
         row["sources"].add(s.get("source") or "tech")
+        row["raw"].add(s.get("raw") or s["name"])
         row["hosts"] += s["hosts"]
         if s.get("version"):
             row["versioned"] += s["hosts"]
@@ -150,7 +186,7 @@ def report(sightings, cve_by_id, product_index, limit=DEFAULT_LIMIT):
     limit = _limit(limit)
     labels, catalogue = catalogue_labels(cve_by_id)
     rows = _merge(sightings)
-    unmatched, unversioned, ambiguous = [], [], []
+    unmatched, unversioned, ambiguous, services = [], [], [], []
     connected_hosts = total_hosts = os_names = 0
     for row in rows:
         total_hosts += row["hosts"]
@@ -158,8 +194,12 @@ def report(sightings, cve_by_id, product_index, limit=DEFAULT_LIMIT):
         if match_policy.is_os_sighting(row["name"], row["cpe"]):
             os_names += 1
             continue
-        found = connect(row["name"], row["cpe"], product_index, cve_by_id)
         base = {"name": row["name"], "sources": sorted(row["sources"]), "hosts": row["hosts"], **({"cpe": row["cpe"]} if row["cpe"] else {})}
+        kind = next(filter(None, (service_kind(row["name"], raw) for raw in sorted(row["raw"]))), "")
+        if kind:  # a CDN, a hosting platform, an analytics script: not software the host runs, so never a naming gap
+            services.append({**base, "kind": kind})
+            continue
+        found = connect(row["name"], row["cpe"], product_index, cve_by_id)
         if not found["cves"]:
             unmatched.append({**base, "versioned_hosts": row["versioned"],
                               "near": _near(token, product_index, labels) if len(token) >= correlation._MIN_TOKEN else []})
@@ -176,14 +216,17 @@ def report(sightings, cve_by_id, product_index, limit=DEFAULT_LIMIT):
                                                 key=lambda v: (-v["cves"], v["vendor"])),
                               "products": products})
     unmatched.sort(key=lambda r: (-r["hosts"], r["name"].lower()))
+    services.sort(key=lambda r: (-r["hosts"], r["name"].lower()))
     unversioned.sort(key=lambda r: (-r["cves"], -r["unversioned_hosts"], r["name"].lower()))
     ambiguous.sort(key=lambda r: (-min(v["cves"] for v in r["vendors"][:2]), -r["hosts"], r["name"].lower()))
     return {
         "catalogue": catalogue,
         "names": len(rows), "host_sightings": total_hosts, "os_sightings": os_names,
-        "connected_names": len(rows) - len(unmatched) - os_names, "connected_host_sightings": connected_hosts,
+        "connected_names": len(rows) - len(unmatched) - len(services) - os_names, "connected_host_sightings": connected_hosts,
         "unmatched_count": len(unmatched), "unversioned_count": len(unversioned), "ambiguous_count": len(ambiguous),
-        "unmatched": unmatched[:limit], "unversioned": unversioned[:limit], "ambiguous": ambiguous[:limit], "limit": limit,
+        "services_count": len(services),
+        "unmatched": unmatched[:limit], "unversioned": unversioned[:limit], "ambiguous": ambiguous[:limit], "services": services[:limit],
+        "limit": limit,
     }
 
 

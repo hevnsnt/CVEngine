@@ -562,7 +562,11 @@ def tech_name_from(line):
     else:
         name = re.sub(r'\s+(version|detect|detected|detection|server|fingerprint)$', '', (info.get('name') or '').strip(), flags=re.I)
         name = re.sub(r'[\s:–-]+$', '', name)  # "AWS Service - Detection" leaves a dangling dash
+    from cveFeed.correlation import stored_technology_name
     name = (name or '').strip()[:100]
+    if stored_technology_name(name) != name:  # a Server-header token ("nginx/1.28.3") is the product and the version it states
+        from cveFeed import js_libraries
+        return js_libraries.unversioned(stored_technology_name(name))
     # every version the template extracted, read the same way each run: nuclei hands several back in no fixed order, and taking the first
     # made the stored version flip between runs. The highest is kept (the conservative reading: it matches the fewest advisories)
     found = {str(v).strip().lstrip('vV')[:30] for v in line.get('extracted-results') or [] if re.match(r'[vV]?\d', str(v or '').strip())}

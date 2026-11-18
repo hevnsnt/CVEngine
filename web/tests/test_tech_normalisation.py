@@ -258,9 +258,9 @@ class CoverageReportTests(unittest.TestCase):
                            s('Initech Frobnicator Ultra', hosts=1), s('Windows', hosts=5)])
         self.assertEqual(out['catalogue']['cves'], 5)
         self.assertEqual(out['os_sightings'], 1)
-        self.assertEqual([(r['name'], r['hosts']) for r in out['unmatched']], [('Cloudflare', 9), ('Initech Frobnicator Ultra', 1)])
-        self.assertEqual(out['unmatched'][0]['near'], [])
-        self.assertEqual(out['unmatched'][1]['near'][0], {'product': 'Initech:Frobnicator', 'cves': 2})
+        self.assertEqual([(r['name'], r['hosts']) for r in out['unmatched']], [('Initech Frobnicator Ultra', 1)])
+        self.assertEqual(out['unmatched'][0]['near'][0], {'product': 'Initech:Frobnicator', 'cves': 2})
+        self.assertEqual([(r['name'], r['hosts'], r['kind']) for r in out['services']], [('Cloudflare', 9, 'cdn')])  # a CDN is no naming gap
         lead = {r['name']: r for r in out['unversioned']}
         self.assertEqual((lead['Frobnicator']['cves'], lead['Frobnicator']['unversioned_hosts'], lead['Frobnicator']['versioned_hosts']), (2, 3, 2))
         self.assertEqual([r['name'] for r in out['unversioned']], ['Widget', 'Frobnicator'])
@@ -345,11 +345,12 @@ class DatabaseTests(TestCase):
         read_only = create_token(self.admin, 'ro', read_only=True)[1]
         status, data = call(admin, 'GET', '/api/v1/technology-coverage?limit=5')
         self.assertEqual(status, 200, data)
-        self.assertEqual([r['name'] for r in data['unmatched']], ['Cloudflare', 'Express'])  # the framework is not Ubiquiti's UniFi Express
+        self.assertEqual([r['name'] for r in data['unmatched']], ['Express'])  # the framework is not Ubiquiti's UniFi Express
+        self.assertEqual([r['name'] for r in data['services']], ['Cloudflare'])
         self.assertEqual({r['name'] for r in data['unversioned']}, {'Cisco Adaptive Security Appliance'})
         error, mcp = tool_call(read_only, 'technology_coverage', {'project': 'pa'})
         self.assertFalse(error, mcp)
-        self.assertEqual((mcp['project'], mcp['unmatched_count']), ('pa', 2))
+        self.assertEqual((mcp['project'], mcp['unmatched_count'], mcp['services_count']), ('pa', 1, 1))
         self.assertEqual(call(member, 'GET', '/api/v1/technology-coverage')[0], 403)
         error, text = tool_call(member, 'technology_coverage')
         self.assertTrue(error)

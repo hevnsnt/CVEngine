@@ -582,14 +582,14 @@ def unversioned_leads(technologies, ports):
     ``(id, stored name)``) and ``ports`` (pairs of ``(ip address, Port)``). One lead per product, and none for a product some other
     sighting on the same host did give a version, an operating system, or a generic label. Pure, so it is unit tested without a database."""
     from cveFeed.correlation import (_MIN_TOKEN, GENERIC_PRODUCT_TOKENS, _norm, name_matches_token, parse_cpe, parse_version,
-                                     split_name_version)
+                                     split_name_version, split_port_product, stated_version)
     candidates = []
     for source_id, stored in technologies:
         name, version = split_name_version(stored or '')
         candidates.append((name or (stored or '').strip(), parse_version(version) is not None, _lead(name or stored, 'tech', source_id)))
     for ip, port in ports:
-        name = (port.product or '').strip()
-        version = (port.version or '').strip() or (parse_cpe(port.cpe or '') or ('', '', ''))[2]
+        name, version, _rest = split_port_product(port.product, port.version)  # "nginx/1.28.3" is nginx at 1.28.3
+        version = version or stated_version(name, (parse_cpe(port.cpe or '') or ('', '', ''))[2])
         candidates.append((name, parse_version(version) is not None,
                            _lead(name, 'port', port.id, ip=ip, port=port.number, protocol=port.protocol, cpe=(port.cpe or '')[:255],
                                  service=port.service_name or '')))
