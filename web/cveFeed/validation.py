@@ -1217,7 +1217,7 @@ def interpret(subject, check, result):
     Returns the result, with its status refined. Pure."""
     if result.get('status') != 'observed':
         return result
-    from cveFeed.correlation import PRODUCT_ALIASES, _norm, name_matches_token, parse_version, version_in_range
+    from cveFeed.correlation import PRODUCT_ALIASES, _norm, name_matches_token, range_holds
     out = dict(result)
     if subject['kind'] == 'cve_match':
         observed = (result.get('observed') or {})
@@ -1228,7 +1228,7 @@ def interpret(subject, check, result):
                         or product in PRODUCT_ALIASES.get(observed_product, ())
                         or observed_product in PRODUCT_ALIASES.get(product, ()))
         if observed.get('version') and same_product:
-            inside = version_in_range(parse_version(observed['version']), subject.get('range') or {})
+            inside = range_holds(observed['version'], subject.get('range') or {})
             if inside is True:
                 out.update(status='reaffirmed', summary=result['summary'] + '; that version is inside the affected range')
             elif inside is False:

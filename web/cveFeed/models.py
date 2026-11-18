@@ -138,7 +138,7 @@ class CVEEntry(models.Model):
         }
         # the CVE List's own forms the feed passes on ("unspecified" bounds, a branch in two ranges, Junos' "21.1*" and comma lists of fixes) are
         # made ranges correlation can read, and a block the feed states no range for keeps the ranges the CVE List record gave (issues 205, 210)
-        from cveFeed.intel import keep_published_ranges, normalize_feed_ranges, overlay_branch_ranges
+        from cveFeed.intel import keep_published_ranges, normalize_feed_ranges, overlay_branch_ranges, overlay_exact_versions
         defaults["affected"] = normalize_feed_ranges(defaults["affected"])
         stored = cls.objects.filter(cve_id=str(entry["id"])[:64]).values_list("affected", "sources").first()
         if stored and "CVE List V5" in (stored[1] or []):
@@ -147,6 +147,9 @@ class CVEEntry(models.Model):
                 defaults["sources"] = [*defaults["sources"], "CVE List V5"]
         # a branch-by-branch fix list the feed gave with no lower bounds takes the CNA's own bounds from the CVE List record (issue 205)
         defaults["affected"], overlaid = overlay_branch_ranges(str(entry["id"])[:64], defaults["affected"])
+        # Cisco's and Oracle's exact versions, which the feed passes on as a bare ``versions`` list, read from the CVE List record
+        defaults["affected"], exact = overlay_exact_versions(str(entry["id"])[:64], defaults["affected"])
+        overlaid = overlaid or exact
         if overlaid and "CVE List V5" not in defaults["sources"]:
             defaults["sources"] = [*defaults["sources"], "CVE List V5"]
         # a bound the structured record states narrower than public sources show (cveFeed.range_corrections, each with its sources)

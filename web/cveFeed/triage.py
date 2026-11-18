@@ -197,6 +197,8 @@ def library_body_proven_q(prefix=''):
 def range_text(rng):
     """An affected range in words: "1.0.3 to before 3.5.0", "before 3.5.0", "up to 2.4.1"."""
     rng = rng if isinstance(rng, dict) else {}
+    if rng.get('build'):  # one of the exact builds the advisory lists (correlation.item_verdict)
+        return f'the listed build {str(rng["build"]).strip()}'
     low = str(rng.get('introduced') or '').strip()
     low = '' if low in ('0', '*') else low
     fixed = str(rng.get('fixed') or rng.get('less_than') or '').strip()
@@ -457,7 +459,7 @@ def _names(*values):
 
 
 def _range(rng, names=()):
-    return {k: _s(rng[k], 80, names) for k in ('introduced', 'fixed', 'lastAffected', 'last_affected', 'version', 'status', 'less_than')
+    return {k: _s(rng[k], 80, names) for k in ('introduced', 'fixed', 'lastAffected', 'last_affected', 'version', 'status', 'less_than', 'build')
             if isinstance(rng, dict) and rng.get(k) not in (None, '')}
 
 
