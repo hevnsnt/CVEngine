@@ -111,6 +111,10 @@ _BANNERS = (
     ('angularjs', re.compile(r'@license AngularJS v' + _VERSION + r'\b')),
     ('react', re.compile(r'@license React v' + _VERSION + r'\b')),
     ('vue', re.compile(_LINE + r'Vue\.js v' + _VERSION + r'\b')),
+    # Vue 3.4 and later: every package's build starts with the monorepo's banner (vuejs/core rollup.config.js), "* vue v3.4.21" or
+    # "* @vue/runtime-core v3.4.21", then "* (c) 2018-present Yuxi (Evan) You and Vue contributors"; a bundler keeps it as a legal comment
+    ('vue', re.compile(_LINE + r'(?:vue|@vue/(?:shared|reactivity|runtime-core|runtime-dom|compiler-core|compiler-dom|compiler-sfc|server-renderer))'
+                       r' v' + _VERSION + r'[ \t]*\r?\n[ \t]*\*[ \t]*\(c\) 2018-present Yuxi \(Evan\) You')),
     ('lodash', re.compile(_LINE + r'(?:@license )?lodash ' + _VERSION + r'\b', re.IGNORECASE)),
     ('moment', re.compile(r'(?m)^//! moment\.js[ \t]*\r?\n//! version[ \t]*:[ \t]*' + _VERSION + r'\b')),
     ('underscore', re.compile(_LINE + r'Underscore\.js ' + _VERSION + r'\b')),
