@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import cmp_to_key
 from datetime import timedelta
@@ -67,6 +68,14 @@ IMPORT_GROUPS = ("kev", "metasploit", "epss", "exploit_db")  # CVENGINE_INTEL_IM
 
 class SourceError(Exception):
     pass
+
+
+class TransientSourceError(SourceError):
+    """A source answer worth asking again: rate limited (429, or GitHub's 403 with a rate-limit reply), a server error, or a cut
+    connection. ``retry_after`` is the wait the source asked for, in seconds, when it said one."""
+    def __init__(self, message, retry_after=None):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 def _clean(value, limit):
@@ -384,9 +393,50 @@ def fetch_cve5(cve, get=None):
         resp.close()
         return None
     if resp.status_code != 200:
+        status, wait = resp.status_code, _retry_after(resp)
         resp.close()
-        raise SourceError(f"CVE List answered HTTP {resp.status_code} for {cve}")
+        if status in (403, 408, 425, 429) or status >= 500:
+            raise TransientSourceError(f"CVE List answered HTTP {status} for {cve}", retry_after=wait)
+        raise SourceError(f"CVE List answered HTTP {status} for {cve}")
     return json.loads(_body(resp))
+
+
+def _retry_after(resp):
+    """The seconds a ``Retry-After`` header asks for (a number only; an HTTP date is ignored), capped at a minute, or None."""
+    try:
+        value = float((getattr(resp, "headers", None) or {}).get("Retry-After") or "")
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(value, 60.0))
+
+
+FETCH_WAITS = (2, 8, 30)  # seconds before each new try of a record whose read failed for a reason that passes (rate limit, server error)
+_sleep = time.sleep  # replaced in tests
+
+
+def _transient(exc):
+    """Whether a failed read is worth trying again: a rate limit or server error, or a connection that failed or was cut."""
+    if isinstance(exc, TransientSourceError):
+        return True
+    try:
+        import requests
+    except ImportError:  # pragma: no cover
+        return False
+    return isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError))
+
+
+def fetch_cve5_patiently(cve, get=None, waits=None):
+    """``fetch_cve5`` that asks again after a read that failed for a reason that passes, waiting ``FETCH_WAITS`` (longer when the source
+    asked for longer with ``Retry-After``). An error that will not pass (a record over the size limit, a body that is not JSON, another HTTP
+    status) is raised at once, and so is the last transient error once the waits are used up."""
+    waits = FETCH_WAITS if waits is None else waits
+    for attempt in range(len(waits) + 1):
+        try:
+            return fetch_cve5(cve, get=get)
+        except Exception as exc:  # noqa: BLE001 - re-raised below unless it passes
+            if attempt >= len(waits) or not _transient(exc):
+                raise
+            _sleep(max(waits[attempt], getattr(exc, "retry_after", None) or 0))
 
 
 _VERSIONISH = re.compile(r"^[0-9][0-9A-Za-z._+~:-]*$")
@@ -1281,7 +1331,7 @@ def builds_candidates(wide=False):
     return CVEEntry.objects.extra(where=[_BUILDS_WIDE_SQL if wide else _BUILDS_SQL]).filter(pk__gt=cursor).order_by("pk")
 
 
-def backfill_exact_builds(limit=200, get=None, workers=8, wide=False):
+def backfill_exact_builds(limit=200, get=None, workers=4, wide=False):
     """One bounded step of giving stored entries the exact builds their CVE List record lists (``_exact_builds``). Returns the counts.
 
     Before the ``builds`` list, the conversion kept 30 ranges and no parenthesised build, so a Cisco host whose build was not among the first 30
@@ -1298,7 +1348,7 @@ def backfill_exact_builds(limit=200, get=None, workers=8, wide=False):
     return _reread_walk(BUILDS_LANE, builds_candidates(wide), reread, limit=limit, get=get, workers=workers)
 
 
-def _reread_walk(lane, candidates, reread, limit=200, get=None, workers=8):
+def _reread_walk(lane, candidates, reread, limit=200, get=None, workers=4):
     """One bounded, resumable step of reading the CVE List record of stored entries again: the first ``limit`` of ``candidates`` (in id order,
     past the ``lane`` cursor) are fetched, ``reread(row, doc)`` gives each its new ``affected`` (None: unchanged), and an entry that changes is
     stored with the "CVE List V5" label (what lets a cve.now refresh keep what the record gave, ``keep_published_ranges``), marked for
@@ -1306,22 +1356,27 @@ def _reread_walk(lane, candidates, reread, limit=200, get=None, workers=8):
     from cveFeed import range_corrections
     from cveFeed.models import BackgroundCursor, CVEEntry, MatchVerdict
     rows = list(candidates[:max(1, limit)])
-    out = {"scanned": len(rows), "updated": 0, "failed": 0, "failed_ids": [], "done": not rows}
+    out = {"scanned": len(rows), "updated": 0, "failed": 0, "failed_ids": [], "skipped": 0, "skipped_ids": [], "done": not rows}
     if not rows:
         return out
 
     def load(row):
         try:
-            return row, fetch_cve5(row.cve_id, get=get), None
-        except Exception as exc:  # noqa: BLE001 - counted; the command tries the walk again
+            return row, fetch_cve5_patiently(row.cve_id, get=get), None
+        except Exception as exc:  # noqa: BLE001 - counted; a passing failure makes the command try the walk again
             return row, None, exc
     with ThreadPoolExecutor(max_workers=workers) as pool:
         fetched = list(pool.map(load, rows))
     for row, doc, error in fetched:
-        if error is not None:
+        if error is not None and _transient(error):  # still rate limited or down after the waits: the walk is tried again later
             out["failed"] += 1
             out["failed_ids"].append(row.cve_id)
             logger.warning("%s: could not read the CVE List record of %s: %s", lane, row.cve_id, error)
+            continue
+        if error is not None:  # will not read on any try (too large, not JSON, another status): left as stored, never blocks the walk
+            out["skipped"] += 1
+            out["skipped_ids"].append(row.cve_id)
+            logger.warning("%s: the CVE List record of %s cannot be read and is left as stored: %s", lane, row.cve_id, error)
             continue
         new = reread(row, doc)
         if new is None:
@@ -1377,7 +1432,7 @@ def bare_candidates():
     return CVEEntry.objects.extra(where=[_BARE_SQL]).filter(pk__gt=cursor).order_by("pk")
 
 
-def backfill_bare_versions(limit=200, get=None, workers=8):
+def backfill_bare_versions(limit=200, get=None, workers=4):
     """One bounded step of giving the stored blocks cve.now passed on as bare ``versions`` the ranges their CVE List record states
     (``overlay_from_record``). Returns ``{scanned, updated, failed, failed_ids, done}`` as ``backfill_exact_builds`` does, with the same walk:
     at most ``limit`` records per call from the ``bare-versions`` cursor, each changed entry marked for re-correlation. A block whose record
