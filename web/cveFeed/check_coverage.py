@@ -588,6 +588,40 @@ def plan_nuclei_tech(h, ev):
     return _targetable(h) or _one(h, ev, ('nuclei-light',))
 
 
+NETDETECT_KINDS = ('nuclei-netdetect', 'nuclei-netdetect-failed', 'nuclei-netdetect-nocheck')
+
+
+def _netdetect_ports(h):
+    """The open non-web ports of the host's scannable addresses whose class a ``network/detection`` template covers (``cveFeed.network_detection``)."""
+    from cvengine_scanner import nuclei_allowlist
+
+    from cveFeed import nuclei_services
+    classes = set(nuclei_allowlist.detection_classes())
+    out = set()
+    for a in h.scannable():
+        for p in a.ports:
+            try:
+                klass = nuclei_services.classify_port(p)
+            except AttributeError:  # a port fact without the fields the classifier reads
+                continue
+            if klass in classes:
+                out.add((a.address, p.number))
+    return sorted(out)[:MAX_UNITS]
+
+
+def plan_netdetect(h, ev):
+    """The network detection pass (``nuclei_netdetect_scan``, on a Sentinel): one unit per open non-web port a detection template covers. The pass
+    records its runs per ``host:port`` under the name the scan targeted, the host name or the address, so both are read."""
+    why = _targetable(h)
+    if why:
+        return why
+    ports = _netdetect_ports(h)
+    if not ports:
+        return 'no open non-web service a network detection template covers'
+    return [Unit(f'{address}:{number}', ev.ledger_runs(NETDETECT_KINDS, h.project_id, f'{h.name}:{number}')
+                 + ev.ledger_runs(NETDETECT_KINDS, h.project_id, f'{address}:{number}')) for address, number in ports]
+
+
 def plan_nuclei(h, ev):
     return _targetable(h) or _one(h, ev, ('nuclei',))
 
@@ -913,6 +947,8 @@ CHECKS = (
           kinds=('version-source', 'version-source-failed'), stages=('version_sources',), ttl_kind='version-source'),
     Check('db-exposure', 'Unauthenticated database check', plan_db_exposure, stages=('db_exposure_scan',)),
     Check('nuclei-tech', 'Nuclei technology pass', plan_nuclei_tech, kinds=('nuclei-light',), stages=('nuclei_light_scan',)),
+    Check('nuclei-netdetect', 'Nuclei network service detection (non-web ports, on a Sentinel)', plan_netdetect, kinds=NETDETECT_KINDS,
+          ttl_kind='nuclei-netdetect'),
     Check('nuclei', 'Nuclei template scan', plan_nuclei, kinds=('nuclei', 'nuclei-nocheck'), stages=('nuclei_targeted_scan',)),
     Check('nuclei-deep', 'Weekly deep Nuclei', plan_nuclei_deep, kinds=('nuclei-deep-host', 'nuclei-deep-target')),
     Check('nuclei-cve', 'CVE template tests', plan_nuclei_cve, kinds=('nuclei-cve',)),
