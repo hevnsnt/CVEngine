@@ -6,8 +6,10 @@ no match. New and refreshed records carry the whole list; this reads the record 
 
 A dry run by default: it counts the CVEs whose record it would read. With --apply it reads them in bounded passes (--limit records each) from
 where the last run stopped, writes the builds and marks each changed CVE for re-correlation (correlate_refreshed_cves matches them); no finding
-row is written here. When a record could not be read, the walk starts again at the next run and the command fails, so the update step is tried
-again. Safe to run again: a CVE that has its builds is not read twice.
+row is written here. A record GitHub does not serve at once (rate limited, a server error, a cut connection) is asked again up to
+three times with growing waits (intel.FETCH_WAITS, longer when GitHub asks for longer); one that still fails makes the walk start again at
+the next run and the command fail, so the update step is tried again. A record that cannot be read on any try (over the size limit, not
+JSON) is left as stored and named in the summary; it never holds the step back. Safe to run again: a CVE that has its builds is not read twice.
 
     python3 manage.py backfill_exact_builds
     python3 manage.py backfill_exact_builds --apply
@@ -36,17 +38,20 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(f"dry run: {count} stored CVEs would have their CVE List record read for exact builds "
                                                  "(run again with --apply)"))
             return
-        total = {"scanned": 0, "updated": 0, "failed": 0}
-        failed_ids = []
+        total = {"scanned": 0, "updated": 0, "failed": 0, "skipped": 0}
+        failed_ids, skipped_ids = [], []
         for _ in range(max(1, opts["passes"])):
             out = intel.backfill_exact_builds(limit=max(1, opts["limit"]), wide=opts["wide"])
             for key in total:
                 total[key] += out[key]
             failed_ids += out["failed_ids"]
+            skipped_ids += out.get("skipped_ids", [])
             if out["done"]:
                 break
         summary = (f"exact builds: {total['scanned']} CVEs looked at, {total['updated']} given their builds and marked for re-correlation, "
                    f"{total['failed']} records unreadable")
+        if skipped_ids:
+            summary += f", {total['skipped']} left as stored because their record cannot be read ({', '.join(skipped_ids[:10])})"
         if failed_ids:
             intel.reset_exact_builds()  # the next run walks again; a CVE that got its builds is not read twice
             raise CommandError(summary + f" ({', '.join(failed_ids[:10])}); the walk starts again at the next run")
