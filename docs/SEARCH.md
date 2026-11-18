@@ -67,6 +67,8 @@ Host search (everything above) answers "which of my hosts...". To look up a CVE 
 | `runtime:` | A language runtime the host states (Python, Go, Node.js, PHP, Ruby, .NET Framework, Erlang/OTP; `dotnet`, `golang`, `node` and `otp` are aliases), optionally a release prefix after `@`, or `any`; present-without-a-version readings count | `runtime:python`, `runtime:go@1.21`, `runtime:dotnet` |
 | `vsource:` | Where a version was read: a catalogue entry, `header` for the stored headers, `snmp` for an SNMP agent's sysDescr, `bundled` for a component inferred from a vendor's bundle, `nmap`, `webserver`, `testssl`, `wpscan` or `db-probe` for [data already received](PIPELINE.md#versions-already-received), `shodan-idb` or `runzero` for a third-party reading (`reported` for every one), or `any` | `vsource:prometheus-metrics`, `vsource:docker-api`, `vsource:header`, `vsource:snmp`, `vsource:bundled` |
 | `country:` | The country of a host's IP address, by ISO code or name | `country:US`, `country:Germany` |
+| `distro:` | The distribution a service banner names ([PIPELINE.md](PIPELINE.md#cve-intelligence)): a distribution (`ubuntu`, `debian`, `rhel` for the Red Hat family, `centos`, `alpine`, `amzn`, `suse`, `freebsd`), a codename (`jammy`, `bookworm`), a release prefix after `@`, or `any`. A release is known when the banner, the OS CPE or the package build states it, or when only one release ever shipped that build | `distro:jammy`, `distro:ubuntu@22.04`, `distro:debian@12`, `distro:rhel@9` |
+| `pkg:` | A distribution source package a service banner names, optionally its exact build after `@` (the dpkg epoch, which banners never show, may be left out), or the start of one | `pkg:openssh`, `pkg:openssh@1:8.9p1-3ubuntu0.6`, `pkg:openssh@8.9p1-3ubuntu0`, `pkg:php8.1` |
 
 `port:` takes a number only and matches the port over either protocol; add `proto:` to pick one (`proto:udp port:123`). Use `product:` or `service:` for names. A bad value, such as `sev:scary`, returns an error that lists the allowed ones.
 
@@ -116,6 +118,7 @@ note:"rack 3" -alias:spare             hosts with that note, minus the spares
 
 ```text
 ip:203.0.113.0/24 product:nginx        nginx inside one network range
+distro:jammy pkg:openssh@8.9p1-3ubuntu0.6   Ubuntu 22.04 hosts still on one OpenSSH build
 host:staging -host:internal            staging names, minus internal
 tech:wordpress -ip:192.0.2.            WordPress outside one address prefix
 ```

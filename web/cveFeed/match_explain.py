@@ -410,6 +410,64 @@ def _bundled_assessment(match):
             'the host. Not confirmed, and it never raises the host\'s heat on its own.')
 
 
+_RELEASE = re.compile(r'^[0-9][0-9.]{0,15}\Z')
+_CODENAME = re.compile(r'^[a-z]{2,16}\Z')
+_PUBLISHERS = {'sury': 'deb.sury.org', 'backports': "the distribution's backports suite", 'vendor': 'another publisher'}
+
+
+def distro_judgement(match):
+    """How the distribution's own data judged the match, from the reading its evidence keeps (``evidence['distro']``, written by correlation from
+    the banner: cveFeed.distro.parse_distro) and the verdict: ``{distro, name, release, codename, package, installed, fixed, status, text}``
+    (and ``reading``, ``release_basis``, ``third_party``, ``tracker`` when known), or {} when the match has no distribution reading. Every value is
+    validated before it is shown; ``text`` is the sentence the match page reads ("Judged by Ubuntu 22.04 (jammy)'s fixed build ...")."""
+    ev = _ev(match)
+    rec = ev.get('distro') if isinstance(ev.get('distro'), dict) else {}
+    key = str(rec.get('distro') or '').lower()
+    if key not in distro.NAMES:
+        return {}
+    name = distro.NAMES[key]
+    release = str(rec.get('release') or '')
+    release = release if _RELEASE.match(release) else ''
+    codename = str(rec.get('codename') or '')
+    codename = codename if _CODENAME.match(codename) else ''
+    package = str(rec.get('package') or '')
+    package = package if _PACKAGE.match(package) else ''
+    installed = str(rec.get('package_release') or '')
+    installed = installed if _BUILD.match(installed) else ''
+    fixed = str(match.distro_fixed_version or '').strip()
+    fixed = fixed if fixed and fixed != '0' and _BUILD.match(fixed) else ''
+    state = str(match.distro_status or '')
+    where = ' '.join(x for x in (name, release, f'({codename})' if codename else '') if x)
+    out = {'distro': key, 'name': name, 'release': release, 'codename': codename, 'package': package, 'installed': installed, 'fixed': fixed,
+           'status': state}
+    for extra in ('reading', 'release_basis', 'third_party', 'tracker'):
+        value = str(rec.get(extra) or '')
+        if re.match(r'^[a-z_]{1,16}\Z', value):
+            out[extra] = value
+    build = ' '.join(x for x in (package or 'the package', installed) if x)
+    publisher = _PUBLISHERS.get(out.get('third_party', ''))
+    if publisher:
+        text = (f'The installed {build} is a build from {publisher}, not {name}\'s own: {name}\'s security tracker does not speak for it, so the '
+                'upstream version decides.')
+    elif out.get('tracker') == 'not_synced':
+        text = f'{where}: cvENGINE keeps no fix data for this distribution, so the upstream version decides.'
+    elif state == distro.PATCHED:
+        text = (f"Judged by {where}'s own fixed build {fixed}: the installed {build} is at or past it." if fixed and installed
+                else f"{where}'s security tracker says {package or 'the package'} is not affected in this release.")
+    elif state == distro.VULNERABLE:
+        text = (f"Judged by {where}'s own fixed build {fixed}: the installed {build} is older." if fixed and installed
+                else f"{where}'s security tracker lists {package or 'the package'} as affected in this release, with no fixed build yet.")
+    elif state == distro.BACKPORT:
+        text = f'{where} has a fixed build of {package or "the package"}{f" ({fixed})" if fixed else ""}; whether the host has it installed is not known.'
+    elif not installed:
+        text = (f'The banner names {where} but not the installed {package or "package"} build: a hint, never proof of a fix. The installed '
+                'build decides.')
+    else:
+        text = f"{where}'s security tracker has no answer for the installed {build} yet, so the upstream version decides."
+    out['text'] = text
+    return out
+
+
 def _assessment(match, family, key, package):
     """``(basis, confidence, why)`` from the evidence class of the match."""
     ev = _ev(match)
@@ -418,6 +476,11 @@ def _assessment(match, family, key, package):
     pkg = package or 'the package'
     fix = _red_hat_fix(match)
     state = str(match.distro_status or '')
+    judged = distro_judgement(match) if family in ('ubuntu', 'debian') else {}
+    if judged.get('release') and judged.get('distro') == family:
+        fam = ' '.join(x for x in (judged['name'], judged['release'], f'({judged["codename"]})' if judged.get('codename') else '') if x)
+    if judged.get('installed'):
+        pkg = f'{pkg} ({judged["installed"]})'
     if state == distro.PATCHED:
         fixed = f' (fixed in {fix["fixed_build"]})' if fix.get('fixed_build') else ''
         return ('distro_patched', RULED_OUT, f"{fam}'s security tracker lists the installed {pkg} build as fixed{fixed}. The version in range is "
@@ -759,6 +822,9 @@ def explain(match, hint=''):
     }
     if fix.get('advisory') or fix.get('fixed_build'):
         out['advisory'] = fix
+    judged = distro_judgement(match)
+    if judged:
+        out['distro'] = judged  # how the distribution's own data judged it: "Judged by Ubuntu 22.04 (jammy)'s own fixed build ..."
     return out
 
 

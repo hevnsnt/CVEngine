@@ -66,6 +66,7 @@ ALLOWED = {
         'cveFeed/detection_commands.py',
         'cveFeed/discovery.py',
         'cveFeed/distro.py',
+        'cveFeed/distro_releases.py',  # distro release inference: mentions nmap's stored OS CPE in a docstring, runs nothing
         'cveFeed/heavy_process.py',
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/host_context.py',
@@ -75,6 +76,7 @@ ALLOWED = {
         'cveFeed/java_runtime.py',  # reads the port rows the fingerprint pass stored (the service nmap's jdwp-version named) and says so; runs nothing
         'cveFeed/ledger.py',
         'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
+        'cveFeed/management/commands/backfill_distro_readings.py',  # re-reads stored banners and nmap OS CPEs for distro readings, runs nothing
         'cveFeed/management/commands/seed_scale_fixture.py',  # scale fixture: names the ledger services 'nmap' as stored data values (synthetic rows for scripts/scale), runs nothing
         'cveFeed/match_policy.py',
         'cveFeed/migrations/0124_os_path_schedule.py',

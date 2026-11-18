@@ -39,6 +39,7 @@ BACKFILLS = (
     'backfill_exact_builds',              # Cisco's exact builds (cut at 30 or dropped) and Oracle's supported versions read per line (re-correlated)
     'backfill_bare_versions',             # blocks cve.now passed on as bare versions (Linux kernel, VulDB, ...) take their record's ranges (re-correlated)
     'backfill_name_aliases',              # hosts whose technology names the alias data and name rules now connect differently (re-correlated)
+    'backfill_distro_readings',           # stored banners read again for the distribution package build and release, and those hosts re-correlated
     'backfill_source_versions',           # the exact versions and CPEs stored ports, runZero, Shodan InternetDB and database replies state (re-correlated)
     'rerate_findings',                    # 1.3.5: rescore hosts for the new heat rules, clear stale fire marks (last: counts everything above)
 )
