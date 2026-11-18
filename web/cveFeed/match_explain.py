@@ -396,6 +396,72 @@ def _range_assessment(match):
     return 'range_read', NOT_CONFIRMED, why
 
 
+# --- a Windows CVE on a host whose release is known and patch level is not (cveFeed.windows_builds) ---------------------------------------
+
+# The read-only commands that read a Windows host's update revision (UBR), in cmd or PowerShell on the host. Constants only: nothing a scanned
+# host or a feed said is put in a command.
+WINDOWS_QUESTION = {'key': 'windows:ubr', 'text': 'Which Windows update revision (UBR) does this host run?'}
+WINDOWS_NEEDS = 'A command prompt or PowerShell on the host (no administrator rights needed; nothing is changed)'
+_REG_KEY = r'"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion"'
+WINDOWS_COMMANDS = (
+    ('Print the whole Windows version: its last number is the update revision (UBR). In cmd:', 'ver',
+     'Microsoft Windows [Version 10.0.20348.2762] is release 10.0.20348 at update revision 2762.'),
+    ('Read the update revision from the registry (cmd). It prints a hexadecimal number: 0xacc is 2764.', f'reg query {_REG_KEY} /v UBR',
+     'UBR is the revision; CurrentBuild (reg query ... /v CurrentBuild) is the release build the NTLM challenge stated.'),
+    ('The same in PowerShell, in decimal, with the build next to it.',
+     "[System.Environment]::OSVersion.Version; (Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion').UBR",
+     'OSVersion gives 10.0.20348 (its last field may read 0: it does not carry the revision); the second line is the UBR.'),
+    ('List the most recent updates installed, to quote the cumulative update (KB) when you close the match.',
+     'Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 5 HotFixID, Description, InstalledOn',
+     'Microsoft\'s Security Update Guide entry for the CVE names the KB that fixes it on this release: if that KB, or a later cumulative update, is '
+     'listed, the fix is installed.'),
+)
+ESU_COMMAND = ('On a release past its end of support, see whether an Extended Security Updates licence is active (it lists every licence; look '
+               'for "ESU").', r'cscript //nologo %windir%\system32\slmgr.vbs /dlv',
+               'An ESU licence that is licensed means updates after the end of support can be installed; none means they cannot.')
+
+
+def windows_steps(fixed='', end_of_support=False):
+    """The host owner's reads of the update revision, with what each answer means against ``fixed`` (the advisory's fixed build, 10.0.20348.2762)."""
+    from cveFeed.windows_builds import fix_revision
+    revision = fix_revision(fixed)
+    target = f'{revision} or higher (the fixed build is {fixed})' if revision is not None else 'the revision of the advisory\'s fixed build or higher'
+    outcomes = {'fixed': f'The update revision is {target}: the update is installed. Close the match as fixed, or as a false positive, quoting the output.',
+                'affected': 'The revision is lower: the update is not installed. Install the latest cumulative update for this release, restart, then '
+                            'close the match as fixed.',
+                'cant_tell': 'The command cannot run there: ask the host\'s administrator for the output of ver.'}
+    steps = [_step(f'{what} {note}', command, needs=WINDOWS_NEEDS, outcomes=outcomes) for what, command, note in WINDOWS_COMMANDS]
+    if end_of_support:
+        what, command, note = ESU_COMMAND
+        steps.append(_step(f'{what} {note}', command, needs=WINDOWS_NEEDS,
+                           outcomes={'affected': 'No ESU licence: no update after the end of support was installed, so the host is affected by '
+                                                 'this CVE. Upgrade to a supported release.',
+                                     'fixed': 'An ESU licence is active: check the revision with the steps above.'}))
+    return steps
+
+
+def _windows_assessment(match):
+    ev = _ev(match)
+    cve_id = _cve_id(match) or 'this CVE'
+    release = _plain(ev.get('release'), 60) or 'this Windows release'
+    build = _plain(ev.get('build'), 20)
+    windows = ev.get('windows') if isinstance(ev.get('windows'), dict) else {}
+    fixed = _plain(ev.get('fixed_build'), 30)
+    both = [_plain(c, 60) for c in (windows.get('candidates') or [])[:3]]
+    eos = ev.get('end_of_support') if isinstance(ev.get('end_of_support'), dict) else {}
+    read = _plain(ev.get('reading'), 160) or f'{release}, build {build}'
+    why = (f'What an outside check read: {read}'
+           + '. That names the release exactly, but never its update revision (the UBR, the last number of the full build), so whether the update '
+           f'that fixes {cve_id} is installed is not known. The build is not read as revision 0: that would put every host inside every range.'
+           + (f' The build is shared by {" and ".join(both)}, and nothing read tells which this host is.' if windows.get('ambiguous') and len(both) > 1 else '')
+           + (f' The fix is build {fixed}.' if fixed else '')
+           + (f' End of support: {release} left Microsoft support on {_plain(eos.get("date"), 10)}, before this CVE was published, so it gets this '
+              'fix only with a paid Extended Security Updates subscription' + (f' (which ended {_plain(eos.get("esu_until"), 10)})' if eos.get('after_esu')
+                                                                                 else '') + ': very likely unpatched.' if eos else '')
+           + ' Not confirmed, and it never raises the host\'s heat on its own: the host owner reads the revision in a minute with the commands below.')
+    return 'windows_patch_unknown', NOT_CONFIRMED, why
+
+
 def _bundled_assessment(match):
     ev = _ev(match)
     cve_id = _cve_id(match) or 'this CVE'
@@ -500,6 +566,8 @@ def _assessment(match, family, key, package):
         return _runtime_assessment(match)
     if match.source == 'build_range':
         return _range_assessment(match)
+    if match.source == 'windows':
+        return _windows_assessment(match)
     if match.source == 'bundled':
         return _bundled_assessment(match)
     if match.source == 'openvas':
@@ -576,6 +644,9 @@ def _found(match, family, key, label, version):
                 else f'The Java runtime on this host stated {_plain(ev.get("reading"), 120) or named}.')
     elif match.source == 'build_range':
         head = f'This appliance\'s build was read only as a range: {_plain(ev.get("reading"), 160) or named}.'
+    elif match.source == 'windows':
+        head = (f'This host runs {_plain(ev.get("release"), 60) or label}, build {_plain(ev.get("build"), 20)}, as its NTLM challenge states; its '
+                'update revision (the patch level) was not read.')
     elif match.source == 'bundled':
         bundled = ev.get('bundled') if isinstance(ev.get('bundled'), dict) else {}
         head = (f"This host states {_plain(bundled.get('product'), 60) or 'a product'} {_plain(bundled.get('product_version'), 30)}, which its "
@@ -717,6 +788,9 @@ def _other_steps(match, basis, label, cve_id):
         return java_steps()
     if basis in ('runtime_unknown', 'runtime_version'):
         return runtime_steps(str(_ev(match).get('runtime') or ''))
+    if basis == 'windows_patch_unknown':
+        ev = _ev(match)
+        return windows_steps(str(ev.get('fixed_build') or ''), end_of_support=isinstance(ev.get('end_of_support'), dict))
     if basis == 'bundled_inferred':
         label = _plain(_ev(match).get('component_label'), 40) or 'the component'
         return [_step(f'On the host, read the version of the {label} the application actually runs (its own version command, the jar or '
@@ -812,7 +886,8 @@ def explain(match, hint=''):
         'platform': {'family': family, 'label': FAMILIES.get(family, {}).get('long', ''), 'package': package, 'query_package': binary},
         'question': ({'key': f'{family or "any"}:{package}', 'text': f'Is the installed {package} package patched?'} if package and cve_id
                      else dict(JAVA_QUESTION) if basis in ('java_unknown', 'java_version')
-                     else runtime_question(str(_ev(match).get('runtime') or '')) if basis in ('runtime_unknown', 'runtime_version') else None),
+                     else runtime_question(str(_ev(match).get('runtime') or '')) if basis in ('runtime_unknown', 'runtime_version')
+                     else dict(WINDOWS_QUESTION) if basis == 'windows_patch_unknown' else None),
         'who': (f'Someone with a shell on {host or "the host"} (its owner or administrator) can run these. No administrator rights are needed, '
                 'and every command only reads: none installs, changes or restarts anything.') if commands else '',
         'steps': steps,
@@ -864,6 +939,14 @@ def validate_plan(matches, hint='', heat_of=None):
             group['rows'].append({'match_id': m.id, 'cve_id': cve_id, 'kev': bool(getattr(m.cve_entry, 'kev', False)), 'heat': heat,
                                   'product': m.matched_product, 'source': m.source})
             continue
+        if m.source == 'windows' and cve_id:
+            # one question settles every Windows CVE of the host: which update revision it runs
+            heat = (heat_of or {}).get(m.id) or match_heat(m)
+            group = groups.setdefault(('windows', 'windows-ubr'), {'windows': True, 'rows': [], 'eos': False})
+            group['eos'] = group['eos'] or isinstance(_ev(m).get('end_of_support'), dict)
+            group['rows'].append({'match_id': m.id, 'cve_id': cve_id, 'kev': bool(getattr(m.cve_entry, 'kev', False)), 'heat': heat,
+                                  'product': m.matched_product, 'source': m.source, 'fixed_build': str(_ev(m).get('fixed_build') or '')[:30]})
+            continue
         if m.source == 'java' and cve_id and not package_decides(m, hint):
             # one question settles every Java runtime CVE of the host: which Java it runs
             heat = (heat_of or {}).get(m.id) or match_heat(m)
@@ -897,6 +980,17 @@ def validate_plan(matches, hint='', heat_of=None):
                                      'affected': 'The release is inside a CVE\'s range: update the runtime the application runs on, restart it, then '
                                                  'close those matches as fixed.',
                                      'cant_tell': 'The release could not be read: leave the matches open and ask the application\'s owner.'}})
+            continue
+        if g.get('windows'):
+            out.append({'key': WINDOWS_QUESTION['key'], 'question': WINDOWS_QUESTION['text'], 'product': rows[0]['product'], 'package': '',
+                        'query_package': '', 'platform': 'windows', 'platform_label': 'Windows', 'kev': any(r['kev'] for r in rows),
+                        'heat': max((r['heat'] for r in rows), key=lambda h: _HEAT_RANK.get(h, 0)), 'count': len(rows), 'cves': cves,
+                        'resolves': rows, 'steps': windows_steps('', end_of_support=g['eos']),
+                        'outcomes': {'fixed': 'Each match whose fixed build\'s last number is at or below the update revision printed is patched: close '
+                                              'those as fixed, quoting the output.',
+                                     'affected': 'A match whose fixed build\'s last number is above the revision is not patched: install the latest '
+                                                 'cumulative update, restart, then close those matches as fixed.',
+                                     'cant_tell': 'The revision could not be read: leave the matches open and ask the host\'s administrator.'}})
             continue
         if g.get('java'):
             out.append({'key': JAVA_QUESTION['key'], 'question': JAVA_QUESTION['text'], 'product': 'Java runtime', 'package': '', 'query_package': '',

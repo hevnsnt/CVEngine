@@ -450,6 +450,8 @@ def kind_of(r):
     ``collect_bundled`` only, an operating system hint by nothing."""
     if r['kind'] != 'product':
         return RUNTIME_KIND
+    if r.get('release_only'):
+        return HINT_KIND  # a Windows release with no patch level (cveFeed.windows_builds): matched by its own rules, never by name and version
     return 'version' if r['confidence'] == 'exact' else HINT_KIND
 
 
@@ -467,6 +469,9 @@ def _observation(r, port):
     evidence = {'confidence': r['confidence'], 'line_only': r['line_only'], 'component': r['component'], 'source': r['source'],
                 'said': r['evidence'], 'version_source': True, **({'cpe': r['cpe']} if r.get('cpe') else {}),
                 **({'bundled': r['bundled']} if isinstance(r.get('bundled'), dict) else {})}
+    if r.get('release_only') and isinstance(r.get('windows'), dict):
+        # the Windows release an NTLM challenge states (cveFeed.windows_builds): the release, never its update revision
+        evidence.update(release_only=True, windows=r['windows'])
     if isinstance(r.get('range'), dict):
         # a build RANGE (cveFeed.edge_builds): never a technology (outcome ``range``, not ``found``), matched by edge_builds.collect_matches
         from cveFeed import edge_builds
@@ -981,7 +986,7 @@ def as_dict(row):
     return {'component': ev.get('component') or '', 'product': row.product, 'kind': 'runtime' if row.kind == RUNTIME_KIND else 'product',
             'version': row.version, 'confidence': ev.get('confidence') or 'weak', 'line_only': bool(ev.get('line_only')),
             'source': source, 'read_by': ev.get('source') or '', 'port': row.port or None, 'url': row.url, 'evidence': ev.get('said') or '',
-            'matched': row.kind != HINT_KIND or bool(bundled), 'cpe': ev.get('cpe') or '',
+            'matched': row.kind != HINT_KIND or bool(bundled) or bool(ev.get('release_only')), 'cpe': ev.get('cpe') or '',
             'bundled_with': ({k: bundled.get(k, '') for k in ('product', 'product_version', 'basis', 'source')} if bundled else None),
             'first_seen': row.first_seen.isoformat() if row.first_seen else None, 'last_seen': row.observed_at.isoformat() if row.observed_at else None,
             'stale': bool(row.observed_at and row.observed_at < timezone.now() - timedelta(days=STALE_DAYS)),
@@ -989,7 +994,11 @@ def as_dict(row):
             # freshness rule (source_versions.in_use), never a technology
             **(_reported_fields(row) if row.kind == 'reported' else {}),
             # a build RANGE (cveFeed.edge_builds): the releases it can be, and how it was read; never a version
-            **({'range': {k: ev['range'].get(k) for k in ('candidates', 'ranges', 'basis')}} if isinstance(ev.get('range'), dict) else {})}
+            **({'range': {k: ev['range'].get(k) for k in ('candidates', 'ranges', 'basis')}} if isinstance(ev.get('range'), dict) else {}),
+            # a Windows release (cveFeed.windows_builds): the release is known, its update revision (the patch level) is not
+            **({'release_only': True, 'windows': {k: ev['windows'].get(k) for k in ('line', 'candidates', 'ambiguous', 'basis', 'sources',
+                                                                                   'end_of_support', 'esu_until')}}
+               if ev.get('release_only') and isinstance(ev.get('windows'), dict) else {})}
 
 
 def _reported_fields(row):
@@ -1033,7 +1042,8 @@ def search_rows(field, value):
     ``component:<name>`` (a product or runtime read from a version source: ``component:grafana``, ``component:docker``; ``component:any``),
     ``runtime:<name>`` (a language runtime: ``runtime:python``, ``runtime:go``, ``runtime:dotnet``; ``runtime:any``), each optionally with a
     version prefix after ``@`` (``runtime:python@3.8`` finds 3.8.10, never 3.80); ``vsource:<entry>`` (where it was read: ``vsource:prometheus-metrics``,
-    ``vsource:header``, ``vsource:snmp`` for an SNMP agent's sysDescr, ``vsource:bundled`` for a component inferred from a vendor's bundle)."""
+    ``vsource:header``, ``vsource:snmp`` for an SNMP agent's sysDescr, ``vsource:bundled`` for a component inferred from a vendor's bundle,
+    ``vsource:ntlm`` for the Windows release an NTLM challenge states)."""
     from django.db.models import Q
     text = (value or '').strip().lower()
     if not text or len(text) > 80:
