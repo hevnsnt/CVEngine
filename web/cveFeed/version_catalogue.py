@@ -850,8 +850,8 @@ SOURCES = (
            note='only an install that kept the documentation web application; the error page footer is the error-page probe\'s (cveFeed.probes)'),
     Source('weblogic-console', 'Oracle WebLogic Server console', 'product',
            (Request('/console/login/LoginForm.jsp', read='text', find='WebLogic Server Version: '),), read_weblogic_console, leads=r'weblogic',
-           verified='https://github.com/projectdiscovery/nuclei-templates/blob/main/http/exposed-panels/weblogic-login.yaml (the sign-in page '
-           'footer "WebLogic Server Version: <release>")',
+           verified='https://cloud.projectdiscovery.io/library/CVE-2020-2883 (ProjectDiscovery\'s public check reads "WebLogic Server '
+           'Version: <release>" from the sign-in page /console/login/LoginForm.jsp)',
            note='only a domain whose administration console answers on the asked port; the T3 handshake would need a Sentinel kind of its own'),
     Source('aspnet-error', 'ASP.NET error page version block', 'runtime',
            (Request('/cvengine-probe-404.aspx', read='text', find='Microsoft .NET Framework Version:'),), read_aspnet_error,
