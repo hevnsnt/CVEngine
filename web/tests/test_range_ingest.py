@@ -1,6 +1,7 @@
 """Version ranges at ingest: what is stored from a CVE List V5 record and from a cve.now entry, for the real records of Confluence
-(CVE-2022-26134), Bitbucket (CVE-2022-36804), Juniper Junos (CVE-2023-36844..36847, CVE-2023-4481, CVE-2024-21591, CVE-2025-21590) and
-Jenkins (CVE-2024-23897). The fixtures under tests/fixtures are trimmed copies of the real CVE List records (cve5/) and of the live cve.now
+(CVE-2022-26134), Bitbucket (CVE-2022-36804), Juniper Junos (CVE-2023-36844..36847, CVE-2023-4481, CVE-2024-21591, CVE-2025-21590),
+Jenkins (CVE-2024-23897), Cisco, Oracle, the Linux kernel (CVE-2024-53104) and Microsoft (CVE-2020-0787, CVE-2024-38063). The fixtures under
+tests/fixtures are trimmed copies of the real CVE List records (cve5/) and of the live cve.now
 entries (cvenow/): only the fields the code reads were kept. Issues 205 (introduced and fixed in separate range objects, a branch lower bound
 lost) and 210 (defaultStatus affected)."""
 import json
@@ -720,3 +721,230 @@ class OracleFeedTests(TestCase):
         mysql.refresh_from_db()
         self.assertFalse(mysql.needs_recorrelation)
         self.assertFalse(intel.builds_candidates().exists())
+
+
+# ---------------------------------------------------------------------------------------------- bare versions lists (Linux kernel, Microsoft)
+
+# CVE-2024-53104 (Linux kernel uvcvideo, KEV, CVSS vector local): the CVE List record (cve5/, trimmed) has two "Linux" entries, git commits
+# with defaultStatus unaffected, and releases with defaultStatus affected: unaffected below 2.6.26, from each stable line's fix to the end of
+# that line (lessThanOrEqual "6.1.*"), and from 6.13 on. The live cve.now entry (cvenow/) keeps the commits as ranges and passes the release
+# entry on as ``versions: ["2.6.26"]`` with ``ranges: []``. CVE-2020-0787 (Windows BITS, KEV): Microsoft's records before 2021 put product
+# names in ``version`` ("10 Version 1803 for 32-bit Systems"), which are not versions. CVE-2024-38063 (cve5/, four of its 25 products): the
+# shape Microsoft writes now, ``version: 10.0.0, lessThan: 10.0.22000.3197, versionType: custom``.
+
+KERNEL_RANGES = [('2.6.26', '4.19.324'), ('4.20', '5.4.286'), ('5.5', '5.10.230'), ('5.11', '5.15.172'), ('5.16', '6.1.117'), ('6.2', '6.6.61'),
+                 ('6.7', '6.11.8'), ('6.12', '6.12.1')]
+KERNEL = [('2.6.25', False), ('2.6.26', True), ('4.19.323', True), ('4.19.324', False), ('4.19.999', False), ('4.20', True), ('5.4.0', True),
+          ('5.4.285', True), ('5.4.286', False), ('5.10.229', True), ('5.10.230', False), ('5.15.172', False), ('6.1.116', True),
+          ('6.1.117', False), ('6.6.60', True), ('6.6.61', False), ('6.11.7', True), ('6.11.8', False), ('6.12.0', True), ('6.12.1', False),
+          ('6.13', False), ('7.0', False)]
+
+
+def release_block(affected):
+    return next(item for item in affected if item.get('versions') == ['2.6.26'])
+
+
+def kernel_record(**changes):
+    doc = cve5('CVE-2024-53104')
+    for entry in doc['containers']['cna']['affected']:
+        if entry['defaultStatus'] == 'affected':
+            entry.update(changes)
+    return doc
+
+
+class LinuxKernelBareVersionsTests(TestCase):
+    def test_the_release_entry_is_read_as_the_releases_between_the_fixed_lines(self):
+        git, releases = intel.convert_affected(cve5('CVE-2024-53104')['containers']['cna']['affected'], 'Linux')
+        self.assertEqual(intro_fixed(releases['ranges']), KERNEL_RANGES)
+        self.assertTrue(all(r['type'] == 'SEMVER' for r in releases['ranges']))
+        self.assertNotIn('builds', releases)  # "2.6.26" is where the flaw began, not one affected build
+        self.assertEqual({r['type'] for r in git['ranges']}, {'GIT'})  # the commits stay commits
+
+    def test_the_live_entry_takes_the_record_ranges_and_never_the_commits(self):
+        offline = feed_from_api('CVE-2024-53104')
+        self.assertEqual(release_block(offline.affected)['ranges'], [])  # what was stored: no range, a "version unknown" KEV candidate
+        CVEEntry.objects.all().delete()
+        entry = feed_from_api('CVE-2024-53104', cve5('CVE-2024-53104'))
+        block = release_block(entry.affected)
+        self.assertEqual(intro_fixed(block['ranges']), KERNEL_RANGES)
+        for rng in block['ranges']:
+            for bound in ('introduced', 'fixed'):
+                self.assertIsNotNone(parse_version(rng[bound], strict=True))  # a version, never a commit
+        self.assertEqual(entry.affected[0], cvenow('CVE-2024-53104')['affected'][0])  # the commit block as the feed gave it
+        self.assertIn('CVE List V5', entry.sources)
+
+    def test_every_kernel_release_is_judged_on_both_sides_of_each_fix(self):
+        entry = feed_from_api('CVE-2024-53104', cve5('CVE-2024-53104'))
+        block = release_block(entry.affected)
+        self.assertEqual(mismatches([block], 'Linux Kernel', KERNEL), [])
+        # with the commit block beside it, a release outside the ranges stays unknown (the commits cannot be compared), never matched
+        for version, expected in KERNEL:
+            self.assertIs(verdict(entry.affected, 'Linux Kernel', version), True if expected else None, version)
+
+    def test_a_refresh_keeps_the_release_ranges_without_reading_the_record(self):
+        entry = feed_from_api('CVE-2024-53104', cve5('CVE-2024-53104'))
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=AssertionError('read again')):
+            again, _ = CVEEntry.from_api(cvenow('CVE-2024-53104'))
+        self.assertEqual(CVEEntry.objects.get(pk=again.pk).affected, entry.affected)
+
+    def test_a_record_that_gives_nothing_sound_leaves_the_block_unbounded(self):
+        star = {'version': '6.13', 'lessThanOrEqual': '*', 'status': 'unaffected', 'versionType': 'original_commit_for_fix'}
+        releases = next(e for e in cve5('CVE-2024-53104')['containers']['cna']['affected'] if e['defaultStatus'] == 'affected')
+        unfixed = kernel_record(versions=[v for v in releases['versions'] if v != star])  # mainline not fixed: 6.13 on is an open range
+        inclusive = kernel_record(versions=[{**v, 'lessThanOrEqual': '6.1.200'} if v.get('lessThanOrEqual') == '6.1.*' else v
+                                            for v in releases['versions']])  # an exact inclusive bound: a hole no range can write
+        nothing = kernel_record(versions=[{'version': '2.6.26', 'status': 'affected'}])  # every release affected
+        for doc in (unfixed, inclusive, nothing):
+            CVEEntry.objects.all().delete()
+            entry = feed_from_api('CVE-2024-53104', doc)
+            self.assertEqual(release_block(entry.affected)['ranges'], [])
+            self.assertNotIn('CVE List V5', entry.sources)
+
+    def test_the_feeds_list_alone_is_never_read_and_commits_never_become_bounds(self):
+        bare = {'vendor': 'Linux', 'product': 'Linux', 'ranges': [], 'versions': ['2.6.26']}
+        self.assertIsNone(intel.record_ranges_for(bare, [], 'Linux'))
+        git = cve5('CVE-2024-53104')['containers']['cna']['affected'][0]
+        hashes = {'vendor': 'Linux', 'product': 'Linux', 'ranges': [], 'versions': [git['versions'][0]['version']]}
+        self.assertIsNone(intel.record_ranges_for(hashes, [git], 'Linux'))
+        digits = [{'vendor': 'x', 'product': 'Widget', 'versions': [{'version': '25407073', 'status': 'affected'}]}]  # all digits, hash-shaped
+        self.assertIsNone(intel.record_ranges_for({'vendor': 'x', 'product': 'Widget', 'versions': ['25407073']}, digits))
+
+    def test_a_kernel_cve_stays_local_and_never_matches_a_host(self):
+        from cveFeed import locality
+        entry = feed_from_api('CVE-2024-53104', cve5('CVE-2024-53104'))
+        self.assertTrue(entry.kev)
+        before = locality.classify(entry.cvss_vector, entry.original_description, entry.title, cvenow('CVE-2024-53104')['affected'], True)
+        after = locality.classify(entry.cvss_vector, entry.original_description, entry.title, entry.affected, True)
+        self.assertEqual((before[0], after[0]), (True, True))  # the ranges change nothing about where it can be exploited from
+        locality.refresh()
+        self.assertTrue(CVEEntry.objects.get(pk=entry.pk).local_only)
+        correlation._INDEX_CACHE['key'] = None
+        cve_by_id, _index = correlation.cve_pool()
+        self.assertNotIn(entry.pk, cve_by_id)
+
+
+class MicrosoftBareVersionsTests(TestCase):
+    def test_product_names_in_the_version_field_are_never_read_as_versions(self):
+        doc = cve5('CVE-2020-0787')
+        for item in cvenow('CVE-2020-0787')['affected']:
+            self.assertIsNone(intel.record_ranges_for(item, doc['containers']['cna']['affected'], 'microsoft'), item['product'])
+        entry = feed_from_api('CVE-2020-0787', doc)
+        self.assertEqual([item['ranges'] for item in entry.affected], [[], [], []])  # unbounded, as before: a "version unknown" candidate
+        self.assertNotIn('CVE List V5', entry.sources)
+
+    def test_the_custom_build_ranges_are_read_per_product(self):
+        entries = cve5('CVE-2024-38063')['containers']['cna']['affected']
+        converted = {item['product']: intro_fixed(item['ranges']) for item in intel.convert_affected(entries, 'microsoft')}
+        self.assertEqual(converted, {'Windows 10 Version 1809': [('10.0.17763.0', '10.0.17763.6293')],
+                                     'Windows Server 2022': [('10.0.20348.0', '10.0.20348.2700')],
+                                     'Windows 11 version 21H2': [('10.0.0', '10.0.22000.3197')],
+                                     'Windows 10 Version 22H2': [('10.0.19045.0', '10.0.19045.4780')]})
+
+    def test_a_bare_block_of_the_custom_shape_takes_only_its_own_products_range(self):
+        entries = cve5('CVE-2024-38063')['containers']['cna']['affected']
+        win11 = {'vendor': 'Microsoft', 'product': 'Windows 11 version 21H2', 'ranges': [], 'versions': ['10.0.0']}
+        found = intel.record_ranges_for(win11, entries, 'microsoft')
+        self.assertEqual(intro_fixed(found['ranges']), [('10.0.0', '10.0.22000.3197')])
+        block = [{**win11, **found}]
+        self.assertIs(verdict(block, 'Windows 11 version 21H2', '10.0.22000.3196'), True)
+        self.assertIs(verdict(block, 'Windows 11 version 21H2', '10.0.22000.3197'), False)
+        # a block whose listed version the record's block for that product does not list is not read
+        self.assertIsNone(intel.record_ranges_for({**win11, 'versions': ['10.0.19045.0']}, entries, 'microsoft'))
+
+
+class BareVersionShapeTests(SimpleTestCase):
+    def ranges(self, product, versions, **entry):
+        found = intel.record_ranges_for({'vendor': 'V', 'product': product, 'ranges': [], 'versions': [v['version'] for v in versions]},
+                                        [{'vendor': 'V', 'product': product, 'versions': versions, **entry}])
+        return [(r.get('introduced'), r.get('fixed') or r.get('lastAffected')) for r in found['ranges']] if found else None
+
+    def test_exact_versions_and_written_ranges(self):
+        aff = lambda *texts: [{'version': t, 'status': 'affected'} for t in texts]  # noqa: E731
+        self.assertEqual(self.ranges('Questions For Confluence', aff('2.7.34', '2.7.35', '3.0.2')),  # CVE-2022-26138: exactly these
+                         [('2.7.34', '2.7.34'), ('2.7.35', '2.7.35'), ('3.0.2', '3.0.2')])
+        # Apache writes the product's name in front of the version (CVE-2021-42013, CVE-2021-41773, CVE-2021-33193)
+        self.assertEqual(self.ranges('Apache HTTP Server', aff('Apache HTTP Server 2.4.49', 'Apache HTTP Server 2.4.50')),
+                         [('2.4.49', '2.4.49'), ('2.4.50', '2.4.50')])
+        self.assertEqual(self.ranges('Apache HTTP Server', aff('Apache HTTP Server 2.4 2.4.49')), [('2.4.49', '2.4.49')])
+        self.assertEqual(self.ranges('Apache HTTP Server', aff('Apache HTTP Server 2.4 2.4.17 to 2.4.48')), [('2.4.17', '2.4.48')])
+        self.assertEqual(self.ranges('PHP', aff('7.2.x below 7.2.30')), [('7.2', '7.2.30')])  # CVE-2020-7067
+        self.assertEqual(self.ranges('tokio', aff('= 1.54.0')), [('1.54.0', '1.54.0')])  # GitHub's "=" (cve.now drops it)
+        self.assertEqual(self.ranges('Slurm', [{'version': '25.05.0', 'lessThan': '25.05.9', 'status': 'affected'}]), [('25.05.0', '25.05.9')])
+
+    def test_what_is_not_sound_is_left_unbounded(self):
+        aff = lambda *texts: [{'version': t, 'status': 'affected'} for t in texts]  # noqa: E731
+        self.assertIsNone(self.ranges('Restaurant_IMS', aff('922ff6d208278282e7c8e36d70d9ae356adec9fe')))  # a commit
+        self.assertIsNone(self.ranges('llama.cpp', aff('0.4.0', '55d4206c8')))  # one commit spoils the list
+        self.assertIsNone(self.ranges('Phoca Gallery', aff('4.5.0-6.1.5')))  # two releases or a revision: not known
+        self.assertIsNone(self.ranges('Windows', aff('10 Version 1607 for 32-bit Systems', '2019')))  # product names
+        self.assertIsNone(self.ranges('Widget', aff('2.0 and later')))  # open
+        self.assertIsNone(self.ranges('Widget', [{'version': '2.0', 'lessThan': '*', 'status': 'affected'}]))  # open
+        self.assertIsNone(self.ranges('Widget', aff('0')))  # every release
+        self.assertIsNone(self.ranges('Widget', aff('1.0'), defaultStatus='affected'))  # every release
+        self.assertIsNone(self.ranges('Widget', [{'version': '1.0', 'lessThan': '2.0', 'status': 'affected', 'versionType': 'git'}]))
+        twice = [{'vendor': 'V', 'product': 'Widget', 'versions': aff('1.0')}] * 2  # which entry the block is cannot be told
+        self.assertIsNone(intel.record_ranges_for({'vendor': 'V', 'product': 'Widget', 'versions': ['1.0']}, twice))
+        other_vendor = [{'vendor': 'Other', 'product': 'Widget', 'versions': aff('1.0')}]
+        self.assertIsNone(intel.record_ranges_for({'vendor': 'V', 'product': 'Widget', 'versions': ['1.0']}, other_vendor))
+
+    def test_a_refresh_gives_a_bare_block_only_its_own_stored_ranges(self):
+        commits = {'vendor': 'Linux', 'product': 'Linux', 'ranges': [{'introduced': 'c0efd232929c2cd8', 'fixed': '95edf13a48e75dc2'},
+                                                                    {'introduced': '5.0', 'fixed': '5.1'}]}
+        releases = {'vendor': 'Linux', 'product': 'Linux', 'ranges': [{'introduced': '2.6.26', 'fixed': '4.19.324'}], 'versions': ['2.6.26']}
+        feed = [{**commits}, {**releases, 'ranges': []}]
+        self.assertEqual(intel.keep_published_ranges(feed, [commits, releases]), [commits, releases])
+        changed = [{**commits}, {**releases, 'ranges': [], 'versions': ['2.6.27']}]  # the record changed: read again, never the commits
+        self.assertEqual(intel.keep_published_ranges(changed, [commits, releases])[1]['ranges'], [])
+
+
+class BareVersionsBackfillTests(TestCase):
+    RECORDS = {'CVE-2024-53104': 'CVE-2024-53104', 'CVE-2020-0787': 'CVE-2020-0787'}
+
+    def fetch(self, cve, get=None):
+        return cve5(self.RECORDS[cve])
+
+    def test_the_backfill_reads_the_stored_bare_blocks_and_marks_the_changed_cves(self):
+        kernel = feed_from_api('CVE-2024-53104')
+        windows = feed_from_api('CVE-2020-0787')
+        jenkins = CVEEntry.objects.create(cve_id='CVE-2024-23897', affected=[{'product': 'Jenkins', 'ranges': []}])  # no versions: not this walk
+        MatchVerdict.objects.create(cve_entry=kernel, matched_product='Linux', matched_version='6.1.50', version_in_range=None, ai_verdict='unknown')
+        self.assertEqual(set(intel.bare_candidates().values_list('cve_id', flat=True)), {'CVE-2024-53104', 'CVE-2020-0787'})
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=self.fetch):
+            out = intel.backfill_bare_versions(limit=10)
+        self.assertEqual((out['scanned'], out['updated'], out['failed']), (2, 1, 0))
+        kernel.refresh_from_db()
+        self.assertEqual(intro_fixed(release_block(kernel.affected)['ranges']), KERNEL_RANGES)
+        self.assertTrue(kernel.needs_recorrelation)
+        self.assertIn('CVE List V5', kernel.sources)
+        self.assertFalse(MatchVerdict.objects.filter(cve_entry=kernel).exists())
+        windows.refresh_from_db()
+        self.assertFalse(windows.needs_recorrelation)  # nothing sound: left as it was
+        jenkins.refresh_from_db()
+        self.assertFalse(jenkins.needs_recorrelation)
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=AssertionError('read twice')):
+            self.assertEqual(intel.backfill_bare_versions(limit=10), {'scanned': 0, 'updated': 0, 'failed': 0, 'failed_ids': [], 'done': True})
+
+    def test_the_update_step_runs_the_command_and_a_failure_walks_again(self):
+        from io import StringIO
+
+        from cveFeed import upgrade_backfills
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+        self.assertIn('backfill_bare_versions', upgrade_backfills.BACKFILLS)
+        feed_from_api('CVE-2024-53104')
+        out = StringIO()
+        call_command('backfill_bare_versions', stdout=out)
+        self.assertIn('1 stored CVEs would', out.getvalue())
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=intel.SourceError('HTTP 503')), self.assertRaises(CommandError):
+            call_command('backfill_bare_versions', '--apply')
+        self.assertEqual(intel.bare_candidates().count(), 1)
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=self.fetch):
+            self.assertEqual(upgrade_backfills.run_one('backfill_bare_versions'), 'done')
+        self.assertTrue(CVEEntry.objects.get(cve_id='CVE-2024-53104').needs_recorrelation)
+
+    def test_the_seed_carries_the_ranges_a_bare_block_was_given(self):
+        from cveFeed import seed
+        entry = feed_from_api('CVE-2024-53104', cve5('CVE-2024-53104'))
+        line = json.loads(json.dumps(seed.record_for(entry)))
+        self.assertEqual(seed.clean_record(line)['affected'], entry.affected)
+        self.assertEqual(intro_fixed(release_block(seed.clean_record(line)['affected'])['ranges']), KERNEL_RANGES)

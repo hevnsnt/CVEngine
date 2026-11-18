@@ -37,6 +37,7 @@ BACKFILLS = (
     'backfill_java_runtimes',             # the Java runtime existing hosts give away without a request, and their runtime CVE matches
     'backfill_version_sources',           # the versions and runtimes existing hosts' stored headers state, and their runtime CVE matches
     'backfill_exact_builds',              # Cisco's exact builds (cut at 30 or dropped) and Oracle's supported versions read per line (re-correlated)
+    'backfill_bare_versions',             # blocks cve.now passed on as bare versions (Linux kernel, VulDB, ...) take their record's ranges (re-correlated)
     'rerate_findings',                    # 1.3.5: rescore hosts for the new heat rules, clear stale fire marks (last: counts everything above)
 )
 MAX_ATTEMPTS = 3
