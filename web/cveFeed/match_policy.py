@@ -66,7 +66,14 @@ REASON_RANGE_READ = ('Build read only as a range: an outside check placed this a
                      'it runs was not read. It is kept for review at very low priority and never fires on its own; it is decided at once when the '
                      'exact build is read, and the appliance\'s owner can settle it in a minute from its administration page or CLI (show version, '
                      'get system status, the About page).')
-UNKNOWN_FLAGS = ('java_unknown', 'runtime_unknown', 'range_read')  # a version that was not read: the same treatment as an advisory with no range
+# a component a vendor bundles with a product release the host states, inferred inside an affected range (cveFeed.version_sources:
+# evidence.bundled_inferred): the host runs it only if its owner kept the bundled one
+REASON_BUNDLED = ('Bundled component, version inferred: the host states a product release, and the vendor ships that release with this '
+                  'component at a version inside the affected range. It applies only if the bundled component was not replaced (an archive '
+                  'install on the system\'s own copy, a jar swapped after an advisory, an external service), which nothing outside the host can '
+                  'tell. It is kept for review at very low priority and never fires on its own; the host owner settles it by reading the version '
+                  'of the component the application actually runs.')
+UNKNOWN_FLAGS = ('java_unknown', 'runtime_unknown', 'bundled_inferred', 'range_read')  # a version not read, only inferred, or read only as a range: treated as an advisory with no range
 
 
 def unknown_reason(evidence):
@@ -76,6 +83,8 @@ def unknown_reason(evidence):
         return REASON_JAVA_UNKNOWN
     if evidence_flag(evidence, 'range_read'):
         return REASON_RANGE_READ
+    if evidence_flag(evidence, 'bundled_inferred'):
+        return REASON_BUNDLED
     return REASON_RUNTIME_UNKNOWN if evidence_flag(evidence, 'runtime_unknown') else REASON_VERSION_UNKNOWN
 
 
@@ -87,6 +96,8 @@ def unknown_why(facts):
         return 'the language runtime\'s version could not be read from outside'
     if facts.get('range_read'):
         return 'only a range of the appliance\'s builds could be read from outside'
+    if facts.get('bundled_inferred'):
+        return 'the bundled component\'s version is only inferred from the product release'
     return 'the advisory gives no affected version range'
 
 
@@ -447,7 +458,7 @@ def version_unknown_q(prefix=''):
     """The database form of ``is_version_unknown`` over CVEMatch rows (``prefix`` reaches the match from another model)."""
     from django.db.models import Q
     return ((evidence_flag_q('unbounded', prefix) | evidence_flag_q('java_unknown', prefix) | evidence_flag_q('runtime_unknown', prefix)
-             | evidence_flag_q('range_read', prefix))
+             | evidence_flag_q('bundled_inferred', prefix) | evidence_flag_q('range_read', prefix))
             & Q(**{prefix + 'version_in_range__isnull': True})
             & ~Q(**{prefix + 'template_result': 'vulnerable'}) & ~Q(**{prefix + 'distro_status': 'vulnerable'})
             & ~evidence_flag_q('runzero', prefix))

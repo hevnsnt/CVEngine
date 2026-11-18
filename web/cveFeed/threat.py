@@ -270,6 +270,7 @@ REASON_VERSION_UNKNOWN = "the CVE publishes no affected version range: kept for 
 REASON_JAVA_UNKNOWN = "the Java runtime's version could not be read from outside: kept for review"
 REASON_RUNTIME_UNKNOWN = "the language runtime's version could not be read from outside: kept for review"
 REASON_RANGE_READ = "only a range of the appliance's builds could be read from outside: kept for review"
+REASON_BUNDLED = "the bundled component's version is only inferred from the product release: kept for review"
 REASON_NOT_HOT = "not on the KEV and no known exploit"
 
 
@@ -291,6 +292,8 @@ def heat_reason(match, heat=None):
             return REASON_JAVA_UNKNOWN
         if match_policy.evidence_flag(match.evidence, 'range_read'):
             return REASON_RANGE_READ  # an edge appliance's build read only as a range (cveFeed.edge_builds)
+        if match_policy.evidence_flag(match.evidence, 'bundled_inferred'):
+            return REASON_BUNDLED
         return REASON_RUNTIME_UNKNOWN if match_policy.evidence_flag(match.evidence, 'runtime_unknown') else REASON_VERSION_UNKNOWN
     capped_why = triage_cap_reason(match, heat)
     if heat_policy() == LEGACY_POLICY:

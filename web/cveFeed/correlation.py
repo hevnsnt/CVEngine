@@ -333,6 +333,10 @@ PRODUCT_ALIASES = {
     "nodejsexpressframework": {"express"},
     "vmwareesxisoapapi": {"esxi"},
     "ciscoioshttpconfig": {"ios"},
+    # Cisco's ASA under its three names: Cisco's records before and after the Secure Firewall rename, and NVD's CPE product (an SNMP agent
+    # says only "Cisco Adaptive Security Appliance Version 9.16(4)18": cveFeed.version_catalogue.from_sysdescr)
+    "ciscoadaptivesecurityapplianceasasoftware": {"adaptivesecurityappliancesoftware",
+                                                  "ciscosecurefirewalladaptivesecurityapplianceasasoftware"},
     "golangnethttpserver": {"go"},
     "pythonbasehttpserver": {"python"},
     # package names a host's own package manager reports (cveFeed.inventory_match): the feed names the same software differently
@@ -1556,7 +1560,7 @@ def save_matches(rows, covered=None):
     return len(unique)
 
 
-_CORRELATED_SOURCES = ("tech", "port", "java", "runtime", "build_range")  # java: cveFeed.java_runtime; runtime: cveFeed.version_sources; build_range: cveFeed.edge_builds
+_CORRELATED_SOURCES = ("tech", "port", "java", "runtime", "bundled", "build_range")  # java: cveFeed.java_runtime; runtime, bundled: cveFeed.version_sources; build_range: cveFeed.edge_builds
 
 
 def close_rejected():
@@ -1750,6 +1754,10 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     from cveFeed import version_sources
     version_sources.collect_matches(subdomain, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence, fix_lookup=fix_lookup)
 
+    # The components a vendor bundles with a product release the host states (cveFeed.bundled_components: Atlassian's Tomcat, Elasticsearch's
+    # Lucene and Log4j, the Jetty in jenkins.war ...): named like a technology, but an inferred version is never a version inside a range, so
+    # at most a needs-validation candidate; a CVE already matched above is not matched twice.
+    version_sources.collect_bundled(subdomain, product_index, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence)
     # The build RANGE an edge appliance's static files put it in (cveFeed.edge_builds: PAN-OS, FortiOS, Pulse Connect Secure): a CVE whose own
     # record names the product and that a release of the range can reach is a needs-validation candidate, never a version in range.
     from cveFeed import edge_builds
@@ -1773,13 +1781,23 @@ def correlate_subdomains(subdomains, product_index, cve_by_id, min_confidence=0.
     rows, ids = [], set()
     pool = set(cve_by_id)
     fix_lookup = fix_lookup or DbFixLookup()
-    for sub in subdomains:
-        hosts += 1
-        ids.add(sub.id)
-        collect_subdomain_matches(sub, product_index, cve_by_id, min_confidence, scan_history, rows, fix_lookup, leads)
-        if hosts % batch == 0:
-            matches += save_matches(rows, covered=(ids, pool))
-            rows, ids = [], set()
+    from itertools import islice
+
+    from cveFeed import version_sources
+    walk = iter(subdomains)
+    while True:
+        chunk = list(islice(walk, batch))
+        if not chunk:
+            break
+        if product_index:
+            version_sources.prefetch_bundled(chunk)  # the hosts' bundled component readings in one query, not one per host
+        for sub in chunk:
+            hosts += 1
+            ids.add(sub.id)
+            collect_subdomain_matches(sub, product_index, cve_by_id, min_confidence, scan_history, rows, fix_lookup, leads)
+            if hosts % batch == 0:
+                matches += save_matches(rows, covered=(ids, pool))
+                rows, ids = [], set()
     return hosts, matches + save_matches(rows, covered=(ids, pool))
 
 
@@ -1912,6 +1930,9 @@ def candidate_subdomains(product_index, base=None):
     if version_sources.index_has_runtime(product_index):
         # a language runtime CVE in the pool: every host with a runtime reading is a candidate (cveFeed.version_sources)
         wanted |= Q(id__in=version_sources.runtime_host_ids(Subdomain.objects if base is None else base))
+    if product_index:
+        # a host whose vendor bundle names a component (cveFeed.bundled_components) is a candidate for that component's CVEs
+        wanted |= Q(id__in=version_sources.bundled_host_ids(Subdomain.objects if base is None else base))
     from cveFeed import edge_builds
     if product_index:
         # an edge appliance's build range (cveFeed.edge_builds): matched by the CVE's vendor and product, not by a technology token

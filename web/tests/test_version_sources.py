@@ -356,8 +356,10 @@ class ReadTests(VersionFixture, TestCase):
         from jsonschema import Draft202012Validator
         from agentapi import sentinel_contract
         self.assertEqual(list(Draft202012Validator(sentinel_contract.target_schema('version_read')).iter_errors(self.vtasks[0]['target'])), [])
-        row = ProbeObservation.objects.get(host='app.rt.test', probe='vsrc:grafana')
+        row = ProbeObservation.objects.get(host='app.rt.test', probe='vsrc:grafana', kind='version')
         self.assertEqual((row.kind, row.product, row.version, row.evidence['confidence']), ('version', 'Grafana', '10.2.3', 'exact'))
+        go = ProbeObservation.objects.get(host='app.rt.test', probe='vsrc:grafana', kind='runtime')  # the Go release Grafana 10.2.3 was built with
+        self.assertEqual((go.product, go.version, go.evidence['confidence'], go.evidence['source']), ('Go', '1.21.3', 'inferred', 'bundled'))
         self.assertIn('Grafana:10.2.3', set(scan.subdomain_set.get().technologies.values_list('name', flat=True)))
         payload = version_sources.readings_for([self.project.pk], {'app.rt.test'})[(self.project.pk, 'app.rt.test')]
         self.assertEqual((payload[0]['product'], payload[0]['version'], payload[0]['source']), ('Grafana', '10.2.3', 'grafana'))
@@ -463,7 +465,7 @@ class PassiveTests(VersionFixture, TestCase):
         sub.webserver = ''
         sub.save(update_fields=['webserver'])
         version_sources.refresh_host(sub)
-        self.assertFalse(ProbeObservation.objects.filter(probe='vsrc:passive', port=0).exists())  # gone with what it was read from
+        self.assertFalse(ProbeObservation.objects.filter(probe='vsrc:passive', port=0, kind='runtime').exists())  # gone with what it was read from
 
     def test_the_catch_up_stores_and_correlates(self):
         cve('CVE-2026-200001', PY_RANGE)

@@ -45,8 +45,9 @@ def _fresh_readings(hosts, since):
     out = {}
     if not projects or not names:
         return out
+    # a version source's hint (a bundled component, an operating system line: cveFeed.version_sources) was inferred, not read from the product
     for project, host, product, version in ProbeObservation.objects.filter(
-            project_id__in=projects, host__in=names, outcome='found', observed_at__gte=since).exclude(version='').values_list(
+            project_id__in=projects, host__in=names, outcome='found', observed_at__gte=since).exclude(version='').exclude(kind='hint').values_list(
             'project_id', 'host', 'product', 'version'):
         out.setdefault((project, host), set()).add((_key(product), version))
     for project, host, evidence in RouteAuth.objects.filter(project_id__in=projects, host__in=names, path='/', checked_at__gte=since).values_list(

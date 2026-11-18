@@ -396,6 +396,20 @@ def _range_assessment(match):
     return 'range_read', NOT_CONFIRMED, why
 
 
+def _bundled_assessment(match):
+    ev = _ev(match)
+    cve_id = _cve_id(match) or 'this CVE'
+    label = _plain(ev.get('component_label'), 40) or 'the component'
+    bundled = ev.get('bundled') if isinstance(ev.get('bundled'), dict) else {}
+    product = ' '.join(x for x in (_plain(bundled.get('product'), 60), _plain(bundled.get('product_version'), 30)) if x) or 'the product'
+    source = _plain(bundled.get('source'), 300)
+    return ('bundled_inferred', NOT_CONFIRMED,
+            f'The host states {product}, and the vendor ships that release with {label} {_plain(ev.get("raw_version"), 30)}'
+            + (f' ({source})' if source else '') + f', which is inside the range {cve_id} affects. That is an inference: it applies only if the '
+            f'bundled {label} was not replaced, which nothing outside the host can tell. Read the version of the {label} the application runs on '
+            'the host. Not confirmed, and it never raises the host\'s heat on its own.')
+
+
 def _assessment(match, family, key, package):
     """``(basis, confidence, why)`` from the evidence class of the match."""
     ev = _ev(match)
@@ -423,6 +437,8 @@ def _assessment(match, family, key, package):
         return _runtime_assessment(match)
     if match.source == 'build_range':
         return _range_assessment(match)
+    if match.source == 'bundled':
+        return _bundled_assessment(match)
     if match.source == 'openvas':
         qod = _qod(ev)
         quality = f' (quality of detection {qod}%)' if qod is not None else ''
@@ -497,6 +513,10 @@ def _found(match, family, key, label, version):
                 else f'The Java runtime on this host stated {_plain(ev.get("reading"), 120) or named}.')
     elif match.source == 'build_range':
         head = f'This appliance\'s build was read only as a range: {_plain(ev.get("reading"), 160) or named}.'
+    elif match.source == 'bundled':
+        bundled = ev.get('bundled') if isinstance(ev.get('bundled'), dict) else {}
+        head = (f"This host states {_plain(bundled.get('product'), 60) or 'a product'} {_plain(bundled.get('product_version'), 30)}, which its "
+                f"vendor ships with {_plain(ev.get('component_label'), 40) or named} {_plain(ev.get('raw_version'), 30)}.").replace('  ', ' ')
     elif match.source == 'runtime':
         label = _plain(ev.get('runtime_label'), 40) or 'a language runtime'
         head = (f'This host runs {label}, but its release was not read from outside.' if ev.get('runtime_unknown')
@@ -634,6 +654,12 @@ def _other_steps(match, basis, label, cve_id):
         return java_steps()
     if basis in ('runtime_unknown', 'runtime_version'):
         return runtime_steps(str(_ev(match).get('runtime') or ''))
+    if basis == 'bundled_inferred':
+        label = _plain(_ev(match).get('component_label'), 40) or 'the component'
+        return [_step(f'On the host, read the version of the {label} the application actually runs (its own version command, the jar or '
+                      'library file name in the application\'s directory, or its startup log). If it is the bundled release, update the product '
+                      f'to a release that bundles a fixed {label}; if it was replaced by a fixed one, close the match as a false positive and say '
+                      'which version runs.')]
     if basis == 'tls_check':
         return [_step('Change the TLS configuration of the service on that port (turn off the protocol, cipher or renegotiation the test names), '
                       'or update its TLS library, then mark the match fixed: cvENGINE runs the same test again to verify (Retest).')]

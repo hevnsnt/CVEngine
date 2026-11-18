@@ -701,6 +701,142 @@ def header_lines(text):
     return out
 
 
+# ----------------------------------------------------------------------------- what an SNMP agent says (sysDescr)
+
+# The UDP sweep's snmp-sysdescr script (cveFeed.udp_scan: one GET of sysDescr with the community "public") stores what the agent answered on
+# the UDP 161 port row. Each pattern below is a format seen in public snmpwalk output or the vendor's documentation, cited in SNMP_FORMATS;
+# the version is read only when the string states it outright. Left out because their sysDescr states no version: MikroTik RouterOS
+# ("RouterOS CCR1036-12G-4S"), FortiGate (an empty string), Palo Alto Networks (the vendor name), Synology and QNAP (a Linux kernel line,
+# read as one), and the HP, Brother, Xerox and Ricoh printers (a model, a JetDirect ROM or a date code that no CVE record lists).
+SNMP_FORMATS = {
+    'cisco-ios': 'Cisco IOS Software, C2960 Software (C2960-LANBASEK9-M), Version 12.2(44)SE6, RELEASE SOFTWARE (fc1) '
+                 '(https://www.zabbix.com/forum/zabbix-troubleshooting-and-problems/40096-snmpv3-problem-in-zabbix-2-2)',
+    'cisco-ios-xe': 'Cisco IOS Software [Amsterdam], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.9.4a (https://ignaonline.com/snmp-v3-on-'
+                    'cisco-ios-xe-full-monitoring-setup-with-librenms-and-grafana/); 3.x: Cisco IOS Software, IOS-XE Software, Catalyst L3 Switch '
+                    'Software (CAT3K_CAA-UNIVERSALK9-M), Version 03.03.03SE RELEASE SOFTWARE (fc2) (https://bugs.racktables.org/view.php?id=1423)',
+    'cisco-nx-os': 'Cisco NX-OS(tm) n5000, Software (n5000-uk9), Version 5.1(3)N2(1b), RELEASE SOFTWARE (https://docs.infoblox.com/space/nios91x/2396389719)',
+    'cisco-asa': 'Cisco Adaptive Security Appliance Version 9.16(4)18 (https://community.cisco.com/t5/network-security/fpr2130-stoped-to-answer-the-'
+                 'snmp-on-some-mibs/td-p/4867332; Cisco\'s own sample: https://www.cisco.com/c/en/us/support/docs/security/firepower-ngfw/'
+                 '217884-verify-firepower-software-versions.html)',
+    'junos': 'Juniper Networks, Inc. vmx internet router, kernel JUNOS 17.1R2.7, Build date: ... (https://iosonounrouter.wordpress.com/2018/08/03/'
+             'polling-junos-via-snmpv3/; Juniper\'s sample: https://apps.juniper.net/cli-explorer/info/show-snmp-mib/)',
+    'arubaos-switch': 'Aruba JL255A 2930F-24G-PoE+-4SFP+ Switch, revision WC.16.10.0003, ROM WC.16.01.0008 (https://support.hpe.com/hpesc/public/'
+                      'docDisplay?docId=sf000096322en_us)',
+    'edgeos': 'EdgeOS v2.0.9-hotfix.2.5402463.210511.1316 (https://community.ui.com/questions/be51b68f-deeb-420e-a6ac-7f5f56538603)',
+    'apc-nmc': 'APC Web/SNMP Management Card (MB:v4.0.1 PF:v5.1.7 PN:apc_hw05_aos_517.bin AF1:v5.1.7 AN1:apc_hw05_sumx_517.bin MN:AP9630 ...) '
+               '(https://networkupstools.org/ddl/APC/Smart-UPS_5000_RM.html)',
+    'linux': 'Linux web1 5.15.0-91-generic #101-Ubuntu SMP ... x86_64 (net-snmp\'s default sysDescr is the uname fields: '
+             'https://github.com/net-snmp/net-snmp/blob/master/agent/mibgroup/mibII/system_mib.c)',
+    'windows': 'Hardware: Intel64 Family 6 Model 85 Stepping 7 AT/AT COMPATIBLE - Software: Windows Version 6.3 (Build 17763 Multiprocessor Free) '
+               '(https://github.com/iabdullah215/INE-Labs/blob/main/INE/eJPT/ine.ejpt.lab.21.md; builds: '
+               'https://learn.microsoft.com/en-us/windows/release-health/windows-server-release-info)',
+}
+SNMP_URL = 'udp/161 sysDescr'
+ASA_NAME = 'Cisco Adaptive Security Appliance (ASA) Software'  # correlation's aliases reach the Secure Firewall name and NVD's CPE product
+_IOS_BUILD = r'\d{2}\.\d\(\d{1,3}[a-z]?\)[A-Z]{0,4}\d{0,3}[a-z]?'       # 15.0(2)SE11, 12.2(55)SE5, 15.2(4)M7, 15.2(7)E3
+_XE_IMAGE = re.compile(r'IOSXE|IOS-XE|IOSD', re.I)                       # an IOS XE image, or the IOS daemon inside one, names itself so
+_AFTER = r'(?=[,.\s]|$)'
+_IOS = re.compile(rf'^Cisco IOS Software, ([^,]{{1,80}}?) Software \(([A-Za-z0-9_-]{{1,60}})\), Version ({_IOS_BUILD}){_AFTER}')
+_IOS_XE_NAMED = re.compile(r'^Cisco IOS Software \[[A-Za-z ]{1,30}\], [^,]{1,80}? Software \(([A-Za-z0-9_-]{1,60})\), '
+                           rf'Version (1[6-9]\.\d{{1,2}}\.\d{{1,2}}[a-z]?){_AFTER}')
+_IOS_XE_3 = re.compile(r'^Cisco IOS Software, IOS-XE Software, [^,]{1,80}? Software \(([A-Za-z0-9_-]{1,60})\), Version '
+                       rf'0?(\d)\.0?(\d{{1,2}})\.0?(\d{{1,2}})\.?([a-z]?[A-Z]{{1,3}}){_AFTER}')
+_IOS_XE = re.compile(rf'^Cisco IOS XE Software, Version (1[6-9]\.\d{{1,2}}\.\d{{1,2}}[a-z]?){_AFTER}')
+_NXOS = re.compile(r'^Cisco NX-OS\(tm\) ([a-z0-9]{1,20}), Software \(([a-z0-9_-]{1,40})\), '
+                   rf'Version (\d{{1,2}}\.\d\(\d{{1,2}}[a-z]?\)(?:[A-Z]\d{{1,2}}\(\d{{1,2}}[a-z]?\))?){_AFTER}')
+_ASA = re.compile(rf'^Cisco Adaptive Security Appliance Version (\d\.\d{{1,2}})\((\d{{1,2}})\)(\d{{1,3}})?{_AFTER}')
+_JUNOS = re.compile(r'^Juniper Networks, Inc\. ([a-z0-9-]{2,40}) .{0,80}?\bkernel JUNOS (\d{1,2}\.\d)(R\d{1,2}(?:-S\d{1,2})?|X\d{2}-D\d{1,3})'
+                    r'(?:\.\d{1,3})?(-EVO)?(?=[\s,#]|$)')
+_ARUBA = re.compile(r'^(?:HP|HPE|Aruba|ProCurve) (J[A-Z0-9]{4,6}) [^,]{1,80}? Switch, revision [A-Z]{1,2}\.(1[5-9]\.\d{2}\.\d{4}), ROM ')
+_EDGEOS = re.compile(r'^EdgeOS v(\d\.\d{1,2}\.\d{1,2})(?:-hotfix\.(\d{1,2}))?\.\d{5,9}\.\d{6}\.\d{4}(?=\s|$)')
+_APC = re.compile(r'^APC Web/SNMP Management Card \(MB:v[\d.]{3,12} PF:v(\d{1,2}\.\d{1,2}\.\d{1,2}) PN:[\w.]{1,40} AF1:v[\d.]{3,12} AN1:[\w.]{1,40} '
+                  r'MN:([A-Z]{2}\d{3,5}[A-Z]?)\b')
+_LINUX = re.compile(r'^Linux ([A-Za-z0-9._-]{1,64}) (\d\.\d{1,2}(?:\.\d{1,3})?)([-+~][A-Za-z0-9.+~_-]{0,60})? #\S{1,40}')
+_WINDOWS = re.compile(r'^Hardware: .{1,120}? - Software: Windows Version (\d{1,2}\.\d) \(Build (\d{4,5})(?: [A-Za-z ]{1,40})?\)')
+# The builds the Windows SNMP service reports and the releases they are (Microsoft's release information). Every build from Windows 8.1 on
+# reports version 6.3; the build tells the release, never its monthly update.
+WINDOWS_BUILDS = {7600: 'Windows 7 or Windows Server 2008 R2', 7601: 'Windows 7 SP1 or Windows Server 2008 R2 SP1', 9200: 'Windows 8 or Windows Server 2012',
+                  9600: 'Windows 8.1 or Windows Server 2012 R2', 10240: 'Windows 10 1507', 14393: 'Windows 10 1607 or Windows Server 2016',
+                  17763: 'Windows 10 1809 or Windows Server 2019', 19041: 'Windows 10 2004', 19042: 'Windows 10 20H2', 19043: 'Windows 10 21H1',
+                  19044: 'Windows 10 21H2', 19045: 'Windows 10 22H2', 20348: 'Windows Server 2022', 22000: 'Windows 11 21H2',
+                  22621: 'Windows 11 22H2', 22631: 'Windows 11 23H2', 26100: 'Windows 11 24H2 or Windows Server 2025'}
+
+
+def cisco_cpe_version(build):
+    """A Cisco build as NVD's CPE names spell it: lowercase, parentheses kept (``15.2(4)M7`` -> ``15.2(4)m7``; the CPE 2.3 string escapes
+    them, ``15.2\\(4\\)m7``). ASA builds are dotted instead (``9.16(4)18`` -> ``9.16.4.18``), as Cisco's own records and NVD list them."""
+    return clip(build, 40).lower()
+
+
+def _cpe(part, vendor, product, version):
+    return f'cpe:2.3:{part}:{vendor}:{product}:' + re.sub(r'([()])', r'\\\1', version) + ':*:*:*:*:*:*:*'
+
+
+def from_sysdescr(text, enterprise=''):
+    """The readings an SNMP agent's sysDescr states (``SNMP_FORMATS``), or []. A network operating system or firmware is a product reading,
+    ``exact`` (the agent names its own release); a Linux kernel is a ``weak`` hint (a distribution's kernel carries backported fixes its
+    version does not show, and a kernel says nothing of the appliance around it); a Windows build is an ``inferred`` line (the release, never
+    its update level). Neither hint is ever matched by version. A Cisco IOS or NX-OS build (``15.2(4)M7``, ``9.3(8)``) keeps the text the
+    device prints and carries the CPE NVD names it by; correlation matches it only to a build an advisory lists (``builds``). ``text`` is untrusted: control characters are dropped and it is clipped before
+    any pattern sees it. ``enterprise`` (snmp-info's engine ID vendor) is kept as evidence only."""
+    said = clip(text, 400)
+    vendor = clip(enterprise, 40)
+    evidence = f'sysDescr: {said}' + (f' (SNMP engine of {vendor})' if vendor else '')
+
+    def one(component, label, version, cpe='', **kw):
+        got = reading(component, label, version, evidence=evidence, url=SNMP_URL, source='snmp', **kw)
+        return [{**got, 'cpe': cpe} if cpe else got]
+
+    found = _ASA.match(said)
+    if found:
+        version = '.'.join(x for x in found.groups() if x)  # 9.16(4)18 is 9.16.4.18
+        return one('cisco-asa', ASA_NAME, version, _cpe('a', 'cisco', 'adaptive_security_appliance_software', version))
+    found = _NXOS.match(said)
+    if found:
+        if found.group(1) == 'aci' or found.group(2).startswith('aci'):
+            return []  # ACI mode names its own release train, not an NX-OS release
+        return one('cisco-nx-os', 'Cisco NX-OS', found.group(3), _cpe('o', 'cisco', 'nx-os', cisco_cpe_version(found.group(3))))
+    found = _IOS_XE_NAMED.match(said) or _IOS_XE.match(said)
+    if found:
+        version = found.group(found.lastindex)
+        return one('cisco-ios-xe', 'Cisco IOS XE', version, _cpe('o', 'cisco', 'ios_xe', version.lower()))
+    found = _IOS_XE_3.match(said)
+    if found:
+        version = f'{found.group(2)}.{int(found.group(3))}.{int(found.group(4))}{found.group(5)}'  # 03.06.06E is 3.6.6E, as Cisco lists it
+        return one('cisco-ios-xe', 'Cisco IOS XE', version, _cpe('o', 'cisco', 'ios_xe', version.lower()))
+    found = _IOS.match(said)
+    if found:
+        if _XE_IMAGE.search(found.group(2)):
+            return []  # the IOS daemon of an IOS XE 3.x release: the build it names is not the IOS XE release
+        return one('cisco-ios', 'Cisco IOS', found.group(3), _cpe('o', 'cisco', 'ios', cisco_cpe_version(found.group(3))))
+    found = _JUNOS.match(said)
+    if found:
+        evo = bool(found.group(4))
+        version = found.group(2) + found.group(3) + ('-EVO' if evo else '')  # 17.1R2.7 is release 17.1R2, build 7
+        return one('junos-evolved' if evo else 'junos', 'Junos OS Evolved' if evo else 'Junos OS', version)
+    found = _ARUBA.match(said)
+    if found:
+        return one('arubaos-switch', 'ArubaOS-Switch', found.group(2))
+    found = _EDGEOS.match(said)
+    if found:
+        return one('edgeos', 'EdgeOS', found.group(1) + (f'-hotfix.{found.group(2)}' if found.group(2) else ''))
+    found = _APC.match(said)
+    if found:
+        return one('apc-nmc', 'APC Network Management Card', found.group(1))
+    found = _WINDOWS.match(said)
+    if found:
+        build = int(found.group(2))
+        base = '10.0' if found.group(1) == '6.3' and build >= 10000 else found.group(1)
+        release = WINDOWS_BUILDS.get(build, '')
+        got = one('windows', 'Windows', f'{base}.{build}', confidence='inferred', line_only=True)
+        got[0]['evidence'] = clip(f'build {build}' + (f' ({release})' if release else '') + f'; {evidence}')
+        return got
+    found = _LINUX.match(said)
+    if found:
+        return one('linux-kernel', 'Linux kernel', found.group(2) + (found.group(3) or ''), confidence='weak')
+    return []
+
+
 # ----------------------------------------------------------------------------- the runtimes and the CVE records that name them
 
 @dataclass(frozen=True)
