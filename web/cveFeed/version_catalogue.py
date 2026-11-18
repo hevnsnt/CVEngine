@@ -27,7 +27,8 @@ A reading is ``{component, label, kind, version, confidence, line_only, evidence
   line_only   only a line is known (``4.8``, OTP ``26``): never a version inside a range, at most a version-unknown candidate
 
 Sources dropped (not anonymous, or no reliable anonymous answer; see docs/PIPELINE.md#version-sources): GitLab ``/api/v4/version`` (needs a
-token), RabbitMQ ``/api/overview`` (the management API always authenticates; RabbitMQ and its Erlang/OTP line are read from its Prometheus
+token; the sign-in page's ``gon.version`` is published only to signed-in users, ``/help`` hides the release from anonymous callers, and
+``gon.revision`` or the webpack manifest's hash name a commit or a build that no table here maps to a release), RabbitMQ ``/api/overview`` (the management API always authenticates; RabbitMQ and its Erlang/OTP line are read from its Prometheus
 endpoint instead), Keycloak (current releases state no version anonymously; the resource path carries a random hash), Polarion (no documented
 anonymous source), and the kubelet (its ``/healthz`` may be served outside the authorization filter, so it cannot tell an open kubelet, and
 ``/pods`` is not asked).
@@ -396,6 +397,175 @@ def read_aspnet_error(answers):
 # print their own ASP.NET version (4.7.3xxx is 4.7.2 and later, which the line 4.7 covers)
 DOTNET_LINES = {('4.8', 9): '4.8.1'}
 
+
+# ----------------------------------------------------------------------------- on-premises Microsoft servers, Tomcat, WebLogic
+
+# MicrosoftSharePointTeamServices: "16.0.0.10417" is build 16.0.10417 (the header puts a 0 third and leaves the revision out, Censys, "Around 1600
+# SharePoint servers vulnerable to attack"). The build number tells the product line apart (Microsoft's SharePoint update history: 2016 runs
+# 16.0.4327 to 16.0.5xxx, 2019 16.0.10337 on, Subscription Edition 16.0.14326 on); the revision is not stated, so a CVE fixed by exactly the
+# update the farm runs (16.0.10417.20018 for a 16.0.10417 farm) still reads as in range: a version reading needs validation anyway. A build past
+# the table (SharePoint Online sends 16.0.0.2xxxx) or under it names no line: a hint, never matched. 2013 and 2010 cannot be told from their
+# Foundation editions: the Server name is used.
+_SHAREPOINT = re.compile(r'^(1[456])\.0\.0\.(\d{4,5})(?=$|[\s:;,])')
+SHAREPOINT_LINES = ((14, 4000, 10000, 'Microsoft SharePoint Server 2010'), (15, 4000, 10000, 'Microsoft SharePoint Server 2013'),
+                    (16, 4000, 10000, 'Microsoft SharePoint Enterprise Server 2016'), (16, 10000, 14000, 'Microsoft SharePoint Server 2019'),
+                    (16, 14000, 23000, 'Microsoft SharePoint Server Subscription Edition'))
+
+
+def sharepoint_reading(value, url, source):
+    """The SharePoint build a ``MicrosoftSharePointTeamServices`` value states, on the product line its build belongs to, or None."""
+    said = clip(value, 80)
+    found = _SHAREPOINT.match(said)
+    if not found:
+        return None
+    major, build = int(found.group(1)), int(found.group(2))
+    version = f'{major}.0.{build}'
+    line = next((label for m, low, high, label in SHAREPOINT_LINES if m == major and low <= build < high), '')
+    if not line:
+        return reading('sharepoint', 'Microsoft SharePoint', version, confidence='inferred', line_only=True, url=url, source=source,
+                       evidence=f'MicrosoftSharePointTeamServices: {said} (build {version}, outside every on-premises line)')
+    return reading('sharepoint', line, version, url=url, source=source, evidence=f'MicrosoftSharePointTeamServices: {said} (build {version}, {line})')
+
+
+def read_sharepoint(answers):
+    """The ``MicrosoftSharePointTeamServices`` header a SharePoint web application sends with every answer (a 401 or a redirect to its sign-in
+    page included): another product never sends it."""
+    answer = answers[0]
+    if not isinstance(answer, dict) or answer.get('error'):
+        return []
+    got = sharepoint_reading((answer.get('headers') or {}).get('microsoftsharepointteamservices'), '/', 'sharepoint')
+    return [got] if got else []
+
+
+# Exchange builds: (major, minor) -> the line, and each cumulative update's build (Microsoft, "Exchange Server build numbers and release dates").
+# A security update keeps its cumulative update's build and raises the revision: 15.2.1544.13 is CU14 with a security update.
+EXCHANGE_LINES = {(14, 3): '2010', (15, 0): '2013', (15, 1): '2016', (15, 2): '2019'}
+EXCHANGE_SE_BUILD = 2562  # Exchange Server Subscription Edition RTM is 15.2.2562.17: a 15.2 build from it on is SE, not 2019
+EXCHANGE_UPDATES = {
+    (15, 2): {221: 'RTM', 330: 'CU1', 397: 'CU2', 464: 'CU3', 529: 'CU4', 595: 'CU5', 659: 'CU6', 721: 'CU7', 792: 'CU8', 858: 'CU9', 922: 'CU10',
+              986: 'CU11', 1118: 'CU12', 1258: 'CU13', 1544: 'CU14', 1748: 'CU15', 2562: 'RTM'},
+    (15, 1): {225: 'RTM', 396: 'CU1', 466: 'CU2', 544: 'CU3', 669: 'CU4', 845: 'CU5', 1034: 'CU6', 1261: 'CU7', 1415: 'CU8', 1466: 'CU9', 1531: 'CU10',
+              1591: 'CU11', 1713: 'CU12', 1779: 'CU13', 1847: 'CU14', 1913: 'CU15', 1979: 'CU16', 2044: 'CU17', 2106: 'CU18', 2176: 'CU19',
+              2242: 'CU20', 2308: 'CU21', 2375: 'CU22', 2507: 'CU23'},
+    (15, 0): {516: 'RTM', 620: 'CU1', 712: 'CU2', 775: 'CU3', 847: 'SP1', 913: 'CU5', 995: 'CU6', 1044: 'CU7', 1076: 'CU8', 1104: 'CU9', 1130: 'CU10',
+              1156: 'CU11', 1178: 'CU12', 1210: 'CU13', 1236: 'CU14', 1263: 'CU15', 1293: 'CU16', 1320: 'CU17', 1347: 'CU18', 1365: 'CU19',
+              1367: 'CU20', 1395: 'CU21', 1473: 'CU22', 1497: 'CU23'},
+}
+_EXCHANGE_BUILD = re.compile(r'^(1[45])\.(\d)\.(\d{1,4})(?:\.(\d{1,4}))?$')
+
+
+def exchange_reading(text, url, source, said):
+    """The Exchange build ``text`` states (``15.2.1544.4``, ``15.02.1544.004``), on its line and with its cumulative update named, or None. A
+    whole build (four parts) is exact; three parts (the OWA resource path of recent releases) name the cumulative update but not its security
+    update level: an inferred line, never matched."""
+    found = _EXCHANGE_BUILD.match(clip(text, 40))
+    if not found:
+        return None
+    major, minor, build = int(found.group(1)), int(found.group(2)), int(found.group(3))
+    line = EXCHANGE_LINES.get((major, minor))
+    if not line:
+        return None
+    if (major, minor) == (15, 2) and build >= EXCHANGE_SE_BUILD:
+        line = 'Subscription Edition'
+    update = EXCHANGE_UPDATES.get((major, minor), {}).get(build, '')
+    label = f'Microsoft Exchange Server {line}'
+    named = f'{label}{" " + update if update else ""}'
+    if found.group(4) is None:
+        return reading('exchange', label, f'{major}.{minor}.{build}', confidence='inferred', line_only=True, url=url, source=source,
+                       evidence=f'{said}: build {major}.{minor}.{build} ({named}; the security update level is not stated)')
+    return reading('exchange', label, f'{major}.{minor}.{build}.{int(found.group(4))}', url=url, source=source, evidence=f'{said} ({named})')
+
+
+# The product lines a name states. Microsoft's records name SharePoint and Exchange per line ("Microsoft SharePoint Server 2019", "Microsoft
+# SharePoint Enterprise Server 2016", "Microsoft Exchange Server 2019 Cumulative Update 14") and start every SharePoint line at 16.0.0, while name
+# matching reads all of them as one product (the year is an edition word): a 2016 build would sit inside a 2019 range. ``line_conflict`` keeps
+# a host whose name states one line off an affected entry that names another.
+_LINE_FAMILIES = (('sharepoint', re.compile(r'\bsharepoint\b')), ('exchange', re.compile(r'\bexchange server\b')))
+_LINE_NAMES = re.compile(r'\b(subscription edition|2010|2013|2016|2019)\b')
+
+
+def product_line(name):
+    """``(family, line)`` a SharePoint or Exchange name states (``('sharepoint', '2019')``, ``('exchange', 'subscription edition')``), or None."""
+    text = re.sub(r'[_\s]+', ' ', str(name or '').lower())
+    family = next((key for key, pattern in _LINE_FAMILIES if pattern.search(text)), None)
+    found = _LINE_NAMES.search(text) if family else None
+    return (family, found.group(1)) if found else None
+
+
+def line_conflict(line, item):
+    """Whether an affected entry (``item``) names a line of the family ``line`` (``product_line`` of the host's name) other than that one. An
+    entry that names no line conflicts with nothing."""
+    if not line or not isinstance(item, dict):
+        return False
+    other = product_line(item.get('product') or item.get('package'))
+    return bool(other and other[0] == line[0] and other[1] != line[1])
+
+
+_OWA_PATH = re.compile(r'/owa/auth/(1[45]\.\d\.\d{1,4}(?:\.\d{1,4})?)/(?:themes|scripts|resources|current)/', re.I)
+_EXPORTTOOL = re.compile(r'^name="microsoft\.exchange\.ediscovery\.exporttool(?:\.application)?"\s+version="(1[45]\.\d\.\d{1,4}\.\d{1,4})"')
+EXCHANGE_LOGON = '/owa/auth/logon.aspx'
+EXCHANGE_EXPORTTOOL = '/ecp/Current/exporttool/microsoft.exchange.ediscovery.exporttool.application'
+
+
+def read_exchange(answers):
+    """Exchange's build, anonymously: the eDiscovery export tool's ClickOnce manifest (Exchange 2013 and later: ``<assemblyIdentity
+    name="microsoft.exchange.ediscovery.exporttool.application" version="15.2.986.5" ...>``, the whole build), the ``X-OWA-Version`` header of
+    the Outlook on the web sign-in page, or the build in its resource paths (``/owa/auth/15.2.1544/themes/...``). The whole build wins; a
+    three-part path alone is the cumulative update, inferred. Never a sign-in attempt."""
+    logon = answers[0] if answers else None
+    tool = answers[1] if len(answers) > 1 else None
+    found = []
+    if isinstance(tool, dict) and not tool.get('error') and tool.get('status') == 200:
+        hit = _EXPORTTOOL.match(clip(tool.get('text'), 300))
+        if hit:
+            found.append(exchange_reading(hit.group(1), EXCHANGE_EXPORTTOOL, 'exchange-owa', f'export tool manifest version {hit.group(1)}'))
+    if isinstance(logon, dict) and not logon.get('error'):
+        header = clip((logon.get('headers') or {}).get('x-owa-version'), 40)
+        if header:
+            found.append(exchange_reading(header, EXCHANGE_LOGON, 'exchange-owa', f'X-OWA-Version: {header}'))
+        path = _OWA_PATH.search(clip(logon.get('text'), 1024)) if logon.get('status') == 200 else None
+        if path:
+            found.append(exchange_reading(path.group(1), EXCHANGE_LOGON, 'exchange-owa', f'sign-in page resource path /owa/auth/{path.group(1)}/'))
+    found = [r for r in found if r]
+    exact = [r for r in found if r['confidence'] == 'exact']
+    return (exact or found)[:1]
+
+
+_TOMCAT_NOTES = re.compile(r'^Apache Tomcat Version (\d{1,2}\.\d{1,2}\.\d{1,3}(?:-M\d{1,3})?) Release Notes\b')
+
+
+def read_tomcat_notes(answers):
+    """Tomcat's ``/docs/RELEASE-NOTES.txt`` (the documentation web application, deployed and open to every address by default): its title
+    line, "Apache Tomcat Version 9.0.85" over "Release Notes". Only a plain-text 200 answer whose excerpt starts with that title reads."""
+    answer = answers[0]
+    if not isinstance(answer, dict) or answer.get('error') or answer.get('status') != 200:
+        return []
+    if not str(answer.get('content_type') or '').startswith('text/plain'):
+        return []
+    found = _TOMCAT_NOTES.match(clip(answer.get('text'), 200))
+    if not found:
+        return []
+    return [reading('tomcat', 'Apache Tomcat', found.group(1), evidence=f'RELEASE-NOTES.txt: Apache Tomcat Version {found.group(1)}',
+                    url='/docs/RELEASE-NOTES.txt', source='tomcat-release-notes')]
+
+
+_WEBLOGIC = re.compile(r'^WebLogic Server Version: (\d{1,2}\.\d{1,2}\.\d{1,2}\.\d{1,2}(?:\.\d{1,2})?)(?=[\s<]|$)')
+
+
+def read_weblogic_console(answers):
+    """The WebLogic administration console's sign-in page (``/console/login/LoginForm.jsp``) states the server's release in its footer
+    ("WebLogic Server Version: 12.2.1.4.0"). An HTML 200 answer whose excerpt starts with that footer reads; nothing is posted to the form."""
+    answer = answers[0]
+    if not isinstance(answer, dict) or answer.get('error') or answer.get('status') != 200:
+        return []
+    if not str(answer.get('content_type') or '').startswith('text/html'):
+        return []
+    found = _WEBLOGIC.match(clip(answer.get('text'), 200))
+    if not found:
+        return []
+    return [reading('weblogic', 'Oracle WebLogic Server', found.group(1), evidence=f'console sign-in page footer: WebLogic Server Version: {found.group(1)}',
+                    url='/console/login/LoginForm.jsp', source='weblogic-console')]
+
 # metric name -> (component, label, kind): the *_build_info of software cvENGINE can match by name
 BUILD_INFO = {
     'prometheus_build_info': ('prometheus', 'Prometheus', 'product'), 'alertmanager_build_info': ('alertmanager', 'Alertmanager', 'product'),
@@ -686,6 +856,28 @@ SOURCES = (
                              'It publishes the process\'s command line, which can carry passwords or tokens, and its memory statistics.',
                              'Do not register expvar\'s handler on a public listener (import _ "expvar" registers it on the default mux), or serve it '
                              'only on a local debug port.', twins=('golang-expvar', 'expvar-exposure', 'golang-expvar-exposure'))),
+    Source('sharepoint', 'Microsoft SharePoint', 'product',
+           (Request('/', read='headers', headers=('microsoftsharepointteamservices', 'server', 'x-powered-by', 'x-aspnet-version')),), read_sharepoint,
+           leads=r'sharepoint', verified='https://censys.com/blog/around-1600-sharepoint-servers-vulnerable-to-attack/ (MicrosoftSharePointTeamServices '
+           '"16.0.0.4351" is build 16.0.4351); https://learn.microsoft.com/en-us/officeupdates/sharepoint-updates (builds per product line)',
+           note='every answer of a SharePoint web application carries the header, a 401 or a redirect to its sign-in page included'),
+    Source('exchange-owa', 'Microsoft Exchange (Outlook on the web)', 'product',
+           (Request(EXCHANGE_LOGON, read='text', find='/owa/auth/', headers=('x-owa-version', 'server', 'x-powered-by', 'x-aspnet-version')),
+            Request(EXCHANGE_EXPORTTOOL, read='text', find='name="microsoft.exchange.ediscovery.exporttool')), read_exchange,
+           leads=r'^(?!.*\b(?:smtpd|imapd|pop3d|pop3|imap)\b).*(?:microsoft exchange|exchange server|outlook web|\bowa\b)',
+           verified='https://github.com/rapid7/metasploit-framework/blob/master/lib/msf/core/exploit/remote/http/exchange.rb (exchange_get_version: '
+           'the sign-in page and the export tool manifest); https://learn.microsoft.com/en-us/exchange/new-features/build-numbers-and-release-dates',
+           note='the sign-in page is only fetched, never posted to; the export tool manifest is a static ClickOnce file (Exchange 2013 and later)'),
+    Source('tomcat-release-notes', 'Apache Tomcat release notes', 'product', (Request('/docs/RELEASE-NOTES.txt', read='text', find='Apache Tomcat Version '),),
+           read_tomcat_notes, leads=r'tomcat|coyote',
+           verified='https://github.com/apache/tomcat/blob/main/RELEASE-NOTES ("Apache Tomcat Version @VERSION@" over "Release Notes", served by the '
+           'docs web application at /docs/RELEASE-NOTES.txt)',
+           note='only an install that kept the documentation web application; the error page footer is the error-page probe\'s (cveFeed.probes)'),
+    Source('weblogic-console', 'Oracle WebLogic Server console', 'product',
+           (Request('/console/login/LoginForm.jsp', read='text', find='WebLogic Server Version: '),), read_weblogic_console, leads=r'weblogic',
+           verified='https://cloud.projectdiscovery.io/library/CVE-2020-2883 (ProjectDiscovery\'s public check reads "WebLogic Server '
+           'Version: <release>" from the sign-in page /console/login/LoginForm.jsp)',
+           note='only a domain whose administration console answers on the asked port; the T3 handshake would need a Sentinel kind of its own'),
     Source('aspnet-error', 'ASP.NET error page version block', 'runtime',
            (Request('/cvengine-probe-404.aspx', read='text', find='Microsoft .NET Framework Version:'),), read_aspnet_error,
            leads=r'asp\.?net|microsoft[- ]iis|\biis\b',
@@ -777,7 +969,8 @@ _NEXUS = re.compile(r'^Nexus/(\d+\.\d+\.\d+)(?:-\d{1,3})? \([A-Z]{2,4}\)$')
 def from_headers(headers, url='/'):
     """The readings response headers give away, no request made: a language runtime in a Server or X-Powered-By header (Python behind
     Werkzeug, Ruby behind WEBrick, PHP, the .NET Framework line X-AspNet-Version names, Python under gunicorn or uvicorn, ASP.NET), and the
-    products whose own header states their version (X-Jenkins, Nexus's Server). ``headers`` maps lowercase names to values."""
+    products whose own header states their version (X-Jenkins, Nexus's Server, SharePoint's MicrosoftSharePointTeamServices, Exchange's
+    X-OWA-Version). ``headers`` maps lowercase names to values."""
     lowered = {str(k).lower(): clip(v, 300) for k, v in (headers or {}).items()}
     server, powered = lowered.get('server', ''), lowered.get('x-powered-by', '')
     out = []
@@ -811,6 +1004,10 @@ def from_headers(headers, url='/'):
     found = _NEXUS.match(server)
     if found:
         out.append(reading('nexus', 'Nexus Repository Manager', found.group(1), evidence=f'Server: {server}', url=url, source='header'))
+    if lowered.get('microsoftsharepointteamservices'):
+        out.append(sharepoint_reading(lowered['microsoftsharepointteamservices'], url, 'header'))
+    if lowered.get('x-owa-version'):
+        out.append(exchange_reading(lowered['x-owa-version'], url, 'header', f'X-OWA-Version: {lowered["x-owa-version"]}'))
     return _unique(out)
 
 

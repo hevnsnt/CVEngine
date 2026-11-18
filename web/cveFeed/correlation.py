@@ -1009,9 +1009,15 @@ def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, deta
     Reads only the pre-built product_index / cve_by_id; shared by the technology
     fingerprint path and the nmap/Port service path so both score identically.
     """
+    from cveFeed.version_catalogue import line_conflict, product_line
+    line = product_line(name)  # a SharePoint or Exchange line the host's name states: an entry for another line is not this product's
     for cve, hit in named_hits(token, product_index, cve_by_id, cpe):
         # Every hit names the same product (see name_matches_token): a wrapper or repackaging with its own version numbers
         # ("jquery-rails", "ingress-nginx") is another product and was never a hit, so its ranges are never compared.
+        if line:
+            hit = [(index, item) for index, item in hit if not line_conflict(line, item)]
+            if not hit:
+                continue  # every entry names another line (a 2019-only record for a 2016 farm): not this product's CVE
         in_range, matched_product = None, name
         if ver is not None:
             in_range, unknown = False, False

@@ -186,6 +186,98 @@ class CatalogueTests(SimpleTestCase):
         self.assertEqual(versions(read('aspnet-error', ok(text=text.replace('4.8.4718', '4.8.9032'))))[0][1], '4.8.1')
         self.assertEqual(read('aspnet-error', ok(text='', status=404))['readings'], [])
 
+    def full(self, result):
+        return [(r['label'], r['version'], r['confidence'], r['line_only']) for r in result['readings']]
+
+    def test_sharepoint_names_its_build_and_product_line(self):
+        # a SharePoint 2019 web application's 401 to an anonymous GET of / (NTLM challenge): the header comes with it
+        answer = ok(status=401, content_type='text/plain; charset=utf-8', headers=SHAREPOINT_HEADERS)
+        self.assertEqual(self.full(read('sharepoint', answer)), [('Microsoft SharePoint Server 2019', '16.0.10417', 'exact', False)])
+        for value, label in (('16.0.0.5513', 'Microsoft SharePoint Enterprise Server 2016'), ('16.0.0.17928', 'Microsoft SharePoint Server Subscription Edition'),
+                             ('15.0.0.5545', 'Microsoft SharePoint Server 2013'), ('14.0.0.7268', 'Microsoft SharePoint Server 2010')):
+            with self.subTest(value=value):
+                got = read('sharepoint', ok(status=302, headers={'microsoftsharepointteamservices': value}))['readings']
+                self.assertEqual((got[0]['label'], got[0]['component'], got[0]['confidence']), (label, 'sharepoint', 'exact'))
+        online = read('sharepoint', ok(headers={'microsoftsharepointteamservices': '16.0.0.25821: 1; RequireReadOnly'}))  # SharePoint Online
+        self.assertEqual(self.full(online), [('Microsoft SharePoint', '16.0.25821', 'inferred', True)])  # no line: a hint, never matched
+        self.assertEqual(version_sources.kind_of(online['readings'][0]), version_sources.HINT_KIND)
+        # IIS alone, SharePoint's health score header alone, a header without a build: nothing
+        self.assertEqual(read('sharepoint', ok(status=401, headers={'server': 'Microsoft-IIS/10.0', 'x-powered-by': 'ASP.NET'}))['readings'], [])
+        self.assertEqual(read('sharepoint', ok(headers={'x-sharepointhealthscore': '0'}))['readings'], [])
+        self.assertEqual(read('sharepoint', ok(headers={'microsoftsharepointteamservices': '16.0'}))['readings'], [])
+        self.assertEqual(read('sharepoint', ok(headers={'microsoftsharepointteamservices': '12.0.0.6421'}))['readings'], [])
+
+    def test_exchange_whole_build_from_the_export_tool_manifest(self):
+        got = read('exchange-owa', ok(text=OWA_LOGON_TEXT, content_type='text/html; charset=utf-8', path=catalogue.EXCHANGE_LOGON),
+                   ok(text=EXPORTTOOL_TEXT, content_type='application/x-ms-application', path=catalogue.EXCHANGE_EXPORTTOOL))
+        self.assertEqual(self.full(got), [('Microsoft Exchange Server 2019', '15.2.1544.4', 'exact', False)])  # the whole build beats the path
+        self.assertIn('CU14', got['readings'][0]['evidence'])
+        se = read('exchange-owa', ok(text='', status=404), ok(text=EXPORTTOOL_TEXT.replace('15.2.1544.4', '15.2.2562.17')))
+        self.assertEqual(self.full(se), [('Microsoft Exchange Server Subscription Edition', '15.2.2562.17', 'exact', False)])
+
+    def test_exchange_owa_header_and_resource_path(self):
+        missing = ok(text='', status=404, content_type='text/html')
+        header = ok(text=OWA_LOGON_TEXT.replace('15.2.1544', '15.1.2507'), headers={'x-owa-version': '15.1.2507.39'}, content_type='text/html')
+        self.assertEqual(self.full(read('exchange-owa', header, missing)), [('Microsoft Exchange Server 2016', '15.1.2507.39', 'exact', False)])
+        path_only = read('exchange-owa', ok(text=OWA_LOGON_TEXT, content_type='text/html'), missing)
+        self.assertEqual(self.full(path_only), [('Microsoft Exchange Server 2019', '15.2.1544', 'inferred', True)])  # the update, not its SU level
+        self.assertIn('CU14', path_only['readings'][0]['evidence'])
+        whole_path = OWA_LOGON_TEXT.replace('15.2.1544', '15.0.1497.2')  # Exchange 2013 still prints the whole build
+        self.assertEqual(self.full(read('exchange-owa', ok(text=whole_path, content_type='text/html'), missing)),
+                         [('Microsoft Exchange Server 2013', '15.0.1497.2', 'exact', False)])
+        # a sign-in page that names no build, a catch-all page, a 404 for the manifest: nothing
+        self.assertEqual(read('exchange-owa', ok(text='/owa/auth/logon.aspx?replaceCurrent=1&amp;url=https%3a%2f%2fmail', content_type='text/html'),
+                              missing)['state'], 'absent')
+        self.assertEqual(read('exchange-owa', HTML_LOGIN, HTML_LOGIN)['readings'], [])
+        self.assertEqual(read('exchange-owa', missing, ok(text='name="microsoft.exchange.ediscovery.exporttool.application" version="2.1.0.0"'))['readings'], [])
+
+    def test_tomcat_release_notes(self):
+        got = read('tomcat-release-notes', ok(text=TOMCAT_NOTES, content_type='text/plain'))
+        self.assertEqual(versions(got), [('tomcat', '9.0.85', 'product', 'exact')])
+        self.assertEqual(got['readings'][0]['label'], 'Apache Tomcat')
+        self.assertEqual(versions(read('tomcat-release-notes', ok(text=TOMCAT_NOTES.replace('9.0.85', '11.0.0-M5'), content_type='text/plain'))),
+                         [('tomcat', '11.0.0-M5', 'product', 'exact')])
+        self.assertEqual(read('tomcat-release-notes', ok(text=TOMCAT_NOTES, content_type='text/html'))['readings'], [])  # a catch-all HTML page
+        self.assertEqual(read('tomcat-release-notes', ok(text=TOMCAT_NOTES, status=404, content_type='text/plain'))['readings'], [])
+        self.assertEqual(read('tomcat-release-notes', ok(text='', status=404, content_type='text/html'))['state'], 'absent')
+        self.assertEqual(read('tomcat-release-notes', ok(text='Apache Tomcat Version 9 Release Notes', content_type='text/plain'))['readings'], [])
+
+    def test_the_product_line_a_name_states(self):
+        self.assertEqual(catalogue.product_line('Microsoft SharePoint Enterprise Server 2016'), ('sharepoint', '2016'))
+        self.assertEqual(catalogue.product_line('microsoft:sharepoint_server_subscription_edition'), ('sharepoint', 'subscription edition'))
+        self.assertEqual(catalogue.product_line('Microsoft Exchange Server 2019 Cumulative Update 14'), ('exchange', '2019'))
+        self.assertIsNone(catalogue.product_line('Microsoft SharePoint'))
+        self.assertIsNone(catalogue.product_line('Windows Server 2019'))
+        line = catalogue.product_line('Microsoft SharePoint Enterprise Server 2016')
+        self.assertTrue(catalogue.line_conflict(line, {'product': 'Microsoft SharePoint Server 2019'}))
+        self.assertFalse(catalogue.line_conflict(line, {'product': 'Microsoft SharePoint Foundation 2016'}))  # the same line
+        self.assertFalse(catalogue.line_conflict(line, {'product': 'SharePoint Server'}))  # no line named: the version decides
+        self.assertFalse(catalogue.line_conflict(line, {'product': 'Microsoft Exchange Server 2019'}))  # another family
+        self.assertFalse(catalogue.line_conflict(None, {'product': 'Microsoft SharePoint Server 2019'}))
+
+    def test_weblogic_console_footer(self):
+        got = read('weblogic-console', ok(text=WEBLOGIC_FOOTER, content_type='text/html; charset=UTF-8'))
+        self.assertEqual(versions(got), [('weblogic', '12.2.1.4.0', 'product', 'exact')])
+        self.assertEqual(got['readings'][0]['label'], 'Oracle WebLogic Server')
+        self.assertEqual(versions(read('weblogic-console', ok(text='WebLogic Server Version: 10.3.6.0</p>', content_type='text/html'))),
+                         [('weblogic', '10.3.6.0', 'product', 'exact')])
+        self.assertEqual(read('weblogic-console', ok(text='WebLogic Server Version: </p>', content_type='text/html'))['readings'], [])
+        self.assertEqual(read('weblogic-console', ok(text='', status=404, content_type='text/html'))['state'], 'absent')
+        self.assertEqual(read('weblogic-console', ok(text=WEBLOGIC_FOOTER, status=403, content_type='text/html'))['readings'], [])
+
+
+SHAREPOINT_HEADERS = {'microsoftsharepointteamservices': '16.0.0.10417', 'server': 'Microsoft-IIS/10.0', 'x-powered-by': 'ASP.NET',
+                      'x-aspnet-version': '4.0.30319'}
+# what the Sentinel hands back of an Exchange 2019 CU14 sign-in page (text from the first "/owa/auth/", whitespace collapsed)
+OWA_LOGON_TEXT = ('/owa/auth/15.2.1544/themes/resources/favicon.ico" type="image/x-icon"> <meta http-equiv="X-UA-Compatible" content="IE=10" /> '
+                  '<link rel="stylesheet" href="/owa/auth/15.2.1544/themes/resources/fabric.min.css" /> <title>Outlook</title>')
+EXPORTTOOL_TEXT = ('name="microsoft.exchange.ediscovery.exporttool.application" version="15.2.1544.4" publicKeyToken="b1d1a6c45aa418ce" '
+                   'language="neutral" processorArchitecture="msil" xmlns="urn:schemas-microsoft-com:asm.v1" /> <description asmv2:publisher="Microsoft '
+                   'Corporation" asmv2:product="Microsoft Exchange" xmlns="urn:schemas-microsoft-com:asm.v1" />')
+TOMCAT_NOTES = ('Apache Tomcat Version 9.0.85 Release Notes ========= CONTENTS: ========= * Dependency Changes * API Stability * Bundled APIs '
+                '* Web application reloading and static fields in shared libraries * Security manager URLs * Symlinking static resources')
+WEBLOGIC_FOOTER = 'WebLogic Server Version: 12.2.1.4.0</p> <p id="copyright">Copyright &copy; 1996,2019, Oracle and/or its affiliates.'
+
 
 class HeaderTests(SimpleTestCase):
     def test_runtimes_and_products_a_header_states(self):
@@ -203,6 +295,11 @@ class HeaderTests(SimpleTestCase):
         self.assertEqual(one({'x-jenkins': '2.426.1'}), [('jenkins', '2.426.1', 'exact')])
         self.assertEqual(one({'server': 'Nexus/3.61.0-02 (OSS)'}), [('nexus', '3.61.0', 'exact')])
         self.assertEqual(one({'server': 'nginx/1.24.0', 'x-powered-by': 'Express'}), [])  # Express states no Node.js release: nothing
+        self.assertEqual(one({'MicrosoftSharePointTeamServices': '16.0.0.10417', 'Server': 'Microsoft-IIS/10.0'}), [('sharepoint', '16.0.10417', 'exact')])
+        self.assertEqual(one({'x-owa-version': '15.2.1544.4'}), [('exchange', '15.2.1544.4', 'exact')])
+        self.assertEqual(one({'x-owa-version': 'unknown', 'microsoftsharepointteamservices': ''}), [])
+        # Apache and OpenSSL in a Server header are the fingerprint's technologies (cvengine_scanner.versions), not a reading made here
+        self.assertEqual(one({'server': 'Apache/2.4.6 (CentOS) OpenSSL/1.0.2k-fips', 'x-powered-by': 'PHP/7.4.33'}), [('php', '7.4.33', 'exact')])
 
     def test_a_stored_technology_is_a_runtime_reading(self):
         self.assertEqual(catalogue.from_technology('Python', '3.11.4')['component'], 'python')
@@ -250,6 +347,13 @@ class WantedTests(SimpleTestCase):
         self.assertEqual(self.ids(ports=[port(2376, 'ssl/unknown')]), [('docker-api', 'https://h.rt.test:2376')])
         self.assertEqual(self.ids(ports=[port(2375, 'http', 'nginx')]), [])
         self.assertEqual(self.ids(ports=[port(9100, 'http')], bases=()), [('prometheus-metrics', 'http://h.rt.test:9100')])
+
+    def test_an_exchange_mail_port_never_warrants_the_web_read(self):
+        self.assertEqual(self.ids([('Microsoft Exchange smtpd', '')], [port(25, 'smtp', 'Microsoft Exchange smtpd')]), [])
+        self.assertEqual(self.ids([('Microsoft Exchange Server', '')]), [('exchange-owa', 'https://h.rt.test')])
+        self.assertEqual(self.ids([('Oracle WebLogic Server', '')], [port(7001, 'http', 'Oracle WebLogic admin httpd')]),
+                         [('weblogic-console', 'http://h.rt.test:7001')])
+        self.assertEqual(self.ids([('Apache Tomcat', '')], [port(8080, 'http', 'Apache Tomcat')]), [('tomcat-release-notes', 'http://h.rt.test:8080')])
 
     def test_a_host_is_asked_at_most_a_few_entries(self):
         products = [(n, '') for n in ('Grafana', 'Kibana', 'Jenkins', 'Consul', 'Vault', 'Traefik', 'Jira', 'SonarQube')]
@@ -442,6 +546,31 @@ class ReadTests(VersionFixture, TestCase):
             version_sources.run_for_scan(scan.id)
         self.assertEqual(len(self.vtasks), 1)
 
+    def test_a_sharepoint_host_gets_its_build_as_a_technology_of_its_line(self):
+        scan = self.host_scan(techs=('Microsoft SharePoint',))
+        sub = scan.subdomain_set.get()
+        self.assertTrue(match_policy.unversioned_products(sub))  # seen without a version before the read
+        answer = {'status': 401, 'content_type': 'text/plain', 'headers': SHAREPOINT_HEADERS}
+        with self.sentinel({'/': answer}):
+            self.assertEqual(version_sources.run_for_scan(scan.id)['asked'], 1)
+        entry, = self.vtasks[0]['target']['reads']
+        self.assertEqual(entry['requests'][0]['headers'][0], 'microsoftsharepointteamservices')
+        row = ProbeObservation.objects.get(host='app.rt.test', probe='vsrc:sharepoint', kind='version')
+        self.assertEqual((row.product, row.version, row.evidence['confidence']), ('Microsoft SharePoint Server 2019', '16.0.10417', 'exact'))
+        names = set(sub.technologies.values_list('name', flat=True))
+        self.assertIn('Microsoft SharePoint Server 2019:16.0.10417', names)
+        self.assertFalse(ProbeObservation.objects.filter(host='app.rt.test', kind='runtime', product='PHP').exists())
+
+    def test_an_exchange_host_is_asked_its_sign_in_page_and_manifest_only(self):
+        scan = self.host_scan(techs=('Microsoft Exchange Server',))
+        table = {catalogue.EXCHANGE_LOGON: {'status': 200, 'content_type': 'text/html', 'headers': {}, 'text': OWA_LOGON_TEXT},
+                 catalogue.EXCHANGE_EXPORTTOOL: {'status': 200, 'content_type': 'application/x-ms-application', 'headers': {}, 'text': EXPORTTOOL_TEXT}}
+        with self.sentinel(table):
+            version_sources.run_for_scan(scan.id)
+        entry, = self.vtasks[0]['target']['reads']
+        self.assertEqual([r['path'] for r in entry['requests']], [catalogue.EXCHANGE_LOGON, catalogue.EXCHANGE_EXPORTTOOL])
+        self.assertIn('Microsoft Exchange Server 2019:15.2.1544.4', set(scan.subdomain_set.get().technologies.values_list('name', flat=True)))
+
     def test_no_scanner_leaves_the_reads_due_and_runs_nothing_here(self):
         scan = self.host_scan(techs=('Grafana',))
         from reNgine.resources import ScannerUnavailable
@@ -466,6 +595,16 @@ class PassiveTests(VersionFixture, TestCase):
         sub.save(update_fields=['webserver'])
         version_sources.refresh_host(sub)
         self.assertFalse(ProbeObservation.objects.filter(probe='vsrc:passive', port=0, kind='runtime').exists())  # gone with what it was read from
+
+    def test_stored_headers_give_php_sharepoint_and_exchange_readings(self):
+        headers = ('Server: Microsoft-IIS/10.0\nMicrosoftSharePointTeamServices: 16.0.0.5513\nX-OWA-Version: 15.1.2507.39\n'
+                   'X-Powered-By: PHP/8.1.2-1ubuntu2.14')
+        scan = self.host_scan(ports=((443, 'https', '', '', {'scripts': {'http-headers': headers}}),))
+        version_sources.refresh_host(scan.subdomain_set.get())
+        rows = {(r.kind, r.product): (r.version, r.evidence['confidence']) for r in ProbeObservation.objects.filter(probe='vsrc:passive', port=443)}
+        self.assertEqual(rows[('runtime', 'PHP')], ('8.1.2-1ubuntu2.14', 'exact'))  # X-Powered-By lands as a runtime reading
+        self.assertEqual(rows[('version', 'Microsoft SharePoint Enterprise Server 2016')], ('16.0.5513', 'exact'))
+        self.assertEqual(rows[('version', 'Microsoft Exchange Server 2016')], ('15.1.2507.39', 'exact'))
 
     def test_the_catch_up_stores_and_correlates(self):
         cve('CVE-2026-200001', PY_RANGE)
@@ -496,6 +635,50 @@ class CorrelationTests(VersionFixture, TestCase):
         component = {'Go': 'go', 'Python': 'python', '.NET Framework': 'dotnet-framework', 'Ruby': 'ruby'}[label]
         version_sources.store_readings(sub, f'vsrc:{source}', [catalogue.reading(component, label, version, kind='runtime', confidence=confidence,
                                                                                   line_only=line_only, source=source)], port=port)
+
+    def readings_on_hosts(self, reader, values):
+        """One host per value, each with the reading ``reader(value)`` stored, then correlated."""
+        scans = []
+        for n, value in enumerate(values):
+            scan = self.host_scan(names=(f'h{n}.rt.test',), address=f'203.0.113.{10 + n}')
+            version_sources.store_readings(scan.subdomain_set.get(), 'vsrc:test', [reader(value)], port=443)
+            scans.append(scan)
+        cve_by_id, index = correlation.cve_pool()
+        subs = correlation.candidate_subdomains(index).filter(scan_history__in=scans)
+        correlation.correlate_subdomains(list(subs), index, cve_by_id, min_confidence=0.4)
+
+    def hits(self, row):
+        return {(m.subdomain.name, m.matched_version, m.version_in_range) for m in CVEMatch.objects.filter(cve_entry=row)}
+
+    def test_a_sharepoint_build_is_matched_by_microsofts_record_for_its_line_only(self):
+        def sp(line, fixed):
+            return {'vendor': 'Microsoft', 'product': f'Microsoft SharePoint {line}', 'ranges': [{'type': 'SEMVER', 'introduced': '16.0.0', 'fixed': fixed}]}
+        only_2019 = cve('CVE-2026-200050', [sp('Server 2019', '16.0.10417.20037')])
+        only_2016 = cve('CVE-2026-200051', [sp('Enterprise Server 2016', '16.0.5520.1000')])
+        both = cve('CVE-2026-200052', [sp('Enterprise Server 2016', '16.0.5520.1000'), sp('Server 2019', '16.0.10417.20037'),
+                                       sp('Server Subscription Edition', '16.0.18526.20508')])
+        unnamed = cve('CVE-2026-200053', [{'vendor': 'Microsoft', 'product': 'SharePoint Server',
+                                           'ranges': [{'type': 'SEMVER', 'introduced': '16.0.0', 'fixed': '16.0.5520.1000'}]}])
+        self.readings_on_hosts(lambda v: catalogue.sharepoint_reading(v, '/', 'sharepoint'), ('16.0.0.10337', '16.0.0.10418', '16.0.0.5513'))
+        # the 2019 farm before the fix matches, the one past it does not, and the 2016 farm (16.0.5513 < 16.0.10417) is no 2019 host
+        self.assertEqual(self.hits(only_2019), {('h0.rt.test', '16.0.10337', True)})
+        self.assertEqual(self.hits(only_2016), {('h2.rt.test', '16.0.5513', True)})  # still matched by the record of its own line
+        self.assertEqual(self.hits(both), {('h0.rt.test', '16.0.10337', True), ('h2.rt.test', '16.0.5513', True)})
+        # an entry that names no line keeps the version rule alone: the 2019 builds are past its bound, the 2016 build inside it
+        self.assertEqual(self.hits(unnamed), {('h2.rt.test', '16.0.5513', True)})
+
+    def test_an_exchange_build_is_matched_by_its_lines_record_only(self):
+        def ex(line, ranges):
+            return {'vendor': 'Microsoft', 'product': f'Microsoft Exchange Server {line}', 'ranges': ranges}
+        # Microsoft's shape: each line starts at its own minor (15.02.0, 15.01.0), so the bounds already keep 2016 and 2019 apart
+        cu14 = cve('CVE-2026-200060', [ex('2019 Cumulative Update 14', [{'type': 'SEMVER', 'introduced': '15.02.0', 'fixed': '15.02.1544.013'}])])
+        # a record with only a fix bound would put a 2016 build inside a 2019 range: the line keeps it off
+        bare = cve('CVE-2026-200061', [ex('2019 Cumulative Update 14', [{'type': 'SEMVER', 'fixed': '15.2.1544.13'}])])
+        cu23 = cve('CVE-2026-200062', [ex('2016 Cumulative Update 23', [{'type': 'SEMVER', 'introduced': '15.01.0', 'fixed': '15.01.2507.044'}])])
+        self.readings_on_hosts(lambda v: catalogue.exchange_reading(v, '/', 'exchange-owa', v), ('15.2.1544.4', '15.1.2507.39'))
+        self.assertEqual(self.hits(cu14), {('h0.rt.test', '15.2.1544.4', True)})
+        self.assertEqual(self.hits(bare), {('h0.rt.test', '15.2.1544.4', True)})
+        self.assertEqual(self.hits(cu23), {('h1.rt.test', '15.1.2507.39', True)})
 
     def test_an_exact_go_release_inside_the_range_is_a_version_match_and_outside_none(self):
         row = cve('CVE-2026-200010', GO_RANGE)
