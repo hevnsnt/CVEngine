@@ -171,6 +171,7 @@ _DISTRO_SUFFIX = re.compile(r"-(?:Ubuntu|Debian)$", re.IGNORECASE)  # BIND's ver
 _UBUNTU_OWN = re.compile(r"^\d+(?:\.\d+)*(?:build\d+)?(?:ubuntu\d+(?:\.\d+)*)?(?:~\d\d\.\d\d(?:\.\d+)*)?(?:build\d+)?(?:\+esm\d+)?$")
 _DEBIAN_OWN = re.compile(r"^\d+(?:\.\d+)*(?:[+~]deb\d+u\d+)?(?:\+b\d+)?$")
 _DEBIAN_BPO = re.compile(r"~bpo\d+\+\d+$")
+_SURY = re.compile(r"\+deb\.sury\.org\+\d+$")  # the build suffix deb.sury.org gives its packages ("1+ubuntu22.04.1+deb.sury.org+1")
 
 
 def _families(text, version, cpe_product):
@@ -205,7 +206,7 @@ def third_party(distro, package_release):
     if distro not in ("ubuntu", "debian") or not package_release:
         return ""
     revision = _strip_epoch(package_release).rpartition("-")[2] if "-" in package_release else ""
-    if "deb.sury.org" in package_release:
+    if _SURY.search(package_release):
         return "sury"
     if not revision:
         return ""
