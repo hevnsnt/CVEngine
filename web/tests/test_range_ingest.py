@@ -566,7 +566,7 @@ class CiscoExactBuildBackfillTests(TestCase):
         self.assertIs(read(CVEEntry.objects.get(pk=asa.pk).affected, ASA_NAME, '9.16.4.18'), True)
         # resumable and done: the next step finds nothing and reads nothing
         with mock.patch('cveFeed.intel.fetch_cve5', side_effect=AssertionError('read twice')):
-            self.assertEqual(intel.backfill_exact_builds(limit=10), {'scanned': 0, 'updated': 0, 'failed': 0, 'failed_ids': [], 'done': True})
+            self.assertEqual(intel.backfill_exact_builds(limit=10), {'scanned': 0, 'updated': 0, 'failed': 0, 'failed_ids': [], 'skipped': 0, 'skipped_ids': [], 'done': True})
 
     def test_the_backfill_is_bounded_per_step_and_continues_where_it_stopped(self):
         self.store('CVE-2023-20109')
@@ -598,7 +598,8 @@ class CiscoExactBuildBackfillTests(TestCase):
         from django.core.management import call_command
         from django.core.management.base import CommandError
         self.store('CVE-2024-20353')
-        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=intel.SourceError('HTTP 503')), self.assertRaises(CommandError):
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=intel.TransientSourceError('HTTP 503')), \
+                mock.patch('cveFeed.intel._sleep'), self.assertRaises(CommandError):
             call_command('backfill_exact_builds', '--apply')
         self.assertEqual(intel.builds_candidates().count(), 1)  # the walk starts again
         with mock.patch('cveFeed.intel.fetch_cve5', side_effect=lambda cve, get=None: self.records(cve)):
@@ -922,7 +923,8 @@ class BareVersionsBackfillTests(TestCase):
         jenkins.refresh_from_db()
         self.assertFalse(jenkins.needs_recorrelation)
         with mock.patch('cveFeed.intel.fetch_cve5', side_effect=AssertionError('read twice')):
-            self.assertEqual(intel.backfill_bare_versions(limit=10), {'scanned': 0, 'updated': 0, 'failed': 0, 'failed_ids': [], 'done': True})
+            self.assertEqual(intel.backfill_bare_versions(limit=10), {'scanned': 0, 'updated': 0, 'failed': 0, 'failed_ids': [], 'skipped': 0,
+                                                                       'skipped_ids': [], 'done': True})
 
     def test_the_update_step_runs_the_command_and_a_failure_walks_again(self):
         from io import StringIO
@@ -935,7 +937,8 @@ class BareVersionsBackfillTests(TestCase):
         out = StringIO()
         call_command('backfill_bare_versions', stdout=out)
         self.assertIn('1 stored CVEs would', out.getvalue())
-        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=intel.SourceError('HTTP 503')), self.assertRaises(CommandError):
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=intel.TransientSourceError('HTTP 503')), \
+                mock.patch('cveFeed.intel._sleep'), self.assertRaises(CommandError):
             call_command('backfill_bare_versions', '--apply')
         self.assertEqual(intel.bare_candidates().count(), 1)
         with mock.patch('cveFeed.intel.fetch_cve5', side_effect=self.fetch):
@@ -948,3 +951,72 @@ class BareVersionsBackfillTests(TestCase):
         line = json.loads(json.dumps(seed.record_for(entry)))
         self.assertEqual(seed.clean_record(line)['affected'], entry.affected)
         self.assertEqual(intro_fixed(release_block(seed.clean_record(line)['affected'])['ranges']), KERNEL_RANGES)
+
+
+class PatientRecordFetchTests(TestCase):
+    """GitHub rate-limits a burst of raw reads: the update step on the VPS failed on its first run (backfill_bare_versions, CommandError)
+    because one record answered 429 among about a thousand read eight at a time, and every failure started the walk again."""
+
+    class Resp:
+        def __init__(self, status, body=b'', headers=None):
+            self.status_code, self._body, self.headers = status, body, headers or {}
+
+        def iter_content(self, size):
+            yield self._body
+
+        def close(self):
+            pass
+
+    def test_a_rate_limited_read_is_asked_again_after_the_wait_github_names(self):
+        answers = [self.Resp(429, headers={'Retry-After': '20'}), self.Resp(503), self.Resp(200, json.dumps({'ok': 1}).encode())]
+        with mock.patch('cveFeed.intel._sleep') as sleep:
+            doc = intel.fetch_cve5_patiently('CVE-2024-53104', get=lambda *a, **k: answers.pop(0))
+        self.assertEqual(doc, {'ok': 1})
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [20.0, intel.FETCH_WAITS[1]])
+
+    def test_a_missing_record_is_not_asked_again_and_a_read_that_cannot_pass_is_raised_at_once(self):
+        calls = []
+
+        def get(*a, **k):
+            calls.append(1)
+            return self.Resp(404)
+        with mock.patch('cveFeed.intel._sleep') as sleep:
+            self.assertIsNone(intel.fetch_cve5_patiently('CVE-2024-0001', get=get))
+            with self.assertRaises(intel.SourceError):
+                intel.fetch_cve5_patiently('CVE-2024-0002', get=lambda *a, **k: self.Resp(410))
+        self.assertEqual(len(calls), 1)
+        sleep.assert_not_called()
+
+    def test_a_record_that_never_reads_is_left_as_stored_and_never_fails_the_update_step(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+        feed_from_api('CVE-2024-53104')
+        out = StringIO()
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=intel.SourceError('the file is larger than the limit')), \
+                mock.patch('cveFeed.intel._sleep') as sleep:
+            call_command('backfill_bare_versions', '--apply', stdout=out)
+        self.assertIn('1 left as stored because their record cannot be read (CVE-2024-53104)', out.getvalue())
+        sleep.assert_not_called()
+
+    def test_a_record_still_rate_limited_after_the_waits_fails_the_step_so_it_is_tried_again(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+        feed_from_api('CVE-2024-53104')
+        with mock.patch('cveFeed.intel.fetch_cve5', side_effect=intel.TransientSourceError('HTTP 429', retry_after=5)) as fetch, \
+                mock.patch('cveFeed.intel._sleep') as sleep, self.assertRaises(CommandError):
+            call_command('backfill_bare_versions', '--apply')
+        self.assertEqual(fetch.call_count, len(intel.FETCH_WAITS) + 1)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [max(w, 5) for w in intel.FETCH_WAITS])
+
+
+class RetryMarksMigrationTests(TestCase):
+    def test_the_migration_clears_only_the_two_reread_steps_marks(self):
+        import importlib
+
+        from django.apps import apps
+        from cveFeed.models import BackgroundCursor
+        for lane in ('bf:backfill_bare_versions', 'bfa:backfill_bare_versions', 'bf:backfill_exact_builds', 'bf:rerate_findings'):
+            BackgroundCursor.objects.create(lane=lane, last_pk=1)
+        importlib.import_module('cveFeed.migrations.0171_retry_record_rereads').clear(apps, None)
+        self.assertEqual(set(BackgroundCursor.objects.filter(lane__startswith='bf').values_list('lane', flat=True)), {'bf:rerate_findings'})
