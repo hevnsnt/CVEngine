@@ -1,0 +1,14 @@
+{
+  "id": "6f1c2a3e-0000-4000-8000-000000000001",
+  "addresses": ["203.0.113.5"],
+  "addresses_extra": [],
+  "names": ["edge-rtr-1"],
+  "os": "Cisco IOS",
+  "os_version": "15.2(4)M7",
+  "hw": "Cisco ISR4321",
+  "type": "Router",
+  "tags": {},
+  "site_name": "Primary",
+  "alive": true,
+  "last_seen": 1763400000
+}

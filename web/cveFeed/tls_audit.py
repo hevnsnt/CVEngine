@@ -193,6 +193,17 @@ def record_observations(project_id, domain_id, host, port, result, ip):
     upsert(OBS_AUDIT, '', 'found', {'protocols': result.protocols, 'issues': len(result.findings), 'ip': ip})
 
 
+def store_banners(sub, port, items):
+    """The Server and application headers testssl.sh read on the port (its ``banner_server`` and ``banner_application`` items), stored as version
+    readings of the host (cveFeed.source_versions, probe ``vsrc:testssl``); the host is correlated again when one is new, changed or gone. Never fatal."""
+    from cveFeed import probes, source_versions
+    try:
+        if source_versions.store_testssl(sub, port, items):
+            probes.recorrelate(sub)
+    except Exception:  # noqa: BLE001 - the audit's own result stands without the banner readings
+        logger.exception('could not store the testssl.sh banners of %s:%s', getattr(sub, 'name', ''), port)
+
+
 def store(domain, host, port, result, where):
     """Upsert this port's findings; resolve the ones the test ran for and no longer reports. Returns the rows resolved."""
     from cveFeed.hygiene import Finding, store_findings
@@ -418,6 +429,7 @@ def sweep(project_id, resolve=None):
             record_observations(project_id, domain_id, host, port, result, ip)
             store(sub.target_domain, host, port, result, where)
             run_for_host(sub)
+            store_banners(sub, port, items)
             ledger.record(SERVICE, [asset], project_id, sub.scan_history)
             summary['tested'] += 1
             summary['issues'] += len(result.findings)

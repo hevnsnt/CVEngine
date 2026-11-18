@@ -1,0 +1,11 @@
+[
+  {"type": "DNS_NAME", "id": "D1", "data": "rt.test", "host": "rt.test", "module": "SEED", "resolved_hosts": ["203.0.113.5"], "parent": "S"},
+  {"type": "DNS_NAME", "id": "D2", "data": "app.rt.test", "host": "app.rt.test", "module": "crt", "resolved_hosts": ["203.0.113.5"], "parent": "D1"},
+  {"type": "OPEN_TCP_PORT", "id": "P1", "data": "app.rt.test:22", "host": "app.rt.test", "module": "shodan_idb", "parent": "D2"},
+  {"type": "TECHNOLOGY", "id": "T1", "data": null, "host": "app.rt.test", "module": "shodan_idb", "parent": "D2",
+   "data_json": {"host": "app.rt.test", "technology": "cpe:/a:openbsd:openssh:8.9p1"}},
+  {"type": "TECHNOLOGY", "id": "T2", "data": null, "host": "app.rt.test", "module": "shodan_idb", "parent": "D2",
+   "data_json": {"host": "app.rt.test", "technology": "cpe:/o:canonical:ubuntu_linux"}},
+  {"type": "TECHNOLOGY", "id": "T3", "data": null, "host": "app.rt.test", "module": "shodan_idb", "parent": "D2",
+   "data_json": {"host": "app.rt.test", "technology": "cpe:/a:jquery:jquery:3.5.1"}}
+]
