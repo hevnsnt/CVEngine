@@ -119,6 +119,14 @@ def _nuclei(task, result, agent):
     scan = task.scan
     if scan is None:
         return {'findings': 0}
+    from agentapi import sentinel_broker
+    if sentinel_broker.network_detection_task(task):  # the network detection pass: what it read fills the ports, as the stage would have (no finding is filed)
+        from cveFeed import network_detection, probes
+        got = network_detection.ingest(scan, [sentinel_dispatch._finding_to_nuclei_line(f) for f in result.get('findings', [])],
+                                       (task.target or {}).get('targets') or [])
+        for sub in got['changed']:
+            probes.recorrelate(sub)
+        return {'ports': got['ports'], 'readings': got['readings']}
     domain = scan.domain
     by_name, by_ip = {}, {}
     for sub in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses'):

@@ -29,6 +29,8 @@ runtime rules of ``cveFeed.version_sources``):
                  IOS XE, IOS XR, NX-OS, FortiOS, Junos OS, PAN-OS, SonicOS, RouterOS). A product a port row, another first-party reading or a
                  technology already states with a version is left out (``recog_readings``): Recog only adds what nmap and the other readers
                  did not read, and never replaces their version. Derived like ``vsrc:nmap``.
+  vsrc:nuclei    a versioned product a ``network/detection/`` template read on a port (``cveFeed.network_detection``) when the port's own row names another
+                 product: nmap's product and version are never overwritten, so a second product the service names is a reading of its own, per port.
 
 The Windows release (``cveFeed.windows_builds``: kind ``hint``, ``release_only``, never a technology, matched by its own rules as "release known,
 patch level unknown"):
@@ -79,7 +81,8 @@ PANEL_PROBE = 'vsrc:panel'
 PANEL_SOURCE = 'panel'
 RECOG_PROBE = 'vsrc:recog'
 NTLM_PROBE = 'vsrc:ntlm'  # cveFeed.windows_builds.PROBE: the Windows release an NTLM challenge states
-FIRST_PARTY_PROBES = (NMAP_PROBE, WEBSERVER_PROBE, TESTSSL_PROBE, WPSCAN_PROBE, DB_PROBE, PANEL_PROBE, RECOG_PROBE)
+NUCLEI_PROBE = 'vsrc:nuclei'  # cveFeed.network_detection: a versioned product a network detection template read on a port whose own row names another product
+FIRST_PARTY_PROBES = (NMAP_PROBE, WEBSERVER_PROBE, TESTSSL_PROBE, WPSCAN_PROBE, DB_PROBE, PANEL_PROBE, RECOG_PROBE, NUCLEI_PROBE)
 REPORTED_PROBES = (SHODAN_PROBE, RUNZERO_PROBE)
 # the Windows release is first-party, but a release with no patch level never makes a third-party reading of the same system give way (a runZero
 # operating system version names the update revision the NTLM challenge does not): it is kept out of FIRST_PARTY_PROBES

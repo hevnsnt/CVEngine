@@ -81,6 +81,7 @@ ALLOWED = {
         'cveFeed/match_policy.py',
         'cveFeed/migrations/0124_os_path_schedule.py',
         'cveFeed/models.py',
+        'cveFeed/network_detection.py',  # the network detection pass (contract 10): reads the result lines a Sentinel returned and fills what the port scan left out of a port row, runs nothing
         'cveFeed/nuclei_fp.py',  # 1.3.5 scanner false positives (develop): reads the stored nmap service name of a port (echo), runs nothing
         'cveFeed/nuclei_templates.py',
         'cveFeed/os_detection.py',
@@ -158,6 +159,7 @@ ALLOWED = {
         'cveFeed/migrations/0049_weekly_deep_nuclei.py',
         'cveFeed/migrations/0079_nuclei_templates_every_six_hours.py',
         'cveFeed/models.py',
+        'cveFeed/network_detection.py',  # the network detection pass (contract 10): reads the result lines a Sentinel returned and fills what the port scan left out of a port row, runs nothing
         'cveFeed/notify.py',
         'cveFeed/nuclei_fp.py',  # 1.3.5 scanner false positives (develop): judges nuclei results already returned, runs nothing
         'cveFeed/nuclei_scan.py',  # T8 nuclei: ledger service keys (nuclei-light, nuclei-cve) and the finding source/module value, stored data, plus activity text naming the pass; runs nothing
@@ -177,6 +179,7 @@ ALLOWED = {
         'cveFeed/setup_flow.py',  # the setup wizard (1.4): scanner kind names such as nmap or nuclei as the toggles it offers (data values written to the Sentinel settings), runs nothing
         'cveFeed/setup_questions.py',  # FA-10: the update question and its note name the tool in words an administrator reads; runs nothing
         'cveFeed/software.py',  # the About page list of the tools of both images (names, versions, licenses), runs nothing
+        'cveFeed/source_versions.py',  # reads the versions stored results already state, among them a network detection template's (vsrc:nuclei), and names them as reading sources, runs nothing
         'cveFeed/supplier_scan.py',
         'cveFeed/tailscale_sync.py',
         'cveFeed/tasks.py',

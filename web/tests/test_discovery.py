@@ -545,6 +545,26 @@ class NucleiStageTests(TestCase):
 		self.assertEqual(scan.scan_status, 2)  # discovery results stand
 		self.assertEqual(ScanActivity.objects.get(scan_of=scan, name='nuclei_targeted_scan').status, 0)
 
+	def test_the_network_detection_pass_runs_after_the_light_pass_and_before_correlation_when_there_is_a_port_for_it(self):
+		from unittest import mock as _mock
+		from cveFeed import network_detection
+		from startScan.models import ScanActivity
+		sent = []
+
+		def run(scan_id, stream, force=False):
+			sent.append((scan_id, stream, force))
+			return {'targets': 1, 'sent': 1, 'ports': 1, 'readings': 0, 'hosts': {}}
+		with _mock.patch.object(network_detection, 'has_work', return_value=True), _mock.patch.object(network_detection, 'run_for_scan', side_effect=run), \
+				_mock.patch('agentapi.sentinel_dispatch.wrap_nuclei_stream', return_value='the light stream of a Sentinel') as wrap:
+			scan, out = self._pipeline(light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]))
+		names = list(ScanActivity.objects.filter(scan_of=scan).order_by('id').values_list('name', flat=True))
+		self.assertLess(names.index('nuclei_light_scan'), names.index('nuclei_netdetect_scan'))
+		self.assertLess(names.index('nuclei_netdetect_scan'), names.index('cve_correlation'))
+		self.assertEqual(ScanActivity.objects.get(scan_of=scan, name='nuclei_netdetect_scan').title, 'Nuclei network detection pass')
+		self.assertEqual(sent, [(scan.id, 'the light stream of a Sentinel', False)])  # a Sentinel's stream, never the test's light one
+		wrap.assert_called_once_with(scan, 'nuclei_light')
+		self.assertEqual(out['network_detection']['ports'], 1)
+
 	def test_stages_run_in_order_and_the_light_pass_comes_before_the_targeted_one(self):
 		from startScan.models import ScanActivity
 		calls = []

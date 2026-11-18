@@ -934,6 +934,12 @@ class SentinelEff:
         return CREDENTIAL_FEATURE in ((self.agent.info or {}).get('features') or [])
 
     @property
+    def network_detection(self):
+        """Whether this Sentinel runs the network detection pass (a ``nuclei_light`` task's ``network_detection``): it declared contract
+        ``NUCLEI_DETECTION_SINCE`` or later. An older one ignores the field and its light pass checks nothing on the ports, so it is never given such a task."""
+        return runs_network_detection(self.agent)
+
+    @property
     def reads_secrets(self):
         """Whether this is the built-in scanner and its image reads a stored sign-in (``info.features`` has ``secret_read``): only then is it offered
         signed-in work. An older built-in image would run such a task signed out and report it as signed in."""
@@ -985,6 +991,8 @@ class SentinelEff:
             return 'capability', INTERNAL_CAPABILITY  # a Sentinel outside the network cannot reach it and would report an empty result as clean
         if credential_work(task.kind) and not self.credential_filter:
             return 'capability', CREDENTIAL_FILTER  # an older client would run default-login and brute-force templates while credential checks are off
+        if network_detection_task(task) and not self.network_detection:
+            return 'capability', NETWORK_DETECTION  # an older client would ignore the field and check nothing on the ports (contract 10)
         return None
 
     def _in_hosts(self, task):
@@ -1008,6 +1016,26 @@ class SentinelEff:
 
 def effective(agent, now=None):
     return SentinelEff(agent, now or timezone.now())
+
+
+NETWORK_DETECTION = 'too old to run the network detection pass (contract 10)'  # the refusal reason of such a task offered to an older Sentinel
+
+
+def runs_network_detection(agent):
+    """Whether ``agent`` declared a contract version (``info.contract_version``) that runs the network detection pass (``flags.NUCLEI_DETECTION_SINCE``)."""
+    from cvengine_scanner import flags as scan_flags
+    reported = (agent.info or {}).get('contract_version') if isinstance(agent.info, dict) else None
+    return isinstance(reported, int) and not isinstance(reported, bool) and reported >= scan_flags.NUCLEI_DETECTION_SINCE
+
+
+def network_detection_task(task):
+    """Whether ``task`` is the network detection pass: a ``nuclei_light`` task whose target carries ``network_detection: true`` (``cveFeed.network_detection``)."""
+    return task.kind == 'nuclei_light' and isinstance(task.target, dict) and task.target.get('network_detection') is True
+
+
+def network_detection_scanner(project, internal=False, now=None):
+    """Whether a live, eligible Sentinel that covers ``project`` and takes ``nuclei_light`` runs the network detection pass: the stage sends nothing otherwise."""
+    return any(e.network_detection and e.live for e in eligible_sentinels(project, 'nuclei_light', now=now, internal=internal, live_only=True))
 
 
 CREDENTIAL_FEATURE = 'credential_filter'  # ``info.features`` entry of a client that leaves checks that send credentials out of a nuclei web run (sentinel_settings.FEATURES)
@@ -1907,6 +1935,9 @@ def _claimable(eff, kinds, now):
         # the poll of a Sentinel that never asks for these kinds costs nothing more)
         from dashboard.models import ScanPolicy
         queued = queued.filter(~Q(kind__in=CREDENTIAL_KINDS) | Exists(ScanPolicy.objects.filter(allow_credential_checks=True)))
+    if not eff.network_detection:  # the network detection pass goes only to a Sentinel that runs it (contract 10); an older one would check nothing
+        # (has_key first: a key lookup on a target without the key is NULL in SQL, and an exclude over it would drop every ordinary light task too)
+        queued = queued.filter(~Q(kind='nuclei_light') | ~Q(target__has_key='network_detection') | Q(target__network_detection=False))
     queued = eff.secret_filter(queued)  # a task that needs a stored credential goes only to a built-in scanner image that reads one; a discovery's keys also to a Sentinel the gate allows
     if not eff.builtin:
         queued = queued.exclude(VALIDATING_Q)  # a task that validates found secrets is never offered to any Sentinel but the built-in one
@@ -2096,6 +2127,8 @@ def _claim(agent, kinds, now):
                 continue  # the built-in scanner's while it is in use
             if credential_work(task.kind) and not eff.credential_filter:
                 continue  # (the query already left it out; this is the same rule where the task is actually taken)
+            if network_detection_task(task) and not eff.network_detection:
+                continue  # (the query already left it out) an older client would ignore the field: left for one that runs the pass
             if task.kind == AI_CHECK and not eff.builtin:
                 from agentapi import ai_checks
                 why = ai_checks.task_problem(task, builtin=False)

@@ -30,6 +30,7 @@ DEFAULT_TTL_HOURS = {'wafw00f': 7 * 24, 'nmap-fast': 7 * 24, 'nmap-full': 14 * 2
                      'openvas': 7 * 24, 'openvas-failed': 3 * 24, 'supplier': 7 * 24, 'supplier-failed': 24,
                      'secrets-scan': 7 * 24, 'secrets-validate': 7 * 24, 'ssh-probe': 7 * 24, 'ssh-probe-failed': 24, 'java-runtime': 7 * 24, 'java-runtime-failed': 24,
                      'version-source': 7 * 24, 'version-source-failed': 24,
+                     'nuclei-netdetect': 7 * 24, 'nuclei-netdetect-failed': 24, 'nuclei-netdetect-nocheck': 7 * 24,  # cveFeed.network_detection
                      # kinds that always ran on the 24 hour default; listed so the check coverage registry (cveFeed.check_coverage) can see them
                      'nuclei-light': 24, 'nuclei-cve': 24, 'rdp-shot': 24, 'node2shell': 24}
 CLAIM_TTL = 180  # seconds; refreshed while held, so a crashed worker frees its assets within minutes
