@@ -31,6 +31,7 @@ from agentapi import host_review_api as hostreview
 from agentapi import tuning
 from agentapi import authcheck
 from agentapi import tailscale
+from agentapi import tech_coverage_api
 from tenancy import audit
 from agentapi.models import SentinelTask
 from agentapi.services import ApiError, Ctx
@@ -583,6 +584,9 @@ TOOLS = [
      lambda c, a: tuning.list_decisions(c, a), False),
     ('get_maintainer_report', 'App Admin only, read-only. What the instance maintainer did and saw in the last 24 hours, in one bounded answer: the tuning mode and what is pinned and by whom, a summary of the signals (memory per lane and container, queue ages, Sentinels, AI spend against its caps; each known or listed as unknown), the open alerts (stale ones marked, each with the decision that answered it), and every decision with what changed, why and what happened (helped, no_effect, regressed, reverted, or still being checked). Instance health only: no host names and no tenant data.',
      _schema(), lambda c, a: tuning.get_maintainer_report(c), False),
+    ('technology_coverage', 'App Admin only, read-only. How the technology names cvENGINE detects on the current hosts connect to the CVE catalogue, with the matcher correlation itself uses (CPE first, then the name and the aliases of cveFeed/data/product_aliases.json): unmatched (names, with the hosts they are seen on, that reach no CVE record: naming gaps or names that are not software, each with near, the catalogue products that share a word with it), unversioned (names seen without a version that do connect, the most CVEs first: leads for a new version source) and ambiguous (names that reach more than one vendor\'s products, such as IOS). Counted across every tenant; project narrows to one project. limit (default 50, at most 500) caps each list; the *_count fields give the full sizes.',
+     _schema({'project': {'type': 'string', 'description': 'project slug: only its hosts'}, 'limit': {'type': 'integer', 'description': 'rows per list, at most 500 (default 50)'}}),
+     lambda c, a: tech_coverage_api.technology_coverage(c, a), False),
     ('set_tuning_mode', 'App Admin only. Set auto-tuning to off (hand tuning: nothing is measured or changed), suggest (recommendations only) or auto (bounded changes are applied), and/or turn the AI advisor on or off. Leaving auto drops the tuned numbers at once.',
      _schema({'mode': {'type': 'string', 'enum': ['off', 'suggest', 'auto']}, 'advisor': {'type': 'boolean'}}),
      lambda c, a: tuning.set_mode(c, {k: a[k] for k in ('mode', 'advisor') if k in a}), True),
@@ -818,7 +822,7 @@ def _without_waiting(message):
     return message
 
 
-HEAVY_TOOLS = frozenset(('search_hosts', 'list_hosts', 'list_situations'))  # a query over a whole project's hosts: one per batch
+HEAVY_TOOLS = frozenset(('search_hosts', 'list_hosts', 'list_situations', 'technology_coverage'))  # a query over a whole project's hosts: one per batch
 
 
 def _heavy_call(message):
