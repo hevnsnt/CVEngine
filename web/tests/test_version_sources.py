@@ -54,7 +54,7 @@ class CatalogueTests(SimpleTestCase):
                     self.assertNotIn('method', spec)
                     self.assertFalse(set(spec['headers']) & {'cookie', 'set-cookie', 'authorization'})
                 self.assertTrue(source.verified)
-                self.assertTrue(source.leads or source.ports)  # never asked of every host
+                self.assertTrue(source.leads or source.ports or source.discovered)  # never asked of every host (a discovered entry: only at a page found)
                 self.assertEqual(source.reader([None] * len(source.requests)), [])  # no answer, no reading
                 self.assertEqual(source.reader([HTML_LOGIN] * len(source.requests)), [])  # a login or catch-all page, no reading
 
@@ -62,7 +62,7 @@ class CatalogueTests(SimpleTestCase):
         from jsonschema import Draft202012Validator
         from agentapi import sentinel_contract
         scope = json.loads((Path(__file__).with_name('fixtures') / 'sentinel_targets' / 'version_read.json').read_text())['scope']
-        for kind in ('version_read', catalogue.DIGEST_KIND):  # an entry with a digest read is the version_digest kind's (contract 8)
+        for kind in ('version_read', catalogue.DIGEST_KIND, catalogue.ROWS_KIND):  # a digest read is version_digest's (contract 8), a rows read version_rows' (9)
             reads = [{'id': f'h|{s.id}', 'host': 'h.rt.test', 'base': 'https://h.rt.test', 'allowed': ['h.rt.test'],
                       'requests': catalogue.request_specs(s, '0123456789ab')} for s in catalogue.SOURCES if s.task_kind == kind]
             target = {'reads': reads, 'scope': scope}

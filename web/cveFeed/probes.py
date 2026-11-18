@@ -46,8 +46,8 @@ BODY_SCAN = 64 * 1024  # a response is read for markers in its first 64 KB only:
 PROBES = (
     {'id': 'headers-root', 'label': 'Response headers and page markers of the front page', 'family': 'http', 'leads': WEB,
      'requests': (('GET', '/'),), 'handler': 'headers', 'safety': 'one GET of the front page'},
-    {'id': 'error-page', 'label': 'Server error page signature (nginx, Apache, Tomcat, Jetty, IIS footers)', 'family': 'http',
-     'leads': r'nginx|openresty|apache|httpd|tomcat|jetty|iis|internetinformation|express|nextjs|springboot|ingress', 'requests': (('GET', PROBE_PATH),),
+    {'id': 'error-page', 'label': 'Server error page signature (nginx, Apache, Tomcat, JBoss Web, Jetty, IIS footers)', 'family': 'http',
+     'leads': r'nginx|openresty|apache|httpd|tomcat|jboss|jetty|iis|internetinformation|express|nextjs|springboot|ingress', 'requests': (('GET', PROBE_PATH),),
      'safety': 'one GET of a path no site serves', 'rules': (
          {'request': 0, 'where': 'body', 'regex': r'<center>nginx/(\d+\.\d+\.\d+)</center>', 'product': 'nginx', 'version': 1,
           'kind': 'version', 'confidence': 0.95, 'source': 'body:nginx-error-page'},
@@ -57,12 +57,25 @@ PROBES = (
           'confidence': 0.8, 'source': 'body:nginx-error-page'},
          {'request': 0, 'where': 'body', 'regex': r'<hr><center>nginx</center>', 'product': 'nginx', 'variant': 'nginx', 'kind': 'identity',
           'confidence': 0.7, 'source': 'body:nginx-error-page'},
-         {'request': 0, 'where': 'body', 'regex': r'(?i)Apache/(\d+\.\d+\.\d+) (?:\([^)]{1,30}\) )?Server at', 'product': 'Apache HTTP Server',
+         # Apache's footer (ServerSignature On) is the whole server banner, modules included when ServerTokens allows them:
+         # "<address>Apache/2.4.6 (CentOS) OpenSSL/1.0.2k-fips PHP/7.4.33 Server at example.com Port 80</address>" (server/core.c
+         # ap_psignature): the web server, and the OpenSSL, PHP and Python releases it lists
+         {'request': 0, 'where': 'body', 'regex': r'(?i)Apache/(\d+\.\d+\.\d+) (?:[^<>]{1,300}? )?Server at ', 'product': 'Apache HTTP Server',
           'version': 1, 'kind': 'version', 'confidence': 0.9, 'source': 'body:apache-error-page'},
+         {'request': 0, 'where': 'body', 'regex': r'(?i)<address>Apache/\d+\.\d+\.\d+ [^<>]{0,300}?\bOpenSSL/(\d+\.\d+\.\d+[a-z]{0,2})(?:-[A-Za-z0-9]{1,12})? [^<>]{0,300}?Server at ',
+          'product': 'OpenSSL', 'version': 1, 'kind': 'version', 'confidence': 0.85, 'source': 'body:apache-error-page'},
+         {'request': 0, 'where': 'body', 'regex': r'(?i)<address>Apache/\d+\.\d+\.\d+ [^<>]{0,300}?\bPHP/(\d+\.\d+\.\d+)[^ <>]{0,40} [^<>]{0,300}?Server at ',
+          'product': 'PHP', 'version': 1, 'kind': 'version', 'confidence': 0.85, 'source': 'body:apache-error-page'},
+         {'request': 0, 'where': 'body', 'regex': r'(?i)<address>Apache/\d+\.\d+\.\d+ [^<>]{0,300}?\bPython/(\d+\.\d+\.\d+)[^ <>]{0,40} [^<>]{0,300}?Server at ',
+          'product': 'Python', 'version': 1, 'kind': 'version', 'confidence': 0.85, 'source': 'body:apache-error-page'},
          {'request': 0, 'where': 'body', 'regex': r'Apache Tomcat/(\d+\.\d+\.\d+[\w.-]*)', 'product': 'Apache Tomcat', 'version': 1,
           'kind': 'version', 'confidence': 0.9, 'source': 'body:tomcat-error-page'},
          {'request': 0, 'where': 'body', 'regex': r'Powered by Jetty:// (\d+\.\d+\.\d+[\w.-]*)', 'product': 'Jetty', 'version': 1,
           'kind': 'version', 'confidence': 0.9, 'source': 'body:jetty-error-page'},
+         # JBoss AS 4 to 7 and EAP 5 and 6 serve Tomcat's error template with their own servlet container's name: "<h3>JBoss Web/7.0.13.Final</h3>"
+         # (AS 7.1), "<h3>JBossWeb/2.0.1.GA</h3>" (AS 4.2); WildFly's Undertow page states no version and is not read
+         {'request': 0, 'where': 'body', 'regex': r'<h3>JBoss ?Web/(\d+\.\d+\.\d+)(?:\.(?:GA|Final|CR\d{1,2}|Beta\d{1,2}|SP\d{1,2}))?</h3>',
+          'product': 'JBoss Web', 'version': 1, 'kind': 'version', 'confidence': 0.9, 'source': 'body:jbossweb-error-page'},
          {'request': 0, 'where': 'title', 'regex': r'IIS (\d+\.\d+) Detailed Error', 'product': 'Microsoft IIS', 'version': 1,
           'kind': 'version', 'confidence': 0.85, 'source': 'title:iis-detailed-error'},
          {'request': 0, 'where': 'body', 'regex': r'^[ \t]{0,8}default backend - 404[ \t]{0,8}$', 'product': 'nginx', 'variant': 'kubernetes-ingress',

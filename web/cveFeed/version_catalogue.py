@@ -44,6 +44,7 @@ CONTROL_PREFIX = 'cvengine-control-'
 COMMON_HEADERS = ('server', 'x-powered-by', 'x-aspnet-version', 'x-aspnetmvc-version', 'x-jenkins')
 CONFIDENCES = ('exact', 'inferred', 'weak')
 DIGEST_KIND = 'version_digest'  # the Sentinel kind of an entry with a digest read (contract 8; cveFeed.edge_builds)
+ROWS_KIND = 'version_rows'      # the Sentinel kind of an entry with a rows read (contract 9): only the named version rows of a status page
 
 _VERSION = re.compile(r'^v?(\d{1,4}(?:\.\d{1,9}){1,3})(?:[-+_.~]([0-9A-Za-z][0-9A-Za-z.+~_-]{0,40}))?$')
 _CONTROL = re.compile(r'[\x00-\x1f\x7f-\x9f  ​-‏‪-‮﻿]+')
@@ -71,7 +72,8 @@ def base_version(text):
 @dataclass(frozen=True)
 class Request:
     path: str
-    read: str = 'json'                 # json | text | metrics | headers | digest (cvengine_scanner.probes.version_read; digest: contract 8)
+    read: str = 'json'                 # json | text | metrics | headers | digest | rows (cvengine_scanner.probes.version_read; digest: contract 8,
+                                       # rows: contract 9, ``fields`` then names the rows)
     fields: tuple = ()
     find: str = ''
     headers: tuple = ()                # the response headers to return instead of COMMON_HEADERS (at most 6: ETag and Last-Modified of an asset)
@@ -110,14 +112,24 @@ class Source:
     exposure: Exposure = None          # an anonymous answer of the right shape is itself a finding
     verified: str = ''                 # where the path and the answer shape were checked (vendor documentation or source)
     note: str = ''
+    discovered: bool = False           # asked only at a page a scan already found on the host (``version_sources.discovered_pages``), never at
+                                       # its own path: ``requests[0].path`` is a placeholder the found page's path replaces (``at_page``)
 
     def lead_re(self):
         return re.compile(self.leads, re.I) if self.leads else None
 
     @property
     def task_kind(self):
-        """The Sentinel kind that runs this entry: ``version_digest`` (contract 8) when a request reads a digest, else ``version_read``."""
-        return DIGEST_KIND if any(r.read == 'digest' for r in self.requests) else 'version_read'
+        """The Sentinel kind that runs this entry: ``version_digest`` (contract 8) when a request reads a digest, ``version_rows`` (contract 9)
+        when one reads rows, else ``version_read``."""
+        if any(r.read == 'digest' for r in self.requests):
+            return DIGEST_KIND
+        return ROWS_KIND if any(r.read == 'rows' for r in self.requests) else 'version_read'
+
+    def at_page(self, path):
+        """This (``discovered``) entry asked at ``path``, a page a scan found on the host: the same entry with its first request moved there."""
+        from dataclasses import replace
+        return replace(self, requests=(replace(self.requests[0], path=path),) + tuple(self.requests[1:]))
 
 
 # ----------------------------------------------------------------------------- reading helpers
@@ -625,6 +637,105 @@ def _unique(readings):
     return out
 
 
+# ----------------------------------------------------------------------------- status pages: only their version rows (contract 9)
+
+def _rows(answer, content_type=''):
+    """The rows a ``rows`` read of one answer carries (``{name: value}``), when it is a 200 answer (of ``content_type`` when given), else None."""
+    if not isinstance(answer, dict) or answer.get('error') or answer.get('status') != 200 or not isinstance(answer.get('rows'), dict):
+        return None
+    if content_type and not str(answer.get('content_type') or '').startswith(content_type):
+        return None
+    return {clip(k, 60): clip(v, 120) for k, v in answer['rows'].items() if isinstance(k, str) and isinstance(v, str)}
+
+
+_APACHE_DESCRIPTION = re.compile(r'^Apache/(\d+\.\d+\.\d+)(?: \(([A-Za-z0-9 ._-]{1,40})\))?((?: [A-Za-z][A-Za-z0-9_.+-]{0,40}/[A-Za-z0-9._+~-]{1,40}){0,16})$')
+
+
+def apache_description(text, url, source, evidence):
+    """The readings Apache's full server description states (``Apache/2.4.57 (Debian) OpenSSL/3.0.11 PHP/8.2.12``: ``ap_get_server_description``,
+    whatever ``ServerTokens`` says): the web server, and each module or runtime it lists with a whole release (the shared Server header parser,
+    ``cvengine_scanner.versions.parse_server_header``). A language runtime (PHP, Python) is a runtime reading; anything else a product. []
+    for any other shape."""
+    from cvengine_scanner import versions
+    said = clip(text, 400)
+    if not _APACHE_DESCRIPTION.match(said):
+        return []
+    out = []
+    for component in versions.parse_server_header(said)['components']:
+        stated = re.sub(r'-fips$', '', component['version'] or '', flags=re.I)  # a FIPS build of a release (RHEL's OpenSSL/1.0.2k-fips) is that release
+        version = stated if re.fullmatch(r'\d{1,4}(?:\.\d{1,9}){1,3}[a-z]{0,2}(?:[-+~][0-9A-Za-z.+~-]{1,40})?', stated) else ''
+        if not version:
+            continue
+        product = component['product']
+        runtime = {'PHP': ('php', 'PHP'), 'Python': ('python', 'Python')}.get(product)
+        if runtime:
+            out.append(reading(runtime[0], runtime[1], version, kind='runtime', evidence=evidence, url=url, source=source))
+        else:
+            out.append(reading(re.sub(r'[^a-z0-9_]+', '-', product.lower()).strip('-'), product, version, evidence=evidence, url=url, source=source))
+    return _unique(out)
+
+
+def read_server_status(answers):
+    """Apache's ``/server-status?auto`` (mod_status, 2.4.13 and later): the ``ServerVersion`` line is the full server description, modules
+    included. Only a plain-text 200 answer with that line in Apache's own shape is read: a catch-all page, a login page or the HTML report
+    (asked without ``?auto``) gives nothing."""
+    rows = _rows(answers[0], 'text/plain')
+    if not rows or 'ServerVersion' not in rows:
+        return []
+    return apache_description(rows['ServerVersion'], '/server-status?auto', 'apache-server-status', f'server-status ServerVersion: {rows["ServerVersion"]}')
+
+
+# the phpinfo rows a version is read from (php-src: main.c "PHP Version", ext/openssl "OpenSSL Library Version", ext/curl "cURL Information",
+# ext/libxml "libXML Loaded Version" / "libXML Compiled Version", ext/pcre "PCRE Library Version", ext/sqlite3 "SQLite Library",
+# sapi/apache2handler "Apache Version"): never "System" (the host name), the configure line, the environment, cookies or variables
+PHPINFO_ROWS = ('PHP Version', 'OpenSSL Library Version', 'cURL Information', 'libXML Loaded Version', 'libXML Compiled Version',
+                'PCRE Library Version', 'SQLite Library', 'Apache Version')
+_PHP_VERSION = re.compile(r'^(\d+\.\d+\.\d+)((?:-|~|\+)[A-Za-z0-9.+~-]{1,40})?$')
+_OPENSSL_ROW = re.compile(r'^(OpenSSL|LibreSSL|BoringSSL) (\d+\.\d+\.\d+[a-z]{0,2})(?:-[A-Za-z0-9]{1,12})?(?: |$)')
+_PCRE_ROW = re.compile(r'^(\d{1,2})\.(\d{1,2})(?: |$)')
+
+
+def read_phpinfo(answers):
+    """A phpinfo page a scan already found (``discovered``): the PHP release (``PHP Version``, the Core module's row) and the libraries it states
+    with theirs: OpenSSL (or LibreSSL), curl, libxml2 (the loaded library; the compiled-in headers' version is only inferred), PCRE or PCRE2,
+    SQLite and the Apache it runs under. The page's ``PHP Version`` row must hold a whole release, or nothing is read. The Sentinel hands back
+    only these rows (``version_rows``): nothing else of the page, which carries the environment, cookies and credentials, leaves it."""
+    rows = _rows(answers[0])
+    php = _PHP_VERSION.match((rows or {}).get('PHP Version', ''))
+    if not php:
+        return []
+    url, source = '/phpinfo', 'phpinfo'
+    out = [reading('php', 'PHP', php.group(1) + (php.group(2) or ''), kind='runtime', evidence=f'phpinfo PHP Version {rows["PHP Version"]}',
+                   url=url, source=source)]
+    found = _OPENSSL_ROW.match(rows.get('OpenSSL Library Version', ''))
+    if found:
+        out.append(reading(found.group(1).lower(), found.group(1), found.group(2), evidence=f'phpinfo OpenSSL Library Version {rows["OpenSSL Library Version"]}',
+                           url=url, source=source))
+    curl = version_of(rows.get('cURL Information', ''), keep_suffix=False)
+    if curl and curl.count('.') == 2:
+        out.append(reading('curl', 'curl', curl, evidence=f'phpinfo cURL Information {rows["cURL Information"]}', url=url, source=source))
+    loaded = re.fullmatch(r'(\d)(\d{2})(\d{2})', rows.get('libXML Loaded Version', ''))  # xmlParserVersion: 20914 is 2.9.14
+    compiled = version_of(rows.get('libXML Compiled Version', ''), keep_suffix=False)
+    if loaded:
+        out.append(reading('libxml2', 'libxml2', f'{int(loaded.group(1))}.{int(loaded.group(2))}.{int(loaded.group(3))}',
+                           evidence=f'phpinfo libXML Loaded Version {rows["libXML Loaded Version"]}', url=url, source=source))
+    elif compiled and compiled.count('.') == 2:
+        out.append(reading('libxml2', 'libxml2', compiled, confidence='inferred', evidence=f'phpinfo libXML Compiled Version {compiled} (the headers PHP '
+                           'was built with; the loaded library is not stated)', url=url, source=source))
+    pcre = _PCRE_ROW.match(rows.get('PCRE Library Version', ''))
+    if pcre:
+        label = 'PCRE2' if int(pcre.group(1)) >= 10 else 'PCRE'
+        out.append(reading(label.lower(), label, f'{pcre.group(1)}.{pcre.group(2)}', evidence=f'phpinfo PCRE Library Version {rows["PCRE Library Version"]}',
+                           url=url, source=source))
+    sqlite = version_of(rows.get('SQLite Library', ''), keep_suffix=False)
+    if sqlite and sqlite.count('.') == 2:
+        out.append(reading('sqlite', 'SQLite', sqlite, evidence=f'phpinfo SQLite Library {sqlite}', url=url, source=source))
+    if rows.get('Apache Version', '').startswith('Apache/'):
+        out += [r for r in apache_description(rows['Apache Version'], url, source, f'phpinfo Apache Version {rows["Apache Version"]}')
+                if r['component'] not in ('php',)]  # PHP is read from its own row
+    return _unique(out)
+
+
 # ----------------------------------------------------------------------------- the catalogue
 
 _K8S_REMEDIATION = ('Keep the API server off networks that do not need it (a private endpoint, an allow-list of client addresses), and keep anonymous '
@@ -749,6 +860,31 @@ SOURCES = (
            note='only a site that shows detailed errors to remote users (customErrors off) prints the block'),
 )
 SOURCES = SOURCES + __import__('cveFeed.edge_builds', fromlist=['sources']).sources()  # the edge appliances' builds (cveFeed.edge_builds)
+# status pages read row by row (contract 9, version_rows): only the version rows ever leave the Sentinel
+SOURCES = SOURCES + (
+    Source('apache-server-status', 'Apache server-status', 'platform', (Request('/server-status?auto', read='rows', fields=('ServerVersion',)),),
+           read_server_status, leads=r'^(?:apache(?: http server| httpd)?|httpd)$',
+           verified='https://github.com/apache/httpd/blob/2.4.x/modules/generators/mod_status.c (the "?auto" report prints "ServerVersion: " '
+           'ap_get_server_description(), the full description whatever ServerTokens says; added to ?auto in 2.4.13, CHANGES)',
+           note='asked only of a host already identified as Apache HTTP Server; a plain-text 200 answer with the ServerVersion line is the only shape read',
+           exposure=Exposure('apache-server-status-exposed', 'Apache server-status page readable without authentication', 1,
+                             'Apache\'s mod_status report (/server-status) answers from the network without credentials.',
+                             'It names the exact Apache, OpenSSL and module releases even when the Server header hides them, and with ExtendedStatus on '
+                             'it lists the client addresses and the URLs being requested, which can carry session tokens.',
+                             'Restrict the handler to the addresses that need it (<Location "/server-status"> Require ip 127.0.0.1 ... </Location>) or '
+                             'disable mod_status.', twins=('apache-server-status', 'apache-server-status-localhost', 'server-status-localhost'))),
+    Source('phpinfo', 'phpinfo page', 'runtime', (Request('/phpinfo.php', read='rows', fields=PHPINFO_ROWS),), read_phpinfo, discovered=True,
+           verified='https://github.com/php/php-src (main/main.c PHP_MINFO core "PHP Version"; ext/openssl, ext/curl, ext/libxml, ext/pcre, '
+           'ext/sqlite3 and sapi/apache2handler MINFO rows)',
+           note='asked only at a phpinfo page a scan already found on the host (a template check\'s phpinfo finding, or a crawled page titled '
+           '"phpinfo()"), never at a guessed path; only the version rows come back',
+           exposure=Exposure('phpinfo-exposed', 'phpinfo page readable without authentication', 1,
+                             'A PHP information page (phpinfo()) answers from the network without credentials.',
+                             'It prints the exact PHP and library releases, the server\'s paths and configuration, and the environment, which often '
+                             'holds database passwords, API keys and session cookies.',
+                             'Delete the page, or restrict it to the addresses that need it.',
+                             twins=('phpinfo-files', 'phpinfo', 'php-info', 'phpinfo-page', 'phpinfo-detect'))),
+)
 BY_ID = {s.id: s for s in SOURCES}
 assert all(len(s.requests) + int(s.control) <= MAX_REQUESTS for s in SOURCES)
 

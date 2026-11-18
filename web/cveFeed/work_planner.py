@@ -98,6 +98,7 @@ NOT_PLANNED = {
     'nuclei_deep': ('nuclei-deep', 'its own paced weekly sweep (weekly_deep_nuclei)'),
     'nuclei_validate': (None, 'a validation of a finding, queued by validation'),
     'version_digest': ('version-sources', 'the digest half of the version source reads (cveFeed.edge_builds): sent by the version_read planner spec itself'),
+    'version_rows': ('version-sources', 'the status page half of the version source reads (server-status, a phpinfo page found): sent by the version_read planner spec itself'),
     'testssl': ('tls-audit', 'its own daily sweep (testssl_sweep)'),
     'wpscan': ('wpscan', 'a stage of the host pipeline, and its own quick pass for the sites the stage missed'),
     'wpscan_thorough': ('wpscan-thorough', 'its own sweep, one site per project at a time (hours per site)'),

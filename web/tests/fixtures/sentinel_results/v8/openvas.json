@@ -1,0 +1,27 @@
+{
+  "outcome": "done",
+  "results": [
+    {
+      "oid": "1.3.6.1.4.1.25623.1.0.100315",
+      "name": "Example NVT",
+      "family": "General",
+      "address": "192.0.2.30",
+      "port": "443/tcp",
+      "severity": 5.0,
+      "threat": "Medium",
+      "qod": 80,
+      "cves": [
+        "CVE-2099-0001"
+      ],
+      "urls": [
+        "https://example.com/"
+      ]
+    }
+  ],
+  "scanned_addresses": [
+    "192.0.2.30"
+  ],
+  "without_cve": 0,
+  "unusable": 0,
+  "partial": false
+}
