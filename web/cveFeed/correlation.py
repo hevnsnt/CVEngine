@@ -69,13 +69,13 @@ def split_name_version(tech_name):
     return name, ""
 
 
-# a nuclei template named for the product ("Nginx version", "Microsoft IIS Detect"): cveFeed.nuclei_scan.tech_name_from drops the word now, rows an
+# a technology template named for the product ("Nginx version", "Microsoft IIS Detect"): the technology pass drops the word now, rows an
 # earlier build stored still carry it
 _TEMPLATE_WORD_RE = re.compile(r"\s+(?:version|detect|detected|detection|fingerprint)\s*$", re.IGNORECASE)
 
 
 def tech_name(name):
-    """The product a stored technology name names, as correlation matches it: the name without a trailing nuclei template word."""
+    """The product a stored technology name names, as correlation matches it: the name without a trailing template word."""
     stripped = _TEMPLATE_WORD_RE.sub("", name or "")
     return stripped if stripped.strip() else (name or "")
 

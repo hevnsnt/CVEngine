@@ -1,7 +1,7 @@
 """Correlate again the hosts whose technology names the name rules now connect differently (cveFeed.correlation.names_rules_touch).
 
 The alias data (cveFeed/data/product_aliases.json) and the name rules decide which CVE records a detected name reaches: "Cisco ASA" now reaches
-Cisco's ASA records, "Ivanti Connect Secure" the Pulse Connect Secure ones, nmap's nginx CPE (igor_sysoev) the F5 records, and "Express" no
+Cisco's ASA records, "Ivanti Connect Secure" the Pulse Connect Secure ones, the port scan's nginx CPE (igor_sysoev) the F5 records, and "Express" no
 longer reaches Ubiquiti's UniFi Express. A host is correlated again by the next scan of it; this does it now, once, for the current hosts
 (each domain's latest inventory) carrying such a name, so a match appears (or a wrong one closes) without waiting for a rescan.
 
