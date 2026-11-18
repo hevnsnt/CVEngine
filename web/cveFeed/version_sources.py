@@ -493,8 +493,8 @@ def snmp_readings(sub, ports=None):
         info = scripts.get('snmp-info') if isinstance(scripts.get('snmp-info'), str) else ''
         enterprise = re.search(r'enterprise:\s*([A-Za-z0-9 .,&-]{1,40})', info or '')
         for r in catalogue.from_sysdescr(text, enterprise.group(1).strip() if enterprise else ''):
-            if (r['component'], r['version']) not in seen:
-                seen.add((r['component'], r['version']))
+            if (r['component'], r['label'], r['version']) not in seen:
+                seen.add((r['component'], r['label'], r['version']))
                 out.append((SNMP_PORT, r))
     return out
 

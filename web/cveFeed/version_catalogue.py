@@ -724,6 +724,7 @@ SNMP_FORMATS = {
                'https://learn.microsoft.com/en-us/windows/release-health/windows-server-release-info)',
 }
 SNMP_URL = 'udp/161 sysDescr'
+ASA_NAMES = ('Cisco Adaptive Security Appliance (ASA) Software', 'Cisco Secure Firewall Adaptive Security Appliance (ASA) Software')
 _IOS_BUILD = r'\d{2}\.\d\(\d{1,3}[a-z]?\)[A-Z]{0,4}\d{0,3}[a-z]?'       # 15.0(2)SE11, 12.2(55)SE5, 15.2(4)M7, 15.2(7)E3
 _XE_IMAGE = re.compile(r'IOSXE|IOS-XE|IOSD', re.I)                       # an IOS XE image, or the IOS daemon inside one, names itself so
 _AFTER = r'(?=[,.\s]|$)'
@@ -782,8 +783,10 @@ def from_sysdescr(text, enterprise=''):
     found = _ASA.match(said)
     if found:
         version = '.'.join(x for x in found.groups() if x)  # 9.16(4)18 is 9.16.4.18
-        return one('cisco-asa', 'Cisco Adaptive Security Appliance Software', version,
-                   _cpe('a', 'cisco', 'adaptive_security_appliance_software', version))
+        cpe = _cpe('a', 'cisco', 'adaptive_security_appliance_software', version)
+        # Cisco's records name the product two ways (before and after the Secure Firewall rename), and correlation matches each name only to
+        # itself: one reading per name, the same release
+        return [r for label in ASA_NAMES for r in one('cisco-asa', label, version, cpe)]
     found = _NXOS.match(said)
     if found:
         if found.group(1) == 'aci' or found.group(2).startswith('aci'):
