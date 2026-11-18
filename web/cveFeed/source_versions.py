@@ -18,6 +18,8 @@ runtime rules of ``cveFeed.version_sources``):
   vsrc:wpscan    the ``headers`` interesting finding of a WordPress scan (``Server: Apache/2.4.29 (Ubuntu)``, ``X-Powered-By: PHP/7.2.24``).
   vsrc:db-probe  the version a credential-less database probe's reply states (``PONG (redis 7.2.4)``, ``PostgreSQL 15.4``, ``(MySQL 8.0.35)``,
                  ``VERSION 1.6.21``, ``cluster x, version 8.11.1``), per port.
+  vsrc:panel     the version an info-level panel template result (tag ``panel``) extracted, under the product the template names, with its
+                 CPE (``cveFeed.panel_versions``), per port. Never stored over a version another source states for the product.
   vsrc:recog     what Rapid7 Recog's fingerprint databases (``cveFeed.recog``) read in the banners the host's rows already store: SSH, SMTP, FTP,
                  POP3, IMAP and telnet banners (``Port.banner``), the Server and Set-Cookie lines of the NSE output, ``mysql-info``'s server
                  version, ``ntp-info``'s readvar variables, an SNMP agent's sysDescr, the host's Server header (``Subdomain.webserver``) and its
@@ -73,9 +75,11 @@ DB_PROBE = 'vsrc:db-probe'
 WEBSERVER_PROBE = 'vsrc:webserver'
 SHODAN_PROBE = 'vsrc:shodan-idb'
 RUNZERO_PROBE = 'vsrc:runzero'
+PANEL_PROBE = 'vsrc:panel'
+PANEL_SOURCE = 'panel'
 RECOG_PROBE = 'vsrc:recog'
 NTLM_PROBE = 'vsrc:ntlm'  # cveFeed.windows_builds.PROBE: the Windows release an NTLM challenge states
-FIRST_PARTY_PROBES = (NMAP_PROBE, WEBSERVER_PROBE, TESTSSL_PROBE, WPSCAN_PROBE, DB_PROBE, RECOG_PROBE)
+FIRST_PARTY_PROBES = (NMAP_PROBE, WEBSERVER_PROBE, TESTSSL_PROBE, WPSCAN_PROBE, DB_PROBE, PANEL_PROBE, RECOG_PROBE)
 REPORTED_PROBES = (SHODAN_PROBE, RUNZERO_PROBE)
 # the Windows release is first-party, but a release with no patch level never makes a third-party reading of the same system give way (a runZero
 # operating system version names the update revision the NTLM challenge does not): it is kept out of FIRST_PARTY_PROBES

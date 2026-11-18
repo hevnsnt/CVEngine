@@ -1,0 +1,20 @@
+id: citrix-adc-gateway-panel
+
+info:
+  name: Citrix ADC Gateway Login Panel - Detect
+  author: organiccrap
+  severity: info
+  description: Citrix ADC Gateway login panel was detected.
+  classification:
+    cvss-metrics: CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N
+    cwe-id: CWE-200
+    cpe: cpe:2.3:a:citrix:gateway:*:*:*:*:*:*:*:*
+  metadata:
+    max-request: 2
+    vendor: citrix
+    product: gateway
+    shodan-query: http.title:"citrix gateway"
+    fofa-query: title="citrix gateway"
+    google-query: intitle:"citrix gateway"
+  tags: panel,citrix,discovery
+

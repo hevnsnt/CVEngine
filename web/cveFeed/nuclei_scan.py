@@ -414,6 +414,8 @@ def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, servi
         for ip in sub.ip_addresses.all():
             by_ip.setdefault(ip.address, sub)
     screen = nuclei_fp.RunScreen(echo_ports=_echo_ports(subs), project=project, scan=scan)
+    from cveFeed.panel_versions import Collector
+    panels = Collector()  # an info-level panel hit's extracted version is a version reading of the host too (cveFeed.panel_versions)
 
     def save(line):
         nonlocal new
@@ -430,6 +432,7 @@ def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, servi
         vuln, created = save_vulnerability(
             target_domain=domain, scan_history=scan, subdomain=sub,
             http_url=line.get('matched-at') or line.get('host') or host, **data)
+        panels.offer(line, sub)
         sev = line.get('info', {}).get('severity', 'unknown')
         counts[sev if sev in counts else 'unknown'] += 1
         if created:
@@ -472,6 +475,7 @@ def _run_nuclei(scan_id, stream, tags=None, targets=None, severities=None, servi
                             save(line)
                     for line in screen.release():  # protocol matches, judged with the chunk's other matches on their port
                         save(line)
+                    panels.flush()  # the chunk's panel versions, stored and their hosts correlated again
                 finally:
                     os.unlink(path)
                 record_reached(service, chunk, project, scan, stream)
