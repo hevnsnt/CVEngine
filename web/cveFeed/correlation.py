@@ -162,6 +162,9 @@ _JUNOS_RELEASE_RE = re.compile(r"^R(\d+)(?:-S(\d+)|\.(\d+))?(?![0-9A-Za-z])")
 _TRAIN_BUILD_RE = re.compile(r"^-(\d{1,3})\.(\d{1,4})(?![\d.A-Za-z])")
 # PAN-OS names a hotfix of a release: 10.2.9-h1 is the first hotfix of 10.2.9, so 10.2.9 < 10.2.9-h1 < 10.2.9-h3 < 10.2.10.
 _HOTFIX_RE = re.compile(r"^-h(\d{1,3})(?![0-9A-Za-z])")
+# ImageMagick's "7.1.2-35": a numeric revision after a dash, a release of its own (7.1.2-35 is not 7.1.2-4). Never a distribution build
+# ("2.4.57-11.el9", "1.18.0-6ubuntu14": the lookahead refuses a dot or a letter after the number)
+_DASH_REVISION_RE = re.compile(r"^-(\d{1,5})(?![\d.A-Za-z_+~])")
 _DATE_RE = re.compile(r"^(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2}))?(?![\d.])")
 _PRE_RANK = {"dev": -6, "snapshot": -6, "alpha": -5, "a": -5, "beta": -4, "b": -4, "m": -3, "pre": -2, "cr": -1, "rc": -1}
 
@@ -219,6 +222,11 @@ def parse_version(value, strict=False):
     hotfix = _HOTFIX_RE.match(rest) if len(parts) == 3 else None
     if hotfix:
         return _patched(parts, parts + [int(hotfix.group(1))])
+    revision = _DASH_REVISION_RE.match(rest) if len(parts) >= 3 else None
+    if revision:  # the release as before, carrying its revision: ``_vcmp`` orders two versions that both carry one by it (7.1.2-4 < 7.1.2-35)
+        out = _Revised(parts)
+        out.revision = int(revision.group(1))
+        return out
     pre = _PRE_RE.match(rest)
     if pre and (pre.group(1) or pre.group(3)):
         parts += [_PRE_RANK[(pre.group(1) or pre.group(2)).lower()], int(pre.group(3) or 0)]
@@ -268,11 +276,22 @@ def build_keys(value):
     return [key] + ([".".join(p for p in digits.groups() if p)] if digits else [])
 
 
+class _Revised(tuple):
+    """A version with a numeric revision after a dash (ImageMagick's "7.1.2-35"). It is the release (7, 1, 2) everywhere, as it always was,
+    so a Debian-style "1.2.3-1" still equals 1.2.3; ``_vcmp`` orders it by ``revision`` only against another version that carries one, which
+    is when an advisory's own bound says "fixed in 7.1.2-4"."""
+    revision = None
+
+
 def _vcmp(a, b):
-    """Compare two version tuples, zero-padded so (1,18) == (1,18,0)."""
+    """Compare two version tuples, zero-padded so (1,18) == (1,18,0). Two versions of one release that both carry a dash revision
+    (``_Revised``) compare by it."""
+    ra, rb = getattr(a, "revision", None), getattr(b, "revision", None)
     n = max(len(a), len(b))
-    a = a + (0,) * (n - len(a))
-    b = b + (0,) * (n - len(b))
+    a = tuple(a) + (0,) * (n - len(a))
+    b = tuple(b) + (0,) * (n - len(b))
+    if a == b and ra is not None and rb is not None:
+        return (ra > rb) - (ra < rb)
     return (a > b) - (a < b)
 
 
@@ -1797,6 +1816,10 @@ def save_matches(rows, covered=None):
 _CORRELATED_SOURCES = ("tech", "port", "java", "runtime", "bundled", "build_range", "windows")  # java: cveFeed.java_runtime; runtime, bundled: cveFeed.version_sources; build_range: cveFeed.edge_builds; windows: cveFeed.windows_builds
 
 
+# a CVE that is no vulnerability any more: rejected by its CNA, or withdrawn or merged (superseded) into another entry by the feed (cve.now's tombstones)
+DEAD_STATUS_RE = r"reject|withdrawn|merged|superseded"
+
+
 def close_rejected():
     """Close every open match of a CVE its CNA has rejected: a rejected CVE is not a vulnerability, and its old matches would otherwise
     stay in the findings for good. Matches a person already worked keep their remediation state. Returns how many were closed."""
@@ -1804,14 +1827,14 @@ def close_rejected():
 
     from cveFeed.models import CVEMatch
     from cveFeed import scoring
-    open_matches = CVEMatch.objects.filter(cve_entry__status__icontains="reject").exclude(
+    open_matches = CVEMatch.objects.filter(cve_entry__status__iregex=DEAD_STATUS_RE).exclude(
         ai_verdict="not_affected", ai_reason__startswith="Closed automatically:")
     closed = 0
     while rows := list(open_matches.order_by('pk').values_list('pk', 'subdomain_id')[:scoring.CHUNK]):
         ids = [pk for pk, _ in rows]
         updated = open_matches.filter(pk__in=ids).update(
             ai_verdict="not_affected", confidence=0.0, updated_at=timezone.now(),
-            ai_reason="Closed automatically: the CVE was rejected by its CNA.")
+            ai_reason="Closed automatically: the CVE was rejected by its CNA, or withdrawn or merged into another entry by the feed.")
         closed += updated
         if updated:
             scoring.rescore_subdomain_ids({subdomain_id for _, subdomain_id in rows})
@@ -2092,7 +2115,7 @@ def cve_pool(cve_limit=None):
     if _INDEX_CACHE["key"] == key:
         return _INDEX_CACHE["value"]
     # a rejected CVE matches nothing, and neither does one only usable from the host itself (cveFeed.locality)
-    qs = CVEEntry.objects.exclude(status__icontains="reject").exclude(local_only=True).only(*_CVE_FIELDS).order_by("-published_at")
+    qs = CVEEntry.objects.exclude(status__iregex=DEAD_STATUS_RE).exclude(local_only=True).only(*_CVE_FIELDS).order_by("-published_at")
     return _pool(qs[:cve_limit] if cve_limit else qs, _INDEX_CACHE, key)
 
 
@@ -2103,7 +2126,7 @@ def local_pool():
 
     from cveFeed.models import CVEEntry
 
-    qs = CVEEntry.objects.exclude(status__icontains="reject").filter(local_only=True)
+    qs = CVEEntry.objects.exclude(status__iregex=DEAD_STATUS_RE).filter(local_only=True)
     stamp = qs.aggregate(n=Count("id"), latest=Max("synced_at"))
     return _pool(qs.only(*_CVE_FIELDS).order_by("-published_at"), _LOCAL_CACHE, (stamp["n"], stamp["latest"]))
 

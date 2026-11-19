@@ -47,6 +47,8 @@ BACKFILLS = (
     'backfill_windows_builds',            # the Windows release stored NTLM and SMB script output states, and its KEV/critical candidates (re-correlated)
     'backfill_panel_versions',            # the version a stored panel template finding extracted, read as a version reading of its host (re-correlated)
     'recover_feed_gap',                   # the cve.now window a walk declared covered after the feed renamed its cursor: read again and matched
+    'retype_distro_ranges',               # ranges bounded by distribution package builds (0:8.7p1-38.el9_4.4) are no longer read as upstream releases
+    'repair_open_ranges',                 # open ranges made from an upper bound the CVE List record writes as text (issue 696), re-correlated
     'neutralise_screenshots',             # stored discovery screenshots named by a Sentinel (x.html, x.svg): renamed to a picture name or removed
     'backfill_shodan_cpes',               # every Shodan InternetDB CPE a reported reading ("vendor product"), CPE technologies removed (re-correlated)
     'backfill_technology_names',          # technology rows folded onto one spelling, MariaDB's "5.5.5-" prefix off port versions (re-correlated)

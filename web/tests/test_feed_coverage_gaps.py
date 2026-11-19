@@ -105,7 +105,8 @@ def make_client(feed):
 
 class FeedSim(TestCase):
 	def setUp(self):
-		for target in ('cveFeed.tasks.auto_fire_new_cves.delay', 'cveFeed.tasks.correlate_refreshed_cves.delay'):
+		for target in ('cveFeed.tasks.auto_fire_new_cves.delay', 'cveFeed.tasks.correlate_refreshed_cves.delay',
+					   'cveFeed.tasks.correlate_new_cves.delay', 'cveFeed.tasks.import_inventory_cve_history.delay'):
 			mock.patch(target).start()
 		self.addCleanup(mock.patch.stopall)
 
@@ -119,6 +120,8 @@ class FeedSim(TestCase):
 		rows = [CVEEntry(cve_id=e['id'], affected=[], published_at=e['_pub'], first_seen_at=e['_pub'] + D(minutes=10)) for e in feed.entries if e['_pub'] <= cutoff]
 		rows.append(CVEEntry(cve_id='CVE-1999-0001', affected=[], published_at=feed.now - D(days=9000)))
 		CVEEntry.objects.bulk_create(rows)
+		# the exporting install read its feed through the cutoff: the seed says no more than that (seed.covered_through)
+		FeedWatermark.objects.update_or_create(source=feed_watermark.SOURCE, defaults={'covered_through': cutoff})
 		path = os.path.join(tempfile.mkdtemp(), 's.jsonl.gz')
 		with mock.patch('django.utils.timezone.now', return_value=cutoff + D(hours=1)):
 			seed.export_seed(path)

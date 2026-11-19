@@ -52,9 +52,10 @@ class _BackfillBase(TestCase):
 		self.client.iter_pages.side_effect = _listing([])
 		self.client.published_between.return_value = []  # below the listing: the date windows (cve_now.CVENowClient.published_between)
 		patches = [mock.patch('cveFeed.tasks.CVENowClient', return_value=self.client),
-				   mock.patch('cveFeed.tasks.auto_fire_new_cves.delay')]
+				   mock.patch('cveFeed.tasks.auto_fire_new_cves.delay'), mock.patch('cveFeed.tasks.correlate_new_cves.delay')]
 		self.fire = patches[1].start()
 		patches[0].start()
+		patches[2].start()
 		self.addCleanup(mock.patch.stopall)
 		self.sleeps = []
 
