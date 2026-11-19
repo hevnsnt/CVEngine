@@ -988,6 +988,18 @@ def nmap_inventory(result, chunk):
     return inventory
 
 
+def _store_nmap_features(project, result, addresses):
+    """The service feature readings the fingerprint pass made (SSH algorithms, RDP NLA, SMTP EHLO keywords, SMB dialect, compression, signing and
+    SMBv1: ``cveFeed.address_features``), stored for the project's host names at the addresses it reported. Never fatal to the pass."""
+    if not (result or {}).get('service_features') or project is None:
+        return
+    try:
+        from cveFeed import address_features
+        address_features.store_fingerprint(getattr(project, 'pk', project), result, addresses, 'nmap')
+    except Exception:  # noqa: BLE001 - the inventory is stored; the readings come again with the next pass
+        logger.exception('could not store the service feature readings of an nmap result')
+
+
 def try_nmap(project, scan, targets, org_id=None, timeout=None):
     """Fingerprint ``targets`` on Sentinels and persist what they report; return the persist totals.
 
@@ -1016,6 +1028,7 @@ def try_nmap(project, scan, targets, org_id=None, timeout=None):
                 done = persist_inventory(inventory, org_id=org_id, os_reliable=reliable)
                 totals = {key: totals.get(key, 0) + done.get(key, 0) for key in set(totals) | set(done)}
                 reported.update(host['ip'] for host in inventory)
+                _store_nmap_features(project, result, [host['ip'] for host in inventory])
     except ScannerUnavailable as exc:  # a chunk nobody did: what a Sentinel covered is done, the rest stays due
         exc.done = [ip for ip in targets if ip in reported]
         raise
