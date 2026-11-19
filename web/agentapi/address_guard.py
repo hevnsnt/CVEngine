@@ -11,7 +11,8 @@ everything). This module only turns a task into the values the rule is asked abo
 * INGESTION: ``sentinel_broker.report_result`` asks ``result_refusal`` for the task and for the addresses its result names. A result for an excluded
   address is dropped (the task ends ``failed`` with the reason, the result is not stored) and logged. ``dns_resolve`` is the one kind that only asks DNS
   for names and never contacts an address: it is not refused at dispatch, and its result is KEPT (the addresses must reach the inventory, that is how a
-  name that moved into the range is found), with the host noted.
+  name that moved into the range is found), with the host noted. An answer one Sentinel alone gives that would move a host into or out of the list is
+  held until a second source confirms it (``agentapi.dns_crosscheck``); a safety decision taken from it (``resolve_before_discovery``) still refuses.
 
 ``COVERAGE`` lists every contract kind and how it is guarded; ``tests.test_address_guard`` fails when a kind is added without an entry.
 """
@@ -355,11 +356,14 @@ def resolve_before_discovery(scan, domain):
     refusal = exclusions.address_excluded(project_id, name)
     if refusal is None and not exclusions.stored_addresses(project_id, [name]).get(name):
         from agentapi import probe_dispatch
-        pairs, _ = probe_dispatch.try_dns_resolve(domain, [name], scan=scan)
+        held = {}
+        pairs, _ = probe_dispatch.try_dns_resolve(domain, [name], scan=scan, held=held)
         ips = sorted({ip for n, ip in pairs if n == name})
         if ips:
             record_resolved(scan, domain, name, ips)
-            refusal = exclusions.address_excluded(project_id, name, resolved=ips)
+        unconfirmed = sorted(held.get(name) or ())  # an answer not yet confirmed is never stored, but a run it would refuse is still refused (fail closed)
+        if ips or unconfirmed:
+            refusal = exclusions.address_excluded(project_id, name, resolved=ips + unconfirmed)
     if refusal:
         note_skipped(domain.project, {name: refusal}, scan=scan, kind='bbot_discovery')
         raise AddressExcluded('bbot_discovery', refusal)
