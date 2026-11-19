@@ -128,6 +128,10 @@ def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
             if rec.get('banner'):
                 port.banner = rec['banner']
                 store_servicefp(port)
+            if isinstance(rec.get('version_scripts'), dict) and rec['version_scripts']:
+                # what nmap's version category scripts printed on their own (never reviewed output): kept as text for banner: and tech: search
+                port.extra['version_scripts'] = {k: v for k, v in rec['version_scripts'].items() if isinstance(v, str)}
+                port.extra['version_script_text'] = '\n'.join(port.extra['version_scripts'].values())[:8000]
             # the distro reading: the four columns, and the rest of it (source package, codename, how the release was read, another publisher's build)
             # for the host page and search
             store_distro(port, info)

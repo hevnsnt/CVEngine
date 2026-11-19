@@ -58,6 +58,21 @@ class FingerprintReadTests(VersionFixture, TestCase):
         self.assertIn('nginx:1.18.0', {t.name for t in sub.technologies.all()})
 
 
+class SentinelPortTextTests(VersionFixture, TestCase):
+    def test_a_fingerprint_is_kept_to_4096_and_version_scripts_are_kept_apart_and_searched(self):
+        from agentapi import sentinel_broker as broker
+        port = {'number': 902, 'state': 'open', 'service_name': 'unknown', 'banner': 'SF-Port902-TCP:' + 'x' * 5000,
+                'version_scripts': {'vmware-version': 'Server version: 7.0.3\nBuild: 20328353', 'banner': 'reviewed id: dropped', 'Bad Id': 'x'},
+                'scripts': {'banner': 'b'}}
+        row = broker._clean_ports([port])[0]
+        self.assertEqual(len(row['banner']), broker.MAX_BANNER)
+        self.assertEqual(row['version_scripts'], {'vmware-version': 'Server version: 7.0.3\nBuild: 20328353'})
+        self.host_scan(web=False)
+        port_inventory.persist_inventory([{'ip': self.ADDRESS, 'ports': [{**row, 'method': 'probed'}]}], os_reliable=True)
+        self.assertIn('Build: 20328353', Port.objects.get(number=902).extra['version_script_text'])
+        self.assertTrue(Subdomain.objects.filter(services._banner_q('Server version: 7.0.3')).filter(name=HOST).exists())
+
+
 class NetworkOsTests(VersionFixture, TestCase):
     def fortigate(self, guess='Fortinet FortiOS 6.2 - 7.2', subject=FORTI_SUBJECT, source='sentinel'):
         scan = self.host_scan()

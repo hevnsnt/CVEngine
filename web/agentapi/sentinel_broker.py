@@ -2486,7 +2486,10 @@ def _clip(value, key):
 
 _SCRIPT_ID = re.compile(r'[a-z0-9][a-z0-9._-]{0,63}')
 MAX_SCRIPTS, MAX_SCRIPT_TEXT, MAX_SCRIPT_TOTAL = 24, 4000, 16000
-MAX_BANNER, MAX_CPES = 1024, 8
+# a banner: the banner script's text (1024 on the Sentinel), or nmap's escaped service fingerprint of a service it could not name (4096: decoded by
+# cveFeed.servicefp); the scripts a version scan ran on its own, kept apart from the reviewed ones as text only read for search
+MAX_BANNER, MAX_CPES = 4096, 8
+MAX_VERSION_SCRIPTS, MAX_VERSION_SCRIPT_TEXT, MAX_VERSION_SCRIPT_TOTAL = 8, 2000, 8000
 _PORT_TEXT = {'service_extra': 200, 'ostype': 40, 'hostname': 255, 'devicetype': 64}  # a service's own words, one line, clipped (contract 5)
 _TLS_TEXT = {'subject': 300, 'issuer': 300, 'not_before': 40, 'not_after': 40, 'key_type': 20, 'key_bits': 10, 'signature': 60}
 _TLS_DIGESTS = {'fingerprint_sha1': 40, 'fingerprint_sha256': 64, 'fingerprint_md5': 32}
@@ -2516,6 +2519,22 @@ def _clean_scripts(value):
             text = _block_text(text, MAX_SCRIPT_TEXT)[:MAX_SCRIPT_TOTAL - total]
             out[sid] = text
             total += len(text)
+    return out
+
+
+def _clean_version_scripts(value):
+    """``{script id: output}`` of the scripts a version scan ran on its own (never one of the reviewed scripts, which ``_clean_scripts`` keeps):
+    at most ``MAX_VERSION_SCRIPTS`` ids of the plain shape, ``MAX_VERSION_SCRIPT_TEXT`` characters each and ``MAX_VERSION_SCRIPT_TOTAL`` in all."""
+    from cvengine_scanner.flags import NSE_SCRIPT_SET
+    out, total = {}, 0
+    for sid, text in (value.items() if isinstance(value, dict) else ()):
+        if len(out) >= MAX_VERSION_SCRIPTS or total >= MAX_VERSION_SCRIPT_TOTAL:
+            break
+        if isinstance(sid, str) and _SCRIPT_ID.fullmatch(sid) and sid not in NSE_SCRIPT_SET and isinstance(text, str):
+            text = _block_text(text, MAX_VERSION_SCRIPT_TEXT)[:MAX_VERSION_SCRIPT_TOTAL - total]
+            if text.strip():
+                out[sid] = text
+                total += len(text)
     return out
 
 
@@ -2570,6 +2589,9 @@ def _clean_ports(ports, cuts=None, target=None):
         scripts = _clean_scripts(item.get('scripts'))
         if scripts:
             row['scripts'] = scripts
+        version_scripts = _clean_version_scripts(item.get('version_scripts'))
+        if version_scripts:
+            row['version_scripts'] = version_scripts
         tls = _clean_tls(item.get('tls'))
         if tls:
             row['tls'] = tls
