@@ -10,6 +10,7 @@ import re
 import time
 
 from reNgine.celery import app
+from cveFeed import cve_now
 from cveFeed.cve_now import CVENowClient
 from cveFeed.models import CVEEntry
 
@@ -293,6 +294,8 @@ def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max
         except Exception as exc:
             failed += 1
             logger.warning('cve.now: failed to refresh %s: %s', old.cve_id, exc)
+            # to the back of the queue: an entry that cannot be read or saved must not hold the first places of every later run
+            CVEEntry.objects.filter(pk=old.pk).update(synced_at=now)
     _follow_signal_changes(signals)
     result = {"seen": seen, "created": created, "skipped": skipped, "refreshed": refreshed, "changed": changed, "failed": failed}
     logger.info(f"cve.now sync complete: {result}")
@@ -342,8 +345,25 @@ def _parse_time(value):
         return None
 
 
+def _walk_windows(client, cutoff, below, now, force, want, first_seen, result):
+    """The part of a backfill window the newest-first listing could not reach (it stops at the newest 400 for a caller without a key):
+    the entries published from ``cutoff`` to ``below``, by date windows (``CVENowClient.published_between``). Each one not stored is
+    wanted. Returns True: the window was listed in full (``published_between`` raises when it was not)."""
+    listed = client.published_between(cutoff, below, now, pause=0.3)
+    result['window_listed'] = len(listed)
+    for start in range(0, len(listed), 500):
+        chunk = listed[start:start + 500]
+        known = set(CVEEntry.objects.filter(cve_id__in=[i for i, _seen in chunk]).values_list('cve_id', flat=True))
+        for entry_id, seen_at in chunk:
+            if force or entry_id not in known:
+                want(entry_id)
+                if seen_at:
+                    first_seen.setdefault(entry_id, seen_at)
+    return True
+
+
 @app.task(name='backfill_cve_now_feed', bind=False, queue='cve_feed_queue')
-def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs=None, pause=0.2, force=False, sleep=None):
+def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs=None, pause=0.5, force=False, sleep=None):
     """Fill the gap behind the incremental sync.
 
     The scheduled sync walks the feed newest-first and stops after 40 known entries in a row or 200 new ones, so entries older
@@ -352,9 +372,11 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
     * ``ids``: exactly these entries (a CVE, GHSA or OSV id), whatever the listing says.
     * ``techs``: the entries cve.now files under a technology slug (default the CVENGINE_CVE_WATCH_TECHS list, php), read from
       its per-technology feed, which lists entries the newest-first walk does not reach.
-    * otherwise the last ``days`` days (CVENGINE_CVE_COVERAGE_DAYS, 14; 0 turns the scheduled run off) of the newest-first
-      listing, without the known-in-a-row stop. Skipped at once, with no request, when the oldest stored entry was first seen
-      before that window (``force`` walks anyway).
+    * otherwise the window from a little before the watermark (``feed_watermark.floor_for``) to the head: the newest-first listing,
+      without the known-in-a-row stop, and below what it may list (the newest 400 without a key, then a 401 ``depth_limit``) the date
+      windows of ``CVENowClient.published_between`` (each day's archive page, and the delta listing for today). The listing ending is
+      never taken for the floor: only a window listed down to it moves the watermark. Skipped at once, with no request, while the last
+      complete walk is recent (``force`` walks anyway).
 
     Bounded per run (``max_new`` entries, ``max_scan`` listed, ``pause`` seconds between entry fetches) and safe to repeat: stored
     entries are skipped, so each run continues where the last stopped. A refusal (403) or repeated failure stops the run
@@ -420,7 +442,7 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
             from cveFeed import feed_watermark
             resumed = row.resume_cursor or None  # a walk cut short by a cap or a failure continues where it was
             head = row.resume_head if resumed else None
-            walked, stopped = 0, False
+            walked, stopped, oldest = 0, False, None
             for page_cursor, page in client.iter_pages(max_entries=max_scan, page_pause=0.3, cursor=resumed):
                 known = set(CVEEntry.objects.filter(cve_id__in=[e.get('id') for e in page if e.get('id')]).values_list('cve_id', flat=True))
                 for summary in page:
@@ -431,6 +453,8 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
                     if published and published < cutoff:
                         reached = True
                         break
+                    if published:
+                        oldest = published if oldest is None else min(oldest, published)
                     entry_id = summary.get('id')
                     if entry_id and (force or entry_id not in known):
                         want(entry_id)
@@ -441,8 +465,19 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
                 if reached or stopped:
                     break
             else:
-                reached = walked < max_scan  # the listing ended before the budget did: everything it lists was read
+                if walked < max_scan:
+                    # the listing ended above the floor: its last page, or the newest 400 a caller without a key may list (a 401
+                    # depth_limit). Neither says the floor was reached; the rest of the window is read by date windows
+                    result['depth_limited'] = bool(getattr(client, 'depth_limited', False))
+                    reached = _walk_windows(client, cutoff, oldest or head, now, force, want, first_seen, result)
             result['listed'] = walked
+    except cve_now.WindowIncomplete as exc:
+        result['status'] = 'incomplete'
+        result['window'] = str(exc)[:200]
+        logger.warning('cve.now backfill could not list the whole window: %s', exc)
+        reached = False
+        if not wanted:
+            return result
     except requests.RequestException as exc:
         status = getattr(getattr(exc, 'response', None), 'status_code', None)
         result['blocked'] = status in (401, 403, 429)
@@ -518,6 +553,8 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
             result['continues'] = True
         elif failures_changed:
             row.save(update_fields=['failures', 'updated_at'])
+        if len(wanted) > max_new:
+            result['continues'] = True  # more is missing than one run reads: the next run lists the window again and reads the rest
     _follow_signal_changes(signals)
     tiers = [e.threat_tier for e in created_rows]
     if created_rows:
@@ -603,23 +640,60 @@ def sync_threat_intel():
     return {**result, 'imported': len(created), 'signals_changed': len(changed)}
 
 
-@app.task(name='correlate_refreshed_cves', bind=False, queue='cve_feed_queue')
-def correlate_refreshed_cves():
-    """Recheck only materially updated CVEs and reset their dependent AI rows."""
+def correlate_cve_rows(cves):
+    """Match ``cves`` (CVEEntry rows) against the current inventory in one walk of the hosts, whatever their tier, and track the matches
+    of the latest scans for triage. What ``correlate_refreshed_cves`` does for a refreshed CVE."""
     from cveFeed import triage
     from cveFeed.autofire import correlate_hot_cves
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch
-    pending = list(CVEEntry.objects.filter(needs_recorrelation=True).order_by('synced_at', 'id')[:10])
-    if not pending:
-        return {'correlated': 0}
-    correlate_hot_cves(pending)
-    qs = CVEMatch.objects.filter(cve_entry__in=pending).filter(latest_scan_q('subdomain__')).select_related(
+    if not cves:
+        return
+    correlate_hot_cves(cves)
+    qs = CVEMatch.objects.filter(cve_entry__in=cves).filter(latest_scan_q('subdomain__')).select_related(
         'cve_entry', 'subdomain__target_domain').order_by('id')
     for start in range(0, qs.count(), 500):
         triage.track(list(qs[start:start + 500]))
+
+
+@app.task(name='correlate_refreshed_cves', bind=False, queue='cve_feed_queue')
+def correlate_refreshed_cves():
+    """Recheck only materially updated CVEs and reset their dependent AI rows."""
+    pending = list(CVEEntry.objects.filter(needs_recorrelation=True).order_by('synced_at', 'id')[:10])
+    if not pending:
+        return {'correlated': 0}
+    correlate_cve_rows(pending)
     CVEEntry.objects.filter(pk__in=[c.pk for c in pending]).update(needs_recorrelation=False)
     return {'correlated': len(pending)}
+
+
+FEED_RECOVERY_RUNS = 12
+FEED_RECOVERY_CHUNK = 200
+
+
+@app.task(name='recover_cve_feed_window', bind=False, queue='cve_feed_queue')
+def recover_cve_feed_window(max_runs=FEED_RECOVERY_RUNS, sleep=None):
+    """Read again the feed window a walk wrongly declared covered (``recover_feed_gap`` moved the watermark back): the backfill walk runs
+    until the window is covered (each run reads at most ``GAP_MAX_NEW`` entries; a failure or a refusal stops it, and the hourly backfill
+    carries on from there), then every CVE created meanwhile is matched against the inventory, whatever its tier (the backfill itself only
+    fires the hot ones)."""
+    from django.utils import timezone
+    from cveFeed import activity
+    started = timezone.now()
+    outcome, runs = {}, 0
+    for runs in range(1, max(1, int(max_runs)) + 1):
+        outcome = backfill_cve_now_feed(sleep=sleep)
+        if outcome.get('status') != 'ok' or 'covered_through' in outcome or not outcome.get('created'):
+            break
+    created = list(CVEEntry.objects.filter(created_at__gte=started).order_by('id'))
+    for start in range(0, len(created), FEED_RECOVERY_CHUNK):
+        correlate_cve_rows(created[start:start + FEED_RECOVERY_CHUNK])
+    covered = 'covered_through' in outcome or outcome.get('status') == 'covered'
+    activity.log('feed', f'cve.now recovery: {len(created)} CVEs the feed listed and the catalog lacked were read and matched against the '
+                         f'inventory in {runs} walk(s); ' + ('the window is covered again' if covered else
+                                                            f'the walk stopped ({outcome.get("status")}); the hourly backfill continues it'),
+                 status='done' if covered else 'failed')
+    return {'runs': runs, 'created': len(created), 'covered': covered, 'last': outcome}
 
 
 @app.task(name='reread_stale_fingerprints', bind=False, queue='cve_feed_queue', time_limit=900, soft_time_limit=840)
