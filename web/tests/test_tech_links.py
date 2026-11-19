@@ -99,12 +99,12 @@ class LightPassTests(Base):
         self.assertIn(('wordpress', 'nuclei', 'cpe:2.3:a:wordpress:wordpress'), self.links())
 
     def test_within_one_pass_a_stated_cpe_wins_whatever_the_order(self):
-        tomcat_named = detect('tomcat')  # tech-detect's own "tomcat" match, then the template that states the CPE
+        named = detect('tomcat')  # tech-detect's own "tomcat" match and the template that states the CPE: one technology row (any case)
         stated = line('tomcat-detect', 'Tomcat Detection', ['tech', 'apache', 'tomcat'])
-        self.light([tomcat_named, stated])
-        self.light([stated, tomcat_named])
-        self.assertIn(('tomcat', 'nuclei:derived', 'cpe:2.3:a:apache:tomcat'), self.links())  # two names, two rows: each its own link
-        self.assertIn(('Tomcat', 'nuclei', 'cpe:2.3:a:apache:tomcat'), self.links())
+        for lines in ([named, stated], [stated, named]):
+            SubdomainTechnology.objects.all().delete()
+            self.light(lines)
+            self.assertEqual({(s, c) for _n, s, c in self.links()}, {('nuclei', 'cpe:2.3:a:apache:tomcat')}, lines[0]['template-id'])
 
     def test_correlation_matches_it_and_says_it_was_derived_and_never_narrows_the_name(self):
         own = cve('CVE-2026-520001', 'wordpress', 'wordpress', '6.0', '6.4.3')
