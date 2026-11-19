@@ -253,10 +253,15 @@ def _report_module_failures(hard_failures, scan):
 def persist_screenshot_blobs(scan, screenshots):
     """Write each screenshot a Sentinel sent with a discovery batch (``sentinel_stream.clean_partial`` already checked its host, name, type and
     size) into this scan's scan-results storage and record it on the matching Subdomain.
-    A screenshot whose host has no Subdomain in this scan, or whose bytes cannot be written, is skipped quietly."""
+    The file is named by the server, never by the Sentinel: ``sentinel-<random>.<png|jpg>``, the extension from the picture type its bytes were checked
+    to be (checked again here: a batch stored before an update was cleaned by older code). So a name like ``x.html`` can never be stored, and two hosts
+    whose files had the same name never overwrite each other.
+    A screenshot whose host has no Subdomain in this scan, whose bytes are not the picture they claim, or that cannot be written, is skipped quietly."""
     if not screenshots:
         return
     import base64
+    import uuid
+
     from cveFeed import shots
     from startScan.models import Subdomain
     dest_dir = os.path.join(settings.MEDIA_ROOT, f'{scan.domain.name}_{scan.id}', 'screenshots')
@@ -264,19 +269,28 @@ def persist_screenshot_blobs(scan, screenshots):
     shots.warn_unavailable(scan)
     for shot in screenshots:
         subdomain = Subdomain.objects.filter(scan_history=scan, name=shot.get('host') or '').first()
-        name = os.path.basename(str(shot.get('filename') or ''))
-        if not subdomain or not name or name.startswith('.'):
+        if not subdomain:
             continue
         try:
             raw = base64.b64decode(shot.get('data') or '', validate=True)
+            kind = shots.image_type(raw)
+            if kind is None or shot.get('content_type', kind) != kind:
+                continue  # not a PNG or JPEG, or not the one it says it is: never written
             os.makedirs(dest_dir, exist_ok=True)
-            dest = os.path.join(dest_dir, f'sentinel-{name}')
+            dest = os.path.join(dest_dir, f'sentinel-{uuid.uuid4().hex}.{shots.extension_for(kind)}')
             with open(dest + '.part', 'wb') as out:
                 out.write(raw)
             os.replace(dest + '.part', dest)
         except (OSError, ValueError):
             logger.exception('could not store a Sentinel screenshot of %s for scan %s', subdomain.name, scan.id)
             continue
+        before = os.path.join(settings.MEDIA_ROOT, subdomain.screenshot_path) if subdomain.screenshot_path else ''
+        if before and os.path.dirname(os.path.abspath(before)) == os.path.abspath(dest_dir) and os.path.basename(before).startswith('sentinel-'):
+            for stale in (before, f'{before}.thumb-{shots.THUMB_WIDTH}.jpg'):  # this scan's earlier picture of the host: replaced, not left behind
+                try:
+                    os.remove(stale)
+                except OSError:
+                    pass
         subdomain.screenshot_path = os.path.relpath(dest, settings.MEDIA_ROOT)
         if hashed < shots.MAX_HASH_PER_FLUSH:
             subdomain.screenshot_hash = shots.dhash_file(dest)

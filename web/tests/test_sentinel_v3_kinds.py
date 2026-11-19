@@ -102,7 +102,7 @@ class CleanResultTests(SimpleTestCase):
     def test_an_nmap_report_is_bounded(self):
         self.assertEqual(self.clean('nmap_full', {'xml': '<nmaprun/>'})['xml'], '<nmaprun/>')
         with self.assertRaises(ApiError):
-            self.clean('nmap_verify', {'xml': 'x' * (sentinel_broker.MAX_NMAP_UDP_XML + 1)})
+            self.clean('nmap_verify', {'xml': 'x' * (sentinel_broker.MAX_NMAP_REPORT_XML + 1)})
 
     def test_an_ipv6_address_is_compared_as_an_address_not_as_text(self):
         """SN-11: the task stores ``2001:0db8::1``, nmap prints ``2001:db8::1``: the host is still the asked one, not a clean empty list."""
