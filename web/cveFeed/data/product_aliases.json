@@ -25,7 +25,7 @@
    "note": "Istio's sidecar and gateway proxy is Envoy built by Istio, and answers with 'Server: istio-envoy': Envoy's advisories are its own (Istio's control plane, istiod, is another product and is not named here)"},
   {"names": ["Varnish", "Varnish Cache", "varnish http accelerator", "Varnish httpd"], "vendors": ["varnish_cache_project", "varnish-cache", "varnish-software"],
    "products": ["varnish_cache", "varnish", "Varnish Cache"],
-   "evidence": ["cpe:2.3:a:varnish_cache_project:varnish_cache", "cpe:/a:varnish-cache:varnish (nmap's CPE)", "CVE-2022-45060 (Varnish Cache 5.x and 6.x before 6.0.11, 7.x before 7.1.2)"],
+   "evidence": ["cpe:2.3:a:varnish_cache_project:varnish_cache", "cpe:2.3:a:varnish-cache:varnish (nmap's CPE cpe:/a:varnish-cache:varnish, in 2.3 form)", "CVE-2022-45060 (Varnish Cache 5.x and 6.x before 6.0.11, 7.x before 7.1.2)"],
    "note": "the open-source Varnish HTTP cache, as nmap, its Via header and nuclei name it"},
   {"names": ["Varnish Cache Plus", "Varnish Enterprise"], "vendors": ["varnish-software"], "products": ["varnish_cache_plus", "Varnish Cache Plus", "Varnish Enterprise"],
    "evidence": ["cpe:2.3:a:varnish-software:varnish_cache_plus", "CVE-2022-45060 (Varnish Enterprise (Cache Plus) 6.0.x before 6.0.10r3)"],
