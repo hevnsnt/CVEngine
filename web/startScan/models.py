@@ -199,7 +199,7 @@ class Subdomain(models.Model):
 	webserver = models.CharField(max_length=1000, blank=True, null=True)
 	content_length = models.IntegerField(default=0, blank=True, null=True)
 	page_title = models.CharField(max_length=1000, blank=True, null=True)
-	technologies = models.ManyToManyField('Technology', related_name='technologies', blank=True)
+	technologies = models.ManyToManyField('Technology', related_name='technologies', blank=True, through='SubdomainTechnology')
 	ip_addresses = models.ManyToManyField('IPAddress', related_name='ip_addresses', blank=True)
 	directories = models.ManyToManyField('DirectoryScan', related_name='directories', blank=True)
 	waf = models.ManyToManyField('Waf', related_name='waf', blank=True)
@@ -559,6 +559,22 @@ class Technology(models.Model):
 
 	def __str__(self):
 		return str(self.name)
+
+
+class SubdomainTechnology(models.Model):
+	"""A host's link to one of its technologies (the table the plain many-to-many always had), with where the technology came from: ``source``
+	(the pass that linked it: ``nuclei`` for the technology templates, ``vsrc:panel`` for a panel template; '' when not recorded, every link
+	stored before these columns), ``cpe`` (the CPE the detecting template's metadata names, ``cpe:2.3:a:apache:tomcat``: correlation matches the
+	technology CPE first, ``cveFeed.source_versions.technology_cpes``) and ``observed_at`` (when it was seen; empty on links stored before)."""
+	subdomain = models.ForeignKey('Subdomain', on_delete=models.CASCADE)
+	technology = models.ForeignKey('Technology', on_delete=models.CASCADE)
+	source = models.CharField(max_length=32, blank=True, default='')
+	cpe = models.CharField(max_length=255, blank=True, default='')
+	observed_at = models.DateTimeField(null=True, blank=True, default=timezone.now)
+
+	class Meta:
+		db_table = 'startScan_subdomain_technologies'
+		unique_together = [('subdomain', 'technology')]
 
 
 class CountryISO(models.Model):

@@ -477,6 +477,42 @@ def tech_name_from(line):
     return name
 
 
+TECH_SOURCE = 'nuclei'  # SubdomainTechnology.source of a technology the technology templates named
+
+
+def tech_cpe_from(line, index=None):
+    """The CPE prefix the template of a ``http/technologies`` result names for the technology it reports (``cpe:2.3:a:apache:tomcat``), or '': its
+    ``info.metadata`` vendor and product, else its ``classification.cpe``, else those of the installed template of that id
+    (``nuclei_templates.technology_products``: a Sentinel's line carries no metadata). A template that names the product by its matcher
+    (``tech-detect``, the WAF and favicon templates) names many products, so its metadata says nothing about the one that fired: none."""
+    from cveFeed import nuclei_templates
+    template = str(line.get('template-id') or '')
+    if not template or template == 'tech-detect' or MATCHER_NAMED.search(template):
+        return ''
+    if index is None:
+        index = nuclei_templates.technology_products()
+    vendor, product, part = nuclei_templates.line_metadata(line, index)
+    return nuclei_templates.cpe_prefix(vendor, product, part)
+
+
+def link_technologies(links, source=TECH_SOURCE, now=None):
+    """Write host technology links ``{(subdomain id, technology id): cpe}`` with their ``source`` and ``observed_at`` (one statement each way). A link
+    that names a CPE takes it (and this source and time) also when the host already had the technology from elsewhere; one that names none is only
+    added where missing, so it never clears a CPE another template gave the same technology."""
+    from django.utils import timezone
+
+    from startScan.models import SubdomainTechnology
+    now = now or timezone.now()
+    rows = [SubdomainTechnology(subdomain_id=s, technology_id=t, source=source, cpe=(cpe or '')[:255], observed_at=now) for (s, t), cpe in links.items()]
+    named, bare = [r for r in rows if r.cpe], [r for r in rows if not r.cpe]
+    if named:
+        SubdomainTechnology.objects.bulk_create(named, update_conflicts=True, unique_fields=['subdomain', 'technology'],
+                                                update_fields=['source', 'cpe', 'observed_at'])
+    if bare:
+        SubdomainTechnology.objects.bulk_create(bare, ignore_conflicts=True)
+    return len(rows)
+
+
 def _version_order(text):
     """A sort key for an extracted version string: its numeric parts, then the text (so equal numbers still order one way every run)."""
     return ([int(p) for p in re.findall(r'\d+', text)[:8]], text)
@@ -517,12 +553,13 @@ def run_light_nuclei(scan_id, stream, force=False):
         for ip in sub.ip_addresses.all():
             by_ip.setdefault(ip.address, sub)
     found, scanned = {}, []
-    tech_rows, pending = {}, set()  # one Technology lookup per name per run; the host links are written once per chunk
-    link = Subdomain.technologies.through
+    tech_rows, pending = {}, {}  # one Technology lookup per name per run; the host links ({(host, technology): CPE}) are written once per chunk
+    from cveFeed import nuclei_templates
+    products = nuclei_templates.technology_products()
 
     def flush_links():
         if pending:
-            link.objects.bulk_create([link(subdomain_id=s, technology_id=t) for s, t in pending], ignore_conflicts=True)
+            link_technologies(pending)
             pending.clear()
     with ledger.claim_many(f'{service}@{project}', todo) as won:
         won_targets = [t for t in todo if t in set(won)]
@@ -551,7 +588,8 @@ def run_light_nuclei(scan_id, stream, force=False):
                             continue
                         if name not in tech_rows:
                             tech_rows[name] = rows_of.technology(name)  # one row per spelling (cveFeed.tech_rows)
-                        pending.add((sub.pk, tech_rows[name].pk))
+                        key = (sub.pk, tech_rows[name].pk)
+                        pending[key] = pending.get(key) or tech_cpe_from(line, products)  # the CPE the template names (one with a CPE wins)
                         found.setdefault(sub.name, set()).add(name)
                 finally:
                     os.unlink(path)

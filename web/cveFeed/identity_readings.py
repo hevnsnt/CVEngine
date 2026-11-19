@@ -5,7 +5,8 @@ product and nothing more: a network operating system's certificate or OS guess, 
 product a network detection template names, a CPE without a version. Such a reading is stored like any other (``version_sources.store_readings``:
 a ``version`` row with outcome ``hidden``, the product answers and states no version), so it is shown and searched (``tech:``, ``component:``,
 ``vsource:``, and ``os:`` for an operating system CPE), it is a lead for the version source reads (``version_sources.host_products``) and for
-correlation (a product seen without a version is a lead, never a match), and it is never a technology.
+correlation (a product seen without a version is a lead, never a match), and it is never a technology by itself (a panel template's identity also
+links the product as a technology with no version, ``panel_versions.bare_technology``: a lead too).
 """
 import re
 

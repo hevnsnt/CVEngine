@@ -150,7 +150,7 @@ export const AGENT_POLICY_HELP =
 export const AUTOTUNE_INTRO =
   "Auto-tuning is on by default. It aims high: about ten minutes after each restart or update it sets the throughput settings below to the most this machine sensibly " +
   "carries (sized from its CPU cores, database connections and Sentinel slots), backs off at once when it sees trouble (memory pressure, " +
-  "time-outs, a busy database, a silent worker, Sentinel waits that timed out), then probes upward again one step at a time after two healthy hours. " +
+  "time-outs, a busy database, a silent worker or broker, Sentinel tasks that time out or expire unclaimed), then probes upward again one step at a time after two healthy hours. Each Sentinel is tuned too: its tasks at once and its per-kind slots follow its own CPU, memory and load, never above its machine's own setting. " +
   "It never changes AI spend caps, never changes anything while scanning is paused or an update is applied, and every change is listed here with its reason and a Revert button.";
 export const AUTOTUNE_OFF_HELP =
   "To tune by hand, choose Off. To keep one number as it is, type it in its box and save it (even the number shown): a saved number is pinned and the tuner leaves it alone, " +
@@ -228,4 +228,46 @@ export function lastRunText(last, formatDate = (x) => x) {
   if (last.held) return `Last run ${when}: ${last.held}.`;
   const n = (last.changes || []).length;
   return `Last run ${when}: ${n ? `${n} change(s)` : "no change"}.`;
+}
+
+// --- each Sentinel (cveFeed/autotune_sentinels.py, agentapi/sentinel_machine.py) -------------------------------------
+// "4 CPUs, load 0.2 per CPU, 75% of 7.8 GB memory available, 1 run killed for memory in the last hour", from ``machine`` (get_sentinel, list_sentinels,
+// get_tuning_status); "" when the Sentinel reports no machine (an older client).
+export function machineText(m) {
+  if (!m || typeof m !== "object") return "";
+  const parts = [];
+  if (Number.isInteger(m.cpus)) parts.push(`${m.cpus} CPU${m.cpus === 1 ? "" : "s"}${Number.isInteger(m.host_cpus) && m.host_cpus !== m.cpus ? ` (host ${m.host_cpus})` : ""}`);
+  if (Array.isArray(m.load_per_cpu) && m.load_per_cpu[0] != null) parts.push(`load ${m.load_per_cpu[0]} per CPU`);
+  if (m.available_share != null && m.total_mb) parts.push(`${Math.round(m.available_share * 100)}% of ${mbText(m.total_mb)} memory available`);
+  const kills = Object.values(m.oom_kills_1h || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+  if (kills) parts.push(`${kills} run${kills === 1 ? "" : "s"} killed for memory in the last hour`);
+  const text = parts.join(", ");
+  if (!text) return "";
+  return m.stale ? `${text} (last reported ${Math.round((m.age_seconds || 0) / 60)} min ago)` : text;
+}
+
+// A Sentinel's memory in words: 512 MB, 7.8 GB.
+const mbText = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`);
+
+const KIND_WORD = (k) => String(k).replace(/_/g, " ");
+// "Auto-tuned to 6 of its machine's 8 tasks at once; nuclei deep 4 at once", "Pinned by ...", "Runs its machine's own 8 tasks at once", or "" with nothing to say.
+export function sentinelTuningText(t) {
+  if (!t || typeof t !== "object" || t.killed) return "";
+  if (t.pinned) return `Tasks at once pinned by ${t.pinned}: auto-tuning leaves it alone`;
+  const kinds = Object.entries(t.kinds || {}).map(([k, n]) => `${KIND_WORD(k)} ${n} at once`);
+  const head = t.max_concurrent != null && t.ceiling != null
+    ? `Auto-tuned to ${t.max_concurrent} of its machine's ${t.ceiling} tasks at once`
+    : t.ceiling != null ? `Runs its machine's own ${t.ceiling} tasks at once` : "";
+  if (!head && !kinds.length) return "";
+  return [head, ...kinds].filter(Boolean).join("; ");
+}
+
+// One line of the Auto-tuning card per Sentinel (``status.sentinels``): its name, what it runs and why it was not moved.
+export function sentinelStatusLine(s) {
+  if (!s) return "";
+  const run = s.last_run || {};
+  const tuning = sentinelTuningText(s.tuning);
+  const machine = machineText(s.machine);
+  const reason = run.held || Object.values(run.settings || {}).map((x) => x.why_not_raised).filter(Boolean)[0] || "";
+  return [`${s.name}: ${tuning || "not tuned yet"}`, machine, reason ? `now: ${reason}` : ""].filter(Boolean).join(" · ");
 }

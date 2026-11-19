@@ -90,7 +90,7 @@ class Templates:
         patcher = mock.patch.object(template_index, 'load', return_value=self.index)
         patcher.start()
         self.addCleanup(patcher.stop)
-        nuclei_templates._panels.pop(self.index['sha256'], None)
+        nuclei_templates._products.clear()
 
 
 class ReadingTests(Templates, SimpleTestCase):
@@ -198,7 +198,7 @@ class IngestTests(PanelBase):
         self.assertEqual(self.readings(), {('Jenkins', '2.426.1', 8080)})
         self.assertIn('Jenkins:2.426.1', self.techs())
 
-    def test_a_hash_a_panel_without_a_version_and_a_non_panel_hit_store_nothing(self):
+    def test_a_hash_or_no_value_is_no_version_only_an_identity_and_a_non_panel_hit_stores_nothing(self):
         lines = [sentinel_line('fortinet-fortigate-panel', 'Fortinet FortiGate SSL VPN Login Panel - Detect', ['panel', 'fortigate', 'vpn', 'discovery'],
                                ['5f1a2b3c'], 'https://app.panel.test/'),
                  sentinel_line('fortinet-panel', 'Fortinet Login Panel - Detect', ['panel', 'fortinet', 'login', 'detect', 'discovery'], [],
@@ -206,8 +206,10 @@ class IngestTests(PanelBase):
                  local_line('nginx-version', 'Nginx Version Detect', ['tech', 'nginx'], ['1.24.0'], 'https://app.panel.test/')]
         self.run_lines(lines)
         self.assertEqual(Vulnerability.objects.count(), 3)
-        self.assertFalse(ProbeObservation.objects.filter(probe=PROBE).exists())
-        self.assertEqual(self.techs(), set())
+        # no version is invented: each panel names its product with none (cveFeed.panel_versions.identity), the nginx technology hit nothing here
+        self.assertEqual({(r.product, r.version, r.outcome, r.evidence.get('cpe', '')) for r in ProbeObservation.objects.filter(probe=PROBE)},
+                         {('Fortinet FortiGate SSL VPN', '', 'hidden', ''), ('Fortiportal', '', 'hidden', 'cpe:2.3:a:fortinet:fortiportal')})
+        self.assertEqual(self.techs(), {'Fortinet FortiGate SSL VPN', 'Fortiportal'})
 
     def test_a_reading_that_cannot_be_stored_never_stops_the_pass(self):
         with mock.patch.object(panel_versions, 'store', side_effect=RuntimeError('boom')):

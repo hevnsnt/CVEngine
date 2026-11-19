@@ -40,6 +40,7 @@ from agentapi import probe_results
 from agentapi import sentinel_policy
 from agentapi import sentinel_settings
 from agentapi import sentinel_contract
+from agentapi import sentinel_machine
 from agentapi import sentinel_stream
 from agentapi import sentinel_autoupdate
 from agentapi import sentinel_tools
@@ -884,11 +885,16 @@ class SentinelEff:
         self.caps = caps
         self.denied = {k for k, p in self.policy.items() if p['mode'] == 'deny'}  # kinds the policy refuses here, whether or not the Sentinel declares them
         self.kind_caps = {k: p['cap'] for k, p in self.policy.items() if p['cap']}  # per-kind concurrency caps
+        if agent.kind == 'scanner':  # the per-kind slots auto-tuning chose for this Sentinel, for the kinds no administrator capped (sentinel_machine)
+            self.kind_caps.update(sentinel_machine.tuned_kind_caps(agent, self.policy))
         self.preferred = {k for k, p in self.policy.items() if p['mode'] == 'prefer'}
         self.projects = scope_lib.project_slugs_in_scope(token.user, agent.scope or {}, limits.get('projects')) if not self.problem else set()
         patterns = (agent.scope or {}).get('hosts') or []
         self.hosts = AssetFilter(patterns) if patterns else None
         self.max_concurrent = min(agent.max_concurrent, limits.get('max_concurrent') or broker.MAX_CONCURRENT_CAP)
+        tuned = sentinel_machine.tuned_slots(agent) if agent.kind == 'scanner' else None
+        if tuned:  # auto-tuning's number for this Sentinel holds from the next claim, before the client registers it (never above its own setting, never over a pin)
+            self.max_concurrent = min(self.max_concurrent, tuned)
         self._internal_nets = {}
 
     @property

@@ -955,12 +955,32 @@ def prefetch(subs):
         by_key.setdefault((row.project_id, row.host), []).append(row)
     for sub in subs:
         sub._source_rows = by_key.get((project_of.get(sub.target_domain_id), _host(sub)), [])
+    from startScan.models import SubdomainTechnology
+    cpes = {}
+    for sub_id, name, cpe in SubdomainTechnology.objects.filter(subdomain_id__in=[s.pk for s in subs]).exclude(cpe='') \
+            .values_list('subdomain_id', 'technology__name', 'cpe'):
+        cpes.setdefault(sub_id, {})[name or ''] = cpe
+    for sub in subs:
+        sub._link_cpes = cpes.get(sub.pk, {})
+
+
+def link_cpes(sub):
+    """``{technology name: CPE}`` the host's technology links carry (``SubdomainTechnology.cpe``: the CPE the nuclei template that named the
+    technology states in its metadata, ``nuclei_scan.tech_cpe_from``); read once per correlation of the host (``prefetch``)."""
+    got = getattr(sub, '_link_cpes', None)
+    if got is None:
+        from startScan.models import SubdomainTechnology
+        got = {name or '': cpe for name, cpe in SubdomainTechnology.objects.filter(subdomain_id=sub.pk).exclude(cpe='')
+               .values_list('technology__name', 'cpe')} if sub.pk else {}
+        sub._link_cpes = got
+    return got
 
 
 def technology_cpes(sub):
-    """``{technology name: CPE}`` for the technologies a first-party CPE reading made (``vsrc:nmap`` from nmap's other CPEs), so correlation
-    matches them CPE first like the port row's own CPE."""
-    out = {}
+    """``{technology name: CPE}`` for the technologies a first-party CPE reading made (``vsrc:nmap`` from nmap's other CPEs, ``vsrc:panel``) and the
+    ones a nuclei template named with a CPE in its metadata (``link_cpes``), so correlation matches them CPE first like the port row's own CPE. A
+    reading's CPE (it carries the version) is taken over the template's."""
+    out = dict(link_cpes(sub))
     for row in _rows(sub):
         ev = row.evidence if isinstance(row.evidence, dict) else {}
         if row.probe in FIRST_PARTY_PROBES and row.kind == 'version' and row.outcome == 'found' and row.version and ev.get('cpe'):
@@ -987,6 +1007,10 @@ def first_party(sub):
     tokens, cpes, ports = set(), set(), {}
     for tech in sub.technologies.all():
         tokens.add(_norm(split_name_version(tech.name or '')[0]))
+    for cpe in link_cpes(sub).values():  # the CPE a technology template named for one of them
+        parsed = parse_cpe(cpe)
+        if parsed:
+            cpes.add(parsed[1])
     for ip in sub.ip_addresses.all():
         for port in ip.ports.all():
             if (port.source or '') == 'bbot' and not port.product:
@@ -1071,7 +1095,8 @@ def os_rows(value):
     ESXi as vmware-version states it)."""
     from cveFeed import version_sources
     runzero_os = Q(probe=RUNZERO_PROBE, port=0) & (Q(evidence__part='os') | ~Q(evidence__has_key='part'))
-    return version_sources.readings_qs().filter(Q(probe=NTLM_PROBE) | runzero_os | Q(evidence__cpe__istartswith='cpe:/o:')) \
+    return version_sources.readings_qs().filter(Q(probe=NTLM_PROBE) | runzero_os | Q(evidence__cpe__istartswith='cpe:/o:')
+                                                | Q(evidence__cpe__istartswith='cpe:2.3:o:')) \
         .filter(Q(product__icontains=value) | Q(evidence__cpe__icontains=value))
 
 

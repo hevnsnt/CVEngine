@@ -1078,6 +1078,11 @@ def agent_dict(agent, detail=False, counts=None, viewer=None, builtin_id=_UNKNOW
         # slots: its concurrency limit, what it holds now and by kind (stored rows only, so the list stays cheap)
         held = counts.get('_held_by_kind', {})
         limit = min(agent.max_concurrent, (agent.limits or {}).get('max_concurrent') or agent.max_concurrent)
+        from agentapi import sentinel_machine
+        tuned = sentinel_machine.tuned_slots(agent)
+        limit = min(limit, tuned) if tuned else limit  # auto-tuning's number for this Sentinel, as the claim enforces it
+        out['machine'] = sentinel_machine.view(agent)  # its CPU, load and memory as it reports them (None for a client that does not)
+        out['tuning'] = sentinel_machine.tuning_view(agent)  # what auto-tuning set for it, pinned, and the machine's own ceiling
         out['slots'] = {'max': limit, 'in_use': sum(held.values()), 'free': max(0, limit - sum(held.values())), 'by_kind': held}
     if detail:
         if agent.kind == 'scanner':
