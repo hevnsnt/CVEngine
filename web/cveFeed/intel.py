@@ -316,7 +316,8 @@ def intel_for(cve, data):
 def merged_flags(feed, intel):
     """(kev, epss_reached, exploit_db) from cve.now's exploitation block and the CVE's intel. A source only adds evidence;
     EPSS, when it scores the CVE, is today's value."""
-    feed = feed if isinstance(feed, dict) else {}
+    from cveFeed.cve_now import exploitation_flags
+    feed = exploitation_flags(feed)  # each signal is an object or null in cve.now's answers since 2026-11: a flag here
     intel = intel if isinstance(intel, dict) else {}
     kev = True if intel.get("kev") else feed.get("kev")
     exploit_db = True if intel.get("exploits") else (None if feed.get("exploitDb") is None else bool(feed.get("exploitDb")))

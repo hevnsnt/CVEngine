@@ -25,8 +25,8 @@ def iso(t):
 
 
 class Resp:
-	def __init__(self, data, status=200):
-		self.data, self.status_code, self.headers = data, status, {}
+	def __init__(self, data, status=200, text=''):
+		self.data, self.status_code, self.headers, self.text = data, status, {}, text
 
 	def json(self):
 		return self.data
@@ -37,30 +37,59 @@ class Resp:
 
 
 class FakeFeed:
-	def __init__(self, now, days, per_day=PER_DAY):
-		self.now, self.headers = now, {}
+	"""cve.now as it answers since 2026-11-15: ``/entries`` lists ``items`` with ``next_cursor`` and refuses a page past the newest
+	``depth`` (401 ``depth_limit``); ``/entries?since=`` lists what changed after a time, oldest first, at most 7 days back; each past UTC
+	day has an ``/archive/<day>.md`` page."""
+	DEPTH = 400
+
+	def __init__(self, now, days, per_day=PER_DAY, depth=DEPTH):
+		self.now, self.headers, self.depth = now, {}, depth
 		step = D(days=days) / (days * per_day)
 		self.entries = []
 		for i in range(days * per_day):
 			pub = now - step * i - D(minutes=1)
 			self.entries.append({'id': f'CVE-2026-{900000 - i}', 'publishedAt': iso(pub), 'firstSeenAt': iso(pub + D(minutes=10)), '_pub': pub})
 		self.by_id = {e['id']: e for e in self.entries}
-		self.fail_ids, self.fail_all, self.gets = set(), False, 0
+		self.fail_ids, self.fail_all, self.gets, self.requests = set(), False, 0, []
 
-	def get(self, url, params=None, timeout=None):
-		path = url.split('/api/v1')[-1]
+	def row(self, e, **extra):
+		return {**{k: v for k, v in e.items() if k != '_pub'}, 'kev': False, **extra}
+
+	def get(self, url, params=None, timeout=None, headers=None):
+		self.requests.append((url, dict(params or {})))
+		path = url.split('/api/v1')[-1] if '/api/v1' in url else url.split('cve.now')[-1]
 		if path.startswith('/entries/'):
 			cid = path.split('/entries/')[1]
 			self.gets += 1
 			if self.fail_all or cid in self.fail_ids:
 				return Resp({}, 500)
 			e = self.by_id[cid]
-			return Resp({'id': cid, 'title': cid, 'publishedAt': e['publishedAt'], 'firstSeenAt': e['firstSeenAt'], 'severity': {'cvss': 5.0}, 'affected': []})
+			return Resp({'id': cid, 'title': cid, 'publishedAt': e['publishedAt'], 'firstSeenAt': e['firstSeenAt'], 'severity': {'cvss': 5.0},
+						 'affected': [], 'exploitation': {'kev': None, 'epssReached': None, 'exploitDb': None}})
+		if path == '/entries' and (params or {}).get('since'):
+			since = datetime.datetime.fromisoformat(params['since'].replace('Z', '+00:00'))
+			if since < self.now - D(days=7):
+				return Resp({'error': 'since_too_old'}, 400)
+			changed = sorted((e for e in self.entries if e['_pub'] + D(minutes=10) > since), key=lambda e: e['_pub'])
+			start, limit = int(params.get('cursor') or 0), int(params['limit'])
+			page = changed[start:start + limit]
+			more = start + limit < len(changed)
+			return Resp({'items': [self.row(e, updatedAt=e['firstSeenAt']) for e in page], 'next_cursor': str(start + limit) if more else None,
+						 'next_since': page[-1]['firstSeenAt'] if page else params['since'], 'has_more': more})
 		if path == '/entries':
 			start = int((params or {}).get('cursor') or 0)
 			limit = int(params['limit'])
+			if start >= self.depth:
+				return Resp({'error': 'depth_limit', 'message': 'deeper pages need an API key; use since'}, 401)
 			nxt = str(start + limit) if start + limit < len(self.entries) else None
-			return Resp({'entries': [{k: v for k, v in e.items() if k != '_pub'} for e in self.entries[start:start + limit]], 'nextCursor': nxt})
+			rows = [self.row(e) for e in self.entries[start:start + limit]]
+			return Resp({'items': rows, 'entries': rows, 'next_cursor': nxt})
+		if path.startswith('/archive/'):
+			day = datetime.date.fromisoformat(path.split('/archive/')[1][:10])
+			if day >= self.now.date():
+				return Resp({}, 404, text='# Not found')
+			lines = [f"- [{e['id']}](https://cve.now/{e['id']}.md): {e['id']} (CVSS 5.0, x)" for e in self.entries if e['_pub'].date() == day]
+			return Resp({}, 200, text=f'# CVEs published {day}\n\n## CVEs\n\n' + '\n'.join(lines) + '\n')
 		if '/feed' in url:
 			return Resp({'items': []})
 		raise AssertionError(url)
@@ -236,6 +265,89 @@ class AssumedWindowTests(FeedSim):
 		self.seed_from(feed, 4)
 		self.run_until_covered(feed)
 		self.assertIsNone(feed_watermark.status()['window_assumed_days'])
+
+
+class RenamedCursorTests(FeedSim):
+	"""cve.now renamed ``nextCursor`` to ``next_cursor`` and stopped anonymous listings at the newest 400 (2026-11): one page must not
+	pass for the whole window, and a window falsely declared covered is read again by the update step."""
+
+	def test_the_sync_pages_on_next_cursor_and_stops_quietly_at_the_depth_limit(self):
+		feed = FakeFeed(timezone.now(), 8)
+		with mock.patch('cveFeed.tasks.CVENowClient', make_client(feed)):
+			out = tasks.sync_cve_now_feed(max_new=10000, max_scan=5000)
+		self.assertEqual(out['created'], FakeFeed.DEPTH)  # four pages of 100, not one
+		self.assertEqual(out['failed'], 0)
+
+	def test_one_page_is_not_taken_for_the_floor(self):
+		feed = FakeFeed(timezone.now(), 8)
+		self.seed_from(feed, 6)
+		with mock.patch('cveFeed.tasks.CVENowClient', make_client(feed)):
+			out = self.backfill()
+		self.assertIn('covered_through', out)
+		self.assertTrue(out['depth_limited'])
+		self.assertEqual(self.missing_in(feed, 6), [])  # 720 entries: the newest 400 by the listing, the rest by date windows
+		self.assertTrue(any('/archive/' in url for url, _p in feed.requests))
+
+	def test_date_windows_list_every_day_from_the_archive_and_today_from_the_delta_listing(self):
+		now = datetime.datetime(2026, 11, 18, 15, 0, tzinfo=datetime.timezone.utc)
+		feed = FakeFeed(now, 8, per_day=300)
+		client = make_client(feed)()
+		floor, below = now - D(days=5), now - D(hours=2)
+		got = client.published_between(floor, below, now, pause=0)
+		ids = {i for i, _seen in got}
+		wanted = {e['id'] for e in feed.entries if floor <= e['_pub'] < below}
+		self.assertFalse(wanted - ids)
+		self.assertTrue(all(feed.by_id[i]['_pub'].date() >= floor.date() for i in ids))
+		since = [p for url, p in feed.requests if p.get('since')]
+		self.assertEqual(since[0]['since'], '2026-11-17T23:00:00.000Z')  # today, from a little before midnight
+		days = sorted(url.rsplit('/', 1)[1] for url, _p in feed.requests if '/archive/' in url)
+		self.assertEqual(days, ['2026-11-13.md', '2026-11-14.md', '2026-11-15.md', '2026-11-16.md', '2026-11-17.md'])
+		with mock.patch.object(cve_now, 'SINCE_MAX_PAGES', 1), self.assertRaises(cve_now.WindowIncomplete):
+			client.published_between(floor, below, now, pause=0)
+
+	def test_a_window_whose_archive_is_missing_is_not_declared_covered(self):
+		feed = FakeFeed(timezone.now(), 8)
+		self.seed_from(feed, 6)
+		before = feed_watermark.current().covered_through
+		real = feed.get
+
+		def no_archive(url, params=None, timeout=None, headers=None):
+			return Resp({}, 404, text='# Not found') if '/archive/' in url else real(url, params=params, timeout=timeout, headers=headers)
+		feed.get = no_archive
+		with mock.patch('cveFeed.tasks.CVENowClient', make_client(feed)):
+			out = self.backfill()
+		self.assertEqual(out['status'], 'incomplete')
+		self.assertEqual(feed_watermark.current().covered_through, before)
+
+	def test_a_falsely_covered_window_is_read_again_and_matched(self):
+		from django.core.management import call_command
+		feed = FakeFeed(timezone.now(), 12)
+		self.seed_from(feed, 11)
+		with mock.patch('cveFeed.tasks.CVENowClient', make_client(feed)):
+			tasks.sync_cve_now_feed(max_new=50)  # what the old walk did: one page read, and the watermark moved to the head
+		FeedWatermark.objects.update(covered_through=timezone.now(), checked_at=timezone.now())
+		self.assertTrue(self.missing_in(feed, 11))
+		through = iso(feed.now - D(days=11))
+		with mock.patch('cveFeed.tasks.recover_cve_feed_window.delay') as queued:
+			call_command('recover_feed_gap', stdout=open(os.devnull, 'w'))
+			self.assertEqual(feed_watermark.current().covered_through.date(), timezone.now().date())  # a dry run changes nothing
+			call_command('recover_feed_gap', apply=True, through=through, stdout=open(os.devnull, 'w'))
+		queued.assert_called_once()
+		self.assertIsNone(feed_watermark.current().checked_at)
+		with mock.patch('cveFeed.tasks.CVENowClient', make_client(feed)), mock.patch('cveFeed.tasks.correlate_cve_rows') as matched:
+			out = tasks.recover_cve_feed_window(sleep=lambda s: None)
+		self.assertTrue(out['covered'])
+		self.assertEqual(self.missing_in(feed, 11), [])
+		self.assertEqual(sum(len(c.args[0]) for c in matched.call_args_list), out['created'])  # every CVE read is matched, whatever its tier
+		self.assertGreater(out['created'], 0)
+
+	def test_the_update_step_never_moves_the_watermark_forward(self):
+		from django.core.management import call_command
+		early = timezone.now() - D(days=40)
+		FeedWatermark.objects.create(source=feed_watermark.SOURCE, covered_through=early)
+		with mock.patch('cveFeed.tasks.recover_cve_feed_window.delay'):
+			call_command('recover_feed_gap', apply=True, stdout=open(os.devnull, 'w'))
+		self.assertEqual(feed_watermark.current().covered_through, early)
 
 
 class StaleScoreAfterIpBackfillTests(TestCase):
