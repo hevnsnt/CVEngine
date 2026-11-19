@@ -174,8 +174,8 @@ approved in the app (`scripts/update-deploy.sh`, run by `scripts/apply-update.sh
 1. **Before anything is stopped**, the newest published image is pulled: the moving tag `ghcr.io/hevnsnt/cvengine-sentinel:main`, which the Sentinel
    repository's publish workflow re-points at every build of its `main` branch (a branch that only receives code after its checks pass; the images
    carry an SBOM and build provenance). A pull that fails (an offline host, a registry that refuses) is logged and the scanner keeps the image it has.
-2. **After the server is back** (celery recreated, the site answering), the scanner is recreated, after celery, because it shares celery's
-   network namespace. Before that, the image that works is kept under a name of its own (`cvengine-sentinel-rollback:previous`), because the moving
+2. **After the server is back** (celery recreated, the site answering), the scanner is recreated on its own network, and the Tailscale sidecar,
+   when that profile is on, is put back into the new scanner's namespace. Before that, the image that works is kept under a name of its own (`cvengine-sentinel-rollback:previous`), because the moving
    tag will name the new one. The update then waits up to five minutes (`CVENGINE_SCANNER_READY_SECONDS`) for the new scanner to be healthy **and** to
    check in with a contract version the server accepts (not below the floor in `scanner.lock.json`, not older than the server still speaks).
 3. **If it does not, it rolls back** to the image the scanner ran before: it writes `CVENGINE_SCANNER_ROLLBACK_IMAGE=cvengine-sentinel-rollback:previous`

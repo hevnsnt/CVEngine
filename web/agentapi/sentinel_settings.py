@@ -380,8 +380,8 @@ def builtin_vantage():
       (``CVENGINE_PROXY_PRIVATE``). The URLs can carry a login: this goes to the built-in scanner only, over the compose network, and is never stored
       or logged.
     - ``private_ranges``: the private networks it may scan although it is not internal, as this server's own scans may: all of private space with
-      ``CVENGINE_ALLOW_PRIVATE_TARGETS``, the tailnet when the Tailscale sidecar is on (the scanner shares celery's network namespace, where the
-      sidecar's route lives). The server still decides which addresses are in scope; this only lifts the scanner's own floor to match.
+      ``CVENGINE_ALLOW_PRIVATE_TARGETS``, the tailnet when the Tailscale sidecar is on (the sidecar runs in the scanner's own network namespace, where
+      its route lives). The server still decides which addresses are in scope; this only lifts the scanner's own floor to match.
 
     Empty when none of these is set."""
     import os

@@ -41,10 +41,9 @@ up: check-env		## Build and start all services.
 	@# a broker without a password gets one (Redis and its clients are recreated below, as their settings changed)
 	@bash -c '. scripts/redis-password.sh && cvengine_ensure_redis_password "$(CVENGINE_COMPOSE_ENV_FILE)" && echo "The Redis broker had no password: generated one (REDIS_PASSWORD in .env)." || true'
 	${SENTINEL_BUILD_ENV} ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --build ${SERVICES}
-	@# The optional Tailscale sidecar shares the celery container's network namespace: it is orphaned (no tailnet route for scans) once celery is recreated, and naming services above leaves profile services out.
-	@if ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} config --services 2>/dev/null | grep -qx tailscale; then ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --no-deps --force-recreate tailscale; fi
-	@# The built-in scanner (docs/BUILTIN-SCANNER.md) shares celery's network namespace too: the newest published image is fetched and it is recreated after celery
-	@# (with CVENGINE_BUILTIN_SCANNER=0 it is taken away instead). Never fails make up: until it runs, the scans that need it wait.
+	@# The built-in scanner (docs/BUILTIN-SCANNER.md), on its own network: the newest published image is fetched and the scanner recreated, and the optional
+	@# Tailscale sidecar, which runs in the scanner's network namespace, is put back into the new one (cvengine_scanner_sidecar; naming services above leaves
+	@# profile services out). With CVENGINE_BUILTIN_SCANNER=0 both are taken away instead. Never fails make up: until it runs, the scans that need it wait.
 	@bash -c '. scripts/scanner.sh && cvengine_scanner_fetch ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} && cvengine_scanner_start --no-wait ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES}'
 
 build: check-env		## Build all services.

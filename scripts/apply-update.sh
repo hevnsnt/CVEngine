@@ -171,14 +171,14 @@ cv_status_settle() { cv_ticker_stop; [ "${CVENGINE_STATUS_LINGER:-6}" = 0 ] || s
 export UPDATE_OWNS_MAINTENANCE=1  # scripts/update-deploy.sh then leaves the flag to this script (an older copy of this script does not say so, and the deploy sets and clears it itself)
 
 # What must not run while files change under it: the Celery workers and beat read ./web too (a worker process that restarts, or a task that
-# imports a module for the first time, loads the new code on the old image), and the scanner shares the workers' network namespace. Scans are
-# already paused and drained when this runs. Stopped, not killed: they are started again if the update is put back, and recreated by it otherwise.
+# imports a module for the first time, loads the new code on the old image), and the built-in scanner, which has no work while the server
+# changes under it. Scans are already paused and drained when this runs. Stopped, not killed: they are started again if the update is put back, and recreated by it otherwise.
 FROZEN=()
 freeze_background() {
   local compose=("${COMPOSE[@]}") running svc
   FROZEN=()
   running=$("${compose[@]}" ps --status running --services 2>/dev/null) || running=''
-  for svc in scanner celery celery-beat; do  # the scanner first: it shares celery's network
+  for svc in scanner celery celery-beat; do
     grep -qx "$svc" <<<"$running" && FROZEN+=("$svc")
   done
   [ "${#FROZEN[@]}" -gt 0 ] || return 0
@@ -188,14 +188,14 @@ freeze_background() {
 thaw_background() {
   local compose=("${COMPOSE[@]}") svc s listed='' ok=0
   [ "${#FROZEN[@]}" -gt 0 ] || return 0
-  for svc in celery celery-beat scanner; do  # celery first: the scanner joins its network
+  for svc in celery celery-beat scanner; do
     for s in "${FROZEN[@]}"; do
       [ "$s" = "$svc" ] || continue
       "${compose[@]}" start "$svc" >>"$LOG" 2>&1 || { ok=1; log "could not start $svc again (docker compose start $svc)"; }
     done
   done
   if listed=$("${compose[@]}" config --services 2>/dev/null) && grep -qx tailscale <<<"$listed"; then
-    "${compose[@]}" restart tailscale >>"$LOG" 2>&1 || true  # it shares celery's network namespace
+    "${compose[@]}" restart tailscale >>"$LOG" 2>&1 || true  # it shares the scanner's network namespace, which the stop took away
   fi
   FROZEN=()
   return "$ok"
@@ -350,8 +350,8 @@ deploy_builtin() {
   "${compose[@]}" run --rm --no-deps --entrypoint python3 web manage.py collectstatic --noinput || return 1
   "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}" || return 1
   verify_running "${services[@]}" || return 1
-  # The built-in scanner (scripts/scanner.sh) where the checkout has it: its pinned image, recreated after celery, put back on the previous image when
-  # it sends no heartbeat. Never a failed update. A checkout with scripts/update-deploy.sh does the same there.
+  # The built-in scanner (scripts/scanner.sh) where the checkout has it: its pinned image, recreated on its own network with the Tailscale sidecar
+  # following it, put back on the previous image when it sends no heartbeat. Never a failed update. A checkout with scripts/update-deploy.sh does the same there.
   if [ -f scripts/scanner.sh ]; then
     . scripts/scanner.sh
     # fetched already before the page went up when that was for the same image

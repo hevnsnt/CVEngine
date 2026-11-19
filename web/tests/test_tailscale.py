@@ -1636,7 +1636,7 @@ class ComposeProfileTests(SimpleTestCase):
     def test_the_sidecar_is_opt_in_and_joins_the_scanners_network_namespace(self):
         ts = self.compose['services']['tailscale']
         self.assertEqual(ts['profiles'], ['tailscale'])
-        self.assertEqual(ts['network_mode'], 'service:celery')
+        self.assertEqual(ts['network_mode'], 'service:scanner')
         self.assertIn('NET_ADMIN', ts['cap_add'])
         self.assertIn('/dev/net/tun:/dev/net/tun', ts['devices'])
         self.assertNotIn('networks', ts)  # network_mode and networks cannot be combined

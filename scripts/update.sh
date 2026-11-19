@@ -886,12 +886,8 @@ app_recreated=1
 if grep -qx reviewer < <("${compose[@]}" config --services 2>/dev/null); then
     "${compose[@]}" up -d --no-deps --force-recreate reviewer || echo 'Could not start the AI reviewer: docker compose up -d reviewer; scanning is not affected.' >&2
 fi
-# The Tailscale sidecar joins the celery container's network namespace by container id, so it is orphaned (no tailscale0, no tailnet route for
-# scans) once celery is recreated. Only present when the tailscale profile is on.
-if grep -qx tailscale < <("${compose[@]}" config --services 2>/dev/null); then
-    "${compose[@]}" up -d --no-deps --force-recreate tailscale ||
-        echo 'Could not restart the Tailscale sidecar: run docker compose up -d --force-recreate tailscale, or scans of tailnet addresses fail.' >&2
-fi
+# The Tailscale sidecar (tailscale profile) is not recreated here: it runs in the built-in scanner's network namespace, not celery's, and is put back
+# into it when the scanner is started below (scripts/scanner.sh, cvengine_scanner_sidecar), including on an install that had it in celery's.
 
 worker_queues_ready() {
     local queues
@@ -929,7 +925,7 @@ while (( SECONDS < deadline )); do
         "$ready_url" || true)
     if [[ "$status" =~ ^[23][0-9][0-9]$ ]] && worker_queues_ready && beat_ready; then
         python3 scripts/update-state.py commit "$(git rev-parse HEAD)"
-        # The built-in scanner, now that the server answers: recreated after celery (it shares celery's network namespace), kept on the new image
+        # The built-in scanner, now that the server answers: recreated on its own network (the Tailscale sidecar follows it), kept on the new image
         # only once a heartbeat of it reaches the server, else put back on the previous one. It never fails the update.
         if declare -F cvengine_scanner_start >/dev/null; then
             step 'Starting the built-in scanner'
