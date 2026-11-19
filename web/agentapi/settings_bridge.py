@@ -37,7 +37,7 @@ ENTRIES = {
     'updates_cancel': ('settings', 'updates/cancel', 'Cancel an update that has not started. Action.', None),
     'updates_dismiss': ('settings', 'updates/dismiss', 'Dismiss the update notice. Action.', None),
     'scanner_plan': ('settings', 'scanner_plan', 'Where scanning runs: Sentinels of your own only, or also the built-in scanner. Change applies on the next update step.', None),
-    'keys': ('settings', 'keys', 'The service keys saved (CVE sources, OpenAI, Anthropic, and so on): which are saved, never their values.', None),
+    'keys': ('settings', 'keys', 'The instance-wide service key saved (the Chaos discovery fallback): whether it is saved, never its value.', None),
     'notifications': ('settings', 'notifications', 'Where notifications go (webhook and chat targets) and which events.', None),
     'email': ('settings', 'email', 'Outgoing mail (SMTP): host, port, sender, whether a password is saved (never shown).', None),
     'email_test': ('settings', 'email/test', 'Send one test mail to the address given. Action.', None),

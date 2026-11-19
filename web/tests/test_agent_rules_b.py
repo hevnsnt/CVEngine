@@ -598,12 +598,12 @@ class PersonOnlyCapabilitiesTests(TestCase):
         self.assertEqual(call(self.root_token, 'DELETE', url)[0], 200)
         self.assertFalse(ApiCredential.objects.filter(project=self.pa).exists())
         # the instance keys and an organization key, through the settings tool
-        error, text = tool_call(self.root_token, 'change_setting', {'name': 'keys', 'values': {'openai': {'key': 'sk-x'}}})
+        error, text = tool_call(self.root_token, 'change_setting', {'name': 'keys', 'values': {'chaos': {'key': 'sk-x'}}})
         self.assertTrue(error)
         self.assertIn('person', text)
         error, text = tool_call(self.root_token, 'change_setting', {'name': 'org_api_key', 'id': f'{self.org1.pk}/shodan', 'values': {'api_key': 'sk-x'}})
         self.assertTrue(error)
-        self.assertFalse(tool_call(self.root_token, 'change_setting', {'name': 'keys', 'values': {'openai': {'clear': True}}})[0])  # removing is open
+        self.assertFalse(tool_call(self.root_token, 'change_setting', {'name': 'keys', 'values': {'chaos': {'clear': True}}})[0])  # removing is open
         self.assertIsInstance(Org.objects.get(pk=self.org1.pk), Org)
 
     def test_a_token_cannot_store_a_target_sign_in_but_can_delete_one(self):

@@ -5,4 +5,3 @@ from scanEngine.models import *
 admin.site.register(EngineType)
 admin.site.register(Notification)
 admin.site.register(VulnerabilityReportSetting)
-admin.site.register(Hackerone)

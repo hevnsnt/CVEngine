@@ -18,7 +18,6 @@ _user = contextvars.ContextVar('tenancy_current_user', default=None)
 # model label -> lookup path to the owning project id; nullable owners listed in NULLABLE
 SCOPES = {
     'dashboard.Project': 'id',
-    'dashboard.InAppNotification': 'project_id',
     'targetApp.Domain': 'project_id',
     'startScan.ScanHistory': 'domain__project_id',
     'startScan.Subdomain': 'target_domain__project_id',
@@ -27,7 +26,6 @@ SCOPES = {
     'startScan.MetaFinderDocument': 'target_domain__project_id',
     'startScan.SubScan': 'scan_history__domain__project_id',
     'startScan.ScanActivity': 'scan_of__domain__project_id',
-    'startScan.Command': 'scan_history__domain__project_id',
     'cveFeed.CVEMatch': 'subdomain__target_domain__project_id',
     'cveFeed.DiscoveryEvent': 'domain__project_id',
     'cveFeed.AgentActivity': 'project_id',
@@ -86,7 +84,7 @@ SCOPES = {
     'cveFeed.ResourceRef': 'project_id',
     'dashboard.ApiCredential': 'project_id',  # an organization's own credential has no project (NULLABLE)
 }
-NULLABLE = {'dashboard.InAppNotification', 'cveFeed.AgentActivity', 'dashboard.ApiCredential', 'cveFeed.AIJob', 'agentapi.StageRun'}  # system-wide (or organization-wide) entries have no project
+NULLABLE = {'cveFeed.AgentActivity', 'dashboard.ApiCredential', 'cveFeed.AIJob', 'agentapi.StageRun'}  # system-wide (or organization-wide) entries have no project
 
 # Models that hold a foreign key to a project, domain, scan or organization and are deliberately NOT in SCOPES. Every other one must be listed above
 # (tests.test_sentinel_hardening checks this), so a model that gains a project owner cannot be forgotten.

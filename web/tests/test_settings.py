@@ -156,8 +156,8 @@ class SettingsApiTests(TestCase):
 			get_provider.assert_not_called()
 
 	def test_api_vault(self):
-		status, data = send(self.c, 'PUT', 'keys', {'chaos': {'key': 'chaos-secret'}, 'hackerone': {'key': 'h1', 'username': 'bob'}})
-		self.assertEqual((status, data['chaos']['has_key'], data['hackerone']['username']), (200, True, 'bob'))
+		status, data = send(self.c, 'PUT', 'keys', {'chaos': {'key': 'chaos-secret'}, 'hackerone': {'key': 'h1', 'username': 'bob'}, 'openai': {'key': 'sk-x'}})
+		self.assertEqual((status, data), (200, {'chaos': {'has_key': True}}))  # the entries nothing read (OpenAI, Netlas, HackerOne) are gone: ignored
 		self.assertNotIn('chaos-secret', json.dumps(data))
 		send(self.c, 'PUT', 'keys', {'chaos': {'key': ''}})
 		self.assertEqual(ChaosAPIKey.objects.get().key, 'chaos-secret')
