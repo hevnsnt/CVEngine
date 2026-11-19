@@ -69,6 +69,7 @@ ALLOWED = {
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/host_context.py',
         'cveFeed/host_inventory.py',
+        'cveFeed/identities.py',  # reads the OS guess, certificates and OS CPEs a Sentinel's port scan stored (cites nmap's OS names), runs nothing
         'cveFeed/intel.py',
         'cveFeed/internal_scan.py',
         'cveFeed/java_runtime.py',  # reads the port rows the fingerprint pass stored (the service nmap's jdwp-version named) and says so; runs nothing
@@ -93,6 +94,7 @@ ALLOWED = {
         'cveFeed/runzero_sync.py',
         'cveFeed/scan_concurrency.py',  # 1.3.2 scan concurrency setting (develop): names the per-tool limits, runs nothing
         'cveFeed/service_intel.py',
+        'cveFeed/servicefp.py',  # decodes the service fingerprint a Sentinel's port scan stored as a port's banner (its format is the tool's), runs nothing
         'cveFeed/settings_api.py',  # 1.3.2 settings API (develop): setting help text, runs nothing
         'cveFeed/setup_flow.py',  # the setup wizard (1.4): scanner kind names such as nmap or nuclei as the toggles it offers (data values written to the Sentinel settings), runs nothing
         'cveFeed/software.py',  # the About page list of the tools of both images (names, versions, licenses), runs nothing

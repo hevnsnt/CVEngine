@@ -305,11 +305,12 @@ def _label(vendor, product):
 
 def results(params):
     """What a match states, as ``[{'part', 'label', 'vendor', 'product', 'version', 'cpe', 'network_os'}]``: the service, the service's
-    component, and the operating system, each only when it names a product and a version."""
+    component, the operating system and the hardware (``hw.*``: the device's model and its version), each when it names a product; ``version``
+    is '' when the fingerprint states none (an identity: the product is known, its version is not)."""
     out = []
-    for part in ('service', 'service.component', 'os'):
-        product, version = params.get(f'{part}.product'), params.get(f'{part}.version')
-        if not product or not version:
+    for part in ('service', 'service.component', 'os', 'hw'):
+        product, version = params.get(f'{part}.product'), params.get(f'{part}.version') or ''
+        if not product or '{' in product:
             continue
         vendor = params.get(f'{part}.vendor') or ''
         cpe = params.get(f'{part}.cpe23') or ''
@@ -342,8 +343,24 @@ def _service(port):
 
 def banner_texts(port):
     """``[(database, text, said)]`` of one port's stored banner (``Port.banner``): the text in the form Recog's database reads it, and what was
-    stored, for the evidence."""
-    lines = _lines(getattr(port, 'banner', '') or '')
+    stored, for the evidence. A banner that is the port scan's service fingerprint of an unidentified service (``cveFeed.servicefp``) is read decoded:
+    the greeting its NULL or GenericLines probe got as a banner, and the Server header and cookies of its first HTTP reply."""
+    from cveFeed import servicefp
+    replies = servicefp.decode(getattr(port, 'banner', '') or '')
+    if replies:
+        out = []
+        first = servicefp.greeting(replies)
+        if first:
+            out += [(db, text, f'service fingerprint {said}') for db, text, said in _banner_lines([first], port)]
+        server = servicefp.http_headers(replies).get('server')
+        if server:
+            out.append(('http_header.server', server, f'service fingerprint Server: {server}'))
+        out += [('http_header.cookie', f'{name}=', f'service fingerprint cookie {name}') for name in servicefp.http_cookies(replies)]
+        return out
+    return _banner_lines(_lines(getattr(port, 'banner', '') or ''), port)
+
+
+def _banner_lines(lines, port):
     if not lines:
         return []
     first, service, number = lines[0], _service(port), getattr(port, 'number', 0)

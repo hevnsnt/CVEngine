@@ -20,6 +20,12 @@ runtime rules of ``cveFeed.version_sources``):
                  ``VERSION 1.6.21``, ``cluster x, version 8.11.1``), per port.
   vsrc:panel     the version an info-level panel template result (tag ``panel``) extracted, under the product the template names, with its
                  CPE (``cveFeed.panel_versions``), per port. Never stored over a version another source states for the product.
+  vsrc:ssh       the banner the Sentinel's SSH inspection read (``cveFeed.ssh_scan``), through Recog's SSH database or the OpenSSH reader
+                 (``ssh_readings``), per port, less what the port row states at the same version.
+  identities     a product a source names with no version (``cveFeed.identity_readings``: shown, searched, a lead, never a technology): what
+                 Recog names without a version (its ``hw.*`` fields a hint) under ``vsrc:recog``, and the network operating system an OS guess,
+                 a certificate or an OS CPE names (``cveFeed.identities``) under ``vsrc:nmap``. An unidentified service's nmap fingerprint
+                 (``cveFeed.servicefp``) is read decoded by both.
   vsrc:recog     what Rapid7 Recog's fingerprint databases (``cveFeed.recog``) read in the banners the host's rows already store: SSH, SMTP, FTP,
                  POP3, IMAP and telnet banners (``Port.banner``), the Server and Set-Cookie lines of the NSE output, ``mysql-info``'s server
                  version, ``ntp-info``'s readvar variables, an SNMP agent's sysDescr, the host's Server header (``Subdomain.webserver``) and its
@@ -86,7 +92,8 @@ PANEL_SOURCE = 'panel'
 RECOG_PROBE = 'vsrc:recog'
 NTLM_PROBE = 'vsrc:ntlm'  # cveFeed.windows_builds.PROBE: the Windows release an NTLM challenge states
 NUCLEI_PROBE = 'vsrc:nuclei'  # cveFeed.network_detection: a versioned product a network detection template read on a port whose own row names another product
-FIRST_PARTY_PROBES = (NMAP_PROBE, WEBSERVER_PROBE, TESTSSL_PROBE, WPSCAN_PROBE, DB_PROBE, PANEL_PROBE, RECOG_PROBE, NUCLEI_PROBE)
+SSH_PROBE = 'vsrc:ssh'  # cveFeed.ssh_scan: the SSH banner the Sentinel's SSH inspection read, through Recog and the OpenSSH reader
+FIRST_PARTY_PROBES = (NMAP_PROBE, WEBSERVER_PROBE, TESTSSL_PROBE, WPSCAN_PROBE, DB_PROBE, PANEL_PROBE, RECOG_PROBE, NUCLEI_PROBE, SSH_PROBE)
 REPORTED_PROBES = (SHODAN_PROBE, RUNZERO_PROBE)
 # the Windows release is first-party, but a release with no patch level never makes a third-party reading of the same system give way (a runZero
 # operating system version names the update revision the NTLM challenge does not): it is kept out of FIRST_PARTY_PROBES
@@ -283,6 +290,10 @@ def port_readings(port):
         cpes.insert(0, port.cpe)  # nmap named no product, only the CPE: correlation skips the port, so the CPE is the reading
     out += _modules(port.service_extra, 'nmap-extrainfo')
     out += script_readings(extra.get('scripts'))
+    from cveFeed import servicefp
+    replies = servicefp.decode(port.banner or '')
+    if replies:  # an unidentified service's fingerprint: the Server, X-Powered-By and version headers of the HTTP reply it got
+        out += [r for r in header_readings(servicefp.http_headers(replies), 'nmap-servicefp', url=f'port {port.number}') if r['kind'] != 'runtime']
     for got in (cpe_reading(c, 'nmap-cpe', evidence=f'nmap CPE {c}') for c in cpes):
         if not got:
             continue
@@ -307,7 +318,9 @@ def _names_port(label, port_token):
 
 
 def nmap_readings(sub, ports):
-    """``[(port number, reading)]`` of every stored open port of a host (``ports``: ``[(address, port)]``, ``version_sources._ports``)."""
+    """``[(port number, reading)]`` of every stored open port of a host (``ports``: ``[(address, port)]``, ``version_sources._ports``), and the
+    network operating system or appliance its OS guess, a certificate or an operating system CPE names (``cveFeed.identities``)."""
+    from cveFeed import identities
     out, seen = [], set()
     for _address, port in ports:
         if port.state not in ('', 'open'):
@@ -317,6 +330,9 @@ def nmap_readings(sub, ports):
             if key not in seen:
                 seen.add(key)
                 out.append((port.number, r))
+    for number, r in identities.host_readings(sub, ports):
+        if not any(n == number and o['component'] == r['component'] for n, o in out):
+            out.append((number, r))
     return out
 
 
@@ -381,14 +397,58 @@ def db_readings(reply):
     return []
 
 
+_SSH_BANNER = re.compile(r'^SSH-\d{1,2}(?:\.\d{1,2})?-(\S{1,120})')
+_OPENSSH = re.compile(r'^OpenSSH_(\d+\.\d+(?:p\d+)?)', re.IGNORECASE)
+
+
+def ssh_readings(banner, port=0):
+    """The readings an SSH banner (``SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6``) states: what Rapid7 Recog's SSH database names (the server and
+    its version, a network operating system), else the OpenSSH release its software version token carries. ``[]`` for anything else."""
+    from cveFeed import recog
+    text = catalogue.clip(banner, 300)
+    found = _SSH_BANNER.match(text)
+    if not found:
+        return []
+    out = []
+    params = recog.match('ssh.banner', text[found.start(1):])
+    for result in recog.results(params or {}):
+        got = _recog_reading(result, 'ssh.banner', f'SSH banner: {text}', (params or {}).get('fingerprint.description') or '')
+        if got:
+            out.append(got)
+    if not any(r['version'] for r in out):
+        openssh = _OPENSSH.match(found.group(1))
+        if openssh:
+            out.append(product_reading('OpenSSH', openssh.group(1), 'ssh-banner', evidence=f'SSH banner: {text}', cpe=f'cpe:/a:openbsd:openssh:{openssh.group(1)}'))
+    return _unique([{**r, 'source': 'ssh'} if r.get('source') == 'recog' else r for r in out if r])
+
+
+def store_ssh(sub, port, banner):
+    """After an SSH inspection of ``sub``'s ``port``: store what its banner states (``ssh_readings``) under ``vsrc:ssh``, less what the port row
+    already states at the same version, and drop what it no longer states. Returns whether anything moved."""
+    from cveFeed.correlation import _norm
+    from cveFeed import version_sources
+    stated = [(_norm(p.product or ''), (p.version or '').strip()) for _a, p in version_sources._ports(sub) if p.number == port and (p.product or '').strip()]
+    readings = [r for r in ssh_readings(banner, port)
+                if not any(v and _same_version(r['version'], v) and _names_port(r['label'], t) for t, v in stated)]
+    return store_port(sub, SSH_PROBE, port, readings)
+
+
 def _recog_reading(result, database, said, description):
     """The reading one Recog result (``recog.results``) is, or None: a product reading named as Recog names it, with Recog's CPE; an operating
     system that is not a network operating system is a ``weak`` hint (``version_sources.kind_of``: never a technology, never matched)."""
     from cveFeed import recog
     from cveFeed.correlation import stated_version
-    version = re.split(r'[\s@]', result['version'].strip(), maxsplit=1)[0]  # ntpd's "4.2.8p15@1.3728-o" is 4.2.8p15
+    version = re.split(r'[\s@]', result['version'].strip(), maxsplit=1)[0] if result['version'].strip() else ''  # ntpd's "4.2.8p15@1.3728-o" is 4.2.8p15
     label = result['label']
-    hint = result['part'] == 'os' and not result['network_os']
+    hint = result['part'] == 'hw' or (result['part'] == 'os' and not result['network_os'])  # a device model or an operating system: shown, never matched
+    if not version:
+        # an identity: Recog names the product and no version. A service, its component or a network operating system is an identity reading
+        # (shown, searched, a lead); an operating system or a device named with no version adds nothing a guess does not
+        if hint:
+            return None
+        from cveFeed import identity_readings
+        return identity_readings.reading(label, 'recog', evidence=f'{said} (Recog {recog.DATABASES.get(database, database)}: {description})',
+                                         cpe=result['cpe'])
     if hint and result['vendor'] and not label.lower().startswith(result['vendor'].lower()):
         label = f"{result['vendor']} {label}"  # "Ubuntu Linux", not "Linux"
     if any(not stated_version(name, version) for name in (label, f"{result['vendor']} {result['product']}")):
@@ -457,14 +517,15 @@ def _stated_products(sub, ports):
     return [item for item in out if item[0] or item[1]]
 
 
-def _recog_names(reading, stated):
-    """Whether ``stated`` (``_stated_products``) names the product of a Recog reading with a version."""
+def _recog_names(reading, stated, named_only=False):
+    """Whether ``stated`` (``_stated_products``) names the product of a Recog reading with a version (``named_only``: at all, for an identity
+    reading, which adds nothing where a port or another reading already names the product)."""
     from cveFeed.correlation import _norm, parse_cpe
     token = _norm(reading['label'])
     parsed = parse_cpe(reading.get('cpe') or '')
     cpe_product = parsed[1] if parsed else ''
     for other, other_cpe, version in stated:
-        if not version:
+        if not version and not named_only:
             continue
         if (_same_product(token, {other}) or (cpe_product and other_cpe and cpe_product == other_cpe)
                 or (cpe_product and _same_product(cpe_product, {other})) or (other_cpe and _same_product(token, {other_cpe}))):
@@ -490,7 +551,7 @@ def recog_readings(sub, ports):
     if not found:
         return []
     stated = _stated_products(sub, ports)
-    return [(number, r) for number, r in found if not _recog_names(r, stated)]
+    return [(number, r) for number, r in found if not _recog_names(r, stated, named_only=not r['version'])]
 
 
 def reported_cpe(tech):
