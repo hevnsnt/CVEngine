@@ -1664,6 +1664,8 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'names': _host_names(sub),
             # the other names that point at this host's addresses: one host, several domain names
             'aliases': sorted({o.name for o in others if o.name.lower() != sub.name.lower()}, key=str.lower),
+            # what a Sentinel said the name resolves to that a second source has not confirmed yet (agentapi.dns_crosscheck): shown, never stored on the host
+            'unconfirmed_addresses': ((shared or {}).get('unconfirmed') or {}).get(host_key) or [],
             'ips': [{'address': addr, 'os': e['ip'].os_guess,
                      'reverse': e['ip'].reverse_pointer or '', 'country': countries.get(e['ip'].geo_iso_id, ''),
                      'names_on_ip': on_ip.get(addr, 0), 'is_cdn': bool(e['ip'].is_cdn),
@@ -1951,13 +1953,15 @@ def _shared_for(project, subs):
     java = java_runtime.runtimes_for(_pids_of(project, subs), {s.name.lower() for s in subs})  # what the host was read to run on (one query)
     from cveFeed import version_sources
     versions = version_sources.readings_for(_pids_of(project, subs), {s.name.lower() for s in subs})  # what its version sources state (one query)
+    from agentapi import dns_crosscheck
+    unconfirmed = dns_crosscheck.held_for(_pids_of(project, subs), {s.name for s in subs})  # DNS answers one source gave that are not on the host yet (one query)
     from startScan.models import SubdomainTechnology
     link_cpes = {}  # the CPE a technology template named for a host's technology (cveFeed.nuclei_scan.tech_cpe_from), one query
     for sub_id, name, version, cpe in SubdomainTechnology.objects.filter(subdomain_id__in=[s.pk for s in subs]).exclude(cpe='') \
             .values_list('subdomain_id', 'technology__name', 'technology__version', 'cpe'):
         link_cpes.setdefault(sub_id, []).append((name or '', version or '', cpe))
     return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots, 'shots': shots, 'legacy_shots': legacy_shots,
-            'probes': probe_rows, 'vhosts': vhosts, 'java': java, 'versions': versions, 'link_cpes': link_cpes}
+            'probes': probe_rows, 'vhosts': vhosts, 'java': java, 'versions': versions, 'unconfirmed': unconfirmed, 'link_cpes': link_cpes}
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}
@@ -5668,8 +5672,9 @@ def validate_match_now(ctx, slug, match_id):
     with transaction.atomic():
         Project.objects.select_for_update().get(pk=project.pk)
         now = timezone.now()
-        OnDemandValidation.objects.filter(project=project, status='queued', created_at__lt=now - timedelta(minutes=10)).update(
-            status='failed', error='queue request expired before a worker accepted it', finished_at=now)
+        # a request parked on its AI plan (cveFeed.validation_plan.park) is queued on purpose: its own wait ends it (PLAN_WAIT and the nudge)
+        OnDemandValidation.objects.filter(project=project, status='queued', created_at__lt=now - timedelta(minutes=10)).exclude(
+            result__has_key='waiting').update(status='failed', error='queue request expired before a worker accepted it', finished_at=now)
         OnDemandValidation.objects.filter(project=project, status='running', started_at__lt=now - timedelta(minutes=30)).update(
             status='failed', error='worker lease expired; request may be retried', finished_at=now)
         active = OnDemandValidation.objects.filter(match=match, status__in=('queued', 'running')).order_by('-id').first()

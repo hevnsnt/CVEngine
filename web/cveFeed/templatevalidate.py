@@ -202,7 +202,7 @@ def _sentinel_gate(tmpl, now):
     except ScannerUnavailable as exc:
         return _wait(tmpl, f'no Sentinel can run template checks ({exc.kind}) right now', now)
     if not valid:
-        return reject(tmpl, f'the scanner did not accept the template: {" ".join((output or "no output").split())[:200]}')
+        return reject(tmpl, f'the scanner did not accept the template: {templategen.plain_reason(output, "no output", 200)}')
     if fixture_ok is False:
         return reject(tmpl, 'it matched a benign page on the Sentinel, so it would flag hosts that are not affected')
     if fixture_ok is None:
@@ -391,8 +391,8 @@ def summary(now=None):
     reasons = {}
     for row in G.objects.filter(status__in=(G.STATUS_INVALID, G.STATUS_EXPIRED), created_at__gte=now - datetime.timedelta(days=30)) \
             .values('validation_reason', 'validation_output'):
-        output_lines = (row['validation_output'] or '').strip().splitlines()
-        reason = (row['validation_reason'] or '').strip() or (output_lines[0] if output_lines else 'no reason recorded')
+        # a row with no reason of its own is named by its output, without the tool's warning lines (``templategen.plain_reason``)
+        reason = templategen.plain_reason(row['validation_reason'], limit=400) or templategen.plain_reason(row['validation_output'], 'no reason recorded', first_line=True)
         reason = re.sub(r'\s*\(tried \d+ times\)$', '', reason)[:160]
         reasons[reason] = reasons.get(reason, 0) + 1
     top = sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))[:6]

@@ -2,7 +2,6 @@ import fcntl
 import os
 import subprocess
 import tempfile
-import time
 from pathlib import Path
 from unittest import mock
 
@@ -210,20 +209,6 @@ class ScanControlTests(OwnUpdateLock, TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'update is running'):
                     release_update_pause()
                 fcntl.flock(hold, fcntl.LOCK_UN)
-
-    def test_modern_heavy_job_stops_even_without_a_scan_id(self):
-        from reNgine import resources
-        ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})
-        store = mock.Mock()
-        job = resources.Job('nuclei', 100, 'fixture', store,
-                            lambda: {'total_mb': 4000, 'available_mb': 3000, 'used_mb': 1000, 'limit_mb': 4000}, time.time)
-        proc = mock.Mock()
-        proc.poll.return_value = None
-        job.proc = proc
-        with mock.patch.object(job, 'rss_mb', return_value=0), mock.patch.object(resources, 'terminate_group') as terminate:
-            self.assertTrue(job.check_once())
-        self.assertTrue(job.aborted)
-        terminate.assert_called_once_with(proc, grace=5)
 
 
 def app_task_names():

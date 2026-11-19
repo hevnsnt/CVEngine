@@ -57,29 +57,31 @@ globalThis.localStorage = {getItem: () => null, setItem() {}};
 const status = (over = {}) => ({
   mode: 'auto', effective_mode: 'auto', killed: false, changed_by: null, changed_at: null,
   advisor: {enabled: true, provider: true, used_today: 2, cap: 8, interval_hours: 3, last_error: null},
-  last_run: {at: '2026-11-01T20:00:00Z', held: null, changes: [{setting: 'heavy.nmap'}]},
+  last_run: {at: '2026-11-01T20:00:00Z', held: null, changes: [{setting: 'work_depth'}]},
   sized_for: '8 cores, 3.4 GB memory budget, 9 Sentinel slots',
   history: [
-    {id: 7, at: '2026-11-01T20:00:00Z', setting: 'heavy.nmap', label: 'Port and service scan (nmap)', old_value: 2, new_value: 3, source: 'controller',
-      action: 'raise', applied: true, pressure: false, reason: 'nmap runs waited <b>x</b>', resolution: null, can_revert: true, can_apply: false},
+    {id: 7, at: '2026-11-01T20:00:00Z', setting: 'work_depth', label: 'Discovery scans kept running', old_value: 3, new_value: 4, source: 'controller',
+      action: 'raise', applied: true, pressure: false, reason: 'the conductor was held back <b>x</b>', resolution: null, can_revert: true, can_apply: false},
     {id: 6, at: '2026-11-01T19:00:00Z', setting: 'stage_parallel', label: 'Chunks of one scan stage at once', old_value: 4, new_value: 5, source: 'ai',
       action: 'raise', applied: false, pressure: false, reason: 'free slots', resolution: null, can_revert: false, can_apply: true},
   ],
   ...over,
 });
-const field = (over) => ({key: 'heavy.nmap', label: 'Port and service scan (nmap)', help: 'The standard scan.', group: 'heavy', default: 2, min: 1, max: 8, value: 3,
-  source: 'auto', env_name: 'HEAVY_MAX_NMAP', env_value: null, saved: null, set_by: null, set_at: null, applies: 'live', ...over});
+const field = (over) => ({key: 'work_depth', label: 'Discovery scans kept running', help: 'How many discovery scans the conductor keeps running.', group: 'depth', default: 3,
+  min: 0, max: 32, value: 4, source: 'auto', env_name: 'CVENGINE_WORK_DEPTH', env_value: null, saved: null, set_by: null, set_at: null, applies: 'live', ...over});
 const concurrency = () => ({
   fields: [
-    field({autotune: {managed: true, tuned: true, pinned: false, was: 2, reason: 'nmap runs waited', at: '2026-11-01T20:00:00Z', min: 1, max: 4, step: 1}}),
-    field({key: 'heavy.nuclei', label: 'Vulnerability templates (nuclei)', value: 2, source: 'admin', saved: 2, set_by: 'bill',
-      autotune: {managed: true, tuned: false, pinned: true, pinned_by: 'bill <i>x</i>', min: 1, max: 3, step: 1}}),
-    field({key: 'heavy.wpscan', label: 'WordPress scan (WPScan)', value: 2, source: 'default',
-      autotune: {managed: true, tuned: false, pinned: false, min: 1, max: 4, step: 1, suggestion: {id: 9, value: 3, from: 2, reason: 'sites waited', source: 'ai'}}}),
-    field({key: 'heavy.naabu', label: 'Fast port discovery (naabu)', value: 1, source: 'default', autotune: {managed: false}}),
+    field({key: 'assess_batch', label: 'Hosts per assessment batch', group: 'discovery', default: 8, min: 1, max: 64, value: 16, source: 'admin', saved: 16, set_by: 'bill',
+      env_name: 'CVENGINE_ASSESS_BATCH', autotune: {managed: true, tuned: false, pinned: true, pinned_by: 'bill <i>x</i>', min: 4, max: 32, step: 4}}),
+    field({key: 'assess_share_percent', label: 'Share of the discovery pool host assessments may hold', group: 'discovery', default: 75, min: 10, max: 100, value: 75, source: 'default',
+      env_name: 'CVENGINE_ASSESS_SHARE_PERCENT', autotune: {managed: true, tuned: false, pinned: false, min: 25, max: 75, step: 10,
+        suggestion: {id: 9, value: 65, from: 75, reason: 'scans waited', source: 'ai'}}}),
+    field({autotune: {managed: true, tuned: true, pinned: false, was: 3, reason: 'the conductor was held back', at: '2026-11-01T20:00:00Z', min: 1, max: 16, step: 1}}),
+    // a lane configured at its floor is not auto-tuned (cveFeed.scan_concurrency.lane_range)
+    field({key: 'lane.classic', label: 'Classic lane tasks at once', group: 'lanes', default: 6, min: 1, max: 32, value: 6, source: 'default', env_name: 'CLASSIC_CONCURRENCY',
+      autotune: {managed: false}}),
   ],
-  groups: [{id: 'heavy', title: 'Scanners at once'}],
-  memory: {budget_mb: 3072, limit_mb: 4096, costs_mb: {}, warnings: []},
+  groups: [{id: 'discovery', title: 'Discovery and assessment'}, {id: 'depth', title: 'The work conductor'}, {id: 'lanes', title: 'Worker lanes'}],
   discovery: {state: 'unknown', message: ''},
   autotune: {mode: 'auto', effective_mode: 'auto', killed: false},
 });
@@ -109,8 +111,8 @@ test('the Auto-tuning card comes first and says it is on by default and how to t
   assert.match(text, /Used today: 2 of 8/);
   assert.match(text, /Last run .*: 1 change\(s\)\./);
   assert.match(text, /Sized for this machine: 8 cores, 3\.4 GB memory budget, 9 Sentinel slots\./);
-  assert.match(text, /Port and service scan \(nmap\) 2 → 3 · auto-tune/);  // the History line: what, who
-  assert.match(text, /Why: Nmap runs waited <b>x<\/b>/);  // text, never markup
+  assert.match(text, /Discovery scans kept running 3 → 4 · auto-tune/);  // the History line: what, who
+  assert.match(text, /Why: The conductor was held back <b>x<\/b>/);  // text, never markup
   assert.ok(!find(host, (n) => n.tag === 'b').length);
   const select = find(host, (n) => n.tag === 'select')[0];
   assert.deepEqual(select.children.map((o) => o.value), ['auto', 'suggest', 'off']);
@@ -161,17 +163,18 @@ test('the kill switch disables the controls and says why', async () => {
   reply = {status: status(), concurrency: concurrency()};
 });
 
-test('rows carry their badge: auto-tuned with what it was, pinned with who and a hand-back, suggested with Apply, nothing for a kind never tuned', async () => {
+test('rows carry their badge: auto-tuned with what it was, pinned with who and a hand-back, suggested with Apply, nothing for a number never tuned', async () => {
   const host = new Node('div');
   await maxxing.cards()[1].build(host);
   const text = host.textContent;
-  assert.match(text, /Auto-tunedAuto-tuned: 3 \(was 2\) · nmap runs waited · /);
+  assert.match(text, /Auto-tunedAuto-tuned: 4 \(was 3\) · the conductor was held back · /);
   assert.match(text, /PinnedPinned by bill <i>x<\/i>: auto-tuning leaves this number alone/);
-  assert.match(text, /SuggestedSuggested \(AI advisor\): 3 \(now 2\) · sites waited/);
-  assert.doesNotMatch(text, /naabu\)[^]*Auto-tuning may move/);
+  assert.match(text, /SuggestedSuggested \(AI advisor\): 65 \(now 75\) · scans waited/);
+  assert.doesNotMatch(text, /Classic lane tasks at once[^]*Auto-tuning may move/);
+  assert.doesNotMatch(text, /Memory budget|Scanners at once/);
   calls.length = 0;
   await buttonNamed(host, 'Let auto-tune manage this')[0].onclick();
-  assert.deepEqual(calls[0], {url: '/cve/api/settings/autotune/release', method: 'POST', body: {setting: 'heavy.nuclei'}});
+  assert.deepEqual(calls[0], {url: '/cve/api/settings/autotune/release', method: 'POST', body: {setting: 'assess_batch'}});
   calls.length = 0;
   await buttonNamed(host, 'Apply')[0].onclick();
   assert.deepEqual(calls[0], {url: '/cve/api/settings/autotune/decisions/9/apply', method: 'POST', body: {}});
@@ -185,8 +188,8 @@ test('the line logic: off says nothing, Suggest offers no hand-back, managed say
   const pinned = {autotune: {managed: true, pinned: true, pinned_by: 'bill'}};
   assert.equal(logic.autoTuneLine(pinned, 'auto').release, true);
   assert.equal(logic.autoTuneLine(pinned, 'suggest').release, false);
-  const managed = logic.autoTuneLine({value: 2, autotune: {managed: true, min: 1, max: 4, step: 1, why_not_raised: 'no nmap run waited'}}, 'auto');
-  assert.equal(managed.text, 'Auto-tuning may move this between 1 and 4 · not raised now: no nmap run waited');
+  const managed = logic.autoTuneLine({value: 2, autotune: {managed: true, min: 1, max: 4, step: 1, why_not_raised: 'the work conductor is not held back by its depth'}}, 'auto');
+  assert.equal(managed.text, 'Auto-tuning may move this between 1 and 4 · not raised now: the work conductor is not held back by its depth');
   const sized = logic.autoTuneLine({value: 8, autotune: {managed: true, tuned: true, was: 2, reason: 'aim high', sized_for: '8 cores, 3.4 GB memory budget, 9 Sentinel slots', target: 8}}, 'auto');
   assert.match(sized.text, /^Auto-tuned: 8 \(was 2\) · aim high · sized for this machine: 8 cores, 3\.4 GB memory budget, 9 Sentinel slots \(target 8\)$/);
   assert.match(logic.decisionText({setting: 'x', label: 'X', old_value: 2, new_value: 8, source: 'controller', action: 'raise', applied: true, phase: 'aim_high'}), /^X: aimed high 2 -> 8/);
@@ -206,29 +209,29 @@ test('the settings page loads the Auto-tuning card before the other cards', () =
 });
 
 test('typing the number auto-tuning chose and saving pins it; an untouched box is never sent', async () => {
-  const tuned = {key: 'heavy.nmap', label: 'nmap', min: 1, max: 8, value: 4, source: 'auto'};
-  const saved = {key: 'heavy.nuclei', label: 'nuclei', min: 1, max: 8, value: 2, source: 'admin'};
-  assert.deepEqual(logic.changesFrom([tuned, saved], {'heavy.nmap': '4', 'heavy.nuclei': '2'}).changes, {});
-  assert.deepEqual(logic.changesFrom([tuned, saved], {'heavy.nmap': '4', 'heavy.nuclei': '2'}, new Set(['heavy.nmap', 'heavy.nuclei'])).changes, {'heavy.nmap': 4});
+  const tuned = {key: 'work_depth', label: 'depth', min: 0, max: 32, value: 4, source: 'auto'};
+  const saved = {key: 'assess_batch', label: 'batch', min: 1, max: 64, value: 16, source: 'admin'};
+  assert.deepEqual(logic.changesFrom([tuned, saved], {work_depth: '4', assess_batch: '16'}).changes, {});
+  assert.deepEqual(logic.changesFrom([tuned, saved], {work_depth: '4', assess_batch: '16'}, new Set(['work_depth', 'assess_batch'])).changes, {work_depth: 4});
   const fraction = {key: 'g', label: 'gap', min: 0, max: 720, value: 0.5, source: 'environment'};
   assert.deepEqual(logic.changesFrom([fraction], {g: '0.5'}, new Set(['g'])), {changes: {}, error: null});  // put back, not invalid
   const host = new Node('div');
   await maxxing.cards()[1].build(host);
-  const nmap = find(host, (n) => n.dataset.key === 'heavy.nmap')[0];
+  const depth = find(host, (n) => n.dataset.key === 'work_depth')[0];
   const save = buttonNamed(host, 'Save')[0];
   assert.equal(save.disabled, true);
-  nmap.value = '3';
-  nmap.oninput();
-  nmap.value = '3';  // the auto-tuned number of this row is 3: typed in again on purpose
-  nmap.oninput();
+  depth.value = '5';
+  depth.oninput();
+  depth.value = '4';  // the auto-tuned number of this row is 4: typed in again on purpose
+  depth.oninput();
   assert.equal(save.disabled, false);
   calls.length = 0;
   await save.onclick();
-  assert.deepEqual(calls[0], {url: '/cve/api/settings/scan_concurrency', method: 'PUT', body: {values: {'heavy.nmap': 3}}});
+  assert.deepEqual(calls[0], {url: '/cve/api/settings/scan_concurrency', method: 'PUT', body: {values: {work_depth: 4}}});
 });
 
 test('an environment pin says where it comes from and offers no hand-back', () => {
-  const line = logic.autoTuneLine({value: 1, autotune: {managed: true, pinned: true, pinned_by: null, pinned_env: 'HEAVY_MAX_NMAP=1'}}, 'auto');
+  const line = logic.autoTuneLine({value: 1, autotune: {managed: true, pinned: true, pinned_by: null, pinned_env: 'CVENGINE_WORK_DEPTH=5'}}, 'auto');
   assert.equal(line.text, "Fixed by the server's own settings: save a value here to take it over");
   assert.equal(line.release, false);
 });
@@ -279,7 +282,7 @@ test('History: a line the page is pointed at (an alert link) is shown even when 
 
 test('History: every decision shape draws without "[object Object]", "undefined", "null", "NaN" or a bare "?", and an undone or revert line has no button', async () => {
   const shapes = [
-    entry(1, {outcome: 'regressed', resolution: 'reverted', can_revert: true, baseline: {metric: 'wait_share', value: 0.4, after: {metric: 'wait_share', value: 0.8, trouble: 1}}}),
+    entry(1, {outcome: 'regressed', resolution: 'reverted', can_revert: true, baseline: {metric: 'discovery_queue', value: 4, after: {metric: 'discovery_queue', value: 9, trouble: 1}}}),
     entry(2, {action: 'revert', phase: 'verify', pressure: true, outcome: 'reverted', undoes: 1, reason: 'verification of the change of 2026-11-13T13:00: put 14 back to 12', old_value: 14, new_value: 12}),
     entry(3, {applied: false, can_apply: true, mode: 'suggest'}),
     entry(4, {source: 'agent', actor: 'ci-agent', verify_at: new Date(Date.now() + 600000).toISOString()}),

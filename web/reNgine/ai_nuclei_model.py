@@ -8,8 +8,10 @@ it. So it has its own setting, ``AIProviderSettings.nuclei_model``, chosen on Se
   the provider's model list when it is read (never a name written in code or stored by a migration); when the list has none, or cannot be read,
   the model of "Everything else" (``AIProviderSettings.model``, never changed by this).
 
-``plan(provider)`` gives the model a request uses and the one it is retried on when it is refused or answers nothing: the haiku default, only
-when the request ran on a different model. At most one retry (cveFeed.nuclei_templates._ask).
+The request is an AI job (``cveFeed.nuclei_templates.ai_plan``): the AI reviewer container makes it, and applies this rule itself from the
+job's options (``nuclei_templates.nuclei_options``: the owner's choice as ``model``, and ``haiku``). It resolves the haiku from its provider's
+list, and when the request ran on another model and was refused or answered nothing, asks the haiku once more (``cvengine_reviewer.llm``). This
+module keeps what the Settings page shows (``in_force``) from the list the page itself reads (``remember``); the server sends no request here.
 """
 import logging
 import time
@@ -76,31 +78,6 @@ def configured():
     from dashboard.models import AIProviderSettings
     row = AIProviderSettings.objects.first()
     return (row.nuclei_model or '').strip() if row else ''
-
-
-def _sibling(provider, model):
-    from reNgine.ai_providers import get_provider
-    return get_provider(provider.name, model=model, api_key=provider.api_key, base_url=provider.base_url, runtime=provider.runtime)
-
-
-def plan(provider):
-    """``(provider for the request, provider for its one retry or None)``. A provider that is not one of ours (a test double) is used as it
-    is. Never raises: a failure here leaves the request on the provider it was given."""
-    from reNgine.ai_providers import AIProvider
-    if not isinstance(provider, AIProvider):
-        return provider, None
-    try:
-        base_model = provider.model
-        haiku = haiku_default(provider)
-        chosen = configured() or haiku or base_model
-        main = provider if chosen == base_model else _sibling(provider, chosen)
-        retry = None
-        if haiku and haiku != chosen:
-            retry = provider if haiku == base_model else _sibling(provider, haiku)
-        return main, retry
-    except Exception:  # noqa: BLE001 - choosing a model must never hold a scan up
-        logger.warning('the nuclei model could not be resolved; using the default model', exc_info=False)
-        return provider, None
 
 
 def in_force(provider, fetch=False):

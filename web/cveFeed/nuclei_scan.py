@@ -686,19 +686,19 @@ def run_targeted_nuclei(scan_id, stream, provider=False, light_techs=None, cve_r
     installed templates use (the static table is the fallback), hosts that share a choice are scanned together so nuclei
     runs once per group, and each CVE matched to a host gets its own template test. Whatever the ledger says was covered
     recently is not run again, except the CVE checks when ``force_cve_checks`` is set (a re-test after a change). ``provider=False``
-    means "ask the configured provider"; None means no AI."""
+    means "the AI if one is configured" (its questions are AI jobs for the reviewer container: the pass does not wait for them); None means
+    no AI."""
     from cveFeed import activity
     from cveFeed.nuclei_templates import host_profile, plan_targeting, profile_sources
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id
-    if provider is False:
-        try:
-            from reNgine.ai_settings import get_configured_provider
-            provider = get_configured_provider()
-        except Exception:  # noqa: BLE001 - a misconfigured provider means the static table, not a failed scan
-            logger.warning('no usable AI provider for the targeted nuclei pass', exc_info=True)
-            provider = None
+    from cveFeed import ai_jobs
+    try:
+        ai = provider is not None and ai_jobs.ai_on()
+    except Exception:  # noqa: BLE001 - a misconfigured provider means the static table, not a failed scan
+        logger.warning('AI settings could not be read for the targeted nuclei pass', exc_info=True)
+        ai = False
     hostnames, _ips, _ports = scan_targets(scan)  # the same filter as every other stage: nothing that resolves inside
     subs = [sub for sub in Subdomain.objects.filter(scan_history=scan).prefetch_related(
         'technologies', 'ip_addresses__ports', 'vulnerability_set', 'cve_matches__cve_entry') if sub.name in hostnames]
@@ -712,9 +712,10 @@ def run_targeted_nuclei(scan_id, stream, provider=False, light_techs=None, cve_r
     from agentapi import stage_runs
     # asked once: when the pass waits on Sentinels and a later pass continues it (agentapi.stage_runs), the plan is the one the AI gave first
     ai_notes = []
-    groups, skipped = stage_runs.once('targeting_plan', lambda: plan_targeting(profiles, provider, notes=ai_notes))
+    groups, skipped = stage_runs.once('targeting_plan', lambda: plan_targeting(profiles, ai, notes=ai_notes, project=project))
     for note in ai_notes[:1]:  # asked once, so said once: a later pass of the run has no notes
-        activity.log('run_check', f'AI nuclei targeting for {domain.name} gave no answer: {note}; the scan used the standard templates',
+        activity.log('run_check', (f'AI nuclei targeting for {domain.name}: {note}' if note.startswith('the AI reviewer container was asked') else
+                                   f'AI nuclei targeting for {domain.name} gave no answer: {note}; the scan used the standard templates'),
                      project=project, scan_id=scan.id)
     result = {'targets': 0, 'findings': 0, 'groups': len(groups), 'hosts': len(profiles) - len(skipped), 'skipped': len(skipped),
               'reused': 0}
@@ -748,8 +749,7 @@ def run_targeted_nuclei(scan_id, stream, provider=False, light_techs=None, cve_r
         if out.get('error'):
             errors.append(out['error'])
     try:
-        from cveFeed import ai_jobs
-        ai = provider is not None and ai_jobs.ai_on()  # provider=None is "no AI" for the whole pass; the draft itself is the reviewer container's
+        # provider=None is "no AI" for the whole pass; the draft itself is the reviewer container's
         checks = run_cve_checks(scan, subs, ai, cve_runner, force=force_cve_checks)
     except Exception as exc:  # noqa: BLE001
         logger.exception('CVE checks failed for scan %s', scan_id)

@@ -1,9 +1,11 @@
-"""The model for the Nuclei tag choice (stages nuclei_tag_selection and nuclei_targeting): the default is resolved from the provider's list (the
-cheapest haiku it lists, else the model of everything else), an owner's choice is kept, a refusal or an empty reply is retried once on the
-haiku default and both calls are in the usage table, the setting is validated like the others, and the Settings page carries the row.
-All through the fake Anthropic API (tests/anthropic_fake.py): no network, no key."""
+"""The model for the Nuclei tag choice (stage nuclei_targeting, an AI job the reviewer container answers): the default is resolved from the
+provider's list (the cheapest haiku it lists, else the model of everything else), an owner's choice is kept, a refusal or an empty reply is
+retried once on the haiku default and both calls are in the usage table, the setting is validated like the others, and the Settings page
+carries the row. The choice is made by the container from the job's options (``nuclei_templates.nuclei_options``); its request layer is
+imported from reviewer/ and talks to the fake Anthropic API (tests/anthropic_fake.py): no network, no key."""
 import json
 import os
+import sys
 from pathlib import Path
 from unittest import mock
 
@@ -26,6 +28,16 @@ SONNET, OPUS, HAIKU, HAIKU_OLD = 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude
 LISTED = [SONNET, OPUS, HAIKU_OLD, HAIKU]
 ANSWER = '{"0": {"tags": ["nginx"], "severities": ["high"]}}'
 WEB = Path(settings.BASE_DIR) if hasattr(settings, 'BASE_DIR') else Path(__file__).resolve().parent.parent
+REVIEWER_DIR = str(Path(__file__).resolve().parent.parent.parent / 'reviewer')
+
+
+def container_llm():
+    if REVIEWER_DIR not in sys.path:
+        sys.path.insert(0, REVIEWER_DIR)
+    from cvengine_reviewer import llm
+    llm._HAIKU.clear()
+    llm._RESOLVED.clear()
+    return llm
 
 
 def provider(url, model=SONNET):
@@ -58,130 +70,93 @@ class PickTests(TestCase):
 
 
 class ResolutionTests(Isolated):
-    def test_the_default_is_the_haiku_the_provider_lists_and_everything_else_is_untouched(self):
+    def test_the_settings_page_shows_the_haiku_the_provider_lists_and_everything_else_is_untouched(self):
         AIProviderSettings.objects.create(provider='anthropic', model=SONNET, enabled=True)
         with FakeAnthropic([SHAPES['text_only']()], models=LISTED) as fake:
-            base = provider(fake.url)
-            main, retry = anm.plan(base)
-            self.assertEqual(main.model, HAIKU)
-            self.assertIsNone(retry)  # the request already runs on the haiku
-            self.assertEqual(base.model, SONNET)
-            self.assertEqual(anm.in_force(base, fetch=True), {'model': HAIKU, 'default': HAIKU, 'source': 'haiku'})
+            self.assertEqual(anm.in_force(provider(fake.url), fetch=True), {'model': HAIKU, 'default': HAIKU, 'source': 'haiku'})
         self.assertEqual(AIProviderSettings.objects.get().model, SONNET)
 
-    def test_without_a_haiku_listed_it_falls_back_to_the_everything_else_model(self):
+    def test_without_a_haiku_listed_the_page_names_the_everything_else_model(self):
         with FakeAnthropic([SHAPES['text_only']()], models=[SONNET, OPUS]) as fake:
-            base = provider(fake.url)
-            main, retry = anm.plan(base)
-            self.assertIs(main, base)
-            self.assertIsNone(retry)
-            self.assertEqual(anm.in_force(base, fetch=True)['source'], 'everything_else')
+            self.assertEqual(anm.in_force(provider(fake.url), fetch=True)['source'], 'everything_else')
 
-    def test_a_list_that_cannot_be_read_is_the_same_as_none_listed(self):
-        with FakeAnthropic([SHAPES['text_only']()], models=None) as fake:  # no /v1/models
-            base = provider(fake.url)
-            self.assertEqual(anm.plan(base), (base, None))
-
-    def test_the_owners_choice_is_used_and_the_haiku_is_the_one_retry(self):
-        AIProviderSettings.objects.create(provider='anthropic', model=SONNET, nuclei_model=OPUS)
-        with FakeAnthropic([SHAPES['text_only']()], models=LISTED) as fake:
-            main, retry = anm.plan(provider(fake.url))
-            self.assertEqual((main.model, retry.model), (OPUS, HAIKU))
-
-    def test_an_owner_who_chose_the_haiku_keeps_it_and_has_no_other_model_to_retry_on(self):
-        AIProviderSettings.objects.create(provider='anthropic', model=SONNET, nuclei_model=HAIKU_OLD)
-        with FakeAnthropic([SHAPES['text_only']()], models=LISTED) as fake:
-            main, retry = anm.plan(provider(fake.url))
-            self.assertEqual((main.model, retry.model), (HAIKU_OLD, HAIKU))
-
-    def test_an_existing_install_gets_the_default_with_no_stored_value(self):
-        row = AIProviderSettings.objects.create(provider='anthropic', model=SONNET)  # a row from before this setting
-        self.assertEqual(row.nuclei_model, '')
-        with FakeAnthropic([SHAPES['text_only']()], models=LISTED) as fake:
-            self.assertEqual(anm.plan(provider(fake.url))[0].model, HAIKU)
+    def test_the_job_carries_the_owners_choice_and_asks_for_the_haiku(self):
+        self.assertEqual(nt.nuclei_options(), {'haiku': True})  # the default: the container resolves the haiku from its list
+        row = AIProviderSettings.objects.create(provider='anthropic', model=SONNET, nuclei_model=OPUS)
+        self.assertEqual(nt.nuclei_options(), {'haiku': True, 'model': OPUS})
         row.refresh_from_db()
-        self.assertEqual((row.model, row.nuclei_model), (SONNET, ''))  # nothing was written
-
-    def test_a_double_that_is_not_a_provider_is_used_as_it_is(self):
-        double = mock.Mock()
-        self.assertEqual(anm.plan(double), (double, None))
+        self.assertEqual((row.model, row.nuclei_model), (SONNET, OPUS))  # nothing was written
 
 
-class RetryTests(Isolated):
-    def ask(self, fake, stage='nuclei_targeting'):
-        notes = []
-        reply = nt._ask(stage, provider(fake.url), 'system', 'user', notes)
-        return reply, notes
+class ContainerRetryTests(Isolated):
+    """The reviewer container applies the rule the server applied before the job moved there (``cvengine_reviewer.llm.complete``)."""
 
-    def test_a_refusal_is_retried_once_on_the_haiku_and_both_calls_are_recorded(self):
-        AIProviderSettings.objects.create(provider='anthropic', model=SONNET, nuclei_model=SONNET)
-        with FakeAnthropic([SHAPES['refusal'](), SHAPES['text_only'](ANSWER)], models=LISTED, echo_model=True) as fake:
-            with self.assertLogs('cveFeed.nuclei_templates', 'INFO') as logged:
-                reply, notes = self.ask(fake)
-            self.assertEqual([r['model'] for r in fake.requests], [SONNET, HAIKU])
-        self.assertEqual(reply, ANSWER)
-        self.assertEqual(notes, [])
-        rows = list(AIUsage.objects.order_by('id'))
-        self.assertEqual([(r.stage, r.model, r.status, r.error_category, r.stop_reason) for r in rows],
-                         [('nuclei_targeting', SONNET, 'failed', 'refused', 'refusal'), ('nuclei_targeting', HAIKU, 'succeeded', '', 'end_turn')])
-        self.assertEqual([m for m in logged.output if 'retried on' in m], [f'INFO:cveFeed.nuclei_templates:refused by {SONNET}, retried on {HAIKU}'])
-        self.assertEqual(nt._failed, {})  # the request is not backed off: it was answered
+    def ask(self, fake, options):
+        llm = container_llm()
+        block = {'provider': 'anthropic', 'model': SONNET, 'api_key': 'not-a-real-key', 'base_url': fake.url, 'runtime': {}}
+        try:
+            text, calls, model = llm.complete(block, 'system', 'user', None, {'max_tokens': 3000, **options})
+        except llm.ModelError as error:
+            return None, error.calls, error.category
+        return text, calls, model
 
-    def test_an_empty_reply_is_retried_the_same_way_for_the_tag_stage(self):
-        AIProviderSettings.objects.create(provider='anthropic', model=SONNET, nuclei_model=OPUS)
-        with FakeAnthropic([SHAPES['empty_content'](), SHAPES['text_only']('["nginx"]')], models=LISTED, echo_model=True) as fake:
-            reply, _ = self.ask(fake, 'nuclei_tag_selection')
-            self.assertEqual([r['model'] for r in fake.requests], [OPUS, HAIKU])
-        self.assertEqual(reply, '["nginx"]')
-        self.assertEqual(list(AIUsage.objects.order_by('id').values_list('stage', 'status')), [('nuclei_tag_selection', 'failed'), ('nuclei_tag_selection', 'succeeded')])
-
-    def test_no_retry_when_the_configured_model_is_already_the_fallback(self):
-        AIProviderSettings.objects.create(provider='anthropic', model=SONNET, nuclei_model=HAIKU)
-        with FakeAnthropic([SHAPES['refusal']()], models=LISTED, echo_model=True) as fake:
-            reply, notes = self.ask(fake)
-            self.assertEqual(len(fake.requests), 1)
-        self.assertIsNone(reply)
-        self.assertEqual(AIUsage.objects.count(), 1)
-        self.assertTrue(notes and 'declined' in notes[0])
-        self.assertEqual(len(nt._failed), 1)  # the backoff of today
-
-    def test_no_retry_by_default_either_because_the_default_is_the_haiku(self):
-        with FakeAnthropic([SHAPES['refusal']()], models=LISTED, echo_model=True) as fake:
-            self.assertIsNone(self.ask(fake)[0])
+    def test_the_default_is_the_haiku_the_provider_lists(self):
+        with FakeAnthropic([SHAPES['text_only'](ANSWER)], models=LISTED, echo_model=True) as fake:
+            text, calls, model = self.ask(fake, {'haiku': True})
             self.assertEqual([r['model'] for r in fake.requests], [HAIKU])
+        self.assertEqual((text, model), (ANSWER, HAIKU))
 
-    def test_no_haiku_listed_means_nothing_to_retry_on(self):
+    def test_without_a_haiku_listed_it_is_the_everything_else_model_and_nothing_to_retry_on(self):
         with FakeAnthropic([SHAPES['refusal']()], models=[SONNET, OPUS], echo_model=True) as fake:
-            self.assertIsNone(self.ask(fake)[0])
-            self.assertEqual(len(fake.requests), 1)
+            text, calls, category = self.ask(fake, {'haiku': True})
+            self.assertEqual([r['model'] for r in fake.requests], [SONNET])
+        self.assertIsNone(text)
+        self.assertIn(category, ('refused', 'empty_response'))  # the fake's refusal shape, as the container's request layer names it
 
-    def test_a_retry_that_is_refused_too_is_the_existing_behaviour_and_never_a_third_call(self):
-        AIProviderSettings.objects.create(provider='anthropic', model=SONNET, nuclei_model=SONNET)
+    def test_a_refusal_of_the_owners_choice_is_asked_once_more_on_the_haiku_and_both_calls_are_recorded(self):
+        from cveFeed import ai_jobs
+        from cveFeed.models import AIJob
+        from django.utils import timezone
+        from datetime import timedelta
+        with FakeAnthropic([SHAPES['refusal'](), SHAPES['text_only'](ANSWER)], models=LISTED, echo_model=True) as fake:
+            text, calls, model = self.ask(fake, {'haiku': True, 'model': OPUS})
+            self.assertEqual([r['model'] for r in fake.requests], [OPUS, HAIKU])
+        self.assertEqual((text, model), (ANSWER, HAIKU))
+        job = AIJob.objects.create(kind='nuclei_targeting', stage='nuclei_targeting', status='leased', lease='L',
+                                   lease_until=timezone.now() + timedelta(hours=1), context={'signatures': [['nginx']], 'digest': 'd'})
+        ai_jobs.submit(job.pk, {'lease': 'L', 'text': text, 'calls': calls, 'provider': 'anthropic', 'model': model})
+        rows = list(AIUsage.objects.order_by('id'))
+        self.assertEqual([(r.stage, r.model, r.status, r.error_category) for r in rows],
+                         [('nuclei_targeting', OPUS, 'failed', calls[0]['category']), ('nuclei_targeting', HAIKU, 'succeeded', '')])
+        self.assertIn(calls[0]['category'], ('refused', 'empty_response'))
+        stage = {s['stage']: s for s in snapshot()['stages']}['nuclei_targeting']
+        self.assertEqual(stage['answered_by'], [HAIKU])  # the usage page says which model answered
+
+    def test_an_empty_reply_is_asked_once_more_the_same_way(self):
+        with FakeAnthropic([SHAPES['empty_content'](), SHAPES['text_only'](ANSWER)], models=LISTED, echo_model=True) as fake:
+            text, _calls, _model = self.ask(fake, {'haiku': True, 'model': OPUS})
+            self.assertEqual([r['model'] for r in fake.requests], [OPUS, HAIKU])
+        self.assertEqual(text, ANSWER)
+
+    def test_a_retry_that_is_refused_too_is_final_and_never_a_third_call(self):
         with FakeAnthropic([SHAPES['refusal']()], models=LISTED, echo_model=True) as fake:
-            reply, notes = self.ask(fake)
+            text, calls, category = self.ask(fake, {'haiku': True, 'model': OPUS})
             self.assertEqual(len(fake.requests), 2)
-            self.assertIsNone(reply)
-            self.assertTrue(notes and 'declined' in notes[0])
-            self.assertEqual(AIUsage.objects.filter(status='failed').count(), 2)
-            self.assertEqual(len(nt._failed), 1)
-            again, notes_again = self.ask(fake)  # inside the five minutes: not asked at all
-            self.assertEqual(len(fake.requests), 2)
-        self.assertIsNone(again)
-        self.assertIn('not asked again', notes_again[0])
+        self.assertEqual((text, len(calls)), (None, 2))
+        self.assertIn(category, ('refused', 'empty_response'))
 
-    def test_other_failures_are_not_retried(self):
-        AIProviderSettings.objects.create(provider='anthropic', model=SONNET, nuclei_model=SONNET)
-        with FakeAnthropic([SHAPES['thinking_only_max_tokens']()], models=LISTED, echo_model=True) as fake:
-            self.assertIsNone(self.ask(fake)[0])
-            self.assertEqual({r['model'] for r in fake.requests}, {SONNET})  # only the larger-limit retry of today, on the same model
-
-    def test_the_retry_counts_against_the_days_cap(self):
-        AIProviderSettings.objects.create(provider='anthropic', model=SONNET, nuclei_model=SONNET)
-        with FakeAnthropic([SHAPES['refusal'](), SHAPES['text_only'](ANSWER)], models=LISTED, echo_model=True) as fake, \
-                mock.patch.object(nt, '_ai_room', side_effect=[True, False]):
-            reply, _ = self.ask(fake)
+    def test_no_retry_when_the_chosen_model_is_the_haiku_or_the_failure_is_another(self):
+        with FakeAnthropic([SHAPES['refusal']()], models=LISTED, echo_model=True) as fake:
+            self.ask(fake, {'haiku': True, 'model': HAIKU})
             self.assertEqual(len(fake.requests), 1)
-        self.assertIsNone(reply)
+        with FakeAnthropic([SHAPES['thinking_only_max_tokens']()], models=LISTED, echo_model=True) as fake:
+            self.ask(fake, {'haiku': True, 'model': OPUS})
+            self.assertEqual({r['model'] for r in fake.requests}, {OPUS})  # only the larger-limit retry, on the same model
+
+    def test_a_job_without_the_options_is_asked_on_the_configured_model_as_before(self):
+        with FakeAnthropic([SHAPES['refusal']()], models=LISTED, echo_model=True) as fake:
+            self.ask(fake, {})
+            self.assertEqual([r['model'] for r in fake.requests], [SONNET])
 
 
 class SettingApiTests(Isolated):
@@ -269,18 +244,6 @@ class SettingApiTests(Isolated):
             self.save_connection(fake, api_key='another-key')  # a new address drops a key that was not typed again
             status, data = send(self.c, 'POST', 'ai/models', {'refresh': True})
             self.assertEqual((status, data.get('nuclei_default'), len(data.get('models', []))), (200, '', 2), data)
-
-    def test_the_usage_page_says_which_model_answered_each_job(self):
-        AIProviderSettings.objects.create(provider='anthropic', model=SONNET, nuclei_model=SONNET)
-        with FakeAnthropic([SHAPES['refusal'](), SHAPES['text_only'](ANSWER)], models=LISTED, echo_model=True) as fake:
-            nt._ask('nuclei_targeting', provider(fake.url), 's', 'u', [])
-        stage = {s['stage']: s for s in snapshot()['stages']}['nuclei_targeting']
-        self.assertEqual(stage['answered_by'], [HAIKU])
-        self.assertEqual({m['model']: (m['attempts'], m['successes']) for m in stage['models']}, {SONNET: (1, 0), HAIKU: (1, 1)})
-        status, data = send(self.c, 'GET', 'ai/usage')
-        self.assertEqual(status, 200)
-        self.assertEqual([s['answered_by'] for s in data['stages'] if s['stage'] == 'nuclei_targeting'], [[HAIKU]])
-
 
 class PageTests(TestCase):
     """The page is drawn by settings.js; Django serves its shell and the script. The row, its sentence and the classes are in the script, and the

@@ -63,6 +63,7 @@ SCOPES = {
     'agentapi.AgentTask': 'project_id',
     'agentapi.SentinelTask': 'project_id',
     'agentapi.StageRun': 'project_id',  # a sweep over every project waits with no project (NULLABLE)
+    'agentapi.DnsReading': 'project_id',  # what Sentinels said a project's names resolve to (agentapi.dns_crosscheck)
     'agentapi.SentinelPartial': 'task__project_id',  # a streamed task's batches waiting to be stored, read only by the stage that dispatched it
     'cveFeed.AuthCredential': 'project_id',
     'cveFeed.FindingComment': 'project_id',

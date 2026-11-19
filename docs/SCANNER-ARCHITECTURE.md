@@ -120,7 +120,7 @@ which send nothing to the target and need no vantage point.
   the index for what it needs to know. The server also looks no target name up any more: the Sentinel that runs the work judges every address a
   name resolves to (an outside task says `external`, so an internal Sentinel holds it to public space), and the TLS audit and OpenVAS name a stored
   address. `tests/test_no_local_tools.py` fails a server-side lookup and a scan tool in the server image.
-- `reNgine/tasks.py` starts no subprocess any more (the legacy `run_command` and its `geoiplookup` caller are gone); `reNgine/resources.py` keeps the memory gate (`heavy_job`), which no production code enters.
+- `reNgine/tasks.py` starts no subprocess any more (the legacy `run_command` and its `geoiplookup` caller are gone); the memory gate (`heavy_job`) and its per-tool `heavy.<kind>` settings are removed as well.
 - Anything run from `fullscan`, `probes` and `route_auth` that today shares Redis claims or ledgers with the server needs those
   claims moved to the server side of the contract (the server takes the claim, the task carries the answer).
 
@@ -242,8 +242,8 @@ A Sentinel task is created by a Celery job that waits for it and files its resul
 7. Server tests that exercise scanning need a fake scanner. Addressed by `web/tests/fake_scanner.py`: a real built-in Sentinel that
    serves tasks through the broker (contract fixtures by default; fail, timeout, idle and offline on request), with
    `assert_ran_nowhere_locally(self, kind)` and `LocalFallback('none')`. A delete PR proves its kind with the pattern in
-   `web/tests/test_fake_scanner.py`: real stage entry point, fake serving the result, assert what was stored and that no local runner or
-   heavy job ran; then the fake offline, where the stage waits and the target stays due.
+   `web/tests/test_fake_scanner.py`: real stage entry point, fake serving the result, assert what was stored and that no local runner
+   ran; then the fake offline, where the stage waits and the target stays due.
 
 ## Single-box install
 
@@ -298,8 +298,7 @@ or without every port naabu found among them: it is never fingerprinted here), t
 fast scan, the naabu sweep, the nuclei light, targeted and weekly deep passes, WPScan, testssl,
 UDP, the web probes, the checks that read a target (certificates, DNS, pages, buckets, suppliers) and the kinds of contract version 3: wafw00f, node2shell, the RDP screenshot and the database check (the stage returns `skipped`), the
 background full sweep (the address is swept later, with no back-off), the nmap probe (counted as held), the path check (no verdict) and the
-template check (no AI template is written, an approved template's test reports the hosts as not tested). Only `ScannerUnavailable` is caught that way: a real `MemoryBusy` from the memory gate is still a failed stage, which is the
-signal the adaptive capacity review reads, and a stopped scan (`ScanAborted`) is handled as before. When no Sentinel is live at all
+template check (no AI template is written, an approved template's test reports the hosts as not tested). Only `ScannerUnavailable` is caught that way (nothing else raises a `MemoryBusy` now that the memory gate is gone), and a stopped scan (`ScanAborted`) is handled as before. When no Sentinel is live at all
 for a project the wrapper raises before the stage body starts, so the pipeline catches it at the wrapper
 (`discovery._waiting_for_scanner`, `run_wpscan`). Signed-in nuclei passes follow the same rule, through the built-in scanner's secure read. The hosts of a run during which a stage waited are queued again (`cveFeed.scanner_wait`).
 
