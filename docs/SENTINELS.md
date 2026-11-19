@@ -16,7 +16,7 @@ Forty kinds of work (`contract_version` 9), each a capability the Sentinel decla
 
 | Kind                                             | Work (the tool that does it)                                                 |
 | ------------------------------------------------ | ---------------------------------------------------------------------------- |
-| `nmap`, `naabu`                                  | The service fingerprint pass and the port sweep (nmap, naabu)                |
+| `nmap`, `naabu`                                  | The service fingerprint pass and the port sweep (nmap, naabu). The pass also reports SSH, SMTP, SMB and RDP service features ([PIPELINE.md](PIPELINE.md#service-features-ssh-smtp-smb-and-rdp)): one EHLO per cleartext SMTP port, one SMB2 and one SMB1 NEGOTIATE on port 445 |
 | `nmap_full`                                      | The background full-port sweep (nmap) |
 | `nmap_verify`                                    | Service detection with the reviewed NSE scripts on named ports (nmap) |
 | `nmap_udp`                                       | The UDP exposure sweep (nmap)                                                |

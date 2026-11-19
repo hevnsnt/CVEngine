@@ -314,7 +314,24 @@ def store_row(project_id, scan, subs, address, port, row, fp=''):
             filed += _file_finding(scan, sub, address, port, row)
         elif key_checked(row):
             _close_finding(scan, sub, address, port)
+    _store_features(project_id, subs, address, row)
     return bool(row['reached'] and verdict), filed
+
+
+def _store_features(project_id, subs, address, row):
+    """The service feature readings of the endpoint (Terrapin, CBC and AES-GCM from the KEXINIT lists, the authentication methods: the result's
+    ``service_features``, kept with the row by ``probe_dispatch.try_ssh_probe``), stored for every name in ``subs`` (``cveFeed.address_features``).
+    Never fatal."""
+    items = row.get('service_features') or []
+    if not items or not row.get('reached'):
+        return
+    try:
+        from cveFeed import address_features
+        names = [sub.name.lower().rstrip('.') for sub in subs]
+        address_features.store(project_id, [{**i, 'host': str(address).lower()} for i in items], KIND, {str(address).lower(): names},
+                               address_features.SSH_PROBE_FEATURES)
+    except Exception:  # noqa: BLE001 - the inspection's own observations stand without the readings
+        logger.exception('could not store the service feature readings of an SSH inspection')
 
 
 def _store_banner(sub, port, row):
