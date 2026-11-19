@@ -192,7 +192,7 @@ class ApplyTests(Base):
 
     def test_at_most_the_daily_limit_of_ai_changes(self):
         for i in range(autotune.MAX_AI_CHANGES_PER_DAY):
-            TuningDecision.objects.create(setting='heavy.nmap', old_value=2, new_value=3, mode='auto', source='ai', action='raise', layer='auto', applied=True,
+            TuningDecision.objects.create(setting='work_depth', old_value=3, new_value=4, mode='auto', source='ai', action='raise', layer='auto', applied=True,
                                           created_at=self.now - timedelta(hours=2))
         offer = self.offer()
         self.assertEqual(offer['left_today'], 0)

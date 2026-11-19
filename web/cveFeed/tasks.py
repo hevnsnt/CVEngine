@@ -1200,6 +1200,16 @@ def _skip_on_demand_validation(job, progress, cve_id, reason):
     return result
 
 
+def _park_on_demand(job, done_before, plan, round_number, line):
+    """The request waits for its AI plan (``validation_plan.park``): it goes back to the queue and is sent on when the answer, or the job's
+    failure, is in (or by the nudge after ``validation_plan.PLAN_WAIT``). Nothing is spent while it waits: no attempt, no check."""
+    from cveFeed import activity, validation_plan
+    validation_plan.park(job.pk, plan, done_before, round_number)
+    activity.settle(line, 'done', f'Validation request #{job.pk} is waiting for the AI reviewer container to choose its checks',
+                    check_state='not_run', ai_state='queued')
+    return {'waiting': 'validation_plan', 'job': plan['job'], 'round': round_number}
+
+
 @app.task(name="validate_match_on_demand", bind=False, queue="validation_priority_queue")
 def validate_match_on_demand(request_id):
     """Review exactly the persisted match; the task accepts no host or target from the caller."""
@@ -1260,56 +1270,74 @@ def validate_match_on_demand(request_id):
         template = validation.resolve_template(match.cve_entry.cve_id)
         available_checks, plan_notes = validation.plan_checks(subject, row.signature, template)
         available_checks = [check for check in available_checks if check]
-        planning = activity.log('confirm', f'Validation request #{job.pk}: choosing permitted checks for {cve_id}',
-                                project=job.project_id, cve_id=cve_id, status='running', **detail)
         from cveFeed import host_context
         host = host_context.clipped(host_context.host_context(match.subdomain, job.project_id, focus=match.matched_product))
-        plan, provider = validation_plan.plan(job.project_id, row, match.cve_entry, subject, available_checks, template, host=host)
-        selected = set(plan['check_kinds'])
-        checks = [check for check in available_checks if check['kind'] in selected]
-        plans = [plan]
-        activity.settle(planning, 'done', f'Validation request #{job.pk}: {plan["reason"]}',
-                        check_kinds=plan['check_kinds'], plan_source=plan['source'])
-        if not still_current():
-            # a scan finished while the plan was asked for: stop before the checks, the template draft and the review, which are the
-            # rest of the work (and of the AI calls) and would all be spent on a match nobody sees any more
-            return _skip_on_demand_validation(job, progress, cve_id, 'historical')
-        candidate = None
-        if plan['generate_template']:
-            draft_step = activity.log('write_check', f'Validation request #{job.pk}: testing an AI-written template draft for {cve_id}',
-                                      project=job.project_id, cve_id=cve_id, status='running', **detail)
-            candidate = validation_plan.generate_candidate(job.project_id, match.cve_entry, provider)
-            activity.settle(draft_step, 'failed' if candidate['status'] in ('invalid', 'failed') else 'done',
-                            f'Validation request #{job.pk}: template candidate {candidate["status"]}; '
-                            'not run on the host', candidate_id=candidate.get('id'))
-        if not checks and template[1] == 'no template covers this CVE':
-            plan_notes.append('No permitted template covers this CVE; an AI draft runs on a host only after it passes the automatic fixture test and second-pass review.')
-        if not checks:
-            plan_notes.append(plan['reason'])
-        if not any(check['kind'] in ('fact_probe', 'script_read') for check in available_checks):
-            from cveFeed import probes
-            plan_notes.append(probes.unaddressable(match.subdomain, match.cve_entry) or
-                              'No version or identity probe applies: the host exposes no web service or service port to ask for this product.')
-        # Refresh only this finding's planned checks, not other hosts that share its signature.
-        for check in checks:
-            ServiceRun.objects.filter(project_id=job.project_id, service=check['service'], asset=check['asset']).delete()
-        row.validation_status, row.attempts, row.next_attempt_at = 'pending', 0, None
-        row.save(update_fields=['validation_status', 'attempts', 'next_attempt_at', 'updated_at'])
-        require_authority(job)
-        check_result = validation.run_validation(job.project_id, [row.pk], selected_kinds=selected, unattended=unattended)
-        match.refresh_from_db()
-        if validation.closed_by_script_read(match):
-            # the script read showed the library fixed or the host an alias, and closed the match through the guarded closure: the
-            # AI review has nothing left to judge, as for a different-product closure above
-            result = {'check_state': 'checked', 'checks': check_result, 'ai_state': 'not_needed', 'plan': plan, 'plans': plans,
-                      'assessment_status': 'closed_not_applicable', 'assessment_reason': match.ai_reason[:700],
-                      'check_notes': plan_notes + ['A fresh read of the page\'s scripts closed this match.'],
-                      'classification': 'not_applicable', 'validation_status': Triage.objects.filter(pk=row.pk).values_list(
-                          'validation_status', flat=True).first()}
-            OnDemandValidation.objects.filter(pk=job.pk, status='running').update(status='completed', result=result, finished_at=timezone.now())
-            activity.settle(progress, 'done', f'Validation request #{job.pk}: {cve_id} closed ({correlation.closure_summary(match.ai_reason)})',
-                            check_state='checked', ai_state='not_needed', assessment_status='closed_not_applicable')
-            return result
+        # A request parked on its AI plan (``validation_plan.park``) comes back here when the answer (or its failure) is in: ``waiting`` names the
+        # job, ``progress`` holds what it already did (its first round of checks, when it waited for the second plan)
+        waiting = (job.result or {}).get('waiting') or None
+        done_before = dict((job.result or {}).get('progress') or {}) if waiting else {}
+        first = done_before.get('first')
+        if first is None:
+            planning = activity.log('confirm', f'Validation request #{job.pk}: choosing permitted checks for {cve_id}',
+                                    project=job.project_id, cve_id=cve_id, status='running', **detail)
+            plan, provider = validation_plan.plan(job.project_id, row, match.cve_entry, subject, available_checks, template, host=host,
+                                                  waiting=waiting)
+            if plan.get('source') == 'pending':
+                activity.settle(planning, 'done', f'Validation request #{job.pk}: waiting for the AI reviewer container to choose the checks')
+                return _park_on_demand(job, done_before, plan, 1, progress)
+            selected = set(plan['check_kinds'])
+            checks = [check for check in available_checks if check['kind'] in selected]
+            plans = [plan]
+            activity.settle(planning, 'done', f'Validation request #{job.pk}: {plan["reason"]}',
+                            check_kinds=plan['check_kinds'], plan_source=plan['source'])
+            if not still_current():
+                # a scan finished while the plan was asked for: stop before the checks, the template draft and the review, which are the
+                # rest of the work (and of the AI calls) and would all be spent on a match nobody sees any more
+                return _skip_on_demand_validation(job, progress, cve_id, 'historical')
+            candidate = None
+            if plan['generate_template']:
+                draft_step = activity.log('write_check', f'Validation request #{job.pk}: testing an AI-written template draft for {cve_id}',
+                                          project=job.project_id, cve_id=cve_id, status='running', **detail)
+                candidate = validation_plan.generate_candidate(job.project_id, match.cve_entry, provider)
+                activity.settle(draft_step, 'failed' if candidate['status'] in ('invalid', 'failed') else 'done',
+                                f'Validation request #{job.pk}: template candidate {candidate["status"]}; '
+                                'not run on the host', candidate_id=candidate.get('id'))
+            if not checks and template[1] == 'no template covers this CVE':
+                plan_notes.append('No permitted template covers this CVE; an AI draft runs on a host only after it passes the automatic fixture test and second-pass review.')
+            if not checks:
+                plan_notes.append(plan['reason'])
+            if not any(check['kind'] in ('fact_probe', 'script_read') for check in available_checks):
+                from cveFeed import probes
+                plan_notes.append(probes.unaddressable(match.subdomain, match.cve_entry) or
+                                  'No version or identity probe applies: the host exposes no web service or service port to ask for this product.')
+            # Refresh only this finding's planned checks, not other hosts that share its signature.
+            for check in checks:
+                ServiceRun.objects.filter(project_id=job.project_id, service=check['service'], asset=check['asset']).delete()
+            row.validation_status, row.attempts, row.next_attempt_at = 'pending', 0, None
+            row.save(update_fields=['validation_status', 'attempts', 'next_attempt_at', 'updated_at'])
+            require_authority(job)
+            check_result = validation.run_validation(job.project_id, [row.pk], selected_kinds=selected, unattended=unattended)
+            match.refresh_from_db()
+            if validation.closed_by_script_read(match):
+                # the script read showed the library fixed or the host an alias, and closed the match through the guarded closure: the
+                # AI review has nothing left to judge, as for a different-product closure above
+                result = {'check_state': 'checked', 'checks': check_result, 'ai_state': 'not_needed', 'plan': plan, 'plans': plans,
+                          'assessment_status': 'closed_not_applicable', 'assessment_reason': match.ai_reason[:700],
+                          'check_notes': plan_notes + ['A fresh read of the page\'s scripts closed this match.'],
+                          'classification': 'not_applicable', 'validation_status': Triage.objects.filter(pk=row.pk).values_list(
+                              'validation_status', flat=True).first()}
+                OnDemandValidation.objects.filter(pk=job.pk, status='running').update(status='completed', result=result, finished_at=timezone.now())
+                activity.settle(progress, 'done', f'Validation request #{job.pk}: {cve_id} closed ({correlation.closure_summary(match.ai_reason)})',
+                                check_state='checked', ai_state='not_needed', assessment_status='closed_not_applicable')
+                return result
+            waiting = None  # the first round's wait is over: a second plan is asked for afresh
+        else:  # the first round ran before the request waited for its second plan: what it did is restored, not done again
+            plan, plans, candidate, check_result = first['plan'], first['plans'], first['candidate'], first['check_result']
+            selected = set(first['selected'])
+            checks = [check for check in available_checks if check['kind'] in selected]
+            plan_notes = list(first['plan_notes'])
+            if not still_current():
+                return _skip_on_demand_validation(job, progress, cve_id, 'historical')
         # One bounded second decision uses observations from the first checks. A banner cannot end
         # the request while another already-approved, scoped check remains available.
         remaining = [check for check in available_checks if check['kind'] not in selected]
@@ -1320,7 +1348,12 @@ def validate_match_on_demand(request_id):
             second_step = activity.log('confirm', f'Validation request #{job.pk}: reviewing observations and choosing the next check',
                                        project=job.project_id, cve_id=cve_id, status='running', **detail)
             second, provider = validation_plan.plan(job.project_id, row, match.cve_entry, subject, remaining, template,
-                                                    provider=provider, observations=observations, host=host)
+                                                    observations=observations, host=host, waiting=waiting)
+            if second.get('source') == 'pending':
+                activity.settle(second_step, 'done', f'Validation request #{job.pk}: waiting for the AI reviewer container to choose the next check')
+                first = {'plan': plan, 'plans': plans, 'candidate': candidate, 'check_result': check_result, 'selected': sorted(selected),
+                         'plan_notes': plan_notes}
+                return _park_on_demand(job, {'first': first}, second, 2, progress)
             next_kinds = set(second['check_kinds'])
             plans.append(second)
             activity.settle(second_step, 'done', f'Validation request #{job.pk}: {second["reason"]}',
@@ -2462,7 +2495,13 @@ def ai_jobs_housekeeping():
     """Every five minutes: leases that ran out go back to the queue, answers whose task was lost are applied, jobs never answered within
     a week expire and their stage asks again (``cveFeed.ai_jobs.housekeeping``)."""
     from cveFeed import ai_jobs
-    return ai_jobs.housekeeping()
+    out = ai_jobs.housekeeping()
+    try:
+        from cveFeed import validation_plan
+        out['plans_nudged'] = validation_plan.nudge_parked()  # validation requests whose AI plan is late go on with the deterministic one
+    except Exception:  # noqa: BLE001 - housekeeping only
+        logger.warning('could not nudge the validation requests waiting for their plan', exc_info=True)
+    return out
 
 
 @app.task(name="host_review_sweep", bind=False, queue="cve_feed_queue", time_limit=900, soft_time_limit=840)

@@ -1990,6 +1990,7 @@ def _claimable(eff, kinds, now):
     queued = eff.secret_filter(queued)  # a task that needs a stored credential goes only to a built-in scanner image that reads one; a discovery's keys also to a Sentinel the gate allows
     if not eff.builtin:
         queued = queued.exclude(VALIDATING_Q)  # a task that validates found secrets is never offered to any Sentinel but the built-in one
+    queued = queued.exclude(avoid_agent=eff.agent.pk)  # a confirming lookup is never offered to the Sentinel whose answer it checks (agentapi.dns_crosscheck)
     return queued.select_related('project__org').order_by('-priority', 'created_at', 'id')
 
 
@@ -2050,6 +2051,8 @@ def _can_take(other, held_pair, task, now):
     held, by_kind = held_pair
     if other.problem or not other.live or task.kind not in other.caps or other.refusal(task) is not None or _updating(other.agent, now):
         return False
+    if task.avoid_agent is not None and task.avoid_agent == other.agent.pk:
+        return False  # a confirming lookup (agentapi.dns_crosscheck): never the Sentinel whose answer it checks
     if held.get(other.agent.pk, 0) >= other.max_concurrent:
         return False
     if task.kind == 'openvas' and by_kind.get((other.agent.pk, 'openvas'), 0) >= 1:
@@ -3369,6 +3372,7 @@ def report_result(ctx, task_id, body):
             audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
                          agent_id=agent.pk, agent=agent.name, outcome=result['outcome'])
             _note_cuts(task, agent, result)
+            _file_dns_answers(task, agent, result, status)
             if status == 'done' and sentinel_adopt.orphaned(task, now):  # nothing waits for it (the update that ran while it was held ended its stage): filed here
                 task.refresh_from_db()
                 adopted = _adopted(ctx, agent, task, result)
@@ -3390,6 +3394,19 @@ def report_result(ctx, task_id, body):
         sentinel_adopt.note_adopted(task)
         return {'task': task_brief(task), 'duplicate': False, 'adopted': True}
     return {'task': task_brief(task), 'duplicate': False}
+
+
+def _file_dns_answers(task, agent, result, status):
+    """A ``dns_resolve`` answer is recorded as it is filed, and confirms what it agrees with (``agentapi.dns_crosscheck``): a confirming lookup has no stage
+    waiting for it, so this is where its answer takes effect."""
+    if task.kind != 'dns_resolve' or status != 'done':
+        return
+    from agentapi import dns_crosscheck
+    try:
+        with transaction.atomic():
+            dns_crosscheck.ingest(task, agent.pk, result)
+    except Exception:  # noqa: BLE001 - the result is filed whatever happens to the cross-check; an unrecorded answer is only one fewer source
+        logger.exception('could not record the DNS answers of task %s', task.pk)
 
 
 def _note_left_out_on_purpose(task, agent, result):
@@ -3487,6 +3504,7 @@ def _adopt_late(ctx, agent, task, body, now):
     audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
                  agent_id=agent.pk, agent=agent.name, outcome=result['outcome'], late=True)
     _note_cuts(task, agent, result)
+    _file_dns_answers(task, agent, result, status)
     if status == 'done':
         outcome = _adopted(ctx, agent, task, result)
         sentinel_adopt.note_adopted(task)

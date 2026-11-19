@@ -173,12 +173,10 @@ class FlagTests(SimpleTestCase):
 			with mock.patch.dict(os.environ, {'CVENGINE_UDPSCAN': value}):
 				self.assertFalse(udp_scan.enabled(), value)
 
-	def test_the_heavy_kind_and_queue_are_registered(self):
+	def test_the_task_and_queue_are_registered(self):
 		from cveFeed.tasks import background_full_scan, udp_scan_sweep
 		from agentapi import system_status
 		self.assertEqual((udp_scan_sweep.name, udp_scan_sweep.queue), ('udp_scan_sweep', 'udp_queue'))
-		self.assertEqual(resources.MAX_CONCURRENT['nmap-udp-bg'], 1)
-		self.assertIn('nmap-udp-bg', resources.BASE_COSTS_MB)
 		self.assertIn('udp_queue', system_status.QUEUES)
 		here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 		with open(os.path.join(here, 'celery-entrypoint.sh'), encoding='utf-8') as handle:

@@ -595,41 +595,66 @@ class NucleiStageTests(TestCase):
 		self.assertTrue(any(m.startswith('nuclei targeted scan of www.example.test:') and '(from bbot, nmap 3306 MySQL 8.0, light pass)' in m
 			for m in names), names)
 
+	def _answer_targeting(self, fake):
+		"""Play the reviewer container for the nuclei targeting questions only (tests/ai_queue.py): the triage questions the pipeline queued too
+		are not this test's."""
+		from cveFeed import ai_jobs
+		from tests import ai_queue
+		for job in ai_jobs.next_jobs(ai_jobs.BATCH_MAX):
+			if job['kind'] == 'nuclei_targeting':
+				ai_jobs.submit(job['id'], ai_queue.answer(job, fake))
+				ai_jobs.apply(job['id'])
+
+	def _fresh_ai(self):
+		from django.core.cache import cache
+		from cveFeed import nuclei_templates
+		from tests import ai_queue
+		cache.clear()  # the AI's choices and a failed request are kept in the shared cache
+		nuclei_templates._failed.clear()
+		self.addCleanup(cache.clear)
+		self.addCleanup(nuclei_templates._failed.clear)
+		ai_queue.configure()
+
 	def test_an_ai_reply_naming_unknown_tags_or_severities_is_dropped(self):
-		class Provider:
-			def complete(self, system, user):
-				return '{"0": {"tags": ["php", "not-a-real-tag", "x; rm -rf /"], "severities": ["high", "bogus"]}}'
+		"""The scan does not wait for the AI: its answer is used by the next scan of the same hosts, and only what is installed survives."""
+		self._fresh_ai()
+		fake = mock.Mock(model='m')
+		fake.name = 'anthropic'
+		fake.complete.return_value = '{"0": {"tags": ["php", "not-a-real-tag", "x; rm -rf /"], "severities": ["high", "bogus"]}}'
 		seen = []
 
 		def targeted(path, **kwargs):
 			seen.append((sorted(kwargs['tags']), kwargs.get('severities')))
 			return iter([])
-		self._pipeline(provider=Provider(), targeted_stream=targeted)
-		self.assertEqual(seen, [(['nginx', 'php'], ['high'])])  # the static tag stays, the unknown ones are gone
+		self._pipeline(provider=False, targeted_stream=targeted)
+		self.assertEqual(seen, [(['nginx'], None)])  # this scan: the static table
+		names = list(AgentActivity.objects.order_by('id').values_list('message', flat=True))
+		self.assertTrue(any('the AI reviewer container was asked to choose tags for 1 host profile(s)' in m for m in names), names)
+		self._answer_targeting(fake)
+		self._pipeline(provider=False, targeted_stream=targeted)
+		self.assertEqual(seen[1], (['nginx', 'php'], ['high']))  # the next scan: the static tag stays, the unknown ones are gone
 
 	def test_a_model_that_answers_with_no_text_leaves_the_scan_on_the_standard_templates_and_says_why(self):
 		from reNgine import ai_providers
-		from django.core.cache import cache
-
-		from cveFeed import nuclei_templates
-		from tests.anthropic_fake import SHAPES, FakeAnthropic
-		cache.clear()  # a failed request is remembered for minutes, in the shared cache too
-		nuclei_templates._failed.clear()
-		self.addCleanup(cache.clear)
-		self.addCleanup(nuclei_templates._failed.clear)
+		self._fresh_ai()
+		fake = mock.Mock(model='m')
+		fake.name = 'anthropic'
+		fake.complete.side_effect = ai_providers.AIProviderError('no text', category='output_truncated', stop_reason='max_tokens')
 		seen = []
 
 		def targeted(path, **kwargs):
 			seen.append(sorted(kwargs['tags']))
 			return iter([])
-		with FakeAnthropic([SHAPES['thinking_only_max_tokens']()]) as fake, self.assertLogs('cveFeed.nuclei_templates', 'WARNING'):
-			provider = ai_providers.get_provider('anthropic', api_key='not-a-real-key', model='claude-haiku-5-5', base_url=fake.url)
-			scan, out = self._pipeline(provider=provider, targeted_stream=targeted)
-		self.assertEqual(seen, [['nginx']])  # the static table's tag: the targeted pass ran
+		self._pipeline(provider=False, targeted_stream=targeted)
+		with self.assertLogs('cveFeed.nuclei_templates', 'WARNING'):
+			self._answer_targeting(fake)
+		scan, out = self._pipeline(provider=False, targeted_stream=targeted)
+		self.assertEqual(seen, [['nginx']])  # the static table's tag: the targeted pass ran (the second scan reuses what it covered)
 		scan.refresh_from_db()
 		self.assertEqual(scan.scan_status, 2)
 		names = list(AgentActivity.objects.order_by('id').values_list('message', flat=True))
-		self.assertTrue(any('The model answered with no text (it stopped at the token limit); the scan used the standard templates' in m for m in names), names)
+		self.assertTrue(any('The model answered with no text (it stopped at the token limit); not asked again for' in m and
+		                    'the scan used the standard templates' in m for m in names), names)
 
 	def test_a_fire_cve_match_runs_its_template_test(self):
 		from cveFeed import nuclei_scan

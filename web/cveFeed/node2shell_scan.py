@@ -114,7 +114,7 @@ def run_for_scan(scan_id, force=False):
                                                              label_of=lambda site: site[0].name):
             if result is not None:
                 note(*todo[index], sentinel_dispatch.node2shell_outcome(result))
-    except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # the hosts not reached are asked again next scan
+    except (resources.ScanAborted, resources.MemoryBusy) as exc:  # the hosts not reached are asked again next scan
         if isinstance(exc, resources.ScannerUnavailable):  # a scanner that is offline is not memory pressure
             activity.settle(running, 'done', message=f'node2shell check for {domain.name} is waiting: no scanner could take this work ({exc.kind}); '
                             'the remaining hosts are asked again next scan')

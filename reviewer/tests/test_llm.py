@@ -256,6 +256,52 @@ class ModelChoiceTests(unittest.TestCase):
             http.assert_not_called()
 
 
+class JobModelTests(unittest.TestCase):
+    """The nuclei targeting job's ``model`` and ``haiku`` options: the server's rule for that job before it became an AI job
+    (``reNgine.ai_nuclei_model``), applied here."""
+    LISTING = {'data': [{'id': 'claude-sonnet-9', 'created_at': '2026-03-01T00:00:00Z'}, {'id': 'claude-haiku-9-20260101', 'created_at': '2026-02-01T00:00:00Z'},
+                        {'id': 'claude-haiku-9', 'created_at': '2026-01-01T00:00:00Z'}]}
+
+    def setUp(self):
+        llm._RESOLVED.clear()
+        llm._HAIKU.clear()
+
+    def models(self, sent):
+        return [r['body']['model'] for r in sent if r['body']]
+
+    def test_the_haiku_is_the_undated_alias_then_the_newest(self):
+        self.assertEqual(llm.pick_haiku([{'id': 'claude-haiku-9-20260101', 'created': 9}, {'id': 'claude-haiku-9', 'created': 1}]), 'claude-haiku-9')
+        self.assertIsNone(llm.pick_haiku([{'id': 'claude-sonnet-9'}]))
+
+    def test_the_default_is_the_listed_haiku(self):
+        (_, _, model), sent = ask('anthropic', self.LISTING, answer('anthropic'), options={'haiku': True}, model='claude-sonnet-9')
+        self.assertEqual((model, self.models(sent)), ('claude-haiku-9', ['claude-haiku-9']))
+
+    def test_the_owners_choice_is_asked_and_a_refusal_is_asked_once_more_on_the_haiku(self):
+        no_text = answer('anthropic', stop_reason='refusal', content=[])
+        (text, calls, model), sent = ask('anthropic', self.LISTING, no_text, answer('anthropic', '{"0": {}}'),
+                                         options={'haiku': True, 'model': 'claude-opus-9'}, model='claude-sonnet-9')
+        self.assertEqual(self.models(sent), ['claude-opus-9', 'claude-haiku-9'])
+        self.assertEqual((text, model, [c['status'] for c in calls]), ('{"0": {}}', 'claude-haiku-9', ['failed', 'succeeded']))
+
+    def test_never_a_third_request_and_no_retry_on_the_same_model(self):
+        no_text = answer('anthropic', stop_reason='refusal', content=[])
+        with self.assertRaises(llm.ModelError) as raised:
+            ask('anthropic', self.LISTING, no_text, options={'haiku': True, 'model': 'claude-opus-9'})
+        self.assertEqual(len(raised.exception.calls), 2)
+        llm._HAIKU.clear()
+        with self.assertRaises(llm.ModelError) as raised:
+            ask('anthropic', self.LISTING, no_text, options={'haiku': True})  # it ran on the haiku already
+        self.assertEqual(len(raised.exception.calls), 1)
+
+    def test_no_haiku_listed_is_the_configured_model_and_a_bad_name_is_ignored(self):
+        (_, _, model), sent = ask('anthropic', {'data': [{'id': 'claude-sonnet-9'}]}, answer('anthropic'), options={'haiku': True},
+                                  model='claude-sonnet-9')
+        self.assertEqual(model, 'claude-sonnet-9')
+        (_, _, model), sent = ask('anthropic', answer('anthropic'), options={'model': 'bad name; rm'}, model='claude-sonnet-9')
+        self.assertEqual(self.models(sent), ['claude-sonnet-9'])
+
+
 class _Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass

@@ -177,6 +177,34 @@ Which stages go through the queue in this release:
 | The RDP login-screen reading (the screenshot travels in the job, at most 4 MB) | `rdp_screenshot` | `rdp_screenshot` |
 | Nuclei template drafts for a CVE with no installed template (gated when they land, never run on a host) | `template_generation` | `template_generation` |
 | The test fixture and the second-pass review of an AI-written draft (see [the automatic lifecycle](#ai-written-templates-validated-by-the-system-never-by-a-person)); two jobs per draft, both under this stage | `template_validation` | `template_validation` |
+| Validation planning: which of the permitted read-only checks settle whether a CVE applies to a host (a validation request waits for it, see below) | `validation_plan` | `validation_plan` |
+| Nuclei targeting: the tags and severities for each host profile of a scan (the scan does not wait for it, see below) | `nuclei_targeting` | `nuclei_targeting` |
+
+Every pipeline call goes through the queue: the server makes no model call of the pipeline, holds no AI key in a worker for one, and fences no
+host data itself (the container's `guard.fence` does, with a fresh nonce per part). What is left in the server are the two requests of
+Settings > AI model: the connection test and the model list (see [Later](#later)).
+
+**Validation planning waits; it never waits for ever.** A validation request (Validate now, and the automatic Fire, Smoke and Ice validations)
+that needs the AI's choice of checks queues a `validation_plan` job (one per evidence: a second request for the same evidence waits for the same
+answer, and an answer of the last 24 hours is used again without asking) and goes back to the queue in the state `queued` with
+`result.waiting` naming the job. It holds no worker, spends no attempt and runs no check while it waits. The answer, the job's failure or its
+expiry sends the request on (`validation_plan.resume_parked`), and it continues where it stopped: a request that waited for its second plan (the
+choice after the first checks' observations) keeps what its first round did and does not run those checks again. It waits at most ten
+minutes (`validation_plan.PLAN_WAIT`; the AI job housekeeping sends on a request that waited longer, and a lost message the same way): then, or
+with the reviewer not taking work (`CVENGINE_REVIEWER=0`, scanning paused), past the planning budget, or when the model's answer is refused twice
+(one repair round, as for triage) or the call fails, the request goes on with the deterministic plan: the vetted CVE template and the version and
+identity probes, generic checks deferred, as with no AI. The planning budgets (`plan_daily_total`, `plan_daily_per_project`) are reserved when the
+job is queued; a repair round is a second row of the day (`TriageCall`, status `repair`), and every call the container makes is a usage row.
+
+**Nuclei targeting does not wait.** A scan's targeted pass runs at once on the static table and the tags the installed templates name for the
+host's products. The AI is asked, in one `nuclei_targeting` job, about the host profiles it has no answer for, and its choice (still a closed set:
+only installed tags, never `cve` or a credential tag unless allowed, only the five severities) is kept per host profile for seven days
+(`nuclei_templates.ANSWER_TTL`, in the shared cache). Every later pass over a host with the same profile uses it. Scheduled scans see the same
+hosts again, so the choice is used from the next pass on, and a profile is asked about once a week instead of on every scan. A scan was never held
+by this stage before either: a refusal, an empty answer or a failure always left the static table. The day's cap
+(`CVENGINE_NUCLEI_AI_MAX_PER_DAY`) counts the calls made and the questions queued; a question queued on a day whose cap is spent waits for the
+next day. A failed request is not queued again inside its window (five minutes, doubling up to an hour), and the next pass says why in the
+scan's activity. A reply that is not one JSON object is sent back once.
 
 ## How every prompt starts
 
@@ -192,10 +220,10 @@ text it needs and a test fails when the copies differ):
    is not enough to decide, say so and leave the finding open. The two nuclei jobs have a task line but not the preamble (see below).
 3. **The job's own rules and output format**, as before.
 
-**The nuclei jobs have a task line and no preamble.** `nuclei_tag_selection` and `nuclei_targeting` are asked as a validation request: "Validate each
+**The nuclei job has a task line and no preamble.** `nuclei_targeting` is asked as a validation request: "Validate each
 software detection listed below on its host to ensure it is not a false positive, and list the nuclei template tags and severities that match what
-is really there." (tag selection: "Validate each software detection listed below to ensure it is not a false positive, and list the nuclei template
-tags that match what is really there.") This sentence replaces only the first sentence of the old prompt; the output format, the allowed-tag list,
+is really there." (The scan-wide tag selection, `nuclei_tag_selection`, was measured with the same wording; it is retired: the scan-wide tags are
+the static table, and the stage only names older usage rows.) This sentence replaces only the first sentence of the old prompt; the output format, the allowed-tag list,
 the user message labels and the parsers are as before. Measured on the real provider (5 repeats per job and model): Sonnet answered
 `nuclei_targeting` 5 of 5 (the old text: 3 of 5) and `nuclei_tag_selection` 5 of 5 (the old text: 5 of 5); Haiku answered every wording 5 of 5. The
 shared preamble made Sonnet refuse these two jobs, so they do not get it. `reNgine/ai_prompts.py` lists them in `UNFRAMED` as "task line only,
@@ -326,7 +354,7 @@ The page has one **Connection** block (provider, API key, address, and a status 
 | Row | Setting | Used for | What it costs in practice |
 | --- | --- | --- | --- |
 | **Everything else** | `model` (AI model settings) | Triage of every finding, CVE match confirmation, validation and Nuclei planning, CVE guidance, template drafts. The pipeline's AI jobs run in the reviewer container but use this model. | Many small requests on every scan: most of the spend, so a cheap model. Empty: the newest cheapest model of the provider (a provider you host yourself must have one chosen). |
-| **Nuclei targeting and tag selection** | `nuclei_model` (AI model settings, `GET`/`PUT /cve/api/settings/ai`) | Which Nuclei templates apply to the software found (the stages `nuclei_targeting` and `nuclei_tag_selection`). These calls are made by the server, not by the reviewer container. | A few small requests per scan. A smaller, faster model works well and avoids refusals. |
+| **Nuclei targeting and tag selection** | `nuclei_model` (AI model settings, `GET`/`PUT /cve/api/settings/ai`) | Which Nuclei templates apply to the software found (the stages `nuclei_targeting` and `nuclei_tag_selection`). The reviewer container makes these calls: the job carries this choice (`model`) and asks for the haiku default (`haiku`). | A few small requests per scan. A smaller, faster model works well and avoids refusals. |
 | **Finding review** | `review_model` | The finding review job. | One larger request per finding, up to the daily cap: a stronger model costs the most here. |
 | **Operations check** | `ops_model` | The operations check job. | A few small requests a day. |
 
@@ -365,8 +393,10 @@ All routes are under `/api/v1/reviewer/` and need a `reviewer`-scope token. The 
 
 ## Later
 
-- Move the pipeline's remaining AI calls into the reviewer container the same way: validation planning, nuclei targeting, and the
-  connection test and model list of Settings > AI model. Then the server makes no model call at all.
+- Move the two requests of Settings > AI model into the reviewer container: the connection test (a fixed ping, `connection_test`, sent when
+  an administrator presses Test) and the model list the page reads to fill its drop-downs. They are not pipeline calls: no host data goes in
+  them, an administrator starts each one, and the page shows the answer at once, which a queued job cannot do. Then the server makes no model
+  call at all.
 
 ### The Nuclei model and its safety net
 
@@ -374,7 +404,7 @@ Some models (measured: `claude-sonnet-5-5` and `claude-opus-5-5`) answer the Nuc
 
 - **Default (empty).** The cheapest model of the provider whose id contains `haiku` and that the provider lists as available, found in the provider's model list each time it is read (cached for ten minutes), never a name written into the code or stored by an upgrade. Where the list has no haiku, or cannot be read, the model of **Everything else**. The drop-down names it ("Default: claude-haiku-5-5", or "Default: same as Everything else" when no haiku is listed).
 - **Your choice.** A model you pick is kept, and the save refuses a model the provider does not list. Changing the provider clears it (a model belongs to the provider it was chosen from). **Everything else** is never changed by this row. An existing install has no stored value and gets the default through code; there is no data migration.
-- **Safety net.** When a call on the Nuclei jobs ends in a refusal or an empty reply and the haiku default is a different model from the one used, the same request is retried **once** on the haiku default. Both calls are rows of the usage table under their stage ([AI-USAGE.md](AI-USAGE.md)), and the log gets one line: `refused by <model>, retried on <model>` (`empty response from ...` for an empty reply). A retry counts against `CVENGINE_NUCLEI_AI_MAX_PER_DAY`. Only if the retry also fails does the request back off for five minutes as before, and the scan carries on with the standard tags. A request is never retried more than once, and a request already on the haiku default is not retried.
+- **Safety net.** When a call on the Nuclei job ends in a refusal or an empty reply and the haiku default is a different model from the one used, the reviewer container asks the same request **once** more on the haiku default (`cvengine_reviewer.llm.complete`, from the job's options `model` and `haiku`). Both calls are rows of the usage table under their stage ([AI-USAGE.md](AI-USAGE.md)), and the container's log gets one line: `refused by <model>, asked once more on <model>` (`empty_response by ...` for an empty reply). A retry counts against `CVENGINE_NUCLEI_AI_MAX_PER_DAY`. Only if the retry also fails does the request back off for five minutes as before, and the scan carries on with the standard tags. A request is never retried more than once, and a request already on the haiku default is not retried.
 
 ## AI-written templates: validated by the system, never by a person
 
@@ -400,6 +430,8 @@ An install that scans only with its own Sentinels (no built-in scanner: `CVENGIN
 
 The scan path survey (`path_probe`) goes the same way: with no built-in scanner, the project's own Sentinels run it, and each Sentinel's measured path is kept as its own verdict (an OS guess from a Sentinel whose path loses the malformed probes is not believed). The install-wide verdict stays the built-in scanner's.
 
+
+**When the draft lands** (`templategen.job_answer`). A draft the deterministic gate refuses (the static check, then the allowlist every Sentinel applies, `cveFeed.check_allowlist`; both pure, so the same text always fails them the same way: a redirect key, a seventh request, a port of its own) is sent back to the AI **once**, with the reason and the refused draft fenced, when the day's template budget has room for that second request; the repair counts against `TEMPLATE_GEN_MAX_PER_DAY` and the second answer is the one that counts. A draft no Sentinel could check at that moment is kept as a draft in the `syntax` stage ("waiting: no Sentinel can run template checks ...") and the validator checks it again when one can; before, it was closed as `invalid` ("tried again later"), which threw the paid answer away and held the CVE for `TEMPLATE_GEN_CVE_DAYS` while nothing was tried again. Every rejection names its reason (`validation_reason`): a static-check rejection and a failed provider call wrote only the output before, and a tool's own warning line (nuclei's "WARNING: sonic/ast only supports ...", printed before anything else on newer Go releases) is never taken for the reason (`templategen.plain_reason`). The update step `revalidate_ai_drafts` does the same for the rows already stored ([UPGRADE.md](UPGRADE.md)).
 
 A failed gate marks the row `invalid` with a plain reason. A failure that can pass next time (an unreadable AI answer, a fixture that missed, a refused call) is retried up to three times, with 15 minute, 1 hour and 4 hour back-off, then rejected. A draft still pending after seven days (`CVENGINE_TEMPLATE_DRAFT_EXPIRY_DAYS`) is closed as `expired` with the reason "expired, not validated" and a line in the activity record, so the queue cannot grow without bound. The AI usage page shows how many checks passed, are being checked, and were rejected (with expired ones counted apart) and the most common plain reasons; both AI jobs appear under the `template_validation` stage with their cost and any refusal.
 

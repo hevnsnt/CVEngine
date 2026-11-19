@@ -4,27 +4,24 @@ and acts on what these return; ``cveFeed.autotune_signals`` takes the measuremen
 
 **Aim high, then scale back.** The deterministic controller is the safety envelope and works without any AI provider:
 
-1. ``size_for`` works out, from what this machine really has (CPU cores, the scanning container's memory budget and what one run of each
-   scanner kind really peaks at, Postgres ``max_connections`` and the connections in use, free disk, the live Sentinels and their slots, and how
+1. ``size_for`` works out, from what this machine really has (CPU cores, the worker containers' memory, Postgres ``max_connections`` and the connections in use, free disk, the live Sentinels and their slots, and how
    big the instance is), an ambitious but sensible **target** for every tunable setting: the most the hardware and the headroom rules say is
    reasonable, never outside the setting's auto-tuning range. A 4 GB box gets far less than a 64 GB one; two Sentinels with nine slots get a
    discovery pool that keeps them busy (twice their slots plus headroom), not the page's maximum. A fact nobody reported yet is replaced by the
-   setting's documented optimistic value (``auto_optimistic`` in the registry), never by the minimum: the memory gate keeps holding work back
-   meanwhile.
+   setting's documented optimistic value (``auto_optimistic`` in the registry), never by the minimum.
 2. **Aim high**: once a restart or update is ``AIM_WARMUP_SECONDS`` old and memory and the Sentinels have reported (``facts_ready``; or after
    ``AIM_FALLBACK_SECONDS`` with the optimistic values for what is missing), every setting goes straight up to that target (lower than the
    target only while the level that last caused trouble is remembered, below). The jump only goes up.
-3. **Scale back on evidence, at once**: memory pressure or a memory kill, scanner time-outs and kills, the database above ``DB_PRESSURE`` of its
-   connections, a CPU overload, a worker or the broker that stopped answering, Sentinel tasks that time out or expire unclaimed, runs of a kind that wait with
-   nothing of the kind running. A back-off is fast (``backoff``: a quarter to a half, at least two steps), needs no cooldown, and is then
+3. **Scale back on evidence, at once**: memory pressure, the database above ``DB_PRESSURE`` of its connections, a CPU overload, a worker or the
+   broker that stopped answering, Sentinel tasks that time out or expire unclaimed. (Each Sentinel's own slots are tuned by
+   ``cveFeed.autotune_sentinels`` from its own machine.) A back-off is fast (``backoff``: a quarter to a half, at least two steps), needs no cooldown, and is then
    held for ``BACKOFF_HOLD`` before another one. The level that caused the trouble is remembered for ``BAD_MEMORY_SECONDS``: nothing goes back
    up to it before that.
 4. **Probe up slowly**: one step, only after ``PROBE_HEALTHY_SECONDS`` without any trouble for that setting, with work waiting and room to spare
    in the last ``HEALTHY_SAMPLES`` measurements, after the probe cooldown since the setting's last change, at most ``DAILY_PROBES`` a day, and
    never above the target or the remembered bad level. The thresholds that allow a probe are far from the ones that force a back-off
    (hysteresis).
-5. A setting above its ceiling (a target sized from facts that reported, a remembered bad level, or for a scanner kind what the memory
-   budget holds at its real peak) is brought down to it at once, with no cooldown (phase ``cap``). The Sentinels a target is sized from are
+5. A setting above its ceiling (a target sized from facts that reported, or a remembered bad level) is brought down to it at once, with no cooldown (phase ``cap``). The Sentinels a target is sized from are
    the most any measurement of the last ``SENTINEL_GRACE_SECONDS`` saw (``steady_facts``), so one missed heartbeat lowers nothing.
 
 6. **Verify, and take back what hurt** (``expectation``, ``measure``, ``verdict``): every change records what it expected to improve and the measurements
@@ -55,11 +52,9 @@ DB_TARGET = 0.70               # the discovery pool is sized to keep the databas
 # whole limit); where the cgroup cannot be read it is the one-minute load average per core of that limit (``load_kind='loadavg'``).
 LOAD_RAISE = {'cgroup': 0.70, 'loadavg': 1.0}      # a probe needs the load under this
 LOAD_PRESSURE = {'cgroup': 0.95, 'loadavg': 2.0}   # above this in two measurements in a row is pressure
-CPU_BUDGET = 1.0               # the local scanner kinds together are sized to use at most this many of the container's cores per core
 RESERVED_CONNECTIONS = 30      # database connections kept for everything but the discovery pool (web, the other workers, beat)
 AIM_WARMUP_SECONDS = 600       # no aim-high jump in the first ten minutes after a restart or an update
 AIM_FALLBACK_SECONDS = 1800    # ... and not before memory and Sentinels reported, unless this long has passed (then the optimistic values fill in)
-CAPACITY_FAILURES = 3          # failures of one scanner kind that point at load (timeouts, out of memory, exit -9) in one interval
 SENTINEL_TROUBLE = 2           # Sentinel tasks that timed out or expired unclaimed in one interval (or one in each of two) that are trouble
 BACKLOG_SECONDS = 1800         # assessment work older than this is a backlog
 SMALL_INSTANCE = 100           # hosts plus targets under this: a small instance, sized modestly
@@ -85,7 +80,6 @@ MAX_AIMS_PER_DAY = 2               # ... and never more often than this (the fir
 # name: (better, floor, label). better: 'lower' or 'higher'. floor: the smallest change in that measurement that counts at all (the numbers move
 # by themselves: a queue of 4 becoming 5 is noise).
 METRICS = {
-    'wait_share': ('lower', 0.20, 'share of measurements with a run waiting for its turn'),
     'discovery_queue': ('lower', 3.0, 'scans waiting in the discovery queue'),
     'assess_oldest_s': ('lower', 600.0, 'age of the oldest waiting assessment (seconds)'),
     'conductor_saturated_share': ('lower', 0.30, 'share of measurements held back by the conductor depth'),
@@ -97,7 +91,7 @@ METRICS = {
 }
 NO_ACTION_PHASES = ('cap', 'verify', 'emergency')  # never reverted, never hold the one-at-a-time gate
 
-# key: the setting's key. kind: what it is (``heavy:<scanner kind>``, ``discovery``, ``batch``, ``depth``, ``stage``, ``work_gap``,
+# key: the setting's key. kind: what it is (``discovery``, ``batch``, ``depth``, ``stage``, ``work_gap``,
 # ``refresh_gap``). low/high: the auto-tuning range. step: one step. sense: ``more`` (a higher number does more at once) or ``gap`` (a higher
 # number waits longer between runs, so does less). optimistic: the target when the facts it is sized from are not known.
 # ``default``: the number the setting ships with (the registry default). Sizing from CPU cores or Sentinels never puts a target below it: only
@@ -105,17 +99,6 @@ NO_ACTION_PHASES = ('cap', 'verify', 'emergency')  # never reverted, never hold 
 # trouble (a back-off) go lower. None: no floor.
 Setting = namedtuple('Setting', 'key kind label low high step sense optimistic default', defaults=(None, None))
 
-# CPU cores one run of a scanner kind keeps busy (nmap and nuclei probe in parallel; route probes and the TLS audit mostly wait on the network).
-CORES_PER_RUN = {'bbot-deep': 1, 'bbot-standard': 0.5, 'bbot-passive': 0.25, 'nuclei': 1, 'nuclei-light': 0.5, 'nmap': 0.5, 'route-probe': 0.025,
-                 'wpscan': 0.25, 'testssl': 0.1, 'screenshot': 0.25}
-# The share of the CPU budget (CPU_BUDGET x cores) each scanner kind is sized for. The kinds run side by side, so they share the cores instead of
-# each being sized against all of them: the shares add up to 1, so the kinds at their targets together stay inside the budget (a kind always gets
-# at least one run).
-# At 16 cores this gives nmap 8, nuclei 4, nuclei light, bbot standard and passive and wpscan 3, testssl 4, screenshot 3 and route probes 16 (their
-# auto-tuning maximums or close), about 15 cores in all. A kind's CPU share only limits how far it goes above its shipped default (``Setting.default``).
-CPU_SHARE = {'nmap': 0.30, 'nuclei': 0.25, 'nuclei-light': 0.10, 'bbot-standard': 0.10, 'bbot-deep': 0.05, 'bbot-passive': 0.05,
-             'route-probe': 0.025, 'wpscan': 0.05, 'testssl': 0.025, 'screenshot': 0.05}
-assert abs(sum(CPU_SHARE.values()) - 1.0) < 1e-9
 
 
 def _frac(part, whole):
@@ -164,22 +147,13 @@ def backoff(setting, value):
     return new if new > value else value
 
 
-def memory_cap(kind, sample):
-    """The most runs of a scanner kind the memory budget holds at the peak those runs really reached (the learned peak with its margin, or the
-    estimate, whichever is larger), or None when no scanning container reported its budget."""
-    budget, cost = _get(sample, 'memory', 'budget_mb'), _get(sample, 'memory', 'cost_mb', kind)
-    if not budget or not cost:
-        return None
-    return max(1, int(budget // cost))
-
-
 # --- sizing: the ambitious but sensible target for this machine ---------------------------------------------------------
 
 def facts_of(sample):
     """The facts ``size_for`` reads, from one measurement (anything not measured is None)."""
     mem, sent, size = sample.get('memory') or {}, sample.get('sentinel') or {}, sample.get('size') or {}
     return {'cores': sample.get('cores'), 'memory_budget_mb': mem.get('budget_mb') if mem.get('reported') else None,
-            'memory_total_mb': mem.get('total_mb'), 'cost_mb': mem.get('cost_mb') or {},
+            'memory_total_mb': mem.get('total_mb'),
             'db_max': _get(sample, 'db', 'max'), 'db_used': _get(sample, 'db', 'used'),
             'sentinel_live': sent.get('live'), 'sentinel_slots': sent.get('slots'),
             'hosts': size.get('hosts'), 'targets': size.get('targets'), 'disk_free_percent': size.get('disk_free_percent'),
@@ -211,9 +185,6 @@ def size_for(setting, facts, current=None):
     """The target for one setting on this machine: ``(number, why, known)``. ``known`` is False when the facts it is sized from were not
     reported and the optimistic value stands in (a target that is not known never lowers a setting). Every formula is here.
 
-    * a scanner kind: as many runs as BOTH the memory budget holds at the kind's real peak (budget // MB per run) and the kind's share of the
-      CPU budget carries (``CPU_BUDGET`` x the container's cores x ``CPU_SHARE`` // ``CORES_PER_RUN``): the kinds share the cores, so all of
-      them at their targets together stay inside the budget;
     * hosts assessed at once (the discovery pool): every waiting Sentinel task holds a slot, so with Sentinels twice their slots plus four;
       without, two per core. Never more than the database gives: the connections in use now (``pg_stat_activity``) plus the growth up to
       ``DB_TARGET`` of ``max_connections``, counted from the tasks the pool really runs, not from its ceiling; and never more than
@@ -226,37 +197,18 @@ def size_for(setting, facts, current=None):
     * hours before a Sentinel refresh: 3 with four Sentinel slots or more, else 6.
 
     Sizing from cores or Sentinels never goes below the number the setting ships with (``Setting.default``, ``_floor``): "aim high" never means
-    less than a fresh install runs. Only the limits that protect the machine go lower: the memory budget at a kind's real peak, the database
-    (when the pool's own running tasks reported; otherwise that headroom is not known and limits nothing), a small instance. The CPU share only
-    limits how far a kind goes above its default.
+    less than a fresh install runs. Only the limits that protect the machine go lower: the database
+    (when the pool's own running tasks reported; otherwise that headroom is not known and limits nothing), a small instance.
 
     A small instance (fewer than ``SMALL_INSTANCE`` hosts and targets) keeps the discovery pool at 8 and the conductor at 3; under
     ``LOW_DISK_PERCENT`` of free disk nothing is above its optimistic value. The result is always inside the setting's auto-tuning range."""
     optimistic = setting.optimistic if setting.optimistic is not None else (setting.low if setting.sense == 'gap' else setting.high)
     cores, slots, live = facts.get('cores'), facts.get('sentinel_slots'), facts.get('sentinel_live')
-    budget = facts.get('memory_budget_mb')
     scale = None if facts.get('hosts') is None or facts.get('targets') is None else facts['hosts'] + facts['targets']
     small = scale is not None and scale < SMALL_INSTANCE
     sentinels_known = live is not None
     kind, known = setting.kind, True
-    if kind.startswith('heavy:'):
-        scanner = kind.split(':', 1)[1]
-        cost = (facts.get('cost_mb') or {}).get(scanner)
-        parts, why = [], []
-        if budget and cost:
-            parts.append(budget // cost)
-            why.append(f'{budget} MB budget / {cost} MB a run')
-        if cores:
-            share = CPU_BUDGET * cores * CPU_SHARE.get(scanner, 0.05)
-            parts.append(max(1, setting.default or 1, int(share // CORES_PER_RUN.get(scanner, 1))))  # CPU never below the shipped default
-            why.append(f'its share of {cores} cores')
-        if len(parts) < 2:
-            known = False
-        if not parts:
-            target, reason = optimistic, 'memory and CPU not reported yet: optimistic value'
-        else:
-            target, reason = min(parts), ' and '.join(why)
-    elif kind == 'discovery':
+    if kind == 'discovery':
         if live and slots:
             target, reason = 2 * slots + 4, f'twice the {slots} Sentinel slots plus 4'
         elif cores and sentinels_known:
@@ -359,8 +311,6 @@ def sized_for_text(facts):
 
 def _memory_pressure(last):
     mem = last.get('memory') or {}
-    if mem.get('kills'):
-        return f'{mem["kills"]} memory kill{"" if mem["kills"] == 1 else "s"}'
     if mem.get('free_frac') is not None and mem['free_frac'] < MEMORY_FREE_PRESSURE:
         return f'only {round(mem["free_frac"] * 100)}% memory free'
     return None
@@ -443,11 +393,8 @@ def _starvation_trouble(samples):
 
 def _pause_trouble(setting, last, pause):
     """The watchdog paused the starting of work for memory (``pause`` says so): evidence of memory pressure for the settings that hold memory, even
-    when the scanning container's own numbers did not show it (the watchdog reads the whole host). A scanner kind only counts when runs of it were
-    going."""
+    when the scanning container's own numbers did not show it (the watchdog reads the whole host)."""
     kind = setting.kind
-    if kind.startswith('heavy:'):
-        return pause if _get(last, 'memory', 'running', kind.split(':', 1)[1], default=0) else None
     return pause if kind in ('discovery', 'depth', 'work_gap') else None
 
 
@@ -463,23 +410,6 @@ def trouble(setting, samples, pause=''):
 
 
 def _trouble(setting, samples, last, kind):
-    if kind.startswith('heavy:'):
-        scanner = kind.split(':', 1)[1]
-        kills = _get(last, 'memory', 'kills_by_kind', scanner, default=0)
-        if kills:
-            return f'{kills} {scanner} run(s) stopped for memory'
-        failures = _get(last, 'failures', scanner, default=0)
-        if failures >= CAPACITY_FAILURES:
-            return f'{failures} {scanner} runs failed for load (timeouts, out of memory, killed)'
-        running = _get(last, 'memory', 'running', scanner, default=0)
-        general = _memory_pressure(last) or _load_pressure(samples)
-        if general and running:
-            return f'{general} with {scanner} running'
-        stuck = samples[-HEALTHY_SAMPLES:]
-        if len(stuck) == HEALTHY_SAMPLES and all(_get(s, 'memory', 'waiting', scanner, default=0) >= 0.9 and
-                                                 not _get(s, 'memory', 'running', scanner, default=0) for s in stuck):
-            return f'{scanner} runs waited for memory for half an hour with none running'
-        return None
     if kind.startswith('lane:'):
         return _lane_trouble(kind.split(':', 1)[1], samples)
     checks = {
@@ -508,8 +438,6 @@ def room(sample):
         return 'no memory report from the scanning container'
     if mem['free_frac'] < MEMORY_FREE_RAISE:
         return f'{round(mem["free_frac"] * 100)}% memory free (a probe needs {round(MEMORY_FREE_RAISE * 100)}%)'
-    if mem.get('kills'):
-        return f'{mem["kills"]} memory kill{"" if mem["kills"] == 1 else "s"}'
     db = _frac(_get(sample, 'db', 'used'), _get(sample, 'db', 'max'))
     if db is None:
         return 'database connections could not be counted'
@@ -526,15 +454,6 @@ def room(sample):
 def demand(setting, value, sample):
     """None when this measurement shows work that one more step would serve, else why not."""
     kind = setting.kind
-    if kind.startswith('heavy:'):
-        scanner = kind.split(':', 1)[1]
-        waited = _get(sample, 'memory', 'waiting', scanner, default=0)
-        running = _get(sample, 'memory', 'running', scanner, default=0)
-        if waited < 0.5:
-            return f'no {scanner} run waited for its turn'
-        if running < value:
-            return f'{running} of {value} {scanner} runs in use'
-        return None
     if kind.startswith('lane:'):
         pct = _lane(sample, kind.split(':', 1)[1]).get('percent')
         if pct is None:
@@ -612,18 +531,17 @@ def _beyond(setting, number, ceiling):
 
 
 def decide(setting, value, baseline, samples, history, *, now, boot_at, target, target_reason='', cooldown, probe_cooldown,
-           hold_until=None, hard_cap=None, target_known=True, ready=True, pause=''):
+           hold_until=None, target_known=True, ready=True, pause=''):
     """What the controller does with one setting now.
 
     ``value``: the number in effect; ``baseline``: the number without the tuner (environment or default); ``samples``: the measurements since
     the last restart, oldest first; ``history``: this setting's applied changes of the last two days, ``[{'at', 'direction', 'pressure',
-    'phase', 'old', 'new'}]``; ``target``: what ``size_for`` says this machine carries; ``hard_cap``: for a scanner kind, what the memory budget
-    holds at its real peak (None when not reported); ``target_known``: False when the target is only the optimistic stand-in for facts that did
+    'phase', 'old', 'new'}]``; ``target``: what ``size_for`` says this machine carries; ``target_known``: False when the target is only the optimistic stand-in for facts that did
     not report (it then never lowers anything); ``ready``: memory and Sentinels have reported (``facts_ready``); ``hold_until``: a revert asked
     for no raise before this time; ``pause``: the reason when the watchdog paused the starting of work for memory (``trouble``). All times in seconds.
 
-    A value above the ceiling (the known target, a remembered bad level, the memory cap) is brought down to it at once, with no cooldown (phase
-    ``cap``): the Sentinels left, the database filled up, a kind's real peak grew. The aim-high jump waits ``AIM_WARMUP_SECONDS`` after the
+    A value above the ceiling (the known target, a remembered bad level) is brought down to it at once, with no cooldown (phase
+    ``cap``): the Sentinels left, the database filled up. The aim-high jump waits ``AIM_WARMUP_SECONDS`` after the
     restart and for ``ready`` (or ``AIM_FALLBACK_SECONDS``), and only ever goes up.
 
     After an emergency back-off the number before it comes back in one step once the database has room again (``_recovery``, phase ``recover``),
@@ -660,11 +578,6 @@ def decide(setting, value, baseline, samples, history, *, now, boot_at, target, 
             return out
         out.update(direction='less', new=new, pressure=True, phase='back_off', why_not_raised=why,
                    reason=f'{why}: backed off {value} to {new}')
-        return out
-    if hard_cap is not None and setting.sense == 'more' and value > hard_cap and max(setting.low, hard_cap) < value:
-        new = max(setting.low, hard_cap)
-        out.update(direction='less', new=new, phase='cap', why_not_raised='the memory budget',
-                   reason=f'{value} runs do not fit the memory budget at their real peak: lowered to {new}')
         return out
     cap = ceiling if target_known else bad_below
     if cap is not None and _beyond(setting, value, cap):
@@ -830,7 +743,7 @@ Verdict = namedtuple('Verdict', 'outcome detail')  # outcome: helped | no_effect
 
 def expectation(setting, direction):
     """The measurement a change of ``setting`` in ``direction`` ('more' or 'less' work, ``direction_of``) expects to improve: a name of ``METRICS``.
-    More work: the backlog it serves gets shorter (a scanner kind: fewer runs waiting for their turn; the discovery pool: a shorter discovery queue;
+    More work: the backlog it serves gets shorter (the discovery pool: a shorter discovery queue;
     a batch: a younger oldest assessment; the conductor depth and gap: fewer measurements held back or idle; Sentinel stage and refresh: fewer idle
     Sentinel slots). Less work: the trouble that caused it is gone (or none appears)."""
     if setting.kind == 'assess_share':
@@ -838,7 +751,7 @@ def expectation(setting, direction):
     if direction != 'more':
         return 'trouble'
     return {'discovery': 'discovery_queue', 'batch': 'assess_oldest_s', 'depth': 'conductor_saturated_share', 'work_gap': 'conductor_idle_share',
-            'stage': 'sentinel_idle_share', 'refresh_gap': 'sentinel_idle_share'}.get(setting.kind) or ('wait_share' if setting.kind.startswith('heavy:') else 'trouble')
+            'stage': 'sentinel_idle_share', 'refresh_gap': 'sentinel_idle_share'}.get(setting.kind) or 'trouble'
 
 
 def _mean(values):
@@ -853,9 +766,6 @@ def _metric_value(metric, setting, samples):
         return None
     if metric == 'trouble':
         return 1.0 if trouble(setting, samples) else 0.0
-    if metric == 'wait_share':
-        scanner = setting.kind.split(':', 1)[1] if setting.kind.startswith('heavy:') else ''
-        return _mean([_get(s, 'memory', 'waiting', scanner, default=0) if (s.get('memory') or {}).get('reported') else None for s in samples])
     if metric == 'discovery_queue':
         return _mean([_get(s, 'discovery', 'queued') for s in samples])
     if metric == 'scan_oldest_s':
@@ -875,12 +785,12 @@ def _metric_value(metric, setting, samples):
 
 
 def _kills(samples):
-    """Memory kills the measurements saw (the scanning containers' own), and the kernel's oom kills plus Celery lane restarts of the last day at their
-    highest (``sample['maint']``, ``cveFeed.autotune_signals.maintainer``); each None when nothing measured it."""
-    counts = [_get(s, 'memory', 'kills') for s in samples if (s.get('memory') or {}).get('reported')]
+    """``(None, oom)``: no server measurement counts kills of its own any more (nothing scans here; a Sentinel's kills are its own measurement,
+    ``cveFeed.autotune_sentinels.measure``), and the kernel's oom kills plus Celery lane restarts of the last day at their highest (``sample['maint']``,
+    ``cveFeed.autotune_signals.maintainer``), None when nothing measured them."""
     rolling = [(_get(s, 'maint', 'oom_kills_24h'), _get(s, 'maint', 'lane_restarts_24h')) for s in samples]
     known = [(a or 0) + (b or 0) for a, b in rolling if a is not None or b is not None]
-    return (sum(c or 0 for c in counts) if counts else None), (max(known) if known else None)
+    return None, (max(known) if known else None)
 
 
 def measure(setting, samples, direction='more'):
@@ -974,7 +884,7 @@ _FENCE = re.compile(r'^\s*```(?:json)?\s*|\s*```\s*$', re.I)
 
 def validate_advice(reply, offered, clean=None):
     """Keep what the controller's envelope allows from the AI advisor's reply. ``offered``: {key: {'setting': Setting, 'value': number in effect,
-    'range': (lowest, highest) the controller allows now}} (from one step down up to the controller's own target, the memory cap included).
+    'range': (lowest, highest) the controller allows now}} (from one step down up to the controller's own target).
     Returns ({key: {'value', 'direction', 'reason'}}, [(key or '?', why it was refused)], error or ''). A reply that is not the JSON asked for is refused whole (``error``); each recommendation
     is then judged on its own, so one bad entry does not throw away the good ones. A reason is model text: it is cleaned (no control characters,
     one line, 200 characters) and only ever shown as text."""
