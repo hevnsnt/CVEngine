@@ -1989,6 +1989,9 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     # freshness rule: never when a first-party reading names the product, never older than REPORTED_MAX_AGE_DAYS; CPE first, confidence capped.
     source_versions.collect_reported(subdomain, product_index, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence,
                                      fix_lookup=fix_lookup)
+    # The products a source names with no version (cveFeed.identities: a FortiGate's OS guess or factory certificate, a Recog identity): leads only
+    from cveFeed import identities
+    identities.collect_leads(subdomain, product_index, cve_by_id, rows, scan_history=scan_history, min_confidence=min_confidence, leads=leads)
 
     # The Java runtime the host was read to run (cveFeed.java_runtime): a CVE in the JDK itself names the runtime, not a technology or a port
     # product, so it is tested against the host's Java runtime readings, and a host where Java is clear but its version unknown is a candidate.

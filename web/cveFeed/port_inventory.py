@@ -127,6 +127,7 @@ def persist_inventory(inventory, source='nmap', org_id=None, os_reliable=None):
                 port.extra['script_text'] = '\n'.join(kept_scripts.values())  # flat text for search, without the script ids
             if rec.get('banner'):
                 port.banner = rec['banner']
+                store_servicefp(port)
             # the distro reading: the four columns, and the rest of it (source package, codename, how the release was read, another publisher's build)
             # for the host page and search
             store_distro(port, info)
@@ -223,3 +224,19 @@ def close_unreported_ports(ip_obj, host):
             port.save(update_fields=['state'])
             closed += 1
     return closed
+
+
+def store_servicefp(port):
+    """Keep the decoded text of a banner that is nmap's service fingerprint (``cveFeed.servicefp``) in ``Port.extra['servicefp']`` (what
+    ``banner:`` and ``tech:`` search, and what the host page shows), or drop it when the banner is no fingerprint. In memory; the caller saves.
+    Returns whether it changed."""
+    from cveFeed import servicefp
+    extra = dict(port.extra or {}) if isinstance(port.extra, dict) else {}
+    decoded = servicefp.text(port.banner or '')
+    before = extra.get('servicefp')
+    if decoded:
+        extra['servicefp'] = decoded
+    else:
+        extra.pop('servicefp', None)
+    port.extra = extra
+    return before != extra.get('servicefp')

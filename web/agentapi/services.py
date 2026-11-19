@@ -2326,7 +2326,7 @@ def _hosts_named_in(rows, project):
 # The JSON keys inside the evidence stores that say what a host runs. Searched by key, never as raw JSON text, so a word like
 # "source" or "markers" does not match every row that happens to have that key.
 _ROUTE_EVIDENCE_KEYS = ('server', 'powered_by', 'fingerprint_names', 'cookies')  # RouteAuth.evidence: headers, fingerprint names, cookie names
-_PORT_TEXT = ('banner', 'service_extra', 'extra__script_text', 'http__webserver', 'http__title')  # Port: raw service text, NSE output, HTTP
+_PORT_TEXT = ('banner', 'service_extra', 'extra__script_text', 'extra__servicefp', 'http__webserver', 'http__title')  # Port: raw service text, NSE output, HTTP
 
 
 def _running_q(value, project):
@@ -2486,7 +2486,7 @@ def _banner_q(value):
     from django.db.models import Q
     ports = 'ip_addresses__ports__'
     q = Q()
-    for lookup in ('banner', 'extra__script_text', 'service_extra'):
+    for lookup in ('banner', 'extra__script_text', 'extra__servicefp', 'service_extra'):  # extra.servicefp: nmap's fingerprint decoded
         q |= Q(**{f'{ports}{lookup}__icontains': value})
     return q & Q(**{ports + 'state__in': ('', 'open')})
 
@@ -2607,7 +2607,7 @@ def _term_filter(field, value, project=None):
 def _port_evidence(p, v, field):
     """Which stored text of an open port holds ``v`` (lowercase), as a short label, or '' when none does. ``banner:`` looks only at
     raw service text; ``tech:`` and bare words also look at product, version, CPE and the port's HTTP server and title."""
-    texts = [('banner', p.banner), ('info', p.service_extra)]
+    texts = [('banner', p.banner), ('info', p.service_extra), ('nmap fingerprint', (p.extra or {}).get('servicefp'))]
     texts += [(sid, out) for sid, out in ((p.extra or {}).get('scripts') or {}).items()]
     if field != 'banner':
         http = p.http or {}

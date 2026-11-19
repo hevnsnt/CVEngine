@@ -309,11 +309,24 @@ def store_row(project_id, scan, subs, address, port, row, fp=''):
                           'confidence': 1.0 if obs['verified'] else 0.0, 'source': 'sshamble', 'evidence': evidence, 'observed_at': now})
         if row['reached']:  # a complete picture of the endpoint: a fact it no longer reports (or an earlier "could not be inspected") is gone
             ProbeObservation.objects.filter(project_id=project_id, host=host, probe=PROBE, port=port, kind=OBS_KIND).exclude(product__in=seen).delete()
+            _store_banner(sub, port, row)
         if compromised(row):
             filed += _file_finding(scan, sub, address, port, row)
         elif key_checked(row):
             _close_finding(scan, sub, address, port)
     return bool(row['reached'] and verdict), filed
+
+
+def _store_banner(sub, port, row):
+    """The products and versions the verified SSH banner states, as first-party readings (``source_versions.store_ssh``, probe ``vsrc:ssh``):
+    searched and matched like the port scan's, never over what the port row states. Never fatal."""
+    banner = next((o['evidence'] for o in row['observations'] if o['id'] == BANNER_ID and o['verified']), '')
+    try:
+        from cveFeed import probes, source_versions
+        if source_versions.store_ssh(sub, port, banner):
+            probes.recorrelate(sub)
+    except Exception:  # noqa: BLE001 - the inspection's own observations and finding stand without the readings
+        logger.exception('could not store the SSH banner readings of %s:%s', getattr(sub, 'name', ''), port)
 
 
 def _file_finding(scan, sub, address, port, row):

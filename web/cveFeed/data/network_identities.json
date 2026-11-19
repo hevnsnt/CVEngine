@@ -1,0 +1,40 @@
+{
+ "schema": 1,
+ "updated": "2026-11-19",
+ "description": "The network operating systems and appliances cvENGINE names from what a scan already stored, with no version (cveFeed.identities): an identity reading (vsrc:nmap, outcome hidden, never a technology), searched by tech:, component: and os:, a lead for the version source reads (edge_builds' FortiOS, PAN-OS and NetScaler reads) and for correlation. 'systems': the operating system an nmap OS guess or one of its runners-up names (IpAddress.os_guess, fingerprint.os_matches; matched case-insensitively against 'guess'), with the CPE its CVE records use. 'certificates': a certificate default to the appliance (Port.tls as nmap's ssl-cert prints it: 'commonName=FG101FTK19000000/organizationName=Fortinet/...'); every pattern in 'all' must match its field. Each entry names its source. A certificate a person issued names nothing, and a vendor without a default certificate pattern from a citable source is read from the OS guess only.",
+ "systems": [
+  {"product": "FortiOS", "cpe": "cpe:/o:fortinet:fortios", "guess": "\\bforti ?os\\b|\\bfortigate\\b", "source": "nmap-os-db: the OS family and vendor names nmap prints for the system (seen on FortiGate hosts: 'Fortinet FortiOS 6.2 - 7.2')"},
+  {"product": "PAN-OS", "cpe": "cpe:/o:paloaltonetworks:pan-os", "guess": "\\bpan-?os\\b|\\bpalo alto networks\\b", "source": "nmap-os-db: the OS family and vendor names nmap prints for the system"},
+  {"product": "SonicOS", "cpe": "cpe:/o:sonicwall:sonicos", "guess": "\\bsonic ?os\\b|\\bsonicwall\\b", "source": "nmap-os-db: the OS family and vendor names nmap prints for the system"},
+  {"product": "Junos OS", "cpe": "cpe:/o:juniper:junos", "guess": "\\bjunos\\b", "source": "nmap-os-db: the OS family and vendor names nmap prints for the system"},
+  {"product": "Cisco IOS XE", "cpe": "cpe:/o:cisco:ios_xe", "guess": "\\bios[ -]?xe\\b", "source": "nmap-os-db: the OS family and vendor names nmap prints for the system"},
+  {"product": "Cisco IOS XR", "cpe": "cpe:/o:cisco:ios_xr", "guess": "\\bios[ -]?xr\\b", "source": "nmap-os-db: the OS family and vendor names nmap prints for the system"},
+  {"product": "Cisco NX-OS", "cpe": "cpe:/o:cisco:nx-os", "guess": "\\bnx-?os\\b", "source": "nmap-os-db: the OS family and vendor names nmap prints for the system"},
+  {"product": "Cisco IOS", "cpe": "cpe:/o:cisco:ios", "guess": "\\bcisco ios\\b(?![ -]?(?:xe|xr)\\b)", "source": "nmap-os-db: the OS family and vendor names nmap prints for the system"},
+  {"product": "Cisco Adaptive Security Appliance Software", "cpe": "cpe:/a:cisco:adaptive_security_appliance_software", "guess": "\\bcisco asa\\b|\\badaptive security appliance\\b", "source": "nmap-os-db: the OS family and vendor names nmap prints for the system"},
+  {"product": "RouterOS", "cpe": "cpe:/o:mikrotik:routeros", "guess": "\\brouter ?os\\b", "source": "nmap-os-db: the OS family and vendor names nmap prints for the system"}
+ ],
+ "certificates": [
+  {"product": "FortiOS", "cpe": "cpe:/o:fortinet:fortios", "field": "subject",
+   "all": ["(?:^|/)commonName=F(?:G|GT|GVM|WF|GR|G\\d)[0-9A-Z]{8,}(?:/|$)", "(?:^|/)organizationName=Fortinet(?: Ltd\\.?)?(?:/|$)"],
+   "source": "Rapid7 Recog xml/x509_subjects.xml 'Fortinet Gateway' and 'Fortinet Gateway (Older)': the factory certificate's CN is the FortiGate serial (FG100ETK1800118, FGT30D3X15038375), O=Fortinet"},
+  {"product": "PAN-OS", "cpe": "cpe:/o:paloaltonetworks:pan-os", "field": "issuer",
+   "all": ["(?:^|/)commonName=\\d{12}(?:/|$)", "(?:^|/)organizationName=Palo Alto Networks(?:/|$)"],
+   "source": "Palo Alto Networks LIVEcommunity, 'Trouble with Expedition Import Config and API Key Generation' (issuer C=US; ST=CA; L=Santa Clara; O=Palo Alto Networks; CN=013201027270: the firewall's 12-digit serial)"},
+  {"product": "SonicOS", "cpe": "cpe:/o:sonicwall:sonicos", "field": "subject",
+   "all": ["(?:^|/)organizationName=HTTPS Management Certificate for SonicWALL \\(self-signed\\)(?:/|$)"],
+   "source": "the SonicWall management interface's self-signed default (O=OU=HTTPS Management Certificate for SonicWALL (self-signed), CN=192.168.168.168), quoted in Spiceworks 'How to disable 192.168.168.168 as a private LAN IP'"},
+  {"product": "Cisco Adaptive Security Appliance Software", "cpe": "cpe:/a:cisco:adaptive_security_appliance_software", "field": "subject",
+   "all": ["(?:^|/)commonName=ASA Temporary Self Signed Certificate(?:/|$)"],
+   "source": "Rapid7 Recog xml/x509_subjects.xml 'Cisco ASA Temp Cert'"},
+  {"product": "Cisco IOS", "cpe": "cpe:/o:cisco:ios", "field": "subject",
+   "all": ["(?:^|/)commonName=IOS-Self-Signed-Certificate-\\d+"],
+   "source": "Rapid7 Recog xml/x509_subjects.xml 'Cisco IOS Default Certificate' (IOS XE issues the same)"},
+  {"product": "Sophos Firewall", "cpe": "", "field": "subject",
+   "all": ["(?:^|/)commonName=SophosApplianceCertificate"],
+   "source": "Rapid7 Recog xml/x509_subjects.xml 'Sophos Appliance' (it names no product line: no CPE is claimed)"}
+ ],
+ "not_covered": [
+  {"vendor": "Juniper", "note": "no default certificate pattern with a citable source: Junos OS is read from the OS guess only"}
+ ]
+}
