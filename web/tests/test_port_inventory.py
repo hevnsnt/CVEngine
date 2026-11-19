@@ -109,10 +109,6 @@ def _report(ports, scanned='22,80,443,3306,8080', extraports='closed', status='u
 		f'<host><status state="{status}"/><address addr="192.0.2.77" addrtype="ipv4"/><ports>{extra}{body}</ports></host><runstats><finished exit="success"/></runstats></nmaprun>')
 
 class OpenPortStateTests(TestCase):
-	def setUp(self):
-		patcher = mock.patch('targetApp.target_types.blocked_names', return_value=set())
-		patcher.start()
-		self.addCleanup(patcher.stop)
 
 	"""Review 2.5: only open ports are scanned, correlated and listed, and a port that closed is closed."""
 

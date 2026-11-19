@@ -334,12 +334,12 @@ def _chunks(items, size=CHUNK):
 
 
 def host_allowed(host, project=None):
-    """The SSRF gate: an IP must be one a scanner may touch (``project`` may authorise a tailnet device of its own), and a name must
-    not resolve to anything blocked."""
-    from targetApp.target_types import IP, classify_target, is_scannable_ip, resolves_to_blocked
+    """The SSRF gate: an IP must be one a scanner may touch (``project`` may authorise a tailnet device of its own). A name is not looked up here: the
+    Sentinel that runs the probe judges every address it resolves to when it connects (``target_types.blocked_address``)."""
+    from targetApp.target_types import IP, classify_target, is_scannable_ip
     if classify_target(host) == IP:
         return is_scannable_ip(host, project=project)
-    return not resolves_to_blocked(host)
+    return bool(str(host or '').strip())
 
 
 def _retired_endpoints(scan):

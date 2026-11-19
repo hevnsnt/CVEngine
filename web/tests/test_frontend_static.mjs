@@ -255,8 +255,9 @@ test('Sentinel page shows the OpenVAS idle state without a deferred list', () =>
 const settingsSource = read('sentinel-settings.js').replace(/^import[\s\S]*?from "[^"]*";\n/gm, '');
 globalThis.__sentinelUi.button = (label, _fn, cls) => sentinelEl('button', cls, label);
 globalThis.__sentinelUi.text = (value = '', attrs = {}) => Object.assign(sentinelEl('input', '', null, attrs), {value});
+Object.assign(globalThis.__sentinelUi, await import('../static/cve/config-maxxing-logic.js'));  // machineText, sentinelTuningText: the module's other import
 const {versionBlock, newestLine, toolsLine, updateLine, waitingLines, watchdogLines, WAIT_RED_SECONDS, kindState, kindNote, kindChips, kindsChange, modesOffered, canReset, capProblem, defaultHint, kindsPanel} = await import(`data:text/javascript,${encodeURIComponent(
-  `const {el, badge, button, text} = globalThis.__sentinelUi;\n${settingsSource}`,
+  `const {el, badge, button, text, machineText, sentinelTuningText} = globalThis.__sentinelUi;\n${settingsSource}`,
 )}`);
 const buttonLabels = (node) => (node.tag === 'button' ? [node.text] : []).concat(...node.children.filter((c) => typeof c !== 'string').map(buttonLabels));
 
@@ -279,6 +280,17 @@ test('a Sentinel card has Update now, the built-in scanner does not and says why
   assert.match(sentinelText(builtin), /follows the newest published Sentinel image/);
   assert.match(sentinelText(builtin), /hold it at one version, set CVENGINE_SCANNER_IMAGE/);
   assert.doesNotMatch(sentinelText(external), /follows the newest published/);
+});
+
+test('Update now stays usable while a Manual updater reports waiting for an administrator, and not while it drains or updates', () => {
+  const updateNow = (status, requested_at = null) => {
+    const find = (node) => (node.tag === 'button' && node.text === 'Update now' ? node : node.children.filter((c) => typeof c !== 'string').map(find).find(Boolean));
+    return find(versionBlock({id: 7, name: 'edge-1', version: 'abc1234', update: {status, requested_at}, settings: {}}, {onChange() {}}));
+  };
+  assert.equal(updateNow('waiting').disabled, false);
+  assert.equal(updateNow('idle').disabled, false);
+  assert.equal(updateNow('draining').disabled, true);
+  assert.equal(updateNow('updating').disabled, true);
 });
 
 test('a card says whether the build is the newest the server saw, since when it runs, and the contract message', () => {
@@ -318,6 +330,15 @@ test('a card says which kind waits for memory and what holds it, and a task that
   assert.equal(sentinelText(lines[0]), 'Waiting for memory, 14 min: screenshots. Needs 400 MB, 140 MB free of 1540 MB; held by naabu on zebra (30 min).');
   assert.match(sentinelText(lines[1]), /Task 3534 \(naabu\) was taken back by the server and is still stopping, 45 s later/);
   assert.match(sentinelText(versionBlock({...base, waiting: [{kind: 'web_screenshot', need_mb: 400, free_mb: 0, budget_mb: 1540, seconds: 5, held_by: []}]}, {onChange() {}})), /Waiting for memory, 5 s: screenshots\. Needs 400 MB/);
+});
+
+test('a card says what the machine has and what auto-tuning set for it', () => {
+  const base = {id: 7, name: 'edge-1', version: 'abc1234', update: {requested_at: null}, settings: {}};
+  const text = sentinelText(versionBlock({...base, machine: {cpus: 4, host_cpus: 4, load_per_cpu: [0.5, 0.5, 0.5], available_share: 0.5, total_mb: 4096, oom_kills_1h: {}},
+    tuning: {max_concurrent: 3, ceiling: 4, kinds: {}, pinned: null}}, {onChange() {}}));
+  assert.match(text, /Machine: 4 CPUs, load 0.5 per CPU, 50% of 4.0 GB memory available\./);
+  assert.match(text, /Auto-tuned to 3 of its machine's 4 tasks at once\./);
+  assert.doesNotMatch(sentinelText(versionBlock(base, {onChange() {}})), /Machine:/);
 });
 
 test('waiting for memory is amber back-pressure, and red only past what the watchdog should have fixed', () => {

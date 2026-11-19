@@ -9,6 +9,10 @@
 <p align="center">Assess each host with industry-standard scanners and fix what matters first.</p>
 
 <p align="center">
+  <sub>English | <a href="README.zh-CN.md">简体中文</a> | <a href="README.zh-TW.md">繁體中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.de.md">Deutsch</a> | <a href="README.pt-BR.md">Português (BR)</a> | <a href="README.ru.md">Русский</a> | <a href="README.ar.md">العربية</a> | <a href="README.hi.md">हिन्दी</a> | <a href="README.it.md">Italiano</a></sub>
+</p>
+
+<p align="center">
   <a href="CHANGELOG.md"><img alt="Release 1.4.1" src="https://img.shields.io/badge/release-1.4.1-2ea44f"></a>
   <a href="LICENSE"><img alt="License GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
   <img alt="Self-hosted with Docker Compose" src="https://img.shields.io/badge/self--hosted-Docker%20Compose-blue">
@@ -108,7 +112,7 @@ cvENGINE runs the best open-source security tools. The scanner image pins each t
 | | [sshamble](https://github.com/runZeroInc/sshamble) | SSH handshake and host keys, checked against the [badkeys](https://badkeys.info) blocklist; it never logs in |
 | | [node2shell detector](https://github.com/assetnote/node2shell-scanner) | Assetnote's read-only check for CVE-2026-111497; off by default |
 | | cvENGINE's own checks | Exposed databases, public and dangling cloud storage (S3, Google Cloud Storage, Azure Blob), web routes and their sign-in state, version probes, and DNS and email hygiene based on [MailFail](https://github.com/ACK-J/MailFail) |
-| **Exploitation intelligence** | [cve.now](https://cve.now), [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog), [ENISA EUVD](https://euvd.enisa.europa.eu/), [VulnCheck KEV](https://vulncheck.com), [FIRST EPSS](https://www.first.org/epss/), [Exploit-DB](https://gitlab.com/exploit-database/exploitdb), [Metasploit](https://github.com/rapid7/metasploit-framework), [CVE List V5](https://github.com/CVEProject/cvelistV5), [OSV](https://osv.dev), [Debian security tracker](https://security-tracker.debian.org) | Which CVEs are exploited today, and which fixes a distribution backported |
+| **Exploitation intelligence** | [cve.now](https://cve.now), [CISA KEV](https://www.cisa.gov/known-exploited-vulnerabilities-catalog), [ENISA EUVD](https://euvd.enisa.europa.eu/), [VulnCheck KEV](https://vulncheck.com), [FIRST EPSS](https://www.first.org/epss/), [Exploit-DB](https://gitlab.com/exploit-database/exploitdb), [Metasploit](https://github.com/rapid7/metasploit-framework), [CVE List V5](https://github.com/CVEProject/cvelistV5), [OSV](https://osv.dev), [Debian security tracker](https://security-tracker.debian.org), [Red Hat Security Data](https://access.redhat.com/security/data) | Which CVEs are exploited today, and which fixes a distribution backported |
 | **Optional add-ons** | [OpenVAS](https://greenbone.github.io/docs/latest/) (Greenbone Community Edition) | A second network vulnerability scanner on a Sentinel, for your hottest hosts. Off by default ([OpenVAS](docs/OPENVAS.md)) |
 | | [Tailscale](https://github.com/tailscale/tailscale) | Optional: join a tailnet, import and scan its devices, and check its configuration ([Tailscale](docs/TAILSCALE.md)) |
 | | [runZero](https://www.runzero.com) | Optional: a scheduled sync of runZero's asset data with your own token ([Configuration](docs/CONFIGURATION.md#runzero)) |

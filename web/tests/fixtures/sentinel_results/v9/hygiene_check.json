@@ -1,0 +1,71 @@
+{
+  "outcome": "done",
+  "certs": [
+    {
+      "host": "www.example.com",
+      "port": 443,
+      "found": true,
+      "cert": {
+        "subject": "www.example.com",
+        "issuer": "Example CA",
+        "sans": [
+          "www.example.com",
+          "example.com"
+        ],
+        "not_before": "2026-01-01T00:00:00+00:00",
+        "not_after": "2026-04-01T00:00:00+00:00",
+        "signature_algorithm": "sha256 (sha256WithRSAEncryption)",
+        "key_description": "RSA 2048",
+        "protocol": "TLSv1.3",
+        "cipher": "TLS_AES_256_GCM_SHA384",
+        "chain_error": "",
+        "legacy_tls": false
+      }
+    },
+    {
+      "host": "mail.example.com",
+      "port": 993,
+      "found": false
+    }
+  ],
+  "mail": [
+    {
+      "name": "example.com",
+      "has_mx": true,
+      "findings": [
+        {
+          "check": "spf_softfail",
+          "severity": 1,
+          "title": "SPF ends in ~all (soft fail)",
+          "detail": "Spoofed mail is marked, not rejected.",
+          "host": "example.com",
+          "evidence": {
+            "record": "v=spf1 mx ~all"
+          }
+        },
+        {
+          "check": "dmarc_missing",
+          "severity": 3,
+          "title": "No DMARC record",
+          "detail": "Mail for this domain can be spoofed.",
+          "host": "example.com",
+          "evidence": {
+            "dns": [
+              {
+                "resolver": "system",
+                "result": "nxdomain",
+                "records": []
+              }
+            ],
+            "dns_confirmed": false
+          }
+        }
+      ]
+    }
+  ],
+  "touched": [
+    "www.example.com",
+    "mail.example.com"
+  ],
+  "refused": []
+}

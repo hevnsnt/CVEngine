@@ -211,8 +211,8 @@ def _purge(project, name, subtree=False):
     """Remove everything recorded for the host ``name`` in ``project`` (exact name, any case; with ``subtree`` also every name under
     it). Returns the counts."""
     from cveFeed.models import (AssetChange, CVEMatch, DiscoveryEvent, FindingAuditEvent, FindingComment, HostArchive, HostAssessment,
-                                HostInventory, HostLabel, HostProfile, HostScreenshot, HostState, HygieneFinding, ProbeObservation, RdpScreenshot,
-                                RouteAuth, TlsCertificate, Triage)
+                                HostInventory, HostLabel, HostProfile, HostScreenshot, HostState, HygieneFinding, JavaRuntime, ProbeObservation, RdpScreenshot,
+                                RouteAuth, ServiceFeature, TlsCertificate, Triage)
     from startScan.models import EndPoint, ScanHistory, Subdomain, Vulnerability
     from targetApp.models import Domain
     from cveFeed import snapshot_cache
@@ -250,10 +250,12 @@ def _purge(project, name, subtree=False):
             ('routes', RouteAuth, {'project': project}), ('changes', AssetChange, {'project': project}),
             ('profiles', HostProfile, {'project': project}), ('triage', Triage, {'project': project}),
             ('inventories', HostInventory, {'project': project}),
-            ('probes', ProbeObservation, {'project': project}), ('archives', HostArchive, {'project': project}),
+            ('probes', ProbeObservation, {'project': project}), ('java_runtimes', JavaRuntime, {'project': project}),
+            ('archives', HostArchive, {'project': project}),
             ('screenshots', RdpScreenshot, {'project': project}), ('web_screenshots', HostScreenshot, {'project': project}),
             ('assessments', HostAssessment, {'project': project}),
             ('certificates', TlsCertificate, {'domain__project': project}),
+            ('service_features', ServiceFeature, {'domain__project': project}),
             ('hygiene', HygieneFinding, {'domain__project': project}),
             ('events', DiscoveryEvent, {'domain__project': project})):
         counts[label] = model.objects.filter(_host_q('host', name, subtree), **flt).delete()[0]

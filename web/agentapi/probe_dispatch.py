@@ -46,7 +46,8 @@ def try_http_probes(project, scan, planned, unattended=True):
     for start in range(0, len(planned), MAX_PROBES_PER_TASK):
         chunk = planned[start:start + MAX_PROBES_PER_TASK]
         target = {'probes': [{'id': asset, 'host': sub.name.lower(), 'probe': entry['probe'], 'base': entry['target']['base'].rstrip('/'),
-                              'allowed': sorted(_allowed(sub))[:20]} for sub, asset, entry in chunk],
+                              'allowed': sorted(_allowed(sub))[:20], **({'features': list(entry['features'])} if entry.get('features') else {})}
+                             for sub, asset, entry in chunk],
                   'scope': probe_scope.for_probes(project.pk, [(sub, entry) for sub, _asset, entry in chunk], unattended=unattended)}
         result = sentinel_dispatch.dispatch_or_none(project, 'http_probe', target, host=_hosts_label(sub.name for sub, _a, _e in chunk),
                                                     scan=scan)
@@ -63,7 +64,29 @@ def try_http_probes(project, scan, planned, unattended=True):
                 answered[asset] = row['observations']
         if result.get('refused'):
             logger.info('http_probe task for %s: the scanner refused hops to %s host(s) outside the scope policy', project.pk, len(result['refused']))
+        _http_features(project, chunk, result)
     return answered
+
+
+def _http_features(project, chunk, result):
+    """Store the service features an ``http_probe`` result read (``cveFeed.service_features.ingest``): HTTP/3 and PHP on Windows from a front
+    page, WebDAV and the methods from an OPTIONS, the VPN portals. Only the web bases this task asked count. Nothing is removed for a read that
+    came back empty (a reading not taken is unknown, and an older Sentinel reads none): a stored reading ages out (``FRESH``). Never fatal."""
+    from urllib.parse import urlsplit
+
+    from cveFeed import service_features
+    items = result.get('service_features') or []
+    if not items:
+        return None
+    asked = set()
+    for sub, _asset, entry in chunk:
+        parts = urlsplit(entry['target']['base'])
+        asked.add((sub.name.lower(), parts.port or (443 if parts.scheme == 'https' else 80)))
+    try:
+        return service_features.ingest(project.pk, items, 'http_probe', allowed=asked)
+    except Exception:  # noqa: BLE001 - the probes' own results stand without it
+        logger.exception('could not store the service features of an http_probe task for project %s', project.pk)
+        return None
 
 
 def _allowed(sub):
@@ -71,10 +94,15 @@ def _allowed(sub):
     return probes.allowed_names(sub)
 
 
-def try_dns_resolve(domain, names, scan=None):
+def try_dns_resolve(domain, names, scan=None, held=None):
     """``(pairs, errors)`` (``{(name, ip)}`` and ``{name: reason}``) from a Sentinel's lookups. The kind has no local path
     (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can take it. A name the scope policy left out is never sent and
-    is an error, as is a name the Sentinel refused or a task nobody finished: looked up again later, never a name without an address."""
+    is an error, as is a name the Sentinel refused or a task nobody finished: looked up again later, never a name without an address.
+
+    The answers are judged first (``agentapi.dns_crosscheck``): ``pairs`` holds what the inventory may take, and for a host whose answer is held (a new
+    address of a host that has addresses, or a move into or out of the do-not-scan list, said by one source only) the addresses it already has. ``held``,
+    when given, is filled with ``{name: {ip: reason}}``; a second Sentinel is asked to confirm them."""
+    from agentapi import dns_crosscheck
     from cveFeed import probe_scope
     project = domain.project
     names = [n for n in dict.fromkeys((n or '').strip().lower().rstrip('.') for n in names) if n]
@@ -94,7 +122,18 @@ def try_dns_resolve(domain, names, scan=None):
             errors.update({name: 'no answer from the scanner' for name in chunk})
             continue
         resolved = result.get('resolved') or {}
-        pairs |= {(name, ip) for name, ips in resolved.items() for ip in ips}
+        verdict = dns_crosscheck.judge(project.pk, resolved)
+        pairs |= verdict.accepted | verdict.carried
+        if verdict.held:
+            if held is not None:
+                for name, addresses in verdict.held.items():
+                    held.setdefault(name, {}).update(addresses)
+            agent_id = getattr(result, 'agent_id', None)
+            dns_crosscheck.note_held(project, verdict.held, scan=scan, sentinel=sentinel_dispatch._sentinel_name(agent_id) if agent_id else '')
+            try:
+                dns_crosscheck.request_confirmation(project, domain, list(verdict.held), agent_id, scan=scan)
+            except Exception:  # noqa: BLE001 - a confirmation that could not be asked for leaves the answer held, nothing else changes
+                logger.exception('could not ask for a confirming lookup in project %s', project.pk)
         failed = result.get('errors') or {}
         for name in chunk:
             if name not in resolved and name in failed:
@@ -309,6 +348,7 @@ def _is_address(value):
 
 MAX_TLS_PER_TASK = 300   # the contract's bounds (cvengine_scanner.probes.hygiene)
 MAX_MAIL_PER_TASK = 101
+MAX_SLP_PER_TASK = 50     # the contract's bound on the optional slp list
 MAX_FINDINGS_PER_TASK = 50  # the contract's bound (cvengine_scanner.probes.dangling_dns.MAX_CHECKS)
 
 
@@ -326,21 +366,24 @@ def _confirm_resolvers():
     return out[:5]
 
 
-def try_hygiene(domain, tls, mail):
+def try_hygiene(domain, tls, mail, slp=()):
     """The cleaned result of one ``hygiene_check`` task (``probe_results.clean_hygiene_check``) for ``domain``: ``tls`` is ``[(host, port)]`` and
     ``mail`` is ``[(name, always)]`` (a name flagged ``always`` is reviewed whatever its records, the others only when they have an MX record of their
-    own and are not a CNAME). The kind has no local path (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can take the work
+    own and are not a CNAME); ``slp`` is ``[(host, port)]``, each asked one SLP service request (whether SLP answers: a ``service_features``
+    reading; a Sentinel that predates the field asks nothing). The kind has no local path (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can take the work
     or the task ended unanswered. Nothing in the answer says an endpoint or a name was checked unless its row is there: the caller reads a missing one
     as unknown."""
     from cveFeed import probe_scope
     project = domain.project
-    if not (tls or mail):
+    if not (tls or mail or slp):
         return {'certs': [], 'mail': []}
     _offered(project, 'hygiene_check')  # raises ScannerUnavailable when none can take it
-    tls, mail = list(tls)[:MAX_TLS_PER_TASK], list(mail)[:MAX_MAIL_PER_TASK]
+    tls, mail, slp = list(tls)[:MAX_TLS_PER_TASK], list(mail)[:MAX_MAIL_PER_TASK], list(slp)[:MAX_SLP_PER_TASK]
+    scope = probe_scope.for_hygiene(project.pk, list(dict.fromkeys(tls + slp)), [n for n, _a in mail])
+    slp = [(h, p) for h, p in slp if h.strip().lower().rstrip('.') in scope['hosts']]  # a host the policy leaves out is never sent
     target = {'tls': [{'host': h, 'port': p} for h, p in tls], 'mail': [{'name': n, 'always': bool(a)} for n, a in mail],
               'confirm_resolvers': _confirm_resolvers(), 'rdap': os.environ.get('CVENGINE_HYGIENE_RDAP', '1') != '0',
-              'scope': probe_scope.for_hygiene(project.pk, tls, [n for n, _a in mail])}
+              **({'slp': [{'host': h, 'port': p} for h, p in slp]} if slp else {}), 'scope': scope}
     result = sentinel_dispatch.dispatch_or_none(project, 'hygiene_check', target, host=_hosts_label([domain.name] + [h for h, _p in tls]))
     if result.get('refused'):
         logger.info('hygiene_check task for %s: the scanner refused %s host(s) outside the scope policy', project.pk, len(result['refused']))
@@ -387,7 +430,100 @@ def try_ssh_probe(project, keys, scan=None, priority=1):
         return {}
     if result.get('refused'):
         logger.info('ssh_probe task for %s: the scanner refused %s endpoint(s) outside the scope policy', project.pk, len(result['refused']))
-    return {(row['address'], row['port']): row for row in result.get('hosts') or []}
+    features = {}
+    for item in result.get('service_features') or []:  # the KEXINIT and method readings (cveFeed.address_features), each kept with its endpoint's row
+        features.setdefault((item['host'], item['port']), []).append(item)
+    return {(row['address'], row['port']): {**row, 'service_features': features.get((str(row['address']).lower(), row['port']), [])}
+            for row in result.get('hosts') or []}
+
+
+
+MAX_JAVA_WEB_PER_TASK = 50   # the contract's bound (cvengine_scanner.probes.java_runtime.MAX_WEB)
+MAX_JAVA_JDWP_PER_TASK = 25  # the contract's bound (cvengine_scanner.probes.java_runtime.MAX_JDWP)
+
+
+def try_java_runtime(project, web, jdwp, scan=None, priority=1, unattended=True):
+    """``({web id: row}, {jdwp id: row})`` for the Java runtime reads a Sentinel made (``probe_results.clean_java_runtime``, cut to the entries asked).
+    ``web`` is ``[(sub, {'id', 'host', 'base', 'checks', 'allowed'})]`` and ``jdwp`` ``[{'id', 'address', 'port'}]`` (``cveFeed.java_runtime.plan``), each
+    within the contract's bound. The kind has no local path (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can take it. A
+    task that ended without a result, and an entry the result has no row for, are missing from the answer: unknown, the caller leaves them due."""
+    from cveFeed import probe_scope
+    web, jdwp = list(web)[:MAX_JAVA_WEB_PER_TASK], list(jdwp)[:MAX_JAVA_JDWP_PER_TASK]
+    if not (web or jdwp) or not _offered(project, 'java_runtime'):
+        return {}, {}
+    target = {'web': [entry for _sub, entry in web], 'jdwp': jdwp,
+              'scope': probe_scope.for_java(project.pk, [sub for sub, _e in web], [j['address'] for j in jdwp], unattended=unattended)}
+    if not target['web']:
+        del target['web']
+    if not target['jdwp']:
+        del target['jdwp']
+    result = sentinel_dispatch.dispatch_or_none(project, 'java_runtime', target, host=_hosts_label([e['host'] for _s, e in web] + [j['address'] for j in jdwp]),
+                                                ips=[j['address'] for j in jdwp][:64] or None, scan=scan, priority=priority)
+    if result is None:
+        return {}, {}
+    if result.get('refused'):
+        logger.info('java_runtime task for %s: the scanner refused %s host(s) outside the scope policy', project.pk, len(result['refused']))
+    return {row['id']: row for row in result.get('web') or []}, {row['id']: row for row in result.get('jdwp') or []}
+
+MAX_VERSION_READS_PER_TASK = 100  # the contract's bound (cvengine_scanner.probes.version_read.MAX_READS)
+
+
+def try_version_read(project, reads, scan=None, priority=1, unattended=True):
+    """``{read id: row}`` for the version source reads a Sentinel made (``probe_results.clean_version_read``, cut to the entries asked). ``reads``
+    is ``[(sub, {'id', 'host', 'base', 'allowed', 'requests'})]`` (``cveFeed.version_sources``), within the contract's bound. The kind has no local
+    path (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can take it. A task that ended without a result, and an
+    entry the result has no row for, are missing from the answer: unknown, the caller leaves them due."""
+    from cveFeed import probe_scope
+    reads = list(reads)[:MAX_VERSION_READS_PER_TASK]
+    if not reads or not _offered(project, 'version_read'):
+        return {}
+    subs = list({id(sub): sub for sub, _e in reads}.values())
+    target = {'reads': [entry for _sub, entry in reads], 'scope': probe_scope.for_versions(project.pk, subs, unattended=unattended)}
+    result = sentinel_dispatch.dispatch_or_none(project, 'version_read', target, host=_hosts_label([e['host'] for _s, e in reads]),
+                                                scan=scan, priority=priority)
+    if result is None:
+        return {}
+    if result.get('refused'):
+        logger.info('version_read task for %s: the scanner refused %s host(s) outside the scope policy', project.pk, len(result['refused']))
+    return {row['id']: row for row in result.get('reads') or []}
+
+
+def try_version_digest(project, reads, scan=None, priority=1, unattended=True):
+    """``try_version_read`` for the entries with a digest read (``version_digest``, contract 8: ``cveFeed.edge_builds``): offered only to a
+    Sentinel that declares contract 8, so a contract 7 one is never sent a digest read (``version_sources._digest_ready`` leaves them out when
+    none can take them)."""
+    from cveFeed import probe_scope
+    reads = list(reads)[:MAX_VERSION_READS_PER_TASK]
+    if not reads or not _offered(project, 'version_digest'):
+        return {}
+    subs = list({id(sub): sub for sub, _e in reads}.values())
+    target = {'reads': [entry for _sub, entry in reads], 'scope': probe_scope.for_versions(project.pk, subs, unattended=unattended)}
+    result = sentinel_dispatch.dispatch_or_none(project, 'version_digest', target, host=_hosts_label([e['host'] for _s, e in reads]),
+                                                scan=scan, priority=priority)
+    if result is None:
+        return {}
+    if result.get('refused'):
+        logger.info('version_digest task for %s: the scanner refused %s host(s) outside the scope policy', project.pk, len(result['refused']))
+    return {row['id']: row for row in result.get('reads') or []}
+
+
+def try_version_rows(project, reads, scan=None, priority=1, unattended=True):
+    """``try_version_read`` for the entries with a rows read (``version_rows``, contract 9: Apache's server-status, a phpinfo page a scan found):
+    offered only to a Sentinel that declares contract 9, so an older one is never sent a rows read (``version_sources._kind_ready`` leaves them
+    out when none can take them)."""
+    from cveFeed import probe_scope
+    reads = list(reads)[:MAX_VERSION_READS_PER_TASK]
+    if not reads or not _offered(project, 'version_rows'):
+        return {}
+    subs = list({id(sub): sub for sub, _e in reads}.values())
+    target = {'reads': [entry for _sub, entry in reads], 'scope': probe_scope.for_versions(project.pk, subs, unattended=unattended)}
+    result = sentinel_dispatch.dispatch_or_none(project, 'version_rows', target, host=_hosts_label([e['host'] for _s, e in reads]),
+                                                scan=scan, priority=priority)
+    if result is None:
+        return {}
+    if result.get('refused'):
+        logger.info('version_rows task for %s: the scanner refused %s host(s) outside the scope policy', project.pk, len(result['refused']))
+    return {row['id']: row for row in result.get('reads') or []}
 
 
 MAX_ROUTE_HOSTS_PER_TASK = 25  # the contract's bound (cvengine_scanner.probes.routes.MAX_HOSTS)

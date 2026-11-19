@@ -111,6 +111,10 @@ _BANNERS = (
     ('angularjs', re.compile(r'@license AngularJS v' + _VERSION + r'\b')),
     ('react', re.compile(r'@license React v' + _VERSION + r'\b')),
     ('vue', re.compile(_LINE + r'Vue\.js v' + _VERSION + r'\b')),
+    # Vue 3.4 and later: every package's build starts with the monorepo's banner (vuejs/core rollup.config.js), "* vue v3.4.21" or
+    # "* @vue/runtime-core v3.4.21", then "* (c) 2018-present Yuxi (Evan) You and Vue contributors"; a bundler keeps it as a legal comment
+    ('vue', re.compile(_LINE + r'(?:vue|@vue/(?:shared|reactivity|runtime-core|runtime-dom|compiler-core|compiler-dom|compiler-sfc|server-renderer))'
+                       r' v' + _VERSION + r'[ \t]*\r?\n[ \t]*\*[ \t]*\(c\) 2018-present Yuxi \(Evan\) You')),
     ('lodash', re.compile(_LINE + r'(?:@license )?lodash ' + _VERSION + r'\b', re.IGNORECASE)),
     ('moment', re.compile(r'(?m)^//! moment\.js[ \t]*\r?\n//! version[ \t]*:[ \t]*' + _VERSION + r'\b')),
     ('underscore', re.compile(_LINE + r'Underscore\.js ' + _VERSION + r'\b')),
@@ -896,9 +900,7 @@ def read_page(entries, page_url, fetch, vet, budget, before_each=None, stop=None
             read, why = _read_one(url, fetch, cached)
         except Exception as exc:  # noqa: BLE001 - a script that cannot be read is skipped; its name stays a hint
             logger.info('script read failed: %s', type(exc).__name__)
-            from cveFeed.local_egress import PortHeld
-            # this server's egress governor or skip list held the port: nothing was sent, which says nothing about the host
-            read, why = None, 'held' if isinstance(exc, PortHeld) else 'unreachable'
+            read, why = None, 'unreachable'
         reader.keep(url, (read, why))
         if read is None:
             entry['skipped'] = why

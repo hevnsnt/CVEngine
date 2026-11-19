@@ -24,13 +24,13 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [WPScan](https://github.com/wpscanteam/wpscan) | [WPScan Public Source License](https://github.com/wpscanteam/wpscan/blob/master/LICENSE) (free for testing your own systems and for pentesters; a commercial license is needed for managed or hosted use) | WordPress vulnerability scanning |
 | [testssl.sh](https://github.com/testssl/testssl.sh) | GPL-2.0 (run as a separate program, never linked) | Tests the TLS configuration of every TLS port: protocols, ciphers, forward secrecy and the named TLS vulnerabilities |
 | [Tailscale](https://github.com/tailscale/tailscale) (the `tailscale/tailscale` container image) | BSD-3-Clause | The optional `tailscale` compose service that joins a tailnet so scans can reach it; read through its local status API |
-| [Greenbone Community Edition](https://greenbone.github.io/docs/latest/): [gvmd](https://github.com/greenbone/gvmd) (with its library [gvm-libs](https://github.com/greenbone/gvm-libs), GPL-2.0-or-later) | AGPL-3.0-or-later | The vulnerability manager of the optional `openvas` compose profile; cvENGINE drives it over GMP. Every Greenbone component runs as a separate container (image from `registry.community.greenbone.net`), never linked into the cvENGINE image |
+| [Greenbone Community Edition](https://greenbone.github.io/docs/latest/): [gvmd](https://github.com/greenbone/gvmd) (with its library [gvm-libs](https://github.com/greenbone/gvm-libs), GPL-2.0-or-later) | AGPL-3.0-or-later | The vulnerability manager of the `openvas` profile of a Sentinel (the Sentinel repository's compose file; this server runs none of it); the Sentinel drives it over GMP. Every Greenbone component runs as a separate container (image from `registry.community.greenbone.net`), never linked into the cvENGINE image |
 | [ospd-openvas](https://github.com/greenbone/ospd-openvas) | AGPL-3.0-or-later | The scanner wrapper of the `openvas` profile; the only container there with `NET_RAW` and `NET_ADMIN` |
 | [openvas-scanner](https://github.com/greenbone/openvas-scanner) | GPL-2.0 (its Rust parts GPL-2.0-or-later) | The scan engine and the notus service of the `openvas` profile |
 | [pg-gvm](https://github.com/greenbone/pg-gvm) | GPL-3.0 | The PostgreSQL database image of the `openvas` profile (PostgreSQL itself is under the PostgreSQL License) |
 | Redis, in Greenbone's `redis-server` image | The license of the Redis version Greenbone ships (check it in the image before redistributing) | The scanner's cache in the `openvas` profile; a separate container |
 | Greenbone feed data (`vulnerability-tests`, `notus-data`, `scap-data`, `cert-bund-data`, `dfn-cert-data`, `data-objects`, `report-formats` images, and `gpg-data`, the signing keys) | Its own terms, printed by the data containers when they start | Vulnerability tests and advisory data for the `openvas` profile. The data images follow a moving tag on purpose (the definitions must keep updating), so what they contain changes without a cvENGINE release; `gpg-data` is pinned by digest |
-| [python-gvm](https://github.com/greenbone/python-gvm) (pinned in `web/requirements.txt`) | GPL-3.0-or-later (its dependencies: `httpx` and `httpcore` BSD-3-Clause, `lxml` BSD-3-Clause, `paramiko` LGPL-2.1, `PyNaCl` and `bcrypt` Apache-2.0, `invoke` BSD-2-Clause, `h2`, `hpack` and `hyperframe` MIT) | The GMP client library behind the OpenVAS add-on; installed in the cvENGINE image (it is linked, which is why its license must fit the GPL-3.0) |
+| [python-gvm](https://github.com/greenbone/python-gvm) (in the Sentinel image, pinned in the Sentinel `requirements.txt`; the server image no longer installs it) | GPL-3.0-or-later (its dependencies: `httpx` and `httpcore` BSD-3-Clause, `lxml` BSD-3-Clause, `paramiko` LGPL-2.1, `PyNaCl` and `bcrypt` Apache-2.0, `invoke` BSD-2-Clause, `h2`, `hpack` and `hyperframe` MIT) | The GMP client library behind the OpenVAS add-on; installed in the cvENGINE image (it is linked, which is why its license must fit the GPL-3.0) |
 | [aardwolf](https://github.com/skelsec/aardwolf) | MIT | The headless RDP client behind the login-screen screenshot, in the Sentinel image (pinned in the Sentinel `requirements.txt`; the server image no longer installs it) |
 | [node2shell-scanner](https://github.com/assetnote/node2shell-scanner) by Assetnote | MIT | Read-only detection of CVE-2026-111497; vendored (trimmed to its detection core) as `client/vendor/node2shell.py` in the Sentinel repository ([cvENGINE-sentinel](https://github.com/hevnsnt/cvENGINE-sentinel)), with the exact source commit in that file's header; the server's `web/cveFeed/node2shell_scan.py` only queues the work |
 
@@ -43,16 +43,19 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [ENISA EUVD](https://euvd.enisa.europa.eu) | European exploited vulnerabilities |
 | [VulnCheck KEV](https://vulncheck.com) | Exploitation data, with a free community key |
 | [FIRST EPSS](https://www.first.org/epss/) | Exploit prediction scores |
+| [Fox-IT citrix-netscaler-triage](https://github.com/fox-it/citrix-netscaler-triage) (Apache-2.0; the NetScaler version table of `scan-citrix-netscaler-version.py` at commit `d12affac`, converted to JSON with its "unknown" rows left out, in `web/cveFeed/data/edge_fingerprints.json`, which keeps the source, the licence and a citation per entry) | The NetScaler build a `rdx_en.json.gz` timestamp or a login page `?v=` value names (`cveFeed.edge_builds`) |
+| [Bishop Fox panos-scanner](https://github.com/noperator/panos-scanner) (MIT, Copyright 2020 @noperator; `version-table.txt` at commit `6f58127f`, its notice kept in `web/cveFeed/data/edge_fingerprints.json`) | The PAN-OS releases a GlobalProtect static file's build date can be (`cveFeed.edge_builds`) |
 | [Exploit-DB](https://gitlab.com/exploit-database/exploitdb) (GPL-2.0 or later) | Public exploit references |
 | [Metasploit Framework](https://github.com/rapid7/metasploit-framework) (BSD-3-Clause) | Exploit module references |
 | [CVE List V5](https://github.com/CVEProject/cvelistV5) | CVE records |
 | [OSV](https://osv.dev) (Apache-2.0 code) and [Debian security tracker](https://security-tracker.debian.org) | Distribution fix data for backport detection |
+| [Red Hat Security Data API](https://access.redhat.com/security/data) (CC BY 4.0) | RHEL fix states, fixed builds and advisories for backport detection |
 | [crt.sh](https://crt.sh) | Certificate transparency lookups |
 | [IANA RDAP bootstrap](https://data.iana.org/rdap/dns.json) and the registries it names | Registry lookups for the hygiene and dangling-domain checks |
 | [cvENGINE CVE seed](https://github.com/hevnsnt/CVEngine/releases/tag/cve-seed) | The pre-built CVE catalog a new install downloads and verifies on first start |
 | [GitHub API](https://docs.github.com/rest) | The in-app update check |
 | [badkeys.info](https://badkeys.info) | Known-weak SSH host keys, downloaded by the Sentinel (see sshamble above) |
-| [nuclei-templates releases](https://github.com/projectdiscovery/nuclei-templates/releases) | The server's template refresh and the reviewer's check for a newer release |
+| [nuclei-templates releases](https://github.com/projectdiscovery/nuclei-templates/releases) | The reviewer's check for a release newer than the one the Sentinels pin |
 | [Greenbone Community feed](https://greenbone.github.io/docs/latest/) | The OpenVAS add-on's vulnerability tests, from `registry.community.greenbone.net` |
 | [HackerOne API](https://api.hackerone.com) | Submitting a report you wrote, with your own API token |
 | Slack, Discord, Telegram and Lark webhooks | Notifications to the webhook or bot you configure |
@@ -63,6 +66,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [runZero Export API](https://help.runzero.com/docs/exporting-asset-data/) | Asset inventory (OS, hardware, tags, CVE reports) read with your own Export API token from `console.runzero.com`; no runZero code is bundled |
 | [bounty-targets-data](https://github.com/arkadiyt/bounty-targets-data) (MIT) | Public scope of bug bounty programs, read at run time |
 | [Bugcrowd Vulnerability Rating Taxonomy](https://github.com/bugcrowd/vulnerability-rating-taxonomy) (Apache-2.0) | Bundled as `web/cveFeed/data/vrt.json` for report categories and priority |
+| [Rapid7 Recog](https://github.com/rapid7/recog) (BSD-2-Clause, Copyright (c) 2014-2015, Rapid7; its `LICENSE` and `COPYING` kept beside the data) | Eleven of its XML fingerprint databases, vendored unchanged in `web/cveFeed/data/recog/` at commit `f1191e24332c51d6a3d98457f64fba8dec340784` (`manifest.json` holds the SHA-256 of each file; `scripts/update_recog.py` refreshes them), read on the server over stored banners for the product, version and CPE they state (`cveFeed.recog`). No Recog code is included |
 
 ## AI back ends
 

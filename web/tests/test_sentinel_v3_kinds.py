@@ -102,7 +102,7 @@ class CleanResultTests(SimpleTestCase):
     def test_an_nmap_report_is_bounded(self):
         self.assertEqual(self.clean('nmap_full', {'xml': '<nmaprun/>'})['xml'], '<nmaprun/>')
         with self.assertRaises(ApiError):
-            self.clean('nmap_verify', {'xml': 'x' * (sentinel_broker.MAX_NMAP_UDP_XML + 1)})
+            self.clean('nmap_verify', {'xml': 'x' * (sentinel_broker.MAX_NMAP_REPORT_XML + 1)})
 
     def test_an_ipv6_address_is_compared_as_an_address_not_as_text(self):
         """SN-11: the task stores ``2001:0db8::1``, nmap prints ``2001:db8::1``: the host is still the asked one, not a clean empty list."""
@@ -163,7 +163,6 @@ class StageBase(NoRealSleep, RouteFixture, TestCase):
         super().setUp()
         LocalFallback('none').apply(self)
         self.no_real_sleep()
-        mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True).start()
 
     def arm(self, kind):
         return assert_ran_nowhere_locally(self, kind)
@@ -294,7 +293,7 @@ class FullSweepTests(NoRealSleep, FullScanBase):
         with FakeScanner(kinds=['nmap_full', 'nmap_verify']) as fake:
             out = fullscan.sweep_ip(ip, pipeline=lambda domain_id, names: retested.append(names))
         self.assertEqual(fake.served_kinds(), ['nmap_full', 'nmap_verify'])
-        self.assertEqual(fake.served[1]['target'], {'address': '192.0.2.10', 'ports': [22, 443, 8443], 'version_intensity': 5})
+        self.assertEqual(fake.served[1]['target'], {'address': '192.0.2.10', 'ports': [22, 443, 8443], 'version_intensity': 7})
         self.assertEqual((out['ok'], out['open'], out['new']), (True, 3, [22, 443, 8443]))
         ip = IpAddress.objects.get(pk=ip.pk)
         self.assertIsNotNone(ip.full_scanned_at)
@@ -387,7 +386,7 @@ class NucleiValidateTests(StageBase):
             templategen.generate_template(self._cve(), project=self.project.id)
         self.assertFalse(AIJob.objects.exists())  # the AI reviewer was never asked for a template nothing could check
 
-    def test_a_template_whose_scanner_went_away_before_its_check_is_never_a_draft(self):
+    def test_a_template_whose_scanner_went_away_before_its_check_waits_for_it_and_is_never_valid(self):
         from types import SimpleNamespace
         from cveFeed.models import GeneratedTemplate
         cve = self._cve()
@@ -396,8 +395,10 @@ class NucleiValidateTests(StageBase):
                 mock.patch.object(templategen, 'validate_anywhere', side_effect=resources.ScannerUnavailable('nuclei_validate', 'gone')):
             templategen.job_answer(job, self.TEMPLATE)
         saved = GeneratedTemplate.objects.get(cve_entry=cve)
-        self.assertEqual(saved.status, GeneratedTemplate.STATUS_INVALID)
-        self.assertIn('not validated: no scanner could take this work (nuclei_validate)', saved.validation_output)
+        # the paid answer is kept, as a draft that waits for its syntax check (cveFeed.templatevalidate runs it again): never valid, never run
+        self.assertEqual((saved.status, saved.validation_stage, saved.path), (GeneratedTemplate.STATUS_DRAFT, 'syntax', ''))
+        self.assertIn('no Sentinel can run template checks (nuclei_validate)', saved.validation_reason)
+        self.assertIn('not validated yet', saved.validation_output)
 
     def test_an_approved_template_is_run_against_the_project_hosts_on_the_scanner(self):
         self.arm('nuclei_validate')

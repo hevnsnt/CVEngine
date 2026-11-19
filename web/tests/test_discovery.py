@@ -32,18 +32,15 @@ class DiscoveryTests(TestCase):
 		self.project = Project.objects.create(name='P', slug='pd', insert_date=timezone.now(), org=org)
 		self.domain = Domain.objects.create(name='example.test', project=self.project, insert_date=timezone.now())
 		EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
-		patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)  # no real DNS in tests
-		self.resolves_to_blocked = patcher.start()
-		self.addCleanup(patcher.stop)
 
 	def test_domain_resolving_to_a_blocked_address_is_never_handed_to_a_scanner(self):
 		scan = self._scan()
-		self.resolves_to_blocked.return_value = True
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), \
+		with mock.patch('cveFeed.tasks.correlate_cves.delay'), \
+				mock.patch('targetApp.target_types.blocked_address', return_value=True), \
 				mock.patch('agentapi.sentinel_stream.dispatch_stream', side_effect=AssertionError('no task may be created')) as dispatch:
 			out = discovery.run_discovery(scan.id)
 		self.assertEqual(out['status'], discovery.FAILED)
-		self.assertIn('resolves to a loopback, link-local or internal address', out['error'])
+		self.assertIn('is a loopback, link-local or internal address', out['error'])
 		dispatch.assert_not_called()
 
 	def _scan(self):
@@ -59,7 +56,7 @@ class DiscoveryTests(TestCase):
 
 	def _run_for_web_check(self, events, mode='standard'):
 		scan = self._scan()
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(events, mode=mode):
+		with mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(events, mode=mode):
 			discovery.run_discovery(scan.id, mode=mode)
 		return [a for a in AgentActivity.objects.filter(message__contains='no web page').order_by('id')]
 
@@ -90,7 +87,7 @@ class DiscoveryTests(TestCase):
 		scan = self._scan()
 
 		problems = [('virustotal', 'Error with API (401 Unauthorized'), ('crt', 'unrelated module without a key')]
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(EVENTS, problems=problems):
+		with mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(EVENTS, problems=problems):
 			discovery.run_discovery(scan.id)
 		lines = list(AgentActivity.objects.filter(message__contains='key was not accepted').values_list('message', 'status'))
 		self.assertEqual(len(lines), 1)  # the module without a configured key is not blamed on a key
@@ -101,7 +98,7 @@ class DiscoveryTests(TestCase):
 	def test_a_module_that_failed_to_set_up_is_one_activity_line_and_discovery_is_otherwise_unchanged(self):
 		scan = self._scan()
 		hard = [('shotmod', 'Failed to set up the browser. Please install manually.'), ('shotmod', ''), ('other', 'x')]
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(EVENTS, hard_failures=hard):
+		with mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(EVENTS, hard_failures=hard):
 			out = discovery.run_discovery(scan.id)
 		self.assertEqual(out['status'], discovery.SUCCESS)  # a missing module never fails the discovery
 		lines = list(AgentActivity.objects.filter(message__startswith='A discovery module failed to set up').order_by('id').values_list('message', 'status'))
@@ -112,7 +109,7 @@ class DiscoveryTests(TestCase):
 
 	def test_a_hard_failure_with_no_reason_says_so(self):
 		scan = self._scan()
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), \
+		with mock.patch('cveFeed.tasks.correlate_cves.delay'), \
 				sentinel_discovery(EVENTS, hard_failures=[('shotmod', '')]):
 			discovery.run_discovery(scan.id)
 		self.assertEqual(AgentActivity.objects.filter(message__contains='shotmod (no reason given)').count(), 1)
@@ -120,14 +117,14 @@ class DiscoveryTests(TestCase):
 	def test_no_activity_line_when_nothing_hard_failed(self):
 		from cveFeed.models import AgentActivity
 		scan = self._scan()
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(EVENTS):
+		with mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(EVENTS):
 			discovery.run_discovery(scan.id)
 		self.assertFalse(AgentActivity.objects.filter(message__startswith='A discovery module failed').exists())
 
 	def test_streaming_discovery_persists_assets_events_and_activity(self):
 		scan = self._scan()
 		self.assertEqual(scan.scan_status, -1)  # queued until a worker starts it
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay') as correlate, sentinel_discovery(EVENTS):
+		with mock.patch('cveFeed.tasks.correlate_cves.delay') as correlate, sentinel_discovery(EVENTS):
 			out = discovery.run_discovery(scan.id)
 		self.assertEqual(out['status'], discovery.SUCCESS)
 		scan.refresh_from_db()
@@ -150,7 +147,7 @@ class DiscoveryTests(TestCase):
 		seen_midway = []
 		batches = [[{'type': 'DNS_NAME', 'id': f'X{n}{i}', 'data': f'h{n}{i}.example.test', 'host': f'h{n}{i}.example.test', 'module': 'crt', 'parent': 'S'}
 					for i in range(5)] for n in range(3)]
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), \
+		with mock.patch('cveFeed.tasks.correlate_cves.delay'), \
 				sentinel_discovery(batches=batches, after_batch=lambda n: seen_midway.append(Subdomain.objects.filter(scan_history=scan).count())):
 			discovery.run_discovery(scan.id)
 		self.assertEqual(seen_midway, [5, 10, 15])  # stored before the next batch, not at the end
@@ -160,7 +157,7 @@ class DiscoveryTests(TestCase):
 		Port.objects.create(number=443, product='nginx', version='1.18')
 		Port.objects.create(number=443, product='apache', version='2.4')  # enrichment stores one row per product
 		scan = self._scan()
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(EVENTS):
+		with mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(EVENTS):
 			out = discovery.run_discovery(scan.id)
 		self.assertEqual(out['status'], discovery.SUCCESS, out)
 		# each IP gets its own row: the other hosts' nginx and apache rows are never adopted (their product would bleed in)
@@ -169,7 +166,7 @@ class DiscoveryTests(TestCase):
 
 	def test_failure_ends_the_scan_visibly_never_stuck_running(self):
 		scan = self._scan()
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay') as correlate, \
+		with mock.patch('cveFeed.tasks.correlate_cves.delay') as correlate, \
 				sentinel_discovery([EVENTS[0]], error=RuntimeError('the stream broke')):
 			out = discovery.run_discovery(scan.id)
 		self.assertEqual(out['status'], discovery.FAILED)
@@ -181,7 +178,7 @@ class DiscoveryTests(TestCase):
 	def test_a_run_that_stopped_part_way_keeps_what_it_found_and_the_scan_goes_on_without_counting_as_a_finished_discovery(self):
 		from cveFeed.models import ServiceRun
 		scan = self._scan()
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), \
+		with mock.patch('cveFeed.tasks.correlate_cves.delay'), \
 				sentinel_discovery([EVENTS[0]], incomplete='the lease expired after producing partial results'):
 			out = discovery.run_discovery(scan.id)
 		# the hosts it found are the scan's (a failed scan's hosts are not the domain's current inventory), the discovery stage says it was cut short,
@@ -197,7 +194,7 @@ class DiscoveryTests(TestCase):
 
 	def test_a_failure_with_nothing_found_still_fails_the_scan(self):
 		scan = self._scan()
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), \
+		with mock.patch('cveFeed.tasks.correlate_cves.delay'), \
 				sentinel_discovery([], error=RuntimeError('the Sentinel reported it failed')):
 			out = discovery.run_discovery(scan.id)
 		self.assertEqual(out['status'], discovery.FAILED)
@@ -205,7 +202,7 @@ class DiscoveryTests(TestCase):
 	def test_a_finished_deep_run_is_recorded_for_the_weekly_sweep_and_a_standard_one_is_not(self):
 		from cveFeed.models import ServiceRun
 		scan = self._scan()
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'):
+		with mock.patch('cveFeed.tasks.correlate_cves.delay'):
 			with sentinel_discovery(EVENTS, mode='standard'):
 				discovery.run_discovery(scan.id, mode='standard')
 			self.assertFalse(ServiceRun.objects.filter(service='bbot-deep').exists())
@@ -221,8 +218,7 @@ class DiscoveryTests(TestCase):
 		from tests.fake_scanner import LocalFallback, assert_ran_nowhere_locally
 		scan = self._scan()
 		for fallback in ('none', 'all', None):  # the kind has no local path, whatever CVENGINE_LOCAL_FALLBACK says
-			with self.subTest(fallback=fallback), LocalFallback(fallback), mock.patch('reNgine.tasks.geo_localize.delay'), \
-					mock.patch('cveFeed.tasks.correlate_cves.delay') as correlate:
+			with self.subTest(fallback=fallback), LocalFallback(fallback), mock.patch('cveFeed.tasks.correlate_cves.delay') as correlate:
 				assert_ran_nowhere_locally(self, 'bbot_discovery')
 				out = discovery.run_discovery(scan.id)
 				self.assertEqual(out['status'], discovery.FAILED)
@@ -255,9 +251,9 @@ class ScreenshotPersistenceTests(TestCase):
 		scan = self._scan()
 		Subdomain.objects.create(scan_history=scan, name='www.example.test')
 		with self.settings(MEDIA_ROOT=self.media_root):
-			discovery.persist_screenshot_blobs(scan, [{'host': 'www.example.test', 'filename': 'shot.png', 'data': self.PNG}])
+			discovery.persist_screenshot_blobs(scan, [{'host': 'www.example.test', 'filename': 'shot.png', 'content_type': 'image/png', 'data': self.PNG}])
 		sub = Subdomain.objects.get(scan_history=scan, name='www.example.test')
-		self.assertEqual(sub.screenshot_path, f'example.test_{scan.id}/screenshots/sentinel-shot.png')
+		self.assertRegex(sub.screenshot_path, rf'^example\.test_{scan.id}/screenshots/sentinel-[0-9a-f]{{32}}\.png$')  # the server's name, never the Sentinel's
 		with open(os.path.join(self.media_root, sub.screenshot_path), 'rb') as f:
 			self.assertEqual(f.read(), b'\x89PNG\r\n\x1a\nfake-bytes')
 
@@ -265,9 +261,11 @@ class ScreenshotPersistenceTests(TestCase):
 		scan = self._scan()
 		Subdomain.objects.create(scan_history=scan, name='www.example.test')
 		with self.settings(MEDIA_ROOT=self.media_root):
-			discovery.persist_screenshot_blobs(scan, [{'host': 'nobody.example.test', 'filename': 'x.png', 'data': self.PNG},
-													  {'host': 'www.example.test', 'filename': '.hidden.png', 'data': self.PNG},
-													  {'host': 'www.example.test', 'filename': 'x.png', 'data': '!!not base64!!'}])
+			discovery.persist_screenshot_blobs(scan, [{'host': 'nobody.example.test', 'filename': 'x.png', 'content_type': 'image/png', 'data': self.PNG},
+													  {'host': 'www.example.test', 'filename': 'x.png', 'content_type': 'image/png', 'data': '!!not base64!!'},
+													  {'host': 'www.example.test', 'filename': 'x.png', 'content_type': 'image/jpeg', 'data': self.PNG},
+													  {'host': 'www.example.test', 'filename': 'x.png', 'content_type': 'image/png',
+													   'data': __import__('base64').b64encode(b'<svg onload=alert(1)>').decode()}])
 		self.assertEqual(Subdomain.objects.filter(screenshot_path__isnull=False).count(), 0)
 
 
@@ -279,15 +277,12 @@ class DiscoveryApiCredentialWiringTests(TestCase):
 		self.project = Project.objects.create(name='K', slug='pk2', insert_date=timezone.now(), org=self.org)
 		self.domain = Domain.objects.create(name='keyed.test', project=self.project, insert_date=timezone.now())
 		EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
-		patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)  # no real DNS in tests: a resolver answer must not decide whether the run starts
-		patcher.start()
-		self.addCleanup(patcher.stop)
 
 	def _dispatched(self):
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
 			scan = discovery.start_discovery(self.domain)
 		seen = {}
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(EVENTS, seen=seen):
+		with mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(EVENTS, seen=seen):
 			discovery.run_discovery(scan.id)
 		return seen
 
@@ -319,9 +314,8 @@ class TrufflehogBountyTests(TestCase):
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
 			scan = discovery.start_discovery(self.domain)
 		seen = {}
-		with mock.patch.dict('os.environ', {'CVENGINE_BBOT_TRUFFLEHOG': env}), mock.patch('reNgine.tasks.geo_localize.delay'), \
-				mock.patch('cveFeed.tasks.correlate_cves.delay'), \
-				mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), sentinel_discovery(EVENTS, seen=seen):
+		with mock.patch.dict('os.environ', {'CVENGINE_BBOT_TRUFFLEHOG': env}), mock.patch('cveFeed.tasks.correlate_cves.delay'), \
+				sentinel_discovery(EVENTS, seen=seen):
 			discovery.run_discovery(scan.id)
 		return seen['target']
 
@@ -497,7 +491,7 @@ class NucleiStageTests(TestCase):
 			port_stage_run=port_double(), db_exposure_checks={}, provider=None)
 		discover = overrides.pop('discover', None) or sentinel_discovery(events)
 		kwargs.update(overrides)
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'), discover:
+		with mock.patch('cveFeed.tasks.run_hygiene_task.delay'), discover:
 			return scan, discovery.run_pipeline(scan.id, **kwargs)
 
 	def test_a_run_that_stopped_part_way_still_runs_the_later_stages_on_what_it_found(self):
@@ -545,13 +539,33 @@ class NucleiStageTests(TestCase):
 		self.assertEqual(scan.scan_status, 2)  # discovery results stand
 		self.assertEqual(ScanActivity.objects.get(scan_of=scan, name='nuclei_targeted_scan').status, 0)
 
+	def test_the_network_detection_pass_runs_after_the_light_pass_and_before_correlation_when_there_is_a_port_for_it(self):
+		from unittest import mock as _mock
+		from cveFeed import network_detection
+		from startScan.models import ScanActivity
+		sent = []
+
+		def run(scan_id, stream, force=False):
+			sent.append((scan_id, stream, force))
+			return {'targets': 1, 'sent': 1, 'ports': 1, 'readings': 0, 'hosts': {}}
+		with _mock.patch.object(network_detection, 'has_work', return_value=True), _mock.patch.object(network_detection, 'run_for_scan', side_effect=run), \
+				_mock.patch('agentapi.sentinel_dispatch.wrap_nuclei_stream', return_value='the light stream of a Sentinel') as wrap:
+			scan, out = self._pipeline(light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]))
+		names = list(ScanActivity.objects.filter(scan_of=scan).order_by('id').values_list('name', flat=True))
+		self.assertLess(names.index('nuclei_light_scan'), names.index('nuclei_netdetect_scan'))
+		self.assertLess(names.index('nuclei_netdetect_scan'), names.index('cve_correlation'))
+		self.assertEqual(ScanActivity.objects.get(scan_of=scan, name='nuclei_netdetect_scan').title, 'Nuclei network detection pass')
+		self.assertEqual(sent, [(scan.id, 'the light stream of a Sentinel', False)])  # a Sentinel's stream, never the test's light one
+		wrap.assert_called_once_with(scan, 'nuclei_light')
+		self.assertEqual(out['network_detection']['ports'], 1)
+
 	def test_stages_run_in_order_and_the_light_pass_comes_before_the_targeted_one(self):
 		from startScan.models import ScanActivity
 		calls = []
 		scan, out = self._pipeline(light_stream=lambda path, **k: calls.append('light') or iter([]),
 			targeted_stream=lambda path, **k: calls.append('targeted') or iter([]))
 		self.assertEqual(list(ScanActivity.objects.filter(scan_of=scan).order_by('id').values_list('name', flat=True)),
-			['bbot_discovery', 'nmap_scan', 'web_screenshot', 'db_exposure_scan', 'nuclei_light_scan', 'route_auth_scan', 'secrets_scan', 'ssh_probe', 'version_probes', 'wpscan', 'cve_correlation', 'nuclei_targeted_scan', 'triage', 'asset_changes'])
+			['bbot_discovery', 'nmap_scan', 'web_screenshot', 'db_exposure_scan', 'nuclei_light_scan', 'route_auth_scan', 'secrets_scan', 'ssh_probe', 'version_probes', 'java_runtime', 'version_sources', 'wpscan', 'cve_correlation', 'nuclei_targeted_scan', 'triage', 'asset_changes'])
 		self.assertEqual(calls, ['light', 'targeted'])
 		self.assertEqual(ScanActivity.objects.get(scan_of=scan, name='triage').title, 'AI triage and validation')
 		self.assertEqual(ScanActivity.objects.get(scan_of=scan, name='nuclei_light_scan').title, 'Nuclei HTTP and technology pass')
@@ -581,41 +595,66 @@ class NucleiStageTests(TestCase):
 		self.assertTrue(any(m.startswith('nuclei targeted scan of www.example.test:') and '(from bbot, nmap 3306 MySQL 8.0, light pass)' in m
 			for m in names), names)
 
+	def _answer_targeting(self, fake):
+		"""Play the reviewer container for the nuclei targeting questions only (tests/ai_queue.py): the triage questions the pipeline queued too
+		are not this test's."""
+		from cveFeed import ai_jobs
+		from tests import ai_queue
+		for job in ai_jobs.next_jobs(ai_jobs.BATCH_MAX):
+			if job['kind'] == 'nuclei_targeting':
+				ai_jobs.submit(job['id'], ai_queue.answer(job, fake))
+				ai_jobs.apply(job['id'])
+
+	def _fresh_ai(self):
+		from django.core.cache import cache
+		from cveFeed import nuclei_templates
+		from tests import ai_queue
+		cache.clear()  # the AI's choices and a failed request are kept in the shared cache
+		nuclei_templates._failed.clear()
+		self.addCleanup(cache.clear)
+		self.addCleanup(nuclei_templates._failed.clear)
+		ai_queue.configure()
+
 	def test_an_ai_reply_naming_unknown_tags_or_severities_is_dropped(self):
-		class Provider:
-			def complete(self, system, user):
-				return '{"0": {"tags": ["php", "not-a-real-tag", "x; rm -rf /"], "severities": ["high", "bogus"]}}'
+		"""The scan does not wait for the AI: its answer is used by the next scan of the same hosts, and only what is installed survives."""
+		self._fresh_ai()
+		fake = mock.Mock(model='m')
+		fake.name = 'anthropic'
+		fake.complete.return_value = '{"0": {"tags": ["php", "not-a-real-tag", "x; rm -rf /"], "severities": ["high", "bogus"]}}'
 		seen = []
 
 		def targeted(path, **kwargs):
 			seen.append((sorted(kwargs['tags']), kwargs.get('severities')))
 			return iter([])
-		self._pipeline(provider=Provider(), targeted_stream=targeted)
-		self.assertEqual(seen, [(['nginx', 'php'], ['high'])])  # the static tag stays, the unknown ones are gone
+		self._pipeline(provider=False, targeted_stream=targeted)
+		self.assertEqual(seen, [(['nginx'], None)])  # this scan: the static table
+		names = list(AgentActivity.objects.order_by('id').values_list('message', flat=True))
+		self.assertTrue(any('the AI reviewer container was asked to choose tags for 1 host profile(s)' in m for m in names), names)
+		self._answer_targeting(fake)
+		self._pipeline(provider=False, targeted_stream=targeted)
+		self.assertEqual(seen[1], (['nginx', 'php'], ['high']))  # the next scan: the static tag stays, the unknown ones are gone
 
 	def test_a_model_that_answers_with_no_text_leaves_the_scan_on_the_standard_templates_and_says_why(self):
 		from reNgine import ai_providers
-		from django.core.cache import cache
-
-		from cveFeed import nuclei_templates
-		from tests.anthropic_fake import SHAPES, FakeAnthropic
-		cache.clear()  # a failed request is remembered for minutes, in the shared cache too
-		nuclei_templates._failed.clear()
-		self.addCleanup(cache.clear)
-		self.addCleanup(nuclei_templates._failed.clear)
+		self._fresh_ai()
+		fake = mock.Mock(model='m')
+		fake.name = 'anthropic'
+		fake.complete.side_effect = ai_providers.AIProviderError('no text', category='output_truncated', stop_reason='max_tokens')
 		seen = []
 
 		def targeted(path, **kwargs):
 			seen.append(sorted(kwargs['tags']))
 			return iter([])
-		with FakeAnthropic([SHAPES['thinking_only_max_tokens']()]) as fake, self.assertLogs('cveFeed.nuclei_templates', 'WARNING'):
-			provider = ai_providers.get_provider('anthropic', api_key='not-a-real-key', model='claude-haiku-5-5', base_url=fake.url)
-			scan, out = self._pipeline(provider=provider, targeted_stream=targeted)
-		self.assertEqual(seen, [['nginx']])  # the static table's tag: the targeted pass ran
+		self._pipeline(provider=False, targeted_stream=targeted)
+		with self.assertLogs('cveFeed.nuclei_templates', 'WARNING'):
+			self._answer_targeting(fake)
+		scan, out = self._pipeline(provider=False, targeted_stream=targeted)
+		self.assertEqual(seen, [['nginx']])  # the static table's tag: the targeted pass ran (the second scan reuses what it covered)
 		scan.refresh_from_db()
 		self.assertEqual(scan.scan_status, 2)
 		names = list(AgentActivity.objects.order_by('id').values_list('message', flat=True))
-		self.assertTrue(any('The model answered with no text (it stopped at the token limit); the scan used the standard templates' in m for m in names), names)
+		self.assertTrue(any('The model answered with no text (it stopped at the token limit); not asked again for' in m and
+		                    'the scan used the standard templates' in m for m in names), names)
 
 	def test_a_fire_cve_match_runs_its_template_test(self):
 		from cveFeed import nuclei_scan
@@ -642,7 +681,7 @@ class NucleiStageTests(TestCase):
 			'data_json': {'host': 'www.example.test', 'severity': 'HIGH', 'description': 'Subdomain takeover: dangling CNAME', 'url': 'https://www.example.test'}}]
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
 			scan = discovery.start_discovery(self.domain)
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(events):
+		with mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(events):
 			discovery.run_discovery(scan.id)
 		v = Vulnerability.objects.get(scan_history=scan)
 		self.assertEqual((v.name, v.severity, v.source), ('Subdomain takeover', 3, 'bbot'))
@@ -724,9 +763,6 @@ class NucleiLedgerTests(TestCase):
 		self.p2 = Project.objects.create(name='P2', slug='nl2', insert_date=timezone.now(), org=org)
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		# no real DNS: a name that is slow to answer counts as blocked, which dropped a host from the chunk test on a loaded runner
-		patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)
-		patcher.start()
-		self.addCleanup(patcher.stop)
 
 	def _scan(self, project, name, host='shared.example.test'):
 		domain = Domain.objects.create(name=name, project=project, insert_date=timezone.now())
@@ -812,7 +848,7 @@ class BbotCoverageTests(TestCase):
 		def nmap_runner(targets):
 			nmap.append(list(targets))
 			return '<nmaprun><runstats><finished exit="success"/></runstats></nmaprun>'
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
+		with mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
 			out = discovery.run_pipeline(scan.id, light_stream=lambda path, **k: nuclei.append(open(path).read().split()) or iter([]),
 				targeted_stream=lambda path, **k: iter([]), port_stage_run=port_double(nmap_runner), db_exposure_checks={}, provider=None)
 		return scan, out, bbot, nmap, nuclei
@@ -865,7 +901,7 @@ class QueuedScanTests(TestCase):
 
 		def started(_batch):
 			seen.append((ScanHistory.objects.get(pk=scan.id).scan_status, ScanActivity.objects.get(scan_of=scan, name='bbot_discovery').status))
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), \
+		with mock.patch('cveFeed.tasks.correlate_cves.delay'), \
 				mock.patch('cveFeed.tasks.run_hygiene_task.delay'), sentinel_discovery(batches=[[]], after_batch=started):
 			discovery.run_pipeline(scan.id, light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
 				port_stage_run=port_double(), db_exposure_checks={}, provider=None)
@@ -905,7 +941,7 @@ class IpTargetTests(TestCase):
 			db_exposure_checks={}, provider=None,
 			ip_lookups={'ptr': lambda ip: ['host-5.example.net'], 'certificate': lambda ip: ['shop.example.org', 'www.example.org']})
 		kwargs.update(overrides)
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
+		with mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
 			out = discovery.run_pipeline(scan.id, **kwargs)
 		return scan, out, bbot, nmap
 
@@ -1004,7 +1040,6 @@ class BbotUrlTests(TestCase):
 		self.scan = ScanHistory.objects.create(domain=self.domain, scan_type=engine, start_scan_date=timezone.now(), scan_status=1, tasks=[],
 			results_dir='x')
 		self.ctx = {'scan_history_id': self.scan.id, 'domain_id': self.domain.id, 'subdomain_id': None, 'subscan_id': None}
-		mock.patch('reNgine.tasks.geo_localize.delay').start()
 		self.addCleanup(mock.patch.stopall)
 
 	def persist(self, urls, names=('www.url.test',)):

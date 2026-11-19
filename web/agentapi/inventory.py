@@ -8,7 +8,6 @@ import hashlib
 import ipaddress
 import json
 import logging
-import socket
 from datetime import timedelta
 
 from django.core.exceptions import RequestDataTooBig
@@ -109,26 +108,28 @@ def _target_value(inv):
     return inv.fqdn if '.' in (inv.fqdn or '') else (inv.ips[0] if inv.ips else '')
 
 
-def _resolves_to(name, address):
+def _stored_at(project, name, address):
+    """Whether the project already holds ``name`` at ``address`` (what a Sentinel's discovery recorded). This server looks no name up itself."""
+    from startScan.models import Subdomain
     try:
-        wanted = ipaddress.ip_address(address)
-        return any(ipaddress.ip_address(info[4][0].split('%')[0]) == wanted for info in socket.getaddrinfo(name, None))
-    except (OSError, ValueError):
+        wanted = str(ipaddress.ip_address(address))
+    except ValueError:
         return False
+    return Subdomain.objects.filter(target_domain__project=project, name=name, ip_addresses__address=wanted).exists()
 
 
 def _may_create(project, inv, source_ip):
     """Whether a report may add its machine to the project on its own. A reporter only says what it is, so a name it claims is added
-    only when it is the machine's own: inside a domain the project already has, or resolving to the address the report came from (a
-    machine reporting itself by address must come from that address). Otherwise a token could have the server scan any domain it names.
-    A day's creations are capped."""
+    only when it is the machine's own: inside a domain the project already has, or a name the project's scans already recorded at the address
+    the report came from (a machine reporting itself by address must come from that address). The name is never looked up here. Otherwise a token
+    could have the server scan any domain it names. A day's creations are capped."""
     from targetApp.models import Domain
     value = _target_value(inv)
     if not value or throttle.exceeded(f'inventory-create:{project.pk}', MAX_CREATED_PER_DAY):
         return False
     if '.' in (inv.fqdn or ''):
         inside = any(inv.fqdn == d or inv.fqdn.endswith('.' + d) for d in Domain.objects.filter(project=project).values_list('name', flat=True))
-        return inside or _resolves_to(inv.fqdn, source_ip)
+        return inside or _stored_at(project, inv.fqdn, source_ip)
     return value == source_ip
 
 

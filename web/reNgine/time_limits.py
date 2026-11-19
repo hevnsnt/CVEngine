@@ -4,10 +4,10 @@ A task that hangs (a socket with no timeout, a subprocess that never exits, a lo
 nothing but a restart would end it. Each queue gets a hard limit set far above its slowest legitimate run, so only a hung task meets it.
 A task that declares its own ``time_limit`` keeps it.
 
-The scan queues are not given a short limit: a task that needs memory waits inside ``resources.heavy_job`` for its turn (up to
-``HEAVY_WAIT_SECONDS``, a day) before it runs, so a limit of a few hours would kill queued work that is only waiting. They get the longest
-limit that is safe, the broker's redelivery window: a task that outlives it is delivered to a second worker anyway. The light queues
-(API, notifications, geolocation) never wait for memory and get half an hour.
+The scan queues are not given a short limit: a stage that waits on a Sentinel holds its task for as long as the Sentinel runs the
+work (an OpenVAS scan or a deep discovery can take hours), so a limit of a few hours would kill work that is only waiting. They get the
+longest limit that is safe, the broker's redelivery window: a task that outlives it is delivered to a second worker anyway. The light
+queues (API, notifications) get half an hour.
 
 The workers run the gevent pool (celery-entrypoint.sh). There the hard limit ends a task that is waiting (a sleep, a socket, a subprocess
 wait) and marks it failed (``TimeLimitExceeded``), freeing its slot; it cannot interrupt a task that is computing without ever yielding, and
@@ -42,11 +42,9 @@ DEFAULTS = {
     'supplier_queue': SCAN_QUEUE,
     'live_cache_queue': 10 * 60,  # a run refreshes a few scopes in seconds (its own budget is three intervals); only a hung database holds it
     'ctwatch_queue': 1 * HOUR,  # a lookup waits at most ``ctmonitor.MAX_INLINE_WAIT`` in a slot; a longer wait is a retry
-    'run_command_queue': 1 * HOUR,
     'api_queue': 30 * 60,
     'send_notif_queue': 30 * 60,
     'send_task_notif_queue': 30 * 60,
-    'geo_localize_queue': 30 * 60,
 }
 
 

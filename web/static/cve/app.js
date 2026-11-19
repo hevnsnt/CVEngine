@@ -10,6 +10,7 @@ import { attachRowMenu } from "/staticfiles/cve/rowmenu.js";
 import { fold, glance } from "/staticfiles/cve/finding-glance.js";
 import { fmtDateTime, fmtDay, fmtTime, zoneLabel } from "/staticfiles/cve/prefs.js";
 import { isNewSince, newTag, newToggle, sinceLastVisit } from "/staticfiles/cve/seen.js";
+import { featureLine } from "/staticfiles/cve/service-features-logic.js";
 import {
   ask,
   button as uiButton,
@@ -41,6 +42,7 @@ import * as CL from "/staticfiles/cve/closure-logic.js";
 import { changeDetail, authLabel, pathOf } from "/staticfiles/cve/change-text.js";
 import * as RT from "/staticfiles/cve/retest-logic.js";
 import { askClosureNote } from "/staticfiles/cve/closure-note.js";
+import { explainCard, validatePlanCard } from "/staticfiles/cve/match-explain.js";
 import * as LM from "/staticfiles/cve/loadmore-logic.js";
 
 const root = document.getElementById("section");
@@ -984,6 +986,20 @@ const factLine = (facts) => {
   const f = facts || {};
   return [f.os, f.computer_name, f.fqdn || f.dns_domain || f.domain].filter(Boolean).join("  ·  ");
 };
+// The distribution package a service banner names: "Package: openssh 8.9p1-3ubuntu0.6  ·  Ubuntu 22.04 (jammy)". A banner that names only the
+// distribution is a hint ("build not shown"), another publisher's build is said so, and a distribution without synced fix data says that too.
+const distroLine = (d) => {
+  if (!d) return "";
+  const release = [d.name, d.release, d.codename ? `(${d.codename})` : ""].filter(Boolean).join(" ");
+  const how = { table: "release from the build", package: "release from the build", stated: "", host: "release from the host", stored: "" }[d.release_basis] || "";
+  const pkg = d.package ? `${d.package} ${d.build || "(build not shown)"}` : d.build;
+  const notes = [
+    how,
+    d.third_party ? `${d.third_party === "sury" ? "deb.sury.org" : d.third_party === "backports" ? "backports" : "third-party"} build: not judged by the distribution's tracker` : "",
+    d.tracker === "not_synced" ? "no distribution fix data synced" : "",
+  ].filter(Boolean);
+  return `Package: ${[pkg, release].filter(Boolean).join("  ·  ")}${notes.length ? ` (${notes.join("; ")})` : ""}`;
+};
 // What runZero (asset inventory) says about an address, stored by the scheduled sync; blank when it has no record of it.
 const runzeroLine = (rz) => {
   if (!rz) return "";
@@ -1076,6 +1092,9 @@ const hostOverview = (h) => {
   if (reverse.length) rows.push({ label: "Reverse DNS", value: reverse.join(", ") });
   const shared = h.ips.filter((ip) => ip.names_on_ip > 1).map((ip) => `${ip.address} (${ip.names_on_ip} names)`);
   if (shared.length) rows.push({ label: "Shared with", value: shared.join(", ") });
+  // DNS answers one Sentinel gave that no second source confirmed yet: shown here, never stored on the host (agentapi.dns_crosscheck)
+  const unconfirmed = (h.unconfirmed_addresses || []).map((u) => `${u.address} (unconfirmed${u.single_source ? ", single source" : ""}: ${u.why || u.reason}; seen in ${u.runs} run${u.runs === 1 ? "" : "s"})`);
+  if (unconfirmed.length) rows.push({ label: "Unconfirmed addresses", value: unconfirmed.join("; ") });
   if (!rows.length) return el("div");
   const box = el("div", "why host-overview");
   box.append(el("h3", "sec", "Overview"), kvBox(rows));
@@ -1086,7 +1105,9 @@ const technologyTable = (h) => {
   const details = h.technology_details || [];
   const archived = h.archived_technologies || [];
   const unverified = h.unverified_products || [];
-  if (!details.length && !archived.length && !unverified.length) return null;
+  const javas = h.java_runtimes || [];
+  const versions = h.version_sources || [];
+  if (!details.length && !archived.length && !unverified.length && !javas.length && !versions.length) return null;
   const box = el("div", "tech-table");
   if (details.length) {
     box.append(el("h3", "sec", `Technologies (${details.length})`));
@@ -1105,6 +1126,48 @@ const technologyTable = (h) => {
         const where = copies.map((c) => `${c.version || "version unknown"} (${c.state || "?"}${c.version_source === "filename" ? ", from the file name" : ""}) ${c.path || ""}`).join("; ");
         box.append(el("p", "note", `Copies on the page, in the order they run: ${where}.${t.copies_unresolved ? " Which copy runs cannot be told from the page, so each stays a candidate." : " The last one loaded replaces the others; an earlier copy stays listed as a candidate, since older code may still use it."}`));
       }
+    });
+  }
+  if (javas.length) {
+    // the Java runtime the host was read to run (cveFeed.java_runtime); evidence is what the host said: text only
+    box.append(el("h3", "sec", `Java runtime (${javas.length})`));
+    box.append(el("p", "note", "Exact: the runtime or a page of the product stated it. Inferred: the JDK the vendor ships with this product version, unless it was replaced. Weak: a supported line or a minimum only. Runtime CVEs are matched against these; with no exact reading they wait for review as \"Java runtime of unknown version\"."));
+    javas.forEach((j) => {
+      const line = el("div", "find tech-line");
+      line.append(el("strong", "", j.line_only ? `Java ${j.major}` : `Java ${j.version}`));
+      if (j.vendor && j.vendor !== "unknown") line.append(el("span", "chip", j.vendor));
+      line.append(badge(j.confidence, j.confidence === "exact" ? "queued" : "ice"));
+      const where = `${(j.source || "").replace(/_/g, " ")}${j.port ? ` on port ${j.port}` : ""}${j.url ? ` (${j.url})` : ""}`;
+      line.append(el("span", "note", j.product ? `${where}: ${j.product}` : where));
+      if (j.minimum) line.append(badge(`starts only on Java ${j.minimum}+`, "ice"));
+      if (j.stale) line.append(badge("not seen for 90 days", "ice"));
+      box.append(line);
+      if (j.evidence) box.append(el("p", "note", `Seen on the host: ${j.evidence}`));
+      if (j.citation) box.append(el("p", "note", `Source: ${j.citation}`));
+    });
+  }
+  if (versions.length) {
+    // what the host's version sources state (cveFeed.version_sources); evidence is what the host said: text only
+    box.append(el("h3", "sec", `Read from version sources (${versions.length})`));
+    box.append(el("p", "note", "Versions the host states anonymously: a product's own version endpoint, a platform API, a metrics page, a header, an SNMP agent's system description. Products are matched like any technology (a version, not a test of the flaw). Runtimes (Python, Go, Node.js, PHP, Ruby, .NET Framework, Erlang/OTP) are matched against CVEs in the runtime; one clearly present with no version read waits for review as \"runtime of unknown version\". A component a vendor bundles with the product release (Tomcat in Jira, Jetty in Jenkins ...) is inferred: it is only ever a candidate to check, since the owner may have replaced it. A Linux kernel build is shown, never matched. A Windows release an NTLM challenge states (10.0.20348: Windows Server 2022) is the release, never its patch level: its KEV and critical network CVEs wait for review as \"release known, patch level unknown\" until the host's update revision is read."));
+    versions.forEach((v) => {
+      const line = el("div", "find tech-line");
+      // an edge appliance's build read only as a range (cveFeed.edge_builds): the releases it can be, never one of them
+      const range = v.range && Array.isArray(v.range.candidates) ? v.range.candidates.slice(0, 12).join(", ") : "";
+      line.append(el("strong", "", v.version ? `${v.product} ${v.line_only ? `${v.version} line` : v.version}` : range ? `${v.product} (one of: ${range})` : `${v.product} (no version stated)`));
+      line.append(el("span", "chip", v.kind));
+      line.append(badge(v.confidence, v.confidence === "exact" ? "queued" : "ice"));
+      const where = `${(v.source || "").replace(/_/g, " ")}${v.port ? ` on port ${v.port}` : ""}${v.url ? ` (${v.url})` : ""}`;
+      line.append(el("span", "note", where));
+      if (v.stale) line.append(badge("not seen for 90 days", "ice"));
+      if (v.matched === false) line.append(badge("shown, not matched", "ice"));
+      // a Windows release an NTLM challenge states (cveFeed.windows_builds): the release is known, its update revision is not
+      if (v.release_only) line.append(badge("patch level unknown", "ice"));
+      box.append(line);
+      if (v.release_only && v.windows && v.windows.ambiguous) box.append(el("p", "note", `The build is shared by ${(v.windows.candidates || []).join(" and ")}; nothing read tells which.`));
+      if (v.bundled_with) box.append(el("p", "note", `Inferred: ${v.bundled_with.product} ${v.bundled_with.product_version} bundles it (${v.bundled_with.source})`));
+      else if (v.evidence) box.append(el("p", "note", `Seen on the host: ${v.evidence}`));
+      if (range && v.range.basis) box.append(el("p", "note", `Read as a range: ${v.range.basis}. Its CVEs wait for review; the appliance's own version page decides.`));
     });
   }
   if (unverified.length) {
@@ -1790,9 +1853,10 @@ function renderFinding(d, cfg, row) {
     line.append(el("a", "", "Open Secrets", { href: `/cve/${encodeURIComponent(projectOf(row) || slug)}/secrets/` }));
     fix.append(line);
   });
+  let statusNode = null;
   if (cfg.statusControl) {
     // the status is a change: in the all-projects view it is shown, and set from the finding's own project
-    if (!ALL) fix.append(cfg.statusControl(d));
+    if (!ALL) fix.append((statusNode = cfg.statusControl(d)));
     else {
       const ro = el("div", "tools");
       const chip = badge(CL.statusLabel(d.remediation.status || "open").toLowerCase());
@@ -1853,6 +1917,37 @@ function renderFinding(d, cfg, row) {
   }
 
 
+  // What the match means in plain words, how sure cvENGINE is, the read-only steps for the host's owner and what each answer means
+  // (match-explain.js). A closure it offers opens the usual note dialog with the evidence filled in and saves through the usual route.
+  let explainNode = null;
+  const drawExplain = (x) => explainCard(x, { status: d.remediation.status, readOnly: ALL || !cfg.statusControl, onClose: closeWithEvidence });
+  const closeWithEvidence = async (status, note) => {
+    const answer = await askClosureNote(status, 1, note);
+    if (!answer) return;
+    try {
+      const r = await api("PATCH", `${baseOf(project)}/findings/match/${d.id}`, { status, note: answer.note });
+      Object.assign(d.remediation, {
+        status: r.remediation_status, note: r.remediation_note, closure_note: r.closure_note, closed_by: r.closed_by,
+        closed_at: r.closed_at, closed_automatically: r.closed_automatically,
+      });
+      d.retest = r.retest || null;
+      if (statusNode) {
+        const next = cfg.statusControl(d);
+        statusNode.replaceWith(next);
+        statusNode = next;
+      }
+      const again = drawExplain(r.explain || d.explain);
+      if (explainNode && again) {
+        explainNode.replaceWith(again);
+        explainNode = again;
+      }
+      toast(`Marked ${CL.statusLabel(status).toLowerCase()}`);
+    } catch (err) {
+      toast(err.message, true);
+    }
+  };
+  if (d.kind === "match") explainNode = drawExplain(d.explain);
+
   const checkFold = fold("Confirm it yourself", `${d.validation.steps.length ? `${d.validation.steps.length} check${d.validation.steps.length === 1 ? "" : "s"} run. ` : ""}${d.confirm?.where?.length ? "Where to look on this host, what to look for, " : ""}How to verify it by hand, and every check that ran`);
   const check = checkFold.body;
   const mine = d.kind === "match" ? confirmBox(d.confirm) : null;
@@ -1895,6 +1990,7 @@ function renderFinding(d, cfg, row) {
   if (v.status === "observed") check.append(el("p", "note", "These checks observed host metadata only. They did not validate or rule out this CVE on this host."));
   out.push(
     ...glance(d, { row, aiBadge: aiBadge(d.ai, { project, kind: d.kind, id: d.id }), note: noAssessment[waitingForNobody(d.ai) ? "not_triaged" : d.ai.status] }),
+    ...(explainNode ? [explainNode] : []),
     fix,
     ...[checkFold, advisoryFold, seenFold, aiHasDetail ? aiFold : null, requestFold, jobFold].filter(Boolean).map((x) => x.root),
   );
@@ -3786,6 +3882,7 @@ const pages = {
       const chip = projChip(h);
       if (chip) head.append(chip);
       if ((h.aliases || []).length) head.append(el("span", "note", `Also answers to ${h.aliases.join(", ")}`, { title: "Names that resolve to the same addresses are one host" }));
+      if ((h.unconfirmed_addresses || []).length) head.append(el("span", "note", `Unconfirmed DNS answer: ${h.unconfirmed_addresses.map((u) => u.address).join(", ")}`, { title: "A single Sentinel gave this address; the host keeps its addresses until a second source confirms it" }));
       if (h.zombie) head.append(badge("Zombie: DNS gone, still answering", "smoke"));
       if (h.secrets) {
         const s = el("a", "badge medium", `Secrets: ${h.secrets}`, { href: `/cve/${encodeURIComponent(projectOf(h))}/secrets/`, title: "Exposed secrets this host serves (masked values only)" });
@@ -3937,6 +4034,9 @@ const pages = {
       );
       pane.append(stats);
       OV.main.append(hostReviewCard({ base: baseOf(projectOf(h)), hostId: h.id, isCurrent: () => current === h.id, ago: fullScanAgo }));
+      // the commands for the host's owner that settle the most of its open matches, one question per package, exploited first
+      const plan = validatePlanCard(h.validate_plan, { host: h.host, project: projectOf(h) });
+      if (plan) OV.main.append(plan);
       OV.side.append(hostOverview(h));
       // why the host has its colour, so the rating can be checked rather than trusted
       const why = el("div", "why");
@@ -4055,6 +4155,8 @@ const pages = {
           );
           card.append(top);
           if (p.info) card.append(el("div", "note", p.info));
+          const pkg = distroLine(p.distro);
+          if (pkg) card.append(el("div", "note", pkg));
           if (p.cpe) card.append(el("div", "note mono", p.cpe));
           if (p.banner) card.append(el("pre", "banner", p.banner));
           Object.entries(p.scripts || {}).forEach(([id, text]) => {
@@ -4065,6 +4167,8 @@ const pages = {
           if (p.db) { const facts = dbFactsCard(p.db); if (facts) card.append(facts); }
           if (p.http) card.append(jsonRows(p.http));
           if (p.tls) card.append(jsonRows(p.tls));
+          const features = featureLine(h.service_features, p.number);
+          if (features) card.append(el("div", "note", features));
           if (p.rdp_screenshot) card.append(rdpShotCard(p.rdp_screenshot));
           S.services.append(card);
         });
@@ -4760,6 +4864,8 @@ pages.hygiene = function hygiene(mount) {
           render: (c) =>
             c.legacy_tls ? badge("1.0/1.1 on", "medium") : c.protocol || "-",
         },
+        // whether the service offers HTTP/2 (the ALPN protocol it chose; cveFeed.service_features)
+        { label: "HTTP/2", render: (c) => (c.http2 ? (c.http2.offered ? "offered" : "not offered") : "-") },
       ]), (c) => (c.days_left == null ? "" : c.days_left < 0 ? "critical" : c.days_left <= 7 ? "high" : c.days_left <= 30 ? "medium" : "")),
     }).start();
   };

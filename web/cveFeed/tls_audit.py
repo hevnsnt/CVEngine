@@ -8,8 +8,8 @@ injection, ROBOT, POODLE, FREAK, DROWN, Logjam, SWEET32, Ticketbleed, RC4, CRIME
 the sweep waits and the targets stay due.
 
 This is a slow, polite background sweep, never part of a scan: one target at a time, the longest-waiting first, at most
-``CVENGINE_TESTSSL_MAX_TARGETS`` per run, one sweep at a time, and it stops when scans are paused. Each target is tested at the address
-``cveFeed.pinned_transport`` vetted, so a name that was pointed at a prohibited address after it was stored is never contacted.
+``CVENGINE_TESTSSL_MAX_TARGETS`` per run, one sweep at a time, and it stops when scans are paused. Each target is tested at its newest stored
+address that a scanner may touch (``_address``); this server looks no name up, and the Sentinel judges that address again before it connects.
 
 What it records:
 
@@ -193,6 +193,17 @@ def record_observations(project_id, domain_id, host, port, result, ip):
     upsert(OBS_AUDIT, '', 'found', {'protocols': result.protocols, 'issues': len(result.findings), 'ip': ip})
 
 
+def store_banners(sub, port, items):
+    """The Server and application headers testssl.sh read on the port (its ``banner_server`` and ``banner_application`` items), stored as version
+    readings of the host (cveFeed.source_versions, probe ``vsrc:testssl``); the host is correlated again when one is new, changed or gone. Never fatal."""
+    from cveFeed import probes, source_versions
+    try:
+        if source_versions.store_testssl(sub, port, items):
+            probes.recorrelate(sub)
+    except Exception:  # noqa: BLE001 - the audit's own result stands without the banner readings
+        logger.exception('could not store the testssl.sh banners of %s:%s', getattr(sub, 'name', ''), port)
+
+
 def store(domain, host, port, result, where):
     """Upsert this port's findings; resolve the ones the test ran for and no longer reports. Returns the rows resolved."""
     from cveFeed.hygiene import Finding, store_findings
@@ -226,7 +237,7 @@ def match_rows(sub, found):
             wanted.setdefault(cve_id, []).append((port, test_id, evidence, seen))
     if not wanted:
         return []
-    known = {c.cve_id: c for c in CVEEntry.objects.filter(cve_id__in=list(wanted)).exclude(status__icontains='reject').exclude(local_only=True)
+    known = {c.cve_id: c for c in CVEEntry.objects.filter(cve_id__in=list(wanted)).exclude(status__iregex=r'reject|withdrawn|merged|superseded').exclude(local_only=True)
              .only('id', 'cve_id')}
     rows = []
     for cve_id, hits in wanted.items():
@@ -352,11 +363,16 @@ def _latest_row(project_id, host):
 
 
 def _address(host, port, project_id):
-    """The one vetted address the audit is pinned to (IPv4 first): a name that resolves somewhere prohibited raises."""
-    from cveFeed import pinned_transport
-    addresses = pinned_transport.resolve(host, port, project=project_id)
-    ordered = sorted(addresses, key=lambda item: item[0] != 2)  # AF_INET is 2
-    return ordered[0][1][0]
+    """The one address the audit is pinned to (IPv4 first): the host's newest stored address that a scanner may touch (what a Sentinel's passes
+    recorded for it). This server looks no name up; the Sentinel judges the address again before testssl.sh connects to it (``scope.check_ip``).
+    Raises ``ValueError`` when the host has no such address yet."""
+    from targetApp.target_types import is_scannable_ip
+    sub = _latest_row(project_id, host)
+    addresses = [ip.address for ip in sub.ip_addresses.all() if ip.address] if sub is not None else []
+    usable = sorted((a for a in addresses if is_scannable_ip(a, project=project_id)), key=lambda a: ':' in a)
+    if not usable:
+        raise ValueError('no stored address of this host is one a scanner may use (it is looked up by a Sentinel at the next discovery)')
+    return usable[0]
 
 
 def sweep(project_id, resolve=None):
@@ -404,7 +420,7 @@ def sweep(project_id, resolve=None):
                 result = evaluate(items, where)
                 if not result.tested:
                     raise TlsAuditError(_why(items))
-            except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # stopped, or no scanner: not the target's failure
+            except (resources.ScanAborted, resources.MemoryBusy) as exc:  # stopped, or no scanner: not the target's failure
                 if isinstance(exc, resources.ScannerUnavailable):  # a scanner that is offline is not memory pressure
                     activity.settle(running, 'done', message=f'TLS audit of {where} is waiting: no scanner could take this work ({exc.kind}); the target stays due until one can')
                     return {**summary, 'skipped': f'no scanner could take this work ({exc.kind}): the targets stay due until one can'}
@@ -418,6 +434,7 @@ def sweep(project_id, resolve=None):
             record_observations(project_id, domain_id, host, port, result, ip)
             store(sub.target_domain, host, port, result, where)
             run_for_host(sub)
+            store_banners(sub, port, items)
             ledger.record(SERVICE, [asset], project_id, sub.scan_history)
             summary['tested'] += 1
             summary['issues'] += len(result.findings)

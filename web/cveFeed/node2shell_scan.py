@@ -72,7 +72,7 @@ def node_sites(scan):
     return sites
 
 
-def run_for_scan(scan_id, checker=None, force=False):
+def run_for_scan(scan_id, force=False):
     """Run the node2shell check against every Node.js or Express host this scan found, bounded per scan and
     TTL-gated. A critical finding is raised only when the detector's own verdict is VULNERABLE. Returns a summary
     dict; never raises."""
@@ -92,7 +92,7 @@ def run_for_scan(scan_id, checker=None, force=False):
         return {'checked': len(sites), 'tested': 0, 'reused': len(covered)}
     from agentapi import sentinel_dispatch
     try:
-        sentinel = checker is None and sentinel_dispatch.scanner_or_local(project, 'node2shell')  # an injected checker (a test) is never second-guessed
+        sentinel_dispatch.scanner_or_local(project, 'node2shell')
     except resources.ScannerUnavailable as exc:  # no scanner can take it (the kind has no local path): the hosts stay due
         return {'checked': len(sites), 'tested': 0, 'reused': len(covered), 'skipped': f'no scanner could take this work ({exc.kind})'}
     running = activity.log('run_check', f'Checking {len(todo)} host(s) of {domain.name} for {CVE_ID} '
@@ -109,15 +109,12 @@ def run_for_scan(scan_id, checker=None, force=False):
         elif result.get('vulnerable') is None:
             errors += 1
     try:
-        if sentinel:  # the detector runs on a scanner; a host no Sentinel finished is not recorded (dispatch_each raises ScannerUnavailable once the others are in)
-            for index, result in sentinel_dispatch.dispatch_each(project, 'node2shell', todo, lambda site: {'url': site[1]}, scan=scan,
-                                                                 label_of=lambda site: site[0].name):
-                if result is not None:
-                    note(*todo[index], sentinel_dispatch.node2shell_outcome(result))
-        else:  # an injected checker (tests only)
-            for sub, url in todo:
-                note(sub, url, checker(url))
-    except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # the hosts not reached are asked again next scan
+        # the detector runs on a scanner; a host no Sentinel finished is not recorded (dispatch_each raises ScannerUnavailable once the others are in)
+        for index, result in sentinel_dispatch.dispatch_each(project, 'node2shell', todo, lambda site: {'url': site[1]}, scan=scan,
+                                                             label_of=lambda site: site[0].name):
+            if result is not None:
+                note(*todo[index], sentinel_dispatch.node2shell_outcome(result))
+    except (resources.ScanAborted, resources.MemoryBusy) as exc:  # the hosts not reached are asked again next scan
         if isinstance(exc, resources.ScannerUnavailable):  # a scanner that is offline is not memory pressure
             activity.settle(running, 'done', message=f'node2shell check for {domain.name} is waiting: no scanner could take this work ({exc.kind}); '
                             'the remaining hosts are asked again next scan')

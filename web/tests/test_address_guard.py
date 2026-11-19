@@ -65,7 +65,7 @@ class World(TestCase):
         _, raw = create_token(self.admin, f'tok-{Agent.objects.count()}')
         status, out = call(raw, 'PUT', '/api/v1/sentinel', {'name': f'live-{Agent.objects.count()}', 'scope': {'projects': [self.project.slug]}, 'capabilities': list(kinds)})
         self.assertIn(status, (200, 201), out)
-        Agent.objects.filter(pk=out['id']).update(status='active', info={'features': ['credential_filter']})  # a current client: an old one is offered no nuclei work while credential checks are off
+        Agent.objects.filter(pk=out['id']).update(status='active', info={'features': ['credential_filter'], 'contract_version': 11})  # a current client: an old one is offered no nuclei work while credential checks are off
         return Agent.objects.get(pk=out['id']), raw
 
 class TheRule(World):
@@ -588,4 +588,4 @@ class EveryKindIsGuarded(World):
     def test_the_lookup_only_kind_is_made_and_every_other_kind_is_in_the_never_local_set(self):
         self.exclude('198.51.100.0/24')
         SentinelTask.objects.create(project=self.project, kind='dns_resolve', target=self.fixture('dns_resolve'))
-        self.assertEqual(set(sentinel_contract.KINDS) - set(dispatch.NEVER_LOCAL), {'discover'})
+        self.assertEqual(set(sentinel_contract.KINDS) - set(dispatch.NEVER_LOCAL), set())  # discover too: no kind runs on the server

@@ -12,7 +12,8 @@ What each kind lands through is the persistence the stage itself uses (never a s
 * ``naabu``: ``cveFeed.port_stage.persist_open_ports`` (a tarpit is left out, as the stage does), then the ledger says discovery is done;
 * ``nuclei_*``: every finding through ``reNgine.tasks.save_vulnerability`` (one row per finding, so a repeat changes nothing). The stage's catch-all
   screening needs control reads from a Sentinel and cannot be made now, so the findings carry the ``unscreened-same-body`` tag the stage uses for the same
-  case. The ledger is left alone: the hosts are due again at their normal time, which also takes the technology fingerprint the light pass writes;
+  case. An info-level panel hit is also read as the stage reads it (``cveFeed.panel_versions.Collector``): a version reading when it extracted a
+  version, else an identity reading and a technology with no version, and the hosts that changed are correlated again. The ledger is left alone: the hosts are due again at their normal time, which also takes the technology fingerprint the light pass writes;
 * ``bbot_discovery``: the batches the Sentinel posted before it ended go through the discovery stage's own ``_flush``, and the ledger says discovery
   is done when the run was complete.
 
@@ -39,10 +40,13 @@ def has_adopter(kind):
 
 def covered_by_stage_run(task):
     """Whether an open ``StageRun`` still waits on ``task``: its callback consumes the result itself, so it is never adopted."""
+    from django.db.models import Q
+
     from agentapi.models import StageRun
     rows = StageRun.objects.filter(state__in=StageRun.OPEN_STATES)
     rows = rows.filter(scan_id=task.scan_id) if task.scan_id else rows.filter(project_id=task.project_id)
-    return any(task.pk in {int(t) for t in (row.task_ids or []) if str(t).isdigit()} for row in rows.only('task_ids'))
+    # the containment test in SQL (a run's ids are stored as numbers; one stored as a string still counts)
+    return rows.filter(Q(task_ids__contains=[task.pk]) | Q(task_ids__contains=[str(task.pk)])).exists()
 
 
 def orphaned(task, now=None):
@@ -51,14 +55,14 @@ def orphaned(task, now=None):
     from django.utils import timezone
 
     from cveFeed import scan_control
-    if covered_by_stage_run(task):
-        return False
     # a closed scan alone is not enough: a sweep that is not a StageRun (the weekly deep sweep) blocks on its own task and files its own result
-    started, ended, _grace = scan_control.update_window()
+    started, ended, _grace = scan_control.update_window()  # one row by primary key: asked first, since without an update nothing is an orphan
     if started is None:
         return False
     since = task.claimed_at or task.created_at
-    return since is not None and since <= (ended or (now or timezone.now()))
+    if since is None or since > (ended or (now or timezone.now())):
+        return False
+    return not covered_by_stage_run(task)
 
 
 def adopt(task, result, agent=None):
@@ -119,12 +123,22 @@ def _nuclei(task, result, agent):
     scan = task.scan
     if scan is None:
         return {'findings': 0}
+    from agentapi import sentinel_broker
+    if sentinel_broker.network_detection_task(task):  # the network detection pass: what it read fills the ports, as the stage would have (no finding is filed)
+        from cveFeed import network_detection, probes
+        got = network_detection.ingest(scan, [sentinel_dispatch._finding_to_nuclei_line(f) for f in result.get('findings', [])],
+                                       (task.target or {}).get('targets') or [])
+        for sub in got['changed']:
+            probes.recorrelate(sub)
+        return {'ports': got['ports'], 'readings': got['readings']}
     domain = scan.domain
     by_name, by_ip = {}, {}
     for sub in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses'):
         by_name.setdefault(sub.name, sub)
         for ip in sub.ip_addresses.all():
             by_ip.setdefault(ip.address, sub)
+    from cveFeed.panel_versions import Collector
+    panels = Collector()  # a panel hit names its product, and its version when it extracted one, as the template pass reads it (cveFeed.panel_versions)
     filed = 0
     for finding in result.get('findings', []):
         line = sentinel_dispatch._finding_to_nuclei_line(finding)
@@ -136,8 +150,13 @@ def _nuclei(task, result, agent):
         host = host_of(line)
         sub = by_name.get(host) or by_ip.get(host)
         save_vulnerability(target_domain=domain, scan_history=scan, subdomain=sub, http_url=line.get('matched-at') or line.get('host') or host, **data)
+        panels.offer(line, sub)
         filed += 1
-    return {'findings': filed}
+    panels.flush()  # stored per host, and a host whose readings changed correlated again
+    out = {'findings': filed}
+    if panels.stored:
+        out['panel_readings'] = panels.stored
+    return out
 
 
 @adopter('bbot_discovery')

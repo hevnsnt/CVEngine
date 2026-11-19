@@ -17,7 +17,7 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent.parent
 
 GROUPS = (
-    ('scanners', 'Scanners and tools', 'These run on Sentinels, in the Sentinel image, at the versions of the Sentinel commit this release was tested with; the built-in scanner follows the newest published Sentinel build, so what runs can be newer. The server image keeps only nuclei, to read and check templates'),
+    ('scanners', 'Scanners and tools', 'These run on Sentinels, in the Sentinel image, at the versions of the Sentinel commit this release was tested with; the built-in scanner follows the newest published Sentinel build, so what runs can be newer. The server image runs and ships none of them'),
     ('greenbone', 'OpenVAS add-on', 'Greenbone Community Edition, in separate containers a Sentinel runs. Off until you turn it on'),
     ('platform', 'Platform', 'What the server and its containers run on'),
 )
@@ -31,7 +31,7 @@ def tool(key, name, url, group, version, license, purpose, where='sentinel', opt
 # The Sentinel commit the Sentinel versions below were read from (its Dockerfile and requirements.txt). tests/test_about_page.py holds it equal to
 # the floor commit of scanner.lock.json and to the sha web/requirements.txt pins: raising the floor means reading the Sentinel's pins again, then changing this line.
 # (The built-in scanner image follows the newest published build; the page says what it was read at, not that it runs exactly this.)
-SENTINEL_PINS_COMMIT = '5ac80a23b43fb571443fd5e9d8b553852b67e393'
+SENTINEL_PINS_COMMIT = '0e8a7927d58ed47fdf13ca91b26eda58a8be4ff8'
 
 GH = 'https://github.com/'
 SENTINEL_DOCKERFILE = 'sentinel:Dockerfile'
@@ -44,11 +44,11 @@ TOOLS = [
     tool('naabu', 'naabu', GH + 'projectdiscovery/naabu', 'scanners', '2.7.0', 'MIT', 'Full-port discovery ahead of nmap',
          pins=[(SENTINEL_DOCKERFILE, r'ARG NAABU_VERSION=([0-9.]+)')]),
     tool('nuclei', 'nuclei', GH + 'projectdiscovery/nuclei', 'scanners', '3.11.1', 'MIT',
-         'Vulnerability scanning and CVE tests. The Sentinel runs it; the server keeps the binary only to read and check templates', where='both',
-         pins=[('web/Dockerfile', r'ARG NUCLEI_VERSION=([0-9.]+)'), (SENTINEL_DOCKERFILE, r'ARG NUCLEI_VERSION=([0-9.]+)')]),
+         'Vulnerability scanning, CVE tests and the syntax check of AI-written templates, on the Sentinel only',
+         pins=[(SENTINEL_DOCKERFILE, r'ARG NUCLEI_VERSION=([0-9.]+)')]),
     tool('nuclei-templates', 'nuclei-templates', GH + 'projectdiscovery/nuclei-templates', 'scanners', 'v10.5.2', 'MIT',
-         'The community template library. The Sentinel image carries this pinned release as a fallback; the server refreshes its own set daily from the '
-         'project and hands Sentinels the approved bundle', where='both', pins=[(SENTINEL_DOCKERFILE, r'ARG NUCLEI_TEMPLATES_VERSION=(v[0-9.]+)')]),
+         'The community template library, a pinned release baked into the Sentinel image. A Sentinel runs only the files the template index of its library '
+         'records with their sha256 and approves under the policy; the server keeps no copy and reads that index', pins=[(SENTINEL_DOCKERFILE, r'ARG NUCLEI_TEMPLATES_VERSION=(v[0-9.]+)')]),
     tool('testssl', 'testssl.sh', GH + 'testssl/testssl.sh', 'scanners', '3.2.5', 'GPL-2.0 (a separate program, never linked)',
          'TLS audit: protocols, ciphers and the named TLS vulnerabilities', pins=[(SENTINEL_DOCKERFILE, r'ARG TESTSSL_VERSION=([0-9.]+)')]),
     tool('wpscan', 'WPScan', GH + 'wpscanteam/wpscan', 'scanners', '4.2.0', 'WPScan Public Source License',
@@ -88,11 +88,11 @@ TOOLS = [
     tool('mailfail', 'MailFail', GH + 'ACK-J/MailFail', 'scanners', '', 'AGPL-3.0',
          'The email-security checks of the hygiene scan, re-implemented with credit (from MailFail by Black Hills Information Security)', where='both'),
     tool('python-gvm-sentinel', 'python-gvm', GH + 'greenbone/python-gvm', 'scanners', '27.10.1', 'GPL-3.0-or-later',
-         'The GMP client library behind the OpenVAS add-on, in the Sentinel image and in the server image', where='both',
-         pins=[('web/requirements.txt', r'(?m)^python-gvm==([0-9.]+)'), (SENTINEL_REQUIREMENTS, r'(?m)^python-gvm==([0-9.]+)')]),
+         'The GMP client library behind the OpenVAS add-on, in the Sentinel image (the server image no longer installs it)',
+         pins=[(SENTINEL_REQUIREMENTS, r'(?m)^python-gvm==([0-9.]+)')]),
     tool('go', 'Go toolchain', 'https://go.dev', 'scanners', '1.27.4', 'BSD-3-Clause',
-         'Builds nuclei and naabu; removed again in the same image layer, so no Go runs in either image', where='both',
-         pins=[('web/Dockerfile', r'ARG GOVERSION=([0-9.]+)'), (SENTINEL_DOCKERFILE, r'ARG GOVERSION=([0-9.]+)')]),
+         'Builds nuclei and naabu in the Sentinel image; removed again in the same image layer, so no Go runs in it',
+         pins=[(SENTINEL_DOCKERFILE, r'ARG GOVERSION=([0-9.]+)')]),
     tool('tailscale', 'Tailscale', GH + 'tailscale/tailscale', 'scanners', '1.104.7', 'BSD-3-Clause',
          'The optional sidecar that joins a tailnet so scans can reach it', where='server', optional='COMPOSE_PROFILES=tailscale',
          pins=[('docker-compose.yml', r'tailscale/tailscale:v([0-9.]+)')]),
@@ -234,12 +234,13 @@ DATA_SOURCES = [
     source('crt.sh', 'https://crt.sh', 'Certificate transparency lookups', used_by='cveFeed/ctmonitor.py'),
     source('IANA RDAP bootstrap and the registries it names', 'https://data.iana.org/rdap/dns.json', 'Registry lookups for the dangling-domain and email hygiene checks', used_by='cveFeed/mailfail.py'),
     source('Internet Archive', 'https://web.archive.org', 'Saved URLs, as passive evidence of what a host once ran', used_by='cveFeed/archive_urls.py'),
-    source('nuclei-templates releases', 'https://github.com/projectdiscovery/nuclei-templates/releases', 'The server\'s daily template refresh and the reviewer\'s check for a newer release', used_by='cveFeed/reviewer.py, the update_nuclei_templates task'),
+    source('nuclei-templates releases', 'https://github.com/projectdiscovery/nuclei-templates/releases', 'The reviewer\'s check for a release newer than the one the Sentinels pin (the server downloads no templates)', used_by='reviewer/cvengine_reviewer/server.py'),
     source('badkeys blocklist', 'https://badkeys.info', 'Known-weak SSH host keys, downloaded by `sshamble badkeys-update` on the Sentinel, daily. Turn that off with CVENGINE_BADKEYS_REFRESH=0 on an air-gapped Sentinel', used_by='cvENGINE-sentinel client/badkeys.py'),
     source('Greenbone Community feed', 'https://greenbone.github.io/docs/latest/', 'Vulnerability tests and advisory data for the OpenVAS add-on, from registry.community.greenbone.net', 'the OpenVAS add-on', used_by='docker-compose.yml, the openvas-* data services'),
     source('GitHub', 'https://docs.github.com/rest', 'The in-app update check (the releases API)', used_by='cveFeed/updater.py'),
     source('bounty-targets-data', 'https://github.com/arkadiyt/bounty-targets-data', 'Public scope of bug bounty programs, read at run time (MIT)', used_by='cveFeed/bounty_data.py'),
     source('Bugcrowd Vulnerability Rating Taxonomy', 'https://github.com/bugcrowd/vulnerability-rating-taxonomy', 'Bundled as cveFeed/data/vrt.json for report categories and priority (Apache-2.0)', used_by='cveFeed/bounty_playbook.py'),
+    source('Rapid7 Recog', 'https://github.com/rapid7/recog', 'Banner fingerprints bundled as cveFeed/data/recog/ (pinned commit, BSD-2-Clause): the product, version and CPE stored banners state', used_by='cveFeed/recog.py'),
     source('HackerOne', 'https://api.hackerone.com', 'Submitting a report you wrote, with your own API token', 'your own HackerOne token', used_by='cveFeed/bounty_submit.py'),
     source('WPScan vulnerability data', 'https://wpscan.com/', 'WordPress vulnerabilities for WPScan', 'your own wpscan.com token', used_by='the Sentinel\'s WPScan'),
     source('runZero Export API', 'https://www.runzero.com', 'Asset inventory (OS, hardware, tags, CVE reports); no runZero code is bundled', 'your own Export API token', used_by='cveFeed/runzero.py'),

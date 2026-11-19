@@ -34,6 +34,14 @@ from tests.test_udp_scan import UdpBase
 HOST = 'www.example.test'
 
 
+def a_local_runner(target):
+    """Stands in for a module function that would run a tool here (``LOCAL_RUNNERS``): none exists any more."""
+    return f'ran {target}'
+
+
+a_local_runner_original = a_local_runner
+
+
 class NoRealSleep:
     """A test that waits on a fake scanner never sleeps for real: nothing may call ``time.sleep`` with more than a blink."""
 
@@ -242,42 +250,38 @@ class HarnessGuardTests(TestCase):
             self.assertIsInstance(caught.exception, LocalRunDetected)
             self.assertIn('nmap ran on this server', str(caught.exception))
             with self.assertRaises(LocalRunDetected):
-                with resources.heavy_job('nmap', label='x'):
-                    pass
+                guard.runner(['192.0.2.2'], [], '5m')
         finally:
             failures = self.finish(case)
         self.assertEqual(len(guard.calls), 2)
         self.assertEqual(len(failures), 1, 'a run that a stage swallowed must still fail the test when it ends')
 
-    def test_the_resource_gate_is_closed_for_the_kinds_tools_and_open_for_everything_else(self):
-        from contextlib import contextmanager
-
-        from cveFeed import heavy_process
-        entered = []
-
-        @contextmanager
-        def gate(kind, *args, **kwargs):  # stands in for the real memory gate, which needs Redis
-            entered.append(kind)
-            yield mock.MagicMock()
-        with mock.patch.object(resources, 'heavy_job', gate):
+    def test_a_local_runner_of_the_kind_is_patched_shut_and_put_back_when_the_test_ends(self):
+        target = f'{__name__}.a_local_runner'
+        with mock.patch.dict(fs.LOCAL_RUNNERS, {'testssl': (target,)}):
             case, guard = self.guarded('testssl')
             try:
                 with self.assertRaises(LocalRunDetected):
-                    heavy_process.run('testssl', ['testssl.sh', 'example.test'], 5)
-                with resources.heavy_job('route-probe', label='x'):  # another tool's job goes through the real gate
-                    pass
+                    globals()['a_local_runner']('192.0.2.1:443')
+                self.assertIsNot(globals()['a_local_runner'], a_local_runner_original)
             finally:
                 failures = self.finish(case)
-        self.assertEqual(entered, ['route-probe'])
-        self.assertEqual(len(guard.calls), 1)
-        self.assertTrue(guard.calls[0][0].startswith('heavy_process.run'), guard.calls)
+        self.assertEqual([where for where, _ in guard.calls], [target])
         self.assertEqual(len(failures), 1)
+        self.assertIs(globals()['a_local_runner'], a_local_runner_original)  # the patch came off
+        self.assertEqual(a_local_runner('x'), 'ran x')
 
-    def test_every_kind_has_a_local_path_and_a_gate(self):
+    def test_the_guard_patches_nothing_of_the_removed_memory_gate(self):
+        self.assertFalse(hasattr(fs, 'HEAVY_KINDS'))
+        self.assertFalse(hasattr(resources, 'heavy_job'))
+        case, guard = self.guarded('testssl')
+        self.assertEqual(self.finish(case), [])  # nothing attempted: nothing fails
+        self.assertEqual(guard.calls, [])
+
+    def test_every_kind_has_a_local_path(self):
         from agentapi.models import SentinelTask as Task
         dispatchable = set(Task.KINDS) - set(scanner_state.NO_STAGE) - {'discover'}
         self.assertEqual(set(fs.LOCAL_RUNNERS), dispatchable)
-        self.assertEqual(set(fs.HEAVY_KINDS), dispatchable)
         with self.assertRaises(ValueError):
             assert_ran_nowhere_locally(mock.Mock(), 'nope')
 
@@ -480,7 +484,7 @@ class NucleiDeepServedTests(StageBase, NoScannerBase):
         self.sub = Subdomain.objects.get(scan_history=self.scan, name=HOST)
         ScanHistory.objects.filter(pk=self.scan.pk).update(scan_status=2)  # weekly_deep_nuclei reads finished scans only
         Subdomain.objects.filter(pk=self.sub.pk).update(target_domain=self.domain)
-        for patcher in (mock.patch('cveFeed.nuclei_scan.approved_templates', return_value=('/tmp/approved', 'rev1', 1)),
+        for patcher in (mock.patch('cveFeed.nuclei_scan.approved_revision', return_value='rev1'),
                         mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda names, **kw: names),
                         mock.patch('cveFeed.nuclei_scan.scan_targets', return_value=({HOST}, set(), set()))):
             patcher.start()

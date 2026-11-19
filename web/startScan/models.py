@@ -199,7 +199,7 @@ class Subdomain(models.Model):
 	webserver = models.CharField(max_length=1000, blank=True, null=True)
 	content_length = models.IntegerField(default=0, blank=True, null=True)
 	page_title = models.CharField(max_length=1000, blank=True, null=True)
-	technologies = models.ManyToManyField('Technology', related_name='technologies', blank=True)
+	technologies = models.ManyToManyField('Technology', related_name='technologies', blank=True, through='SubdomainTechnology')
 	ip_addresses = models.ManyToManyField('IPAddress', related_name='ip_addresses', blank=True)
 	directories = models.ManyToManyField('DirectoryScan', related_name='directories', blank=True)
 	waf = models.ManyToManyField('Waf', related_name='waf', blank=True)
@@ -479,6 +479,8 @@ class Vulnerability(models.Model):
 		indexes = [
 			models.Index(fields=['subdomain', 'open_status', 'severity'], name='vuln_sub_open_sev_idx'),
 			models.Index(fields=['scan_history', 'name'], name='vuln_scan_name_idx'),
+			# the Vulnerabilities list's order (worst first, then newest): its page of ids is read in this order and cut after 50 rows
+			models.Index(fields=['-severity', '-id'], name='vuln_severity_id_idx'),
 		]
 		constraints = [
 			# one row per finding (see save_vulnerability); md5 keeps long names and URLs inside the btree row limit
@@ -529,19 +531,6 @@ class ScanActivity(models.Model):
 		return str(self.title)
 
 
-class Command(models.Model):
-	id = models.AutoField(primary_key=True)
-	scan_history = models.ForeignKey(ScanHistory, on_delete=models.CASCADE, blank=True, null=True)
-	activity = models.ForeignKey(ScanActivity, on_delete=models.CASCADE, blank=True, null=True)
-	command = models.TextField(blank=True, null=True)
-	return_code = models.IntegerField(blank=True, null=True)
-	output = models.TextField(blank=True, null=True)
-	time = models.DateTimeField()
-
-	def __str__(self):
-		return str(self.command)
-
-
 class Waf(models.Model):
 	id = models.AutoField(primary_key=True)
 	name = models.CharField(max_length=500)
@@ -570,6 +559,22 @@ class Technology(models.Model):
 
 	def __str__(self):
 		return str(self.name)
+
+
+class SubdomainTechnology(models.Model):
+	"""A host's link to one of its technologies (the table the plain many-to-many always had), with where the technology came from: ``source``
+	(the pass that linked it: ``nuclei`` for the technology templates, ``vsrc:panel`` for a panel template; '' when not recorded, every link
+	stored before these columns), ``cpe`` (the CPE the detecting template's metadata names, ``cpe:2.3:a:apache:tomcat``: correlation matches the
+	technology CPE first, ``cveFeed.source_versions.technology_cpes``) and ``observed_at`` (when it was seen; empty on links stored before)."""
+	subdomain = models.ForeignKey('Subdomain', on_delete=models.CASCADE)
+	technology = models.ForeignKey('Technology', on_delete=models.CASCADE)
+	source = models.CharField(max_length=32, blank=True, default='')
+	cpe = models.CharField(max_length=255, blank=True, default='')
+	observed_at = models.DateTimeField(null=True, blank=True, default=timezone.now)
+
+	class Meta:
+		db_table = 'startScan_subdomain_technologies'
+		unique_together = [('subdomain', 'technology')]
 
 
 class CountryISO(models.Model):

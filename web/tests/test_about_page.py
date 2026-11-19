@@ -154,6 +154,7 @@ class SoftwareListTests(TestCase):
 		# every ==pin of its requirements.txt is a library the page names (playwright and aardwolf are tools of their own)
 		listed = {name.lower() for name, _, _ in __import__('cveFeed.software', fromlist=['x']).SENTINEL_LIBRARIES}
 		listed |= {name.lower() for name, _, _ in __import__('cveFeed.software', fromlist=['x']).server_libraries()}
+		listed |= {t['name'].lower() for t in __import__('cveFeed.software', fromlist=['x']).TOOLS}  # a library the page lists as a tool of its own (python-gvm)
 		for line in (sentinel / 'requirements.txt').read_text().splitlines():
 			match = re.match(r'([A-Za-z0-9_.-]+)(==|>=)', line.split('#')[0].strip())
 			if match:

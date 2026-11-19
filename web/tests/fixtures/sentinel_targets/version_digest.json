@@ -1,0 +1,90 @@
+{
+  "reads": [
+    {
+      "id": "vpn.example.com|vsrc|netscaler-gzip|https://vpn.example.com",
+      "host": "vpn.example.com",
+      "base": "https://vpn.example.com",
+      "requests": [
+        {
+          "path": "/vpn/js/rdx/core/lang/rdx_en.json.gz",
+          "read": "digest",
+          "headers": [
+            "etag",
+            "last-modified",
+            "content-type",
+            "server"
+          ]
+        },
+        {
+          "path": "/vpn/js/rdx/core/lang/cvengine-control-1a2b3c4d5e6f",
+          "read": "digest",
+          "headers": [
+            "etag",
+            "last-modified",
+            "content-type",
+            "server"
+          ]
+        }
+      ],
+      "allowed": [
+        "vpn.example.com",
+        "example.com",
+        "www.example.com"
+      ]
+    },
+    {
+      "id": "gp.example.com|vsrc|panos-globalprotect|https://gp.example.com",
+      "host": "gp.example.com",
+      "base": "https://gp.example.com",
+      "requests": [
+        {
+          "path": "/global-protect/portal/css/login.css",
+          "read": "headers",
+          "headers": [
+            "etag",
+            "last-modified",
+            "content-type",
+            "server"
+          ]
+        },
+        {
+          "path": "/global-protect/portal/images/favicon.ico",
+          "read": "headers",
+          "headers": [
+            "etag",
+            "last-modified",
+            "content-type",
+            "server"
+          ]
+        },
+        {
+          "path": "/global-protect/portal/css/cvengine-control-0f1e2d3c4b5a",
+          "read": "headers",
+          "headers": [
+            "etag",
+            "last-modified",
+            "content-type",
+            "server"
+          ]
+        }
+      ],
+      "allowed": [
+        "gp.example.com"
+      ]
+    }
+  ],
+  "scope": {
+    "hosts": [
+      "vpn.example.com",
+      "example.com",
+      "www.example.com",
+      "gp.example.com"
+    ],
+    "domains": [],
+    "excluded": [],
+    "excluded_trees": [],
+    "private": false,
+    "addresses": [],
+    "blocked": []
+  }
+}

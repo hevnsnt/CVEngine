@@ -71,6 +71,13 @@ REVIEW = [
         'POST P/findings/{kind}/{finding_id}/comments', 'add_supplier', 'POST P/suppliers', 'set_supplier_finding_status', 'PATCH P/suppliers/findings/{finding_id}',
         'update_cve_detection', 'PUT cves/{cve_id}/detection', 'PUT secrets/rules',
     ]),
+    ('allow', 'App Admin only (refused to every other role): a verdict on an AI-written template or a revision of it. Retiring only stops a check '
+     'and withdraws what it confirmed; a revision is a new draft that passes every automatic gate an AI draft passes before it may run (its '
+     'spend is the two AI calls of that validation, and only while a person has it switched on), and it widens no scope, sends no credentials '
+     'and switches nothing on', [
+        'set_generated_template_verdict', 'POST generated-templates/{generated_id}/review',
+        'update_generated_template', 'POST generated-templates/{generated_id}/revisions',
+    ]),
     ('allow', 'host-reported data, or the protocol of the agent or Sentinel that holds the token (its own registration, heartbeat and tasks); a new agent is pending until a person approves it', [
         'POST P/inventory', 'POST P/inventory/{inventory_id}/adopt', 'register_assets', 'PUT assets', 'register_agent', 'PUT agent', 'agent_heartbeat', 'POST agent/heartbeat',
         'get_next_task', 'POST agent/tasks/next', 'accept_task', 'POST agent/tasks/{task_id}/accept', 'report_task_result', 'POST agent/tasks/{task_id}/result', 'release_task',

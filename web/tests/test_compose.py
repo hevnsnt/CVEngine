@@ -55,10 +55,9 @@ class ComposeEnvTests(unittest.TestCase):
             for svc in APP_SERVICES:
                 self.assertEqual([o for o in load(name)[svc].get('security_opt', []) if 'seccomp' in o], [], f'{name} {svc}')
 
-    def test_the_openvas_feed_containers_come_back_after_a_host_reboot(self):
-        services = load('docker-compose.yml')
-        for name in ('vulnerability-tests', 'notus-data', 'scap-data', 'cert-bund-data', 'dfn-cert-data', 'data-objects', 'report-formats'):
-            self.assertEqual(services[f'openvas-{name}'].get('restart'), 'unless-stopped', name)
+    def test_no_openvas_container_is_defined_here(self):
+        # OpenVAS runs on a Sentinel (kind openvas): the Greenbone containers are the Sentinel's compose file's, not this one's
+        self.assertFalse([name for name in load('docker-compose.yml') if name.startswith('openvas')])
 
     def test_unused_concurrency_variables_are_gone(self):
         for name in FILES + ('.env.example',):
@@ -69,7 +68,7 @@ class ComposeEnvTests(unittest.TestCase):
 
 @unittest.skipUnless(yaml and (ROOT / 'docker-compose.yml').is_file(), 'needs PyYAML and the compose file')
 class BuiltinScannerComposeTests(unittest.TestCase):
-    """The built-in scanner service (docs/BUILTIN-SCANNER.md): on by default, the moving tag scanner.lock.json names, celery's network namespace, a health check
+    """The built-in scanner service (docs/BUILTIN-SCANNER.md): on by default, the moving tag scanner.lock.json names, a network of its own, a health check
     on its heartbeats, and the enrollment read from the shared volume by the client itself."""
 
     @classmethod
@@ -86,10 +85,21 @@ class BuiltinScannerComposeTests(unittest.TestCase):
         self.assertNotIn('build', self.scanner)
         self.assertEqual(self.scanner['pull_policy'], '${CVENGINE_SCANNER_PULL_POLICY:-missing}')
 
-    def test_it_shares_celerys_network_namespace(self):
-        self.assertEqual(self.scanner['network_mode'], 'service:celery')
-        self.assertNotIn('networks', self.scanner)
-        self.assertIn('celery', self.scanner['depends_on'])
+    def test_it_has_a_network_of_its_own_shared_only_with_web(self):
+        # every scan leaves from here, so the server's containers carry no scan traffic; the scanner reaches web and nothing else of the stack
+        self.assertNotIn('network_mode', self.scanner)
+        self.assertEqual(self.scanner['networks'], ['scanner_network'])
+        self.assertNotIn('celery', self.scanner['depends_on'])
+        self.assertIn('web', self.scanner['depends_on'])
+        self.assertIn('scanner_network', self.compose['web']['networks'])
+        on_it = sorted(name for name, svc in self.compose.items() if 'scanner_network' in (svc.get('networks') or []))
+        self.assertEqual(on_it, ['scanner', 'web'])
+        for name, svc in self.compose.items():
+            self.assertNotEqual(svc.get('network_mode'), 'service:celery', name)
+
+    def test_the_tailscale_sidecar_joins_the_scanner_not_celery(self):
+        self.assertEqual(self.compose['tailscale']['network_mode'], 'service:scanner')
+        self.assertEqual(self.compose['tailscale']['depends_on'], ['scanner'])
 
     def test_it_has_the_sentinels_reduced_capability_set_and_nothing_that_would_block_it(self):
         # SN-8, as proven by the Sentinel's own CI (scripts/ci_scan_smoke.sh there): every capability dropped, NET_RAW for nmap's SYN scan, OS detection and UDP

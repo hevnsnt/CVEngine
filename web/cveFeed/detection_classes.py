@@ -308,3 +308,212 @@ def language_ecosystem_of(package):
     if re.match(r'^[a-z0-9_.-]+/[a-z0-9_.-]+\Z', low):
         return 'composer'
     return ''
+
+
+# --- the service features an advisory says the flaw needs (by rules, from its own words) --------------------------------------------------
+# One rule table: each rule is a CVE predicate (the advisory's wording, read from its title and description: ``needs``, unless ``not_needed``
+# says the flaw is reached without the feature) and what it means for a reading of one service feature (``cvengine_scanner.features``): the
+# reading values that make the host exposed (``exposed``, any of a reading's comma-joined tokens) and the values that rule it out (``rule_out``,
+# every token; None: every reading that is not exposed). ``unread`` names a way to the feature that no Sentinel reads (cleartext HTTP/2, h2c,
+# is never probed): the precondition stays, but its absence never rules a match out. Evaluated in one place (cveFeed.service_features); a new
+# feature is a new rule here and a vocabulary entry, never new correlation code.
+#
+# HTTP/2. A feature named only as the flaw's protocol ("a crafted HTTP/2 request", "the HTTP/2 implementation") is NOT a precondition: such an
+# advisory says nothing of whether HTTP/2 has to be turned on, and a stated precondition is all this rule reads.
+_HTTP2 = r'HTTP/?2(?:\.0)?'
+_NEVER = re.compile(r'(?!)')  # a rule part that never holds
+# An advisory that names no mail server or SMTP at all is not an SMTP advisory: an SMTP reading says nothing of it (an NTLM or STARTTLS flaw of
+# another protocol). Used as ``not_needed`` of the SMTP rules.
+_NOT_SMTP = re.compile(r'\A(?![\s\S]*\b(?:SMTP|ESMTP|Exim|Postfix|Sendmail|OpenSMTPD|qmail|MTA)\b)', re.IGNORECASE)
+FEATURE_RULES = (
+    {'id': 'http2_enabled', 'feature': 'http2', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(
+         r'\bngx_http_v2_module\b|\bmod_http2\b|\b' + _HTTP2 + r' (?:protocol )?module\b'
+         r'|\b(?:configurations?|configured|deployments?|instances?|servers?|sites?|virtual hosts?)\s+(?:that\s+|which\s+|to\s+)?'
+         r'(?:use|uses|using|enable|enables|serve|serves|support|supports|have)\s+' + _HTTP2 + r'\b'
+         r'|\bwhen (?:they |it )?(?:use|uses|using|serves?|serving) ' + _HTTP2 + r'\b'
+         r'|\b(?:when|if|where|with|while|only (?:when|if))\s+(?:the\s+)?' + _HTTP2 + r'(?:\s+(?:support|protocol|module))?\s+'
+         r'(?:is|was|are|has been|have been)\s+(?:enabled|configured|turned on|in use|used|active|negotiated)\b'
+         r'|\bwith ' + _HTTP2 + r' (?:support )?(?:enabled|turned on|configured)\b'
+         r'|\bhttp2 (?:option|parameter|directive)\b|[\'"]http2[\'"] (?:option|parameter|directive)|\blisten\b[^.]{0,60}\bhttp2\b|\bhttp2 on\b'
+         r'|\bProtocols\b[^.]{0,40}\bh2\b',
+         re.IGNORECASE),
+     'not_needed': re.compile(
+         r'\bHTTP/1(?:\.[01x])?\s*(?:,|and|or|/)\s*(?:HTTP/)?2\b|\b' + _HTTP2 + r'\s*(?:,|and|or|/)\s*HTTP/(?:1|3)\b'
+         r'|\bregardless of (?:the )?(?:HTTP )?protocol|\b(?:does not|doesn\'t|do not) (?:require|need) ' + _HTTP2 + r'\b'
+         r'|\bnot (?:limited|specific|restricted) to ' + _HTTP2 + r'\b',
+         re.IGNORECASE),
+     'unread': re.compile(r'\bh2c\b|\bcleartext ' + _HTTP2 + r'|' + _HTTP2 + r' over (?:cleartext|plain ?text|TCP)\b|\bprior knowledge\b',
+                          re.IGNORECASE)},
+    # --- SSH, read from the server's KEXINIT (nmap's ssh2-enum-algos in the fingerprint pass, the ssh_probe kind) -------------------------------
+    # Terrapin (CVE-2023-48795): "... aka a Terrapin attack". The prefix truncation needs ChaCha20-Poly1305 or a CBC cipher with an EtM MAC, and
+    # strict key exchange (kex-strict-*-v00@openssh.com) is the fix: a server that offers it, or neither affected mode, rules the match out.
+    {'id': 'ssh_terrapin', 'feature': 'ssh_terrapin', 'exposed': ('exposed',), 'rule_out': ('strict_kex', 'no_affected_mode'),
+     'needs': re.compile(r'\bTerrapin\b|\bprefix truncation attack', re.IGNORECASE), 'not_needed': _NEVER, 'unread': _NEVER},
+    # CVE-2008-5161: "Error handling in the SSH protocol in ... OpenSSH 4.7p1 ..., when using a block cipher algorithm in Cipher Block Chaining
+    # (CBC) mode, makes it easier ... to recover certain plaintext data". The SSH product and the CBC condition in one sentence; a TLS or SSL
+    # advisory is not this rule's (its CBC is a TLS cipher suite, which the SSH reading says nothing of).
+    {'id': 'ssh_cbc_mode', 'feature': 'ssh_cbc', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\b(?:SSH|sshd|OpenSSH)\b.{0,600}?\b(?:Cipher Block Chaining|CBC)\b(?:\s*\(CBC\))?\s+mode\b', re.IGNORECASE | re.DOTALL),
+     'not_needed': re.compile(r'\b(?:TLS|SSLv?[23]?|DTLS|HTTPS)\b'), 'unread': _NEVER},
+    # CVE-2013-4548: "The mm_newkeys_from_blob function in monitor_wrap.c in sshd in OpenSSH 6.2 and 6.3, when an AES-GCM cipher is used, ..."
+    {'id': 'ssh_aes_gcm', 'feature': 'ssh_aes_gcm', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\b(?:sshd|OpenSSH|SSH)\b.{0,400}?\bwhen an? AES-GCM cipher is (?:used|negotiated|in use)\b', re.IGNORECASE | re.DOTALL),
+     'not_needed': re.compile(r'\b(?:TLS|SSLv?[23]?|DTLS|HTTPS)\b'), 'unread': _NEVER},
+    # --- SMTP, read from one cleartext EHLO (the nmap fingerprint pass's follow-up) ------------------------------------------------------------
+    # CVE-2017-16943, CVE-2017-16944: "The receive_msg function in receive.c in the SMTP daemon in Exim 4.88 and 4.89 allows ... via vectors
+    # involving BDAT commands". BDAT exists only when the server lists CHUNKING (RFC 3030); Exim's own workaround was chunking_advertise_hosts =.
+    # Only for an advisory about a mail server (``_NOT_SMTP``).
+    {'id': 'smtp_bdat', 'feature': 'smtp_chunking', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bBDAT\b|\bCHUNKING (?:extension|command|support)\b'), 'not_needed': _NOT_SMTP, 'unread': _NEVER},
+    # CVE-2023-42114, CVE-2023-42116 ("... the handling of NTLM challenge requests", Exim), CVE-2020-12783 ("an out-of-bounds read in the SPA
+    # authenticator that could result in SPA/NTLM authentication bypass", Exim): reached through AUTH NTLM, which the server lists only when the
+    # SPA authenticator is configured (Exim's advisory: "Do not use SPA (NTLM) authentication"). A list read before STARTTLS that may grow after
+    # it (``tls_unread``) shows NTLM but never clears it.
+    {'id': 'smtp_auth_ntlm', 'feature': 'smtp_auth', 'exposed': ('ntlm',),
+     'rule_out': ('external', 'gssapi', 'cram-md5', 'digest-md5', 'plain', 'login', 'xoauth2', 'oauthbearer', 'scram-sha-1', 'scram-sha-256',
+                  'other', 'none'),
+     'needs': re.compile(r'\bNTLM challenge\b|\bSPA authenticator\b|\bSPA/NTLM\b|\bAUTH NTLM\b', re.IGNORECASE),
+     'not_needed': _NOT_SMTP, 'unread': _NEVER},
+    # CVE-2011-0411: "The STARTTLS implementation in Postfix ... allows man-in-the-middle attackers to insert commands into encrypted SMTP
+    # sessions", CVE-2021-33515 (Dovecot submission: "allows STARTTLS command injection in lib-smtp"): a server that does not list STARTTLS has
+    # no such implementation in reach. Never an IMAP, POP3 or other protocol's STARTTLS, and never the sending side (Exim's CVE-2021-38371,
+    # "during MTA SMTP sending"), which no listening port shows.
+    {'id': 'smtp_starttls_injection', 'feature': 'smtp_starttls', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bSTARTTLS\b.{0,400}?\b(?:insert|inject)\w*\b.{0,60}?\bcommands?\b|\bSTARTTLS command injection\b',
+                         re.IGNORECASE | re.DOTALL),
+     'not_needed': re.compile(_NOT_SMTP.pattern + r'|\b(?:IMAP|POP3|LMTP|NNTP|XMPP|FTP)\b|\bSMTP (?:client|sending)\b|\bMTA SMTP sending\b',
+                              re.IGNORECASE | re.DOTALL),
+     'unread': _NEVER},
+    # --- SMB, read from one SMB2 and one SMB1 NEGOTIATE on port 445 ----------------------------------------------------------------------------
+    # MS17-010 (CVE-2017-0143 to CVE-2017-0148: "The SMBv1 server in Microsoft Windows ..."), CVE-2017-11780 ("The Server Message Block 1.0
+    # (SMBv1) on ..."), CVE-2020-1301 ("... the Microsoft Server Message Block 1.0 (SMBv1) server handles certain requests"): a server that refuses
+    # SMBv1 rules the match out. Not when the advisory names a later SMB version beside it, nor the SMBv1 client.
+    {'id': 'smbv1_server', 'feature': 'smbv1', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\b(?:SMBv1|SMB ?1(?:\.0)?|Server Message Block (?:version )?1(?:\.0)?)\b(?:\s*\(SMBv1\))?\s+(?:server|protocol)\b'
+                         r'|\bThe Server Message Block 1\.0 \(SMBv1\)', re.IGNORECASE),
+     'not_needed': re.compile(r'\bSMBv1\b[^.]{0,30}\b(?:and|or)\b[^.]{0,10}\bSMBv?[23]|\bSMBv?[23](?:\.\d+)*\b[^.]{0,30}\b(?:and|or)\b[^.]{0,10}\bSMBv1\b'
+                              r'|\bSMBv1 client\b', re.IGNORECASE),
+     'unread': _NEVER},
+    # SMBGhost and SMBleed (CVE-2020-0796, CVE-2020-1206): "... the way that the Microsoft Server Message Block 3.1.1 (SMBv3) protocol handles
+    # certain requests". Microsoft's advisory (ADV200005, and the FAQ of both CVEs) places the flaw in SMB 3.1.1 compression and gives disabling
+    # compression as the workaround, so the reading that rules them out is no 3.1.1 compression. That exact wording, or an advisory that names
+    # SMB compression itself.
+    {'id': 'smb_compression', 'feature': 'smb_compression', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bServer Message Block 3\.1\.1 \(SMBv3\) protocol handles certain requests\b|\bSMB(?:v?3(?:\.1\.1)?)? compression\b'
+                         r'|\bcompress(?:ed|ion) (?:header|transform|request|message)s?\b[^.]{0,60}\bSMB', re.IGNORECASE),
+     'not_needed': _NEVER, 'unread': _NEVER},
+    # --- RDP, read from nmap's rdp-enum-encryption in the fingerprint pass ---------------------------------------------------------------------
+    # BlueKeep (CVE-2019-0708) and DejaBlue (CVE-2019-1181, CVE-2019-1182, CVE-2019-1222, CVE-2019-1226): "... when an unauthenticated attacker
+    # connects to the target system using RDP and sends specially crafted requests". With Network Level Authentication required, a client must
+    # authenticate (CredSSP) before the vulnerable code is reached, Microsoft's stated mitigation: such a host closes the match as the precondition
+    # not being met (an authenticated attacker is a different finding). Never the RD Gateway (CVE-2020-0609, CVE-2020-0610: the same words, but
+    # the gateway's own UDP and HTTPS transport) or the client.
+    {'id': 'rdp_unauthenticated', 'feature': 'rdp_nla', 'exposed': ('not_required',), 'rule_out': ('required',),
+     'needs': re.compile(r'\bunauthenticated attacker connects to the target (?:system|server|host) using RDP\b', re.IGNORECASE),
+     'not_needed': re.compile(r'\bRD Gateway\b|\bRemote Desktop Gateway\b|\bRemote Desktop (?:Connection )?Client\b|\bRD Web\b', re.IGNORECASE),
+     'unread': _NEVER},
+)
+# what a database prefilter for ``feature_preconditions`` looks for (PostgreSQL ``~*``): every ``needs`` wording above names one of these. A new
+# rule adds its own words here.
+FEATURE_PREFILTER = (r'http/?2|ngx_http_v2|h2c|\mh2\M'
+                     r'|terrapin|prefix truncation|cipher block chaining|\mcbc\M|aes-gcm|\mbdat\M|chunking|ntlm|spa authenticator|starttls'
+                     r'|smbv1|smb ?1|server message block|compression|unauthenticated attacker connects')
+
+
+# --- web service features (featweb): HTTP/3, PHP on Windows, WebDAV, the VPN portals and SLP --------------------------------------------------
+# Each rule quotes the advisory's own condition ("configured to use the HTTP/3 QUIC module", "PHP-CGI on Windows", "the WebDAV service in IIS",
+# "SSL-VPN", "GlobalProtect portal or gateway", "configured with either WebVPN or AnyConnect", "configured as a Gateway ... or AAA virtual server",
+# "access to port 427"). ``rule_out`` () never clears a match: the reading cannot prove the feature off (Alt-Svc absent is only "not
+# advertised"; a module's WebDAV may sit below /, which one OPTIONS / does not read). Ivanti Connect Secure has no rule: its advisories name no
+# portal setting, the portal is the product, and the reading is shown only.
+_NEVER = re.compile(r'(?!)')
+_H3 = r'(?:HTTP/3|QUIC)'
+_WEBDAV_CLIENT = r'WebDAV (?:client|redirector|Mini-Redirector)|remote WebDAV (?:location|share|server)|\bWebDAV share'
+FEATURE_RULES += (
+    {'id': 'http3_quic_module', 'feature': 'http3', 'exposed': ('yes',), 'rule_out': (),
+     'needs': re.compile(
+         r'\bngx_http_v3_module\b|\bHTTP/3 (?:QUIC )?module\b|\bQUIC module\b'
+         r'|\b(?:configured|configurations?) (?:to use|with|that use) (?:the )?' + _H3 + r'\b'
+         r'|\b(?:when|if|where|only when|only if) (?:the )?' + _H3 + r'(?: support| protocol| module)? (?:is|are|has been|was) '
+         r'(?:enabled|configured|turned on|in use|used|active)\b'
+         r'|\bwith ' + _H3 + r' (?:support )?(?:enabled|turned on|configured)\b|\blisten\b[^.]{0,60}\bquic\b', re.IGNORECASE),
+     'not_needed': re.compile(r'\bregardless of (?:the )?(?:HTTP )?protocol|\b(?:does not|doesn\'t|do not) (?:require|need) ' + _H3 + r'\b'
+                              r'|\bHTTP/[12](?:\.[01x])?\s*(?:,|and|or|/)\s*(?:HTTP/)?3\b', re.IGNORECASE),
+     'unread': _NEVER},
+    {'id': 'php_cgi_windows', 'feature': 'php_windows', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bPHP[- ]CGI\b[^.]{0,80}\bon Windows\b|\bon Windows\b[^.]{0,80}\bPHP[- ]CGI\b|\bWindows[- ]based PHP\b'
+                         r'|\bBest[- ]Fit\b[^.]{0,200}\bPHP\b|\bPHP\b.{0,300}?\bWindows (?:code ?pages?|"?Best[- ]Fit)', re.IGNORECASE),
+     'not_needed': _NEVER, 'unread': _NEVER},
+    {'id': 'webdav_iis', 'feature': 'webdav', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bWebDAV (?:service|extension|component)\b[^.]{0,80}\b(?:Internet Information Services|IIS)\b'
+                         r'|\b(?:Internet Information Services|IIS)\b[^.]{0,40}\bWebDAV (?:service|extension|component)\b', re.IGNORECASE),
+     'not_needed': re.compile(_WEBDAV_CLIENT, re.IGNORECASE), 'unread': _NEVER},
+    {'id': 'webdav_module', 'feature': 'webdav', 'exposed': ('yes',), 'rule_out': (),
+     'needs': re.compile(r'\bmod_dav(?:_fs|_lock|_svn)?\b|\bWebDAV (?:module|support)\b[^.]{0,40}\b(?:enabled|configured|turned on|loaded)\b'
+                         r'|\bwhen (?:the )?WebDAV (?:module |support |service )?(?:is |was )?(?:enabled|configured|turned on)\b'
+                         r'|\bwith WebDAV (?:enabled|turned on|configured)\b', re.IGNORECASE),
+     'not_needed': re.compile(_WEBDAV_CLIENT + r'|\bmod_\w+ and (?:\(\d\) )?mod_dav\b|\bmod_dav (?:and|or) (?:\(\d\) )?mod_\w+', re.IGNORECASE),
+     'unread': _NEVER},
+    {'id': 'fortios_sslvpn', 'feature': 'vpn_fortinet', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bForti(?:OS|Proxy|Gate)\b.{0,400}?\bSSL[- ]?VPN\b|\bSSL[- ]?VPN\b.{0,200}?\bForti(?:OS|Proxy|Gate)\b', re.IGNORECASE),
+     'not_needed': re.compile(r'\b(?:administrative|admin|management) (?:web )?(?:interface|GUI)\b|\bfgfmd\b', re.IGNORECASE), 'unread': _NEVER},
+    {'id': 'panos_globalprotect', 'feature': 'vpn_globalprotect', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bGlobalProtect (?:portal|gateway|feature|interface)s?\b', re.IGNORECASE),
+     'not_needed': re.compile(r'\bGlobalProtect (?:app|agent|client)\b|\bCaptive Portal\b|\bClientless VPN\b|\bweb interfaces?\b', re.IGNORECASE),
+     'unread': _NEVER},
+    {'id': 'cisco_webvpn', 'feature': 'vpn_cisco', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bconfigured with (?:either )?WebVPN or AnyConnect\b|\bWebVPN or AnyConnect (?:features?|configurations?)\b'
+                         r'|\bAnyConnect and WebVPN configurations?\b|\bwebvpn (?:feature )?is enabled\b|\bwebvpn-configured interface\b'
+                         r'|\bWebVPN login page\b|\bVPN web server\b|\bSSL VPN functionality\b', re.IGNORECASE),
+     'not_needed': re.compile(r'\bAnyConnect Secure Mobility Client\b|\bSecure Client for\b|\bAnyConnect (?:client|for (?:Windows|Mac|Linux))\b'
+                              r'|\bmanagement and VPN web servers?\b|\bmanagement web server\b|\bHTTPS management\b|\bASDM\b', re.IGNORECASE),
+     'unread': _NEVER},
+    {'id': 'netscaler_gateway_aaa', 'feature': 'vpn_citrix', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bconfigured as (?:a |an )?(?:Gateway|AAA virtual server)\b|\bGateway \(VPN virtual server, ICA Proxy, CVPN, RDP Proxy\)'
+                         r'|\bAAA virtual server\b', re.IGNORECASE),
+     'not_needed': re.compile(r'\bLB virtual servers?\b|\bCR virtual server\b|\bload balancing virtual server|\bmanagement interface\b'
+                              r'|\bNSIP\b|\bCLIP\b|\bSNIP\b', re.IGNORECASE),
+     'unread': _NEVER},
+    {'id': 'openslp_port_427', 'feature': 'slp', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bport 427\b|\bOpenSLP (?:as used in|service)\b|\bService Location Protocol\b', re.IGNORECASE),
+     'not_needed': _NEVER,
+     # the reading is TCP 427's: an advisory that names UDP (the CVE-2023-29552 amplification) keeps its precondition, but a refused TCP port
+     # does not rule it out
+     'unread': re.compile(r'\bUDP\b', re.IGNORECASE)},
+)
+FEATURE_PREFILTER += (r'|ngx_http_v3|http/3|quic|php[- ]cgi|windows-based php|best[- ]fit|webdav|mod_dav|ssl[- ]?vpn|globalprotect|webvpn|windows code ?pages?'
+                      r'|anyconnect|vpn web server|aaa virtual server|configured as (a |an )?gateway|openslp|port 427|service location protocol')
+# --- end of the web service features
+
+
+def _sentences(text):
+    return [s.strip() for s in re.split(r'(?<=[.!?])\s+(?=[A-Z"\'(])|\n+', text) if s.strip()]
+
+
+def feature_rule(feature):
+    """The first rule of ``FEATURE_RULES`` for ``feature`` (what its readings mean), or None."""
+    return next((r for r in FEATURE_RULES if r['feature'] == feature), None)
+
+
+def feature_preconditions(title='', description=''):
+    """``{feature: {'rule', 'quote', 'rule_out', 'exposed', 'clears'}}``: the service features the advisory says the flaw needs (the first rule
+    of ``FEATURE_RULES`` that holds, per feature), each with the sentence that says so (the description's first, else the title; at most 300
+    characters), whether a reading may rule a match out (False when the advisory also names a way to the feature no reading covers, such as
+    h2c), the reading values that expose the host and those that clear it (None: every value that does not expose it). Empty when none is
+    stated, or when the advisory says the flaw does not need it. Plain text from a third-party feed: quoted, never run."""
+    from reNgine.ai_providers import clean_text
+    title = clean_text(str(title or ''), 400) or ''
+    text = clean_text(str(description or ''), 4000) or ''
+    whole = f'{title}\n{text}'
+    out = {}
+    for rule in FEATURE_RULES:
+        if rule['feature'] in out or rule['not_needed'].search(whole):
+            continue
+        quote = next((s for s in _sentences(text) if rule['needs'].search(s)), '') or (title if rule['needs'].search(title) else '')
+        if not quote:
+            continue
+        out[rule['feature']] = {'rule': rule['id'], 'quote': quote if len(quote) <= 300 else quote[:297].rsplit(' ', 1)[0] + '...',
+                                'rule_out': not rule['unread'].search(whole), 'exposed': tuple(rule['exposed']),
+                                'clears': tuple(rule['rule_out']) if rule['rule_out'] is not None else None}
+    return out

@@ -18,7 +18,6 @@ _user = contextvars.ContextVar('tenancy_current_user', default=None)
 # model label -> lookup path to the owning project id; nullable owners listed in NULLABLE
 SCOPES = {
     'dashboard.Project': 'id',
-    'dashboard.InAppNotification': 'project_id',
     'targetApp.Domain': 'project_id',
     'startScan.ScanHistory': 'domain__project_id',
     'startScan.Subdomain': 'target_domain__project_id',
@@ -27,11 +26,11 @@ SCOPES = {
     'startScan.MetaFinderDocument': 'target_domain__project_id',
     'startScan.SubScan': 'scan_history__domain__project_id',
     'startScan.ScanActivity': 'scan_of__domain__project_id',
-    'startScan.Command': 'scan_history__domain__project_id',
     'cveFeed.CVEMatch': 'subdomain__target_domain__project_id',
     'cveFeed.DiscoveryEvent': 'domain__project_id',
     'cveFeed.AgentActivity': 'project_id',
     'cveFeed.TlsCertificate': 'domain__project_id',
+    'cveFeed.ServiceFeature': 'domain__project_id',
     'cveFeed.HygieneFinding': 'domain__project_id',
     'cveFeed.HostState': 'project_id',
     'cveFeed.HostAssessment': 'project_id',
@@ -39,6 +38,7 @@ SCOPES = {
     'cveFeed.RouteAuth': 'project_id',
     'cveFeed.HostLabel': 'project_id',
     'cveFeed.ProbeObservation': 'project_id',
+    'cveFeed.JavaRuntime': 'project_id',
     'cveFeed.SavedSearch': 'project_id',
     'cveFeed.HostProfile': 'project_id',
     'cveFeed.TailscaleLink': 'project_id',
@@ -62,6 +62,7 @@ SCOPES = {
     'agentapi.AgentTask': 'project_id',
     'agentapi.SentinelTask': 'project_id',
     'agentapi.StageRun': 'project_id',  # a sweep over every project waits with no project (NULLABLE)
+    'agentapi.DnsReading': 'project_id',  # what Sentinels said a project's names resolve to (agentapi.dns_crosscheck)
     'agentapi.SentinelPartial': 'task__project_id',  # a streamed task's batches waiting to be stored, read only by the stage that dispatched it
     'cveFeed.AuthCredential': 'project_id',
     'cveFeed.FindingComment': 'project_id',
@@ -85,7 +86,7 @@ SCOPES = {
     'cveFeed.ResourceRef': 'project_id',
     'dashboard.ApiCredential': 'project_id',  # an organization's own credential has no project (NULLABLE)
 }
-NULLABLE = {'dashboard.InAppNotification', 'cveFeed.AgentActivity', 'dashboard.ApiCredential', 'cveFeed.AIJob', 'agentapi.StageRun'}  # system-wide (or organization-wide) entries have no project
+NULLABLE = {'cveFeed.AgentActivity', 'dashboard.ApiCredential', 'cveFeed.AIJob', 'agentapi.StageRun'}  # system-wide (or organization-wide) entries have no project
 
 # Models that hold a foreign key to a project, domain, scan or organization and are deliberately NOT in SCOPES. Every other one must be listed above
 # (tests.test_sentinel_hardening checks this), so a model that gains a project owner cannot be forgotten.
@@ -95,6 +96,8 @@ UNSCOPED = {
     'dashboard.ApiToken': 'owned by a user, not a project; the inventory token only names the project it reports to; authenticated before any scope exists',
     'dashboard.AuditLog': 'organization level trail, read through its own organization filter',
     'startScan.IpAddress': 'per organization, shared by the organization\'s projects',
+    'startScan.SubdomainTechnology': 'the table of the host-technology many-to-many link (as unscoped as it was when Django made it): read through a '
+                                     'host already in scope, or as a subquery of host ids under the scoped host query',
     'cveFeed.HostExclusion': 'per organization',
     'cveFeed.ExcludedAddress': 'per organization',
     'cveFeed.OpenvasOrg': 'per organization',

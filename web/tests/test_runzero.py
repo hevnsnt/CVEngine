@@ -1,6 +1,7 @@
 import json
 import os
 from datetime import timedelta
+from pathlib import Path
 from unittest import mock
 
 import requests
@@ -20,6 +21,9 @@ from tests.test_agentapi import call, tool_call
 
 TOKEN = 'ET-test-token-0123456789abcdef'
 SECRET_FRAGMENT = 'test-token-0123456789'
+
+
+SERVICES_PAGE = json.loads((Path(__file__).with_name('fixtures') / 'source_versions' / 'runzero_services_page.json').read_text())
 
 
 class FakeResponse:
@@ -121,7 +125,40 @@ class ParsingTests(SimpleTestCase):
         self.assertEqual(ctx.exception.kind, 'auth')
 
 
+    def test_a_service_keeps_only_its_fingerprint_attributes(self):
+        record = SERVICES_PAGE['services'][0]  # runZero's SSH service on 22: banner, host key and Recog's service.* fingerprint
+        got = runzero.parse_service(record)
+        self.assertEqual((got['address'], got['port'], got['transport'], got['protocol'], got['asset_id'], got['updated'][:10]),
+                         ('203.0.113.5', 22, 'tcp', 'ssh', '6f1c2a3e-0000-4000-8000-000000000001', '2025-11-17'))
+        self.assertEqual(got['attributes'], {'service.cpe23': 'cpe:/a:openbsd:openssh:8.2p1', 'service.family': 'OpenSSH',
+                                             'service.product': 'OpenSSH', 'service.vendor': 'OpenBSD', 'service.version': '8.2p1'})
+        component = runzero.parse_service(SERVICES_PAGE['services'][1])
+        self.assertEqual(component['attributes']['service.component.version'], '7.4.3')
+        # an ICMP "service", one that names no version, an unfilled Recog template and junk are no services
+        icmp, unversioned = SERVICES_PAGE['services'][3], SERVICES_PAGE['services'][4]
+        for junk in (icmp, unversioned, {**record, 'service_data': {'service.product': 'OpenSSH', 'service.version': '{service.version}'}},
+                     {**record, 'service_address': 'nope'}, {**record, 'service_port': '70000'}, {**record, 'service_data': 'x'}, 'x', None):
+            self.assertIsNone(runzero.parse_service(junk), junk)
+        clipped = runzero.parse_service({**record, 'service_data': {'service.product': 'A' * 5000, 'service.version': '1.2'}})
+        self.assertEqual(len(clipped['attributes']['service.product']), 200)
+
+
 class ClientTests(SimpleTestCase):
+    def test_the_services_export_is_paged_with_its_own_key_fields_and_search(self):
+        first = {**SERVICES_PAGE, 'next_key': 'k2'}
+        c, session, _ = client(FakeResponse(200, json.dumps(first).encode()), page('services', [SERVICES_PAGE['services'][2]]))
+        services, truncated = c.fetch_services()
+        self.assertEqual([(s['address'], s['port']) for s in services],
+                         [('203.0.113.5', 22), ('203.0.113.5', 80), ('203.0.113.5', 8080), ('198.51.100.9', 161), ('203.0.113.5', 8080)])
+        self.assertFalse(truncated)
+        (url1, kw1), (_url2, kw2) = session.calls
+        self.assertEqual(url1, 'https://console.runzero.com/api/v1.0/export/org/services.json')
+        self.assertEqual((kw1['params']['search'], kw1['params']['page_size']), ('has:"service.version"', runzero.SERVICE_PAGE_SIZE))
+        self.assertIn('service_data', kw1['params']['fields'].split(','))
+        self.assertEqual(kw2['params']['start_key'], 'k2')
+        self.assertEqual(kw1['headers']['Authorization'], f'Bearer {TOKEN}')
+        self.assertFalse(kw1['allow_redirects'])
+
     def test_pages_are_followed_and_the_token_only_travels_in_the_header(self):
         c, session, _ = client(page('assets', [{'addresses': ['192.0.2.1']}], 'k1'), page('assets', [{'addresses': ['192.0.2.2']}]))
         assets, truncated = c.fetch_assets('alive:true')
@@ -289,10 +326,16 @@ class FakeClient:
     def fetch_vulnerabilities(self, search='', limit=0):
         return list(self.reports), False
 
+    def fetch_services(self, search=runzero.SERVICE_SEARCH, limit=0):
+        if self.services_error:
+            raise self.services_error
+        return list(self.services), False
 
-def fake_client(assets=(), reports=(), error=None, quota_low=False, cut=False):
+
+def fake_client(assets=(), reports=(), error=None, quota_low=False, cut=False, services=(), services_error=None):
     return mock.patch.object(runzero_sync.runzero, 'Client', type('C', (FakeClient,), {
-        'assets': list(assets), 'reports': list(reports), 'error': error, 'quota_low': quota_low, 'cut': cut}))
+        'assets': list(assets), 'reports': list(reports), 'error': error, 'quota_low': quota_low, 'cut': cut, 'services': list(services),
+        'services_error': services_error}))
 
 
 class SyncFixture(TestCase):
@@ -495,6 +538,56 @@ class ReportsAsEvidenceTests(SyncFixture):
     def test_boost_is_capped_at_one(self):
         self.assertEqual(runzero.boosted(0.95), 1.0)
         self.assertEqual(runzero.boosted(1.0), 1.0)
+
+
+class ServiceTests(SyncFixture):
+    def services(self, address='192.0.2.10', asset_id='a-1'):
+        out = []
+        for record in SERVICES_PAGE['services']:
+            parsed = runzero.parse_service({**record, 'service_address': address, 'service_asset_id': asset_id})
+            if parsed:
+                out.append(parsed)
+        return out
+
+    def test_versioned_services_are_kept_on_the_address_by_port(self):
+        result = self.sync(assets=[asset(['192.0.2.10'])], services=self.services())
+        self.assertEqual((result['state'], result['counts']['services']), ('ok', 4))
+        self.ip_a.refresh_from_db()
+        kept = self.ip_a.fingerprint['runzero']['services']
+        self.assertEqual([(s['port'], s['transport'], s['attributes'].get('service.product')) for s in kept],
+                         [(22, 'tcp', 'OpenSSH'), (80, 'tcp', 'HTTPD'), (161, 'udp', 'Net-SNMP'), (8080, 'tcp', 'Jetty')])
+        self.assertNotIn('banner', json.dumps(kept))  # only the fingerprint attributes are kept
+        self.assertFalse(Port.objects.filter(number__in=(22, 80, 161, 8080)).exists())  # no port row is made from them
+        # the readings they give are third-party readings of the project's host on each port (cveFeed.source_versions)
+        from cveFeed import source_versions
+        from cveFeed.models import ProbeObservation
+        got = {(r.product, r.port) for r in ProbeObservation.objects.filter(probe=source_versions.RUNZERO_PROBE, project=self.pa)}
+        self.assertTrue({('OpenSSH', 22), ('Jetty', 8080), ('Apache HTTPD', 80), ('Net-SNMP', 161)} <= got)
+        self.assertIn('4 versioned services', AgentActivity.objects.filter(kind='runzero').latest('id').message)
+
+    def test_a_service_of_another_asset_on_the_same_address_is_not_this_hosts(self):
+        newer = asset(['192.0.2.10'], id='a-2', last_seen='2026-02-01T00:00:00+00:00')
+        self.sync(assets=[asset(['192.0.2.10']), newer], services=self.services(asset_id='a-1'))
+        self.ip_a.refresh_from_db()
+        self.assertEqual(self.ip_a.fingerprint['runzero']['services'], [])
+
+    def test_a_failed_services_export_keeps_the_sync_and_the_services_already_stored(self):
+        self.sync(assets=[asset(['192.0.2.10'])], services=self.services())
+        result = self.sync(assets=[asset(['192.0.2.10'], os='Ubuntu Linux')],
+                           services_error=runzero.RunZeroError('too_large', 'runZero sent a reply larger than the limit; narrow the search'))
+        self.assertEqual(result['state'], 'ok')
+        self.assertIn('larger than the limit', result['counts']['services_error'])
+        self.ip_a.refresh_from_db()
+        self.assertEqual(self.ip_a.fingerprint['runzero']['os'], 'Ubuntu Linux')
+        self.assertEqual(len(self.ip_a.fingerprint['runzero']['services']), 4)
+        self.sync(assets=[asset(['192.0.2.10'])], services=[])  # a complete read that lists none: the address's services are gone
+        self.ip_a.refresh_from_db()
+        self.assertEqual(self.ip_a.fingerprint['runzero']['services'], [])
+
+    def test_another_tenants_address_never_gets_the_services(self):
+        self.sync(assets=[asset(['192.0.2.10'])], services=self.services())
+        self.ip_b.refresh_from_db()
+        self.assertNotIn('runzero', self.ip_b.fingerprint or {})
 
 
 class ImportTests(SyncFixture):

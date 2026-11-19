@@ -25,7 +25,7 @@ from scanEngine.models import EngineType
 from startScan.models import IpAddress, ScanHistory, Subdomain
 from targetApp.models import Domain
 
-COLLAPSE = re.compile(r'ROW_NUMBER\(\) OVER \(PARTITION BY CASE')
+COLLAPSE = re.compile(r'ROW_NUMBER\(\) OVER \(PARTITION BY (CASE|b\.host_key)')  # the ORM window (a CASE key) or services._collapse_sql's one statement
 
 
 def collapses(run):

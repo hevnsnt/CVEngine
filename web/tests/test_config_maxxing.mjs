@@ -7,8 +7,10 @@ import * as L from '../static/cve/config-maxxing-logic.js';
 const dir = new URL('../static/cve/', import.meta.url);
 const read = (name) => readFileSync(new URL(name, dir), 'utf8');
 
-const field = (over = {}) => ({key: 'heavy.nmap', label: 'Port and service scan (nmap)', group: 'heavy', default: 2, min: 1, max: 8, value: 2, source: 'default',
-  env_name: 'HEAVY_MAX_NMAP', env_value: null, set_by: null, set_at: null, applies: 'live', ...over});
+const field = (over = {}) => ({key: 'assess_batch', label: 'Hosts per assessment batch', group: 'discovery', default: 8, min: 1, max: 64, value: 8, source: 'default',
+  env_name: 'CVENGINE_ASSESS_BATCH', env_value: null, set_by: null, set_at: null, applies: 'live', ...over});
+const depth = (over = {}) => field({key: 'work_depth', label: 'Discovery scans kept running', group: 'depth', default: 3, min: 0, max: 32, value: 3,
+  env_name: 'CVENGINE_WORK_DEPTH', ...over});
 
 test('the section is called configMaxxing, with that capitalisation, and has no subtitle', () => {
   assert.equal(L.SECTION_LABEL, 'configMaxxing');
@@ -19,8 +21,9 @@ test('the section is called configMaxxing, with that capitalisation, and has no 
     assert.doesNotMatch(src, /config-maxing|"tinkerer"|#tinkerer/i, `${name} uses another name or an alias`);
   }
   assert.match(L.WARNING_TEXT, /slower, use more memory or send more traffic to your targets/);
-  assert.match(L.EXPLANATION_TEXT, /second machine \(a Sentinel\) is the best way to scale/);
-  assert.match(L.EXPLANATION_TEXT, /memory gate still holds work back/);
+  assert.match(L.EXPLANATION_TEXT, /Every scan runs on a Sentinel/);
+  assert.match(L.EXPLANATION_TEXT, /another Sentinel \(a second machine\) is the best way to scale/);
+  assert.doesNotMatch(L.EXPLANATION_TEXT, /memory gate/);  // no scanner runs on the server, so no gate holds work back here
 });
 
 test('the anchor is #configmaxxing, and one card can be named after a slash', () => {
@@ -49,71 +52,53 @@ test('the section is collapsed by default and the choice is remembered, without 
 test('a box accepts only whole numbers inside the field range', () => {
   const f = field();
   assert.deepEqual(L.checkDraft(f, '4'), {ok: true, value: 4});
-  assert.deepEqual(L.checkDraft(f, ' 8 '), {ok: true, value: 8});
-  for (const bad of ['', '0', '9', '-1', '2.5', 'two', '1e1', null, undefined]) {
+  assert.deepEqual(L.checkDraft(f, ' 64 '), {ok: true, value: 64});
+  for (const bad of ['', '0', '65', '-1', '2.5', 'two', '1e1', null, undefined]) {
     const result = L.checkDraft(f, bad);
     assert.equal(result.ok, false, String(bad));
-    assert.match(result.error, /1 to 8|from 1 to 8/);
+    assert.match(result.error, /^Hosts per assessment batch must be (a whole number )?from 1 to 64$/);
   }
-  assert.deepEqual(L.checkDraft(field({key: 'work_depth', min: 0, max: 32, label: 'x'}), '0'), {ok: true, value: 0});
+  assert.deepEqual(L.checkDraft(depth(), '0'), {ok: true, value: 0});
 });
 
 test('only the boxes that differ from what is in effect are sent, and one bad box blocks the save with its message', () => {
-  const fields = [field(), field({key: 'heavy.nuclei', label: 'nuclei', value: 1, default: 1})];
-  assert.deepEqual(L.changesFrom(fields, {'heavy.nmap': '2', 'heavy.nuclei': '1'}), {changes: {}, error: null});
-  assert.deepEqual(L.changesFrom(fields, {'heavy.nmap': '4', 'heavy.nuclei': '1'}), {changes: {'heavy.nmap': 4}, error: null});
-  const bad = L.changesFrom(fields, {'heavy.nmap': '4', 'heavy.nuclei': '99'});
-  assert.match(bad.error, /nuclei/);
-  assert.deepEqual(bad.changes, {'heavy.nmap': 4});
+  const fields = [field(), depth()];
+  assert.deepEqual(L.changesFrom(fields, {assess_batch: '8', work_depth: '3'}), {changes: {}, error: null});
+  assert.deepEqual(L.changesFrom(fields, {assess_batch: '16', work_depth: '3'}), {changes: {assess_batch: 16}, error: null});
+  const bad = L.changesFrom(fields, {assess_batch: '16', work_depth: '99'});
+  assert.match(bad.error, /Discovery scans kept running must be from 0 to 32/);
+  assert.deepEqual(bad.changes, {assess_batch: 16});
 });
 
 test('each row says where its number comes from, the default, the environment value and who set it', () => {
   assert.equal(L.sourceLabel(field()), 'Built-in default');
-  assert.equal(L.sourceLabel(field({source: 'environment', env_value: 3})), 'Set on the server');
+  assert.equal(L.sourceLabel(field({source: 'environment', env_value: 12})), 'Set on the server');
   assert.equal(L.sourceLabel(field({source: 'admin'})), 'Saved here');
-  const lines = L.originLines(field({source: 'admin', value: 4, env_value: 3, set_by: 'alice', set_at: '2026-10-31T10:00:00Z'}), (d) => `<${d}>`);
-  assert.deepEqual(lines, ['Default 2', 'Set by alice on <2026-10-31T10:00:00Z>']);
-  assert.deepEqual(L.originLines(field()), ['Default 2']);
-  assert.equal(L.serverSetting(field()), 'HEAVY_MAX_NMAP is not set');
-  assert.equal(L.serverSetting(field({env_value: 3})), 'HEAVY_MAX_NMAP=3');
-  assert.equal(L.rangeText(field()), '1 to 8');
+  const lines = L.originLines(field({source: 'admin', value: 16, env_value: 12, set_by: 'alice', set_at: '2026-10-31T10:00:00Z'}), (d) => `<${d}>`);
+  assert.deepEqual(lines, ['Default 8', 'Set by alice on <2026-10-31T10:00:00Z>']);
+  assert.deepEqual(L.originLines(field()), ['Default 8']);
+  assert.equal(L.serverSetting(field()), 'CVENGINE_ASSESS_BATCH is not set');
+  assert.equal(L.serverSetting(field({env_value: 12})), 'CVENGINE_ASSESS_BATCH=12');
+  assert.equal(L.rangeText(field()), '1 to 64');
 });
 
 test('Reset to default is offered only for a value that was saved here', () => {
   assert.equal(L.canReset(field()), false);
-  assert.equal(L.canReset(field({source: 'environment', env_value: 3})), false);
+  assert.equal(L.canReset(field({source: 'environment', env_value: 12})), false);
   assert.equal(L.canReset(field({source: 'admin'})), true);
 });
 
 test('fields are grouped in the order the server gave, and an empty group is left out', () => {
-  const fields = [field(), field({key: 'work_depth', group: 'depth'})];
-  const groups = L.groupFields(fields, [{id: 'heavy', title: 'A'}, {id: 'discovery', title: 'B'}, {id: 'depth', title: 'C'}]);
-  assert.deepEqual(groups.map((g) => [g.id, g.fields.length]), [['heavy', 1], ['depth', 1]]);
+  const fields = [field(), depth()];
+  const groups = L.groupFields(fields, [{id: 'discovery', title: 'A'}, {id: 'lanes', title: 'B'}, {id: 'depth', title: 'C'}]);
+  assert.deepEqual(groups.map((g) => [g.id, g.fields.length]), [['discovery', 1], ['depth', 1]]);
 });
 
-test('the memory warning follows the typed numbers like the server does', () => {
-  const costs = {nmap: 400, nuclei: 1000, 'bbot-deep': 2400};
-  const defaults = {nmap: 2, nuclei: 1, 'bbot-deep': 1};
-  assert.deepEqual(L.memoryPlan(defaults, costs, 3072, defaults).warnings, []);
-  assert.deepEqual(L.memoryPlan({nmap: 1, nuclei: 1, 'bbot-deep': 1}, costs, 100, defaults).warnings, []);
-  assert.deepEqual(L.memoryPlan({nmap: 8, nuclei: 8, 'bbot-deep': 4}, costs, null, defaults).warnings, []);
-  const plan = L.memoryPlan({nmap: 8, nuclei: 4, 'bbot-deep': 1}, costs, 3072, defaults);
-  assert.equal(plan.total, 9600);
-  const text = plan.warnings.join(' ');
-  assert.match(text, /9600 MB/);
-  assert.match(text, /more than 2 times the 3072 MB/);
-  assert.deepEqual(L.memoryPlan({nmap: 4, nuclei: 2, 'bbot-deep': 1}, costs, 3072, defaults).warnings, []);
-  assert.match(text, /second machine/);
-  assert.doesNotMatch(text, /CELERY_MEM_LIMIT/);
-  assert.match(text, /second machine/);
-  const alone = L.memoryPlan({nmap: 2, nuclei: 4, 'bbot-deep': 1}, costs, 3000, defaults, {nuclei: 'nuclei'});
-  assert.ok(alone.warnings.some((w) => w.startsWith('nuclei at 4') && w.includes('by itself')));
-});
-
-test('sizes are written in MB or GB, and unknown stays unknown', () => {
-  assert.equal(L.formatMb(512), '512 MB');
-  assert.equal(L.formatMb(3072), '3.0 GB');
-  assert.equal(L.formatMb(null), 'unknown');
+test('there is no scanner memory plan any more: no budget, no per-tool limits, no warning', () => {
+  for (const gone of ['memoryPlan', 'formatMb', 'OVERCOMMIT']) assert.equal(L[gone], undefined, gone);
+  const card = read('scan-concurrency-card.js');
+  assert.doesNotMatch(card, /memoryPlan|formatMb|Memory budget|"heavy"|f\.group === "heavy"/);
+  assert.doesNotMatch(read('config-maxxing-logic.js'), /heavy|memory gate|CELERY_MEM_LIMIT/i);
 });
 
 test('the discovery pool never claims a number the worker did not report', () => {
@@ -145,4 +130,18 @@ test('Settings has the configMaxxing group, collapsed by default, with a pointer
   assert.match(src, /isSectionHash\(location\.hash\)/);
   assert.doesNotMatch(src, /innerHTML/);
   assert.match(src, /try \{\s*storage = window\.localStorage;\s*\} catch/);
+});
+
+test('a Sentinel machine and its tuning read as one line each', () => {
+  const m = {cpus: 4, host_cpus: 4, load_per_cpu: [0.25, 0.3, 0.3], available_share: 0.75, total_mb: 8000, oom_kills_1h: {nuclei_deep: 1}, stale: false};
+  assert.equal(L.machineText(m), '4 CPUs, load 0.25 per CPU, 75% of 7.8 GB memory available, 1 run killed for memory in the last hour');
+  assert.equal(L.machineText({...m, host_cpus: 16, oom_kills_1h: {}}), '4 CPUs (host 16), load 0.25 per CPU, 75% of 7.8 GB memory available');
+  assert.match(L.machineText({...m, stale: true, age_seconds: 900}), /last reported 15 min ago/);
+  assert.equal(L.machineText(null), '');
+  assert.equal(L.sentinelTuningText({max_concurrent: 6, ceiling: 8, kinds: {nuclei_deep: 4}}), "Auto-tuned to 6 of its machine's 8 tasks at once; nuclei deep 4 at once");
+  assert.equal(L.sentinelTuningText({max_concurrent: null, ceiling: 8, kinds: {}}), "Runs its machine's own 8 tasks at once");
+  assert.match(L.sentinelTuningText({pinned: 's_root (Sentinel settings, 5)', ceiling: 8}), /^Tasks at once pinned by s_root/);
+  assert.equal(L.sentinelTuningText({killed: true, max_concurrent: 6, ceiling: 8}), '');
+  assert.equal(L.sentinelStatusLine({name: 'edge', tuning: {ceiling: 8}, machine: null, last_run: {held: 'offline: left as it is'}}),
+    "edge: Runs its machine's own 8 tasks at once · now: offline: left as it is");
 });

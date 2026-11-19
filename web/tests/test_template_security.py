@@ -70,17 +70,25 @@ class TemplateExecutionBoundaryTests(DatabaseTestCase):
         ScanPolicy.objects.create(nuclei_all_templates=False)  # the restricted policy: only read-only templates run
         self.scratch = tempfile.TemporaryDirectory()
         self.addCleanup(self.scratch.cleanup)
-        self.installed = Path(self.scratch.name) / 'installed'
         self.generated = Path(self.scratch.name) / 'generated'
-        self.installed.mkdir()
         self.generated.mkdir()
-        for name, value in (('TEMPLATES_ROOT', self.installed), ('GENERATED_DIR', self.generated)):
-            patch = mock.patch.object(templategen, name, str(value))
-            patch.start()
-            self.addCleanup(patch.stop)
+        patch = mock.patch.object(templategen, 'GENERATED_DIR', str(self.generated))
+        patch.start()
+        self.addCleanup(patch.stop)
         templategen.invalidate_template_index()
         self.addCleanup(templategen.invalidate_template_index)
         self.cve = CVEEntry.objects.create(cve_id='CVE-2099-1234', published_at=timezone.now())
+
+    RELATIVE = 'http/cves/2099/CVE-2099-1234.yaml'
+
+    def install(self, text):
+        """An installed template of the pinned release, as the server knows it: an entry of the template index (no file here)."""
+        from tests.test_validation import index_of
+        patch = mock.patch('cvengine_scanner.template_index.load', return_value=index_of({self.RELATIVE: text}))
+        patch.start()
+        self.addCleanup(patch.stop)
+        templategen.invalidate_template_index()
+        return templategen.INSTALLED_PREFIX + self.RELATIVE
 
     def write(self, root, text):
         path = root / 'cve-2099-1234.yaml'
@@ -89,7 +97,7 @@ class TemplateExecutionBoundaryTests(DatabaseTestCase):
         return str(path)
 
     def test_autofire_refuses_installed_write_template_before_dispatch(self):
-        self.write(self.installed, GOOD.replace('method: GET', 'method: POST'))
+        self.install(GOOD.replace('method: GET', 'method: POST'))
         with mock.patch('cveFeed.activity.step'), mock.patch.object(templategen, '_test_chunk') as run:
             result = templategen.run_cve_tests(self.cve, ['dummy.example.test'])
         run.assert_not_called()
@@ -97,10 +105,11 @@ class TemplateExecutionBoundaryTests(DatabaseTestCase):
         self.assertIn('POST', result['reason'])
 
     def test_direct_execution_cannot_bypass_policy(self):
-        path = self.write(self.installed, GOOD.replace('method: GET', 'method: POST'))
-        with mock.patch('agentapi.sentinel_dispatch.try_template_test') as sent:
+        path = self.install(GOOD.replace('method: GET', 'method: POST'))
+        with mock.patch('agentapi.sentinel_dispatch.try_installed_template_test') as sent, mock.patch('agentapi.sentinel_dispatch.try_template_test') as text_sent:
             result = templategen.run_template(path, ['dummy.example.test'], project=1)
-        sent.assert_not_called()  # a template the policy refuses is never handed to a scanner
+        sent.assert_not_called()
+        text_sent.assert_not_called()  # a template the policy refuses is never handed to a scanner
         self.assertIn('POST', result[0]['error'])
 
     def test_generated_file_requires_current_approval_and_exact_content(self):
@@ -127,28 +136,30 @@ class TemplateExecutionBoundaryTests(DatabaseTestCase):
         self.assertIn('reviewed positive fixture', validation.approved_template(path)[1])
 
     def test_installed_destination_is_bound_and_preserves_upstream_root_url_refusal(self):
-        path = self.write(self.installed, GOOD.replace('{{BaseURL}}/version', '{{BaseURL}}@other.test/'))
+        path = self.install(GOOD.replace('{{BaseURL}}/version', '{{BaseURL}}@other.test/'))
         self.assertTrue(validation.approved_template(path)[1])
-        path = self.write(self.installed, GOOD.replace('{{BaseURL}}', '{{RootURL}}'))
+        mock.patch.stopall()
+        path = self.install(GOOD.replace('{{BaseURL}}', '{{RootURL}}'))
         self.assertTrue(validation.approved_template(path)[1])
 
-    def test_outside_root_and_oversized_templates_are_rejected(self):
+    def test_outside_the_generated_directory_or_the_index_is_rejected(self):
         outside = Path(self.scratch.name) / 'outside.yaml'
         outside.write_text(GOOD)
         self.assertIn('outside', validation.approved_template(str(outside))[1])
-        path = self.write(self.installed, 'x' * (validation.MAX_INSTALLED_TEMPLATE_BYTES + 1))
-        self.assertIn('too large', validation.approved_template(path)[1])
+        self.install(GOOD)
+        self.assertIn('not a template of the pinned release', validation.approved_template(templategen.INSTALLED_PREFIX + 'http/not-there.yaml')[1])
 
-    def test_runner_uses_the_approved_snapshot_not_the_mutable_original(self):
-        path = self.write(self.installed, GOOD)
+    def test_an_installed_template_is_sent_by_path_and_index_hash_never_as_text(self):
+        path = self.install(GOOD)
         captured = {}
 
-        def scanner(text, hosts, project):
-            Path(path).write_text(GOOD.replace('method: GET', 'method: POST'))  # the original changes after the policy read it
-            captured.update(text=text, hosts=list(hosts), project=project)
-            return [{'host': host, 'vulnerable': False, 'output': ''} for host in hosts]
-
-        with mock.patch('agentapi.sentinel_dispatch.try_template_test', side_effect=scanner):
-            templategen.run_template(path, ['dummy.example.test'], project=1)
-        self.assertEqual(captured['text'], GOOD)  # the scanner is sent exactly the bytes the policy inspected
-        self.assertEqual((captured['hosts'], captured['project']), (['dummy.example.test'], 1))
+        def scanner(relative, sha256, hosts, project):
+            captured.update(relative=relative, sha256=sha256, hosts=list(hosts), project=project)
+            return [{'host': host, 'vulnerable': False, 'output': ''} for host in hosts], GOOD
+        from cvengine_scanner import template_index
+        with mock.patch('agentapi.sentinel_dispatch.try_installed_template_test', side_effect=scanner), \
+                mock.patch('agentapi.sentinel_dispatch.try_template_test', side_effect=AssertionError('text sent')):
+            out = templategen.run_template(path, ['dummy.example.test'], project=1)
+        self.assertEqual(captured, {'relative': self.RELATIVE, 'sha256': template_index.load()['templates'][self.RELATIVE]['sha256'],
+                                    'hosts': ['dummy.example.test'], 'project': 1})
+        self.assertIn('template_evidence', out[0])  # read from the text the Sentinel ran

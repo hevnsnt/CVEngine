@@ -341,6 +341,8 @@ class StateTests(TestCase):
 	def test_state_reads_the_phase_file_apply_update_sh_writes(self):
 		self.install(OLD)
 		row = updater.check(get=fake_github())
+		with open(os.path.join(self.dir, '.update-approved'), 'w') as f:  # a drain is shown while an approval waits (tests.test_state_machines_ops)
+			f.write(NEW + '\n')
 		with open(os.path.join(self.dir, '.update-phase.json'), 'w') as f:
 			json.dump({'phase': 'draining', 'detail': 'waiting for 2 scan(s) to finish', 'scans_running': 2, 'changed_at': 1_800_000_000}, f)
 		state = updater.state(row)

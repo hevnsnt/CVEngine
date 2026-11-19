@@ -29,6 +29,8 @@ def _cert_row(host, port, info):
     cert = {k: info.get(k) or '' for k in ('subject', 'issuer', 'signature_algorithm', 'key_description', 'protocol', 'cipher', 'chain_error')}
     cert.update(sans=list(info.get('sans') or []), not_before=_iso(info.get('not_before')), not_after=_iso(info.get('not_after')),
                 legacy_tls=bool(info.get('legacy_tls')))
+    if 'alpn' in info:  # what the handshake's ALPN offer read (a Sentinel before the field sends none)
+        cert['alpn'] = info['alpn']
     return {'host': host, 'port': port, 'found': True, 'cert': cert}
 
 
@@ -47,14 +49,17 @@ def responder(probe=None, emailer=None, mx=None):
             findings, has_mx = emailer(item['name'])
             mail.append({'name': item['name'], 'has_mx': bool(has_mx), 'findings': [
                 {'check': f.check, 'severity': f.severity, 'title': f.title, 'detail': f.detail, 'host': f.host, 'evidence': f.evidence or {}} for f in findings]})
-        return {'outcome': 'done', 'certs': certs, 'mail': mail, 'touched': [t['host'] for t in target['tls']], 'refused': []}
+        # the HTTP/2 readings the handshakes took (a probe info with ``alpn``), as the library's batch reports them
+        features = scanner_hygiene.service_features(certs)
+        return {'outcome': 'done', 'certs': certs, 'mail': mail, 'touched': [t['host'] for t in target['tls']], 'refused': [],
+                **({'service_features': features} if features else {})}
     return answer
 
 
 def run_hygiene(domain_id, probe=None, emailer=None, mx=None, hosts=None, now=None):
     """``hygiene.run_hygiene`` for ``domain_id`` with a scanner that answers from ``probe``, ``emailer`` and ``mx``."""
     from cveFeed import hygiene
-    patches = (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True))
+    patches = ()
     for patch in patches:
         patch.start()
     try:

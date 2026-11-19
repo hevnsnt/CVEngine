@@ -271,6 +271,26 @@ def _inside_min_gap(row, now):
     return bool(keys) and triage.revalidation_key(triage.describe(match)) in keys
 
 
+def current_signature(row):
+    """The signature of the finding's evidence as it is now: the finding is described afresh and tracked (``triage.track``), so a row whose
+    evidence changed since it was last tracked takes the new signature (and is reset or queued for a fresh review, as ``track`` decides) before a
+    validation job is compared with it. The stored ``row.signature`` is only what the last ``track`` saw: comparing a finished job with it took a
+    finding whose version, range result or distribution answer had moved for one already validated. ``None`` when the finding is gone."""
+    findings = triage.load_findings([row])
+    if not findings:
+        return None
+    pairs = triage.track(findings)
+    return pairs[0][0].signature if pairs else None
+
+
+def _changed_since(row, job):
+    """Whether the CVE match behind ``row`` was written after ``job`` (finished or created): then its evidence may have moved without the row being
+    tracked again, and the stored signature cannot say the job still stands (``enqueue`` describes it afresh)."""
+    match = getattr(row, 'match', None) if row.match_id else None
+    when = job.finished_at or job.created_at
+    return bool(match is not None and match.updated_at and when and match.updated_at > when)
+
+
 def enqueue(row, lane, source='automatic'):
     """Idempotent dispatch of this persisted finding. No target argument reaches the broker. ``source`` is who asked: ``automatic`` (the sweep) or
     ``host_review`` (the AI host review's chosen step, ``cveFeed.host_actions``): neither is a person's work, and both run under the unattended gates."""
@@ -284,6 +304,10 @@ def enqueue(row, lane, source='automatic'):
             'match__cve_entry', 'match__subdomain__target_domain', 'vulnerability', 'route', 'hygiene').get(pk=row.pk)
         if tier_for(row) != lane or (lane == ICE and not row.match_id):
             return 'stale'
+        signature = current_signature(row)
+        if signature is None:
+            return 'stale'
+        row.signature = signature  # every comparison below is with the evidence the finding has now, not the one last tracked
         if row.match_id:
             previous = OnDemandValidation.objects.filter(match_id=row.match_id).order_by('-id').first()
             carried = _carried_job(row) if previous is None else None
@@ -363,8 +387,23 @@ def _backfill_projects(limit=2):
             cursor.last_pk = ids[-1]
         cursor.save(update_fields=['last_pk', 'updated_at'])
     for project_id in ids:
-        triage.backfill(project_id, limit=25)
+        if triage.backfill(project_id, limit=25):
+            _ask_pending(project_id)
     return len(ids)
+
+
+def _ask_pending(project_id):
+    """The backfill just gave findings of this project their first Triage row (pending): queue the project's triage sweep now, within its caps,
+    rather than leave them for the hourly sweep. At most once in ten minutes per project."""
+    from django.core.cache import cache
+    if not cache.add(f'cvengine:triage-pending-asked:{project_id}', 1, 600):
+        return
+    try:
+        from cveFeed.tasks import triage_pending
+        triage_pending.delay(project_id)
+    except Exception:  # noqa: BLE001 - the hourly sweep asks them anyway
+        import logging
+        logging.getLogger(__name__).warning('could not queue the triage of project %s', project_id, exc_info=True)
 
 
 def _active_counts():
@@ -399,7 +438,7 @@ def _settled(row, lane, jobs, active, now):
     job = jobs.get(row.pk)
     if job is not None and job.status in ('queued', 'running'):
         return None if job.status == 'queued' and job.priority > PRIORITY[lane] else 'inflight'
-    if job is not None and _recently_handled(job, row.signature, now):
+    if job is not None and _recently_handled(job, row.signature, now) and not _changed_since(row, job):
         return 'fresh'
     if active.get(row.project_id, 0) >= (PROJECT_ICE_CAP if lane == ICE else PROJECT_ACTIVE_CAP):
         return 'project_cap'

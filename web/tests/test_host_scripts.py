@@ -32,28 +32,25 @@ class OpenvasStateTests(unittest.TestCase):
     def state(self, *args):
         return subprocess.run(['python3', '-I', str(SCRIPTS / 'update-state.py'), *args], cwd=self.tmp, capture_output=True, text=True)
 
-    def answer(self, **extra):
-        return json.dumps({'want': 'on', 'state': 'ok', 'ok': True, 'error': '', 'at': 1700000000, **extra})
-
-    def test_the_answer_replaces_a_planted_link_instead_of_writing_through_it(self):
-        for name in ('.openvas-applied', '.openvas-applied.tmp'):
+    def test_a_published_state_file_replaces_a_planted_link_instead_of_writing_through_it(self):
+        for name in ('.updater-heartbeat', '.updater-heartbeat.tmp'):
             (self.tmp / 'web' / name).symlink_to(self.victim)
-        result = self.state('openvas-applied', self.answer())
+        result = self.state('heartbeat')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.victim.read_text(), 'keep me')
-        published = self.tmp / 'web' / '.openvas-applied'
+        published = self.tmp / 'web' / '.updater-heartbeat'
         self.assertFalse(published.is_symlink())
-        self.assertEqual(json.loads(published.read_text())['state'], 'ok')
+        self.assertIn('at', json.loads(published.read_text()))
 
     def test_a_hard_linked_destination_is_replaced_not_written(self):
-        os.link(self.victim, self.tmp / 'web' / '.openvas-applied')
-        self.assertEqual(self.state('openvas-applied', self.answer()).returncode, 0)
+        os.link(self.victim, self.tmp / 'web' / '.updater-heartbeat')
+        self.assertEqual(self.state('heartbeat').returncode, 0)
         self.assertEqual(self.victim.read_text(), 'keep me')
 
-    def test_only_the_documented_answer_is_published(self):
-        for bad in ('not json', '[]', self.answer(want='sideways'), self.answer(state='maybe'), self.answer(ok='yes'), self.answer(error='x' * 201)):
-            self.assertEqual(self.state('openvas-applied', bad).returncode, 1, bad)
-        self.assertFalse((self.tmp / 'web' / '.openvas-applied').exists())
+    def test_the_old_openvas_actions_are_gone(self):
+        # the in-stack OpenVAS add-on and its host switch are gone (OpenVAS runs on a Sentinel): update-state.py no longer takes their actions
+        for action in ('openvas-wanted', 'openvas-applied', 'openvas-restarted', 'openvas-log'):
+            self.assertNotIn(f"'{action}'", (SCRIPTS / 'update-state.py').read_text(), action)
 
     def test_the_scanner_update_marker_replaces_a_planted_link_and_the_watcher_acts_on_the_request_once(self):
         (self.tmp / 'web' / '.scanner-update-done').symlink_to(self.victim)
@@ -67,26 +64,6 @@ class OpenvasStateTests(unittest.TestCase):
         self.assertIn('web/.scanner-update-requested -nt web/.scanner-update-done', watch)  # newer than the marker: one run per request
         self.assertIn('[ ! -L web/.scanner-update-requested ]', watch)  # a link planted by the container is never acted on
         self.assertIn('scripts/update-state.py scanner-update-done', watch)  # the marker is published, never redirected into the shared mount
-
-    def test_the_gvmd_restart_answer_replaces_a_planted_link(self):
-        (self.tmp / 'web' / '.openvas-restarted').symlink_to(self.victim)
-        result = self.state('openvas-restarted', 'ok')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.victim.read_text(), 'keep me')
-        published = self.tmp / 'web' / '.openvas-restarted'
-        self.assertFalse(published.is_symlink())
-        self.assertTrue(json.loads(published.read_text())['ok'])
-        self.assertFalse(json.loads((self.state('openvas-restarted', 'failed'), published.read_text())[1])['ok'])
-
-    def test_the_log_tail_replaces_a_planted_link(self):
-        (self.tmp / 'web' / '.openvas-log').symlink_to(self.victim)
-        private = self.tmp / 'private.log'
-        private.write_bytes(b'x' * 100000 + b'last line\n')
-        self.assertEqual(self.state('openvas-log', str(private)).returncode, 0)
-        self.assertEqual(self.victim.read_text(), 'keep me')
-        published = (self.tmp / 'web' / '.openvas-log').read_bytes()
-        self.assertTrue(published.endswith(b'last line\n'))
-        self.assertLessEqual(len(published), 65536)
 
     def test_the_running_build_is_read_without_following_a_planted_link(self):
         # security review 1.3.4 (sentinel-1): apply-update.sh read web/.commit with head, so a link to a host file put its first line into
@@ -103,26 +80,9 @@ class OpenvasStateTests(unittest.TestCase):
         self.assertEqual(self.state('built').stdout.strip(), '')
         self.assertNotIn('head -n1 web/.commit', (SCRIPTS / 'apply-update.sh').read_text())
 
-    def test_the_request_is_read_without_following_links_and_only_on_or_off_count(self):
-        wanted = self.tmp / 'web' / '.openvas-wanted'
-        wanted.write_text('on\n')
-        self.assertEqual(self.state('openvas-wanted').stdout.strip(), 'on')
-        wanted.write_text('off')
-        self.assertEqual(self.state('openvas-wanted').stdout.strip(), 'off')
-        wanted.write_text('rm -rf /')
-        self.assertEqual(self.state('openvas-wanted').stdout.strip(), '')
-        wanted.unlink()
-        self.victim.write_text('on')
-        wanted.symlink_to(self.victim)
-        self.assertEqual(self.state('openvas-wanted').stdout.strip(), '')
-
     def test_nothing_outside_the_publisher_writes_into_web(self):
-        sync = (SCRIPTS / 'openvas-sync.sh').read_text()
         watch = (SCRIPTS / 'update-watch.sh').read_text()
-        for text in (sync, watch):
-            self.assertNotRegex(text, r'>>?\s*"?web/')  # a plain redirection into the shared mount follows links, as root
-        self.assertNotIn('$APPLIED.tmp', sync)
-        self.assertNotIn('mv -f', sync)
+        self.assertNotRegex(watch, r'>>?\s*"?web/')  # a plain redirection into the shared mount follows links, as root
 
 
 @unittest.skipUnless(HAVE_SCRIPTS, 'needs the repository scripts directory')

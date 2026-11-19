@@ -1,4 +1,4 @@
-"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``identity_check``, ``hygiene_check``, ``dangling_dns_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe``, ``route_probe``, ``page_read`` and ``ssh_probe``.
+"""The server's reading of the probe kinds' results (contract version 3): ``http_probe``, ``dns_resolve``, ``alive_check``, ``bucket_check``, ``identity_check``, ``hygiene_check``, ``dangling_dns_check``, ``supplier_check``, ``vhost_probe``, ``subdir_probe``, ``route_probe``, ``page_read``, ``ssh_probe``, (contract version 6) ``java_runtime``, (contract version 7) ``version_read``, (contract version 8) ``version_digest`` and (contract version 9) ``version_rows``.
 
 Every result is untrusted. ``clean_*`` keep only the contract's shape, clip every string and cap every list (the bounds are the contract's and
 ``cveFeed.models.ProbeObservation``'s columns); ``bind`` then drops what the task did not ask about (a probe id it did not plan, a name it did
@@ -457,6 +457,177 @@ def clean_ssh_probe(body):
         raise ApiError(400, 'an ssh_probe result lists its hosts (at most %d)' % MAX_SSH_HOSTS)
     out = [row for row in (_ssh_host(item) for item in hosts) if row is not None]
     return {'hosts': out, 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+
+
+
+MAX_JAVA_WEB = 50   # the contract's bounds
+MAX_JAVA_JDWP = 25
+MAX_JAVA_READINGS = 10
+MAX_JAVA_ASKED = 20
+JAVA_SOURCES = ('jdwp', 'actuator', 'jolokia', 'status_page', 'header', 'error_page')  # what a Sentinel may report (the server makes the inferences)
+JAVA_CONFIDENCES = ('exact', 'inferred', 'weak')
+
+
+def _java_reading(item):
+    """One reading of a java_runtime result, or None. The version is normalised again here (``cvengine_scanner.java.normalize_version``): what is
+    stored never rests on the Sentinel's spelling, and a version that is not one is dropped."""
+    from cvengine_scanner import java
+    if not isinstance(item, dict) or item.get('source') not in JAVA_SOURCES:
+        return None
+    norm = java.normalize_version(_text(item.get('version'), 40))
+    if norm is None:
+        return None
+    vendor = _text(item.get('vendor'), 40)
+    port = item.get('port', 0)
+    port = port if isinstance(port, int) and not isinstance(port, bool) and 0 <= port <= 65535 else 0
+    return {'version': norm['version'], 'major': norm['major'], 'line_only': norm['line_only'],
+            'vendor': vendor if vendor in java.VENDORS else java.normalize_vendor(vendor),
+            'runtime': _text(item.get('runtime'), 200), 'build': _text(item.get('build'), 60) or norm['build'][:60], 'source': item['source'],
+            'confidence': item.get('confidence') if item.get('confidence') in JAVA_CONFIDENCES else 'weak', 'url': _text(item.get('url'), 300),
+            'port': port, 'evidence': _text(item.get('evidence'), 300)}
+
+
+def _java_web(item):
+    if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id'] or not isinstance(item.get('readings'), list):
+        return None
+    asked = []
+    for a in (item.get('asked') if isinstance(item.get('asked'), list) else [])[:MAX_JAVA_ASKED]:
+        if isinstance(a, dict) and isinstance(a.get('path'), str):
+            asked.append({'path': _text(a['path'], 200), 'status': _int(a.get('status'), 0, 999), **({'error': _text(a['error'], 40)} if a.get('error') else {})})
+    row = {'id': _text(item['id'], 200), 'readings': [r for r in map(_java_reading, item['readings'][:MAX_JAVA_READINGS]) if r], 'asked': asked}
+    if isinstance(item.get('error'), str) and item['error']:
+        row['error'] = _text(item['error'], 200)
+    return row
+
+
+def _java_jdwp(item):
+    if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id']:
+        return None
+    speaks = item.get('speaks') if isinstance(item.get('speaks'), bool) else None
+    reading = _java_reading(item.get('reading')) if speaks else None
+    if reading is not None and reading['source'] != 'jdwp':
+        reading = None
+    row = {'id': _text(item['id'], 200), 'speaks': speaks, 'reading': reading}
+    if isinstance(item.get('error'), str) and item['error']:
+        row['error'] = _text(item['error'], 200)
+    return row
+
+
+def clean_java_runtime(body):
+    """The web and JDWP rows of a ``java_runtime`` result, clipped. A row that is not well formed is dropped: it reads as no answer for that entry,
+    which the caller leaves due. A JDWP row that does not say the handshake was echoed keeps no reading."""
+    web, jdwp = body.get('web'), body.get('jdwp')
+    if not isinstance(web, list) or len(web) > MAX_JAVA_WEB or not isinstance(jdwp, list) or len(jdwp) > MAX_JAVA_JDWP:
+        raise ApiError(400, 'a java_runtime result lists its web hosts (at most %d) and JDWP endpoints (at most %d)' % (MAX_JAVA_WEB, MAX_JAVA_JDWP))
+    return {'web': [r for r in map(_java_web, web) if r], 'jdwp': [r for r in map(_java_jdwp, jdwp) if r],
+            'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+
+MAX_VERSION_READS = 100  # the contract's bounds (cvengine_scanner.probes.version_read)
+MAX_VERSION_ANSWERS = 4
+MAX_VERSION_FIELDS = 12
+MAX_VERSION_HEADERS = 6
+MAX_VERSION_LINES = 40
+_HEADER_NAME = re.compile(r'^[a-z0-9-]{1,40}$')
+_FIELD_NAME = re.compile(r'^[A-Za-z0-9_-]{1,60}(?:\.[A-Za-z0-9_-]{1,60}){0,5}$')
+NEVER_HEADERS = ('set-cookie', 'cookie', 'authorization', 'proxy-authorization', 'www-authenticate', 'proxy-authenticate')
+
+
+def _version_value(value):
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value if abs(value) < 2 ** 53 else None
+    if isinstance(value, float):
+        return value if value == value and abs(value) != float('inf') else None
+    if isinstance(value, str):
+        return _text(value, 200)
+    if isinstance(value, dict) and value.get('type') in ('object', 'array'):
+        return {'type': value['type'], 'size': _int(value.get('size'), 0, 10 ** 9)}
+    return None
+
+
+_SHA256 = re.compile(r'^[0-9a-f]{64}$')
+_HEAD = re.compile(r'^(?:[0-9a-f]{2}){0,16}$')
+_ROW_NAME = re.compile(r'^[A-Za-z][A-Za-z0-9 ._()/-]{0,59}$')    # the contract's rows (version_rows, contract 9)
+_ROW_VALUE = re.compile(r'^[A-Za-z0-9 ._+~:()/,#-]{1,120}$')
+
+
+def _version_answer(item, digest=False, rows=False):
+    """One answer of a version_read result (``digest``: of a version_digest result, contract 8, whose answer may carry a digest of the body;
+    ``rows``: of a version_rows result, contract 9, whose answer may carry the named version rows of a status page), clipped: never a body,
+    only the parts the contract allows. None when it is not one."""
+    if not isinstance(item, dict) or not isinstance(item.get('path'), str) or not item['path'].startswith('/'):
+        return None
+    out = {'path': _text(item['path'], 200), 'status': _int(item.get('status'), 0, 999)}
+    if isinstance(item.get('error'), str) and item['error']:
+        out['error'] = _text(item['error'], 40)
+    out['content_type'] = _text(item.get('content_type'), 100)
+    out['bytes'] = _int(item.get('bytes'), 0, 10 ** 9)
+    out['truncated'] = item.get('truncated') is True
+    headers = item.get('headers') if isinstance(item.get('headers'), dict) else {}
+    out['headers'] = {k: _text(v, 200) for k, v in list(headers.items())[:MAX_VERSION_HEADERS]
+                      if isinstance(k, str) and _HEADER_NAME.match(k) and k not in NEVER_HEADERS and isinstance(v, str)}
+    if 'json' in item:
+        doc = item['json']
+        out['json'] = ({k: _version_value(v) for k, v in list(doc.items())[:MAX_VERSION_FIELDS] if isinstance(k, str) and _FIELD_NAME.match(k)}
+                       if isinstance(doc, dict) else None)
+    if isinstance(item.get('text'), str):
+        out['text'] = _text(item['text'], 1024)
+    if isinstance(item.get('lines'), list):
+        out['lines'] = _strings(item['lines'], MAX_VERSION_LINES, 400)
+    if digest and item.get('redirected') is True:
+        out['redirected'] = True  # another path's answer: no digest is read from it
+    elif digest and isinstance(item.get('digest'), dict):
+        raw = item['digest']
+        sha, head = str(raw.get('sha256') or '').lower(), str(raw.get('head') or '').lower()
+        out['digest'] = {**({'sha256': sha} if _SHA256.match(sha) and not out['truncated'] else {}), 'head': head if _HEAD.match(head) else ''}
+    if rows and isinstance(item.get('rows'), dict):
+        # only a row of the contract's shape: a short name, a short version-like value (a status page's version rows, never the page)
+        out['rows'] = {k: v.strip() for k, v in list(item['rows'].items())[:MAX_VERSION_FIELDS]
+                       if isinstance(k, str) and _ROW_NAME.match(k) and isinstance(v, str) and _ROW_VALUE.match(v.strip())}
+    return out
+
+
+def _version_read(item, digest=False, rows=False):
+    if not isinstance(item, dict) or not isinstance(item.get('id'), str) or not item['id'] or not isinstance(item.get('answers'), list):
+        return None
+    row = {'id': _text(item['id'], 200),
+           'answers': [a for a in (_version_answer(x, digest=digest, rows=rows) for x in item['answers'][:MAX_VERSION_ANSWERS]) if a]}
+    if len(row['answers']) != len(item['answers'][:MAX_VERSION_ANSWERS]):
+        row['answers'] = []  # an answer that is not one leaves the order unknown: the whole entry reads as unanswered
+        row['error'] = 'an answer was malformed'
+    if isinstance(item.get('error'), str) and item['error']:
+        row['error'] = _text(item['error'], 200)
+    return row
+
+
+def clean_version_read(body):
+    """The read rows of a ``version_read`` result, clipped (``cveFeed.version_sources`` parses them). A row that is not well formed is dropped:
+    it reads as no answer for that entry, which the caller leaves due."""
+    reads = body.get('reads')
+    if not isinstance(reads, list) or len(reads) > MAX_VERSION_READS:
+        raise ApiError(400, 'a version_read result lists its reads (at most %d)' % MAX_VERSION_READS)
+    return {'reads': [r for r in map(_version_read, reads) if r], 'touched': _hosts(body.get('touched')), 'refused': _hosts(body.get('refused'))}
+
+
+def clean_version_digest(body):
+    """The read rows of a ``version_digest`` result (contract 8): a version_read result whose answers may also carry a digest of a static asset
+    (its SHA-256 and first bytes, ``cveFeed.edge_builds``), never the asset."""
+    reads = body.get('reads')
+    if not isinstance(reads, list) or len(reads) > MAX_VERSION_READS:
+        raise ApiError(400, 'a version_digest result lists its reads (at most %d)' % MAX_VERSION_READS)
+    return {'reads': [r for r in (_version_read(x, digest=True) for x in reads) if r], 'touched': _hosts(body.get('touched')),
+            'refused': _hosts(body.get('refused'))}
+
+
+def clean_version_rows(body):
+    """The read rows of a ``version_rows`` result (contract 9): a version_read result whose answers may also carry the named version rows of a
+    status page (Apache's server-status, a phpinfo page: ``cveFeed.version_catalogue``), never the page."""
+    reads = body.get('reads')
+    if not isinstance(reads, list) or len(reads) > MAX_VERSION_READS:
+        raise ApiError(400, 'a version_rows result lists its reads (at most %d)' % MAX_VERSION_READS)
+    return {'reads': [r for r in (_version_read(x, rows=True) for x in reads) if r], 'touched': _hosts(body.get('touched')),
+            'refused': _hosts(body.get('refused'))}
 
 
 STATES = ('answered', 'no_answer', 'challenged', 'busy')
@@ -922,6 +1093,30 @@ def bind(kind, result, task):
                 kept.append(row)
         dropped = len(result['hosts']) - len(kept)
         result = {**result, 'hosts': kept}
+    elif kind == 'java_runtime':  # only the web hosts and JDWP endpoints the task asked, once each
+        dropped = 0
+        out = {}
+        for key in ('web', 'jdwp'):
+            asked = {p.get('id') for p in target.get(key) or [] if isinstance(p, dict)}
+            seen, kept = set(), []
+            for row in result[key]:
+                if row['id'] in asked and row['id'] not in seen:
+                    seen.add(row['id'])
+                    kept.append(row)
+            dropped += len(result[key]) - len(kept)
+            out[key] = kept
+        result = {**result, **out}
+    elif kind in ('version_read', 'version_digest', 'version_rows'):  # only the read entries the task asked, once each, and only answers to the paths each asked, in order
+        asked = {p.get('id'): [r.get('path') for r in p.get('requests') or [] if isinstance(r, dict)] for p in target.get('reads') or [] if isinstance(p, dict)}
+        seen, kept = set(), []
+        for row in result['reads']:
+            if row['id'] in asked and row['id'] not in seen:
+                seen.add(row['id'])
+                if [a['path'] for a in row['answers']] != asked[row['id']][:len(row['answers'])]:
+                    row = {**row, 'answers': [], 'error': 'the answers do not follow the requests asked'}
+                kept.append(row)
+        dropped = len(result['reads']) - len(kept)
+        result = {**result, 'reads': kept}
     elif kind == 'supplier_check':  # only the names the task listed, once each
         asked = {str(n).strip().lower().rstrip('.') for n in target.get('domains') or [] if isinstance(n, str)}
         kept, seen = [], set()

@@ -210,27 +210,16 @@ class GatingTests(Fixture, TestCase):
     def test_a_name_that_resolves_somewhere_prohibited_is_dropped_by_the_scannable_gate(self):
         self.assertEqual({h for h, _ip, _d in self.due(blocked=lambda h: h == 'api.rt.test')}, {'www.rt.test'})
 
-    def test_the_real_vetting_refuses_a_name_pointed_at_a_prohibited_address(self):
-        """No injected resolver: pinned_transport.resolve runs against what DNS says now."""
-        with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('169.254.169.254', 443))]):
-            self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
-        with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('127.0.0.1', 443))]):
-            self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
-        with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('93.184.216.5', 443))]):
+    def test_the_real_selection_names_the_stored_address_and_looks_no_name_up(self):
+        """No injected resolver: the address put in a task is the host's newest stored address a scanner may touch (what a Sentinel recorded), never a
+        DNS answer read here (the server resolves no target name)."""
+        from startScan.models import IpAddress
+        with mock.patch('socket.getaddrinfo', side_effect=AssertionError('the server looked a target name up')):
             self.assertEqual([(h, ip) for h, ip, _d in ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False)], [('www.rt.test', '93.184.216.5')])
-
-    def test_a_name_that_does_not_resolve_at_all_is_dropped_by_the_real_vetting(self):
-        """No injected resolver: a name with no DNS answer (NXDOMAIN) must be skipped exactly like one that resolves somewhere
-        prohibited, never handed to gvmd as a bare name or an empty address."""
-        import socket
-        with mock.patch('socket.getaddrinfo', side_effect=socket.gaierror(-2, 'Name or service not known')):
-            self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
-
-    def test_a_name_with_no_address_family_cvengine_understands_is_dropped(self):
-        """A getaddrinfo answer with no usable family, or an empty answer set, never produces a target: pinned_transport.resolve
-        raises for both, and due() skips the host rather than letting an empty or missing address reach gvmd."""
-        with mock.patch('socket.getaddrinfo', return_value=[]):
-            self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
+            IpAddress.objects.filter(address='93.184.216.5').update(address='169.254.169.254')
+            self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])  # a stored address no scanner may touch
+            IpAddress.objects.filter(address='169.254.169.254').delete()
+            self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])  # no stored address yet
 
     def test_documentation_ranges_and_this_instances_own_address_are_refused(self):
         for ip in ('192.0.2.1', '198.51.100.9', '203.0.113.200', '2001:db8::5'):
@@ -260,8 +249,9 @@ class GatingTests(Fixture, TestCase):
         for ip in ('93.184.216.5', '93.184.214.7', '2606:4700::5'):
             self.assertFalse(bool(ov.refuse_reason(ip)), ip)
         self.assertEqual(self.due(resolve=lambda h, p: '100.64.0.9'), [])
-        with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('100.64.0.9', 443))]):
-            self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
+        from startScan.models import IpAddress
+        IpAddress.objects.filter(address='93.184.216.5').update(address='100.64.0.9')  # the stored address is a tailnet one: never handed over
+        self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
 
     def test_a_name_the_project_does_not_have_is_never_scanned(self):
         self.assertEqual(self.due(['stranger.example.test']), [])
@@ -385,6 +375,42 @@ class ImportTests(Fixture, TestCase):
             Vulnerability.objects.all().delete()
             self.run_scan([{**APACHE, 'qod': qod, 'qod_type': qod_type}])
             self.assertEqual(CVEMatch.objects.get(cve_entry=self.cve).template_result, expected, (qod, qod_type))
+
+    def _trace_cves(self, vendors):
+        return [CVEEntry.objects.create(cve_id=f'CVE-2005-{3398 + i}', title=f'{v} TRACE', published_at=timezone.now(), cvss=4.3,
+                                        affected=[{'vendor': v, 'product': f'{v} web server'}]) for i, v in enumerate(vendors)]
+
+    def test_a_behaviour_check_does_not_confirm_other_vendors_cves(self):
+        # zebra, match 4687: "HTTP Debugging Methods (TRACE/TRACK) Enabled" (QoD 99) on Apache/Red Hat was kept as a confirmed Solaris
+        # Management Console CVE, over an AI "not applicable", and rated fire. The NVT saw TRACE enabled; it never tested a Solaris product.
+        cves = self._trace_cves(('sun', 'microsoft', 'hp'))
+        trace = dict(APACHE, oid='1.3.6.1.4.1.25623.1.0.11213', name='HTTP Debugging Methods (TRACE/TRACK) Enabled', severity=5.8, qod=99,
+                     qod_type='remote_vul', cves=[c.cve_id for c in cves])
+        self.run_scan([trace])
+        for cve in cves:
+            m = CVEMatch.objects.get(cve_entry=cve, source='openvas')
+            self.assertEqual((m.template_result, m.version_in_range), ('', None), cve.cve_id)
+            self.assertLessEqual(m.confidence, 0.5)
+            self.assertTrue(m.evidence['generic_check'])
+        vuln = Vulnerability.objects.get(template_id='openvas:1.3.6.1.4.1.25623.1.0.11213')  # the misconfiguration itself is still a finding
+        self.assertTrue(vuln.open_status)
+        self.assertIn('qod-confirmed', set(vuln.tags.values_list('name', flat=True)))
+        from cveFeed import triage
+        d = triage.describe_cve_match(CVEMatch.objects.select_related('cve_entry', 'subdomain').get(cve_entry=cves[0], source='openvas'))
+        self.assertEqual(triage.hard_evidence('cve_match', d['facts'])[0], '')  # the model may judge whether this product runs here
+        self.assertIn('tested', d['payload']['openvas'])
+
+    def test_a_check_of_one_product_still_confirms_its_cves(self):
+        cves = self._trace_cves(('apache', 'apache'))
+        self.run_scan([dict(APACHE, cves=[c.cve_id for c in cves])])
+        for cve in cves:
+            self.assertEqual(CVEMatch.objects.get(cve_entry=cve, source='openvas').template_result, 'vulnerable')
+
+    def test_a_check_that_identified_the_product_still_confirms_its_cves(self):
+        cves = self._trace_cves(('sun', 'microsoft'))
+        self.run_scan([dict(APACHE, cves=[c.cve_id for c in cves], description='Installed version: 2.4.37\nFixed version: 2.4.51')])
+        for cve in cves:
+            self.assertEqual(CVEMatch.objects.get(cve_entry=cve, source='openvas').template_result, 'vulnerable')
 
     def test_a_cve_the_catalogue_does_not_know_is_a_finding_without_a_match(self):
         self.run_scan([{**APACHE, 'cves': ['CVE-2099-0001']}])
@@ -858,12 +884,6 @@ class SettingsApiTests(Fixture, TestCase):
         self.assertEqual(status, 400)
         self.assertIn('api.rt.test', data['error'])
 
-    def test_a_host_that_resolves_to_a_prohibited_range_cannot_be_opted_in(self):
-        with mock.patch('targetApp.target_types.blocked_names', return_value={'www.rt.test'}):
-            status, data = send(self.c, 'PUT', f'openvas/projects/{self.pid}', {'hosts': ['www.rt.test']})
-        self.assertEqual(status, 400)
-        self.assertIn('may not be pointed at', data['error'])
-
     def test_malformed_hosts_and_too_many_are_refused(self):
         for hosts in (['bad host'], ['a;b'], 'x' * 300, [f'h{i}.rt.test' for i in range(201)], 5):
             self.assertEqual(send(self.c, 'PUT', f'openvas/projects/{self.pid}', {'hosts': hosts})[0], 400, hosts)
@@ -877,6 +897,9 @@ class SettingsApiTests(Fixture, TestCase):
 
 
 class ComposeTests(SimpleTestCase):
+    """The server carries no Greenbone stack: OpenVAS runs on a Sentinel (kind ``openvas``). The old in-stack add-on is gone from the compose file, the
+    Makefile and the image, and an update removes its leftover containers while keeping their volumes (scripts/retire-openvas.sh)."""
+
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -890,82 +913,35 @@ class ComposeTests(SimpleTestCase):
         if not self.compose:
             self.skipTest('needs PyYAML and the compose file')
         self.services = self.compose['services']
-        self.openvas = {n: s for n, s in self.services.items() if n.startswith('openvas-')}
 
-    def test_every_addon_service_is_in_the_profile_and_the_default_stack_is_unchanged(self):
-        self.assertEqual({n for n, s in self.services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer', 'scanner'})  # the AI reviewer and the built-in scanner are part of the default stack
-        self.assertGreaterEqual(len(self.openvas), 10)
-        for name, service in self.openvas.items():
-            self.assertEqual(service['profiles'], ['openvas'], name)
-
-    def test_the_program_images_are_pinned_by_tag_and_digest_and_the_feed_data_follows_its_tag_on_purpose(self):
-        programs = {'gvmd', 'pg-gvm', 'pg-gvm-migrator', 'redis-server', 'ospd-openvas', 'openvas-scanner', 'gpg-data'}
-        seen = set()
-        for name, service in self.openvas.items():
-            image = service['image']
-            self.assertTrue(image.split('/')[:2] == ['registry.community.greenbone.net', 'community'], name)
-            repo, _, rest = image.rpartition('/')[2].partition(':')
-            if repo in programs:
-                seen.add(repo)
-                self.assertRegex(rest, r'^stable@sha256:[0-9a-f]{64}$', name)
-            else:
-                self.assertEqual(rest, 'community', name)  # a data image: a pinned feed would be a stale one
-        self.assertEqual(seen, programs)
-
-    def test_the_scanner_is_pinned_to_a_digest_the_registry_still_serves(self):
-        # Greenbone removes the digest behind an old "stable" (the registry answers 404, so a fresh pull of the add-on fails): sha256:5067aa68...
-        # before 11/2, sha256:7a7c440c... (and the Sentinel's sha256:d6d8288c...) on 11/10. Both services that run the scanner image
-        # (openvas-configure and openvas-openvasd) pin the stable digest read on 2026-11-10, the one the Sentinel client pins too.
-        withdrawn = ('5067aa68bdb63038180cbdbb5cdc199c1908ec6b7d55997a41b6a51b14c12eee', '7a7c440cf675a83ca1b6d8284eb28450893a8b05f5fed1f98e997df605792632')
-        current = '5b2043df8abed6acff7cd4c08636ea87c57f73b95cd406c88dc2adcec24426dd'
-        scanner = [s['image'] for s in self.openvas.values() if s['image'].rpartition('/')[2].startswith('openvas-scanner:')]
-        self.assertEqual(len(scanner), 2)
-        for image in scanner:
-            self.assertEqual(image, f'registry.community.greenbone.net/community/openvas-scanner:stable@sha256:{current}')
-        for path in ('docker-compose.yml', 'docs/OPENVAS.md'):
-            for gone in withdrawn:
-                self.assertNotIn(f'sha256:{gone}', (ROOT / path).read_text(), path)
-
-    def test_only_celery_mounts_gvmds_socket_and_read_only(self):
-        for name, service in self.services.items():
-            mounts = [v for v in service.get('volumes', []) if 'gvmd_socket_vol' in v]
-            if name == 'celery':
-                self.assertEqual(mounts, ['openvas_gvmd_socket_vol:/run/gvmd:ro'])
-            elif name == 'openvas-gvmd':
-                self.assertEqual(mounts, ['openvas_gvmd_socket_vol:/run/gvmd'])
-            else:
-                self.assertEqual(mounts, [], name)
-
-    def test_the_addon_is_isolated_and_publishes_nothing(self):
-        for name, service in self.openvas.items():
-            self.assertNotIn('ports', service, name)
-            self.assertNotIn('network_mode', service, name)
-            self.assertNotIn('rengine_network', service.get('networks', []) if isinstance(service.get('networks'), list) else service.get('networks', {}), name)
-            self.assertNotIn('env_file', service, name)  # .env reaches no add-on container
-        self.assertEqual(self.services['celery']['networks'], ['rengine_network'])
-        raised = {n for n, s in self.openvas.items() if s.get('cap_add')}
-        self.assertEqual(raised, {'openvas-ospd'})  # the one container that needs raw sockets
-
-    def test_no_secret_is_in_the_compose_file_and_celery_gained_nothing_else(self):
+    def test_no_greenbone_service_volume_or_network_remains(self):
+        self.assertEqual({n for n, s in self.services.items() if 'profiles' not in s}, {'db', 'redis', 'celery', 'celery-beat', 'web', 'proxy', 'reviewer', 'scanner'})
+        self.assertFalse([n for n in self.services if n.startswith('openvas')])
+        self.assertFalse([v for v in self.compose['volumes'] if 'openvas' in v])
+        self.assertNotIn('openvas_network', self.compose['networks'])
         text = (ROOT / 'docker-compose.yml').read_text()
-        self.assertNotRegex(text, r'(?i)gmp[_ ]?password\s*[:=]')
-        self.assertNotIn('admin:admin', text)
-        celery = self.services['celery']
-        self.assertNotIn('cap_add', celery)
-        self.assertNotIn('network_mode', celery)
+        self.assertNotIn('greenbone', text)
+        self.assertNotIn('gvmd', text)
+        for name, service in self.services.items():
+            self.assertFalse([v for v in service.get('volumes', []) if 'gvmd' in v], name)
 
-    def test_the_addon_does_not_start_with_a_plain_up_but_does_with_the_profile(self):
-        text = (ROOT / 'Makefile').read_text()
-        services = re.search(r'^SERVICES\s*:=\s*(.*)$', text, re.M).group(1).split()
-        self.assertFalse([s for s in services if s.startswith('openvas')])
-        self.assertIn('openvas-up:', text)
-        self.assertIn('--profile openvas up -d', text)
-        listed = re.search(r'^OPENVAS_SERVICES\s*:=\s*(.*)$', text, re.M).group(1).split()
-        self.assertEqual(set(listed), set(self.openvas))
+    def test_no_make_target_script_or_library_of_the_old_addon_remains(self):
+        makefile = (ROOT / 'Makefile').read_text()
+        for gone in ('openvas-up', 'openvas-down', 'OPENVAS_SERVICES', '--profile openvas'):
+            self.assertNotIn(gone, makefile)
+        for gone in ('openvas-sync.sh', 'openvas-disk-check.sh', 'openvas-user.sh'):
+            self.assertFalse((ROOT / 'scripts' / gone).exists(), gone)
+        self.assertNotIn('openvas', (ROOT / 'scripts' / 'update-watch.sh').read_text())
+        self.assertNotRegex((ROOT / 'web' / 'requirements.txt').read_text(), r'(?m)^python-gvm')
+        self.assertNotIn('COMPOSE_PROFILES=openvas', (ROOT / '.env.example').read_text())
 
-    def test_env_example_documents_the_profile_and_no_login_script_remains(self):
-        self.assertIn('COMPOSE_PROFILES=openvas', (ROOT / '.env.example').read_text())
-        self.assertFalse((ROOT / 'scripts' / 'openvas-user.sh').exists())  # the GMP login is the Sentinel's: nothing here makes one
+    def test_every_start_path_retires_the_leftover_containers_and_keeps_their_volumes(self):
+        for name in ('scripts/update.sh', 'scripts/update-deploy.sh', 'Makefile'):
+            self.assertIn('cvengine_retire_openvas', (ROOT / name).read_text(), name)
+        script = (ROOT / 'scripts' / 'retire-openvas.sh').read_text()
+        self.assertIn('label=com.docker.compose.project.working_dir=', script)
+        self.assertIn('openvas-*)', script)
+        self.assertNotIn('volume rm $', script)  # the volumes are never removed by the script: it prints the command
 
 
 class SupplyChainTests(SimpleTestCase):
@@ -979,37 +955,17 @@ class SupplyChainTests(SimpleTestCase):
             spec.loader.exec_module(module)
             setattr(cls, name, module)
 
-    def test_the_client_library_is_pinned_and_checked_for_newer_releases(self):
-        pin = re.search(r'(?m)^python-gvm==(\d+\.\d+\.\d+)$', (ROOT / 'web' / 'requirements.txt').read_text())
-        self.assertIsNotNone(pin)
-        def get(url, as_json=True):
-            if url == 'https://pypi.org/pypi/python-gvm/json':
-                return {'info': {'version': '99.0.0'}}
-            raise OSError('offline')
-        rows = {r['tool']: r for r in self.check_tool_versions.collect(get)}
-        self.assertEqual(rows['python-gvm (OpenVAS add-on client)']['pinned'], pin.group(1))
-        self.assertTrue(rows['python-gvm (OpenVAS add-on client)']['behind'])
-
-    def test_the_sbom_lists_the_greenbone_images_with_their_digests(self):
-        by_name = {c['name']: c for c in self.generate_sbom.build()['components']}
-        gvmd = by_name['registry.community.greenbone.net/community/gvmd']
-        self.assertEqual((gvmd['version'], gvmd['properties'][0]['value']), ('stable', 'true'))
-        self.assertRegex(gvmd['hashes'][0]['content'], r'^[0-9a-f]{64}$')
-        feed = by_name['registry.community.greenbone.net/community/vulnerability-tests']
-        self.assertEqual((feed['properties'][0]['value'], 'hashes' in feed), ('false', False))  # the feed follows its tag on purpose
-        self.assertIn('python-gvm', by_name)
-
-    def test_the_digests_in_the_docs_are_the_ones_the_compose_file_runs(self):
-        doc = (ROOT / 'docs' / 'OPENVAS.md').read_text()
-        # the Greenbone images only: the built-in scanner's image is pinned by scanner.lock.json and checked in test_compose
-        for digest in re.findall(r'registry\.community\.greenbone\.net/\S+?@sha256:([0-9a-f]{64})', (ROOT / 'docker-compose.yml').read_text()):
-            self.assertIn(digest, doc)
+    def test_the_server_neither_pins_nor_watches_the_client_library_or_the_greenbone_images(self):
+        rows = {r['tool'] for r in self.check_tool_versions.collect(lambda url, as_json=True: None)}
+        self.assertFalse([r for r in rows if 'gvm' in r])
+        names = {c['name'] for c in self.generate_sbom.build()['components']}
+        self.assertFalse([n for n in names if 'greenbone' in n or n == 'python-gvm'])
 
 
 class DocsTests(SimpleTestCase):
     def test_the_docs_exist_and_are_linked(self):
         doc = (ROOT / 'docs' / 'OPENVAS.md').read_text()
-        for needle in ('COMPOSE_PROFILES=openvas', 'Denial of Service', 'Brute force attacks', 'QoD', '80', 'Not verified', 'sha256:'):
+        for needle in ('COMPOSE_PROFILES=openvas', 'Denial of Service', 'Brute force attacks', 'QoD', '80', 'Not verified', 'retire-openvas.sh'):
             self.assertIn(needle, doc)
         self.assertIn('OPENVAS.md', (ROOT / 'docs' / 'README.md').read_text())
         self.assertIn('OPENVAS.md', (ROOT / 'README.md').read_text())
@@ -1149,27 +1105,6 @@ class ChooseWhatToScanTests(Fixture, TestCase):
 
 class HostWatcherTests(SimpleTestCase):
 
-
-    def test_the_sync_script_accepts_only_on_and_off_and_lists_the_makefile_services(self):
-        script = (ROOT / 'scripts' / 'openvas-sync.sh').read_text()
-        self.assertIn('case $want in on | off) ;; *) exit 0 ;; esac', script)
-        self.assertIn('update-state.py openvas-wanted', script)  # the request is read without following a link planted in ./web (this runs as root)
-        listed = re.search(r'^SERVICES=\((.*)\)$', script, re.M).group(1).split()
-        makefile = (ROOT / 'Makefile').read_text()
-        self.assertEqual(listed, re.search(r'^OPENVAS_SERVICES\s*:=\s*(.*)$', makefile, re.M).group(1).split())
-        watch = (ROOT / 'scripts' / 'update-watch.sh').read_text()
-        self.assertIn('scripts/openvas-sync.sh', watch)
-        self.assertIn('web/.openvas-wanted', (ROOT / '.gitignore').read_text())
-        # a gvmd restart request (stale NVT cache) restarts openvas-gvmd only, while the add-on is on, and is answered so it runs once
-        self.assertIn('scripts/openvas-sync.sh restart-gvmd', watch)
-        self.assertIn('web/.openvas-restart -nt web/.openvas-restarted', watch)
-        self.assertIn('--profile openvas restart openvas-gvmd', script)
-        self.assertIn('ps --status running -q openvas-gvmd', script)  # only a running gvmd, also one started by hand (no web/.openvas-wanted)
-        self.assertIn('[ "$want" != off ]', script)
-        # the restart is handled before the on/off gate, which exits without an answer when web/.openvas-wanted is missing (make openvas-up)
-        self.assertLess(script.index('restart-gvmd ]'), script.index('case $want in on | off) ;; *) exit 0 ;; esac'))
-        self.assertIn('update-state.py openvas-restarted', script)
-        self.assertIn('web/.openvas-restart', (ROOT / '.gitignore').read_text())
 
     def test_the_page_has_nothing_to_type_and_builds_no_markup(self):
         js = (ROOT / 'web' / 'static' / 'cve' / 'openvas-panel.js').read_text()

@@ -37,7 +37,7 @@ ENTRIES = {
     'updates_cancel': ('settings', 'updates/cancel', 'Cancel an update that has not started. Action.', None),
     'updates_dismiss': ('settings', 'updates/dismiss', 'Dismiss the update notice. Action.', None),
     'scanner_plan': ('settings', 'scanner_plan', 'Where scanning runs: Sentinels of your own only, or also the built-in scanner. Change applies on the next update step.', None),
-    'keys': ('settings', 'keys', 'The service keys saved (CVE sources, OpenAI, Anthropic, and so on): which are saved, never their values.', None),
+    'keys': ('settings', 'keys', 'The instance-wide service key saved (the Chaos discovery fallback): whether it is saved, never its value.', None),
     'notifications': ('settings', 'notifications', 'Where notifications go (webhook and chat targets) and which events.', None),
     'email': ('settings', 'email', 'Outgoing mail (SMTP): host, port, sender, whether a password is saved (never shown).', None),
     'email_test': ('settings', 'email/test', 'Send one test mail to the address given. Action.', None),
@@ -78,7 +78,6 @@ ENTRIES = {
 # Routes that are in the tables on purpose without a tool. Each carries the reason; a new route with no entry and no reason fails the test.
 NOT_EXPOSED = {
     ('settings', 'factory_reset'): 'destroys the instance; not something an agent should be able to do on one call. A person does it in the UI.',
-    ('settings', 'egress/connections\\.csv'): 'a CSV download; list_egress_connections returns the same data.',
     ('settings', 'cve_seed/import'): 'uploads a file; it needs a person at the browser.',
     ('settings', 'cve_seed/download/(?P<which>seed|manifest)'): 'a file download.',
     ('settings', 'autotune/decisions'): 'list_tuning_decisions.',
@@ -162,7 +161,7 @@ AGENT_LOWER_ONLY = {'ai': ('plan_daily_total', 'plan_daily_per_project', 'cve_gu
 # ``validate_min_gap_hours`` is the other way round (a shorter gap spends more), so an agent may only raise it. A cap of 0 turns the pacing off: more, not less.
 TUNABLE_ONLY_RAISE = ('validate_min_gap_hours',)
 TUNABLE_SWITCHES = ('planner_enabled', 'sentinel_bbot_keys')
-TUNABLE_ZERO_IS_UNLIMITED = ('egress_port25_per_hour',)
+TUNABLE_ZERO_IS_UNLIMITED = ()
 # Lists that decide what is scanned, with which way narrows them (FB-5): an ``only`` list lets less through the fewer entries it has (and an empty one lets everything
 # through), a ``skip`` list the more entries it has. {entry: {field: 'only' | 'skip'}}
 AGENT_SCOPE_LISTS = {'tailscale_project': {'only_tags': 'only', 'only_os': 'only', 'skip_tags': 'skip'}}
@@ -461,7 +460,7 @@ def _tunable_rules(values):
 
 
 def _scan_concurrency_rules(values):
-    """FB-5: a scan concurrency number that auto-tuning does not manage (the heavy scanner limits) goes straight to the page's handler, which takes any number in
+    """FB-5: a scan concurrency number that auto-tuning does not manage (a worker lane configured at or below its floor) goes straight to the page's handler, which takes any number in
     range: an agent may only lower it (a reset to the default counts as the default)."""
     from cveFeed import scan_concurrency as sc
     for key, new in values.items():

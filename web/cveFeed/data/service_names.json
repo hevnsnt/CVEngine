@@ -1,0 +1,16 @@
+{
+ "schema": 1,
+ "updated": "2026-11-18",
+ "description": "Technology names that are not software a host runs: a hosting platform, a CDN or load balancer the provider operates, an analytics or tag script, a protocol or a header check. None can carry a CVE the host's owner patches, and correlation never matches them. Read only by cveFeed.tech_coverage (manage.py technology_coverage), which lists them under 'services' instead of 'unmatched', so the unmatched list holds naming gaps. A name is compared as correlation normalizes it (case and punctuation dropped), before and after a 'product/version' header token is split.",
+ "services": [
+  {"kind": "load balancer", "names": ["AWS Elastic Load Balancing", "awselb", "elastic load balancing", "Microsoft-Azure-Application-Gateway",
+                                      "Microsoft Azure Application Gateway"]},
+  {"kind": "cdn", "names": ["Amazon CloudFront httpd", "Amazon CloudFront", "cloudfront", "AWS Cloudfront service", "cloudflare",
+                            "Cloudflare http proxy", "akamai", "akamai cdn", "AkamaiGHost", "Akamai Cache", "google cloud cdn"]},
+  {"kind": "hosting", "names": ["cloud platform", "Google Frontend", "Google frontend HttpServer", "google cloud", "AWS Service",
+                                "amazon web services", "UploadServer", "Detect websites using Google bucket storage", "Google Bucket",
+                                "google cloud storage", "Detect websites using AWS bucket storage", "Detect Amazon-S3 Bucket", "Amazon S3"]},
+  {"kind": "analytics", "names": ["google-tag-manager", "Hotjar RUM", "google analytics"]},
+  {"kind": "protocol", "names": ["hsts", "http/3"]}
+ ]
+}

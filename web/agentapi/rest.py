@@ -23,8 +23,9 @@ from agentapi import sentinel_stream
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
-from agentapi import egress
+from agentapi import generated_templates as gentpl
 from agentapi import tuning
+from agentapi import tech_coverage_api
 from agentapi import authcheck
 from agentapi import reports
 from agentapi import reviewer_api
@@ -177,6 +178,19 @@ def _queue_agent_work(request, ctx, slug, **_):
     return out, (201 if out['queued'] else 200)
 
 
+def _review_generated(request, ctx, generated_id):
+    body = _body(request)
+    if body.get('verdict') in (None, ''):
+        raise ApiError(400, 'give a verdict: keep or retire (GET this route for the review report)')
+    return gentpl.set_generated_template_verdict(ctx, generated_id, verdict=body.get('verdict'), reason=body.get('reason'))
+
+
+def _revise_generated(request, ctx, generated_id):
+    body = _body(request)
+    _need(body, 'yaml', 'reason')
+    return gentpl.update_generated_template(ctx, generated_id, yaml=body.get('yaml'), reason=body.get('reason'), fixture=body.get('fixture')), 201
+
+
 # --- routes ---------------------------------------------------------------------
 # (method, path regex, summary, handler(request, ctx, **path_kwargs)); handlers return dict or (dict, status)
 
@@ -184,12 +198,9 @@ ROUTES = [
     ('GET', r'me', 'Who am I: user, projects and roles, token info', lambda r, c, **k: svc.me(c)),
     ('GET', r'system/status', 'Instance status: overall health with problems and notes, scanning pause, update phase, inventory counts per project (targets, hosts, exposed hosts, scans running/queued, open findings), and for an App Admin the database and broker, queue depths, workers, schedules, memory, disk, CVE feed, AI budget and auto-tuning (mode, last run, last decisions, why each setting was not raised)',
      lambda r, c, **k: system_status.system_status(c)),
-    ('GET', r'egress/connections', 'App Admin: the log of this server\'s own outbound connections to the logged ports (25, 465, 587 by default), newest first: '
-     'at, address, port, outcome (sent|paced|skipped), mode (exact|estimated), kind (the tool), project, scan_id. ?port=&project=&since=&until= '
-     '(ISO 8601 or epoch seconds), limit (up to 1000) and cursor (the next of the previous page); format=csv downloads every matching record',
-     lambda r, c, **k: egress.connections_csv(c, r.GET) if r.GET.get('format') == 'csv' else egress.list_connections(c, r.GET)),
     ('GET', r'projects', 'Projects visible to the caller', lambda r, c, **k: svc.list_projects(c)),
     ('GET', r'engines', 'Scan engines (legacy labels: every scan runs the same fixed pipeline)', lambda r, c, **k: svc.list_engines(c)),
+    ('GET', r'states', 'Every lifecycle (scans, ...): its states, what each means, and which state may follow which', lambda r, c, **k: svc.describe_states(c)),
     ('GET', r'cves', 'CVE feed (tier, q filters)', lambda r, c, **k: svc.list_cve_feed(c, r.GET)),
     ('GET', r'cves/(?P<cve_id>CVE-[0-9]{4}-[0-9]+|CVE-[A-Za-z0-9-]+)/detection', 'The shared detection strategy of one CVE',
      lambda r, c, cve_id, **k: svc.get_cve_detection(c, cve_id)),
@@ -197,6 +208,16 @@ ROUTES = [
      lambda r, c, cve_id, **k: svc.update_cve_detection(c, cve_id, guidance=_body(r).get('guidance'), strategy=_body(r).get('strategy'))),
     ('GET', r'cves/(?P<cve_id>CVE-[0-9]{4}-[0-9]+|CVE-[A-Za-z0-9-]+)', 'One CVE with affected ranges',
      lambda r, c, cve_id, **k: svc.get_cve(c, cve_id)),
+    ('GET', r'generated-templates', 'AI-written scan templates, newest first (cve_id, status, evidence filters), with the counts of the matches each '
+     'recorded on your hosts', lambda r, c, **k: gentpl.list_generated_templates(c, r.GET)),
+    ('GET', r'generated-templates/(?P<generated_id>\d+)', 'One AI-written template: YAML, validation record, fixture, static gate, its matches on your '
+     'hosts, revision chain and reviews', lambda r, c, generated_id, **k: gentpl.get_generated_template(c, generated_id)),
+    ('GET', r'generated-templates/(?P<generated_id>\d+)/review', 'The review report of an AI-written template (reads only)',
+     lambda r, c, generated_id, **k: gentpl.review_generated_template(c, generated_id)),
+    ('POST', r'generated-templates/(?P<generated_id>\d+)/review', 'Record a verdict on an AI-written template (App Admin); body {verdict: keep|retire, reason}',
+     lambda r, c, generated_id, **k: _review_generated(r, c, generated_id)),
+    ('POST', r'generated-templates/(?P<generated_id>\d+)/revisions', 'Revise an AI-written template as a new draft that supersedes it (App Admin); '
+     'body {yaml, reason, fixture?}', lambda r, c, generated_id, **k: _revise_generated(r, c, generated_id)),
     ('GET', r'projects/(?P<slug>[-\w]+)/targets', 'List targets', lambda r, c, slug, **k: svc.list_targets(c, slug, r.GET)),
     ('POST', r'projects/(?P<slug>[-\w]+)/targets', 'Add a domain, IP, CIDR or range; body {value, description, discover, mode, scope_mode}. "=example.com" (or scope_mode host) adds exactly that host, no subdomains',
      lambda r, c, slug, **k: (svc.add_target(c, slug, *_need(_body(r), 'value'), description=_body(r).get('description', ''), discover=bool(_body(r).get('discover')),
@@ -316,7 +337,7 @@ ROUTES = [
      lambda r, c, slug, inventory_id, **k: inventory.delete_inventory(c, slug, int(inventory_id))),
     ('GET', r'projects/(?P<slug>[-\w]+)/hosts/(?P<host>[^/]+)/inventory', 'The host inventory report tied to a host (newest if several): OS, packages, patches, listening services, with its age and whether it is stale',
      lambda r, c, slug, host, **k: inventory.get_inventory(c, slug, host=host, params=r.GET)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/search', 'Search hosts: words, tech:, port:, product:, service:, os:, cve:, ip: (CIDR), host:, vuln:, sev:, auth:, sensitive:, secret:, zombie:, country:, comma for OR within one filter (port:80,443), -negation; sorted by score (sort=name); heat=fire|smoke|ice|clean|unscanned narrows the page, facets.heat always counts every value; facets=port,product,tech,os,country (facet_size=10) adds the same whole-match counts for those',
+    ('GET', r'projects/(?P<slug>[-\w]+)/search', 'Search hosts: words, tech: (which hosts run a product, from every source and under any of its names, a platform through what runs on it; @unknown, @known or a release after @: tech:php@unknown, tech:wordpress@7.1), port:, product:, service:, os:, cve:, ip: (CIDR), host:, vuln:, sev:, auth:, sensitive:, secret:, zombie:, country:, java: (java:17, java:17.0.9, java:8u392, a vendor or a source; any and unknown are tech:java and tech:java@unknown), component:, runtime: and vsource: (what the version sources of the host state: component:grafana, runtime:python@3.8, vsource:prometheus-metrics), comma for OR within one filter (port:80,443), -negation; sorted by score (sort=name); heat=fire|smoke|ice|clean|unscanned narrows the page, facets.heat always counts every value; facets=port,product,tech,os,country (facet_size=10) adds the same whole-match counts for those',
      lambda r, c, slug, **k: svc.search_hosts(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/hosts/export', 'Download every discovered host of the project as a file to hand to a penetration testing company, streamed with no row cap: ?format=csv|txt (default csv: host, IP addresses, open TCP and UDP ports, services, web URLs, project, organization, target, first and last seen; no findings, notes or owners. txt: every host name then every IP address, unique and sorted, for nmap -iL), ?scope=external|all (default external: leaves out hosts and addresses that are internal or private), ?archived=0|1 (default 0). Hosts the organization removed and excluded are never listed. The answer carries X-Export-Hosts (the number of hosts) and is written to the audit log',
      lambda r, c, slug, **k: host_export.response(c, r.GET, slug=slug)),
@@ -529,6 +550,8 @@ ROUTES = [
      lambda r, c, **k: tuning.list_decisions(c, r.GET)),
     ('GET', r'tuning/report', 'App Admin: the maintainer report, the last 24 hours in one bounded answer: the tuning mode and what is pinned, a summary of the signals (memory, queues, Sentinels, AI spend), the open alerts (stale marked, with the decision that answered each), and the decisions with their outcomes. Instance health only: no host or tenant data',
      lambda r, c, **k: tuning.get_maintainer_report(c)),
+    ('GET', r'technology-coverage', 'App Admin, read-only: how the technology names on the current hosts connect to the CVE catalogue (cveFeed.tech_coverage): unmatched names with their hosts and near products, unversioned names ranked by CVE count, ambiguous names that reach more than one vendor, and services (CDN, hosting, analytics names that are not software); ?project= narrows to one project, ?limit= (default 50, at most 500) caps each list',
+     lambda r, c, **k: tech_coverage_api.technology_coverage(c, r.GET)),
     ('PUT', r'tuning/mode', 'App Admin: {mode: off|suggest|auto} and/or {advisor: true|false}; leaving auto drops the tuned numbers at once (saved, environment or default values apply again)',
      lambda r, c, **k: tuning.set_mode(c, _body(r))),
     ('POST', r'tuning/decisions/(?P<decision_id>\d+)/apply', 'App Admin, signed in as a person (an API token is refused with 403): apply a recommendation (mode auto: it becomes the tuned number; otherwise it is saved as your value, which pins the setting); 409 when the setting changed since',
@@ -557,7 +580,7 @@ ROUTES = [
      lambda r, c, ref, **k: reviewer_api.refusal(r, c, ref, _body(r) if len(r.body or b'') <= reviewer_api.MAX_REFUSAL_BODY else None)),
     ('GET', r'reviewer/ops/snapshot', 'AI reviewer token only: the operations checks {checks: [{code, state, severity, title, detail, facts, actions}], actions}; ?templates_release= and templates_published_at= pass the newest nuclei-templates release',
      lambda r, c, **k: reviewer_api.ops_snapshot(r, c)),
-    ('POST', r'reviewer/ops/report', 'AI reviewer token only: the operations job\'s report {alerts: [{code, severity, diagnosis}], actions: [feed_sentinels|refresh_nuclei_templates], tuning: [{setting, value, reason, alert}] (optional, at most two, judged against what may be proposed now) with snapshot_id (the id the snapshot carried; proposals of a report without one the server made are held), model, templates_release}; an action runs only when a current check offers it',
+    ('POST', r'reviewer/ops/report', 'AI reviewer token only: the operations job\'s report {alerts: [{code, severity, diagnosis}], actions: [feed_sentinels], tuning: [{setting, value, reason, alert}] (optional, at most two, judged against what may be proposed now) with snapshot_id (the id the snapshot carried; proposals of a report without one the server made are held), model, templates_release}; an action runs only when a current check offers it',
      lambda r, c, **k: reviewer_api.ops_report(r, c, _body(r))),
     ('POST', r'reviewer/usage', 'AI reviewer token only: one report of a model call the container made for its own two jobs {stage: finding_review|operations_check, provider, model, status: succeeded|failed, category, stop_reason, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, duration_ms}; recorded as AI usage under that stage, counts and outcome only',
      lambda r, c, **k: reviewer_api.usage(r, c, _body(r))),
@@ -579,10 +602,6 @@ ROUTES = [
      lambda r, c, **k: secrets_api.secret_rules(c)),
     ('PUT', r'secrets/rules', 'App Admin: change {rules_yaml, skip_words, skip_regex} (each optional). Rules may have only name, id (custom.*), pattern, min_entropy, confidence, keywords, examples: never a validation. Audited',
      lambda r, c, **k: secrets_api.set_secret_rules(c, _body(r))),
-    ('GET', r'sentinel/template-policy', 'Sentinel token only: the Nuclei template policy in force and its approved template bundle: {rev, read_only, bundle: {sha256, bytes, templates, path}}',
-     lambda r, c, **k: sentinels.template_policy(c)),
-    ('GET', r'sentinel/template-policy/bundle', 'Sentinel token only: the approved Nuclei templates as a .tar.gz (application/gzip, ETag = the sha256 in quotes, If-None-Match answers 304)',
-     lambda r, c, **k: sentinels.template_bundle_response(c, r.headers.get('If-None-Match'))),
     ('POST', r'sentinel/tasks/next', 'Lease the best eligible SentinelTask, or none; body {wait: seconds up to 20, kinds: [nmap, naabu, nuclei_light, nuclei_targeted, nuclei_deep, testssl, nmap_udp, wpscan, wpscan_thorough, openvas, discover, waf, bbot_discovery, secrets_scan]}',
      lambda r, c, **k: sentinels.next_task(c, _body(r))),
     ('GET', r'sentinel/tasks/(?P<task_id>\d+)', 'One of your SentinelTasks with its target', lambda r, c, task_id, **k: sentinels.get_task(c, task_id)),

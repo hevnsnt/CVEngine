@@ -6,7 +6,9 @@ Two jobs, one pass:
   this project (``IpAddress``, in the project's organization and reached through one of its own hosts), runZero's facts (OS, hardware,
   type, tags, site, names, last seen) are stored under ``IpAddress.fingerprint['runzero']`` and an empty ``os_guess`` is filled.
   runZero's own CVE reports for those hosts are stored beside them and are additional evidence only: they raise the confidence of a
-  CVE match cvENGINE already found on that host and port, they never create a match and never confirm one.
+  CVE match cvENGINE already found on that host and port, they never create a match and never confirm one. So are the services runZero
+  read a product version on (its services export: product, version and CPE per port), each kept under the port runZero names; they become
+  third-party version readings of the host (``cveFeed.source_versions``, ``vsrc:runzero``), never a Port row of their own.
 * Import, off until the project turns it on. Addresses runZero knows and cvENGINE does not are added as targets through the same
   code as Add targets (``agentapi.services.add_entries``), so exclusions, the private-range policy and organization uniqueness all
   apply. A public address is imported only inside a network the organization already has as a target (a CIDR block or address). Names are imported only when they sit under a domain the organization already has: a name on a network is claimed by
@@ -31,6 +33,7 @@ DEFAULT_IMPORT_MAX = 500
 STALE_RUNNING = timedelta(minutes=30)  # a "running" row older than this is a worker that died, not a sync in progress
 MIN_GAP = timedelta(seconds=60)  # Sync now cannot be repeated faster than this
 MAX_VULNS_PER_IP = 50
+MAX_SERVICES_PER_IP = 64
 CHUNK = 1000
 
 
@@ -110,11 +113,20 @@ def _known_ips(project, addresses):
     return found
 
 
-def _block(asset, reports):
+def _block(asset, reports, services=()):
     vulns = sorted(reports, key=lambda r: -(r['cvss3'] or 0))[:MAX_VULNS_PER_IP]
     return {'asset_id': asset['id'], 'os': asset['os'], 'os_version': asset['os_version'], 'hw': asset['hw'], 'type': asset['type'],
             'tags': asset['tags'], 'site': asset['site'], 'names': asset['names'], 'alive': asset['alive'], 'last_seen': asset['last_seen'],
-            'vulns': [{k: v[k] for k in ('cve', 'port', 'transport', 'severity', 'cvss3', 'name')} for v in vulns]}
+            'vulns': [{k: v[k] for k in ('cve', 'port', 'transport', 'severity', 'cvss3', 'name')} for v in vulns],
+            'services': _services_of(asset, services)}
+
+
+def _services_of(asset, services):
+    """The versioned services of one address (``runzero.parse_service``) as the block keeps them, sorted by port: only those of the asset the
+    address was mapped to (an address runZero lists on two assets keeps the newest one's), at most ``MAX_SERVICES_PER_IP``."""
+    mine = [s for s in services if not s['asset_id'] or not asset['id'] or s['asset_id'] == asset['id']]
+    mine.sort(key=lambda s: (s['port'], s['transport']))
+    return [{k: s[k] for k in ('port', 'transport', 'protocol', 'attributes', 'updated')} for s in mine[:MAX_SERVICES_PER_IP]]
 
 
 def _store(ip, block):
@@ -206,27 +218,40 @@ def _retract_matches(project):
     return changed
 
 
-def _enrich(project, by_ip, reports, partial=False):
+def _enrich(project, by_ip, reports, partial=False, services=(), services_partial=False):
     """Store runZero's facts on the project's matching addresses. ``(matched, updated, reports_kept, corroborated)``. ``partial`` says
     the walk stopped early (the quota, the record cap) so the lists are not all of runZero's answer: what was read is stored, but a block
     or a CVE report that is merely absent from it is kept, never taken to mean runZero dropped it. The same goes for an empty answer
-    while hosts carry runZero data (a token whose search scope changed): nothing is retired on silence."""
+    while hosts carry runZero data (a token whose search scope changed): nothing is retired on silence. ``services_partial`` says the same of
+    the services export alone (it failed or was cut short): an address's stored services are kept unless this read names some."""
     known = _known_ips(project, by_ip)
-    by_address = {}
+    by_address, services_at = {}, {}
     for report in reports:
         by_address.setdefault(report['address'], []).append(report)
+    for service in services:
+        services_at.setdefault(service['address'], []).append(service)
     updated = kept = 0
     for ip in known:
         mine = by_address.get(ip.address, [])
         kept += len(mine)
-        block = _block(by_ip[ip.address], mine)
+        block = _block(by_ip[ip.address], mine, services_at.get(ip.address, []))
+        block['project_id'] = project.pk  # whose sync wrote it: the version readings it gives belong to this project's hosts (cveFeed.source_versions)
+        before = (ip.fingerprint or {}).get('runzero') or {}
         if partial:
-            block['vulns'] = ((ip.fingerprint or {}).get('runzero') or {}).get('vulns', []) if not mine else block['vulns']
+            block['vulns'] = before.get('vulns', []) if not mine else block['vulns']
+        if (partial or services_partial) and not block['services']:
+            block['services'] = before.get('services', [])
         updated += _store(ip, block)
     forgotten = 0
     if not partial and by_ip:
         forgotten = _forget_absent(project, by_ip)
         _retract_matches(project)
+    if updated or forgotten:
+        try:  # the operating system and service readings the blocks state, as third-party readings of the project's hosts (cveFeed.source_versions)
+            from cveFeed import source_versions
+            source_versions.refresh_runzero_project(project)
+        except Exception:  # noqa: BLE001 - the sync's own facts stand without the readings
+            logger.exception('could not store the runZero version readings of project %s', project.pk)
     return len(known), updated + forgotten, kept, _corroborate_matches(project, known)
 
 
@@ -359,12 +384,17 @@ def _run(project, row, token):
     assets, assets_cut = client.fetch_assets('')  # all of it: enrichment is not limited by the import search
     by_ip = _newest_by_address(assets)
     reports, reports_cut = ([], False)
+    services, services_cut, services_error = [], False, ''
     if by_ip:
         reports, reports_cut = client.fetch_vulnerabilities('')
+        services, services_cut, services_error = _fetch_services(client)
     partial = bool(assets_cut or reports_cut or client.quota_low)
-    matched, updated, kept, corroborated = _enrich(project, by_ip, reports, partial)
+    matched, updated, kept, corroborated = _enrich(project, by_ip, reports, partial, services=services,
+                                                   services_partial=bool(services_cut or services_error))
     counts = {'assets': len(assets), 'matched_hosts': matched, 'updated_hosts': updated, 'cve_reports': kept,
-              'corroborated_matches': corroborated, 'truncated': partial}
+              'corroborated_matches': corroborated, 'truncated': partial, 'services': len(services)}
+    if services_error:
+        counts['services_error'] = services_error  # the assets and CVE reports were read: the services wait for the next sync
     if client.quota_low:
         counts['quota_low'] = True  # runZero's daily quota is nearly spent: the sync stopped early and the next one carries on
     if row.import_enabled:
@@ -373,10 +403,24 @@ def _run(project, row, token):
     return counts
 
 
+def _fetch_services(client):
+    """``(services, truncated, error)`` of the services export (``runzero.Client.fetch_services``). A failure of this one export (a token
+    without access to it, a reply over the size limit) never fails the sync: the assets and CVE reports already read are stored, the
+    addresses keep the services they had, and the reason is counted."""
+    try:
+        services, cut = client.fetch_services()
+    except runzero.RunZeroError as exc:
+        logger.info('runZero services export not read: %s', exc.message)
+        return [], False, exc.message
+    return services, cut or client.quota_low, ''
+
+
 def _summary(counts):
     text = f"runZero sync: {counts['assets']} assets read, {counts['matched_hosts']} matched hosts ({counts['updated_hosts']} updated)"
     if counts.get('cve_reports'):
         text += f", {counts['cve_reports']} CVE reports"
+    if counts.get('services'):
+        text += f", {counts['services']} versioned services"
     if 'imported' in counts:
         text += f", {counts['imported']} targets imported"
     return text

@@ -145,10 +145,10 @@ class ContainerSignalTests(SimpleTestCase):
     def test_the_worker_resource_tick_publishes_the_worker_container(self):
         from reNgine import resources
         store = resources.RedisStore(mock.MagicMock(), 'cvengine:heavy:test')
-        with mock.patch.object(store, 'waiting', return_value=[]), mock.patch.object(store, 'live', return_value=[]), mock.patch.object(store, 'events', return_value=[]), \
-                mock.patch.object(store, 'publish_state'), mock.patch.object(cs, 'publish') as publish:
+        with mock.patch.object(store, 'publish_state') as state, mock.patch.object(cs, 'publish') as publish:
             resources.report_state(store, state_fn=lambda: {'total_mb': 1, 'limit_mb': None, 'used_mb': 1, 'available_mb': 1}, now_fn=lambda: NOW)
         self.assertEqual(publish.call_args[0], ('worker',))
+        self.assertEqual(set(state.call_args[0][0]), {'host', 'memory', 't'})  # memory only: no runs, waits or kills of the removed gate
 
 
 class QueueAgeTests(SimpleTestCase):
@@ -471,7 +471,8 @@ class AISpendTests(TestCase):
         self.assertEqual(out['state'], 'partial')
         rows = {r['key']: r for r in out['caps']}
         self.assertEqual((rows['validate_max_per_day']['state'], rows['validate_max_per_day']['used']), ('unknown', None))
-        with mock.patch('cveFeed.tunables.usage_today', return_value={}):
+        with mock.patch('cveFeed.tunables.usage_today', return_value={}), \
+                mock.patch.object(ms, '_other_caps', return_value={k: RuntimeError('x') for k in ms.OTHER_AI_CAP_KEYS}):
             cache.clear()
             self.assertEqual(ms.ai_spend()['state'], 'unknown')
 
@@ -597,8 +598,6 @@ class StatusSignalsTests(TestCase):
                       mock.patch.dict(os.environ, {'CVENGINE_STATUS_CACHE_SECONDS': '0'})):
             patch.start()
             self.addCleanup(patch.stop)
-        from tests.test_local_egress import _clear
-        _clear()
 
     def status(self, token):
         from tests.test_agentapi import call
@@ -611,7 +610,7 @@ class StatusSignalsTests(TestCase):
         code, data = self.status(self.t_root)
         self.assertEqual(code, 200)
         signals = data['system']['signals']
-        self.assertEqual(set(signals['signals']), {'lanes', 'containers', 'queues', 'claim_refusals', 'database', 'redis', 'ai_spend'})
+        self.assertEqual(set(signals['signals']), {'lanes', 'containers', 'queues', 'claim_refusals', 'database', 'redis', 'ai_spend', 'triage_backlog'})
         for name, signal in signals['signals'].items():
             self.assertIn(signal['state'], ('known', 'partial', 'unknown'), name)
         code, data = self.status(self.t_member)
@@ -666,8 +665,9 @@ class StatusSignalsTests(TestCase):
             ms.collect(depths, client, NOW)
         with CaptureQueriesContext(connection) as warm:
             ms.collect(depths, client, NOW)
-        # cold: database (size and longest query, one transaction), the three oldest-queued reads, the AI counters (about ten counts), the claim names none
-        self.assertLessEqual(len([q for q in cold.captured_queries if 'SAVEPOINT' not in q['sql'] and not q['sql'].startswith(('SET', 'RELEASE'))]), 20)
+        # cold: database (size and longest query, one transaction), the three oldest-queued reads, the AI counters (about ten counts, and about eight for
+        # the reviewer, host review, guidance, planning and per-project triage caps), the triage backlog (one aggregate), the claim names none
+        self.assertLessEqual(len([q for q in cold.captured_queries if 'SAVEPOINT' not in q['sql'] and not q['sql'].startswith(('SET', 'RELEASE'))]), 30)
         self.assertEqual(len([q for q in warm.captured_queries if 'SAVEPOINT' not in q['sql']]), 0)  # everything database-backed is reused for a minute
         cache.clear()
         with CaptureQueriesContext(connection) as whole:
@@ -677,7 +677,7 @@ class StatusSignalsTests(TestCase):
         with mock.patch.object(system_status, '_signals', return_value={'unknown': []}):
             with CaptureQueriesContext(connection) as without:
                 self.status(self.t_root)
-        self.assertLessEqual(len(whole) - len(without), 30)  # 26 when measured: the database reads, the AI counters and their savepoints
+        self.assertLessEqual(len(whole) - len(without), 45)  # 39 when measured: the database reads, the AI counters (the reviewer, guidance, planning and per-project caps too), the triage backlog and their savepoints
         self.assertLessEqual(len(again) - len(without), 2)  # a second poll inside the minute reads almost nothing more than a status with no signals at all
 
     def test_the_status_text_carries_no_address_credential_or_query_text(self):

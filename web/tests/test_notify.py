@@ -211,7 +211,7 @@ class NotifyTests(TestCase):
 		self.enable()
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
 			scan = discovery.start_discovery(self.domain)
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'), sentinel_discovery(EVENTS):
+		with mock.patch('cveFeed.tasks.run_hygiene_task.delay'), sentinel_discovery(EVENTS):
 			discovery.run_pipeline(scan.id, light_stream=lambda path, **k: iter([]),
 			                       targeted_stream=lambda path, **k: iter([]), port_stage_run=port_double(),
 			                       db_exposure_checks={}, provider=None)

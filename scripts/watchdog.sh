@@ -118,17 +118,11 @@ if [ "$(wc -l <"$ACTIONS_LOG" 2>/dev/null || echo 0)" -gt 500 ]; then tail -n 20
 
 if ! layout; then answer failed "could not work out the Compose layout (see the log on the host)"; exit 0; fi
 recreate() { timeout -k 10 300 "${COMPOSE[@]}" up -d --no-deps --force-recreate "$@" >>"$LOG" 2>&1 </dev/null 6>&- 9>&-; }
-present() { grep -qx "$1" < <("${COMPOSE[@]}" ps -a --services 2>/dev/null </dev/null); }
 rc=0
 case $action in
   restart-celery)
-    recreate celery || rc=$?
-    # the scanner and the Tailscale sidecar share celery's network namespace by container id: they follow it (the update does the same)
-    if [ $rc -eq 0 ]; then
-      for svc in scanner tailscale; do
-        if present "$svc"; then recreate "$svc" || log "act: could not recreate $svc after celery"; fi
-      done
-    fi;;
+    # the built-in scanner and the Tailscale sidecar have a network of their own: recreating celery leaves them as they are
+    recreate celery || rc=$?;;
   restart-celery-beat) recreate celery-beat || rc=$?;;
   prune-docker)
     timeout -k 10 300 docker image prune -f >>"$LOG" 2>&1 </dev/null 6>&- 9>&- || rc=$?

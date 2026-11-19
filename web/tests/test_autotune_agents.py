@@ -231,10 +231,13 @@ class GuardRailTests(AgentBase):
         self.assertTrue(AuditLog.objects.filter(action='scan_concurrency.set').exists())
 
     def test_a_write_with_other_keys_in_it_sends_the_managed_ones_to_the_engine_and_the_rest_to_the_page(self):
-        out = self.write({'values': {'discovery_concurrency': 12, 'heavy.nmap-full-bg': 1}})
-        self.assertEqual(out['agent_changes']['discovery_concurrency']['status'], 'applied')
-        self.assertEqual(self.saved(), {'heavy.nmap-full-bg': 1})  # not auto-tuned: the page's handler saved it
-        self.assertNotIn('heavy.nmap-full-bg', out['agent_changes'])
+        out = self.write({'values': {'stage_parallel': 5, 'bulk_discover_now': 40}}, name='tunables')
+        self.assertEqual(out['agent_changes']['stage_parallel']['status'], 'applied')
+        self.assertEqual(dict(TunableSettings.current().values or {}), {'bulk_discover_now': 40})  # not auto-tuned: the page's handler saved it
+        self.assertNotIn('bulk_discover_now', out['agent_changes'])
+        with self.assertRaises(ApiError):  # a scanner limit of the removed memory gate is no setting at all: the page refuses it
+            self.write({'values': {'discovery_concurrency': 12, 'heavy.nmap-full-bg': 1}})
+        self.assertNotIn('heavy.nmap-full-bg', self.saved())
 
 
 class VerifyAndRevertTests(AgentBase):
@@ -306,12 +309,6 @@ class AgentLimitTests(AgentBase):
             self.write(values(planner_enabled=1), name='tunables')
         with self.assertRaises(ApiError):
             self.write(values(sentinel_bbot_keys=2), name='tunables')
-
-    def test_a_cap_of_zero_on_the_port_25_pacing_is_not_lower_it_turns_the_pacing_off(self):
-        with self.assertRaises(ApiError):
-            self.write({'values': {'egress_port25_per_hour': 0}}, name='tunables')
-        self.write({'values': {'egress_port25_per_hour': 100}}, name='tunables')
-        self.assertEqual(tunables.value('egress_port25_per_hour'), 100)
 
     def test_the_ai_and_reviewer_limits_are_lower_only_and_nothing_paid_or_scan_wide_is_switched_on(self):
         from dashboard.models import AIProviderSettings

@@ -1,5 +1,6 @@
 """Settings, configMaxxing, Scan concurrency: validation, precedence (saved > environment > default), reset, who may use it, the audit trail, what
-admission and the conductor read, the AI tuner's bounds, the memory warning and the live resize of the discovery worker."""
+the assessment batch and the conductor read, the retired tuner steps, and the live resize of the discovery worker. No scanner runs on the server, so
+there is no per-tool ``heavy.<kind>`` limit and no memory plan any more."""
 import json
 import os
 import unittest
@@ -19,8 +20,7 @@ from tests.test_tenancy import client_for
 from tests.steady import expiring_caches
 
 REAL_REQUEST_APPLY = sc.request_apply
-ENV_NAMES = [f.env for f in sc.FIELDS] + [n for f in sc.FIELDS for n in ('HEAVY_TUNE_MIN_' + f.key.split('.', 1)[-1].upper().replace('-', '_'),
-	'HEAVY_TUNE_MAX_' + f.key.split('.', 1)[-1].upper().replace('-', '_'))]
+ENV_NAMES = [f.env for f in sc.FIELDS]
 
 
 class Isolated:
@@ -42,35 +42,38 @@ class Isolated:
 	def scrub(self):
 		client = sc._redis()
 		if client is not None:
-			client.delete(sc.VALUES_KEY, sc.RUNNING_KEY, *[f'cvengine:adaptive:max:{k}' for k in res.MAX_CONCURRENT])
+			client.delete(sc.VALUES_KEY, sc.RUNNING_KEY, 'cvengine:adaptive:max:nmap')
 		sc.invalidate()
 		res._saved.update(values={})  # not even the last copy of an outage may carry over to the next test
 
 
 class FieldTests(Isolated, unittest.TestCase):
-	def test_every_scanner_kind_has_a_field_with_its_default_and_a_sane_ceiling(self):
-		for kind, default in res.MAX_CONCURRENT.items():
-			field = sc.BY_KEY[f'heavy.{kind}']
-			self.assertEqual((field.default, field.low), (default, 1), kind)
-			self.assertTrue(default <= field.high <= 16, kind)
+	def test_the_fields_their_defaults_and_groups_and_no_scanner_kind(self):
+		self.assertEqual([f.key for f in sc.FIELDS], ['discovery_concurrency', 'assess_batch', 'work_depth', 'assess_share_percent', 'lane.cve_feed', 'lane.classic'])
+		self.assertFalse([k for k in sc.BY_KEY if k.startswith('heavy.')])  # every scan runs on a Sentinel: no per-tool limit on the server
+		self.assertEqual({f.group for f in sc.FIELDS}, set(sc.GROUP_TITLES))
+		self.assertNotIn('heavy', sc.GROUP_TITLES)
 		self.assertEqual((sc.BY_KEY['discovery_concurrency'].default, sc.BY_KEY['work_depth'].default, sc.BY_KEY['assess_batch'].default), (8, 3, 8))
+		for gone in ('HEAVY_HELP', 'HEAVY_HIGH', 'HEAVY_AUTO', 'memory_plan', 'memory_context', 'OVERCOMMIT'):
+			self.assertFalse(hasattr(sc, gone), gone)
 
 	def test_clean_accepts_whole_numbers_in_range_and_none_for_reset(self):
-		self.assertEqual(sc.clean('heavy.nmap', 4), 4)
-		self.assertEqual(sc.clean('heavy.nmap', '4'), 4)
-		self.assertEqual(sc.clean('heavy.nmap', 4.0), 4)
-		self.assertIsNone(sc.clean('heavy.nmap', None))
+		self.assertEqual(sc.clean('assess_batch', 4), 4)
+		self.assertEqual(sc.clean('assess_batch', '4'), 4)
+		self.assertEqual(sc.clean('assess_batch', 4.0), 4)
+		self.assertIsNone(sc.clean('assess_batch', None))
 		self.assertEqual(sc.clean('work_depth', 0), 0)  # the conductor can be switched off
 
 	def test_clean_refuses_everything_else_with_the_range_in_the_message(self):
-		for key, bad in (('heavy.nmap', 0), ('heavy.nmap', 9), ('heavy.bbot-deep', 5), ('heavy.nmap', -1), ('heavy.nmap', True), ('heavy.nmap', 2.5),
-				('heavy.nmap', 'lots'), ('heavy.nmap', ''), ('heavy.nmap', [2]), ('discovery_concurrency', 0), ('discovery_concurrency', 33),
-				('work_depth', 33), ('work_depth', -1), ('heavy.route-probe', 17)):
+		for key, bad in (('assess_batch', 0), ('assess_batch', 65), ('assess_share_percent', 9), ('assess_batch', -1), ('assess_batch', True), ('assess_batch', 2.5),
+				('assess_batch', 'lots'), ('assess_batch', ''), ('assess_batch', [2]), ('discovery_concurrency', 0), ('discovery_concurrency', 33),
+				('work_depth', 33), ('work_depth', -1), ('assess_share_percent', 101)):
 			with self.assertRaises(ValueError, msg=(key, bad)) as caught:
 				sc.clean(key, bad)
 			self.assertRegex(str(caught.exception), r'from \d+ to \d+')
-		with self.assertRaises(ValueError):
-			sc.clean('heavy.nope', 2)
+		for gone in ('heavy.nmap', 'heavy.nuclei', 'heavy.nope'):  # the per-tool scanner limits are no settings any more
+			with self.assertRaises(ValueError, msg=gone):
+				sc.clean(gone, 2)
 
 
 class PrecedenceTests(Isolated, TestCase):
@@ -79,10 +82,10 @@ class PrecedenceTests(Isolated, TestCase):
 		self.root = User.objects.create_superuser('conc_root', 'c@x.io', 'x')
 
 	def test_default_then_environment_then_the_saved_value(self):
-		self.assertEqual(sc.resolve('heavy.nmap', {}), {'value': 2, 'source': 'default'})
-		os.environ['HEAVY_MAX_NMAP'] = '3'
-		self.assertEqual(sc.resolve('heavy.nmap', {}), {'value': 3, 'source': 'environment'})
-		self.assertEqual(sc.resolve('heavy.nmap', {'heavy.nmap': 5}), {'value': 5, 'source': 'admin'})
+		self.assertEqual(sc.resolve('assess_batch', {}), {'value': 8, 'source': 'default'})
+		os.environ['CVENGINE_ASSESS_BATCH'] = '12'
+		self.assertEqual(sc.resolve('assess_batch', {}), {'value': 12, 'source': 'environment'})
+		self.assertEqual(sc.resolve('assess_batch', {'assess_batch': 24}), {'value': 24, 'source': 'admin'})
 
 	def test_the_same_rule_for_the_discovery_pool_and_the_conductor(self):
 		os.environ.update(DISCOVERY_CONCURRENCY='12', CVENGINE_WORK_DEPTH='0')
@@ -91,22 +94,22 @@ class PrecedenceTests(Isolated, TestCase):
 		self.assertEqual(sc.resolve('work_depth', {'work_depth': 6}), {'value': 6, 'source': 'admin'})
 
 	def test_an_environment_value_that_is_not_a_number_is_ignored(self):
-		os.environ['HEAVY_MAX_NMAP'] = 'many'
-		self.assertEqual(sc.resolve('heavy.nmap', {})['source'], 'default')
-		os.environ['HEAVY_MAX_NMAP'] = '0'  # 0 never meant zero runs: it meant "not set"
-		self.assertEqual(sc.resolve('heavy.nmap', {})['source'], 'default')
+		os.environ['CVENGINE_ASSESS_BATCH'] = 'many'
+		self.assertEqual(sc.resolve('assess_batch', {})['source'], 'default')
+		os.environ['CVENGINE_ASSESS_BATCH'] = '0'  # under the floor of 1: not set
+		self.assertEqual(sc.resolve('assess_batch', {})['source'], 'default')
 
 	def test_a_saved_value_that_is_out_of_range_is_not_used(self):
-		self.assertEqual(sc.resolve('heavy.nmap', {'heavy.nmap': 99})['source'], 'default')
+		self.assertEqual(sc.resolve('assess_batch', {'assess_batch': 99})['source'], 'default')
 
 	def test_a_saved_value_wins_over_the_environment_and_a_reset_goes_back_to_it(self):
-		os.environ['HEAVY_MAX_NMAP'] = '3'
-		sc.update({'heavy.nmap': 5}, self.root)
-		self.assertEqual(sc.effective('heavy.nmap'), 5)
-		sc.update({'heavy.nmap': None}, self.root)
-		self.assertEqual((sc.effective('heavy.nmap'), sc.resolve('heavy.nmap')['source']), (3, 'environment'))
-		del os.environ['HEAVY_MAX_NMAP']
-		self.assertEqual(sc.effective('heavy.nmap'), 2)
+		os.environ['CVENGINE_ASSESS_BATCH'] = '12'
+		sc.update({'assess_batch': 24}, self.root)
+		self.assertEqual(sc.effective('assess_batch'), 24)
+		sc.update({'assess_batch': None}, self.root)
+		self.assertEqual((sc.effective('assess_batch'), sc.resolve('assess_batch')['source']), (12, 'environment'))
+		del os.environ['CVENGINE_ASSESS_BATCH']
+		self.assertEqual(sc.effective('assess_batch'), 8)
 
 	def test_the_assessment_batch_size_is_saved_then_environment_then_default(self):
 		from cveFeed import host_assessment
@@ -146,77 +149,90 @@ class SavingTests(Isolated, TestCase):
 		return next(f for f in data['fields'] if f['key'] == key)
 
 	def test_get_describes_every_field_with_its_default_range_environment_and_origin(self):
-		os.environ['HEAVY_MAX_NUCLEI'] = '2'
+		os.environ['CVENGINE_WORK_DEPTH'] = '5'
 		status, data = send(self.c, 'GET', 'scan_concurrency')
 		self.assertEqual(status, 200)
 		keys = [f['key'] for f in data['fields']]
 		self.assertEqual(keys, [f.key for f in sc.FIELDS])
-		nmap = self.field(data, 'heavy.nmap')
-		self.assertEqual((nmap['value'], nmap['default'], nmap['min'], nmap['max'], nmap['source'], nmap['env_value']), (2, 2, 1, 8, 'default', None))
-		self.assertEqual(nmap['env_name'], 'HEAVY_MAX_NMAP')
-		nuclei = self.field(data, 'heavy.nuclei')
-		self.assertEqual((nuclei['value'], nuclei['source'], nuclei['env_value'], nuclei['default']), (2, 'environment', 2, 1))
+		batch = self.field(data, 'assess_batch')
+		self.assertEqual((batch['value'], batch['default'], batch['min'], batch['max'], batch['source'], batch['env_value']), (8, 8, 1, 64, 'default', None))
+		self.assertEqual(batch['env_name'], 'CVENGINE_ASSESS_BATCH')
+		depth = self.field(data, 'work_depth')
+		self.assertEqual((depth['value'], depth['source'], depth['env_value'], depth['default']), (5, 'environment', 5, 3))
 		self.assertEqual(self.field(data, 'discovery_concurrency')['applies'], 'pool')
-		self.assertEqual(nmap['applies'], 'live')
+		self.assertEqual(batch['applies'], 'live')
+		self.assertEqual([g['id'] for g in data['groups']], ['discovery', 'depth', 'lanes'])
+		self.assertNotIn('memory', data)  # no scanner memory plan: nothing runs a scanner here
 
 	def test_put_saves_a_partial_change_and_says_who_and_when(self):
-		status, data = send(self.c, 'PUT', 'scan_concurrency', {'values': {'heavy.nmap': 4, 'work_depth': 5}})
+		status, data = send(self.c, 'PUT', 'scan_concurrency', {'values': {'assess_batch': 16, 'work_depth': 5}})
 		self.assertEqual(status, 200)
-		nmap = self.field(data, 'heavy.nmap')
-		self.assertEqual((nmap['value'], nmap['source'], nmap['set_by']), (4, 'admin', 'conc_root'))
-		self.assertTrue(nmap['set_at'])
+		batch = self.field(data, 'assess_batch')
+		self.assertEqual((batch['value'], batch['source'], batch['set_by']), (16, 'admin', 'conc_root'))
+		self.assertTrue(batch['set_at'])
 		self.assertEqual(self.field(data, 'work_depth')['value'], 5)
-		self.assertEqual(self.field(data, 'heavy.nuclei')['source'], 'default')  # untouched
-		self.assertEqual(ScanConcurrency.current().values, {'heavy.nmap': 4, 'work_depth': 5})
+		self.assertEqual(self.field(data, 'discovery_concurrency')['source'], 'default')  # untouched
+		self.assertEqual(ScanConcurrency.current().values, {'assess_batch': 16, 'work_depth': 5})
 
 	def test_one_bad_value_saves_nothing(self):
-		status, data = send(self.c, 'PUT', 'scan_concurrency', {'values': {'heavy.nmap': 4, 'heavy.nuclei': 99}})
+		status, data = send(self.c, 'PUT', 'scan_concurrency', {'values': {'assess_batch': 16, 'work_depth': 99}})
 		self.assertEqual(status, 400)
-		self.assertIn('Vulnerability templates (nuclei) must be a whole number from 1 to 8', data['error'])
+		self.assertIn('Discovery scans kept running must be a whole number from 0 to 32', data['error'])
 		self.assertEqual(ScanConcurrency.current().values, {})
 		for body in ({}, {'values': {}}, {'values': 'x'}, {'values': {'heavy.nope': 1}}, {'nmap': 3}):
 			self.assertEqual(send(self.c, 'PUT', 'scan_concurrency', body)[0], 400, body)
 
+	def test_a_scanner_limit_of_the_removed_memory_gate_is_refused_and_saves_nothing(self):
+		status, data = send(self.c, 'PUT', 'scan_concurrency', {'values': {'heavy.nmap': 2, 'work_depth': 5}})
+		self.assertEqual(status, 400)
+		self.assertIn('heavy.nmap', data['error'])
+		self.assertEqual(ScanConcurrency.current().values, {})
+		root = User.objects.get(username='conc_root')
+		with self.assertRaises(ValueError):
+			sc.update({'heavy.nmap': 2}, root)
+		self.assertEqual(ScanConcurrency.current().values, {})
+		self.assertFalse(AuditLog.objects.filter(action__startswith='scan_concurrency').exists())
+
 	def test_null_resets_one_field_and_leaves_the_others(self):
-		send(self.c, 'PUT', 'scan_concurrency', {'values': {'heavy.nmap': 4, 'heavy.nuclei': 3}})
-		status, data = send(self.c, 'PUT', 'scan_concurrency', {'values': {'heavy.nmap': None}})
+		send(self.c, 'PUT', 'scan_concurrency', {'values': {'assess_batch': 16, 'work_depth': 5}})
+		status, data = send(self.c, 'PUT', 'scan_concurrency', {'values': {'assess_batch': None}})
 		self.assertEqual(status, 200)
-		self.assertEqual((self.field(data, 'heavy.nmap')['source'], self.field(data, 'heavy.nmap')['set_by']), ('default', None))
-		self.assertEqual(self.field(data, 'heavy.nuclei')['value'], 3)
-		self.assertEqual(ScanConcurrency.current().meta.keys(), {'heavy.nuclei'})
+		self.assertEqual((self.field(data, 'assess_batch')['source'], self.field(data, 'assess_batch')['set_by']), ('default', None))
+		self.assertEqual(self.field(data, 'work_depth')['value'], 5)
+		self.assertEqual(ScanConcurrency.current().meta.keys(), {'work_depth'})
 
 	def test_reset_all_clears_every_tinkerer_setting_and_is_audited(self):
-		send(self.c, 'PUT', 'scan_concurrency', {'values': {'heavy.nmap': 4, 'work_depth': 5, 'discovery_concurrency': 12}})
+		send(self.c, 'PUT', 'scan_concurrency', {'values': {'assess_batch': 16, 'work_depth': 5, 'discovery_concurrency': 12}})
 		status, data = send(self.c, 'POST', 'config_maxxing/reset', {})
 		self.assertEqual((status, data['cleared']), (200, {'autotune': 0, 'scan_concurrency': 3, 'ai_spend': 0, 'throughput': 0, 'autotune_pace': 0,
-			'retention': 0, 'egress': 0, 'planner': 0, 'heat': 0, 'discovery_keys': 0}))
+			'retention': 0, 'planner': 0, 'heat': 0, 'discovery_keys': 0}))
 		self.assertEqual(ScanConcurrency.current().values, {})
 		self.assertTrue(AuditLog.objects.filter(action='config_maxxing.reset_all', actor=self.root).exists())
 		self.assertTrue(AuditLog.objects.filter(action='config_maxxing.scan_concurrency_reset_all').exists())
 		self.assertEqual(send(self.c, 'GET', 'config_maxxing')[1], {'cards': [{'id': 'autotune', 'title': 'Auto-tuning'},
 			{'id': 'scan_concurrency', 'title': 'Scan concurrency'}, {'id': 'ai_spend', 'title': 'AI spend'},
 			{'id': 'throughput', 'title': 'Scan pacing'}, {'id': 'autotune_pace', 'title': 'Auto-tuning pace'},
-			{'id': 'retention', 'title': 'Data retention'}, {'id': 'egress', 'title': 'Outbound connections'}, {'id': 'planner', 'title': 'Work planner'}, {'id': 'heat', 'title': 'Heat policy'},
+			{'id': 'retention', 'title': 'Data retention'}, {'id': 'planner', 'title': 'Work planner'}, {'id': 'heat', 'title': 'Heat policy'},
 			{'id': 'discovery_keys', 'title': 'Discovery API keys'}]})
 
 	def test_every_change_is_audited_with_before_and_after_and_a_no_change_is_not(self):
-		os.environ['HEAVY_MAX_NMAP'] = '3'
-		send(self.c, 'PUT', 'scan_concurrency', {'values': {'heavy.nmap': 5}})
+		os.environ['CVENGINE_ASSESS_BATCH'] = '12'
+		send(self.c, 'PUT', 'scan_concurrency', {'values': {'assess_batch': 24}})
 		entry = AuditLog.objects.get(action='scan_concurrency.set')
 		self.assertEqual((entry.actor_name, entry.target, entry.detail['before'], entry.detail['before_source'], entry.detail['after']),
-			('conc_root', 'heavy.nmap', 3, 'environment', 5))
-		send(self.c, 'PUT', 'scan_concurrency', {'values': {'heavy.nmap': 5}})  # the same again
+			('conc_root', 'assess_batch', 12, 'environment', 24))
+		send(self.c, 'PUT', 'scan_concurrency', {'values': {'assess_batch': 24}})  # the same again
 		self.assertEqual(AuditLog.objects.filter(action='scan_concurrency.set').count(), 1)
-		send(self.c, 'PUT', 'scan_concurrency', {'values': {'heavy.nmap': None}})
+		send(self.c, 'PUT', 'scan_concurrency', {'values': {'assess_batch': None}})
 		reset = AuditLog.objects.get(action='scan_concurrency.reset')
-		self.assertEqual((reset.target, reset.detail['before'], reset.detail['after']), ('heavy.nmap', 5, 3))
-		send(self.c, 'PUT', 'scan_concurrency', {'values': {'heavy.nmap': None}})  # nothing was set
+		self.assertEqual((reset.target, reset.detail['before'], reset.detail['after']), ('assess_batch', 24, 12))
+		send(self.c, 'PUT', 'scan_concurrency', {'values': {'assess_batch': None}})  # nothing was set
 		self.assertEqual(AuditLog.objects.filter(action='scan_concurrency.reset').count(), 1)
 
 	def test_only_an_app_admin_may_read_or_change_it(self):
 		for user in (self.org_admin, self.member):
 			other = client_for(user)
-			for method, path, body in (('GET', 'scan_concurrency', None), ('PUT', 'scan_concurrency', {'values': {'heavy.nmap': 3}}),
+			for method, path, body in (('GET', 'scan_concurrency', None), ('PUT', 'scan_concurrency', {'values': {'assess_batch': 3}}),
 					('GET', 'config_maxxing', None), ('POST', 'config_maxxing/reset', {})):
 				self.assertEqual(send(other, method, path, body)[0], 403, (user.username, path))
 			self.assertEqual(other.get('/cve/settings/').status_code, 403)  # the page that holds the section
@@ -229,20 +245,20 @@ class SavingTests(Isolated, TestCase):
 		self.assertFalse([t for t in mcp.TOOLS if 'concurrency' in str(t).lower()] if hasattr(mcp, 'TOOLS') else [])
 		self.assertEqual(client_for(self.root).get('/api/v1/scan_concurrency/').status_code, 404)
 
-	def test_saving_publishes_to_redis_and_clears_the_tuner_step_of_that_scanner(self):
+	def test_saving_publishes_to_redis_and_leaves_a_retired_tuner_step_alone(self):
 		client = sc._redis()
 		client.set('cvengine:adaptive:max:nmap', json.dumps({'value': 1}))
-		client.set('cvengine:adaptive:max:nuclei', json.dumps({'value': 1}))
-		sc.update({'heavy.nmap': 4}, self.root)
-		self.assertEqual(json.loads(client.get(sc.VALUES_KEY))['values'], {'heavy.nmap': 4})
-		self.assertIsNone(client.get('cvengine:adaptive:max:nmap'))
-		self.assertIsNotNone(client.get('cvengine:adaptive:max:nuclei'))
+		sc.update({'assess_batch': 16}, self.root)
+		self.assertEqual(json.loads(client.get(sc.VALUES_KEY))['values'], {'assess_batch': 16})
+		self.assertIsNotNone(client.get('cvengine:adaptive:max:nmap'))  # no scanner limit is saved, so no tuner step is cleared (nothing reads it)
 
-	def test_a_discovery_change_queues_the_live_resize_and_others_do_not(self):
-		sc.update({'heavy.nmap': 4}, self.root)
+	def test_a_discovery_or_lane_change_queues_the_live_resize_and_others_do_not(self):
+		sc.update({'assess_batch': 16, 'work_depth': 5}, self.root)
 		self.queued.assert_not_called()
 		sc.update({'discovery_concurrency': 12}, self.root)
 		self.queued.assert_called_once_with()
+		sc.update({'lane.classic': 7}, self.root)
+		self.assertEqual(self.queued.call_count, 2)
 
 	def test_a_broker_that_is_down_does_not_fail_the_save(self):
 		sc.update({'discovery_concurrency': 12}, self.root)
@@ -251,79 +267,88 @@ class SavingTests(Isolated, TestCase):
 		self.assertEqual(ScanConcurrency.current().values, {'discovery_concurrency': 12})
 
 
-class AdmissionTests(Isolated, TestCase):
-	"""reNgine.resources admission reads the saved value without a restart, and falls back to today's static value when it cannot."""
+class ReaderTests(Isolated, TestCase):
+	"""The assessment batch and the conductor read the saved value without a restart, and fall back to the environment when they cannot."""
 
 	def setUp(self):
 		super().setUp()
 		self.root = User.objects.create_superuser('conc_root', 'c@x.io', 'x')
 
-	def test_admission_honours_the_saved_value(self):
-		self.assertEqual(res.max_concurrent('nmap'), 2)
-		sc.update({'heavy.nmap': 5}, self.root)
-		self.assertEqual(res.max_concurrent('nmap'), 5)
-		store = res.MemoryStore()
-		for i in range(5):
-			self.assertTrue(store.reserve(f't{i}', 100, 'nmap: x', 99999, 0, 'nmap', res.max_concurrent('nmap')))
-		self.assertFalse(store.reserve('t5', 100, 'nmap: x', 99999, 0, 'nmap', res.max_concurrent('nmap')))
+	def batch(self):
+		from cveFeed import host_assessment
+		return host_assessment.batch_size()
+
+	def test_the_readers_honour_the_saved_value(self):
+		self.assertEqual((self.batch(), conductor.wanted_depth()), (8, 3))
+		sc.update({'assess_batch': 24, 'work_depth': 6}, self.root)
+		self.assertEqual((self.batch(), conductor.wanted_depth()), (24, 6))
 
 	def test_the_saved_value_beats_the_environment_and_a_reset_goes_back_to_it(self):
-		os.environ['HEAVY_MAX_NMAP'] = '3'
-		self.assertEqual(res.max_concurrent('nmap'), 3)
-		sc.update({'heavy.nmap': 1}, self.root)
-		self.assertEqual(res.max_concurrent('nmap'), 1)
-		sc.update({'heavy.nmap': None}, self.root)
-		self.assertEqual(res.max_concurrent('nmap'), 3)
+		os.environ['CVENGINE_ASSESS_BATCH'] = '12'
+		self.assertEqual(self.batch(), 12)
+		sc.update({'assess_batch': 4}, self.root)
+		self.assertEqual(self.batch(), 4)
+		sc.update({'assess_batch': None}, self.root)
+		self.assertEqual(self.batch(), 12)
 
 	@expiring_caches
 	def test_another_process_sees_a_save_within_the_cache_time(self):
-		sc.update({'heavy.nmap': 5}, self.root)
-		self.assertEqual(sc.stored_values(now_fn=lambda: 1000.0), {'heavy.nmap': 5})
-		sc._redis().set(sc.VALUES_KEY, json.dumps({'values': {'heavy.nmap': 6}}))  # a save in another process
-		self.assertEqual(sc.stored_values(now_fn=lambda: 1000.0 + sc.CACHE_SECONDS - 1), {'heavy.nmap': 5})  # still cached
-		self.assertEqual(sc.stored_values(now_fn=lambda: 1000.0 + sc.CACHE_SECONDS + 1), {'heavy.nmap': 6})
+		sc.update({'assess_batch': 24}, self.root)
+		self.assertEqual(sc.stored_values(now_fn=lambda: 1000.0), {'assess_batch': 24})
+		sc._redis().set(sc.VALUES_KEY, json.dumps({'values': {'assess_batch': 32}}))  # a save in another process
+		self.assertEqual(sc.stored_values(now_fn=lambda: 1000.0 + sc.CACHE_SECONDS - 1), {'assess_batch': 24})  # still cached
+		self.assertEqual(sc.stored_values(now_fn=lambda: 1000.0 + sc.CACHE_SECONDS + 1), {'assess_batch': 32})
 
-	def test_with_redis_down_admission_falls_back_to_the_static_value(self):
-		os.environ['HEAVY_MAX_NMAP'] = '3'
+	def test_with_redis_down_the_readers_fall_back_to_the_environment(self):
+		os.environ['CVENGINE_ASSESS_BATCH'] = '12'
 		sc.invalidate()
 		with mock.patch.object(res, 'redis_client', side_effect=ConnectionError('redis is down')), mock.patch.object(res, 'get_store', side_effect=ConnectionError('down')):
-			self.assertEqual(res.max_concurrent('nmap'), 3)
-			self.assertEqual(res.max_concurrent('nuclei'), 1)
+			self.assertEqual(self.batch(), 12)
+			self.assertEqual(sc.effective('discovery_concurrency'), 8)
 			self.assertEqual(conductor.wanted_depth(), 3)
 
 	def test_with_redis_down_the_last_value_this_process_saw_is_kept(self):
-		sc.update({'heavy.nmap': 5}, self.root)
-		self.assertEqual(res.max_concurrent('nmap'), 5)
+		sc.update({'assess_batch': 24}, self.root)
+		self.assertEqual(self.batch(), 24)
 		res._saved.update(at=-1000.0)  # expired: it will try Redis again
 		with mock.patch.object(res, 'redis_client', side_effect=ConnectionError('redis is down')):
-			self.assertEqual(res.max_concurrent('nmap'), 5)
+			self.assertEqual(self.batch(), 24)
 
-	def test_a_flushed_redis_does_not_put_a_saved_limit_back_to_the_default(self):
+	def test_a_flushed_redis_does_not_put_a_saved_value_back_to_the_default(self):
 		"""Redis answers but the published copy is gone (restart without persistence, a flush): the database is the truth, read and published again."""
-		sc.update({'heavy.nmap': 5, 'work_depth': 7}, self.root)
+		sc.update({'assess_batch': 24, 'work_depth': 7}, self.root)
 		sc._redis().delete(sc.VALUES_KEY)
 		sc.invalidate()
-		self.assertEqual(res.max_concurrent('nmap'), 5)  # not 2
+		self.assertEqual(self.batch(), 24)  # not 8
 		self.assertEqual(conductor.wanted_depth(), 7)
-		self.assertEqual(json.loads(sc._redis().get(sc.VALUES_KEY))['values'], {'heavy.nmap': 5, 'work_depth': 7})  # published again
+		self.assertEqual(json.loads(sc._redis().get(sc.VALUES_KEY))['values'], {'assess_batch': 24, 'work_depth': 7})  # published again
 
-	def test_a_copy_nobody_can_read_is_no_copy_for_admission_either(self):
-		sc.update({'heavy.nmap': 5}, self.root)
+	def test_a_flushed_redis_publishes_again_without_a_scanner_limit_left_in_the_row(self):
+		ScanConcurrency.current()
+		ScanConcurrency.objects.update(values={'heavy.nmap': 4, 'work_depth': 7})  # a row the migration has not cleaned (an older backup restored)
+		sc._redis().delete(sc.VALUES_KEY)
+		sc.invalidate()
+		self.assertEqual(conductor.wanted_depth(), 7)
+		self.assertEqual(json.loads(sc._redis().get(sc.VALUES_KEY))['values'], {'work_depth': 7})
+		self.assertEqual(sc.saved_values(), {'work_depth': 7})
+
+	def test_a_copy_nobody_can_read_is_no_copy_for_the_readers_either(self):
+		sc.update({'assess_batch': 24}, self.root)
 		sc._redis().set(sc.VALUES_KEY, 'not json')
 		sc.invalidate()
-		self.assertEqual(res.max_concurrent('nmap'), 5)
+		self.assertEqual(self.batch(), 24)
 
 	def test_a_flushed_redis_with_the_database_down_keeps_the_last_copy_and_a_read_does_not_create_the_row(self):
-		sc.update({'heavy.nmap': 5}, self.root)
-		self.assertEqual(res.max_concurrent('nmap'), 5)
+		sc.update({'assess_batch': 24}, self.root)
+		self.assertEqual(self.batch(), 24)
 		sc._redis().delete(sc.VALUES_KEY)
 		sc.invalidate()
 		with mock.patch.object(sc, 'recover', side_effect=RuntimeError('db down')):
-			self.assertEqual(res.max_concurrent('nmap'), 5)
+			self.assertEqual(self.batch(), 24)
 		ScanConcurrency.objects.all().delete()
 		sc._redis().delete(sc.VALUES_KEY)
 		sc.invalidate()
-		self.assertEqual(res.max_concurrent('nmap'), 2)  # nothing saved any more
+		self.assertEqual(self.batch(), 8)  # nothing saved any more
 		self.assertEqual(ScanConcurrency.objects.count(), 0)
 
 	def test_a_reading_failure_is_not_retried_on_every_call(self):
@@ -334,95 +359,18 @@ class AdmissionTests(Isolated, TestCase):
 		self.assertEqual(attempts.call_count, 1)
 
 
-class TunerBoundsTests(Isolated, TestCase):
-	"""What the admin saved is the cap in force; a step a retired tuner left in Redis is not read (the auto-tuner, cveFeed.autotune, moves the
-	caps now)."""
+class RetiredTunerTests(Isolated, TestCase):
+	"""A step the retired three hour tuner left in Redis (``cvengine:adaptive:max:<kind>``) is not read by anything: what a person saved is in force."""
 
 	def setUp(self):
 		super().setUp()
 		self.root = User.objects.create_superuser('conc_root', 'c@x.io', 'x')
-
-	def test_the_saved_value_is_the_baseline_and_the_top_of_the_range(self):
-		sc.update({'heavy.nmap': 6}, self.root)
-		self.assertEqual(res.max_concurrent('nmap'), 6)
-
-	def test_a_tuner_step_above_the_saved_value_is_held_to_it(self):
-		sc._redis().set('cvengine:adaptive:max:nmap', json.dumps({'value': 5}))
-		self.assertEqual(res.max_concurrent('nmap'), 2)  # the old behaviour: bounded by the static cap
-		sc.update({'heavy.nmap': 3}, self.root)
-		sc._redis().set('cvengine:adaptive:max:nmap', json.dumps({'value': 5}))
-		self.assertEqual(res.max_concurrent('nmap'), 3)
 
 	def test_a_leftover_step_of_the_retired_three_hour_tuner_changes_nothing(self):
-		"""The retired capacity review no longer moves admission caps (the auto-tuner does, cveFeed.autotune): a step it left in Redis is not read."""
-		sc.update({'heavy.nmap': 4}, self.root)
+		sc.update({'assess_batch': 16}, self.root)
 		sc._redis().set('cvengine:adaptive:max:nmap', json.dumps({'value': 3, 'direction': 'down'}))
-		self.assertEqual(res.max_concurrent('nmap'), 4)
-		sc.update({'heavy.nmap': 5}, self.root)
-		self.assertEqual(res.max_concurrent('nmap'), 5)
-
-class MemoryPlanTests(unittest.TestCase):
-	COSTS = {'nmap': 400, 'nuclei': 1000, 'bbot-deep': 2400}
-
-	def plan(self, caps, budget, defaults=None):
-		return sc.memory_plan(caps, self.COSTS, budget, defaults or {'nmap': 2, 'nuclei': 1, 'bbot-deep': 1})
-
-	def test_the_defaults_are_never_flagged_even_when_every_kind_at_its_limit_exceeds_the_budget(self):
-		plan = self.plan({'nmap': 2, 'nuclei': 1, 'bbot-deep': 1}, 3072)
-		self.assertEqual((plan['total_mb'], plan['default_total_mb'], plan['warnings']), (4200, 4200, []))
-
-	def test_raising_a_limit_past_the_budget_warns_and_names_the_way_out(self):
-		plan = self.plan({'nmap': 8, 'nuclei': 4, 'bbot-deep': 1}, 3072)
-		self.assertEqual(plan['total_mb'], 3200 + 4000 + 2400)
-		text = ' '.join(plan['warnings'])
-		self.assertIn('9600 MB', text)
-		self.assertIn('more than 2 times the 3072 MB', text)
-		self.assertIn('CELERY_MEM_LIMIT', text)
-		self.assertIn('second machine', text)
-
-	def test_one_scanner_alone_above_the_budget_is_named(self):
-		plan = self.plan({'nmap': 2, 'nuclei': 4, 'bbot-deep': 1}, 3000)
-		self.assertTrue(any('Vulnerability templates (nuclei)' in w and 'by itself' in w for w in plan['warnings']), plan['warnings'])
-
-	def test_a_raise_that_stays_under_twice_the_budget_is_quiet(self):
-		plan = self.plan({'nmap': 4, 'nuclei': 2, 'bbot-deep': 1}, 3072)  # 6000 MB worst case, budget 3072: under 6144
-		self.assertEqual((plan['total_mb'], plan['warnings']), (6000, []))
-
-	def test_a_raise_that_fits_is_quiet_and_an_unknown_budget_is_never_a_warning(self):
-		self.assertEqual(self.plan({'nmap': 3, 'nuclei': 1, 'bbot-deep': 1}, 16000)['warnings'], [])
-		self.assertEqual(self.plan({'nmap': 8, 'nuclei': 8, 'bbot-deep': 4}, None)['warnings'], [])
-
-	def test_lowering_a_limit_is_never_flagged(self):
-		self.assertEqual(self.plan({'nmap': 1, 'nuclei': 1, 'bbot-deep': 1}, 100)['warnings'], [])
-
-
-class MemoryContextTests(Isolated, TestCase):
-	def setUp(self):
-		super().setUp()
-		self.root = User.objects.create_superuser('conc_root', 'c@x.io', 'x')
-		self.c = client_for(self.root)
-
-	def test_the_page_shows_the_scanning_containers_budget_and_a_warning_for_a_big_raise(self):
-		snapshot = {'store': 'redis', 'containers': [{'host': 'celery', 'memory': {'limit_mb': 4096, 'total_mb': 4096}, 'budget_mb': 3072}]}
-		with mock.patch.object(res, 'cluster_snapshot', return_value=snapshot):
-			memory = send(self.c, 'GET', 'scan_concurrency')[1]['memory']
-			self.assertEqual((memory['budget_mb'], memory['limit_mb'], memory['warnings']), (3072, 4096, []))
-			sc.update({'heavy.nmap': 8, 'heavy.nuclei': 8, 'heavy.bbot-standard': 8}, self.root)
-			memory = send(self.c, 'GET', 'scan_concurrency')[1]['memory']
-		self.assertTrue(memory['warnings'])
-		self.assertGreater(memory['total_mb'], memory['default_total_mb'])
-		self.assertIn('nmap', memory['costs_mb'])
-
-	def test_without_redis_the_web_containers_own_memory_is_not_taken_for_the_scanners(self):
-		snapshot = {'store': 'process', 'containers': [{'host': 'web', 'memory': {'limit_mb': 1024}, 'budget_mb': 768}]}
-		with mock.patch.object(res, 'cluster_snapshot', return_value=snapshot):
-			memory = send(self.c, 'GET', 'scan_concurrency')[1]['memory']
-		self.assertEqual((memory['budget_mb'], memory['warnings']), (None, []))
-
-	def test_without_a_worker_report_the_budget_is_unknown_and_nothing_is_claimed(self):
-		with mock.patch.object(res, 'cluster_snapshot', return_value={'store': 'redis', 'containers': []}):
-			memory = send(self.c, 'GET', 'scan_concurrency')[1]['memory']
-		self.assertEqual((memory['budget_mb'], memory['limit_mb'], memory['warnings']), (None, None, []))
+		self.assertEqual((sc.effective('assess_batch'), sc.saved_values()), (16, {'assess_batch': 16}))
+		self.assertNotIn('nmap', json.dumps(sc.snapshot()['fields']))
 
 
 class FakeApp:
@@ -518,7 +466,7 @@ class LiveResizeTests(Isolated, TestCase):
 		app = FakeApp({'discovery_worker@celery': 8})
 		with mock.patch('reNgine.celery.app', app):
 			sc.reconcile()
-		self.assertEqual(json.loads(sc._redis().get(sc.VALUES_KEY))['values'], {'heavy.nmap': 4, 'discovery_concurrency': 10})
+		self.assertEqual(json.loads(sc._redis().get(sc.VALUES_KEY))['values'], {'discovery_concurrency': 10})  # a scanner limit left in the row is not published
 		self.assertEqual(app.calls[0][1], {'max': 10})
 		with mock.patch.object(sc, 'saved_values', side_effect=RuntimeError('db')):
 			self.assertIsNone(sc.reconcile())

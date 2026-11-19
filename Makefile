@@ -9,8 +9,6 @@ SENTINEL_BUILD_ENV = SENTINEL_SHA=$$(./scripts/sentinel-ref.sh)# the newest Sent
 
 COMPOSE_ALL_FILES := -f docker-compose.yml
 SERVICES          := db web proxy redis celery celery-beat reviewer
-# the optional OpenVAS (Greenbone) add-on: docs/OPENVAS.md. Named in full because `--profile openvas stop` would stop the whole stack.
-OPENVAS_SERVICES  := openvas-gvmd openvas-ospd openvas-openvasd openvas-redis openvas-pg-gvm openvas-pg-gvm-migrator openvas-configure openvas-gpg-data openvas-vulnerability-tests openvas-notus-data openvas-scap-data openvas-cert-bund-data openvas-dfn-cert-data openvas-data-objects openvas-report-formats
 
 # Check if 'docker compose' command is available, otherwise use 'docker-compose'
 DOCKER_COMPOSE := $(shell if command -v docker > /dev/null && docker compose version > /dev/null 2>&1; then echo "docker compose"; else echo "docker-compose"; fi)
@@ -18,7 +16,7 @@ $(info Using: $(shell echo "$(DOCKER_COMPOSE)"))
 
 # --------------------------
 
-.PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate down stop restart rm test logs images help inventory-sync openvas-up openvas-down uninstall-updater scanner-build scanner-update scanner-logs
+.PHONY: check-env check-secrets certs up build admin admin-password username changepassword migrate down stop restart rm test logs images help inventory-sync uninstall-updater scanner-build scanner-update scanner-logs
 
 # .env is not tracked. Create it on first use, with the passwords generated and DOMAIN_NAME set to this machine's address.
 check-env:
@@ -41,10 +39,11 @@ up: check-env		## Build and start all services.
 	@# a broker without a password gets one (Redis and its clients are recreated below, as their settings changed)
 	@bash -c '. scripts/redis-password.sh && cvengine_ensure_redis_password "$(CVENGINE_COMPOSE_ENV_FILE)" && echo "The Redis broker had no password: generated one (REDIS_PASSWORD in .env)." || true'
 	${SENTINEL_BUILD_ENV} ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --build ${SERVICES}
-	@# The optional Tailscale sidecar shares the celery container's network namespace: it is orphaned (no tailnet route for scans) once celery is recreated, and naming services above leaves profile services out.
-	@if ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} config --services 2>/dev/null | grep -qx tailscale; then ${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} up -d --no-deps --force-recreate tailscale; fi
-	@# The built-in scanner (docs/BUILTIN-SCANNER.md) shares celery's network namespace too: the newest published image is fetched and it is recreated after celery
-	@# (with CVENGINE_BUILTIN_SCANNER=0 it is taken away instead). Never fails make up: until it runs, the scans that need it wait.
+	@# the old in-stack OpenVAS containers (no longer in docker-compose.yml) are stopped and removed; their volumes are kept
+	@bash -c '. scripts/retire-openvas.sh && cvengine_retire_openvas'
+	@# The built-in scanner (docs/BUILTIN-SCANNER.md), on its own network: the newest published image is fetched and the scanner recreated, and the optional
+	@# Tailscale sidecar, which runs in the scanner's network namespace, is put back into the new one (cvengine_scanner_sidecar; naming services above leaves
+	@# profile services out). With CVENGINE_BUILTIN_SCANNER=0 both are taken away instead. Never fails make up: until it runs, the scans that need it wait.
 	@bash -c '. scripts/scanner.sh && cvengine_scanner_fetch ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} && cvengine_scanner_start --no-wait ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES}'
 
 build: check-env		## Build all services.
@@ -93,13 +92,6 @@ rm:				## Remove all services containers.
 
 test:			## Run the test suite (the stack must be running).
 	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} $(COMPOSE_ALL_FILES) exec celery python3 manage.py test tests
-
-openvas-up: check-env	## Start the old in-stack OpenVAS (Greenbone) containers, which the application no longer uses (a Sentinel runs OpenVAS, docs/OPENVAS.md). Costs about 4 GB of RAM and 60 GB of Docker's disk; only for someone who wants them by hand.
-	@./scripts/openvas-disk-check.sh
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} --profile openvas up -d ${OPENVAS_SERVICES}
-
-openvas-down:	## Stop the OpenVAS add-on (its data volumes are kept).
-	${COMPOSE_PREFIX_CMD} ${DOCKER_COMPOSE} ${COMPOSE_ALL_FILES} --profile openvas stop ${OPENVAS_SERVICES}
 
 uninstall-updater:	## Remove the host's update watcher (the cron line install.sh added); run with sudo if install.sh ran as root (docs/UPDATES.md).
 	bash scripts/uninstall-updater.sh

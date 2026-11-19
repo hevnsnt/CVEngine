@@ -1,9 +1,9 @@
-// The Scan concurrency card of Settings, configMaxxing: how many scanner runs of each kind, how many hosts are assessed at once and how many
-// discovery scans are kept running. Everything from the server is set with textContent or value.
+// The Scan concurrency card of Settings, configMaxxing: how many hosts are assessed at once, how many discovery scans are kept running and
+// how many tasks the worker lanes run. Everything from the server is set with textContent or value.
 import { api, badge, button, details, el, shortDate, toast } from "/staticfiles/cve/ui.js";
 import { API, autoTuneRow, registerCard } from "/staticfiles/cve/config-maxxing.js";
 import {
-  EXPLANATION_TEXT, canReset, changesFrom, checkDraft, discoveryNotice, formatMb, groupFields, memoryPlan, originLines, rangeText, runningText, serverSetting, sourceLabel,
+  EXPLANATION_TEXT, canReset, changesFrom, discoveryNotice, groupFields, originLines, rangeText, runningText, serverSetting, sourceLabel,
 } from "/staticfiles/cve/config-maxxing-logic.js";
 
 const PATH = `${API}/scan_concurrency`;
@@ -52,44 +52,11 @@ async function build(host, ctx = {}) {
   const data = await api("GET", PATH);
   const card = el("div", "card", null, { style: "max-width:720px" });
   card.append(el("h2", "", "Scan concurrency", { style: "margin-bottom:12px" }), el("p", "note", EXPLANATION_TEXT, { style: "margin:0 0 12px" }));
-  const memory = data.memory || {};
-  card.append(
-    el(
-      "p",
-      "note",
-      `Memory budget of the scanning container: ${formatMb(memory.budget_mb)}` +
-        (memory.limit_mb ? ` (container limit ${formatMb(memory.limit_mb)})` : "") +
-        (memory.budget_mb == null ? ". No worker has reported yet." : "."),
-      { style: "margin:0 0 8px" },
-    ),
-    ...(memory.limit_mb ? [details("The container limit is set by the server's administrator with CELERY_MEM_LIMIT.")] : []),
-  );
-  const warnings = el("div", "", null, { role: "status", "aria-live": "polite" });
-  card.append(warnings);
   const inputs = [];
-  const labels = {};
-  const defaults = {};
-  data.fields.forEach((f) => {
-    if (f.group === "heavy") {
-      labels[f.key.slice(6)] = f.label;
-      defaults[f.key.slice(6)] = f.default;
-    }
-  });
   const drafts = () => Object.fromEntries(inputs.map((i) => [i.dataset.key, i.value]));
   const touched = () => new Set(inputs.filter((i) => i.dataset.touched).map((i) => i.dataset.key));
   const refresh = () => {
-    const current = drafts();
-    const caps = {};
-    data.fields
-      .filter((f) => f.group === "heavy")
-      .forEach((f) => {
-        const checked = checkDraft(f, current[f.key]);
-        caps[f.key.slice(6)] = checked.ok ? checked.value : f.value;
-      });
-    const plan = memoryPlan(caps, memory.costs_mb || {}, memory.budget_mb, defaults, labels);
-    warnings.textContent = "";
-    plan.warnings.forEach((w) => warnings.append(el("p", "msg err", w)));
-    const { error, changes } = changesFrom(data.fields, current, touched());
+    const { error, changes } = changesFrom(data.fields, drafts(), touched());
     problem.textContent = error || "";
     problem.hidden = !error; // an empty error bar must not show
     saveButton.disabled = !!error || !Object.keys(changes).length;

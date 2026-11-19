@@ -151,7 +151,9 @@ def update_saved_search(ctx, slug, search_id, body):
         with transaction.atomic():
             for key, value in fields.items():
                 setattr(s, key, value)
-            s.save()
+            # only what the edit changes: an evaluation finishing meanwhile writes matched and last_match_count, and writing back the
+            # values read before it would make the next evaluation alert the same hosts again
+            s.save(update_fields=[*fields, 'updated_at'])
     except IntegrityError:
         raise ApiError(400, 'you already have a saved search with that name')
     return _view(s, project)

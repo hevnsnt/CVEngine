@@ -14,13 +14,14 @@ class QueueTimeLimitTests(SimpleTestCase):
             self.assertLess(hard, 12 * 3600)  # a longer task would be delivered to a second worker while it still runs
 
     def test_scan_queues_get_the_longest_safe_limit_and_light_queues_a_short_one(self):
-        # tasks of the scan queues wait for memory inside heavy_job (up to HEAVY_WAIT_SECONDS) before they run: a short limit would kill them
+        # a stage of the scan queues holds its task while a Sentinel runs the work (hours for OpenVAS or a deep discovery): a short limit would kill it
         longest = 12 * 3600 - time_limits.VISIBILITY_MARGIN
         for queue in ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'udp_queue', 'vhost_queue'):
             self.assertEqual(limits_for(queue, {})[1], longest, queue)
-        for queue in ('api_queue', 'send_notif_queue', 'geo_localize_queue'):
+        for queue in ('api_queue', 'send_notif_queue'):
             self.assertEqual(limits_for(queue, {})[1], 30 * 60, queue)
-        self.assertEqual(limits_for('run_command_queue', {})[1], 3600)
+        for gone in ('run_command_queue', 'geo_localize_queue'):  # the reNgine command runner and its geoiplookup caller are gone
+            self.assertIsNone(limits_for(gone, {}), gone)
 
     def test_openvas_and_unknown_queues_have_no_default_limit(self):
         # a local OpenVAS task has its own budget of 24 hours per host

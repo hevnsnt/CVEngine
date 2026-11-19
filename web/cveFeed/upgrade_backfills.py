@@ -33,6 +33,30 @@ BACKFILLS = (
     'rerate_dangling_dns',                # 1.3.5: dangling-DNS findings rated by what an outsider can claim (read-only DNS and HTTP checks)
     'backfill_secrets_inventory',         # 1.4: the secrets stored token and bbot findings carry, filed in the inventory and masked in place
     'trim_flooded_ports',                 # 1.4: addresses that answer on every port keep the lowest 100 stored ports, as a Sentinel report does (memory)
+    'recheck_template_hits',              # 1.4.2: AI-written checks' confirmations that only read a version string become version reads
+    'backfill_java_runtimes',             # the Java runtime existing hosts give away without a request, and their runtime CVE matches
+    'backfill_version_sources',           # the versions, runtimes, SNMP releases and bundled components existing hosts already state, and their matches
+    'backfill_exact_builds',              # Cisco's exact builds (cut at 30 or dropped) and Oracle's supported versions read per line (re-correlated)
+    'backfill_bare_versions',             # blocks cve.now passed on as bare versions (Linux kernel, VulDB, ...) take their record's ranges (re-correlated)
+    'backfill_name_aliases',              # hosts whose technology names the alias data and name rules now connect differently (re-correlated)
+    'backfill_distro_readings',           # stored banners read again for the distribution package build and release, and those hosts re-correlated
+    'backfill_source_versions',           # the exact versions and CPEs stored ports, runZero, Shodan InternetDB and database replies state (re-correlated)
+    'backfill_name_versions',             # Server-header tokens stored as names ("nginx/1.28.3") split into product and version (re-correlated)
+    'backfill_protocol_versions',         # a connector's version read as the product's (Tomcat's "Coyote JSP engine 1.1") closes (re-correlated)
+    'backfill_recog_readings',            # the products, versions and CPEs Rapid7 Recog reads in the banners hosts already store (re-correlated)
+    'backfill_identities',                # service fingerprints decoded; network OS, appliance certificate, Recog and SSH identities read (re-correlated)
+    'backfill_windows_builds',            # the Windows release stored NTLM and SMB script output states, and its KEV/critical candidates (re-correlated)
+    'backfill_panel_versions',            # the version a stored panel template finding extracted, read as a version reading of its host (re-correlated)
+    'backfill_template_identities',       # technology template CPEs onto host technology links, panel hits without a version as identities (re-correlated)
+    'recover_feed_gap',                   # the cve.now window a walk declared covered after the feed renamed its cursor: read again and matched
+    'retype_distro_ranges',               # ranges bounded by distribution package builds (0:8.7p1-38.el9_4.4) are no longer read as upstream releases
+    'repair_open_ranges',                 # open ranges made from an upper bound the CVE List record writes as text (issue 696), re-correlated
+    'neutralise_screenshots',             # stored discovery screenshots named by a Sentinel (x.html, x.svg): renamed to a picture name or removed
+    'backfill_shodan_cpes',               # every Shodan InternetDB CPE a reported reading ("vendor product"), CPE technologies removed (re-correlated)
+    'backfill_technology_names',          # technology rows folded onto one spelling, MariaDB's "5.5.5-" prefix off port versions (re-correlated)
+    'recheck_openvas_generic_checks',     # OpenVAS matches a behaviour check (TRACE enabled) confirmed on a CVE whose record names no vendor or product
+    'backfill_version_scripts',           # vmware-version's ESXi build and the other version script output stored ports keep, runZero hw hints (re-correlated)
+    'revalidate_ai_drafts',               # AI-written checks closed only because no scanner could check them go back to validation; reasons named
     'rerate_findings',                    # 1.3.5: rescore hosts for the new heat rules, clear stale fire marks (last: counts everything above)
 )
 MAX_ATTEMPTS = 3

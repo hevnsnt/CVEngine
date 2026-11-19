@@ -153,6 +153,71 @@ class ScannerListingTests(ScannerScriptBase):
         self.assertEqual(self.run_fn('cvengine_scanner_enabled').returncode, 1)
 
 
+class TailscaleSidecarTests(ScannerScriptBase):
+    """The Tailscale sidecar runs in the scanner's network namespace (network_mode: service:scanner): every scanner (re)creation puts it back into the new
+    namespace, an install whose sidecar still sits in celery's (the release before) is moved with no manual step, and with the scanner off it is removed."""
+
+    def sidecar(self):
+        return self.reload().get('sidecar')
+
+    def test_the_sidecar_follows_the_scanner_into_its_new_namespace(self):
+        self.state['tailscale_profile'] = True
+        self.state['sidecar'] = {'id': 'sidecarid', 'mode': 'container:scannerid', 'running': True}
+        self.running_old()
+        result = self.run_fn('cvengine_scanner_update')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.running_image(), NEW)
+        self.assertEqual(self.sidecar()['mode'], 'container:' + self.reload()['container']['id'])
+        ups = [c for c in self.calls() if ' up -d ' in c]
+        self.assertTrue(ups[0].endswith(' scanner') and ups[1].endswith(' tailscale'), ups)  # the scanner first, then the sidecar into it
+
+    def test_an_upgrade_moves_a_sidecar_that_is_still_in_celerys_namespace(self):
+        self.state['tailscale_profile'] = True
+        self.state['sidecar'] = {'id': 'sidecarid', 'mode': 'container:celeryid', 'running': True}
+        self.running_old()
+        self.state['images'][MOVING] = OLD
+        self.state['registry'][MOVING] = OLD  # nothing new to pull: the scanner itself is not recreated
+        self.save()
+        result = self.run_fn('cvengine_scanner_update')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.sidecar()['mode'], 'container:scannerid')
+        self.assertEqual(self.reload()['sidecar_ups'], 1)
+
+    def test_a_sidecar_already_in_the_scanners_namespace_is_left_alone(self):
+        self.state['tailscale_profile'] = True
+        self.running_old()
+        self.state['sidecar'] = {'id': 'sidecarid', 'mode': 'container:scannerid', 'running': True}
+        self.save()
+        self.assertEqual(self.run_fn('cvengine_scanner_sidecar').returncode, 0)
+        self.assertNotIn('sidecar_ups', self.reload())
+
+    def test_without_the_profile_nothing_is_done(self):
+        self.running_old()
+        self.assertEqual(self.run_fn('cvengine_scanner_update').returncode, 0)
+        self.assertFalse([c for c in self.calls() if 'tailscale' in c])
+
+    def test_with_the_scanner_turned_off_the_sidecar_is_removed(self):
+        self.state['tailscale_profile'] = True
+        self.state['sidecar'] = {'id': 'sidecarid', 'mode': 'container:scannerid', 'running': True}
+        self.running_old()
+        (self.work / '.env').write_text('POSTGRES_DB=x\nCVENGINE_BUILTIN_SCANNER=0\n')
+        result = self.run_fn('cvengine_scanner_fetch')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNone(self.sidecar())
+        self.assertIsNone(self.reload()['container'])
+        self.assertIn('turned off', result.stderr)
+
+    def test_a_rollback_puts_the_sidecar_into_the_restored_scanner(self):
+        self.state['tailscale_profile'] = True
+        self.state['sidecar'] = {'id': 'sidecarid', 'mode': 'container:scannerid', 'running': True}
+        self.state['healthy'][NEW] = False
+        self.running_old()
+        result = self.run_fn('cvengine_scanner_update')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.running_image(), OLD)
+        self.assertEqual(self.sidecar()['mode'], 'container:' + self.reload()['container']['id'])
+
+
 class ScannerUpdateTests(ScannerScriptBase):
     def test_a_newer_image_is_pulled_started_and_kept_when_it_is_healthy_and_checked_in(self):
         self.running_old()
@@ -546,14 +611,14 @@ class ComposeRenderingTests(unittest.TestCase):
 
 
 class UpdatePathTests(unittest.TestCase):
-    """Every path that recreates celery also fetches the scanner's image first and starts the scanner after (it shares celery's network namespace)."""
+    """Every path that recreates the server also fetches the scanner's image first and starts the scanner once the server answers."""
 
     def text(self, name):
         return (ROOT / name).read_text()
 
     def test_each_update_path_fetches_before_and_starts_after(self):
         for name, after in (('scripts/update.sh', 'worker_queues_ready && beat_ready'), ('scripts/update-deploy.sh', 'verify_serving || return 1'),
-                            ('scripts/apply-update.sh', 'verify_running "${services[@]}" || return 1'), ('Makefile', '--force-recreate tailscale')):
+                            ('scripts/apply-update.sh', 'verify_running "${services[@]}" || return 1'), ('Makefile', 'up -d --build ${SERVICES}')):
             with self.subTest(name=name):
                 text = self.text(name)
                 self.assertIn('cvengine_scanner_fetch', text)

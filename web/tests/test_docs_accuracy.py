@@ -9,7 +9,7 @@ from django.test import SimpleTestCase
 
 ROOT = Path(__file__).resolve().parents[2]
 WEB = ROOT / 'web'
-NUMBER_WORDS = {10: 'ten', 11: 'eleven', 12: 'twelve', 15: 'fifteen', 29: 'twenty-nine', 30: 'thirty', 35: 'thirty-five', 36: 'thirty-six', 37: 'thirty-seven'}
+NUMBER_WORDS = {10: 'ten', 11: 'eleven', 12: 'twelve', 15: 'fifteen', 29: 'twenty-nine', 30: 'thirty', 35: 'thirty-five', 36: 'thirty-six', 37: 'thirty-seven', 38: 'thirty-eight', 39: 'thirty-nine', 40: 'forty'}
 
 # read by a script or a test hook of its own, not an operator setting
 # design records written before 1.4 landed: they say what the plan was, not what runs
@@ -52,12 +52,12 @@ class KindListTests(SimpleTestCase):
         # no document gives another count of the kinds
         for name in glob.glob(str(ROOT / 'docs' / '*.md')) + [str(ROOT / 'README.md')]:
             text = Path(name).read_text(encoding='utf-8')
-            for stated in re.findall(r'\b(?:(?:[Tt]wenty|[Tt]hirty|[Ff]ifteen|[Ee]leven)(?:-\w+)?|\d\d) (?:`SentinelTask` |task |scan-stage )?kinds\b', text):
+            for stated in re.findall(r'\b(?:(?:[Tt]wenty|[Tt]hirty|[Ff]orty|[Ff]ifteen|[Ee]leven)(?:-\w+)?|\d\d) (?:`SentinelTask` |task |scan-stage )?kinds\b', text):
                 self.assertIn(stated.split(' ')[0].lower(), (word, str(len(kinds)), 'ten', 'twenty-five', '25', '10'), f'{name} says "{stated}"')
 
     def test_every_kind_is_dispatched_or_sentinel_only(self):
         from agentapi import sentinel_dispatch
-        self.assertEqual(sorted(set(contract_kinds()) - set(sentinel_dispatch.NEVER_LOCAL)), ['discover'])
+        self.assertEqual(sorted(set(contract_kinds()) - set(sentinel_dispatch.NEVER_LOCAL)), [])  # discover included: an external Sentinel's by design
 
 
 class EnvironmentVariableTests(SimpleTestCase):

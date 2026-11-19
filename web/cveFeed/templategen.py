@@ -29,10 +29,12 @@ from reNgine.ai_providers import UNTRUSTED_NOTICE, clean_text
 
 logger = logging.getLogger(__name__)
 
-TEMPLATES_ROOT = os.environ.get("NUCLEI_TEMPLATES_DIR", "/root/nuclei-templates")
-# Deliberately NOT under TEMPLATES_ROOT: the blanket `nuclei -l` pass loads everything in the default template
-# directory, which would run an AI-written template against every tenant's hosts. These run only via explicit -t.
+# The validated AI-written templates, kept here (and in the database) because this server wrote and approved them. The community templates are not:
+# the server keeps no copy of them. An installed template is named by a reference into the pinned release the Sentinels run, ``INSTALLED_PREFIX`` and its
+# path in the release (``nuclei-templates:http/cves/2021/CVE-2021-44228.yaml``), and what this server knows about it comes from the scanner library's
+# template index (``cvengine_scanner.template_index``).
 GENERATED_DIR = os.environ.get("CVENGINE_GENERATED_TEMPLATES_DIR", "/root/cvengine-generated-templates")
+INSTALLED_PREFIX = "nuclei-templates:"
 MAX_TEMPLATE_BYTES = 20000
 RUN_TIMEOUT = 180
 CHUNK_HOSTS = 100  # hosts per template check
@@ -610,17 +612,164 @@ def _template_evidence(text):
     return VERSION_EVIDENCE
 
 
-def evidence_of_template(path):
-    """``template_evidence`` of the approved template at ``path`` (BEHAVIOR_EVIDENCE when it cannot be read: never a downgrade)."""
+def approved_text(path):
+    """The text of the approved template at ``path`` (``validation.approved_template``), or '' when it cannot be read or is not approved."""
     try:
         from cveFeed.validation import approved_template
         text, problem = approved_template(path)
     except Exception:  # noqa: BLE001
-        return BEHAVIOR_EVIDENCE
+        return ''
+    return '' if problem else (text or '')
+
+
+# ----------------------------------------------------------------------------- what one hit showed: the counterfactual
+
+# ``template_evidence`` reads the template alone and is an allowlist, so a version check written in a shape it does not list (a product word
+# its name does not carry, ``Server: Apache``, two request blocks) is read as behaviour: an AI-written check that only read
+# ``Server: Apache/2.4.37`` from the site root was recorded as a confirmed hit (CVE-2024-38475 and CVE-2023-25690 on a RHEL httpd).
+# ``hit_evidence`` asks the hit itself. The offline evaluator (``templatefixture.matches``) must agree with the scanner on the response the hit
+# recorded, and the same response with every version number replaced by one no range covers must NOT match: the version decided the hit, so
+# the hit is the version read again. And what surrounds the version numbers must be enough on its own, so a hit that also needed a marker
+# elsewhere in the response (a file's magic, an error text) stays behaviour.
+# A version number: two or three dotted parts with an optional letter (2.4.37, 1.1.1k), never part of a longer dotted run (10.0.0.1).
+_HIT_VERSION = re.compile(r"(?<![\d.])\d{1,6}(?:\.\d{1,6}){1,2}[a-z]?(?!\.?\d)")
+_NEUTRAL_VERSION = "0.0"  # inside no affected range
+# the stored copies of a hit's response are clipped (the Sentinel's hit at 8000 characters, a finding's at 8 KiB, a validation step's at
+# 4 KiB): a response this long may have lost its tail, where a matcher may have matched in a way the kept part does not show
+_HIT_CLIP_FLOOR = 4000
+_HEADER_NAME = re.compile(r"^[A-Za-z0-9-]{1,60}$")
+_HEADER_END = re.compile(r"\r?\n\r?\n")
+_HIT_STATUS_LINE = re.compile(r"^HTTP/\d(?:\.\d)?\s+(\d{3})(?:\s|$)")
+_CONTEXT_WORDS = 3  # words kept before a version number in the cut-down body ("<title>Apache Tomcat/9.0.1")
+
+
+def _parse_hit_response(text, network):
+    """``(fixture, headers_complete)`` of a hit's raw response: ``{status, headers, body}`` as ``templatefixture`` reads it (a network banner
+    is a body). Raises ValueError for anything that is not a plain HTTP response."""
+    text = str(text)
+    if network:
+        return {"status": 200, "headers": {}, "body": text}, True
+    parts = _HEADER_END.split(text, 1)
+    lines = re.split(r"\r?\n", parts[0])
+    status = _HIT_STATUS_LINE.match(lines[0].strip())
+    if not status:
+        raise ValueError("not an HTTP response")
+    headers = {}
+    for line in lines[1:]:
+        name, colon, value = line.partition(":")
+        if not colon or not _HEADER_NAME.match(name.strip()):
+            raise ValueError("not an HTTP header line")
+        key = next((k for k in headers if k.lower() == name.strip().lower()), name.strip())
+        headers[key] = f"{headers[key]}, {value.strip()}" if key in headers else value.strip()
+    return {"status": int(status.group(1)), "headers": headers, "body": parts[1] if len(parts) > 1 else ""}, len(parts) > 1
+
+
+def _neutralised(fixture):
+    """The same response with every version number replaced by one no range covers."""
+    def swap(value):
+        return _HIT_VERSION.sub(_NEUTRAL_VERSION, value)
+    return {"status": fixture["status"], "headers": {k: swap(v) for k, v in fixture["headers"].items()}, "body": swap(fixture["body"])}
+
+
+def _around_versions(fixture):
+    """Only what surrounds the version numbers: the headers that carry one (and the Content-Type), and in the body each word holding a
+    version with the few words before it. The status stays."""
+    headers = {k: v for k, v in fixture["headers"].items() if _HIT_VERSION.search(v) or k.lower() == "content-type"}
+    words = fixture["body"].split()
+    kept = [" ".join(words[max(0, index - _CONTEXT_WORDS):index + 1]) for index, word in enumerate(words) if _HIT_VERSION.search(word)]
+    return {"status": fixture["status"], "headers": headers, "body": "\n".join(kept)}
+
+
+def _request_blocks(doc):
+    """``[(proto, block)]`` of a template, or None when it holds anything but plain http and network blocks."""
+    if not isinstance(doc, dict) or set(map(str, doc)) - _TEMPLATE_KEYS or doc.get("self-contained"):
+        return None
+    blocks = []
+    for proto in ("http", "requests", "network", "tcp"):
+        found = doc.get(proto) or []
+        if not isinstance(found, list) or not all(isinstance(b, dict) for b in found):
+            return None
+        blocks += [(proto, block) for block in found]
+    return blocks or None
+
+
+def _live_matchers(block):
+    return [m for m in (block.get("matchers") or []) if isinstance(m, dict) and not m.get("internal")]
+
+
+def _version_decided_hit(text, outcome):
+    """Whether (a) to (e) of ``hit_evidence`` hold. Raises on anything it cannot read (the caller reads that as behaviour)."""
+    from cveFeed import templatefixture
+    hit = outcome.get("hit") if isinstance(outcome, dict) else None
+    response = hit.get("response") if isinstance(hit, dict) else None
+    if not isinstance(response, str) or not response.strip():
+        return False
+    blocks = _request_blocks(load_template(text))
+    # (a) every request only reads: nothing the answer could owe to a payload, no page that is itself an exposure
+    if not blocks or not all(_plain_requests(proto, block) for proto, block in blocks):
+        return False
+    network = [proto in ("network", "tcp") for proto, _block in blocks]
+    if any(network) and not all(network):
+        return False  # a banner and a page in one check: one response cannot stand for both
+    network = all(network)
+    matchers = [m for _proto, block in blocks for m in _live_matchers(block)]
+    if not matchers:
+        return False
+    # (b) the hit's response, as the offline evaluator reads one
+    fixture, headers_complete = _parse_hit_response(response, network)
+    clipped = len(response) >= _HIT_CLIP_FLOOR
+    if clipped and (network or not headers_complete):
+        return False  # a stored copy cut inside the headers, or a banner cut short
+    # (c) the offline evaluator agrees with the scanner on the real response
+    if not templatefixture.matches(text, fixture):
+        return False
+    # several requests, or a stored copy that may have lost its tail: the response read here may not be all the scanner matched on (another
+    # request's answer, the lost tail). Every matcher must hold on what is here, so no other route to the match is left unseen
+    requests = sum(len(block.get("path") or []) + len(block.get("raw") or []) if proto in ("http", "requests") else 1 for proto, block in blocks)
+    if requests > 1 or clipped:
+        parts = templatefixture._parts(fixture)
+        if not all(templatefixture._one(m, fixture, parts) for m in matchers):
+            return False
+    # (d) without its version numbers the response no longer matches: the version decided the hit
+    if templatefixture.matches(text, _neutralised(fixture)):
+        return False
+    # (e) what surrounds the version numbers is enough on its own: the hit needed no marker anywhere else in the response
+    return bool(templatefixture.matches(text, _around_versions(fixture)))
+
+
+def hit_evidence(template_text, outcome, static=None):
+    """VERSION_EVIDENCE when this hit (``outcome['hit']``, the matched result line) of the template ``template_text`` shows only a version
+    string, else BEHAVIOR_EVIDENCE. Pure. ``static`` is ``template_evidence(template_text)`` when the caller has it.
+
+    VERSION_EVIDENCE when the static classifier says so, or when all of these hold on the hit:
+
+      (a) every request block only reads (``_plain_requests``: GET or HEAD of a static path that is not itself an exposure, no header but
+          Host, no body; or a network banner read with nothing sent);
+      (b) the hit's raw response parses into ``{status, headers, body}`` (a network banner is a body);
+      (c) the offline evaluator (``templatefixture.matches``) matches it: it agrees with the scanner;
+      (d) it does NOT match the same response with every version number (2 or 3 dotted parts and an optional letter: ``2.4.37``, ``1.1.1k``;
+          never part of an address such as ``10.0.0.1``) replaced by ``0.0``, which no range covers;
+      (e) it still matches the response cut down to what surrounds the version numbers (the headers that carry one, the Content-Type, a few
+          words before each version in the body), so it needed no marker anywhere else.
+
+    A template of several requests, or a response long enough to have been clipped in storage, must also hold on the recorded response with
+    every matcher (another request, or the lost tail, may have matched in a way this response does not show), and a clipped copy must keep
+    the headers whole. Anything the evaluator cannot decide (a dsl, xpath or json matcher: ``templatefixture.Unsupported``), a response that
+    does not parse, a missing hit, or any error is BEHAVIOR_EVIDENCE: a genuine hit is never downgraded on doubt."""
     try:
-        return BEHAVIOR_EVIDENCE if problem else template_evidence(text)
-    except Exception:  # noqa: BLE001 - never downgrade on a template this cannot read
+        static = template_evidence(template_text) if static is None else static
+        if static == VERSION_EVIDENCE:
+            return VERSION_EVIDENCE
+        return VERSION_EVIDENCE if template_text and _version_decided_hit(template_text, outcome) else BEHAVIOR_EVIDENCE
+    except Exception:  # noqa: BLE001 - Unsupported, a parse failure, a field of an unexpected shape: never downgrade
         return BEHAVIOR_EVIDENCE
+
+
+def outcome_evidence(template_text, outcome, static):
+    """What one test outcome of a template shows: ``static`` (its ``template_evidence``) for a miss or an error, ``hit_evidence`` for a hit."""
+    if static == VERSION_EVIDENCE or not template_text or not outcome.get("vulnerable") or outcome.get("error"):
+        return static
+    return hit_evidence(template_text, outcome, static)
 
 
 def is_confirmed(outcome):
@@ -656,21 +805,54 @@ def _template_index(roots):
     if cached and cached[0] == signature:
         return cached[1]
     index = {}
+    generated = os.path.realpath(GENERATED_DIR)
     for root in key:
+        revisions = os.path.realpath(root) == generated  # only an AI-written check's revision is named <cve id>-r<n> (``revision_base``)
         for dirpath, _dirs, files in os.walk(root):
             for name in files:
                 stem, dot, ext = name.rpartition(".")
                 if dot and ext.lower().startswith("y") and ext.lower().endswith("ml"):
-                    index.setdefault(stem.lower(), []).append(os.path.join(dirpath, name))
+                    path = os.path.join(dirpath, name)
+                    index.setdefault(stem.lower(), []).append(path)
+                    base = revision_base(stem) if revisions else ""
+                    if base:
+                        index.setdefault(base, []).append(path)
     _TEMPLATE_INDEX[key] = (signature, index)
     return index
 
 
+# A revision of an AI-written check (cveFeed.template_review) is a new row with a new id, never the old file rewritten: one template id always
+# means one text (the same-check replacement of ``record_outcomes`` and ``recheck_template_hits`` rely on it). Its id and file name are the
+# CVE id and "-r<n>" (cve-2024-38475-r2), so the template index still finds it for its CVE.
+_REVISION_ID = re.compile(r"^(cve-\d{4}-\d{4,})-r(\d{1,4})$")
+
+
+def revision_base(template_id):
+    """The lowercase CVE id a revision's id or file stem (``cve-2024-38475-r2``) names, or '' for anything else."""
+    found = _REVISION_ID.match(str(template_id or "").lower())
+    return found.group(1) if found else ""
+
+
+def revision_id(cve_id, number):
+    """The id of revision ``number`` of a CVE's check: ``cve-2024-38475-r2``."""
+    return f"{str(cve_id).lower()}-r{int(number)}"
+
+
+def installed_relative(path):
+    """The path in the pinned release of an installed template reference (``INSTALLED_PREFIX`` + path), or ``None`` for anything else."""
+    path = str(path or '')
+    return path[len(INSTALLED_PREFIX):] if path.startswith(INSTALLED_PREFIX) else None
+
+
 def find_existing_template(cve_id, roots=None):
-    """Template coverage: paths of installed templates named for ``cve_id``."""
-    roots = roots or [TEMPLATES_ROOT, GENERATED_DIR]
+    """Template coverage for ``cve_id``: the paths of the validated AI-written templates named for it (under ``GENERATED_DIR``, or ``roots``), then the
+    references (``INSTALLED_PREFIX`` + path) of the templates of the pinned release named for it, from the scanner library's template index. This server
+    holds no copy of the release: a Sentinel reads the file from its own image."""
+    from cvengine_scanner import template_index
+    roots = roots or [GENERATED_DIR]
     # case-insensitive: upstream names files CVE-..., generated ones use the lowercase id
-    return sorted(_template_index(roots).get(cve_id.lower(), []))
+    generated = sorted(_template_index(roots).get(cve_id.lower(), []))
+    return generated + [INSTALLED_PREFIX + path for path, _entry in template_index.for_cve(cve_id)]
 
 
 def validate_anywhere(text, project=None):
@@ -695,35 +877,68 @@ def _host_key(value):
 
 
 def run_template(path, hosts, project=None):
-    """Run one approved template against ``hosts`` on the built-in scanner (a ``nuclei_validate`` task in mode ``test``, filed under ``project``,
-    the one the hosts belong to: never another tenant's); returns a ``{host, vulnerable, output}`` per host, in order. The scanner runs exactly the
-    bytes ``approved_template`` inspected. Nothing runs on this server: a host no scanner took, or a call with no project, is reported as not
-    tested (an error outcome) and stays due.
-
-    One more look at the names first: a name a tenant controls can answer a public address when the host list is vetted and an internal one later,
-    so the names are resolved again here, at launch, and one that now resolves to a blocked address is reported as not tested instead of being
-    sent to a scanner. (The scanner resolves the name itself a moment later: this narrows the window, it does not close it.)"""
-    from targetApp.target_types import IP, bare_host, blocked_names, classify_target
+    """Run one approved template against ``hosts`` on a scanner (a ``nuclei_validate`` task in mode ``test``, filed under ``project``, the one the hosts
+    belong to: never another tenant's); returns a ``{host, vulnerable, output, template_evidence}`` per host, in order. The scanner runs exactly the
+    bytes that were approved: an AI-written template's text (``approved_template``), or an installed one named by its path and sha256 in the pinned
+    release, which the Sentinel reads from its own image. Nothing runs on this server and no host name is looked up here: the Sentinel judges every
+    address a name resolves to and reports a host it refuses as not tested. A host no scanner took, or a call with no project, is reported as not
+    tested (an error outcome) and stays due."""
     hosts = [hosts] if isinstance(hosts, str) else list(hosts)
-    names = {bare_host(h) for h in hosts}
-    blocked = blocked_names([n for n in names if n and classify_target(n) != IP]) if hosts else set()
-    allowed = [h for h in hosts if bare_host(h) not in blocked]
-    ran = iter(_run_on_scanner(path, allowed, project) if allowed else [])
-    return [{"host": h, "vulnerable": False, "output": "", "error": "the host name now resolves to an address that may not be scanned"}
-            if bare_host(h) in blocked else next(ran) for h in hosts]
+    return _run_on_scanner(path, hosts, project) if hosts else []
+
+
+def _not_tested(hosts, why):
+    return [{"host": host, "vulnerable": False, "output": "", "error": why} for host in hosts]
 
 
 def _run_on_scanner(path, hosts, project):
-    """The outcomes of the template at ``path`` over ``hosts``, from the built-in scanner (``sentinel_dispatch.try_template_test``), one per host."""
+    """The outcomes of the template at ``path`` over ``hosts``, from a scanner (``sentinel_dispatch.try_template_test``, or
+    ``try_installed_template_test`` for an installed template), one per host, each with what it shows (``template_evidence``: ``outcome_evidence`` of
+    the text that ran; an installed template's text comes back with the Sentinel's result)."""
     if project is None:
-        return [{"host": host, "vulnerable": False, "output": "", "error": "not tested: a template check needs the project the host belongs to"}
-                for host in hosts]
-    from cveFeed.validation import approved_template
-    text, problem = approved_template(path)
-    if problem:
-        return [{"host": host, "vulnerable": False, "output": "", "error": problem} for host in hosts]
+        return _not_tested(hosts, "not tested: a template check needs the project the host belongs to")
+    from cveFeed.validation import approved_template, installed_approval
     from agentapi import sentinel_dispatch
-    return sentinel_dispatch.try_template_test(text, hosts, project)
+    relative = installed_relative(path)
+    if relative is not None:
+        entry, problem = installed_approval(relative)
+        if problem:
+            return _not_tested(hosts, problem)
+        outcomes, text = sentinel_dispatch.try_installed_template_test(relative, entry["sha256"], hosts, project)
+        if not text:  # a hit cannot be read without the text that ran (a version check is not a confirmation): not tested, it stays due
+            outcomes = [{"host": o.get("host"), "vulnerable": False, "output": "",
+                         "error": "not tested: the scanner did not send back the template it ran, so its hit cannot be read"}
+                        if o.get("vulnerable") and not o.get("error") else o for o in outcomes]
+    else:
+        text, problem = approved_template(path)
+        if problem:
+            return _not_tested(hosts, problem)
+        outcomes = sentinel_dispatch.try_template_test(text, hosts, project)
+    try:
+        static = template_evidence(text) if text else BEHAVIOR_EVIDENCE
+    except Exception:  # noqa: BLE001 - never downgrade on a template this cannot read
+        static = BEHAVIOR_EVIDENCE
+    for outcome in outcomes:
+        outcome["template_evidence"] = outcome_evidence(text, outcome, static) if text else BEHAVIOR_EVIDENCE
+        outcome["template_static"] = static
+    return outcomes
+
+
+def with_evidence(path, outcomes):
+    """``outcomes`` with ``template_evidence`` on each that has none yet (``_run_on_scanner`` sets it from the text that ran): read from the approved text
+    at ``path``, an AI-written template's. An installed template's text is not on this server, so it is behaviour: never a downgrade."""
+    if all('template_evidence' in o for o in outcomes):
+        return outcomes
+    text = approved_text(path)
+    try:
+        static = template_evidence(text) if text else BEHAVIOR_EVIDENCE
+    except Exception:  # noqa: BLE001 - never downgrade on a template this cannot read
+        static = BEHAVIOR_EVIDENCE
+    for outcome in outcomes:
+        if 'template_evidence' not in outcome:
+            outcome['template_evidence'] = outcome_evidence(text, outcome, static) if text else BEHAVIOR_EVIDENCE
+            outcome.setdefault('template_static', static)
+    return outcomes
 
 
 def _test_chunk(path, hosts, project=None):
@@ -732,29 +947,7 @@ def _test_chunk(path, hosts, project=None):
     return run_template(path, hosts, project=project)
 
 
-def templates_dir_problem(generated=None, root=None):
-    """Why the generated-templates directory and nuclei's template root must not be set as they are, or "" when they are apart.
-    AI-written templates are run only by explicit ``-t``; the blanket ``nuclei -l`` pass loads everything under the template root,
-    so a generated directory inside it would run unproven templates against every tenant's hosts, and a root inside the generated
-    directory would put nuclei's own templates in the directory a factory reset empties."""
-    generated = os.path.realpath(generated or GENERATED_DIR)
-    root = os.path.realpath(root or TEMPLATES_ROOT)
-
-    def inside(child, parent):
-        return child == parent or child.startswith(parent.rstrip(os.sep) + os.sep)
-    if inside(generated, root):
-        return (f"CVENGINE_GENERATED_TEMPLATES_DIR ({generated}) is inside the nuclei templates directory ({root}): the blanket nuclei "
-                "pass would run AI-written templates against every host. Set it to a directory outside it.")
-    if inside(root, generated):
-        return (f"NUCLEI_TEMPLATES_DIR ({root}) is inside CVENGINE_GENERATED_TEMPLATES_DIR ({generated}): a factory reset empties "
-                "that directory. Keep the two apart.")
-    return ""
-
-
 def save_template_file(template_id, yaml_text):
-    problem = templates_dir_problem()
-    if problem:
-        raise RuntimeError(problem)
     if not ID_RE.fullmatch(template_id):
         raise ValueError('invalid generated template filename')
     os.makedirs(GENERATED_DIR, exist_ok=True)
@@ -845,7 +1038,11 @@ def _generation_lease(cve):
         raise TemplateBudgetExceeded(f'an AI check for {cve.cve_id} was already attempted on {last.created_at:%Y-%m-%d} ({last.status})')
     from cveFeed.models import AIJob
     asked = AIJob.objects.filter(kind='template_generation', created_at__gte=now - datetime.timedelta(days=1), status__in=AIJob.OPEN).count()
-    if GeneratedTemplate.objects.filter(created_at__gte=now - datetime.timedelta(days=1)).count() + asked >= generation_limit('TEMPLATE_GEN_MAX_PER_DAY'):
+    # a person's or agent's revision (``supersedes`` set) asked the AI to write nothing: it is not part of the generation budget
+    written = GeneratedTemplate.objects.filter(created_at__gte=now - datetime.timedelta(days=1), supersedes__isnull=True).count()
+    # a draft sent back once to fix what the safety gate refused (``job_answer``) was a second paid request
+    repairs = AIJob.objects.filter(kind='template_generation', created_at__gte=now - datetime.timedelta(days=1), attempt__gt=1).count()
+    if written + asked + repairs >= generation_limit('TEMPLATE_GEN_MAX_PER_DAY'):
         raise TemplateBudgetExceeded('the daily AI template budget is spent')
     if AIJob.objects.filter(kind='template_generation', dedupe=f'template:{cve.pk}', status__in=AIJob.OPEN).exists():
         raise TemplateBudgetExceeded(f'an AI check for {cve.cve_id} is already being written')
@@ -885,22 +1082,82 @@ def _job_model(job):
     return f'{job.provider}:{job.model}' if job.provider else (job.model or 'unknown')
 
 
+# A tool's own warning printed before anything else (nuclei, on newer Go releases: "WARNING: sonic/ast only supports (go1.17~1.26 ...) ... will
+# fallback to encoding/json"): never the reason a template was refused. ``plain_reason`` drops it, as ``sentinel_broker.explain_error`` does.
+_WARNING_LINE = re.compile(r"^\s*(?:\[wrn\]|\[warn(?:ing)?\]|warn(?:ing)?\b)", re.I)
+_WARNING_TAIL = re.compile(r":\s*(?:\[wrn\]|warning\b).*$", re.I | re.S)
+
+
+def plain_reason(output, fallback="", limit=400, first_line=False):
+    """The words of a check's output that say why, on one line: the tool's own warning lines (``_WARNING_LINE``) are left out, and a one-line
+    message that holds the warning after a colon is cut there. ``first_line``: only the first line left. ``fallback`` when nothing is left."""
+    lines = [line.strip() for line in str(output or "").splitlines() if line.strip()]
+    kept = [line for line in lines if not _WARNING_LINE.match(line)][:1 if first_line else None]
+    text = _WARNING_TAIL.sub("", " ".join(kept)).strip()
+    return " ".join((text or fallback).split())[:limit]
+
+
+def holds_warning(text):
+    """Whether ``text`` is, or holds after a colon, a tool's own warning (what ``plain_reason`` leaves out)."""
+    return bool(_WARNING_LINE.match(str(text or "")) or _WARNING_TAIL.search(str(text or "")))
+
+
+def _repair_room():
+    """Whether today's template budget has room for one more request: a draft rejected by the deterministic gate is sent back to the AI once
+    (``job_answer``), and that second request counts against ``TEMPLATE_GEN_MAX_PER_DAY`` (``_generation_lease`` counts it). The job being
+    answered is still open, so it is counted among the asked ones."""
+    from cveFeed.models import AIJob, GeneratedTemplate
+    now = timezone.now()
+    day = now - datetime.timedelta(days=1)
+    asked = AIJob.objects.filter(kind='template_generation', created_at__gte=day, status__in=AIJob.OPEN).count()
+    repairs = AIJob.objects.filter(kind='template_generation', created_at__gte=day, attempt__gt=1).count()
+    written = GeneratedTemplate.objects.filter(created_at__gte=day, supersedes__isnull=True).count()
+    return written + asked + repairs < generation_limit('TEMPLATE_GEN_MAX_PER_DAY')
+
+
+def gate_problem(text, cve_id):
+    """Why a draft fails the deterministic gate, or '': the static check, then the allowlist a Sentinel applies to every check it runs
+    (``cveFeed.check_allowlist``, the same rules). Both are pure, so the same text always fails them the same way."""
+    ok, reason = static_check(text, expected_cve_id=cve_id)
+    if not ok:
+        return f"static check: {reason}"
+    return check_allowlist.allowlist_problem(text)
+
+
+def repair_parts(parts, reply, reason):
+    """The original question again with why the draft was refused and the draft itself (both fenced: the reason can quote the draft, which was
+    written from the CVE feed's text), for the one repair request."""
+    return [*parts,
+            {"text": "\nYour previous template was REJECTED by the safety gate, for the reason in the REJECTION block. Write the template again, "
+                     "fixing that, and keep every rule above. Output ONLY one YAML document, no prose."},
+            {"fence": "REJECTION", "data": {"reason": str(reason)[:600], "rejected_template": str(reply)[:MAX_TEMPLATE_BYTES]}}]
+
+
 def job_answer(job, text):
     """The model's template arrived: gated as before (static check, then the syntax check and the benign fixture on a scanner:
-    nothing unvalidated ever exists under GENERATED_DIR) and saved as a draft or as invalid."""
+    nothing unvalidated ever exists under GENERATED_DIR) and saved as a draft or as invalid. A draft the deterministic gate refuses is sent
+    back to the AI once with the reason (``repair_parts``), when the day's budget has room for that request; the second answer is the one
+    that counts. A draft no scanner could check now waits in the ``syntax`` stage for ``cveFeed.templatevalidate`` to check it again: the
+    paid answer is not thrown away and the CVE is not blocked for a week by a check that never ran."""
     from cveFeed.models import CVEEntry, GeneratedTemplate
-    from cveFeed import activity
+    from cveFeed import activity, ai_jobs
     from reNgine.resources import ScannerUnavailable
     cve = CVEEntry.objects.filter(pk=job.context.get('cve')).first()
     if cve is None:
         return None
     project = job.context.get('project')
     text = extract_yaml(text)
+    problem = gate_problem(text, cve.cve_id)
+    if problem and job.attempt == 1 and _repair_room():
+        activity.log('write_check', f'The AI-written check for {cve.cve_id} failed the safety gate ({plain_reason(problem, limit=200)}); '
+                     'it was sent back to the AI once to fix it', project=project, cve_id=cve.cve_id)
+        return ai_jobs.Retry('template_generation', repair_parts(job.packet.get('parts') or [], text, problem))
     ok, reason = static_check(text, expected_cve_id=cve.cve_id)
     tmpl = GeneratedTemplate(cve_entry=cve, yaml=text, ai_model=_job_model(job)[:128],
                              template_id=(load_template(text) or {}).get("id", "") if ok else "")
     if not ok:
         tmpl.status, tmpl.validation_output = GeneratedTemplate.STATUS_INVALID, f"static check: {reason}"
+        tmpl.validation_reason, tmpl.validated_at = plain_reason(tmpl.validation_output, "static check failed"), timezone.now()
         tmpl.save()
         activity.log('write_check', f'The AI-written check for {cve.cve_id} failed the static check', project=project, cve_id=cve.cve_id)
         return None
@@ -913,27 +1170,35 @@ def job_answer(job, text):
                        project=project, cve_id=cve.cve_id) as handle:
         try:
             valid, output = validate_anywhere(text, project)
-        except ScannerUnavailable as exc:  # the scanner went away between the check above and now: never a draft without its check
-            valid, output = False, f'not validated: no scanner could take this work ({exc.kind}); the CVE is tried again later'
+        except ScannerUnavailable as exc:  # the scanner went away between the check above and now: the draft waits for its check
+            from cveFeed import templatevalidate
+            why = f'no Sentinel can run template checks ({exc.kind}) right now'
+            tmpl.validation_next_at = timezone.now() + templatevalidate.WAIT_SYSTEM
+            tmpl.validation_reason = f'waiting: {why}'
+            tmpl.validation_output = f'not validated yet: {why}; the syntax check runs again when a Sentinel can take it'
+            tmpl.save(update_fields=['validation_next_at', 'validation_reason', 'validation_output'])
+            handle.done_message = f'Check for {cve.cve_id} waits for a Sentinel to validate it'
+            return None
         handle.done_message = f'Check for {cve.cve_id} {"passed" if valid else "failed"} validation'
     tmpl.status = GeneratedTemplate.STATUS_DRAFT if valid else GeneratedTemplate.STATUS_INVALID
     tmpl.validation_stage, tmpl.validation_next_at = '', None
     tmpl.validation_output = (output + '\nPending automatic validation: a positive fixture test and a second-pass review run before it may run on a host.'
                               if valid else output)
     if not valid:
-        tmpl.validation_reason = (output or 'the scanner did not accept the template')[:400]
+        tmpl.validation_reason = plain_reason(output, 'the scanner did not accept the template')
         tmpl.validated_at = timezone.now()
     tmpl.save()
     return None
 
 
 def job_failure(job, category, detail):
-    """A failed provider call is still a billable attempt: the ledger row is left, so the CVE is not asked again at once."""
+    """A failed provider call is still a billable attempt: the ledger row is left, so the CVE is not asked again at once. Its reason says so."""
     from cveFeed.models import CVEEntry, GeneratedTemplate
     cve = CVEEntry.objects.filter(pk=job.context.get('cve')).first()
     if cve is not None:
+        why = f'the AI provider call failed ({category}); no template was written'
         GeneratedTemplate.objects.create(cve_entry=cve, yaml='', status=GeneratedTemplate.STATUS_INVALID, ai_model=_job_model(job)[:128],
-                                         validation_output=f'the AI provider call failed ({category}); no template was written')
+                                         validation_output=why, validation_reason=why, validated_at=timezone.now())
 
 
 def _severity_of(cvss, fallback):
@@ -947,21 +1212,28 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     """Persist what the template test found, so it shows in the findings, host heat and graph rather than only in the activity
     log: a vulnerable host gets a Vulnerability (source 'nuclei-cve', linked to the CVE, with the matched request and response as
     evidence), and every tested host's CVEMatch records the result ("vulnerable", "no_match", or "error" when it could not be
-    tested). A hit of a version-class template (``template_evidence``) is recorded as VERSION_ONLY_RESULT and makes no finding: it read
-    the version again, it did not show the flaw. Only a "vulnerable" result ever replaces a "vulnerable" one (from nuclei, OpenVAS or
-    the TLS audit): a version hit, a miss or an error of a later run never lowers a confirmation. Only hosts of ``project`` are touched: without
-    one nothing is guessed.
+    tested). A hit that only read a version string (``template_evidence``, or the hit itself: ``hit_evidence``) is recorded as
+    VERSION_ONLY_RESULT and makes no finding: it read the version again, it did not show the flaw. Only a "vulnerable" result replaces a
+    "vulnerable" one (from nuclei, OpenVAS or the TLS audit): a miss, an error or another template's version hit of a later run never lowers
+    a confirmation. The one exception is the same check read correctly: a version hit of the template that recorded the confirmation
+    (``template_id`` the same) replaces it, the nuclei-cve finding that template filed for the CVE on the host is closed automatically as a
+    false positive (``close_version_hit_findings``; one a person changed is left alone), and the match's triage starts over
+    (``retriage``). The match's remediation status is never touched. Only hosts of ``project`` are touched: without one nothing is guessed.
 
     A version-class hit proves the version is on the host (``match_policy.version_read_from_component``): under the KEV heat policy a KEV or
     exploited match it turns from smoke to fire is rescored and paged once (``scoring.evidence_arrived``, ``notify.fire_confirmed``: once per
     heat rule), the state read before the write (``threat.unproven``) so a match that was already fire is not paged again. It is still no
     confirmed finding (no Vulnerability, no "template test confirmed" message). Returns the number of findings saved."""
-    from django.utils import timezone
+    from django.db.models import Q
 
     from cveFeed.models import CVEMatch
     from reNgine.tasks import parse_nuclei_result, save_vulnerability
     from startScan.models import Subdomain
     if project is None or not outcomes:
+        return 0
+    stale = stale_generated_template(template_id=template_id)
+    if stale is not None:  # retired (or superseded) while it ran: what it found is not recorded, not even a miss
+        discarded_result(cve, stale, project=getattr(project, "pk", project))
         return 0
     by_host = {}
     for outcome in outcomes:
@@ -973,19 +1245,27 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     from cveFeed import template_gates, threat
     # a template that matches patched releases too (template_gates.GATES): its hit on a host whose release is patched is no hit
     gated = {name for (name, _d), sub in latest.items() if template_gates.out_of_range({cve.cve_id, template_id or ''}, sub)}
-    now, saved, proved = timezone.now(), 0, []
+    now, saved, proved, corrected = timezone.now(), 0, [], []
+    template_id = (template_id or "")[:128]
     for name, outcome in by_host.items():
         # a version-class template's hit is the version read again (template_evidence): recorded as such, never as "vulnerable"
         result = ("error" if outcome.get("error") else VERSION_ONLY_RESULT if is_version_hit(outcome)
                   else "vulnerable" if outcome["vulnerable"] and name not in gated else "no_match")
         rows = CVEMatch.objects.filter(cve_entry=cve, subdomain__name=name, subdomain__target_domain__project_id=project)
         if result != "vulnerable":
-            # a confirmation stands until a person or a confirming check says otherwise: a version read again, a miss or an error of a later
-            # run (a timeout, a WAF that answered this time, a template that changed) never lowers it, whichever tester made it
-            rows = rows.exclude(template_result="vulnerable")
+            # a confirmation stands until a person or a confirming check says otherwise: a miss or an error of a later run (a timeout, a WAF
+            # that answered this time), or another template's version hit, never lowers it, whichever tester made it. The same template's
+            # version hit does: it is the same check, now read for what it showed (hit_evidence)
+            standing = Q(template_result="vulnerable")
+            if result == VERSION_ONLY_RESULT and template_id:
+                same = list(rows.filter(template_result="vulnerable", template_id=template_id).values_list("pk", flat=True))
+                if same:
+                    corrected.append((name, same, outcome))
+                standing &= ~Q(template_id=template_id)
+            rows = rows.exclude(standing)
         unproven = ({m.pk for m in rows.select_related("cve_entry", "triage") if threat.unproven(m)}
                     if result == VERSION_ONLY_RESULT and threat.heat_policy() != threat.LEGACY_POLICY else set())
-        rows.update(template_result=result, template_id=(template_id or "")[:128], template_tested_at=now)
+        rows.update(template_result=result, template_id=template_id, template_tested_at=now)
         if unproven:  # read before the write: only a real smoke-to-fire change is rescored and paged
             proved += [m.pk for m in CVEMatch.objects.filter(pk__in=unproven).select_related("cve_entry", "triage")
                        if not threat.unproven(m) and threat.match_heat(m) == threat.FIRE]
@@ -1013,7 +1293,152 @@ def record_outcomes(cve, outcomes, project=None, template_id=""):
     if proved:
         from cveFeed import scoring
         scoring.evidence_arrived(proved, confirmed=proved)
+    for name, ids, outcome in corrected:
+        hit = outcome.get("hit") if isinstance(outcome.get("hit"), dict) else {}
+        version_hit_corrected(cve, name, getattr(project, "pk", project), {template_id, str(hit.get("template-id") or "")[:200]}, ids)
     return saved
+
+
+def stale_generated_template(template_id="", path=""):
+    """The AI-written template (``GeneratedTemplate``) installed under ``template_id`` (or at ``path``) when it may no longer run, else None.
+    A run reads the approved text before it starts (``validation.approved_template``); a review can retire the template, or a valid revision
+    supersede it, while the run is out, and its result must then not be recorded (``record_outcomes``, ``validation.apply_validation``). Stale:
+    every row installed under that id or path is no longer ``valid`` (retired, rejected, expired), or the valid one has a valid revision. A
+    template no AI-written row was installed under (an installed upstream template) is never stale."""
+    from cveFeed.models import GeneratedTemplate
+    if path:
+        rows = GeneratedTemplate.objects.filter(path=str(path))
+    elif template_id:
+        rows = GeneratedTemplate.objects.filter(template_id=str(template_id)[:128]).exclude(path="")
+    else:
+        return None
+    rows = list(rows.select_related("cve_entry").order_by("-id")[:20])
+    if not rows:
+        return None
+    for row in rows:
+        if row.status == GeneratedTemplate.STATUS_VALID and not row.revisions.filter(status=GeneratedTemplate.STATUS_VALID).exists():
+            return None
+    return rows[0]
+
+
+def discarded_result(cve, stale, project=None):
+    """The one activity line for a result of a retired check that was thrown away."""
+    from cveFeed import activity
+    activity.log("validate", f"The result of a retired check ({stale.template_id or '#%d' % stale.pk}) for {cve.cve_id} was discarded: the "
+                             "check was retired or superseded while it ran, so nothing it found is recorded", project=project, cve_id=cve.cve_id,
+                 vulnerable=False)
+
+
+VERSION_HIT_NOTE = ("Closed automatically: the template check only read the version string from the response, which is not proof of the "
+                    "flaw (a distribution backports fixes without changing the version it prints). The match stays, on its version.")
+
+
+def close_version_hit_findings(cve, host, project, template_ids, note=VERSION_HIT_NOTE, by="template_evidence"):
+    """Close, automatically and as a false positive, the nuclei-cve findings ``template_ids`` filed for ``cve`` on ``host`` of ``project``,
+    once a hit of that template is known to have read only the version string (``hit_evidence``), or once the template was retired
+    (``note`` RETIRED_NOTE, ``cveFeed.template_review``). Only a finding still open that nobody set is closed (``REMEDIATION.move`` from open,
+    no ``remediation_by``): one a person changed keeps their decision. Each closure is written to the finding's audit trail with no user.
+    Returns the ids closed."""
+    from cveFeed.models import FindingAuditEvent
+    from reNgine.state_machines import REMEDIATION
+    from startScan.models import Vulnerability
+    ids = [t for t in template_ids if t]
+    if not ids or project is None:
+        return []
+    found = list(Vulnerability._base_manager.filter(source="nuclei-cve", subdomain__name=host, target_domain__project_id=project,
+                                                    template_id__in=ids, cve_ids__name__iexact=cve.cve_id, remediation_status="open",
+                                                    remediation_by__isnull=True).values_list("pk", flat=True).distinct())
+    if not found:
+        return []
+    now = timezone.now()
+    closed = []
+    for pk in found:  # one by one, so the audit trail names only the rows that really moved
+        if REMEDIATION.move(Vulnerability._base_manager.filter(pk=pk, remediation_by__isnull=True), "false_positive", only_from=("open",),
+                            remediation_note=note, remediation_updated_at=now):
+            closed.append(pk)
+    FindingAuditEvent.objects.bulk_create([
+        FindingAuditEvent(project_id=project, finding_kind="vulnerability", finding_id=pk, event="status", actor=None,
+                          before={"status": "open"}, after={"status": "false_positive", "note": note, "by": by})
+        for pk in closed])
+    return closed
+
+
+def retriage(match_ids):
+    """Start the triage of these CVE matches over now that their template result changed (``triage.track``: the row is reset, its
+    classification, verdict and validation record dropped, the legacy verdict cleared and the hosts rescored; the triage then asks again).
+    The signature holds whether a template confirmed the match, but a row that inherited a rescan twin's validation hit, or was never resynced
+    after the hit, may carry a signature that already says no: its stored signature is cleared first, so every row starts over whatever it
+    held. Never raises."""
+    try:
+        from cveFeed import triage
+        from cveFeed.models import CVEMatch, Triage
+        ids = list(match_ids)
+        Triage.objects.filter(match_id__in=ids).update(signature="", evidence_key="")
+        triage.track(triage.with_cves(CVEMatch.objects.filter(pk__in=ids).select_related("subdomain__target_domain")))
+    except Exception:  # noqa: BLE001 - the next scan's triage pass reads the changed signature too
+        logger.exception("could not start the triage of %d corrected matches over", len(match_ids))
+
+
+def version_hit_corrected(cve, host, project, template_ids, match_ids):
+    """What follows once a confirmation a template recorded is read again as a version hit (``record_outcomes``, the one-time
+    ``recheck_template_hits``): its nuclei-cve finding is closed (``close_version_hit_findings``), the matches' triage starts over
+    (``retriage``), the host is rescored and the activity feed says why. The matches' remediation status is never touched. Returns the
+    finding ids closed."""
+    from cveFeed import activity, scoring
+    closed = []
+    try:
+        closed = close_version_hit_findings(cve, host, project, template_ids)
+    except Exception:  # noqa: BLE001 - the template result is recorded either way
+        logger.exception("could not close the %s version-only template findings on %s", cve.cve_id, host)
+    retriage(match_ids)
+    scoring.rescore_quietly(project, [host])
+    activity.log("validate", f"The {cve.cve_id} check on {host} only read the version string: its earlier match is now recorded as a version "
+                             "read, not a confirmation" + (f", and finding #{', #'.join(map(str, closed))} was closed as a false positive"
+                                                           if closed else ""),
+                 project=project, cve_id=cve.cve_id, vulnerable=False)
+    return closed
+
+
+RETIRED_NOTE = ("Closed automatically: the AI-written template check that confirmed this was retired by a review, so its confirmation no "
+                "longer stands. The match stays, on its version, until another check confirms it.")
+
+
+def retired_check_corrected(cve, host, project, template_ids, match_ids):
+    """What follows once a confirmation a retired AI-written template recorded is withdrawn (``cveFeed.template_review.retire``) and its hit
+    cannot be read as a version hit (no stored response, or ``hit_evidence`` says it showed more): the matches were put back to no template
+    result by the caller; the finding that template filed is closed as a false positive with RETIRED_NOTE (one a person changed is left alone),
+    the matches' triage starts over (``retriage``), the host is rescored and the activity feed says why. The matches' remediation status is
+    never touched. Returns the finding ids closed."""
+    from cveFeed import activity, scoring
+    closed = []
+    try:
+        closed = close_version_hit_findings(cve, host, project, template_ids, note=RETIRED_NOTE, by="template_retired")
+    except Exception:  # noqa: BLE001 - the template result is recorded either way
+        logger.exception("could not close the %s findings of a retired template on %s", cve.cve_id, host)
+    retriage(match_ids)
+    scoring.rescore_quietly(project, [host])
+    activity.log("validate", f"The {cve.cve_id} check that confirmed {host} was retired: the confirmation no longer stands and the match is "
+                             "unconfirmed again" + (f", and finding #{', #'.join(map(str, closed))} was closed as a false positive"
+                                                    if closed else ""),
+                 project=project, cve_id=cve.cve_id, vulnerable=False)
+    return closed
+
+
+def stored_hit(project_id, host, cve_id, template_ids, match_ids):
+    """The response (and request) a confirmed hit of one of ``template_ids`` on ``host`` recorded, or None: the nuclei-cve finding's copy (8
+    KiB), else the validation step's (4 KiB). Read by ``recheck_template_hits`` and by the template review (``cveFeed.template_review``)."""
+    from cveFeed.models import Triage
+    from startScan.models import Vulnerability
+    row = (Vulnerability._base_manager.filter(source='nuclei-cve', subdomain__name=host, target_domain__project_id=project_id,
+                                              template_id__in=[t for t in template_ids if t], cve_ids__name__iexact=cve_id)
+           .exclude(response__isnull=True).exclude(response='').order_by('-id').values('request', 'response').first())
+    if row:
+        return {'request': row['request'] or '', 'response': row['response']}
+    for evidence in Triage.objects.filter(match_id__in=match_ids).order_by('-id').values_list('validation_evidence', flat=True):
+        step = evidence.get('nuclei_template') if isinstance(evidence, dict) else None
+        if isinstance(step, dict) and isinstance(step.get('response'), str) and step['response'].strip():
+            return {'request': step.get('request') or '', 'response': step['response']}
+    return None
 
 
 def run_cve_tests(cve, hosts, ai=False, project=None):
@@ -1042,21 +1467,24 @@ def run_cve_tests(cve, hosts, ai=False, project=None):
         return {"source": "candidate", "template": "", "results": [], "job": job.pk,
                 "reason": "an AI draft is being written; it is validated automatically when it lands and is never run on a host until every gate has passed"}
     results = []
-    evidence = evidence_of_template(path)  # what a hit of this template shows: the flaw, or the version string only
+    # what a hit of this template shows: the flaw, or the version string only. The template alone says so for the shapes ``template_evidence`` lists; for
+    # any other, each hit is asked itself (``hit_evidence``). ``_run_on_scanner`` reads it from the text that ran and puts it on each outcome
+    static = BEHAVIOR_EVIDENCE
     from targetApp.target_types import scannable_hosts
-    hosts = scannable_hosts(hosts, project=project)  # whatever called us, nothing that resolves to a blocked address is ever tested
+    hosts = scannable_hosts(hosts, project=project)  # whatever called us: exclusions, archives and scope (a name is judged by the Sentinel that runs it)
     for start in range(0, len(hosts), CHUNK_HOSTS):
         chunk = hosts[start:start + CHUNK_HOSTS]
         label = chunk[0] if len(chunk) == 1 else f'{len(chunk)} hosts'
         with activity.step('run_check', f'Running the {cve.cve_id} check against {label}', project=project,
                            cve_id=cve.cve_id) as handle:
-            outcomes = _test_chunk(path, chunk, project=getattr(project, 'pk', project))
-            for outcome in outcomes:
-                outcome['template_evidence'] = evidence
+            outcomes = with_evidence(path, _test_chunk(path, chunk, project=getattr(project, 'pk', project)))
+            static = next((o.get('template_static') for o in outcomes if o.get('template_static')), static)
             errors = sum(bool(o.get('error')) for o in outcomes)
+            versions = sum(is_version_hit(o) for o in outcomes)
             handle.done_message = (f'{errors} of {len(outcomes)} checks failed for {cve.cve_id}' if errors else
                                    f'{sum(o["vulnerable"] for o in outcomes)} of {len(outcomes)} hosts matched {cve.cve_id}'
-                                   + (' (a version check: the version only)' if evidence == VERSION_EVIDENCE else ''))
+                                   + (' (a version check: the version only)' if static == VERSION_EVIDENCE
+                                      else f' ({versions} of them on the version string only)' if versions else ''))
         results.extend(outcomes)
     for outcome in results:
         host = outcome['host']

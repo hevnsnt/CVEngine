@@ -1,0 +1,50 @@
+{
+  "reads": [
+    {
+      "id": "grafana.example.com|vsrc|grafana|https://grafana.example.com",
+      "host": "grafana.example.com",
+      "base": "https://grafana.example.com",
+      "requests": [
+        {"path": "/api/health", "read": "json", "fields": ["version", "database", "commit"], "headers": ["server"]}
+      ],
+      "allowed": ["grafana.example.com", "example.com", "www.example.com"]
+    },
+    {
+      "id": "git.example.com|vsrc|gitea|https://git.example.com",
+      "host": "git.example.com",
+      "base": "https://git.example.com",
+      "requests": [
+        {"path": "/api/v1/version", "read": "json", "fields": ["version"]},
+        {"path": "/api/v1/cvengine-control-1a2b3c4d5e6f", "read": "json", "fields": ["version"]}
+      ],
+      "allowed": ["git.example.com"]
+    },
+    {
+      "id": "metrics.example.com|vsrc|prometheus-metrics|http://metrics.example.com:9100",
+      "host": "metrics.example.com",
+      "base": "http://metrics.example.com:9100",
+      "requests": [
+        {"path": "/metrics", "read": "metrics", "headers": ["content-type"]}
+      ],
+      "allowed": ["metrics.example.com"]
+    },
+    {
+      "id": "shop.example.com|vsrc|aspnet-error|https://shop.example.com",
+      "host": "shop.example.com",
+      "base": "https://shop.example.com",
+      "requests": [
+        {"path": "/cvengine-probe-404.aspx", "read": "text", "find": "Microsoft .NET Framework Version:", "headers": ["x-aspnet-version", "x-powered-by"]}
+      ],
+      "allowed": ["shop.example.com"]
+    }
+  ],
+  "scope": {
+    "hosts": ["grafana.example.com", "example.com", "www.example.com", "git.example.com", "metrics.example.com", "shop.example.com"],
+    "domains": [],
+    "excluded": [],
+    "excluded_trees": [],
+    "private": false,
+    "addresses": [],
+    "blocked": []
+  }
+}

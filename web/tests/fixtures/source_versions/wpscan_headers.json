@@ -1,0 +1,15 @@
+{
+  "outcome": "done",
+  "report": {
+    "target_url": "https://blog.rt.test/",
+    "interesting_findings": [
+      {"url": "https://blog.rt.test/", "to_s": "Headers", "type": "headers", "found_by": "Headers (Passive Detection)", "confidence": 100,
+       "confirmed_by": {}, "references": {}, "interesting_entries": ["Server: Apache/2.4.29 (Ubuntu)", "X-Powered-By: PHP/7.2.24"]},
+      {"url": "https://blog.rt.test/xmlrpc.php", "to_s": "XML-RPC seems to be enabled: https://blog.rt.test/xmlrpc.php", "type": "xmlrpc",
+       "found_by": "Direct Access (Aggressive Detection)", "confidence": 100, "interesting_entries": []}
+    ],
+    "version": {"number": "6.4.2", "status": "outdated", "confidence": 100, "found_by": "Rss Generator (Passive Detection)"}
+  },
+  "returncode": 0,
+  "stderr_tail": ""
+}

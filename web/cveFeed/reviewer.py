@@ -131,10 +131,14 @@ def ops_due(row, now=None):
 
 
 def reviews_today(now=None):
+    """The finding reviews counted against ``review_daily_max`` today (since UTC midnight): the finding reviewer's own rows, refusals included.
+    The verdicts a host review writes (``FindingReview.host_review`` set, up to ``host_review.MAX_FINDINGS`` per host) are counted by the host
+    review's own cap (``host_review.reviews_today``), not here: they cost no call of the finding reviewer, and counting them let a few host
+    reviews use up the finding reviewer's whole day."""
     from cveFeed.models import FindingReview
     now = now or timezone.now()
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    return FindingReview.objects.filter(created_at__gte=start).count()
+    return FindingReview.objects.filter(created_at__gte=start, host_review__isnull=True).count()
 
 
 REFUSED = 'refused'  # FindingReview.outcome of a review the model did not answer (refused, empty, cut off, unusable): no verdict
@@ -214,7 +218,7 @@ def _reviewed(triages, fingerprints):
 
 
 def due(limit=PACKET_LIMIT, now=None):
-    """Up to ``limit`` ``(triage, review_key)`` pairs to review now: open findings whose current key has no review, CVE matches first.
+    """Up to ``limit`` ``(triage, review_key)`` pairs to review now: open findings whose current key has no review, hottest first (``_due_in``).
     Each project with open findings gets an equal share of the batch (what one has too little of goes to the others), so a large project
     cannot take the whole of the daily cap while another has work."""
     from cveFeed.models import Triage
@@ -235,13 +239,32 @@ def due(limit=PACKET_LIMIT, now=None):
     return picked
 
 
+def heat_rank_expr():
+    """The heat of a Triage row's finding as a number (3 fire, 2 smoke, 1 ice, 0 none), in the database: the CVE match's heat
+    (``threat.match_heat_rank_expr``, read through a subquery on the match), a scanner finding's (``threat.finding_heat_rank_expr``) and a hygiene
+    finding's severity heat, with a heat a person set winning. The same expressions every list and count reads, so the reviewer reads the
+    hottest findings first, as a person would see them."""
+    from django.db.models import Case, IntegerField, OuterRef, Subquery, Value, When
+    from cveFeed import threat
+    from cveFeed.models import CVEMatch
+    match_heat = Subquery(CVEMatch.objects.filter(pk=OuterRef('match_id')).annotate(_heat=threat.match_heat_rank_expr()).values('_heat')[:1],
+                          output_field=IntegerField())
+    return Case(*[When(heat_override=heat, then=Value(threat.HEAT_RANK[heat])) for heat in (threat.FIRE, threat.SMOKE, threat.ICE)],
+                When(match__isnull=False, then=match_heat),
+                When(vulnerability__isnull=False, then=threat.finding_heat_rank_expr(prefix='vulnerability__')),
+                When(hygiene__isnull=False, then=threat.severity_heat_rank_expr('hygiene__severity')),
+                default=Value(0), output_field=IntegerField())
+
+
 def _due_in(project_id, limit, now):
-    """``due`` for one project. The open findings are read in pages of WINDOW in that order until ``limit`` are found or none are left, so a
-    finding is reached however many reviewed ones come before it."""
+    """``due`` for one project, hottest first: the finding's heat (``heat_rank_expr``: fire, a KEV or exploited CVE on the host, before smoke and
+    ice), then its kind (CVE matches first), then the newest. The open findings are read in pages of WINDOW in that order until ``limit`` are found
+    or none are left, so a finding is reached however many reviewed ones come before it."""
     from django.db.models import Case, IntegerField, Value, When
     from cveFeed.models import Triage
     rank = Case(*[When(kind=k, then=Value(v)) for k, v in KIND_ORDER.items()], default=Value(9), output_field=IntegerField())
-    qs = (Triage.objects.filter(open_q(), project_id=project_id).exclude(kind='route_auth').annotate(kind_rank=rank).order_by('kind_rank', '-last_seen', '-id')
+    qs = (Triage.objects.filter(open_q(), project_id=project_id).exclude(kind='route_auth').annotate(heat_rank=heat_rank_expr(), kind_rank=rank)
+          .order_by('-heat_rank', 'kind_rank', '-last_seen', '-id')
           .only('id', 'kind', 'project_id', 'host', 'evidence_key', 'signature'))
     picked = []
     offset = 0
@@ -564,6 +587,10 @@ def apply_verdict(ref, body, now=None):
     key = review_key(triage, fingerprint)
     if parsed['review_key'] != key:
         raise VerdictError('the finding or its host changed since the packet was built', 409)
+    if reviews_today(now) >= settings_row().review_daily_max:
+        # the cap ``record_refusal`` holds too: a packet handed out before the cap was lowered, or a container that kept its batch past midnight,
+        # writes no more reviews than the day allows (``next_packets`` never hands out more than are left)
+        raise VerdictError('the daily limit of reviews is used up', 429)
     return apply_finding_verdict(triage, parsed, key, now=now)
 
 
@@ -640,9 +667,15 @@ def apply_finding_verdict(triage, parsed, key, host_review=None, extra_injection
             text = f"{CLOSE_PREFIX} ({model or 'model not reported'}) found this is a false positive. {note}".strip()
             text = closure.clip_note(text)
             before = finding.remediation_status
+            # only from the status the gate read: the AI reviewer is an automatic actor and never writes over a person's newer decision
+            from reNgine.state_machines import REMEDIATION
+            if not REMEDIATION.move(type(finding)._base_manager.filter(pk=finding.pk), 'false_positive', only_from=(before,),
+                                    remediation_updated_at=now, remediation_by=None, remediation_note=text):
+                outcome, held = 'held', 'a person changed the status meanwhile'
+                FindingReview.objects.filter(pk=review.pk).update(outcome=outcome, held_reason=held)
+        if outcome == 'closed':
             finding.remediation_status, finding.remediation_updated_at, finding.remediation_by = 'false_positive', now, None
             finding.remediation_note = text
-            finding.save(update_fields=['remediation_status', 'remediation_updated_at', 'remediation_by', 'remediation_note'])
             FindingAuditEvent.objects.create(project_id=triage.project_id, finding_kind=AUDIT_KIND[triage.kind], finding_id=finding.pk,
                                              event='status', actor=None, before={'status': before},
                                              after={'status': 'false_positive', 'note': text, 'by': 'ai_reviewer', 'review_id': review.pk,
@@ -792,7 +825,7 @@ def summary_from_row(obj):
 
 # --------------------------------------------------------------------------------------------------------------- operations
 
-ACTIONS = {'feed_sentinels': timedelta(minutes=15), 'refresh_nuclei_templates': timedelta(hours=1)}
+ACTIONS = {'feed_sentinels': timedelta(minutes=15)}
 ACTIVITY_ERROR_PROBLEM = 20     # failed activity lines of one kind in six hours
 SENTINEL_FAILED_PROBLEM = 5     # failed or expired Sentinel tasks of one Sentinel and kind in six hours
 SENTINEL_ERROR_SHARE = 0.05     # ...the overall rule: that many in a group and this share of all the tasks that finished (or no Sentinel is live, or none completed) is an alert
@@ -807,20 +840,19 @@ def _admin():
 
 
 def installed_templates_version():
-    """The nuclei-templates release installed on this server, from nuclei's own config file, or ''."""
-    root = os.environ.get('NUCLEI_CONFIG_DIR', '/root/.config/nuclei')
+    """The nuclei-templates release the Sentinels run: the one the scanner library's template index describes (``cvengine_scanner.template_index``),
+    which is the release the Sentinel image pins. This server keeps no copy of the templates. '' when the library has no index."""
     try:
-        with open(os.path.join(root, '.templates-config.json'), encoding='utf-8') as handle:
-            data = json.load(handle)
-    except (OSError, ValueError):
+        from cvengine_scanner import template_index
+    except ImportError:
         return ''
-    return str(data.get('nuclei-templates-version') or '')[:40] if isinstance(data, dict) else ''
+    return str(template_index.release() or '')[:40]
 
 
 # Every code ops_checks can return, in the order it computes them. The snapshot sends it to the reviewer container, which builds the model's answer
 # format from it; tests/test_ai_prompts.py holds it equal to the codes written in ops_checks and to the container's fallback copy.
 OPS_CODES = ('sentinels_idle', 'workers_down', 'nuclei_templates', 'sentinel_errors', 'sentinel_waiting', 'sentinels_offline', 'scan_errors', 'system',
-             'generated_templates', 'ai_errors', 'memory', 'queue_starvation', 'sentinel_claims_refused')
+             'generated_templates', 'ai_errors', 'memory', 'queue_starvation', 'sentinel_claims_refused', 'ai_budget', 'triage_backlog')
 
 
 def _check(code, state, title, detail, facts=None, actions=(), severity=None):
@@ -942,32 +974,22 @@ def ops_checks(now=None, templates_release=None, _out=None):
     else:
         checks.append(_check('workers_down', 'ok', 'Background workers answer', '', {'state': workers.get('state')}))
 
-    # nuclei templates
-    templates = ((system.get('tools') or {}).get('nuclei_templates')) or {}
-    refresh = templates.get('last_refresh') or {}
+    # nuclei templates: this server keeps none; the Sentinels run the release their library's template index describes (the Sentinel image's pin)
     installed = installed_templates_version()
     newer = ''
     if isinstance(templates_release, dict) and re.fullmatch(r'v?\d+(?:\.\d+){1,3}', str(templates_release.get('tag') or '')):
         tag = str(templates_release['tag'])
         if installed and tag.lstrip('v') != installed.lstrip('v'):
             newer = tag
-    hours = None
-    try:
-        hours = (now - datetime.fromisoformat(refresh['at'])).total_seconds() / 3600 if refresh.get('at') else None
-    except (TypeError, ValueError):
-        hours = None
-    failed = bool(refresh) and not refresh.get('ok')
-    if failed or newer or (hours is not None and hours > 24):
-        detail = []
-        if failed:
-            detail.append(f"The last refresh failed: {str(refresh.get('result') or 'no detail')[:200]}.")
-        if hours is not None and hours > 24:
-            detail.append(f'No successful refresh for {int(hours)} hours.')
-        if newer:
-            detail.append(f'nuclei-templates {newer} is out; this server has {installed}.')
-        checks.append(_check('nuclei_templates', 'problem' if failed else 'warning', 'nuclei templates are out of date', ' '.join(detail),
-                             {'installed': installed, 'latest': newer or installed, 'hours_since_refresh': round(hours or 0, 1), 'failed': failed},
-                             actions=('refresh_nuclei_templates',)))
+    if not installed:
+        checks.append(_check('nuclei_templates', 'problem', 'The scanner library has no nuclei template index',
+                             'The Sentinel library this server installed carries no template index, so no nuclei work can be planned: update the '
+                             'server (it installs the Sentinel library with the index).', {'installed': ''}))
+    elif newer:
+        checks.append(_check('nuclei_templates', 'warning', 'A newer nuclei-templates release exists',
+                             f'nuclei-templates {newer} is out; the Sentinels run {installed}, the release the Sentinel image pins with its template index. '
+                             'A newer set arrives with a Sentinel release that moves the pin and regenerates the index.',
+                             {'installed': installed, 'latest': newer}))
     else:
         checks.append(_check('nuclei_templates', 'ok', 'nuclei templates are current', '', {'installed': installed}))
 
@@ -1077,6 +1099,8 @@ def ops_checks(now=None, templates_release=None, _out=None):
     checks.append(_check('memory', **maintainer_checks.memory(signals)))
     checks.append(_check('queue_starvation', **maintainer_checks.queue_starvation(signals, work)))
     checks.append(_check('sentinel_claims_refused', **maintainer_checks.claim_refusals(signals)))
+    checks.append(_check('ai_budget', **maintainer_checks.ai_budget(signals)))  # an AI cap used up stops that work silently otherwise
+    checks.append(_check('triage_backlog', **maintainer_checks.triage_backlog(signals)))  # findings of the current inventory waiting for their AI triage
 
     # a Sentinel that was registered and approved, was heard from this week, and now none is live: nothing runs, whether or not tasks wait
     if not fleet['live_sentinels']:
@@ -1278,8 +1302,6 @@ def _run_action(name):
     from cveFeed import tasks
     if name == 'feed_sentinels':
         tasks.feed_sentinels.apply_async()
-    elif name == 'refresh_nuclei_templates':
-        tasks.update_nuclei_templates.apply_async()
 
 
 # The reviewer container's own two jobs call the model themselves, so it tells the server about each call (this route) and the usage page

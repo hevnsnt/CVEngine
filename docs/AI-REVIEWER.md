@@ -98,7 +98,8 @@ reviewer is built on the assumption that every scanned byte is hostile.
    job runs at most once per scheduled slot. A task meant to burn tokens ends at the cap. A review the model refuses, answers with nothing,
    cuts off twice or answers outside the schema is recorded (with no verdict) and counts against the cap; the finding is asked about again
    only when its host changes or 24 hours have passed. Reporting it is idempotent: the same report again inside 24 hours returns the same
-   answer and adds no row, a state that already has a verdict takes none (409), no more than the daily cap are kept (429), and the body
+   answer and adds no row, a state that already has a verdict takes none (409), no more than the daily cap are kept (429; a verdict past the
+   cap is refused the same way), and the body
    is at most 4 KB (413). The operations job makes at most one model call an hour on every failure path (a refused report, an unreachable
    server, any error): the container notes the attempt before it calls the model. A verdict is applied under a row lock on the finding, so
    it cannot overwrite a person's change made at the same moment. A provider that is down (not the finding's fault) is not recorded; three failures in a row pause the work for 15 minutes.
@@ -153,7 +154,12 @@ when it lands.
 Nothing is lost on the way. A lease that runs out puts the job back in the queue (three times, then it fails and the stage asks again); an
 answer whose Celery task was lost is applied by the housekeeping pass every five minutes; a job nobody answers within a week expires and its
 stage asks again. Work that was in flight in the old code when an update restarted the server is simply asked again: its claim runs out
-after ten minutes and the triage sweep queues it.
+after ten minutes and the triage sweep (every hour) queues it. A validation that queued a triage question names its job (`ai_job_id`), and the
+answer, a refusal or an expiry updates the validation's `ai_state`.
+
+A detection record (`cve_detection`) answer the validator refuses is sent back once with why, like a triage answer; a second refusal counts as a
+failed ask (the record backs off and is asked again later, and gives up after its failures), never as an answer. The CVE guidance budget counts
+the authoring questions asked in the last 24 hours from the AI jobs themselves, so a revision that queues a record again hands nothing back.
 
 **When the reviewer is off.** With no AI provider configured, the stages queue nothing and behave as they always did without AI. With a
 provider but no reviewer to serve the queue (`CVENGINE_REVIEWER=0`, the container stopped, scanning paused), jobs wait and nothing fails.
@@ -171,6 +177,34 @@ Which stages go through the queue in this release:
 | The RDP login-screen reading (the screenshot travels in the job, at most 4 MB) | `rdp_screenshot` | `rdp_screenshot` |
 | Nuclei template drafts for a CVE with no installed template (gated when they land, never run on a host) | `template_generation` | `template_generation` |
 | The test fixture and the second-pass review of an AI-written draft (see [the automatic lifecycle](#ai-written-templates-validated-by-the-system-never-by-a-person)); two jobs per draft, both under this stage | `template_validation` | `template_validation` |
+| Validation planning: which of the permitted read-only checks settle whether a CVE applies to a host (a validation request waits for it, see below) | `validation_plan` | `validation_plan` |
+| Nuclei targeting: the tags and severities for each host profile of a scan (the scan does not wait for it, see below) | `nuclei_targeting` | `nuclei_targeting` |
+
+Every pipeline call goes through the queue: the server makes no model call of the pipeline, holds no AI key in a worker for one, and fences no
+host data itself (the container's `guard.fence` does, with a fresh nonce per part). What is left in the server are the two requests of
+Settings > AI model: the connection test and the model list (see [Later](#later)).
+
+**Validation planning waits; it never waits for ever.** A validation request (Validate now, and the automatic Fire, Smoke and Ice validations)
+that needs the AI's choice of checks queues a `validation_plan` job (one per evidence: a second request for the same evidence waits for the same
+answer, and an answer of the last 24 hours is used again without asking) and goes back to the queue in the state `queued` with
+`result.waiting` naming the job. It holds no worker, spends no attempt and runs no check while it waits. The answer, the job's failure or its
+expiry sends the request on (`validation_plan.resume_parked`), and it continues where it stopped: a request that waited for its second plan (the
+choice after the first checks' observations) keeps what its first round did and does not run those checks again. It waits at most ten
+minutes (`validation_plan.PLAN_WAIT`; the AI job housekeeping sends on a request that waited longer, and a lost message the same way): then, or
+with the reviewer not taking work (`CVENGINE_REVIEWER=0`, scanning paused), past the planning budget, or when the model's answer is refused twice
+(one repair round, as for triage) or the call fails, the request goes on with the deterministic plan: the vetted CVE template and the version and
+identity probes, generic checks deferred, as with no AI. The planning budgets (`plan_daily_total`, `plan_daily_per_project`) are reserved when the
+job is queued; a repair round is a second row of the day (`TriageCall`, status `repair`), and every call the container makes is a usage row.
+
+**Nuclei targeting does not wait.** A scan's targeted pass runs at once on the static table and the tags the installed templates name for the
+host's products. The AI is asked, in one `nuclei_targeting` job, about the host profiles it has no answer for, and its choice (still a closed set:
+only installed tags, never `cve` or a credential tag unless allowed, only the five severities) is kept per host profile for seven days
+(`nuclei_templates.ANSWER_TTL`, in the shared cache). Every later pass over a host with the same profile uses it. Scheduled scans see the same
+hosts again, so the choice is used from the next pass on, and a profile is asked about once a week instead of on every scan. A scan was never held
+by this stage before either: a refusal, an empty answer or a failure always left the static table. The day's cap
+(`CVENGINE_NUCLEI_AI_MAX_PER_DAY`) counts the calls made and the questions queued; a question queued on a day whose cap is spent waits for the
+next day. A failed request is not queued again inside its window (five minutes, doubling up to an hour), and the next pass says why in the
+scan's activity. A reply that is not one JSON object is sent back once.
 
 ## How every prompt starts
 
@@ -186,10 +220,10 @@ text it needs and a test fails when the copies differ):
    is not enough to decide, say so and leave the finding open. The two nuclei jobs have a task line but not the preamble (see below).
 3. **The job's own rules and output format**, as before.
 
-**The nuclei jobs have a task line and no preamble.** `nuclei_tag_selection` and `nuclei_targeting` are asked as a validation request: "Validate each
+**The nuclei job has a task line and no preamble.** `nuclei_targeting` is asked as a validation request: "Validate each
 software detection listed below on its host to ensure it is not a false positive, and list the nuclei template tags and severities that match what
-is really there." (tag selection: "Validate each software detection listed below to ensure it is not a false positive, and list the nuclei template
-tags that match what is really there.") This sentence replaces only the first sentence of the old prompt; the output format, the allowed-tag list,
+is really there." (The scan-wide tag selection, `nuclei_tag_selection`, was measured with the same wording; it is retired: the scan-wide tags are
+the static table, and the stage only names older usage rows.) This sentence replaces only the first sentence of the old prompt; the output format, the allowed-tag list,
 the user message labels and the parsers are as before. Measured on the real provider (5 repeats per job and model): Sonnet answered
 `nuclei_targeting` 5 of 5 (the old text: 3 of 5) and `nuclei_tag_selection` 5 of 5 (the old text: 5 of 5); Haiku answered every wording 5 of 5. The
 shared preamble made Sonnet refuse these two jobs, so they do not get it. `reNgine/ai_prompts.py` lists them in `UNFRAMED` as "task line only,
@@ -221,8 +255,13 @@ Size of each system prompt, in characters (about 3.5 characters a token), before
 ## Finding review in detail
 
 - **Which findings.** Every finding with a triage record whose remediation status is open or in progress: CVE matches (Fire, Smoke and Ice),
-  scanner findings and hygiene findings. Web routes have no remediation workflow and are left out. Fire comes first, then Smoke, then the rest,
-  newest first. Each project with open findings gets an equal share of every batch, so one large project cannot use the whole daily cap while another has work.
+  scanner findings and hygiene findings. Web routes have no remediation workflow and are left out. Fire comes first, then Smoke, then the rest
+  (the finding's heat as every list shows it, a heat a person set included: a KEV match or a hot scanner finding before a cold CVE match), then
+  CVE matches before the other kinds, newest first. Each project with open findings gets an equal share of every batch, so one large project
+  cannot use the whole daily cap while another has work.
+- **The daily cap counts the finding reviewer's own reviews.** `review_daily_max` counts the reviews the finding reviewer wrote today, refusals
+  included; the verdicts a host review writes (up to 60 per host) count against `host_review_daily_max` only, so a few host reviews no longer use
+  up the finding reviewer's day.
 - **Once per state.** A review is keyed by the finding's evidence key and its host's state fingerprint (`HostState.fingerprint`: IPs, ports
   with service and version, technologies, HTTP status and title). The same key is never reviewed twice. A new port, a new version or new
   evidence makes a new key, and the finding is read again.
@@ -247,7 +286,7 @@ the numbers behind that state, and the actions it allows:
 | --- | --- | --- |
 | `sentinels_idle` | Live Sentinels finished no task in the last two hours while hosts are due | `feed_sentinels`: queue due hosts for the Sentinels now |
 | `workers_down` | One or more of the four Celery lanes (discovery, CVE feed, validation, classic) did not answer probe after probe, or none did | none (the text says `docker compose restart celery`) |
-| `nuclei_templates` | The last template refresh failed or is older than a day, or a newer nuclei-templates release exists | `refresh_nuclei_templates` |
+| `nuclei_templates` | A newer nuclei-templates release exists than the one the Sentinels run (the release their library's template index describes), or the installed library has no index | none (a newer set arrives with a Sentinel release) |
 | `sentinel_errors` | Sentinel tasks that failed or that a Sentinel stopped reporting in the last six hours, judged for each Sentinel and kind on its own numbers (the Sentinel that held a task is kept when its lease expires). A group is an alert when it has at least 5 failures and at least half of that Sentinel's tasks of that kind failed, or when it has failures and none of that Sentinel's tasks of that kind completed (so a kind that fails every time, or one Sentinel that is dead among several, is named at any volume of work beside it); the older overall rule stays as an extra trigger: five or more of one kind on one Sentinel with no live Sentinel, or nothing completed, or a failed share of all finished tasks of 5 percent or more. The text names the Sentinel and the kind. A task that expired only because no Sentinel slot was free is not counted, and neither is a task that a Sentinel had claimed before its own finished update restart and that stopped reporting up to 15 minutes after it (that Sentinel's own tasks only, a failed update excuses nothing, and neither does the server's clean-up line). The facts and the text give `groups`, `failed`, `completed`, `live_sentinels` | none |
 | `sentinel_waiting` | Tasks that expired waiting for a free Sentinel slot in the last six hours (an informational note: their targets stay due and are asked again). The facts and the text give the `slots` of the live Sentinels, the `completed` count, the queue now, and `growing` (the last three hours waited 25 percent more than the three before). `falling_behind` is true when no Sentinel is live, or the waits are growing and the queue holds at least as many tasks as there are slots; only then does the text advise adding a Sentinel or slots. When tasks expired unclaimed while the slots in use are at most half of all slots (`not_claiming`, `slots_in_use`), the title is "Sentinels are not claiming work", the severity is warning and the text gives no capacity advice: it says why when it can (`refused_2h` claim calls refused by the server's rate limiter, or `claimed_2h` is 0: no Sentinel asked for work). `saturated` is true when a tenth of the finished and waiting tasks waited, or the queue holds three times the slots, whatever the trend: the text then says the Sentinels are at capacity and nothing is broken, instead of "no action needed". With no Sentinel live it is a problem with warning severity, not a note | none |
 | `sentinels_offline` | A Sentinel is registered, approved and was heard from in the last week, and none is live now (with or without waiting tasks). Warning severity; `silent` lists the names | none |
@@ -258,6 +297,8 @@ the numbers behind that state, and the actions it allows:
 | `memory` | A worker lane or a container uses 85 percent (warning) or 95 percent (problem) of its memory limit, a container was killed by the kernel for memory at least once in 24 hours (`oom_kills_24h`), or one worker lane restarted 3 or more times in 24 hours. The text names the lane or container (the web container, the worker container, the lane), the numbers, and the `.env` limit to raise (`WEB_MEM_LIMIT`, `CELERY_MEM_LIMIT`). A reading that is missing, stale or has no limit gives no verdict (`not_read` in the facts) | none |
 | `queue_starvation` | A scan has waited an hour or more while host assessments are running or queued, or a Sentinel task kind's oldest queued task has waited at least an hour and six times its own median wait of the last day while the Sentinels claimed other kinds in the last 30 minutes. Not judged while scanning is paused | none |
 | `sentinel_claims_refused` | The server's own rate limiter refused claim calls: 10 or more in the last two clock hours is a warning, 100 or more a problem. The text names the Sentinels and says that adding Sentinels will not help | none |
+| `ai_budget` | An AI cap is used up, so that work stops until its window resets: the configMaxxing caps (triage, validation, template drafts, auto-tuning, nuclei), the per-project triage cap (the busiest project), the finding review and host review caps, the CVE guidance budget and the validation planning budgets. A warning that names each cap with its use; a cap of 0 (switched off) is not reported | none |
+| `triage_backlog` | Findings of the current inventory waiting for their AI triage: the oldest pending or error row has waited 6 hours (warning) or 48 hours (problem). Rows of matches a later scan replaced and of closed findings are not counted. The text gives the counts and the next step (an AI provider, the reviewer container, the AI budget check) | none |
 
 A check in `problem` opens an **admin alert**, a banner on every page for App Admins similar to the update banner. A check that is `ok` again
 resolves its alert. A check can also be `unknown` when the numbers it needs could not be read: that is no verdict, it opens and resolves nothing, and the model is not asked about it. The checks run from the outer watchdog's tick in the web container (every 30 minutes, with no Celery lane involved) as well as from the beat task, so they continue when the lane that dies in an incident is gone; an alert that has not been re-checked for an hour is shown with "Not re-checked for ..." in front of its text. An admin can dismiss an alert, and it stays dismissed until the problem changes.
@@ -313,7 +354,7 @@ The page has one **Connection** block (provider, API key, address, and a status 
 | Row | Setting | Used for | What it costs in practice |
 | --- | --- | --- | --- |
 | **Everything else** | `model` (AI model settings) | Triage of every finding, CVE match confirmation, validation and Nuclei planning, CVE guidance, template drafts. The pipeline's AI jobs run in the reviewer container but use this model. | Many small requests on every scan: most of the spend, so a cheap model. Empty: the newest cheapest model of the provider (a provider you host yourself must have one chosen). |
-| **Nuclei targeting and tag selection** | `nuclei_model` (AI model settings, `GET`/`PUT /cve/api/settings/ai`) | Which Nuclei templates apply to the software found (the stages `nuclei_targeting` and `nuclei_tag_selection`). These calls are made by the server, not by the reviewer container. | A few small requests per scan. A smaller, faster model works well and avoids refusals. |
+| **Nuclei targeting and tag selection** | `nuclei_model` (AI model settings, `GET`/`PUT /cve/api/settings/ai`) | Which Nuclei templates apply to the software found (the stages `nuclei_targeting` and `nuclei_tag_selection`). The reviewer container makes these calls: the job carries this choice (`model`) and asks for the haiku default (`haiku`). | A few small requests per scan. A smaller, faster model works well and avoids refusals. |
 | **Finding review** | `review_model` | The finding review job. | One larger request per finding, up to the daily cap: a stronger model costs the most here. |
 | **Operations check** | `ops_model` | The operations check job. | A few small requests a day. |
 
@@ -344,7 +385,7 @@ All routes are under `/api/v1/reviewer/` and need a `reviewer`-scope token. The 
 | `GET findings/next?limit=N` | Up to N review packets, each leased for 15 minutes |
 | `POST findings/<ref>/verdict` | One verdict. The answer says whether it was applied, recorded, held (and why) or stale |
 | `POST findings/<ref>/refusal` | The model gave no usable answer for the packet (`review_key`, `category`, `model`). Recorded with no verdict and counted against the daily cap; the finding is not handed out again for 24 hours unless its host changes |
-| `GET ops/snapshot` | The checks above that have a verdict, `codes`, `signals` (a bounded summary of the maintainer's measurements: lane and container memory, oom kills, restarts, queue ages, refused claims, database, Redis, AI spend), `tuning` (auto-tuning's mode and last five decisions, and `proposals`: what the AI may change now), `tuning_settings` (the keys a proposal may name), and (`watchdog`) the last ten things the outer watchdog did, so the diagnosis can explain them ([WATCHDOG.md](WATCHDOG.md)); no check or action depends on it |
+| `GET ops/snapshot` | The checks above that have a verdict, `codes`, `signals` (a bounded summary of the maintainer's measurements: lane and container memory, oom kills, restarts, queue ages, refused claims, database, Redis, AI spend, the triage backlog), `tuning` (auto-tuning's mode and last five decisions, and `proposals`: what the AI may change now), `tuning_settings` (the keys a proposal may name), and (`watchdog`) the last ten things the outer watchdog did, so the diagnosis can explain them ([WATCHDOG.md](WATCHDOG.md)); no check or action depends on it |
 | `POST ops/report` | Diagnoses, requested actions and optional `tuning` proposals. The answer says what was run and, for each proposal, whether it was applied, recommended, refused or held |
 | `GET jobs/next?limit=N` | Up to N (at most 20) of the pipeline's queued AI jobs, each leased with a fresh lease token |
 | `POST jobs/<id>/result` | The answer to one job, or its failure category, with the lease token and the calls' token counts |
@@ -352,8 +393,10 @@ All routes are under `/api/v1/reviewer/` and need a `reviewer`-scope token. The 
 
 ## Later
 
-- Move the pipeline's remaining AI calls into the reviewer container the same way: validation planning, nuclei targeting, and the
-  connection test and model list of Settings > AI model. Then the server makes no model call at all.
+- Move the two requests of Settings > AI model into the reviewer container: the connection test (a fixed ping, `connection_test`, sent when
+  an administrator presses Test) and the model list the page reads to fill its drop-downs. They are not pipeline calls: no host data goes in
+  them, an administrator starts each one, and the page shows the answer at once, which a queued job cannot do. Then the server makes no model
+  call at all.
 
 ### The Nuclei model and its safety net
 
@@ -361,7 +404,7 @@ Some models (measured: `claude-sonnet-5-5` and `claude-opus-5-5`) answer the Nuc
 
 - **Default (empty).** The cheapest model of the provider whose id contains `haiku` and that the provider lists as available, found in the provider's model list each time it is read (cached for ten minutes), never a name written into the code or stored by an upgrade. Where the list has no haiku, or cannot be read, the model of **Everything else**. The drop-down names it ("Default: claude-haiku-5-5", or "Default: same as Everything else" when no haiku is listed).
 - **Your choice.** A model you pick is kept, and the save refuses a model the provider does not list. Changing the provider clears it (a model belongs to the provider it was chosen from). **Everything else** is never changed by this row. An existing install has no stored value and gets the default through code; there is no data migration.
-- **Safety net.** When a call on the Nuclei jobs ends in a refusal or an empty reply and the haiku default is a different model from the one used, the same request is retried **once** on the haiku default. Both calls are rows of the usage table under their stage ([AI-USAGE.md](AI-USAGE.md)), and the log gets one line: `refused by <model>, retried on <model>` (`empty response from ...` for an empty reply). A retry counts against `CVENGINE_NUCLEI_AI_MAX_PER_DAY`. Only if the retry also fails does the request back off for five minutes as before, and the scan carries on with the standard tags. A request is never retried more than once, and a request already on the haiku default is not retried.
+- **Safety net.** When a call on the Nuclei job ends in a refusal or an empty reply and the haiku default is a different model from the one used, the reviewer container asks the same request **once** more on the haiku default (`cvengine_reviewer.llm.complete`, from the job's options `model` and `haiku`). Both calls are rows of the usage table under their stage ([AI-USAGE.md](AI-USAGE.md)), and the container's log gets one line: `refused by <model>, asked once more on <model>` (`empty_response by ...` for an empty reply). A retry counts against `CVENGINE_NUCLEI_AI_MAX_PER_DAY`. Only if the retry also fails does the request back off for five minutes as before, and the scan carries on with the standard tags. A request is never retried more than once, and a request already on the haiku default is not retried.
 
 ## AI-written templates: validated by the system, never by a person
 
@@ -388,4 +431,17 @@ An install that scans only with its own Sentinels (no built-in scanner: `CVENGIN
 The scan path survey (`path_probe`) goes the same way: with no built-in scanner, the project's own Sentinels run it, and each Sentinel's measured path is kept as its own verdict (an OS guess from a Sentinel whose path loses the malformed probes is not believed). The install-wide verdict stays the built-in scanner's.
 
 
+**When the draft lands** (`templategen.job_answer`). A draft the deterministic gate refuses (the static check, then the allowlist every Sentinel applies, `cveFeed.check_allowlist`; both pure, so the same text always fails them the same way: a redirect key, a seventh request, a port of its own) is sent back to the AI **once**, with the reason and the refused draft fenced, when the day's template budget has room for that second request; the repair counts against `TEMPLATE_GEN_MAX_PER_DAY` and the second answer is the one that counts. A draft no Sentinel could check at that moment is kept as a draft in the `syntax` stage ("waiting: no Sentinel can run template checks ...") and the validator checks it again when one can; before, it was closed as `invalid` ("tried again later"), which threw the paid answer away and held the CVE for `TEMPLATE_GEN_CVE_DAYS` while nothing was tried again. Every rejection names its reason (`validation_reason`): a static-check rejection and a failed provider call wrote only the output before, and a tool's own warning line (nuclei's "WARNING: sonic/ast only supports ...", printed before anything else on newer Go releases) is never taken for the reason (`templategen.plain_reason`). The update step `revalidate_ai_drafts` does the same for the rows already stored ([UPGRADE.md](UPGRADE.md)).
+
 A failed gate marks the row `invalid` with a plain reason. A failure that can pass next time (an unreadable AI answer, a fixture that missed, a refused call) is retried up to three times, with 15 minute, 1 hour and 4 hour back-off, then rejected. A draft still pending after seven days (`CVENGINE_TEMPLATE_DRAFT_EXPIRY_DAYS`) is closed as `expired` with the reason "expired, not validated" and a line in the activity record, so the queue cannot grow without bound. The AI usage page shows how many checks passed, are being checked, and were rejected (with expired ones counted apart) and the most common plain reasons; both AI jobs appear under the `template_validation` stage with their cost and any refusal.
+
+### Reviewing, retiring and revising an AI-written template
+
+The gates above say whether a template is safe to run and agrees with a fixture; they cannot say that a hit shows the flaw. Two AI-written checks once "confirmed" CVE-2024-38475 and CVE-2023-25690 on a Red Hat httpd by reading the `Server` header's version, which Red Hat does not change when it backports a fix. Every AI-written template can therefore be read, judged and corrected over the [Agent API](AGENT-API.md#ai-written-templates) (`cveFeed/template_review.py`):
+
+- **Read.** `list_generated_templates` and `get_generated_template` show every row with its YAML, validation record, fixture, the static gate's verdict today, its evidence class (`version`: a hit only reads the version string again; `behavior`: it may show the flaw) and its revision chain. A template is per CVE and the same for every organization, so its text is shown to every member; the CVE matches it recorded are counted and listed only for hosts in the caller's own projects, and its per-host `test_results` only to an App Admin.
+- **Review report.** `review_generated_template` (reads only) re-runs the offline checks: the static gate, the evidence class, the template against its own fixture, the benign page and a 404 (`templatefixture`), and each confirmation it recorded on the caller's hosts read again from the response kept with it (`templategen.hit_evidence`, as `recheck_template_hits` reads it). It answers in plain findings: "decides on the version string only", "matches the benign page", "its only product marker is \"Apache\" ... it would run on, and match, any Apache server whose banner shows an affected version".
+- **Keep or retire** (`set_generated_template_verdict`, App Admin only, because a template runs against every organization's hosts). `keep` records the review. `retire` marks the row `invalid` with the reason, so `validation.approved_template` never hands it to a host again; a run that was already out when it was retired, or when a revision superseded it, has its result discarded (no confirmation, no finding, one activity line), and it reads again every confirmation it recorded, in every project: a hit whose kept response shows only the version string becomes `version_only`, as a version hit of the same check would be, and any other (no response kept, or one that shows more) is withdrawn to no template result, because the check that made it is no longer trusted. Either way the scanner finding it filed is closed automatically as a false positive with a note that says why (one a person changed is left alone) and the match's triage starts over. A match's remediation status is never touched. Its row keeps the record of what it installed, and promotion refuses any other text under an id that was installed before, so a template id always names one text.
+- **Revise** (App Admin only): `update_generated_template` never edits a template in place, because one template id must always mean one text (the same-check replacement of a confirmation relies on it). It saves a new draft row that supersedes the old one, with an id of its own (`<cve id>-r<n>`, written into the YAML for you; the template index finds the file for its CVE). YAML the static gate refuses is rejected at once with the gate's reason. The draft then takes exactly the lifecycle above (static gate, the scanner's syntax check and benign control on a Sentinel, the AI's fixture written from the CVE data alone, the second pass) and runs on no host before it is valid; while **Validate AI-written checks automatically** is off it waits as a draft. A fixture given with the revision (`{vulnerable, not_affected}`) is checked offline at once and again at the fixture step, on top of the AI's fixture and never instead of it: the AI's is the one written without seeing the template. When the revision becomes valid, the template it supersedes is retired as above by the system, and the revision is the template a CVE's test picks. A person's revision uses none of the daily AI template-writing budget.
+
+Every verdict and revision is kept as a `GeneratedTemplateReview` row (who, when, the verdict, the reason and what it did) and written to the audit log (`generated_template.keep`, `generated_template.retire`, `generated_template.revise`; a retirement by a valid revision has no user).

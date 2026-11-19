@@ -997,7 +997,7 @@ class SweepAndScheduleTests(TriageDbBase):
 		from django_celery_beat.models import PeriodicTask
 		rows = {t.name: t for t in PeriodicTask.objects.filter(name__in=['cvengine-triage-sweep', 'cvengine-validate-sweep'])}
 		self.assertEqual({n: t.task for n, t in rows.items()}, {'cvengine-triage-sweep': 'triage_sweep', 'cvengine-validate-sweep': 'validate_sweep'})
-		self.assertEqual(rows['cvengine-triage-sweep'].crontab.hour, '4')
+		self.assertEqual((rows['cvengine-triage-sweep'].crontab.hour, rows['cvengine-triage-sweep'].crontab.minute), ('*', '41'))  # hourly since 0172
 		self.assertEqual(rows['cvengine-triage-sweep'].queue, 'cve_feed_queue')
 
 	def test_the_sweep_is_per_project_and_claimed(self, _log):

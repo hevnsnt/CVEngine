@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from datetime import timedelta
 
 from django.core.cache import cache
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Avg, CharField, Count, DurationField, Exists, F, Q, Value
 from django.db.models.functions import Cast, Coalesce, Concat, Greatest
 from django.http import JsonResponse
@@ -40,6 +40,7 @@ from agentapi import probe_results
 from agentapi import sentinel_policy
 from agentapi import sentinel_settings
 from agentapi import sentinel_contract
+from agentapi import sentinel_machine
 from agentapi import sentinel_stream
 from agentapi import sentinel_autoupdate
 from agentapi import sentinel_tools
@@ -51,6 +52,7 @@ from agentapi.auth import SCOPE_SENTINEL, create_token
 from agentapi.models import SENTINEL_ACTIVE_STATUSES, Agent, SentinelEnrollment, SentinelTask
 from agentapi.services import ApiError, AssetFilter
 from dashboard.models import AuditLog
+from reNgine.state_machines import SENTINEL_TASK
 from tenancy import audit, roles
 
 logger = logging.getLogger(__name__)
@@ -65,7 +67,6 @@ CANDIDATES = broker.CANDIDATES
 INTERNAL_CAPABILITY = 'network:internal'  # declared by a Sentinel deployed inside a private network; the only kind that may claim work for an address of a declared internal range
 RATES = {'claim': broker.RATES['claim'], 'report': broker.RATES['report'], 'release': broker.RATES['release'],
          'heartbeat': broker.RATES['heartbeat'], 'register': broker.RATES['register'],
-         'policy': (60, 60), 'bundle': (12, 60),  # the template policy is a cheap read, the bundle a download of several MiB
          'secret': (6, 60),  # a stored credential is read once per signed-in task; more than a few a minute is a caller gone wrong, or guessing ids
          'partial': (240, 60),  # a streamed task posts a batch every few seconds while it runs (sentinel_stream.report_partial)
          'bootstrap': (30, 60),  # per client address, and the one call that needs no bearer token (``limit_address``): a throttle on what an unknown caller can make the server hash and query
@@ -98,7 +99,6 @@ UPDATE_HOLD = timedelta(minutes=30)  # a Sentinel that reported draining or upda
 RUN_GRACE = timedelta(minutes=10)  # heartbeats extend a running task's lease up to this long past the longest the dispatcher waits for its kind
 RUNNING_GRACE = timedelta(seconds=120)  # a task accepted more recently than this is not ended for missing from a heartbeat's ``running`` list (the Sentinel may not have started it yet)
 MAX_RUNNING_IDS = 100
-TEMPLATE_POLICY_PATH = '/api/v1/sentinel/template-policy'
 PREFER_DEFER_DEFAULT = 60  # seconds a task is held back from a Sentinel that does not prefer its kind while one that does is live and has room (CVENGINE_SENTINEL_PREFER_DEFER_SECONDS)
 BALANCE_DEFER_DEFAULT = 60  # seconds a task is held back from a Sentinel while a less loaded, eligible one has room for it (CVENGINE_SENTINEL_BALANCE_DEFER_SECONDS)
 BUILTIN_FALLBACK_DEFAULT = 120  # seconds a task waits for an external Sentinel before the built-in scanner may take it (CVENGINE_BUILTIN_FALLBACK_SECONDS)
@@ -226,35 +226,6 @@ def limit_address(address, action='bootstrap'):
     name = f'agentapi:{action}:addr:{address or "unknown"}'
     if not broker._hit(name, limit, window):
         raise ApiError(429, f'too many {action} calls from this address: at most {limit} per {window} seconds', retry_after_seconds=broker._window_left(name, window))
-
-
-def _template_bundle(ctx, action):
-    """The current approved template bundle, for a Sentinel's own token only (a person's full token answers 403: the bundle is the Sentinel's
-    copy of the server's template policy, not an API for people). A set that cannot be offered is a clear 503."""
-    from agentapi import template_bundle
-    if ctx.token is None or ctx.token.scope != SCOPE_SENTINEL:
-        raise ApiError(403, 'the template policy is for a Sentinel token only')
-    agent = _sentinel_agent(ctx, write=False)
-    _limit(agent.token, action)
-    try:
-        return template_bundle.current()
-    except template_bundle.BundleError as error:
-        raise ApiError(503, f'the approved Nuclei template bundle is not available: {error}')
-
-
-def template_policy(ctx):
-    """``GET sentinel/template-policy``: the template policy in force and the bundle of templates it approves."""
-    from agentapi import template_bundle
-    return template_bundle.policy(_template_bundle(ctx, 'policy'), TEMPLATE_POLICY_PATH + '/bundle')
-
-
-def template_bundle_response(ctx, if_none_match=None):
-    """``GET sentinel/template-policy/bundle``: the archive, streamed from disk, or a 304 when ``If-None-Match`` names it."""
-    from agentapi import template_bundle
-    try:
-        return template_bundle.response(_template_bundle(ctx, 'bundle'), if_none_match)
-    except template_bundle.BundleError as error:
-        raise ApiError(503, f'the approved Nuclei template bundle is not available: {error}')
 
 
 def _renew_token(token, now=None):
@@ -538,6 +509,8 @@ def effective_capabilities(agent, withheld=None, policy=None):
         caps -= set(failing_kinds(agent) if withheld is None else withheld)  # a kind it keeps failing is run here for a while instead (failing_kinds)
         reported = (agent.info or {}).get('contract_version')
         caps = {c for c in caps if c not in SentinelTask.KINDS or sentinel_contract.can_run(reported, c)}  # a kind its contract version predates is never sent
+        if not runs_template_index_version(reported):
+            caps -= set(TEMPLATE_INDEX_KINDS)  # before contract 11 it would wait for a template bundle this server no longer packs: never offered
         if caps & set(BUILTIN_KINDS) and not is_builtin(agent):
             from agentapi import ai_checks
             # older than the kind's external_since: never offered outside (route_probe_signed has none and is refused by ``builtin_only_kind``)
@@ -870,8 +843,10 @@ def task_hosts(task):
     raw += [p['host'] for p in target.get('probes') or [] if isinstance(p, dict) and isinstance(p.get('host'), str)]  # an http_probe batch
     raw += [n for n in target.get('names') or [] if isinstance(n, str)]  # a dns_resolve batch
     raw += [d for d in target.get('domains') or [] if isinstance(d, str)]  # a supplier_check batch
-    raw += [r['host'] for r in target.get('reads') or [] if isinstance(r, dict) and isinstance(r.get('host'), str)]  # a page_read batch
+    raw += [r['host'] for r in target.get('reads') or [] if isinstance(r, dict) and isinstance(r.get('host'), str)]  # a page_read, version_read, version_digest or version_rows batch
     raw += [t['address'] for t in target.get('targets') or [] if isinstance(t, dict) and isinstance(t.get('address'), str)]  # an ssh_probe batch: the address of each endpoint
+    raw += [w['host'] for w in target.get('web') or [] if isinstance(w, dict) and isinstance(w.get('host'), str)]  # a java_runtime batch: its web hosts
+    raw += [j['address'] for j in target.get('jdwp') or [] if isinstance(j, dict) and isinstance(j.get('address'), str)]  # and its JDWP endpoints
     raw += [q.get('name') for q in target.get('dns') or [] if isinstance(q, dict)]  # an identity_check batch: the names and addresses asked about
     raw += [q.get('host') for q in target.get('certs') or [] if isinstance(q, dict)]
     for check in target.get('checks') or []:  # an alive_check batch: the old name and its last known address
@@ -928,11 +903,16 @@ class SentinelEff:
         self.caps = caps
         self.denied = {k for k, p in self.policy.items() if p['mode'] == 'deny'}  # kinds the policy refuses here, whether or not the Sentinel declares them
         self.kind_caps = {k: p['cap'] for k, p in self.policy.items() if p['cap']}  # per-kind concurrency caps
+        if agent.kind == 'scanner':  # the per-kind slots auto-tuning chose for this Sentinel, for the kinds no administrator capped (sentinel_machine)
+            self.kind_caps.update(sentinel_machine.tuned_kind_caps(agent, self.policy))
         self.preferred = {k for k, p in self.policy.items() if p['mode'] == 'prefer'}
         self.projects = scope_lib.project_slugs_in_scope(token.user, agent.scope or {}, limits.get('projects')) if not self.problem else set()
         patterns = (agent.scope or {}).get('hosts') or []
         self.hosts = AssetFilter(patterns) if patterns else None
         self.max_concurrent = min(agent.max_concurrent, limits.get('max_concurrent') or broker.MAX_CONCURRENT_CAP)
+        tuned = sentinel_machine.tuned_slots(agent) if agent.kind == 'scanner' else None
+        if tuned:  # auto-tuning's number for this Sentinel holds from the next claim, before the client registers it (never above its own setting, never over a pin)
+            self.max_concurrent = min(self.max_concurrent, tuned)
         self._internal_nets = {}
 
     @property
@@ -947,6 +927,12 @@ class SentinelEff:
         """Whether this Sentinel says (``info.features``) that it leaves checks that send credentials out of its nuclei web runs. An older one does not, and its web
         pass would run default-login and brute-force templates whatever this server says: it is not given such work while they are off."""
         return CREDENTIAL_FEATURE in ((self.agent.info or {}).get('features') or [])
+
+    @property
+    def network_detection(self):
+        """Whether this Sentinel runs the network detection pass (a ``nuclei_light`` task's ``network_detection``): it declared contract
+        ``NUCLEI_DETECTION_SINCE`` or later. An older one ignores the field and its light pass checks nothing on the ports, so it is never given such a task."""
+        return runs_network_detection(self.agent)
 
     @property
     def reads_secrets(self):
@@ -1000,6 +986,10 @@ class SentinelEff:
             return 'capability', INTERNAL_CAPABILITY  # a Sentinel outside the network cannot reach it and would report an empty result as clean
         if credential_work(task.kind) and not self.credential_filter:
             return 'capability', CREDENTIAL_FILTER  # an older client would run default-login and brute-force templates while credential checks are off
+        if network_detection_task(task) and not self.network_detection:
+            return 'capability', NETWORK_DETECTION  # an older client would ignore the field and check nothing on the ports (contract 10)
+        if installed_check_task(task) and not runs_template_index(self.agent):
+            return 'capability', TEMPLATE_INDEX  # an older client cannot read an installed template by path (contract 11)
         return None
 
     def _in_hosts(self, task):
@@ -1023,6 +1013,52 @@ class SentinelEff:
 
 def effective(agent, now=None):
     return SentinelEff(agent, now or timezone.now())
+
+
+NETWORK_DETECTION = 'too old to run the network detection pass (contract 10)'  # the refusal reason of such a task offered to an older Sentinel
+# The kinds that run nuclei templates from the template index (contract 11, ``cvengine_scanner.flags.TEMPLATE_INDEX_SINCE``): the server keeps no copy of the
+# templates, so a Sentinel builds the approved set from its own baked templates and its library's index. An older one waited for a server bundle that no
+# longer exists, so it is never credited with these kinds (``effective_capabilities``); a ``nuclei_validate`` test that names an installed template by
+# ``template_path`` is refused to it (``SentinelEff.refusal``), and the stage waits (``ScannerUnavailable``) while no live Sentinel is new enough.
+TEMPLATE_INDEX_KINDS = ('nuclei_light', 'nuclei_targeted', 'nuclei_deep')
+TEMPLATE_INDEX = 'too old to run nuclei templates from the template index (contract 11)'
+
+
+def runs_template_index_version(reported):
+    """Whether a Sentinel that declared contract version ``reported`` builds its approved template set from the template index (contract 11 or later)."""
+    from cvengine_scanner import flags as scan_flags
+    return isinstance(reported, int) and not isinstance(reported, bool) and reported >= scan_flags.TEMPLATE_INDEX_SINCE
+
+
+def runs_template_index(agent):
+    return runs_template_index_version((agent.info or {}).get('contract_version') if isinstance(agent.info, dict) else None)
+
+
+def installed_check_task(task):
+    """Whether ``task`` is a ``nuclei_validate`` test of an installed template named by ``template_path`` (contract 11)."""
+    return task.kind == AI_CHECK and isinstance(task.target, dict) and task.target.get('template_path') is not None
+
+
+def installed_check_scanner(project, now=None):
+    """Whether a live Sentinel that may take ``nuclei_validate`` for ``project`` runs installed templates from the template index (contract 11)."""
+    return any(runs_template_index(e.agent) and e.live for e in eligible_sentinels(project, AI_CHECK, now=now, live_only=True))
+
+
+def runs_network_detection(agent):
+    """Whether ``agent`` declared a contract version (``info.contract_version``) that runs the network detection pass (``flags.NUCLEI_DETECTION_SINCE``)."""
+    from cvengine_scanner import flags as scan_flags
+    reported = (agent.info or {}).get('contract_version') if isinstance(agent.info, dict) else None
+    return isinstance(reported, int) and not isinstance(reported, bool) and reported >= scan_flags.NUCLEI_DETECTION_SINCE
+
+
+def network_detection_task(task):
+    """Whether ``task`` is the network detection pass: a ``nuclei_light`` task whose target carries ``network_detection: true`` (``cveFeed.network_detection``)."""
+    return task.kind == 'nuclei_light' and isinstance(task.target, dict) and task.target.get('network_detection') is True
+
+
+def network_detection_scanner(project, internal=False, now=None):
+    """Whether a live, eligible Sentinel that covers ``project`` and takes ``nuclei_light`` runs the network detection pass: the stage sends nothing otherwise."""
+    return any(e.network_detection and e.live for e in eligible_sentinels(project, 'nuclei_light', now=now, internal=internal, live_only=True))
 
 
 CREDENTIAL_FEATURE = 'credential_filter'  # ``info.features`` entry of a client that leaves checks that send credentials out of a nuclei web run (sentinel_settings.FEATURES)
@@ -1301,6 +1337,9 @@ def _explain(kind, agents, live, internal=False, only=None, load=None, builtin_o
         elif kind not in e.caps and not sentinel_contract.can_run((a.info or {}).get('contract_version'), kind):
             reasons.add('outdated')
             clauses.append(f'{a.name} has it but its client is too old to run {word}')
+        elif kind in TEMPLATE_INDEX_KINDS and kind not in e.caps and not runs_template_index(a):
+            reasons.add('outdated')
+            clauses.append(f'{a.name} has it but is too old to build its nuclei template set from the template index (contract 11): update it; its {word} work waits until then')
         elif credential_work(kind) and kind in e.caps and not e.credential_filter:
             reasons.add('outdated')
             clauses.append(f'{a.name} is too old to leave out checks that send credentials: update it; its {word} work waits until then')
@@ -1696,6 +1735,15 @@ def _scrubbed(task):
     return {'target': {**target, 'token': '***'}} if task.kind in ('wpscan', 'wpscan_thorough') and target.get('token') not in (None, '', '***') else {}
 
 
+def _move_task(queryset, status, only_from=None, target=None, **fields):
+    """``SENTINEL_TASK.move`` for a task row, with the scrubbed ``target`` of ``_scrubbed`` written once the move is made (``Machine.move`` names its
+    own argument ``target``). Returns how many rows moved."""
+    moved = SENTINEL_TASK.move(queryset, status, only_from=only_from, **fields)
+    if moved and target is not None:
+        queryset.update(target=target)
+    return moved
+
+
 def scrub_values(task_id):
     """Drop the secret values (and the context a scanner cut around them) from the stored result of a ``secrets_scan`` or ``route_probe`` task once its
     findings are filed in the inventory (``cveFeed.secrets_inventory``, which fingerprints and masks them there). A result is stored as the scanner sent
@@ -1742,8 +1790,8 @@ def _end_as_expired(task, reason, now):
     # the agent is cleared (nothing may treat the task as still held), but who held it stays in the result: the administrator alert judges each Sentinel
     # on its own tasks, and a Sentinel whose tasks all expire must be named
     result = {**(task.result if isinstance(task.result, dict) else {}), EXPIRED_AGENT: task.agent_id} if task.agent_id else task.result
-    won = SentinelTask._base_manager.filter(pk=task.pk, status__in=SENTINEL_ACTIVE_STATUSES).update(
-        status='expired', agent=None, lease_expires_at=None, error=reason[:300], finished_at=now, result=result, **_scrubbed(task))
+    won = _move_task(SentinelTask._base_manager.filter(pk=task.pk), 'expired', agent=None, lease_expires_at=None, error=reason[:300], finished_at=now,
+                             result=result, **({'last_holder': task.agent_id} if task.agent_id else {}), **_scrubbed(task))
     if won:
         _ended(task, task.agent_id)
     return bool(won)
@@ -1772,26 +1820,67 @@ def _ended(task, agent_id=None):
     stage_runs.task_ended(task)
 
 
+QUEUED_EXPIRED = 'no Sentinel took the task while it waited in the queue'
+
+
 def reap_expired(now=None):
     """Return every SentinelTask whose lease ran out to 'expired' (never retried locally by the broker: the dispatcher that
     created it already fell back to running the tool itself once its own wait timed out, so there is nothing left to
     queue). Also a task that has waited in the queue longer than ``queued_ttl`` for its kind: a task has no lease until it is claimed, and the
     dispatcher that normally expires it is gone when its worker died, so without this an orphan would stay claimable, and counted as waiting
-    work, for ever. Called by every broker entry point, like ``agent_broker.reap_expired``."""
+    work, for ever. Called by every broker entry point, like ``agent_broker.reap_expired`` (a report for a lease that lapsed a moment ago must
+    find it expired), so it is kept cheap: with nothing to reap it is two index reads, and a queued task nobody held is ended with the others of
+    its sweep in one statement; only a task a Sentinel held is ended on its own row (its result keeps who held it, ``EXPIRED_AGENT``)."""
     now = now or timezone.now()
     if _in_update_grace(now):  # an update is running (or has just ended): Sentinels were talking to a server that was down, nothing is judged lost yet
         return 0
-    stale = (Q(status='queued', kind='openvas', created_at__lt=now - queued_ttl('openvas'))
-             | (Q(status='queued', created_at__lt=now - queued_ttl('nmap')) & ~Q(kind='openvas')))
-    expired = SentinelTask._base_manager.filter(Q(status__in=SENTINEL_ACTIVE_STATUSES, lease_expires_at__lt=now) | stale).select_related('project')[:CANDIDATES]
+    # two selects, each served by its own index (the lease index, and the partial index of the queued rows by age): one select with an OR of both read
+    # the whole table whenever there was nothing to reap
+    expired = list(SentinelTask._base_manager.filter(status__in=SENTINEL_ACTIVE_STATUSES, lease_expires_at__lt=now).select_related('project').order_by()[:CANDIDATES])
+    if len(expired) < CANDIDATES:
+        stale = Q(kind='openvas', created_at__lt=now - queued_ttl('openvas')) | (Q(created_at__lt=now - queued_ttl('nmap')) & ~Q(kind='openvas'))
+        newest = now - min(queued_ttl('openvas'), queued_ttl('nmap'))
+        seen = {t.pk for t in expired}
+        expired += [t for t in SentinelTask._base_manager.filter(stale, status='queued', created_at__lt=newest).select_related('project').order_by()[:CANDIDATES - len(expired)]
+                    if t.pk not in seen]
     ended = {}  # org id -> [(task, reason)]
-    for task in list(expired):
-        reason = 'the lease expired without a report' if task.status != 'queued' else 'no Sentinel took the task while it waited in the queue'
+    unheld = []  # queued tasks nobody held, with nothing to scrub: ended together
+    for task in expired:
+        if task.status == 'queued' and not task.agent_id and not _scrubbed(task):
+            unheld.append(task)
+            continue
+        reason = 'the lease expired without a report' if task.status != 'queued' else QUEUED_EXPIRED
         if _end_as_expired(task, reason, now):
             ended.setdefault(task.project.org_id, []).append((task, reason))
+    won = _expire_unheld([t.pk for t in unheld], QUEUED_EXPIRED, now)
+    batch = [t for t in unheld if t.pk in won]
+    for task in batch:
+        ended.setdefault(task.project.org_id, []).append((task, QUEUED_EXPIRED))
+    _ended_many(batch)
     _audit_sweep(ended)
     scrub_stale_values(now)
     return sum(len(v) for v in ended.values())
+
+
+def _expire_unheld(ids, reason, now):
+    """End the queued tasks ``ids`` that are still queued and held by nobody, in one statement: what ``_end_as_expired`` writes for such a task (no
+    agent to clear or remember, no target to scrub). Returns the set of ids this call ended; a task claimed or ended meanwhile is left alone."""
+    if not ids or 'queued' not in SENTINEL_TASK.sources('expired'):  # the move the state machine allows, as ``_move_task`` asks it
+        return set()
+    table = SentinelTask._meta.db_table
+    with connection.cursor() as cursor:
+        cursor.execute(f'UPDATE "{table}" SET "status" = %s, "lease_expires_at" = NULL, "error" = %s, "finished_at" = %s '
+                       f'WHERE "id" = ANY(%s) AND "status" = %s AND "agent_id" IS NULL RETURNING "id"', ['expired', reason[:300], now, list(ids), 'queued'])
+        return {row[0] for row in cursor.fetchall()}
+
+
+def _ended_many(tasks):
+    """``_ended`` for tasks nobody held: one wake-up push for all of them and one look for the stage runs that wait on any of them."""
+    if not tasks:
+        return
+    from agentapi import sentinel_notify, stage_runs
+    sentinel_notify.wake_tasks([t.pk for t in tasks])
+    stage_runs.tasks_ended(tasks)
 
 
 STALE_VALUES_AFTER = timedelta(minutes=10)  # a finished secrets_scan or route_probe result keeps its secret values this long at most
@@ -1913,9 +2002,13 @@ def _claimable(eff, kinds, now):
         # the poll of a Sentinel that never asks for these kinds costs nothing more)
         from dashboard.models import ScanPolicy
         queued = queued.filter(~Q(kind__in=CREDENTIAL_KINDS) | Exists(ScanPolicy.objects.filter(allow_credential_checks=True)))
+    if not eff.network_detection:  # the network detection pass goes only to a Sentinel that runs it (contract 10); an older one would check nothing
+        # (has_key first: a key lookup on a target without the key is NULL in SQL, and an exclude over it would drop every ordinary light task too)
+        queued = queued.filter(~Q(kind='nuclei_light') | ~Q(target__has_key='network_detection') | Q(target__network_detection=False))
     queued = eff.secret_filter(queued)  # a task that needs a stored credential goes only to a built-in scanner image that reads one; a discovery's keys also to a Sentinel the gate allows
     if not eff.builtin:
         queued = queued.exclude(VALIDATING_Q)  # a task that validates found secrets is never offered to any Sentinel but the built-in one
+    queued = queued.exclude(avoid_agent=eff.agent.pk)  # a confirming lookup is never offered to the Sentinel whose answer it checks (agentapi.dns_crosscheck)
     return queued.select_related('project__org').order_by('-priority', 'created_at', 'id')
 
 
@@ -1976,6 +2069,8 @@ def _can_take(other, held_pair, task, now):
     held, by_kind = held_pair
     if other.problem or not other.live or task.kind not in other.caps or other.refusal(task) is not None or _updating(other.agent, now):
         return False
+    if task.avoid_agent is not None and task.avoid_agent == other.agent.pk:
+        return False  # a confirming lookup (agentapi.dns_crosscheck): never the Sentinel whose answer it checks
     if held.get(other.agent.pk, 0) >= other.max_concurrent:
         return False
     if task.kind == 'openvas' and by_kind.get((other.agent.pk, 'openvas'), 0) >= 1:
@@ -2072,14 +2167,16 @@ def _claim(agent, kinds, now):
     _hint.wake, _hint.other = None, False
     eff = effective(agent, now)
     if eff.problem:
-        raise ApiError(403, f'no work can be assigned: {eff.problem}')
+        raise broker.blocked(eff.problem)
     if _updating(agent, now):
         return None, 'the Sentinel is updating itself and takes no new work'
     from cveFeed import scan_control
     if scan_control.update_hold():  # cvENGINE is updating: the queues wait, the Sentinels keep what they hold and hand it over afterwards
         return None, 'cvENGINE is updating and hands out no new work'
     with transaction.atomic():
-        Agent.objects.select_for_update().get(pk=agent.pk)
+        status = Agent.objects.select_for_update().values_list('status', flat=True).get(pk=agent.pk)
+        if status != 'active':  # suspended or revoked after the check above: re-read under the lock, so the check holds for this claim
+            raise broker.blocked(f'the agent is {status}')
         held_by_kind = _holders([agent.pk])[1]
         held = sum(n for (_, _kind), n in held_by_kind.items())
         if held >= eff.max_concurrent:
@@ -2100,6 +2197,8 @@ def _claim(agent, kinds, now):
                 continue  # the built-in scanner's while it is in use
             if credential_work(task.kind) and not eff.credential_filter:
                 continue  # (the query already left it out; this is the same rule where the task is actually taken)
+            if network_detection_task(task) and not eff.network_detection:
+                continue  # (the query already left it out) an older client would ignore the field: left for one that runs the pass
             if task.kind == AI_CHECK and not eff.builtin:
                 from agentapi import ai_checks
                 why = ai_checks.task_problem(task, builtin=False)
@@ -2149,7 +2248,7 @@ def _claim(agent, kinds, now):
                     expire(task, reason=f'cancelled: {refusal}')
                 continue
             won = SentinelTask.objects.filter(pk=task.pk, status='queued').update(
-                status='claimed', agent=agent, attempts=task.attempts + 1, claimed_at=now, lease_expires_at=now + OFFER_LEASE, error='')
+                status='claimed', agent=agent, last_holder=agent.pk, attempts=task.attempts + 1, claimed_at=now, lease_expires_at=now + OFFER_LEASE, error='')
             if won:
                 task.refresh_from_db()
                 from agentapi import sentinel_notify
@@ -2192,7 +2291,7 @@ def next_task(ctx, body=None):
             _await_work(agent, why, max(0.0, deadline - time.monotonic()))
             agent.refresh_from_db()
             if agent.status != 'active':
-                raise ApiError(403, f'no work can be assigned: the agent is {agent.status}')
+                raise broker.blocked(f'the agent is {agent.status}')
     if not claimed:
         return {'task': None, 'reason': why, 'retry_after_seconds': 5 if wait == 0 or held else 1}
     return {'task': task_payload(claimed), 'reason': ''}
@@ -2418,9 +2517,10 @@ def read_secret(ctx, task_id):
                                       status__in=SECRET_ACTIVE).update(secret_read_at=now)
     if not won:
         refuse(409, 'already read, or no longer held by this Sentinel', 'the stored credential was already read for this task')
+    withheld = []
     try:
         if keys_project is not None:
-            config = sentinel_stream.keys_payload(task)
+            config, withheld = sentinel_stream.keys_payload(task, agent)  # only the levels its enrolling user administers, only the modules its mode runs
             body = {'bbot_config': config} if config else None
         else:
             credential = _credential_payload(credential_id, task.project_id, now)
@@ -2428,6 +2528,11 @@ def read_secret(ctx, task_id):
     except Exception as exc:  # noqa: BLE001 - nothing of the credential may reach a log or a message: the type is all that is kept
         body = None
         logger.error('could not read the stored credential for sentinel task %s (%s)', task.pk, type(exc).__name__)
+    if withheld:  # keys stored at a level this Sentinel's enrolling user does not administer: held back, and said so (levels only, never a value)
+        audit.record(ctx.user, 'sentinel.discovery_keys.withheld',
+                     f'discovery keys stored at the {" and ".join(withheld)} level withheld from {agent.name} for {task.project.name} '
+                     '(its enrolling user does not administer them)',
+                     org=seen['org'], task_id=task.pk, agent_id=agent.pk, project_id=task.project_id, levels=withheld)
     if body is None:
         refuse(410, 'the stored credential could not be read', 'the stored credential is not available for this task')
     _secret_audit(ctx, 'granted', task.pk, agent_id=agent.pk, ref=task.secret_ref, org=seen['org'])
@@ -2435,7 +2540,7 @@ def read_secret(ctx, task_id):
         providers = sentinel_stream.provider_names(body.get('bbot_config'))
         audit.record(ctx.user, 'sentinel.discovery_keys.delivered',
                      f'discovery keys delivered to {agent.name} for {task.project.name} (providers: {", ".join(providers) or "none"})',
-                     org=seen['org'], task_id=task.pk, agent_id=agent.pk, project_id=task.project_id, providers=providers)
+                     org=seen['org'], task_id=task.pk, agent_id=agent.pk, project_id=task.project_id, providers=providers, withheld_levels=withheld)
     response = JsonResponse({**body, 'task_id': task.pk})
     response['Cache-Control'] = 'no-store'
     response['Pragma'] = 'no-cache'
@@ -2457,7 +2562,10 @@ def _clip(value, key):
 
 _SCRIPT_ID = re.compile(r'[a-z0-9][a-z0-9._-]{0,63}')
 MAX_SCRIPTS, MAX_SCRIPT_TEXT, MAX_SCRIPT_TOTAL = 24, 4000, 16000
-MAX_BANNER, MAX_CPES = 1024, 8
+# a banner: the banner script's text (1024 on the Sentinel), or nmap's escaped service fingerprint of a service it could not name (4096: decoded by
+# cveFeed.servicefp); the scripts a version scan ran on its own, kept apart from the reviewed ones as text only read for search
+MAX_BANNER, MAX_CPES = 4096, 8
+MAX_VERSION_SCRIPTS, MAX_VERSION_SCRIPT_TEXT, MAX_VERSION_SCRIPT_TOTAL = 8, 2000, 8000
 _PORT_TEXT = {'service_extra': 200, 'ostype': 40, 'hostname': 255, 'devicetype': 64}  # a service's own words, one line, clipped (contract 5)
 _TLS_TEXT = {'subject': 300, 'issuer': 300, 'not_before': 40, 'not_after': 40, 'key_type': 20, 'key_bits': 10, 'signature': 60}
 _TLS_DIGESTS = {'fingerprint_sha1': 40, 'fingerprint_sha256': 64, 'fingerprint_md5': 32}
@@ -2487,6 +2595,22 @@ def _clean_scripts(value):
             text = _block_text(text, MAX_SCRIPT_TEXT)[:MAX_SCRIPT_TOTAL - total]
             out[sid] = text
             total += len(text)
+    return out
+
+
+def _clean_version_scripts(value):
+    """``{script id: output}`` of the scripts a version scan ran on its own (never one of the reviewed scripts, which ``_clean_scripts`` keeps):
+    at most ``MAX_VERSION_SCRIPTS`` ids of the plain shape, ``MAX_VERSION_SCRIPT_TEXT`` characters each and ``MAX_VERSION_SCRIPT_TOTAL`` in all."""
+    from cvengine_scanner.flags import NSE_SCRIPT_SET
+    out, total = {}, 0
+    for sid, text in (value.items() if isinstance(value, dict) else ()):
+        if len(out) >= MAX_VERSION_SCRIPTS or total >= MAX_VERSION_SCRIPT_TOTAL:
+            break
+        if isinstance(sid, str) and _SCRIPT_ID.fullmatch(sid) and sid not in NSE_SCRIPT_SET and isinstance(text, str):
+            text = _block_text(text, MAX_VERSION_SCRIPT_TEXT)[:MAX_VERSION_SCRIPT_TOTAL - total]
+            if text.strip():
+                out[sid] = text
+                total += len(text)
     return out
 
 
@@ -2541,6 +2665,9 @@ def _clean_ports(ports, cuts=None, target=None):
         scripts = _clean_scripts(item.get('scripts'))
         if scripts:
             row['scripts'] = scripts
+        version_scripts = _clean_version_scripts(item.get('version_scripts'))
+        if version_scripts:
+            row['version_scripts'] = version_scripts
         tls = _clean_tls(item.get('tls'))
         if tls:
             row['tls'] = tls
@@ -2735,10 +2862,15 @@ def _clean_testssl_result(body):
     return cleaned
 
 
-MAX_NMAP_UDP_XML = 4 * 1024 * 1024  # a one-address, curated-port-list -sU report; generous, still far below a DoS-sized payload
+# A one-address -sU report of the curated port list (cveFeed.udp_scan.DEFAULT_PORTS, 18 ports, at most udp_scan.MAX_PORTS = 64) with its six
+# scripts: a real one is about 5 KB (tests/fixtures/sentinel_lab/nmap_udp.json), so 512 KiB is a hundred times that and more than 64 ports of
+# 8 KB of script output each. It was 4 MiB, the full TCP report's cap, which only gave a hostile report more room (security review, MEDIUM 1).
+# The contract (cvengine_scanner) still says 4 MiB: tests.test_sentinel_contract holds this cap at or below it until the Sentinel lowers it too.
+MAX_NMAP_UDP_XML = 512 * 1024
+MAX_NMAP_REPORT_XML = 4 * 1024 * 1024  # an nmap_full or nmap_verify report: every TCP port of one address can be open
 
 
-def _clean_nmap_udp_result(body):
+def _clean_nmap_udp_result(body, limit=MAX_NMAP_UDP_XML):
     """A Sentinel's ``nmap -sU`` report, kept as raw XML text rather than pre-parsed: UDP's own state vocabulary
     (``open|filtered``, extraports summarisation, the NSE scripts ``cveFeed.udp_scan.identify`` reads) is read correctly
     only by the scanner library's ``parse_xml`` (``cveFeed.port_inventory.parse_xml``) - so the
@@ -2748,8 +2880,8 @@ def _clean_nmap_udp_result(body):
     xml = body.get('xml')
     if not isinstance(xml, str) or not xml.strip():
         raise ApiError(400, 'xml must be a non-empty string')
-    if len(xml) > MAX_NMAP_UDP_XML:
-        raise ApiError(400, f'xml must be at most {MAX_NMAP_UDP_XML} characters')
+    if len(xml) > limit:
+        raise ApiError(400, f'xml must be at most {limit} characters')
     return {'xml': xml}
 
 
@@ -2877,8 +3009,8 @@ def _clean_waf_result(body):
 
 def _clean_nmap_report(body):
     """An ``nmap_full`` or ``nmap_verify`` report: raw XML like the ``nmap_udp`` one, for the same reason (``cveFeed.port_inventory.parse_xml``, hardened
-    against a custom ENTITY declaration, is the one reader of such a report). Only the size is bounded here."""
-    return _clean_nmap_udp_result(body)
+    against a custom ENTITY declaration, is the one reader of such a report). Only the size is bounded here (``MAX_NMAP_REPORT_XML``)."""
+    return _clean_nmap_udp_result(body, MAX_NMAP_REPORT_XML)
 
 
 MAX_NODE2SHELL_EVIDENCE = 2048  # matches the vendored detector's EVIDENCE_LIMIT and what cveFeed.node2shell_scan keeps of a response
@@ -3011,7 +3143,9 @@ def _clean_nuclei_validate_result(body):
                 item['error'] = _text(row['error'], 300)
             kept.append(item)
         out['outcomes'] = kept
-    if not set(out) - {'template_sha256'}:
+    if isinstance(body.get('template'), str) and 0 < len(body['template']) <= 200_000:
+        out['template'] = body['template']  # contract 11: the installed template a test named by path, as the Sentinel read and ran it (``ai_checks.result_problem`` holds it to the hash)
+    if not set(out) - {'template_sha256', 'template'}:
         raise ApiError(400, 'a nuclei_validate result carries valid (validate) or outcomes (test)')
     return out
 
@@ -3038,7 +3172,9 @@ _CLEANERS = {'nmap': _clean_nmap_result, 'naabu': _clean_naabu_result, 'nuclei_l
              'supplier_check': probe_results.clean_supplier_check, 'route_probe': probe_results.clean_route_probe, 'route_probe_signed': probe_results.clean_route_probe_signed, 'page_read': probe_results.clean_page_read,
              'hygiene_check': probe_results.clean_hygiene_check, 'dangling_dns_check': probe_results.clean_dangling_dns_check,
              'identity_check': probe_results.clean_identity_check, 'web_screenshot': web_screenshot_results.clean,
-             'ssh_probe': probe_results.clean_ssh_probe}
+             'ssh_probe': probe_results.clean_ssh_probe, 'java_runtime': probe_results.clean_java_runtime,
+             'version_read': probe_results.clean_version_read, 'version_digest': probe_results.clean_version_digest,
+             'version_rows': probe_results.clean_version_rows}
 
 
 def _bind_to_task(kind, result, task):
@@ -3049,7 +3185,7 @@ def _bind_to_task(kind, result, task):
         from cveFeed.secrets_scan import clean_result as clean_secrets
         return {'outcome': 'done', **clean_secrets(result, task.target)}
     if task is not None and kind in ('http_probe', 'dns_resolve', 'alive_check', 'bucket_check', 'supplier_check', 'vhost_probe', 'subdir_probe', 'hygiene_check',
-                                       'dangling_dns_check', 'route_probe', 'route_probe_signed', 'identity_check', 'page_read', 'ssh_probe'):
+                                       'dangling_dns_check', 'route_probe', 'route_probe_signed', 'identity_check', 'page_read', 'ssh_probe', 'java_runtime', 'version_read', 'version_digest', 'version_rows'):
         return probe_results.bind(kind, result, task)
     if task is not None and kind == 'web_screenshot':
         return web_screenshot_results.bind(result, task)
@@ -3115,6 +3251,11 @@ def _held_to_its_host(outcome):
     return outcome
 
 
+def _service_features(items):
+    from cvengine_scanner.features import clean_features
+    return clean_features(items)
+
+
 def clean_result(kind, body, task=None):
     """The typed, clipped result of a SentinelTask from a Sentinel's report, shaped for ``kind`` and validated against a
     strict schema: anything unexpected is dropped, every string is clipped and every list capped, before it is ever
@@ -3133,7 +3274,13 @@ def clean_result(kind, body, task=None):
     try:
         # evidence a probe copied from the host (a header, a script URL, a banner) can hold a NUL or a lone surrogate: Postgres refuses both, so the
         # whole result would never be stored (agentapi/storage_safe.py)
-        return storage_safe.clean(_bind_to_task(kind, {'outcome': 'done', **cleaner(body)}, task))
+        cleaned = {'outcome': 'done', **cleaner(body)}
+        # what the Sentinel read about features of the services (HTTP/2 ...): optional on every kind, validated by the shared vocabulary
+        # (cvengine_scanner.features.clean_features) and stored by the kind's ingest through cveFeed.service_features.ingest
+        features = _service_features(body.get('service_features'))
+        if features:
+            cleaned['service_features'] = features
+        return storage_safe.clean(_bind_to_task(kind, cleaned, task))
     except ApiError:
         raise
     except (TypeError, ValueError, KeyError):
@@ -3171,14 +3318,27 @@ def explain_error(text):
 
 
 def _held_before(task, agent):
-    """Whether ``agent`` held ``task`` before it ended. ``expire`` clears the task's agent, so the claim's audit row is the only record of who it was."""
+    """Whether ``agent`` held ``task`` before it ended. ``expire`` clears the task's agent; the claim (and the expiry) keep it in ``last_holder``. A task
+    claimed before that column existed has none, and its claim's audit row is asked instead."""
+    if task.last_holder is not None:
+        return task.last_holder == agent.pk
+    if task.claimed_at is None:
+        return False  # never claimed: nobody held it
     return AuditLog.objects.filter(action='sentinel.task.claim', detail__task_id=task.pk, detail__agent_id=agent.pk).exists()
+
+
+def _late_recorded(task):
+    """Whether a late report of ``task`` was already recorded (``_record_late``): ``late_reported_at``, or for a task claimed before that column existed
+    (no ``last_holder``), its audit row."""
+    if task.late_reported_at is not None:
+        return True
+    return task.last_holder is None and task.claimed_at is not None and AuditLog.objects.filter(action='sentinel.task.late', detail__task_id=task.pk).exists()
 
 
 def _record_late(ctx, agent, task):
     """A Sentinel reported a task whose stage had already stopped waiting: the result is discarded (the stage ran it here or left the targets due),
     but it is said, once per task however often the Sentinel retries: an audit row, and an activity line next to the stage's own."""
-    if AuditLog.objects.filter(action='sentinel.task.late', detail__task_id=task.pk).exists():
+    if _late_recorded(task) or not SentinelTask._base_manager.filter(pk=task.pk, late_reported_at__isnull=True).update(late_reported_at=timezone.now()):
         return
     from agentapi import sentinel_dispatch
     from cveFeed import activity
@@ -3207,7 +3367,7 @@ def report_result(ctx, task_id, body):
             raise ApiError(404, 'task not found')
         from agentapi import sentinel_adopt
         from cveFeed import scan_control
-        if late and not AuditLog.objects.filter(action='sentinel.task.late', detail__task_id=task.pk).exists() and sentinel_adopt.orphaned(task, now):
+        if late and not _late_recorded(task) and sentinel_adopt.orphaned(task, now):
             # an update (or a restart) ended the stage that waited for this task, and this Sentinel did hold it: its result is filed, not discarded
             late_adopted = _adopt_late(ctx, agent, task, body, now)
             if late_adopted is not None:
@@ -3235,19 +3395,22 @@ def report_result(ctx, task_id, body):
                          agent_id=agent.pk, agent=agent.name, outcome='dropped', reason=str(dropped))
         elif rejected is None:
             status = 'failed' if result['outcome'] == 'error' else 'done'
-            SentinelTask.objects.filter(pk=task.pk).update(status=status, result=result, finished_at=now, lease_expires_at=None,
-                                                            error=explain_error(result.get('error', '')) if status == 'failed' else '', **_scrubbed(task))
+            if not _move_task(SentinelTask.objects.filter(pk=task.pk), status, only_from=('claimed', 'running'), result=result, finished_at=now,
+                                      lease_expires_at=None, error=explain_error(result.get('error', '')) if status == 'failed' else '', **_scrubbed(task)):
+                return _ended_meanwhile(ctx, agent, task)
             audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
                          agent_id=agent.pk, agent=agent.name, outcome=result['outcome'])
             _note_cuts(task, agent, result)
+            _file_dns_answers(task, agent, result, status)
             if status == 'done' and sentinel_adopt.orphaned(task, now):  # nothing waits for it (the update that ran while it was held ended its stage): filed here
                 task.refresh_from_db()
                 adopted = _adopted(ctx, agent, task, result)
         else:
             # A report that does not fit the schema will not fit when sent again: end the task as failed now (its dispatcher falls back at once and
             # the Sentinel's slot is free), instead of leaving it running until the lease cap while heartbeats keep extending it.
-            SentinelTask.objects.filter(pk=task.pk).update(status='failed', finished_at=now, lease_expires_at=None,
-                                                            error=f'the Sentinel\'s result was rejected: {rejected.message}'[:300], **_scrubbed(task))
+            if not _move_task(SentinelTask.objects.filter(pk=task.pk), 'failed', only_from=('claimed', 'running'), finished_at=now, lease_expires_at=None,
+                                      error=f'the Sentinel\'s result was rejected: {rejected.message}'[:300], **_scrubbed(task)):
+                return _ended_meanwhile(ctx, agent, task)
             audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
                          agent_id=agent.pk, agent=agent.name, outcome='rejected')
     _ended(task, agent.pk)
@@ -3260,6 +3423,19 @@ def report_result(ctx, task_id, body):
         sentinel_adopt.note_adopted(task)
         return {'task': task_brief(task), 'duplicate': False, 'adopted': True}
     return {'task': task_brief(task), 'duplicate': False}
+
+
+def _file_dns_answers(task, agent, result, status):
+    """A ``dns_resolve`` answer is recorded as it is filed, and confirms what it agrees with (``agentapi.dns_crosscheck``): a confirming lookup has no stage
+    waiting for it, so this is where its answer takes effect."""
+    if task.kind != 'dns_resolve' or status != 'done':
+        return
+    from agentapi import dns_crosscheck
+    try:
+        with transaction.atomic():
+            dns_crosscheck.ingest(task, agent.pk, result)
+    except Exception:  # noqa: BLE001 - the result is filed whatever happens to the cross-check; an unrecorded answer is only one fewer source
+        logger.exception('could not record the DNS answers of task %s', task.pk)
 
 
 def _note_left_out_on_purpose(task, agent, result):
@@ -3305,11 +3481,39 @@ def _adopted(ctx, agent, task, result):
     return outcome
 
 
+# The errors of an expired task a late result may still be filed for (``_adopt_late``): it was lost or timed out (the Sentinel or the server went away,
+# typically for an update) while the Sentinel held it. Every other way a held task expires is a decision a late result must not undo: a person
+# cancelled it ('cancelled by a person'), it was taken back from its Sentinel ('the agent is suspended', 'the agent no longer covers this work', 'agent
+# unregistered'...), a stop or a pause ended its stage, or a newer run took the work over.
+LATE_SERVABLE_ERRORS = ('the lease expired without a report', 'the dispatch wait timed out', 'the Sentinel no longer reports this task')
+
+
+def late_servable(task):
+    """Whether the expired ``task`` ended in a way a late result can still serve (see ``LATE_SERVABLE_ERRORS``)."""
+    return task.status == 'expired' and (task.error or '').startswith(LATE_SERVABLE_ERRORS)
+
+
+def _ended_meanwhile(ctx, agent, task):
+    """The answer to a report whose task ended between the report's check and its write (expired by the reaper, cancelled by a person): the result is
+    not filed, and the answer is the one a report after that end gets (``duplicate``, ``late`` for an expired task)."""
+    task.refresh_from_db()
+    if task.status == 'expired':
+        _record_late(ctx, agent, task)
+        return {'task': task_brief(task), 'duplicate': True, 'late': True}
+    return {'task': task_brief(task), 'duplicate': True}
+
+
 def _adopt_late(ctx, agent, task, body, now):
     """A Sentinel's result for a task the server had already expired (its lease ran out while the server was down, or an update ended its stage), held
     by that Sentinel and with nothing waiting for it: the result is taken and filed, the task becomes ``done``. Returns the answer, or ``None`` when
-    the result does not fit the schema (the caller then treats it as a late report, as before). Called inside the task's row lock."""
+    the result does not fit the schema (the caller then treats it as a late report, as before), and when the task did not expire for a reason a late
+    result can still serve (``late_servable``) or this Sentinel no longer covers it. Called inside the task's row lock."""
     from agentapi import address_guard, sentinel_adopt
+    if not late_servable(task):
+        return None  # a person cancelled it, or it was taken back from this Sentinel (suspended, narrowed, unregistered): the decision stands
+    eff = effective(agent, now)
+    if eff.problem or task.project.slug not in eff.projects or not eff._in_hosts(task) or task.kind not in eff.caps:
+        return None  # suspended, or its scope or capabilities narrowed since the task expired (the kind turned off, the project taken away)
     try:
         result = clean_result(task.kind, body, task)
         if task.kind in sentinel_contract.STREAMED:
@@ -3321,15 +3525,15 @@ def _adopt_late(ctx, agent, task, body, now):
     if address_guard.result_refusal(task, result):  # an address excluded since: as for any report, the result is not filed
         return None
     status = 'failed' if result['outcome'] == 'error' else 'done'
-    won = SentinelTask._base_manager.filter(pk=task.pk, status='expired').update(
-        status=status, agent=agent, result=result, finished_at=now, lease_expires_at=None, error=explain_error(result.get('error', '')) if status == 'failed' else '',
-        **_scrubbed(task))
+    won = _move_task(SentinelTask._base_manager.filter(pk=task.pk), status, only_from=('expired',), agent=agent, result=result, finished_at=now,
+                             lease_expires_at=None, error=explain_error(result.get('error', '')) if status == 'failed' else '', **_scrubbed(task))
     if not won:
         return None
     task.refresh_from_db()
     audit.record(ctx.user, 'sentinel.task.complete', _target(task), org=task.project.org_id, task_id=task.pk, trace_id=task.trace_id,
                  agent_id=agent.pk, agent=agent.name, outcome=result['outcome'], late=True)
     _note_cuts(task, agent, result)
+    _file_dns_answers(task, agent, result, status)
     if status == 'done':
         outcome = _adopted(ctx, agent, task, result)
         sentinel_adopt.note_adopted(task)
@@ -3339,6 +3543,17 @@ def _adopt_late(ctx, agent, task, body, now):
     return {'task': task_brief(task), 'duplicate': False, 'adopted': bool(outcome.get('adopted')), 'late': True}
 
 
+RELEASED = 'released by the Sentinel'  # how every release's error begins: the Sentinel's own words only ever follow it
+
+
+def release_reason(reason):
+    """The ``error`` a released task keeps: ``RELEASED``, then the Sentinel's reason after a colon. The reason is the Sentinel's text, so it never stands at
+    the start, where it could read as one of the server's own (``LATE_SERVABLE_ERRORS`` would make a late result adoptable, ``cancelled by a person``
+    would name a person who did nothing)."""
+    text = _text(reason, 200).strip()
+    return f'{RELEASED}: {text}' if text else RELEASED
+
+
 def release_task(ctx, task_id, reason=''):
     agent = _sentinel_agent(ctx)
     broker._limit(agent.token, 'release')
@@ -3346,7 +3561,7 @@ def release_task(ctx, task_id, reason=''):
     task = SentinelTask.objects.select_related('project').filter(pk=_int(task_id), agent=agent).first()
     if task is None:
         raise ApiError(404, 'task not found')
-    if task.status not in ('claimed', 'running') or not expire(task, _text(reason, 200) or 'released by the Sentinel', actor=ctx.user):
+    if task.status not in ('claimed', 'running') or not expire(task, release_reason(reason), actor=ctx.user):
         raise ApiError(409, 'the task is not held by this Sentinel')
     task.refresh_from_db()
     return {'task': task_brief(task)}
@@ -3654,14 +3869,26 @@ def task_label(task):
 
 def task_outcome(task):
     """How a finished task ended, in words a person can tell apart: ``completed``, ``completed at its time budget (partial)``, ``cancelled by an
-    administrator``, ``stopped before it finished`` (gvmd or the Sentinel stopped the scan), ``lost (the Sentinel stopped answering)`` or ``failed``."""
+    administrator``, ``stopped before it finished`` (gvmd or the Sentinel stopped the scan), ``released by the Sentinel``, ``not taken in time (no Sentinel
+    was free)``, ``taken back (the Sentinel was suspended)`` (or revoked), ``taken back (the Sentinel no longer covers this work)``, ``lost (the Sentinel
+    stopped answering)`` or ``failed``."""
     error = (task.error or '').lower()
     if task.status == 'done':
         return 'completed at its time budget (partial)' if (task.result or {}).get('partial') else 'completed'
+    if task.status == 'expired' and error.startswith(RELEASED.lower()):
+        return 'released by the Sentinel'  # first: what follows is the Sentinel's own text, never read for anything else
     if 'cancelled by a person' in error:
         return 'cancelled by an administrator'
     if task.status == 'expired':
-        return 'lost (the Sentinel stopped answering)' if 'released' not in error else 'released by the Sentinel'
+        if 'released' in error:
+            return 'released by the Sentinel'
+        if error.startswith(tuple(e.lower() for e in WAITING_ERRORS)):
+            return 'not taken in time (no Sentinel was free)'
+        if error.startswith('the agent is '):  # update_agent's release: suspended or revoked
+            return f'taken back (the Sentinel was {error[len("the agent is "):].split(";")[0].strip() or "stopped"})'
+        if 'no longer covers' in error:
+            return 'taken back (the Sentinel no longer covers this work)'
+        return 'lost (the Sentinel stopped answering)'
     if 'stopped' in error:
         return 'stopped before it finished'
     return 'failed'
@@ -3686,7 +3913,8 @@ def cancel_task(ctx, slug, task_id):
     if task is None:
         raise ApiError(404, 'task not found')
     won = SentinelTask.objects.filter(pk=task.pk, status=task.status, status__in=SENTINEL_ACTIVE_STATUSES).update(
-        status='expired', agent=None, lease_expires_at=None, finished_at=timezone.now(), error='cancelled by a person', **_scrubbed(task))
+        status='expired', agent=None, lease_expires_at=None, finished_at=timezone.now(), error='cancelled by a person',
+        **({'last_holder': task.agent_id} if task.agent_id else {}), **_scrubbed(task))
     if not won:
         raise ApiError(409, 'the task already finished')
     audit.record(ctx.user, 'sentinel.task.cancel', _target(task), org=project.org_id, task_id=task.pk, trace_id=task.trace_id,

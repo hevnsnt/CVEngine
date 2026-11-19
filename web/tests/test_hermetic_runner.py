@@ -346,3 +346,26 @@ class EnvironmentTests(Guarded):
                 self.assertIs(socket.gethostbyname, real_lookup)
             finally:
                 undo()
+
+
+class SavedSettingsCopyTests(SimpleTestCase):
+    """A saved setting's Redis copy outlives the test that published it (the database rolls back, Redis does not): it is cleared before every test."""
+
+    def test_the_keys_are_the_ones_the_settings_publish_to(self):
+        from cveFeed import tunables
+        from reNgine import resources
+        self.assertEqual(set(runner.SAVED_SETTINGS_KEYS), {tunables.VALUES_KEY, resources.SAVED_VALUES_KEY, resources.AUTO_VALUES_KEY})
+
+    def test_clearing_before_a_test_removes_a_published_triage_cap(self):
+        from cveFeed import tunables, triage
+        from reNgine import resources
+        client = resources.redis_client()
+        if client is None:
+            self.skipTest('no Redis in this run')
+        tunables.publish({'triage_max_per_run': 10})
+        tunables.invalidate()
+        self.assertEqual(triage.cap('TRIAGE_MAX_PER_RUN'), 10)  # what the next test used to see
+        runner.clear_egress_state()
+        tunables._cache.update(at=None, values={})  # what the runner's per-test unload does to this process's own copy
+        self.assertIsNone(client.get(tunables.VALUES_KEY))
+        self.assertEqual(triage.cap('TRIAGE_MAX_PER_RUN'), 100)

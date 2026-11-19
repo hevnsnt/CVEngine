@@ -74,7 +74,7 @@ class DecisionsTests(Base):
             self.assertEqual(self.ids(run('source=controller&outcome=helped')), [self.helped.pk], tool)
             page = run('limit=2&offset=1')
             self.assertEqual((len(page['results']), page['has_more']), (2, True), tool)
-            self.assertEqual(self.ids(run('setting=heavy.nmap')), [], tool)
+            self.assertEqual(self.ids(run('setting=work_depth')), [], tool)
 
     def test_a_filter_value_that_means_nothing_is_a_400_not_an_empty_list(self):
         self.assertEqual(call(self.rw, 'GET', '/api/v1/tuning/decisions?outcome=great')[0], 400)
@@ -156,9 +156,9 @@ class ReportTests(Base):
         self.assertEqual(newest, sorted(newest, reverse=True))
 
     def test_pinned_settings_say_by_whom_and_signals_say_what_they_know(self):
-        with mock.patch.object(autotune, 'status', return_value={**autotune.status(), 'pinned': [{'setting': 'heavy.nmap', 'label': 'nmap', 'value': 2, 'by': 'bill', 'from': 'saved'}]}):
+        with mock.patch.object(autotune, 'status', return_value={**autotune.status(), 'pinned': [{'setting': 'work_depth', 'label': 'Discovery scans kept running', 'value': 2, 'by': 'bill', 'from': 'saved'}]}):
             data = self.report()
-        self.assertEqual(data['tuning']['pinned'], [{'setting': 'heavy.nmap', 'label': 'nmap', 'value': 2, 'by': 'bill', 'from': 'saved'}])
+        self.assertEqual(data['tuning']['pinned'], [{'setting': 'work_depth', 'label': 'Discovery scans kept running', 'value': 2, 'by': 'bill', 'from': 'saved'}])
         self.assertIn('unknown', data['signals'])
         self.assertEqual(set(data['sentinels']), {'live', 'live_remote', 'slots'})
         self.assertNotIn('host', str(data['sentinels']))

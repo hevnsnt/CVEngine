@@ -38,6 +38,8 @@ looked for.
 """
 import os
 
+from cveFeed.distro import BACKPORT
+
 FIRE = "fire"
 SMOKE = "smoke"
 ICE = "ice"
@@ -237,6 +239,8 @@ def match_heat(match, capped=True):
             heat = cap
         if heat == FIRE and exploit_db_alone(cve, match.ai_verdict) and match_policy.is_version_only(match):
             heat = SMOKE  # Exploit-DB alone never lifts a version-only match above smoke (1.3.5)
+        if heat == FIRE and match.distro_status == BACKPORT and match_policy.is_version_only(match):
+            heat = SMOKE  # the distribution ships a fixed build for the release: a version alone never makes that fire, whatever the cap
         heat = capped_by_triage(heat, match)
     return heat
 
@@ -263,6 +267,11 @@ def unproven(match, validation_status=None):
 
 REASON_PATCHED = "the host's distribution has patched it"
 REASON_VERSION_UNKNOWN = "the CVE publishes no affected version range: kept for review"
+REASON_JAVA_UNKNOWN = "the Java runtime's version could not be read from outside: kept for review"
+REASON_RUNTIME_UNKNOWN = "the language runtime's version could not be read from outside: kept for review"
+REASON_RANGE_READ = "only a range of the appliance's builds could be read from outside: kept for review"
+REASON_BUNDLED = "the bundled component's version is only inferred from the product release: kept for review"
+REASON_WINDOWS_PATCH = "the Windows release is known, but its patch level cannot be read from outside: kept for review"
 REASON_NOT_HOT = "not on the KEV and no known exploit"
 
 
@@ -280,7 +289,15 @@ def heat_reason(match, heat=None):
     if match.distro_status == "patched":
         return REASON_PATCHED
     if match_policy.version_unknown(match):
-        return REASON_VERSION_UNKNOWN
+        if match_policy.evidence_flag(match.evidence, 'java_unknown'):
+            return REASON_JAVA_UNKNOWN
+        if match_policy.evidence_flag(match.evidence, 'range_read'):
+            return REASON_RANGE_READ  # an edge appliance's build read only as a range (cveFeed.edge_builds)
+        if match_policy.evidence_flag(match.evidence, 'windows_patch_unknown'):
+            return REASON_WINDOWS_PATCH  # a Windows release with no update revision (cveFeed.windows_builds)
+        if match_policy.evidence_flag(match.evidence, 'bundled_inferred'):
+            return REASON_BUNDLED
+        return REASON_RUNTIME_UNKNOWN if match_policy.evidence_flag(match.evidence, 'runtime_unknown') else REASON_VERSION_UNKNOWN
     capped_why = triage_cap_reason(match, heat)
     if heat_policy() == LEGACY_POLICY:
         why = "legacy heat policy: KEV, a public exploit, CVSS and EPSS"
@@ -333,6 +350,7 @@ def match_heat_rank_expr(capped=True):
         whens.append(When(version_only_q() & (fire if cap == SMOKE else fire | smoke), then=Value(HEAT_RANK[cap])))
     if capped:
         whens.append(When(version_only_q() & fire & ~fire_without_exploit_db_q("cve_entry__"), then=Value(HEAT_RANK[SMOKE])))
+        whens.append(When(version_only_q() & fire & Q(distro_status=BACKPORT), then=Value(HEAT_RANK[SMOKE])))
         whens.append(When(triage_held_q(match=True) & fire, then=Value(HEAT_RANK[SMOKE])))
     whens += [When(fire, then=Value(HEAT_RANK[FIRE])), When(smoke, then=Value(HEAT_RANK[SMOKE]))]
     return Case(*whens, default=Value(HEAT_RANK[ICE]), output_field=IntegerField())

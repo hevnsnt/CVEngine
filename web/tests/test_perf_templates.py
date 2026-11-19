@@ -21,7 +21,7 @@ class _FakeScanner:
 class BatchedRunTests(unittest.TestCase):
 	def setUp(self):
 		_FakeScanner.calls = []
-		patches = [mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False),  # no real DNS: a slow lookup now counts as blocked
+		patches = [# no real DNS: a slow lookup now counts as blocked
 			mock.patch('cveFeed.validation.approved_template', return_value=('id: fixture', '')),
 			mock.patch('agentapi.sentinel_dispatch.try_template_test', _FakeScanner.test)]
 		for p in patches:

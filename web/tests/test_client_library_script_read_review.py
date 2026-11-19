@@ -11,7 +11,7 @@ from unittest import mock
 from django.test import TestCase
 from django.utils import timezone
 
-from cveFeed import detection, detection_author, js_libraries, local_egress, validation
+from cveFeed import detection, detection_author, js_libraries, validation
 from cveFeed.models import CVEDetection, CVEEntry, CVEMatch, ServiceRun, Triage
 from tests.test_client_library_validation import JQ, PAGE, STAYS_OPEN, Base, HotLaneTests, Site, alias_site, jquery_site, page, script
 
@@ -292,22 +292,6 @@ class ManualValidateNowTests(Base):
 		site = jquery_site('3.6.0')
 		result, ran = self.run_job(self.job(m), site, blocked=[self.project.pk])
 		self.assertEqual((ran, site.calls, result['reason']), ([], [], 'bounty_not_confirmed'))
-
-
-class HeldPortTests(Base):
-	"""A script on a port this server held is ``held`` in a reading (``js_libraries.read_page``); the reads themselves, and every hop of them, are a
-	Sentinel's now (``page_read``) under the scope policy ``probe_scope.for_page_read`` builds (tests.test_page_read)."""
-
-	def test_a_script_on_a_held_port_is_held_not_unreachable(self):
-		reader = js_libraries.Reader(1, fresh=True)
-		entries = js_libraries.parse_page(page('/js/jquery.min.js')['body'], PAGE)
-
-		def held(url, headers=None):
-			raise local_egress.PortHeld(443, 'paced')
-		report = {}
-		js_libraries.read_page(entries, PAGE, held, lambda url: '', {'left': 6}, reader=reader, report=report)
-		self.assertEqual(report['skipped'], [(JQ, 'held')])
-
 
 
 class WholeBodyTests(TestCase):

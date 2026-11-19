@@ -175,7 +175,8 @@ deploy_steps() {
   local fit_plan=''
   if [ -f scripts/host-fit.sh ]; then
     . scripts/host-fit.sh
-    fit_plan=$(python3 scripts/update-state.py sentinels-choice 2>/dev/null) || fit_plan=''
+    load_update_sentinels
+    fit_plan=$CV_UPDATE_SENTINELS
     cvengine_fit_run "$fit_plan" "${compose[@]}" || true
     [ -z "$cv_fit_short" ] || phase applying "build: $cv_fit_short"
   fi
@@ -216,23 +217,26 @@ deploy_steps() {
   fi
   cv_status step starting
   "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}" || return 1
-  # The Tailscale sidecar shares the celery container's network namespace by container id, so it is orphaned (no tailscale0, no tailnet route
-  # for scans) when celery is recreated. Only present when the profile is on.
-  if grep -qx tailscale <<<"$listed"; then
-    "${compose[@]}" up -d --no-deps --force-recreate tailscale || log "could not restart the Tailscale sidecar: run docker compose up -d --force-recreate tailscale, or scans of tailnet addresses fail"
-  fi
+  # The Tailscale sidecar (tailscale profile) is not recreated here: it runs in the built-in scanner's network namespace, not celery's, and is put
+  # back into it when the scanner is started below (scripts/scanner.sh, cvengine_scanner_sidecar), including on an install that had it in celery's.
   # The AI reviewer is recreated after the application (it waits for the server's token on its own); it is not in verify_running, and its
   # failing to start never fails the update.
   if grep -qx reviewer <<<"$listed"; then
     "${compose[@]}" up -d --no-deps --force-recreate reviewer || log "could not start the AI reviewer (docker compose up -d reviewer); scanning is not affected"
   fi
   verify_running "${services[@]}" || return 1
+  # The old in-stack OpenVAS containers, which docker-compose.yml no longer defines, are stopped and removed; their volumes are kept.
+  if [ -f scripts/retire-openvas.sh ]; then
+    # shellcheck source=scripts/retire-openvas.sh
+    . scripts/retire-openvas.sh
+    cvengine_retire_openvas || true
+  fi
   # still DEPLOY_STAGE=migrated: a failure here is a failure AFTER the migration, and the script that applies the update (the copy already on
   # the host, which only knows build, datastores, migrate and migrated) must keep the new code and retry, never put the old code on the new schema
   phase applying verifying
   cv_status step verifying
   verify_serving || return 1
-  # The built-in scanner, once the server answers: recreated after celery (it shares celery's network namespace), kept on the new image only once a
+  # The built-in scanner, once the server answers: recreated on its own network (the Tailscale sidecar follows it), kept on the new image only once a
   # heartbeat of it reaches the server, else put back on the previous one. Never a failed update: until it runs, the scans that need it wait.
   if declare -F cvengine_scanner_start >/dev/null; then
     phase applying scanner
@@ -307,18 +311,27 @@ verify_workers() {
 # removes what is safe to remove (untagged images, the build cache; never a tagged image or a volume) and measures again. If Docker's directory cannot
 # be measured the check says nothing. DEPLOY_WHY is the sentence the Update screen shows when the update ends here.
 DEPLOY_WHY=${DEPLOY_WHY:-}
+# The Approve dialog's answer to "which scanners run" (web/.update-sentinels), needed by the disk check and by the scanner plan below. scripts/apply-update.sh
+# reads it once per run and hands it over in CV_UPDATE_SENTINELS (empty when there is none). An older apply-update.sh does not: then it is read here once,
+# on first use, and kept for the rest of the deploy, so the disk check no longer takes it from the scanner plan.
+load_update_sentinels() {
+  [ -z "${CV_UPDATE_SENTINELS+x}" ] || return 0
+  CV_UPDATE_SENTINELS=$(python3 scripts/update-state.py sentinels-choice 2>/dev/null) || CV_UPDATE_SENTINELS=''
+  export CV_UPDATE_SENTINELS
+}
 check_disk() {
   local plan=''
   if [ ! -f scripts/update-disk.sh ]; then return 0; fi
   . scripts/update-disk.sh
-  plan=$(python3 scripts/update-state.py sentinels-choice 2>/dev/null) || plan=''
+  load_update_sentinels
+  plan=$CV_UPDATE_SENTINELS
   cvengine_disk_check "$plan" && return 0
   DEPLOY_WHY=$cv_disk_sentence
   log "$cv_disk_sentence (nothing was stopped or changed)"
   return 1
 }
 
-# The cold build of the server image needs about 2 GiB (a 1 GiB cap fails in the nuclei compile). On a host under 7 GB (the rule of scripts/host-fit.sh) the
+# The cold build of the server image needs about 2 GiB (it used to compile nuclei; its Python packages still need room to build). On a host under 7 GB (the rule of scripts/host-fit.sh) the
 # heavy containers that can come back safely are stopped for the build and started again right after it, with or without a build that worked: the
 # built-in scanner and the celery workers (their memory stays resident after the scans drain, and the build then competes with it, swaps or is killed).
 # Never db, redis, web or proxy, and beat is small. CVENGINE_UPDATE_STOP_CELERY=0 (environment or .env) turns it off.
@@ -333,7 +346,7 @@ build_free_memory() {
   kb=$(cvengine_fit_mem_kb)
   (( kb > 0 && kb < cv_fit_small_kb )) || return 0
   running=$("${compose[@]}" ps --status running --services 2>/dev/null) || running=''
-  for svc in scanner celery; do  # the scanner first: it shares celery's network
+  for svc in scanner celery; do
     grep -qx "$svc" <<<"$running" && BUILD_STOPPED+=("$svc")
   done
   [ "${#BUILD_STOPPED[@]}" -gt 0 ] || return 0
@@ -345,14 +358,14 @@ build_free_memory() {
 build_restore_memory() {  # always, build worked or not: nothing stays stopped
   local compose=("${COMPOSE[@]}") svc ordered=() ok=1 listed=''
   [ "${#BUILD_STOPPED[@]}" -gt 0 ] || return 0
-  for svc in celery scanner; do  # celery first: the scanner joins its network
+  for svc in celery scanner; do
     for s in "${BUILD_STOPPED[@]}"; do [ "$s" = "$svc" ] && ordered+=("$svc"); done
   done
   for svc in "${ordered[@]}"; do
     "${compose[@]}" start "$svc" >/dev/null 2>&1 || { ok=0; log "could not start $svc again after the build (docker compose start $svc)"; }
   done
-  # the Tailscale sidecar shares celery's network namespace by container id: it follows celery's restart
-  if listed=$("${compose[@]}" config --services 2>/dev/null) && grep -qx tailscale <<<"$listed" && grep -qx celery <<<"${ordered[*]}"; then
+  # the Tailscale sidecar shares the scanner's network namespace by container id: it follows the scanner's restart
+  if listed=$("${compose[@]}" config --services 2>/dev/null) && grep -qx tailscale <<<"$listed" && grep -qw scanner <<<"${ordered[*]}"; then
     "${compose[@]}" restart tailscale >/dev/null 2>&1 || true
   fi
   [ "$ok" = 1 ] && log "${ordered[*]} started again after the build"

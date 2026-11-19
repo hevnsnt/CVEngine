@@ -579,17 +579,13 @@ class ScopePolicyTests(ScopeFixture, TestCase):
         self.assertFalse(self.ok('100.64.0.5', project=self.other_project.id))
 
     def test_an_address_a_name_resolved_to_is_never_tailnet_authority(self):
-        import socket
-        from targetApp.target_types import resolves_to_blocked
-        answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('100.64.0.5', 0))]
-        with mock.patch('socket.getaddrinfo', return_value=answer):
-            self.assertTrue(resolves_to_blocked('evil.example.test', project=self.project.id))  # a name pointed at a tailnet device is refused
+        # the server looks no name up (the Sentinel judges what a name resolves to, never with tailnet authority); an address a scan stored for a name
+        # is not stored with it either
         from reNgine.tasks import save_ip_address
         sub = Subdomain.objects.create(target_domain=self.domain, name='evil.example.test')
         self.assertEqual(save_ip_address('100.64.0.5', subdomain=sub, project_id=self.project.id), (None, False))
         own = Subdomain.objects.create(target_domain=self.domain, name='100.64.0.5')
-        with mock.patch('reNgine.tasks.geo_localize.delay'):
-            ip, created = save_ip_address('100.64.0.5', subdomain=own, project_id=self.project.id)
+        ip, created = save_ip_address('100.64.0.5', subdomain=own, project_id=self.project.id)
         self.assertEqual(ip.address, '100.64.0.5')
         self.assertEqual(save_ip_address('100.64.0.5', subdomain=own), (None, False))  # without the project there is no authority
 
@@ -602,32 +598,17 @@ class ScopePolicyTests(ScopeFixture, TestCase):
         scan = ScanHistory.objects.create(domain=attacker, scan_type=EngineType.objects.first(), start_scan_date=timezone.now(), scan_status=1,
                                           results_dir='/tmp')
         ctx = {'scan_history_id': scan.id, 'domain_id': attacker.id, 'subdomain_id': None, 'subscan_id': None}
-        with mock.patch('reNgine.tasks.geo_localize.delay'):
-            persist_bbot_result(bbot_lib.BbotResult(subdomains={'evil.example.test'}, resolutions={('evil.example.test', '100.64.0.5')},
-                                                    ports={('100.64.0.5', 22), ('evil.example.test', 22)}), ctx)
+        persist_bbot_result(bbot_lib.BbotResult(subdomains={'evil.example.test'}, resolutions={('evil.example.test', '100.64.0.5')},
+                                                ports={('100.64.0.5', 22), ('evil.example.test', 22)}), ctx)
         self.assertFalse(IpAddress.objects.filter(address='100.64.0.5').exists())
         self.assertFalse(Port.objects.filter(number=22).exists())
         # the device's own scan, in its own project, still records it
         own = ScanHistory.objects.create(domain=self.domain, scan_type=EngineType.objects.first(), start_scan_date=timezone.now(), scan_status=1,
                                          results_dir='/tmp')
-        with mock.patch('reNgine.tasks.geo_localize.delay'):
-            persist_bbot_result(bbot_lib.BbotResult(subdomains={'100.64.0.5'}, resolutions={('100.64.0.5', '100.64.0.5')}, ports={('100.64.0.5', 22)}),
-                                {'scan_history_id': own.id, 'domain_id': self.domain.id, 'subdomain_id': None, 'subscan_id': None})
+        persist_bbot_result(bbot_lib.BbotResult(subdomains={'100.64.0.5'}, resolutions={('100.64.0.5', '100.64.0.5')}, ports={('100.64.0.5', 22)}),
+                            {'scan_history_id': own.id, 'domain_id': self.domain.id, 'subdomain_id': None, 'subscan_id': None})
         self.assertEqual(list(IpAddress.objects.filter(address='100.64.0.5').values_list('org_id', flat=True)), [self.org.id])
         self.assertTrue(Port.objects.filter(number=22).exists())
-
-    def test_probe_transport_pins_a_tailnet_literal_of_its_project_but_not_a_name_that_resolves_there(self):
-        import socket
-        from cveFeed import pinned_transport
-        answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('100.64.0.5', 80))]
-        with mock.patch('socket.getaddrinfo', return_value=answer):
-            self.assertEqual(pinned_transport.resolve('100.64.0.5', 80, project=self.project.id), ((socket.AF_INET, ('100.64.0.5', 80)),))
-            with self.assertRaises(ValueError):
-                pinned_transport.resolve('100.64.0.5', 80)  # no project
-            with self.assertRaises(ValueError):
-                pinned_transport.resolve('100.64.0.5', 80, project=self.other_project.id)
-            with self.assertRaises(ValueError):
-                pinned_transport.resolve('evil.example.test', 80, project=self.project.id)
 
     def test_archived_host_rediscovery_judges_dns_answers_without_tailnet_authority(self):
         from cveFeed import archive_rediscovery
@@ -636,12 +617,12 @@ class ScopePolicyTests(ScopeFixture, TestCase):
         self.assertEqual(result['status'], 'blocked')
 
     def test_the_other_scan_gates_are_bound_to_the_project(self):
-        from targetApp.target_types import blocked_names, scannable_hosts
+        from targetApp.target_types import blocked_address, scannable_hosts
         self.assertEqual(scannable_hosts(['100.64.0.5', '100.64.0.6', '10.0.0.1'], project=self.project.id), ['100.64.0.5'])
         self.assertEqual(scannable_hosts(['100.64.0.5'], project=self.other_project.id), [])
         self.assertEqual(scannable_hosts(['100.64.0.5']), [])
-        self.assertEqual(blocked_names(['100.64.0.5', '100.64.0.6'], project=self.project.id), {'100.64.0.6'})
-        self.assertEqual(blocked_names(['100.64.0.5'], project=self.sibling.id), {'100.64.0.5'})
+        self.assertEqual([a for a in ('100.64.0.5', '100.64.0.6') if blocked_address(a, project=self.project.id)], ['100.64.0.6'])
+        self.assertTrue(blocked_address('100.64.0.5', project=self.sibling.id))
         from cveFeed import route_auth
         self.assertTrue(route_auth.host_allowed('100.64.0.5', self.project.id))
         self.assertFalse(route_auth.host_allowed('100.64.0.5', self.other_project.id))
@@ -685,14 +666,17 @@ class ScopePolicyTests(ScopeFixture, TestCase):
         self.assertEqual(nuclei_scan.scan_targets(scan)[1], {'100.64.0.5'})
         self.assertEqual(changes.host_state(Subdomain.objects.get(pk=sub.pk))['ips'].keys(), {'100.64.0.5'})
         probed = []
-        db_exposure.run_db_exposure_checks(scan.id, checks={'redis': ('Redis', lambda host, port: probed.append(host) or False)})
+        from tests.test_db_exposure import db_probe_dispatch
+        with db_probe_dispatch(lambda host, port: probed.append(host) or False):
+            db_exposure.run_db_exposure_checks(scan.id)
         self.assertEqual(probed, ['100.64.0.5'])
         stranger = Domain.objects.create(name='stranger.example.test', project=self.other_project, insert_date=timezone.now())
         scan2, sub2 = scan_of(stranger, 'stranger.example.test')  # another project's host that somehow holds the address
         self.assertEqual(nuclei_scan.scan_targets(scan2)[1], set())
         self.assertEqual(changes.host_state(Subdomain.objects.get(pk=sub2.pk))['ips'], {})
         probed.clear()
-        db_exposure.run_db_exposure_checks(scan2.id, checks={'redis': ('Redis', lambda host, port: probed.append(host) or False)})
+        with db_probe_dispatch(lambda host, port: probed.append(host) or False):
+            db_exposure.run_db_exposure_checks(scan2.id)
         self.assertEqual(probed, [])
 
     def test_the_full_port_sweep_admits_a_device_only_through_its_own_project(self):
@@ -727,7 +711,7 @@ class PipelineReachTests(ScopeFixture, TestCase):
         kwargs = dict(light_stream=lambda path, **k: iter([]),
                       targeted_stream=lambda path, **k: iter([]), port_stage_run=port_double(runner), db_exposure_checks={}, provider=None,
                       ip_lookups={'ptr': lambda ip: [], 'certificate': lambda ip: []})
-        with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'), \
+        with mock.patch('cveFeed.tasks.run_hygiene_task.delay'), \
                 mock.patch('agentapi.sentinel_stream.dispatch_stream', side_effect=AssertionError('no discovery run for an IP')):
             discovery.run_pipeline(scan.id, **kwargs)
         return scan, nmap
@@ -751,10 +735,10 @@ class PipelineReachTests(ScopeFixture, TestCase):
         self.assertEqual(nmap, [])
 
     def test_resolution_checks_agree(self):
-        from targetApp.target_types import resolves_to_blocked
-        self.assertFalse(resolves_to_blocked('100.64.0.5', project=self.project.id))
-        self.assertTrue(resolves_to_blocked('100.64.0.5'))
-        self.assertTrue(resolves_to_blocked('100.64.0.99', project=self.project.id))
+        from targetApp.target_types import blocked_address
+        self.assertFalse(blocked_address('100.64.0.5', project=self.project.id))
+        self.assertTrue(blocked_address('100.64.0.5'))
+        self.assertTrue(blocked_address('100.64.0.99', project=self.project.id))
 
 
 class SyncBase(TestCase):
@@ -1636,7 +1620,7 @@ class ComposeProfileTests(SimpleTestCase):
     def test_the_sidecar_is_opt_in_and_joins_the_scanners_network_namespace(self):
         ts = self.compose['services']['tailscale']
         self.assertEqual(ts['profiles'], ['tailscale'])
-        self.assertEqual(ts['network_mode'], 'service:celery')
+        self.assertEqual(ts['network_mode'], 'service:scanner')
         self.assertIn('NET_ADMIN', ts['cap_add'])
         self.assertIn('/dev/net/tun:/dev/net/tun', ts['devices'])
         self.assertNotIn('networks', ts)  # network_mode and networks cannot be combined

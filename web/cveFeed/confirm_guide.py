@@ -363,8 +363,9 @@ def _host_version_step(product):
     return None
 
 
-def _os_package_commands(product, hint=''):
-    """Read-only commands that print the installed OS package of ``product`` (its binary package name for each distribution family)."""
+def _os_package_commands(product, hint='', cve_id=''):
+    """Read-only commands that print the installed OS package of ``product`` (its binary package name for each distribution family), and on
+    Red Hat the changelog check for ``cve_id``: Red Hat backports a fix without raising the version, so the build is no verdict there."""
     from cveFeed.detection_classes import os_package_name
     out = []
     families = [t[3] for t in TRACKERS if t[0].search(hint or '')] or ['dpkg', 'rpm']
@@ -377,9 +378,13 @@ def _os_package_commands(product, hint=''):
                         'explain': f'Prints the installed {name} package release (Debian and Ubuntu). Compare it with the fixed release '
                                    'the distribution\'s tracker lists for this CVE, not with the upstream version.'})
         elif eco == 'rpm':
+            if _CVE.match(cve_id or ''):
+                out.append({'platform': 'rhel', 'command': f'rpm -q --changelog {_q(name)} | grep -F -e {_q(cve_id)}',
+                            'explain': f'Prints the changelog lines of the installed {name} package that name {cve_id}: a line means this '
+                                       'build carries the fix, whatever version the banner states (Red Hat backports fixes).'})
             out.append({'platform': 'rhel', 'command': f"rpm -q --qf '%{{NAME}} %{{VERSION}}-%{{RELEASE}}\\n' {_q(name)}",
                         'explain': f'Prints the installed {name} version-release (Red Hat, SUSE). Compare it with the fixed build in the '
-                                   'vendor\'s advisory for this CVE.'})
+                                   'vendor\'s advisory for this CVE, not with the upstream version.'})
         elif eco == 'apk':
             out.append({'platform': 'alpine', 'command': f'apk info -v {_q(name)}', 'explain': f'Prints the installed {name} package.'})
     return out
@@ -414,20 +419,20 @@ def _template_section(match, host, bases):
         return None
     out = {'template_id': template_id, 'result': match.template_result}
     try:
-        from cveFeed.templategen import GENERATED_DIR, TEMPLATES_ROOT, find_existing_template
+        from cveFeed.templategen import GENERATED_DIR, find_existing_template, installed_relative
         import os
         for path in find_existing_template(match.cve_entry.cve_id):
             stem = os.path.splitext(os.path.basename(path))[0]
             if stem.lower() != template_id.lower():
                 continue
-            if path.startswith(TEMPLATES_ROOT.rstrip('/') + '/'):
-                rel = path[len(TEMPLATES_ROOT.rstrip('/')) + 1:]
+            rel = installed_relative(path)  # a template of the pinned release, from the scanner library's template index
+            if rel is not None:
                 if re.match(r'^[A-Za-z0-9._/-]{1,300}\Z', rel) and '..' not in rel:
                     out['template_url'] = f'https://github.com/projectdiscovery/nuclei-templates/blob/main/{rel}'
             elif path.startswith(GENERATED_DIR.rstrip('/') + '/'):
                 out['generated'] = True  # on the cvENGINE server only: ``nuclei -id`` elsewhere cannot find it
             break
-    except Exception:  # noqa: BLE001 - a missing templates directory only costs the link
+    except Exception:  # noqa: BLE001 - a missing template index only costs the link
         pass
     if 'template_url' not in out and not out.get('generated'):
         out['template_search_url'] = f'https://github.com/projectdiscovery/nuclei-templates/search?q={template_id}'
@@ -657,7 +662,7 @@ def _web_product(match, cve, strategy, host, bases):
     version_cmd = _host_version_step(product)
     if version_cmd:
         local.append({'title': 'On the host: the version of the installed binary', 'commands': [version_cmd]})
-    packages = _os_package_commands(product)
+    packages = _os_package_commands(product, str(getattr(match.subdomain, 'webserver', '') or ''), cve.cve_id)
     if packages:
         local.append({'title': 'On the host: the installed package release (a backported fix keeps the old upstream version)', 'commands': packages})
     verdict = _verdict(product, version, ranges, 'The header (or the page)',
@@ -711,7 +716,7 @@ def _network_service(match, cve, strategy, host):
     version_cmd = _host_version_step(product)
     if version_cmd:
         local.append({'title': 'On the host: the version of the installed binary', 'commands': [version_cmd]})
-    packages = _os_package_commands(product, banner_hint)
+    packages = _os_package_commands(product, banner_hint, cve.cve_id)
     if packages:
         local.append({'title': 'On the host: the installed package release', 'commands': packages})
     from cveFeed.detection_classes import is_distro_build
@@ -879,6 +884,143 @@ def _host_reported(match, cve, strategy, host):
             'fix': f'Update the package to {_upgrade("the package", ranges)}, then let the host report again.'}
 
 
+# The commands that read which Java a process runs (constants: the reader fills in <PID>). The same list ``match_explain.JAVA_STEPS`` words.
+JAVA_COMMANDS = (
+    {'platform': 'linux', 'command': 'pgrep -a java', 'explain': 'Lists the Java processes and their command lines: note the PID of the application.'},
+    {'platform': 'linux', 'command': 'jcmd <PID> VM.version', 'explain': 'The running JVM states its exact version and vendor (needs the JDK\'s jcmd).'},
+    {'platform': 'linux', 'command': 'readlink -f /proc/<PID>/exe', 'explain': 'The java binary the process runs.'},
+    {'platform': 'linux', 'command': '"$(readlink -f /proc/<PID>/exe)" -version', 'explain': 'That binary\'s version and vendor.'},
+    {'platform': 'linux', 'command': 'cat "$(dirname "$(dirname "$(readlink -f /proc/<PID>/exe)")")/release"',
+     'explain': 'The JDK or JRE release file: JAVA_VERSION and IMPLEMENTOR.'},
+    {'platform': 'container', 'command': 'docker exec <CONTAINER> java -version', 'explain': 'The same question inside a container.'},
+)
+
+
+def _java_runtime(match, cve, strategy, host):
+    """A CVE in the Java runtime (cveFeed.java_runtime): what an outside check could and could not read, then the host owner's commands."""
+    ev = match.evidence if isinstance(match.evidence, dict) else {}
+    unknown = bool(ev.get('java_unknown'))
+    look_for = [{'label': 'Java runtime read from outside', 'quote': _quote(str(r.get('version') or ''), 40) + f" ({_quote(str(r.get('source') or ''), 20)}, "
+                                                                     f"{_quote(str(r.get('confidence') or ''), 10)})"}
+                for r in (ev.get('java') or [])[:6] if isinstance(r, dict)]
+    ranges = _ranges_of(match)
+    version = '' if unknown else _version(match.matched_version)
+    where = [{'label': 'Host', 'text': host}] if host else []
+    port = _port(ev.get('port'))
+    if port:
+        where.append({'label': 'Port', 'text': str(port)})
+    steps = [_step('What an outside check could not see', 'cvENGINE could not read which Java runtime this host runs: no debug port, actuator, '
+                   'Jolokia endpoint, status page, header or error page of it stated the version. The commands below read it on the host.')] if unknown else []
+    return {'class': 'java_runtime', 'class_label': 'Java runtime of unknown version' if unknown else 'Java runtime version',
+            'headline': f'Confirm which Java runtime {host or "the host"} runs' if unknown else f'Confirm Java {version} on {host}',
+            'where': where, 'look_for': look_for, 'steps': steps,
+            'verdict': _verdict('Java', version, ranges, 'jcmd VM.version (or java -version)',
+                                'The Java process or its binary could not be read: ask the application\'s owner, and leave the match open.'),
+            'precondition': _precondition(cve, strategy),
+            'local': [{'title': 'On the host, as the user the application runs as', 'commands': [dict(c) for c in JAVA_COMMANDS]}],
+            'fix': f'Update the Java runtime the application runs on to {_upgrade("Java", ranges)}, restart the application, then let cvENGINE read it again.'}
+
+
+def _windows_release(match, cve, strategy, host):
+    """A Windows CVE on a host whose NTLM challenge states the release but not its update revision (cveFeed.windows_builds): what an outside check
+    read, then the commands that read the revision on the host and how the answer decides."""
+    from cveFeed import match_explain, windows_builds
+    ev = match.evidence if isinstance(match.evidence, dict) else {}
+    windows = ev.get('windows') if isinstance(ev.get('windows'), dict) else {}
+    release = _quote(str(ev.get('release') or match.matched_product or 'Windows'), 60)
+    build = _quote(str(ev.get('build') or ''), 20)
+    fixed = _quote(str(ev.get('fixed_build') or ''), 30)
+    revision = windows_builds.fix_revision(fixed)
+    eos = ev.get('end_of_support') if isinstance(ev.get('end_of_support'), dict) else {}
+    ranges = _ranges_of(match)
+    where = [{'label': 'Host', 'text': host}] if host else []
+    port = _port(ev.get('port'))
+    if port:
+        where.append({'label': 'Port', 'text': str(port)})
+    look_for = [{'label': 'Windows release read from outside', 'quote': f'{release}, build {build}'},
+                {'label': 'How it was read', 'quote': _quote(str(ev.get('said') or ev.get('reading') or ''), 300) or 'an NTLM challenge'}]
+    if windows.get('ambiguous'):
+        look_for.append({'label': 'The build is shared by', 'quote': _quote(' and '.join(str(c) for c in (windows.get('candidates') or [])[:3]), 200)})
+    steps = [_step('What an outside check could not see', f'The NTLM challenge states {release}, build {build}: the release, never its update revision '
+                   '(UBR), so whether the update that fixes this CVE is installed is not known. The build is not read as revision 0. The commands below '
+                   'read the revision on the host.')]
+    if eos:
+        steps.append(_step('End of support', f'{release} left Microsoft support on {_quote(str(eos.get("date") or ""), 10)}, before this CVE was published. '
+                           'It gets the fix only with a paid Extended Security Updates subscription'
+                           + (f', and that programme ended on {_quote(str(eos.get("esu_until") or ""), 10)}' if eos.get('after_esu') else '')
+                           + ': without one it is very likely unpatched. Upgrade to a supported release.'))
+    commands = [{'platform': 'windows', 'command': command, 'explain': f'{what} {note}'} for what, command, note in match_explain.WINDOWS_COMMANDS]
+    if eos:
+        what, command, note = match_explain.ESU_COMMAND
+        commands.append({'platform': 'windows', 'command': command, 'explain': f'{what} {note}'})
+    decide = (f'The update revision is {revision} or higher: the fix (build {fixed}) is installed, not affected.' if revision is not None
+              else 'The update revision is at or past the advisory\'s fixed build: not affected.')
+    verdict = _verdict(release, build, ranges, 'The full build (ver)',
+                       'The revision could not be read: ask the host\'s administrator for the output of ver, and leave the match open.')
+    verdict['not_affected'] = decide
+    verdict['affected'] = (f'The update revision is lower than {revision}: the fix is not installed, affected.' if revision is not None
+                           else 'The update revision is below the advisory\'s fixed build: affected.')
+    return {'class': 'windows_release', 'class_label': 'Windows release known, patch level unknown',
+            'headline': f'Confirm the update revision {host or "the host"} runs', 'where': where, 'look_for': look_for, 'steps': steps,
+            'verdict': verdict, 'precondition': _precondition(cve, strategy),
+            'local': [{'title': 'On the host, in cmd or PowerShell', 'commands': commands}],
+            'fix': (f'Install the latest cumulative update for {release} (build {fixed} or later), restart, then close the match.' if fixed and not eos
+                    else f'Upgrade {release} to a supported Windows release, or install the update under Extended Security Updates.' if eos
+                    else f'Install the latest cumulative update for {release}, restart, then close the match.')}
+
+
+def _language_runtime(match, cve, strategy, host):
+    """A CVE in a language runtime (cveFeed.version_sources): what an outside check could and could not read, then the host owner's commands."""
+    from cveFeed.version_catalogue import RUNTIMES
+    ev = match.evidence if isinstance(match.evidence, dict) else {}
+    unknown = bool(ev.get('runtime_unknown'))
+    runtime = RUNTIMES.get(str(ev.get('runtime') or ''))
+    label = runtime.label if runtime else 'the runtime'
+    look_for = [{'label': f'{label} read from outside', 'quote': _quote(str(r.get('version') or 'present, no release'), 40)
+                 + f" ({_quote(str(r.get('source') or ''), 30)}, {_quote(str(r.get('confidence') or ''), 10)})"}
+                for r in (ev.get('readings') or [])[:6] if isinstance(r, dict)]
+    ranges = _ranges_of(match)
+    version = '' if unknown else _version(match.matched_version)
+    where = [{'label': 'Host', 'text': host}] if host else []
+    port = _port(ev.get('port'))
+    if port:
+        where.append({'label': 'Port', 'text': str(port)})
+    steps = [_step('What an outside check could not see', f'cvENGINE could not read which {label} release this host runs: its headers, error '
+                   'pages and version sources did not state it. The commands below read it on the host.')] if unknown else []
+    commands = [{'platform': platform, 'command': command, 'explain': what} for platform, command, what in (runtime.commands if runtime else ())]
+    return {'class': 'language_runtime', 'class_label': f'{label} of unknown release' if unknown else f'{label} release',
+            'headline': f'Confirm which {label} release {host or "the host"} runs' if unknown else f'Confirm {label} {version} on {host}',
+            'where': where, 'look_for': look_for, 'steps': steps,
+            'verdict': _verdict(label, version, ranges, 'the runtime\'s own version command',
+                                'The runtime or its process could not be read: ask the application\'s owner, and leave the match open.'),
+            'precondition': _precondition(cve, strategy),
+            'local': [{'title': 'On the host, as the user the application runs as', 'commands': commands}] if commands else [],
+            'fix': f'Update {label} for the application to {_upgrade(label, ranges)}, restart the application, then let cvENGINE read it again.'}
+
+
+def _bundled_component(match, cve, strategy, host):
+    """A component a vendor bundles with the product release the host states (cveFeed.bundled_components): the version is inferred, so the
+    guide reads the component that actually runs."""
+    ev = match.evidence if isinstance(match.evidence, dict) else {}
+    bundled = ev.get('bundled') if isinstance(ev.get('bundled'), dict) else {}
+    label = _quote(str(ev.get('component_label') or match.matched_product or 'the component'), 40)
+    version = _version(ev.get('raw_version') or match.matched_version)
+    product = ' '.join(x for x in (_quote(str(bundled.get('product') or ''), 60), _quote(str(bundled.get('product_version') or ''), 30)) if x)
+    ranges = _ranges_of(match)
+    where = [{'label': 'Host', 'text': host}] if host else []
+    look_for = [{'label': 'Product release the host states', 'quote': product or 'not recorded'},
+                {'label': f'{label} that release bundles', 'quote': f"{version} ({_quote(str(bundled.get('source') or ''), 200)})"}]
+    steps = [_step('What an outside check could not see', f'The host states {product or "its product release"}; the vendor ships it with {label} '
+                   f'{version}. Whether the application still runs that {label} (and not one the owner installed or replaced) is not known.')]
+    return {'class': 'bundled_component', 'class_label': f'{label} bundled with {product}' if product else f'Bundled {label}',
+            'headline': f'Confirm which {label} {host or "the host"} runs', 'where': where, 'look_for': look_for, 'steps': steps,
+            'verdict': _verdict(label, version, ranges, f'the {label} the application runs (its version command, jar or library file name)',
+                                f'The {label} the application runs could not be read: ask the application\'s owner, and leave the match open.'),
+            'precondition': _precondition(cve, strategy), 'local': [],
+            'fix': f'Update {product or "the product"} to a release that bundles {label} {_upgrade(label, ranges)}, or update the bundled {label}, '
+                   'then let cvENGINE read it again.'}
+
+
 def match_guide(match):
     """The confirm-it-yourself guide for one CVEMatch (its cve_entry and subdomain loaded), or None when the match has no host. Pure but for
     a few bounded reads of what cvENGINE already recorded about the host (route-check pages, probe observations, the nuclei hit)."""
@@ -899,6 +1041,14 @@ def match_guide(match):
         guide = _openvas(match, cve, strategy, host)
     elif source == 'host':
         guide = _host_reported(match, cve, strategy, host)
+    elif source == 'java':
+        guide = _java_runtime(match, cve, strategy, host)
+    elif source == 'runtime':
+        guide = _language_runtime(match, cve, strategy, host)
+    elif source == 'windows':
+        guide = _windows_release(match, cve, strategy, host)
+    elif source == 'bundled':
+        guide = _bundled_component(match, cve, strategy, host)
     elif source == 'wp-plugin' or ev.get('source') == 'wpscan':
         guide = _cms(match, cve, strategy, host, bases)
     elif source == 'port':

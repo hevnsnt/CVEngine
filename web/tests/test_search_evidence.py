@@ -77,7 +77,7 @@ class SearchEvidenceTests(TestCase):
 	def test_each_result_says_where_php_was_seen(self):
 		why = self.why('tech:php')
 		self.assertEqual(why['header.acme.example'], ['web server nginx/1.18 PHP/8.1'])
-		self.assertEqual(why['cookie.acme.example'], ['cookie PHPSESSID'])
+		self.assertEqual(why['cookie.acme.example'], ['cookie PHPSESSID', 'PHP version not known'])  # a cookie names PHP, not its release
 		self.assertEqual(why['finger.acme.example'], ['PHP:8.2.30 (header:x-powered-by)'])
 
 	def test_a_closed_port_a_retired_route_and_another_projects_route_do_not_count(self):

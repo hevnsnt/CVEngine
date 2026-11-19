@@ -38,7 +38,6 @@ class StageTests(NoRealSleep, RouteFixture, TestCase):
 		super().setUp()
 		LocalFallback('none').apply(self)
 		self.no_real_sleep()
-		mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True).start()
 		self.guard = assert_ran_nowhere_locally(self, 'waf')
 
 	def scan_with_web_hosts(self, *names):

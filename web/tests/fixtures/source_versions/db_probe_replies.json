@@ -1,0 +1,10 @@
+{
+  "redis": {"outcome": "done", "open": true, "evidence": "PONG (redis 7.2.4)"},
+  "memcached": {"outcome": "done", "open": true, "evidence": "VERSION 1.6.21"},
+  "postgres": {"outcome": "done", "open": true, "evidence": "PostgreSQL 15.4 (Debian 15.4-2.pgdg120+1)"},
+  "elastic": {"outcome": "done", "open": true, "evidence": "cluster docker-cluster, version 8.11.1"},
+  "mysql": {"outcome": "done", "open": true, "evidence": "connected as root with no password (MySQL 8.0.35)"},
+  "mariadb": {"outcome": "done", "open": true, "evidence": "connected as root with no password (MySQL 5.5.5-10.6.12-MariaDB)"},
+  "couchdb": {"outcome": "done", "open": true, "evidence": "/_all_dbs answered with 3 database name(s)"},
+  "mongodb": {"outcome": "done", "open": true, "evidence": "listDatabases answered with 2 database name(s)"}
+}
