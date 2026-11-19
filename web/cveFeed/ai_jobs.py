@@ -1,6 +1,6 @@
 """The pipeline's model calls, made by the AI reviewer container (docs/AI-REVIEWER.md): the server makes none itself.
 
-A stage that needs a model's answer (triage, validation planning, nuclei targeting, ...) queues an ``AIJob`` instead of calling a provider,
+A stage that needs a model's answer (triage, validation planning, template tag targeting, ...) queues an ``AIJob`` instead of calling a provider,
 and carries on. The container takes
 jobs over ``/api/v1/reviewer/jobs/next`` (``next_jobs``), calls the model and posts the answer to ``/api/v1/reviewer/jobs/<id>/result``
 (``submit``). A Celery task then continues the stage where it left off (``apply``): the answer is checked with the stage's own validator
@@ -383,7 +383,7 @@ def _count_retries(job, rows):
     """A cut-off reply asked again is one more billable request for the stage's own daily budget: a triage's retry is written to the triage
     ledger as a repair is, so ``TRIAGE_MAX_PER_DAY`` counts what was billed. The other stages' budgets (one template draft per CVE per
     week, ``TEMPLATE_GEN_MAX_PER_DAY`` a day with a draft's one repair round counted apart, one detection attempt per CVE per week, the
-    planning budgets with their repair rows, the nuclei cap from the usage rows themselves) count jobs, and one attempt of a job makes at most
+    planning budgets with their repair rows, the template tag targeting cap from the usage rows themselves) count jobs, and one attempt of a job makes at most
     two requests."""
     retried = sum(1 for r in rows if r.error_category == 'truncated_retried')
     if not retried or job.kind != 'triage':
