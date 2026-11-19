@@ -31,6 +31,7 @@ MAX_PROJECTS = 100
 DISK_LOW_PERCENT = 10
 FEED_STALE_HOURS = 48
 MEMORY_REPORT_STALE_SECONDS = 180
+MEMORY_CRITICAL_MB, MEMORY_CRITICAL_SHARE = 150, 0.03  # a worker container with less free than this (or 3% of its memory, the larger) is a problem
 CT_BACKLOG_WARN = 5000  # lookups waiting in ctwatch_queue before status says so; the reaper stops recovering orphans past broker_recovery.MAX_QUEUE_SCAN
 
 
@@ -527,6 +528,11 @@ def _schedules(health):
             'note': health.get('scheduler_note')}
 
 
+def _critical_mb(total_mb):
+    """The free memory below which a worker container is a problem: what the removed memory gate called its critical level."""
+    return int(max(MEMORY_CRITICAL_MB, total_mb * MEMORY_CRITICAL_SHARE)) if total_mb else None
+
+
 def _memory():
     from reNgine import resources
     snap = resources.cluster_snapshot()
@@ -535,10 +541,7 @@ def _memory():
         mem = c.get('memory') or {}
         containers.append({
             'host': c.get('host'), 'total_mb': mem.get('total_mb'), 'used_mb': mem.get('used_mb'),
-            'available_mb': mem.get('available_mb'), 'job_budget_mb': c.get('budget_mb'),
-            'headroom_mb': c.get('headroom_mb'), 'critical_mb': c.get('critical_mb'),
-            'jobs_running': len(c.get('running', [])), 'jobs_waiting': len(c.get('waiting', [])),
-            'memory_kills_24h': len(c.get('memory_kills', [])), 'report_age_seconds': c.get('age_seconds'),
+            'available_mb': mem.get('available_mb'), 'limit_mb': mem.get('limit_mb'), 'report_age_seconds': c.get('age_seconds'),
         })
     from reNgine import lane_memory
     return {'store': snap.get('store'), 'containers': containers, 'lanes': lane_memory.report()}
@@ -881,7 +884,8 @@ def _system(user, problems, notes, run=None):
     out['memory'] = take('memory')
     if 'containers' in out['memory']:
         for c in out['memory']['containers']:
-            if c['available_mb'] is not None and c['critical_mb'] is not None and c['available_mb'] < c['critical_mb']:
+            critical = _critical_mb(c.get('total_mb'))
+            if c['available_mb'] is not None and critical is not None and c['available_mb'] < critical:
                 problems.append(f"memory: {c['host']} has {c['available_mb']} MB free, below its critical level")
             if (c['report_age_seconds'] or 0) > MEMORY_REPORT_STALE_SECONDS:
                 problems.append(f"memory: {c['host']} has not reported for {c['report_age_seconds']} seconds")

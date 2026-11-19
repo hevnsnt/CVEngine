@@ -1,5 +1,5 @@
 """Auto-tuning of the throughput settings of Settings, configMaxxing: the numbers that say how much this instance does at once and how eagerly it
-starts work (scanner kinds at once, hosts assessed at once, hosts per assessment batch, discovery scans kept running, chunks of one stage at
+starts work (hosts assessed at once, hosts per assessment batch, discovery scans kept running, chunks of one stage at
 once, the hours between rescans and between Sentinel refreshes) are moved from what this instance measured, instead of being guessed once.
 
 **Modes** (one for the instance, ``AutoTuneSettings``): ``auto`` (the default: the tuner applies bounded changes itself), ``suggest`` (it works
@@ -73,13 +73,6 @@ Managed = namedtuple('Managed', 'key registry label setting env_name')
 
 # --- the registry of tunable settings ----------------------------------------------------------------------------------
 
-def _env_int(name):
-    try:
-        return int(float(os.environ[name]))
-    except (KeyError, ValueError):
-        return None
-
-
 DISCOVERY_PIN_BELOW = 4  # scripts/update-deploy.sh warn_discovery_pin says the same at the same number
 
 
@@ -89,9 +82,7 @@ def _scan():
 
 
 def managed():
-    """Every setting that opts in to auto-tuning, from both registries, with its auto-tuning range (``cveFeed.autotune_policy.Setting``). For a
-    scanner kind, HEAVY_TUNE_MIN_<KIND> / HEAVY_TUNE_MAX_<KIND> in the environment narrow or widen the range (never outside what the page
-    allows)."""
+    """Every setting that opts in to auto-tuning, from both registries, with its auto-tuning range (``cveFeed.autotune_policy.Setting``)."""
     from cveFeed import scan_concurrency, tunables
     from cveFeed.autotune_policy import Setting
     out = []
@@ -99,17 +90,8 @@ def managed():
         if not f.auto_tunable:
             continue
         low, high = f.auto_min, f.auto_max
-        if f.group == 'heavy':
-            kind = f.key.split('.', 1)[1]
-            suffix = kind.upper().replace('-', '_')
-            env_low, env_high = _env_int('HEAVY_TUNE_MIN_' + suffix), _env_int('HEAVY_TUNE_MAX_' + suffix)
-            low = max(f.low, min(f.high, env_low)) if env_low else low
-            high = max(f.low, min(f.high, env_high)) if env_high else high
-            high = max(low, high)
-            what = f'heavy:{kind}'
-        else:
-            what = {'discovery_concurrency': 'discovery', 'assess_batch': 'batch', 'work_depth': 'depth', 'assess_share_percent': 'assess_share',
-                    'lane.cve_feed': 'lane:cve_feed', 'lane.classic': 'lane:classic'}[f.key]
+        what = {'discovery_concurrency': 'discovery', 'assess_batch': 'batch', 'work_depth': 'depth', 'assess_share_percent': 'assess_share',
+                'lane.cve_feed': 'lane:cve_feed', 'lane.classic': 'lane:classic'}[f.key]
         optimistic = max(low, min(high, f.auto_optimistic))
         out.append(Managed(f.key, 'scan_concurrency', f.label, Setting(f.key, what, f.label, low, high, f.auto_step, 'more', optimistic,
                                                                                f.default), f.env))
@@ -941,8 +923,7 @@ def _agent_result(m, raw, status, value, text, **extra):
 
 def _agent_limit(m, current, number, samples, history, now_dt):
     """What the controller would let this setting do, for a number that asks for more work than ``current``: ``(highest number allowed, why it is
-    not higher)``. The controller's own ceiling (the target for this machine, the level that caused trouble in the last day) and a scanner kind's
-    memory budget, so that the next round does not simply lower the number again."""
+    not higher)``. The controller's own ceiling (the target for this machine, the level that caused trouble in the last day), so that the next round does not simply lower the number again."""
     from cveFeed import autotune_policy as policy
     setting, now = m.setting, now_dt.timestamp()
     if setting.sense == 'gap':  # a wait between runs: more work is a SHORTER wait, so the ceiling for more work starts at the shortest the range allows
@@ -954,10 +935,6 @@ def _agent_limit(m, current, number, samples, history, now_dt):
         target, reason, known = policy.size_for(setting, facts, current=current)
         if known and policy._beyond(setting, limit, target):
             limit, why = target, f'the target for this machine is {target} ({reason or "sized"})'
-        if setting.kind.startswith('heavy:'):
-            cap = policy.memory_cap(setting.kind.split(':', 1)[1], samples[-1])
-            if cap is not None and setting.sense == 'more' and max(setting.low, cap) < limit:
-                limit, why = max(setting.low, cap), f'the memory budget holds {cap} at their real peak'
     held, text = policy.remembered_ceiling(setting, limit, history, now=now)
     if text:
         limit, why = held, text
@@ -1062,7 +1039,7 @@ def _ai_held(key, now_dt):
 
 
 # The alerts whose resource a setting uses: a lowering of the AI needs trouble for that setting, or one of these alerts open (and cited). ``None``: every setting.
-ALERT_RESOURCES = {'memory': None, 'workers_down': ('discovery', 'batch', 'depth', 'stage'), 'scan_errors': ('heavy:',), 'sentinel_errors': ('stage',),
+ALERT_RESOURCES = {'memory': None, 'workers_down': ('discovery', 'batch', 'depth', 'stage'), 'sentinel_errors': ('stage',),
                    'sentinel_waiting': ('stage',), 'queue_starvation': ('assess_share',)}
 
 
@@ -1094,8 +1071,8 @@ def _lowering_block(m, samples, history, now_dt, unverified, cited, open_codes):
 def ai_offer(now_dt=None):
     """What the health-check AI may propose NOW. Returns ``{'gate': why it may not, or '', 'left_today': proposals still allowed today, 'offered': {key: {'setting',
     'label', 'value', 'range': (lowest, highest), 'higher': text}}, 'not_offered': {key: why}}``. For each setting that is not pinned and not held from the AI: the
-    auto-tuning range, but a number that asks for more work stops at the controller's own ceiling (the target for this machine, the level that caused trouble,
-    a scanner kind's memory budget) and at the current number while a raise is not allowed (trouble for the setting, a hold, the raise cooldown, another calm
+    auto-tuning range, but a number that asks for more work stops at the controller's own ceiling (the target for this machine, the level that caused trouble)
+    and at the current number while a raise is not allowed (trouble for the setting, a hold, the raise cooldown, another calm
     change not yet verified); a lower number is always allowed. A setting with no number left to choose is listed in ``not_offered`` with the reason."""
     from cveFeed import autotune_policy as policy
     now_dt = now_dt or _now()
@@ -1261,7 +1238,7 @@ def agent_change(user, values, who='an agent'):
     * ``off`` (the policy), or auto-tuning off (the mode or the kill switch): refused, nothing is recorded;
     * ``suggest`` (the policy, or the mode): recorded as a recommendation a person applies with one click (``apply_decision``);
     * ``auto``: the number is clamped to the auto-tuning range and to what the controller itself would allow now (the target for this machine, the
-      level that caused trouble in the last day, a scanner kind's memory budget), refused while trouble shows for the setting, while another calm
+      level that caused trouble in the last day), refused while trouble shows for the setting, while another calm
       change is unverified, after a revert's hold and inside the raise cooldown (a LOWER number is never held back by those), and applied through
       ``apply_tuned`` with ``verify=``: judged after 30 minutes and taken back if it made things worse.
 
@@ -1497,7 +1474,7 @@ def run(now_dt=None):
             summary['settings'][m.key] = info
             continue
         target, target_reason, target_known = policy.size_for(m.setting, facts, current=value)
-        hard_cap = policy.memory_cap(m.setting.kind.split(':', 1)[1], samples[-1]) if m.setting.kind.startswith('heavy:') and samples else None
+        hard_cap = None
         plan = policy.decide(m.setting, value, baseline, samples, _history(m.key, now_dt), now=now, boot_at=float(boot['at']),
                              target=target, target_reason=target_reason, cooldown=cooldown, probe_cooldown=probe_cooldown,
                              hold_until=_hold_until(row, m.key), hard_cap=hard_cap, target_known=target_known, ready=ready)

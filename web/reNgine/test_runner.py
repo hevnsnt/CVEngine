@@ -1,7 +1,7 @@
 """Test runner that lets ``manage.py test --parallel`` run safely against one Redis server.
 
-Django clones the PostgreSQL test database for every worker, but the tests also use Redis (the Django cache, the scan memory gate,
-claims and locks), and ``cache.clear()`` or a held lock in one worker would break a test running in another. Each worker therefore
+Django clones the PostgreSQL test database for every worker, but the tests also use Redis (the Django cache, claims, locks
+and the published settings), and ``cache.clear()`` or a held lock in one worker would break a test running in another. Each worker therefore
 gets two Redis databases of its own (broker and cache: 2n and 2n+1), flushed when it starts, so Redis has room for 7 workers.
 Everything else about a normal (one process) run is unchanged.
 

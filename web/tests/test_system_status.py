@@ -53,8 +53,8 @@ HEALTH = {'workers_state': 'responding', 'worker_note': 'ok', 'scheduler_note': 
 		  'workers': [{'worker': 'discovery_worker', 'queue': 'discovery_queue', 'responding': True, 'consuming': True, 'active': 1}],
 		  'schedules': [{'name': 'cve-feed', 'next_due_state': 'estimated'}, {'name': 'late-task', 'next_due_state': 'past_due_unconfirmed'}],
 		  'jobs': {'scans': {'pending': 1, 'running': 1}}, 'last_activity': {'running': None, 'done': None, 'failed': None}}
-CLUSTER = {'store': 'redis', 'containers': [{'host': 'celery-1', 'memory': {'total_mb': 8000, 'used_mb': 3000, 'available_mb': 5000},
-	'budget_mb': 6000, 'headroom_mb': 400, 'critical_mb': 240, 'age_seconds': 20, 'running': [{'label': 'nmap:x'}], 'waiting': [], 'memory_kills': []}]}
+CLUSTER = {'store': 'redis', 'containers': [{'host': 'celery-1', 'memory': {'total_mb': 8000, 'limit_mb': 8000, 'used_mb': 3000, 'available_mb': 5000},
+	'age_seconds': 20}]}  # reNgine.resources.cluster_snapshot: memory only (no scanner runs on the server, so no budget, runs or kills)
 
 
 def patched(broker=None, health=None, cluster=None):
@@ -152,7 +152,8 @@ class SystemStatusTests(TestCase):
 		self.assertEqual(system['queues']['waiting']['discovery_queue'], 3)
 		self.assertEqual((system['queues']['waiting_total'], system['queues']['unacknowledged']), (3, 2))
 		self.assertEqual(system['workers']['state'], 'responding')
-		self.assertEqual(system['memory']['containers'][0]['available_mb'], 5000)
+		self.assertEqual(system['memory']['containers'], [{'host': 'celery-1', 'total_mb': 8000, 'used_mb': 3000, 'available_mb': 5000, 'limit_mb': 8000,
+			'report_age_seconds': 20}])  # nothing of the removed memory gate: no job budget, headroom, runs, waits or memory kills
 		self.assertGreater(system['disk']['total_mb'], 0)
 		self.assertIn('cve_entries', system['feeds'])
 		self.assertFalse(system['ai']['provider_enabled'])
@@ -241,8 +242,14 @@ class SystemStatusTests(TestCase):
 													 age_seconds=900)]}
 		_, data = self.run_status(self.t_root, cluster=low, health=dict(HEALTH, schedules=[]))
 		text = ' '.join(data['problems'])
-		self.assertIn('below its critical level', text)
+		self.assertIn('celery-1 has 100 MB free, below its critical level', text)  # 3% of 8000 MB is 240
 		self.assertIn('has not reported', text)
+		enough = {'store': 'redis', 'containers': [dict(CLUSTER['containers'][0], memory={'total_mb': 8000, 'used_mb': 7700, 'available_mb': 300})]}
+		_, data = self.run_status(self.t_root, cluster=enough, health=dict(HEALTH, schedules=[]))
+		self.assertFalse([p for p in data['problems'] if p.startswith('memory:')], data['problems'])
+		small = {'store': 'redis', 'containers': [dict(CLUSTER['containers'][0], memory={'total_mb': 1000, 'used_mb': 860, 'available_mb': 140})]}
+		_, data = self.run_status(self.t_root, cluster=small, health=dict(HEALTH, schedules=[]))
+		self.assertIn('below its critical level', ' '.join(data['problems']))  # never under 150 MB on a small container
 
 	def test_low_disk_is_a_problem(self):
 		usage = mock.Mock(total=100 << 20, used=95 << 20, free=5 << 20)

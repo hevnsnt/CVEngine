@@ -924,7 +924,7 @@ def scan_concurrency_get(request):
 
 
 def scan_concurrency_put(request):
-    """Save a partial change: {"values": {"heavy.nmap": 4, "work_depth": null}}. A number sets a field, null puts it back to the default."""
+    """Save a partial change: {"values": {"discovery_concurrency": 12, "work_depth": null}}. A number sets a field, null puts it back to the default."""
     from cveFeed import scan_concurrency
     data = _body(request)
     values = data.get('values')
