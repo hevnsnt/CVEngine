@@ -18,8 +18,6 @@ from django.utils.crypto import constant_time_compare, salted_hmac
 from django.utils.http import url_has_allowed_host_and_scheme
 
 from reNgine.client_ip import client_ip
-from hostedsso import gating
-from hostedsso.common import sso_active, sso_url
 from tenancy import audit, invite, mfa, throttle
 
 PENDING_KEY = 'mfa_pending'
@@ -128,22 +126,7 @@ class MFALoginView(LoginView):
     """Password step; users with MFA are not logged in until /mfa/verify/ succeeds. Wrong passwords are counted and, past a limit,
     refused before the password is even checked, so the login form cannot be used to guess passwords."""
 
-    def get(self, request, *args, **kwargs):
-        refused = gating.refuse_local_login(request)  # SSO enforced: the form is not offered (None, and nothing changes, when it is off)
-        return refused or super().get(request, *args, **kwargs)
-
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
-        if sso_active():
-            context['sso_login_url'] = sso_url(self.request, self.request.GET.get('next') or self.request.POST.get('next'))
-        return context
-
     def post(self, request, *args, **kwargs):
-        refused = gating.refuse_local_login(request)
-        if refused:
-            return refused
-        if gating.breakglass_in_use(request):
-            gating.audit_breakglass(request, 'sso.breakglass_attempt', attempted=_login_name(request.POST.get('username')))
         if login_throttled(request, request.POST.get('username')):
             kwargs = self.get_form_kwargs()
             kwargs.pop('data', None)
@@ -171,9 +154,6 @@ class MFALoginView(LoginView):
         profile = getattr(user, 'tenancy_profile', None)
         self.request.session.pop(PENDING_KEY, None)
         if not (profile and profile.mfa_enabled):
-            if gating.breakglass_in_use(self.request):  # break-glass needs the local second factor too
-                gating.audit_breakglass(self.request, 'sso.breakglass_refused', user, reason='no local MFA')
-                return redirect(sso_url(self.request))
             return super().form_valid(form)
         self.request.session[PENDING_KEY] = {
             'user': user.pk, 'backend': user.backend, 'next': self.get_success_url(), 'ts': time.time(),
@@ -187,10 +167,6 @@ def admin_login_redirect(request):
     user on to the admin, and anyone else to the app, so the redirect cannot loop with the admin's own permission check."""
     target = request.GET.get('next', '')
     user = request.user
-    if not user.is_authenticated:
-        refused = gating.refuse_local_login(request, target)  # SSO enforced: no local admin sign-in either
-        if refused:
-            return refused
     if user.is_authenticated and not (user.is_active and user.is_staff):
         return redirect(settings.LOGIN_REDIRECT_URL)
     if url_has_allowed_host_and_scheme(target, allowed_hosts={request.get_host()}, require_https=request.is_secure()):
@@ -205,9 +181,6 @@ def admin_login_redirect(request):
 def verify_view(request):
     from dashboard.models import UserProfile
     pending = request.session.get(PENDING_KEY)
-    if not gating.local_login_allowed(request):  # the break-glass window closed since the password step
-        request.session.pop(PENDING_KEY, None)
-        return gating.refuse_local_login(request)
     if not _valid_pending(pending):
         request.session.pop(PENDING_KEY, None)
         return redirect('login')
@@ -229,8 +202,6 @@ def verify_view(request):
                 request.session.pop(PENDING_KEY, None)
                 clear_failures(user)
                 login(request, user, backend=pending['backend'])
-                if gating.breakglass_in_use(request):
-                    gating.audit_breakglass(request, 'sso.breakglass_login', user)
                 target = pending['next']
                 ok = url_has_allowed_host_and_scheme(target, allowed_hosts={request.get_host()})
                 return redirect(target if ok else '/')
@@ -301,7 +272,5 @@ def invite_view(request, token):
         second_factor = bool(profile.mfa_enabled)
     if second_factor:  # a reset for someone with two-step sign-in: the password alone must not open a session
         return _invite_page(request, 'tenancy/invite_done.html', {'invited': locked_user, 'second_factor': True})
-    if not gating.local_login_allowed(request):  # SSO enforced: the new password does not open a local session
-        return redirect(sso_url(request))
     login(request, locked_user, backend=settings.AUTHENTICATION_BACKENDS[0])
     return redirect(settings.LOGIN_REDIRECT_URL)

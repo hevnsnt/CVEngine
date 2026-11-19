@@ -11,16 +11,6 @@ from tenancy import membership_cache, roles, scope
 PROJECT_PARAMS = ('slug', 'project_slug', 'project')
 
 
-def _sso_second_factor(request):
-    """True for a session created by hostedsso's exchange whose assertion carried a second factor (and SSO is still on)."""
-    from hostedsso.common import sso_active
-    session = getattr(request, 'session', None)
-    if not sso_active() or session is None or not session.get('sso_sub'):
-        return False
-    amr = session.get('sso_amr')
-    return isinstance(amr, list) and any(a in ('otp', 'hwk') for a in amr)
-
-
 class TenancyMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
@@ -86,20 +76,16 @@ class TenancyMiddleware:
         return roles.effective_role(user, project) if project else None
 
     @staticmethod
-    def must_enrol_mfa(user, request=None):
-        """True when the user belongs to an organization that requires MFA and has not enrolled. A session that came from single sign-on
-        already passed a second factor at the identity provider (the assertion is only accepted with ``otp`` or ``hwk`` in its ``amr``), so it
-        counts; enrolling a local factor stays possible."""
+    def must_enrol_mfa(user):
+        """True when the user belongs to an organization that requires MFA and has not enrolled."""
         profile = getattr(user, 'tenancy_profile', None)
         if profile and profile.mfa_enabled:
-            return False
-        if request is not None and _sso_second_factor(request):
             return False
         return roles.requires_mfa(user)
 
     @classmethod
     def _require_mfa(cls, request, user):
-        return redirect(reverse('cve_account') + '#security') if cls.must_enrol_mfa(user, request) else None
+        return redirect(reverse('cve_account') + '#security') if cls.must_enrol_mfa(user) else None
 
 
 class RetireClassicUiMiddleware:

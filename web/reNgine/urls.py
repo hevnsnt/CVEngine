@@ -11,7 +11,6 @@ mask_secret_fields()  # the admin never shows a stored secret
 
 urlpatterns = [
     path('', include('agentapi.urls')),
-    path('sso/', include('hostedsso.urls')),
     # before admin/: the stock admin login would sign a staff user in with the password alone and skip the second step
     path('admin/login/', admin_login_redirect, name='admin_login_redirect'),
     path(

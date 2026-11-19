@@ -206,7 +206,6 @@ services:
       - ./web/static/cve/maintenance.html:/usr/share/nginx/maintenance/maintenance.html:ro
       - ./config/nginx/state:/etc/nginx/state:ro  # holds the maintenance flag while an update runs
       - ./config/nginx/trusted-upstreams.conf:/etc/nginx/trusted-upstreams.conf:ro  # empty: no peer is believed to have set X-Forwarded-For (HOSTING-ONLINE.md, Cloudflare Tunnel)
-      - ./config/nginx/edge-auth.conf.example:/etc/nginx/edge-auth.conf:ro  # no entries: hosted mode is off (hosted/README.md; docker-compose.hosted.yml mounts the real file)
       - static_volume:/usr/src/app/staticfiles/
       - scan_results:/usr/src/scan_results:ro
     networks:

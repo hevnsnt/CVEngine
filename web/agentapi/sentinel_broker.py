@@ -601,34 +601,8 @@ def generate_instance_enrollment(ctx, network='external'):
     return _create_enrollment(ctx, network=network)
 
 
-def public_api_url():
-    """``CVENGINE_PUBLIC_API_URL`` when it is a usable origin, else ``None``: the address Sentinels outside this install reach its API on when that is not
-    the name people sign in at (a hosted server, whose own name is internal: hosted/README.md). ``https://host[:port]`` only (``http://`` for loopback),
-    no user name, path, query or fragment, no trailing slash; anything else is ignored, so a typo falls back to ``DOMAIN_NAME`` instead of handing a
-    Sentinel an address that cannot be right."""
-    import os
-    from urllib.parse import urlsplit
-    raw = os.environ.get('CVENGINE_PUBLIC_API_URL', '').strip()
-    if not raw:
-        return None
-    try:
-        parts = urlsplit(raw)
-        host, _port = parts.hostname, parts.port
-    except ValueError:
-        return None
-    local = host in ('localhost', '127.0.0.1')
-    if parts.scheme != 'https' and not (parts.scheme == 'http' and local):
-        return None
-    if not host or not re.fullmatch(r'[A-Za-z0-9._-]+', host) or parts.username is not None or parts.password is not None or parts.path not in ('', '/') or parts.query or parts.fragment or raw.endswith('?') or raw.endswith('#'):
-        return None
-    return f'{parts.scheme}://{parts.netloc}'
-
-
 def _server_url():
     import os
-    configured = public_api_url()
-    if configured:
-        return configured
     domain = os.environ.get('DOMAIN_NAME', 'localhost').strip() or 'localhost'
     scheme = 'http' if domain in ('localhost', '127.0.0.1') else 'https'
     return f'{scheme}://{domain}'
