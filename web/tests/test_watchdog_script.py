@@ -156,12 +156,13 @@ class WatchdogScriptTests(unittest.TestCase):
         finally:
             os.close(fd)
 
-    def test_the_scanner_and_the_tailscale_sidecar_follow_celery_when_they_exist(self):
+    def test_the_scanner_and_the_tailscale_sidecar_are_left_alone_when_celery_is_recreated(self):
+        # they have a network of their own (the sidecar is in the scanner's namespace): recreating celery does not touch them
         (self.stub / 'services').write_text('web\ncelery\nscanner\ntailscale\n')
         self.request()
         self.run_script('act')
         recreated = [c.split('--force-recreate ')[1].strip() for c in self.docker_calls() if '--force-recreate' in c]
-        self.assertEqual(recreated, ['celery', 'scanner', 'tailscale'])
+        self.assertEqual(recreated, ['celery'])
 
     def test_restart_celery_beat_and_the_prune(self):
         self.request('restart-celery-beat', 'R6')

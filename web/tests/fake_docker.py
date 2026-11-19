@@ -3,7 +3,9 @@
 
 State lives in $STUB_DIR/state.json (the test reads and writes it): ``images`` (name or id -> image id), ``registry`` (reference -> image id a
 pull delivers), ``container`` ({id, image_id, ref} or null), ``contract`` / ``release`` / ``healthy`` (image id -> what a container of it reports),
-``server`` (what the web container answers: "version min_supported"), and the switches ``pull_fails``, ``busy``, ``no_scanner``. Every call is
+``server`` (what the web container answers: "version min_supported"), and the switches ``pull_fails``, ``busy``, ``no_scanner``. With ``tailscale_profile``
+the tailscale service is listed and ``sidecar`` ({id, mode, running} or null) is its container, whose network mode is ``container:<scanner id>`` when
+`up` creates it; every `up` of the scanner gives it a new container id, as a recreate does. Every call is
 appended to ``calls.log``. The scanner container's image is read the way Compose would: CVENGINE_SCANNER_IMAGE, else
 CVENGINE_SCANNER_ROLLBACK_IMAGE (both from ./.env), else ``default_ref``; a name that is not on the host fails `up` (``--pull never``) or is
 pulled first (the default).
@@ -56,7 +58,7 @@ if sub and sub[0] == 'compose':
     rest = rest[i:]
     if rest[:2] == ['config', '--services']:
         names = ['scanner'] if not state.get('no_scanner') else []
-        names += ['web', 'celery', 'celery-beat', 'db', 'redis']
+        names += ['web', 'celery', 'celery-beat', 'db', 'redis'] + (['tailscale'] if state.get('tailscale_profile') else [])
         for name in names:
             out(name)
             sys.stdout.flush()
@@ -65,11 +67,24 @@ if sub and sub[0] == 'compose':
                 time.sleep(0.3)
         sys.exit(0)
     if rest[:2] == ['ps', '-aq']:
-        if state.get('container'):
+        if rest[2:3] == ['tailscale']:
+            if state.get('sidecar'):
+                out(state['sidecar']['id'])
+        elif state.get('container'):
             out(state['container']['id'])
         sys.exit(0)
     if rest[:1] == ['rm']:
-        state['container'] = None
+        if rest[-1] == 'tailscale':
+            state['sidecar'] = None
+        else:
+            state['container'] = None
+        save()
+        sys.exit(0)
+    if rest[:1] == ['up'] and rest[-1] == 'tailscale':
+        if not state.get('container') or state.get('sidecar_up_fails'):
+            sys.exit(1)
+        state['sidecar'] = {'id': 'sidecarid', 'mode': 'container:' + state['container']['id'], 'running': True}
+        state['sidecar_ups'] = state.get('sidecar_ups', 0) + 1
         save()
         sys.exit(0)
     if rest[:1] == ['up']:
@@ -82,7 +97,8 @@ if sub and sub[0] == 'compose':
             sys.exit(1)
         if state.get('up_fails'):
             sys.exit(1)
-        state['container'] = {'id': 'scannerid', 'image_id': resolve(ref), 'ref': ref}
+        state['scanner_ups'] = state.get('scanner_ups', 0) + 1
+        state['container'] = {'id': 'scannerid%d' % state['scanner_ups'], 'image_id': resolve(ref), 'ref': ref, 'running': True}
         state['drained'] = False
         save()
         sys.exit(0)
@@ -156,10 +172,19 @@ if args[:1] == ['build']:
     save()
     sys.exit(0)
 if args[:1] == ['inspect']:
-    container = state.get('container')
-    if not container:
-        sys.exit(1)
     fmt = args[args.index('-f') + 1]
-    out(container['image_id'] if fmt == '{{.Image}}' else container['ref'])
+    sidecar = state.get('sidecar')
+    if sidecar and args[-1] == sidecar['id']:
+        out({'{{.HostConfig.NetworkMode}}': sidecar['mode'], '{{.State.Running}}': 'true' if sidecar['running'] else 'false'}.get(fmt, sidecar['id']))
+        sys.exit(0)
+    container = state.get('container')
+    if not container or args[-1] != container['id']:
+        sys.exit(1)
+    if fmt == '{{.Id}}':
+        out(container['id'])
+    elif fmt == '{{.State.Running}}':
+        out('true' if container.get('running', True) else 'false')
+    else:
+        out(container['image_id'] if fmt == '{{.Image}}' else container['ref'])
     sys.exit(0)
 sys.exit(0)
