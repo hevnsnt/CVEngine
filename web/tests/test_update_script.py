@@ -371,13 +371,14 @@ class ManualUpdateTests(UpdateScriptCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn('Could not pull the newest proxy image', result.stderr)
 
-    def test_the_tailscale_sidecar_is_recreated_after_celery_when_its_profile_is_on(self):
+    def test_the_tailscale_sidecar_is_not_recreated_with_celery(self):
+        # it runs in the built-in scanner's network namespace, not celery's: scripts/scanner.sh puts it back after the scanner starts
+        # (cvengine_scanner_sidecar, tests/test_scanner_script.py), never the application's recreate
         (self.stub / 'tailscale_profile').touch()
         result = self.run_update()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        calls = self.calls()
-        self.assertLess(next(i for i, c in enumerate(calls) if '--force-recreate web' in c),
-                        calls.index('docker compose -f docker-compose.yml up -d --no-deps --force-recreate tailscale'))
+        self.assertTrue(any('--force-recreate web' in c for c in self.calls()))
+        self.assertFalse([c for c in self.calls() if 'force-recreate tailscale' in c])
 
     def test_static_publish_failure_does_not_serve_new_app(self):
         (self.stub / 'collectstatic_fail').touch()

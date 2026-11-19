@@ -6,9 +6,11 @@
 #   . scripts/scanner.sh
 #   cvengine_scanner_fetch docker compose [ARGS...]   before anything is stopped: pull the newest published scanner image (the moving tag, `main`)
 #   cvengine_scanner_start [--no-wait] docker compose [ARGS...]
-#                                                     after celery was recreated: recreate the scanner, wait until it is healthy AND has checked in with a
+#                                                     once the server answers: recreate the scanner, wait until it is healthy AND has checked in with a
 #                                                     contract version this server accepts, and put the previous image back when it does not (`make up`
 #                                                     passes --no-wait: a first start is not waited for; a changed image is still checked)
+#   cvengine_scanner_sidecar docker compose [ARGS...] the Tailscale sidecar (profile tailscale) back in the scanner's network namespace after the scanner was
+#                                                     recreated; the functions above call it themselves
 #   cvengine_scanner_update docker compose [ARGS...]  the "Scanner update" routine for a running install (scripts/scanner-update.sh runs it): fetch,
 #                                                     then, only when the newest image is not the one running, let the scanner finish its work and start
 #                                                     the new one as above. Safe to run from cron or a timer.
@@ -22,6 +24,8 @@
 # CVENGINE_SCANNER_READY_SECONDS (default 300) is how long the start waits for the first heartbeat; CVENGINE_SCANNER_DRAIN_SECONDS (default 900) how long
 # a scheduled update lets the running scanner finish its tasks before it gives up for this time.
 # When a new image is refused, the reason is logged and, through the scanner that is running again, reported to the server (the Sentinels page shows it).
+# The scanner has a network of its own (scanner_network, shared only with web; the host network or a LAN address with docker-compose.hostnet.yml or
+# docker-compose.macvlan.yml): recreating the server's containers does not touch it, and recreating it does not touch them.
 
 _cv_scanner_rollback_tag=cvengine-sentinel-rollback:previous
 _cv_scanner_why=''          # why the last new image was refused (set by _cvengine_scanner_ready)
@@ -109,6 +113,7 @@ cvengine_scanner_fetch() {
     if grep -qx scanner < <("$@" config --services 2>/dev/null); then
       "$@" rm -sf scanner >/dev/null 2>&1 || true
       _cvengine_scanner_log "the built-in scanner is turned off (CVENGINE_BUILTIN_SCANNER=0); not fetching its image"
+      cvengine_scanner_sidecar "$@"
     fi
     return 0
   fi
@@ -190,6 +195,41 @@ _cvengine_scanner_ready() {  # docker compose [ARGS...]: wait until the running 
   return 1
 }
 
+# The Tailscale sidecar (the tailscale profile, docs/TAILSCALE.md) joins the scanner's network namespace by container id (network_mode: service:scanner), so
+# a scanner that was recreated leaves it in a dead namespace: no tailscale0 where the scans run. An install updated from a release where the sidecar joined
+# celery's namespace has it pointing at celery's container instead. This recreates it whenever it is not in the namespace of the scanner container that
+# exists now, and does nothing otherwise. With the scanner turned off it has nowhere to sit and is removed (a Sentinel on a tailnet machine scans the
+# tailnet then; Settings > Tailscale still reads the devices through the API). Never fails the caller.
+cvengine_scanner_sidecar() {  # docker compose [ARGS...]
+  local scanner_id sidecar_id mode running
+  grep -qx tailscale < <("$@" config --services 2>/dev/null) || return 0  # the profile is not on
+  sidecar_id=$("$@" ps -aq tailscale 2>/dev/null | head -n1) || sidecar_id=''
+  if ! cvengine_scanner_enabled "$@"; then
+    if [ -n "$sidecar_id" ]; then
+      "$@" rm -sf tailscale >/dev/null 2>&1 || true
+      _cvengine_scanner_log "the Tailscale sidecar runs in the built-in scanner's network namespace, and the scanner is turned off (CVENGINE_BUILTIN_SCANNER=0): removed it (its node state is kept)"
+    fi
+    return 0
+  fi
+  scanner_id=$(_cvengine_scanner_container "$@")
+  [ -z "$scanner_id" ] || scanner_id=$(docker inspect -f '{{.Id}}' "$scanner_id" 2>/dev/null) || scanner_id=''
+  if [ -z "$scanner_id" ] || [ "$(docker inspect -f '{{.State.Running}}' "$scanner_id" 2>/dev/null)" != true ]; then
+    _cvengine_scanner_log "the Tailscale sidecar waits for the built-in scanner, which is not running; it is started with the scanner"
+    return 0
+  fi
+  if [ -n "$sidecar_id" ]; then
+    mode=$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$sidecar_id" 2>/dev/null) || mode=''
+    running=$(docker inspect -f '{{.State.Running}}' "$sidecar_id" 2>/dev/null) || running=''
+    if [ "$mode" = "container:$scanner_id" ] && [ "$running" = true ]; then return 0; fi
+  fi
+  if "$@" up -d --no-deps --force-recreate tailscale >/dev/null 2>&1; then
+    _cvengine_scanner_log "the Tailscale sidecar was (re)started in the built-in scanner's network namespace"
+  else
+    _cvengine_scanner_log "could not start the Tailscale sidecar in the built-in scanner's namespace: run docker compose up -d --force-recreate tailscale, or scans of tailnet addresses wait"
+  fi
+  return 0
+}
+
 # The scanner service drops every capability but NET_RAW and SYS_CHROOT (docker-compose.yml). An image from before that reduction (held with
 # CVENGINE_SCANNER_IMAGE, the rollback image, a floor built from an older commit) has nmap and naabu with the file capabilities `cap_net_raw,cap_net_admin+eip`:
 # the kernel refuses to start a binary whose file capabilities exceed the container's bounding set (execve fails with EPERM), so every raw-socket scan would
@@ -229,6 +269,7 @@ _cvengine_scanner_fit_capabilities() {  # docker compose [ARGS...]: after `up`, 
   [ "$file" = .env ] || _cvengine_scanner_set_var .env CVENGINE_SCANNER_EXTRA_CAP "$want" || _cvengine_scanner_log "could not write CVENGINE_SCANNER_EXTRA_CAP to .env"
   if [ -n "$want" ]; then export CVENGINE_SCANNER_EXTRA_CAP=$want; else unset CVENGINE_SCANNER_EXTRA_CAP; fi
   "$@" up -d --no-deps --force-recreate --pull never scanner || _cvengine_scanner_log "could not recreate the built-in scanner with its capabilities adjusted; see docker compose logs scanner"
+  cvengine_scanner_sidecar "$@"
   return 0
 }
 
@@ -252,17 +293,20 @@ cvengine_scanner_start() {
       up_args=(--pull never)
     else
       _cvengine_scanner_log "the built-in scanner image $wanted is not on this host; the scanner cannot start until it is (make scanner-build, or the next update)"
+      cvengine_scanner_sidecar "$@"
       return 0
     fi
   elif [ -n "$previous_id" ] && [ "$previous_id" != "$wanted_id" ] && [ -z "$own" ]; then
     # the moving tag will name the new image, so the image that works now gets a name of its own to go back to (and is kept from pruning)
     docker tag "$previous_id" "$_cv_scanner_rollback_tag" >/dev/null 2>&1 || previous_id=''
   fi
-  # recreated after celery: it joins celery's network namespace by container id, so it lost its network when celery was recreated
+  # recreated on its own network (scanner_network, or the overlay's host network or LAN address); the Tailscale sidecar follows it into the new namespace
   if ! "$@" up -d --no-deps --force-recreate ${up_args[@]+"${up_args[@]}"} scanner; then
     _cvengine_scanner_log "could not start the built-in scanner (docker compose up -d scanner); scans that need it wait until it runs"
+    cvengine_scanner_sidecar "$@"
     return 0
   fi
+  cvengine_scanner_sidecar "$@"
   _cvengine_scanner_fit_capabilities "$@"
   [ "$wait" = 1 ] || return 0
   if _cvengine_scanner_ready "$@"; then
@@ -277,6 +321,7 @@ cvengine_scanner_start() {
     _cvengine_scanner_log "the new built-in scanner image ($wanted) was not kept: $_cv_scanner_why. Putting the previous image back (build ${previous_release:-unknown}, image ${previous_id#sha256:}); the next update tries the newest again"
     _cvengine_scanner_rollback "$file" "$_cv_scanner_rollback_tag"
     if "$@" up -d --no-deps --force-recreate --pull never scanner; then
+      cvengine_scanner_sidecar "$@"
       _cvengine_scanner_fit_capabilities "$@"
       # the restored scanner tells the server why, through its next heartbeat (the Sentinels page shows a failed update with its reason)
       _cvengine_scanner_exec "$@" -- python3 -m client.control report failed --phase scanner-update --detail "kept the previous image: $_cv_scanner_why" --from "${previous_release:-unknown}" --to "${wanted##*/}" >/dev/null 2>&1 || true
@@ -309,6 +354,7 @@ cvengine_scanner_update() {  # docker compose [ARGS...]
   wanted_id=$(_cvengine_scanner_image_id "$wanted")
   if [ -n "$running_id" ] && [ "$running_id" = "$wanted_id" ]; then
     _cvengine_scanner_log "the built-in scanner already runs the newest published image"
+    cvengine_scanner_sidecar "$@"
     return 0
   fi
   if [ -n "$running_id" ]; then

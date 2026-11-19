@@ -177,7 +177,7 @@ which send nothing to the target and need no vantage point.
 0. Result contract, fixtures and tests. Done in PR 276.
 1. This inventory, kept current as work lands.
 2. Publish the Sentinel image with an SBOM. Add the `targets` half and `contract_version` to the contract. Done. The image: the Sentinel repository's `publish.yml` pushes `ghcr.io/hevnsnt/cvengine-sentinel` for amd64 and arm64 with an SBOM and provenance on every push to `main` and every tag, prints the digest, and checks the image has no git, Go, GVM stack or docker socket; WPScan and its gems are installed from a lockfile with checksums and nothing is updated at build time. cvENGINE follows its `main` tag, with `scanner.lock.json` (`scripts/scanner_lock.py`) as the known-good floor. The contract: the `targets` half, `contract_version` declared at registration and heartbeat, `kind_since` and `min_supported_contract_version`, and the server offers a kind only to a Sentinel whose version can run it. The Sentinel client sends `info.contract_version` (2) and runs the `waf` kind (hevnsnt/cvENGINE-sentinel#25, #28: it asks a server for `waf` only when the server's contract has it, so a 1.3 server is unaffected). Contract version 2 adds the `waf` kind (schema, fixtures, a server-side `persist_waf_result`), offered only to a Sentinel that declares 2; the wafw00f stage dispatches it since 1.4. Contract version 3 adds `nmap_full`, `nmap_verify`, `node2shell`, `rdp_shot`, `db_probe`, `path_probe` and `nuclei_validate` (section B); the frozen fixtures of version 2 are in `tests/fixtures/sentinel_results/v2/`.
-3. The built-in scanner service in compose, enrolled automatically, shown in system status. Done, on by default (`CVENGINE_BUILTIN_SCANNER=0` turns it off and revokes it): a default compose service on the newest published image, sharing celery's network namespace, with a health check on its heartbeats and a watchdog that restarts it; it reads its enrollment from the shared volume and re-enrols by itself when its token is refused; `install.sh`, `make up`, `scripts/update.sh`, the web updater and `apply-update.sh` pull the newest image, start it after celery and roll back to the previous image when it is not healthy and checked in ([UPDATES.md](UPDATES.md#the-built-in-scanner)); the upgrade rehearsal checks it comes up and enrols. System status carries `scanning.builtin_scanner` and the Sentinels page marks its card Built-in.
+3. The built-in scanner service in compose, enrolled automatically, shown in system status. Done, on by default (`CVENGINE_BUILTIN_SCANNER=0` turns it off and revokes it): a default compose service on the newest published image, on a network of its own (`scanner_network`, shared only with web), with a health check on its heartbeats and a watchdog that restarts it; it reads its enrollment from the shared volume and re-enrols by itself when its token is refused; `install.sh`, `make up`, `scripts/update.sh`, the web updater and `apply-update.sh` pull the newest image, start it once the server answers and roll back to the previous image when it is not healthy and checked in ([UPDATES.md](UPDATES.md#the-built-in-scanner)); the upgrade rehearsal checks it comes up and enrols. System status carries `scanning.builtin_scanner` and the Sentinels page marks its card Built-in.
 4. Make waiting non-fatal before any fallback is deleted. Done. A stage whose kind may not run here and that no scanner took waits
    (`resources.ScannerUnavailable`): nothing is marked failed or recorded, the strip on every page says the scanner is offline, and the
    hosts of a scan or host run during which a stage waited are queued again as a deferred re-test (`cveFeed.scanner_wait`, due
@@ -224,17 +224,17 @@ A Sentinel task is created by a Celery job that waits for it and files its resul
 5. Per-task overhead at 10,000 hosts: testssl, UDP and WPScan are one task per target, each with rows and an activity line.
    Batch them in contract version 2.
 6. Egress proxy, Tailscale and `CVENGINE_ALLOW_PRIVATE_TARGETS` lab installs applied to local scans and not to dispatched ones. Addressed:
-   the built-in scanner shares celery's network namespace (so the Tailscale sidecar's route, and the host network and macvlan overlays, are
-   its own), and its settings reply carries `vantage` (`sentinel_settings.builtin_vantage`: the proxies, the bypass list, whether private
+   the Tailscale sidecar's route and the host network and macvlan overlays belong to the built-in scanner's own network namespace, and its settings reply carries `vantage` (`sentinel_settings.builtin_vantage`: the proxies, the bypass list, whether private
    addresses go through the proxy, and the private ranges the server may scan), derived at every reply, stored nowhere and sent to the
    built-in scanner alone, which applies it to nuclei, WPScan, testssl.sh, wafw00f and its scope floor. An external Sentinel ignores it. Its
    nmap OS guesses are judged as this server's own (they cross the same path). (The warning that an image too old to apply them would scan from the wrong network, `vantage_warnings`, is gone with the local fallback it described.)
 
-   Why share celery's namespace rather than route through the sidecar: routing the tailnet from another container needs forwarding and
-   address translation inside celery's namespace and still leaves the host network and macvlan overlays behind; a second Tailscale node
-   needs a second key. Sharing the namespace gives exact parity with no new privilege for celery. What it costs: the scanner's raw-socket
-   tools could see celery's own traffic (to Redis and PostgreSQL), which they could already reach on the bridge network with the same
-   capability, and the scanner must be recreated after celery, which every update path and `make up` do (as for the Tailscale sidecar).
+   The scanner has a network of its own (`scanner_network`, shared only with web; it once shared celery's namespace). Every scan leaves from
+   it, the server's containers carry no scan traffic and need no scanning privileges or networking, and the scanner reaches the server
+   (`http://web:8000`) and nothing else of the stack: not Redis, not PostgreSQL. The Tailscale sidecar joins the scanner's namespace and the
+   host network and macvlan overlays move the scanner, so a tailnet route or a LAN address is the scanner's alone. What it costs: recreating
+   the scanner leaves the sidecar in a dead namespace, so `scripts/scanner.sh` puts it back after every scanner start
+   (`cvengine_scanner_sidecar`); recreating celery or web touches neither.
 7. Server tests that exercise scanning need a fake scanner. Addressed by `web/tests/fake_scanner.py`: a real built-in Sentinel that
    serves tasks through the broker (contract fixtures by default; fail, timeout, idle and offline on request), with
    `assert_ran_nowhere_locally(self, kind)` and `LocalFallback('none')`. A delete PR proves its kind with the pattern in
@@ -299,7 +299,7 @@ signal the adaptive capacity review reads, and a stopped scan (`ScanAborted`) is
 for a project the wrapper raises before the stage body starts, so the pipeline catches it at the wrapper
 (`discovery._waiting_for_scanner`, `run_wpscan`). Signed-in nuclei passes follow the same rule, through the built-in scanner's secure read. The hosts of a run during which a stage waited are queued again (`cveFeed.scanner_wait`).
 
-The built-in scanner shares celery's network namespace and is sent this server's egress proxy and private-target setting (`sentinel_settings.builtin_vantage`), so its scans start from where the server's did (risk 6). The older warning that an image without the `vantage` feature would ignore them (`scanning.scanner.vantage`) went with the policy it described.
+The built-in scanner is sent this server's egress proxy and private-target setting (`sentinel_settings.builtin_vantage`), so its scans honour the server's own settings (risk 6). The older warning that an image without the `vantage` feature would ignore them (`scanning.scanner.vantage`) went with the policy it described.
 
 
 ### The "scanner offline" reading

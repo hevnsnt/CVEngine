@@ -1,6 +1,6 @@
 """This server's own tailscaled, read from the status file its sidecar publishes (the `tailscale status --json` data), with no credential.
 
-The `tailscale` compose profile runs a tailscaled sidecar in the celery container's network namespace. The sidecar rewrites
+The `tailscale` compose profile runs a tailscaled sidecar in the built-in scanner's network namespace. The sidecar rewrites
 ``status.json`` every few seconds into a volume that only celery mounts, read-only: it holds what `tailscale status --json` prints
 (whether the node is connected, which tailnet it is in, every peer this node may see: name, addresses, OS, tags, online state, routes
 it is primary for, key expiry) with the login URL removed. That is enough to enumerate and scan a tailnet without any API credential,

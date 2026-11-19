@@ -2447,9 +2447,10 @@ def read_secret(ctx, task_id):
                                       status__in=SECRET_ACTIVE).update(secret_read_at=now)
     if not won:
         refuse(409, 'already read, or no longer held by this Sentinel', 'the stored credential was already read for this task')
+    withheld = []
     try:
         if keys_project is not None:
-            config = sentinel_stream.keys_payload(task)
+            config, withheld = sentinel_stream.keys_payload(task, agent)  # only the levels its enrolling user administers, only the modules its mode runs
             body = {'bbot_config': config} if config else None
         else:
             credential = _credential_payload(credential_id, task.project_id, now)
@@ -2457,6 +2458,11 @@ def read_secret(ctx, task_id):
     except Exception as exc:  # noqa: BLE001 - nothing of the credential may reach a log or a message: the type is all that is kept
         body = None
         logger.error('could not read the stored credential for sentinel task %s (%s)', task.pk, type(exc).__name__)
+    if withheld:  # keys stored at a level this Sentinel's enrolling user does not administer: held back, and said so (levels only, never a value)
+        audit.record(ctx.user, 'sentinel.discovery_keys.withheld',
+                     f'discovery keys stored at the {" and ".join(withheld)} level withheld from {agent.name} for {task.project.name} '
+                     '(its enrolling user does not administer them)',
+                     org=seen['org'], task_id=task.pk, agent_id=agent.pk, project_id=task.project_id, levels=withheld)
     if body is None:
         refuse(410, 'the stored credential could not be read', 'the stored credential is not available for this task')
     _secret_audit(ctx, 'granted', task.pk, agent_id=agent.pk, ref=task.secret_ref, org=seen['org'])
@@ -2464,7 +2470,7 @@ def read_secret(ctx, task_id):
         providers = sentinel_stream.provider_names(body.get('bbot_config'))
         audit.record(ctx.user, 'sentinel.discovery_keys.delivered',
                      f'discovery keys delivered to {agent.name} for {task.project.name} (providers: {", ".join(providers) or "none"})',
-                     org=seen['org'], task_id=task.pk, agent_id=agent.pk, project_id=task.project_id, providers=providers)
+                     org=seen['org'], task_id=task.pk, agent_id=agent.pk, project_id=task.project_id, providers=providers, withheld_levels=withheld)
     response = JsonResponse({**body, 'task_id': task.pk})
     response['Cache-Control'] = 'no-store'
     response['Pragma'] = 'no-cache'
@@ -2764,10 +2770,15 @@ def _clean_testssl_result(body):
     return cleaned
 
 
-MAX_NMAP_UDP_XML = 4 * 1024 * 1024  # a one-address, curated-port-list -sU report; generous, still far below a DoS-sized payload
+# A one-address -sU report of the curated port list (cveFeed.udp_scan.DEFAULT_PORTS, 18 ports, at most udp_scan.MAX_PORTS = 64) with its six
+# scripts: a real one is about 5 KB (tests/fixtures/sentinel_lab/nmap_udp.json), so 512 KiB is a hundred times that and more than 64 ports of
+# 8 KB of script output each. It was 4 MiB, the full TCP report's cap, which only gave a hostile report more room (security review, MEDIUM 1).
+# The contract (cvengine_scanner) still says 4 MiB: tests.test_sentinel_contract holds this cap at or below it until the Sentinel lowers it too.
+MAX_NMAP_UDP_XML = 512 * 1024
+MAX_NMAP_REPORT_XML = 4 * 1024 * 1024  # an nmap_full or nmap_verify report: every TCP port of one address can be open
 
 
-def _clean_nmap_udp_result(body):
+def _clean_nmap_udp_result(body, limit=MAX_NMAP_UDP_XML):
     """A Sentinel's ``nmap -sU`` report, kept as raw XML text rather than pre-parsed: UDP's own state vocabulary
     (``open|filtered``, extraports summarisation, the NSE scripts ``cveFeed.udp_scan.identify`` reads) is read correctly
     only by the scanner library's ``parse_xml`` (``cveFeed.port_inventory.parse_xml``) - so the
@@ -2777,8 +2788,8 @@ def _clean_nmap_udp_result(body):
     xml = body.get('xml')
     if not isinstance(xml, str) or not xml.strip():
         raise ApiError(400, 'xml must be a non-empty string')
-    if len(xml) > MAX_NMAP_UDP_XML:
-        raise ApiError(400, f'xml must be at most {MAX_NMAP_UDP_XML} characters')
+    if len(xml) > limit:
+        raise ApiError(400, f'xml must be at most {limit} characters')
     return {'xml': xml}
 
 
@@ -2906,8 +2917,8 @@ def _clean_waf_result(body):
 
 def _clean_nmap_report(body):
     """An ``nmap_full`` or ``nmap_verify`` report: raw XML like the ``nmap_udp`` one, for the same reason (``cveFeed.port_inventory.parse_xml``, hardened
-    against a custom ENTITY declaration, is the one reader of such a report). Only the size is bounded here."""
-    return _clean_nmap_udp_result(body)
+    against a custom ENTITY declaration, is the one reader of such a report). Only the size is bounded here (``MAX_NMAP_REPORT_XML``)."""
+    return _clean_nmap_udp_result(body, MAX_NMAP_REPORT_XML)
 
 
 MAX_NODE2SHELL_EVIDENCE = 2048  # matches the vendored detector's EVIDENCE_LIMIT and what cveFeed.node2shell_scan keeps of a response
@@ -3399,6 +3410,17 @@ def _adopt_late(ctx, agent, task, body, now):
     return {'task': task_brief(task), 'duplicate': False, 'adopted': bool(outcome.get('adopted')), 'late': True}
 
 
+RELEASED = 'released by the Sentinel'  # how every release's error begins: the Sentinel's own words only ever follow it
+
+
+def release_reason(reason):
+    """The ``error`` a released task keeps: ``RELEASED``, then the Sentinel's reason after a colon. The reason is the Sentinel's text, so it never stands at
+    the start, where it could read as one of the server's own (``LATE_SERVABLE_ERRORS`` would make a late result adoptable, ``cancelled by a person``
+    would name a person who did nothing)."""
+    text = _text(reason, 200).strip()
+    return f'{RELEASED}: {text}' if text else RELEASED
+
+
 def release_task(ctx, task_id, reason=''):
     agent = _sentinel_agent(ctx)
     broker._limit(agent.token, 'release')
@@ -3406,7 +3428,7 @@ def release_task(ctx, task_id, reason=''):
     task = SentinelTask.objects.select_related('project').filter(pk=_int(task_id), agent=agent).first()
     if task is None:
         raise ApiError(404, 'task not found')
-    if task.status not in ('claimed', 'running') or not expire(task, _text(reason, 200) or 'released by the Sentinel', actor=ctx.user):
+    if task.status not in ('claimed', 'running') or not expire(task, release_reason(reason), actor=ctx.user):
         raise ApiError(409, 'the task is not held by this Sentinel')
     task.refresh_from_db()
     return {'task': task_brief(task)}
@@ -3720,6 +3742,8 @@ def task_outcome(task):
     error = (task.error or '').lower()
     if task.status == 'done':
         return 'completed at its time budget (partial)' if (task.result or {}).get('partial') else 'completed'
+    if task.status == 'expired' and error.startswith(RELEASED.lower()):
+        return 'released by the Sentinel'  # first: what follows is the Sentinel's own text, never read for anything else
     if 'cancelled by a person' in error:
         return 'cancelled by an administrator'
     if task.status == 'expired':
