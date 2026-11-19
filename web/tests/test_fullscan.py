@@ -311,11 +311,9 @@ class SweepTests(FullScanBase):
 		ip.refresh_from_db()
 		self.assertIsNone(ip.full_scanned_at)
 
-	def test_the_task_and_heavy_kind_are_registered(self):
+	def test_the_task_is_registered(self):
 		from cveFeed.tasks import background_full_scan
 		self.assertEqual(background_full_scan.name, 'background_full_scan')
-		self.assertEqual(resources.BASE_COSTS_MB['nmap-full-bg'], 500)
-		self.assertEqual(resources.MAX_CONCURRENT['nmap-full-bg'], 1)
 
 	def test_the_schedule_migration_created_the_periodic_task(self):
 		from django_celery_beat.models import PeriodicTask

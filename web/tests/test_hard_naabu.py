@@ -116,9 +116,6 @@ class PipelineTests(TestCase):
 		with mock.patch('cveFeed.ledger.fresh', side_effect=RuntimeError('redis down')):
 			self.assertIsNone(port_stage.discover(['198.51.100.50'], self.scan, runner=lambda ips: {}))
 
-	def test_naabu_is_a_heavy_job_kind_with_a_ttl(self):
+	def test_naabu_has_a_ledger_ttl(self):
 		from cveFeed import ledger
-		from reNgine import resources
-		self.assertEqual(resources.BASE_COSTS_MB['naabu'], 150)
-		self.assertEqual(resources.MAX_CONCURRENT['naabu'], 1)
 		self.assertEqual(ledger.ttl('naabu'), 7 * 24 * 3600)

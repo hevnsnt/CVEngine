@@ -360,6 +360,5 @@ class MemoryPressureResponseTests(SimpleTestCase):
     def test_the_error_is_a_memory_busy_for_waiting_but_carries_its_kind_for_the_wording(self):
         error = resources.ScannerUnavailable('nmap', 'no Sentinel is live for this project')
         self.assertIsInstance(error, resources.MemoryBusy)
-        self.assertNotIsInstance(error, resources.MemoryKill)  # the one a memory-pressure retry reacts to
         self.assertNotIn('memory', str(error).lower())
         self.assertEqual(error.kind, 'nmap')

@@ -9,7 +9,7 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-    dependencies = [('cveFeed', '0175_drop_nuclei_template_refresh'), ('targetApp', '0008_domain_expect_private_ca')]
+    dependencies = [('cveFeed', '0176_drop_heavy_settings'), ('targetApp', '0008_domain_expect_private_ca')]
     operations = [
         migrations.CreateModel(
             name='ServiceFeature',

@@ -8,7 +8,7 @@ class Command(BaseCommand):
             'else the default. celery-entrypoint.sh asks for discovery_concurrency before it starts the workers, so a restart lands on the saved value.')
 
     def add_arguments(self, parser):
-        parser.add_argument('key', help='discovery_concurrency, work_depth or heavy.<kind>')
+        parser.add_argument('key', help='discovery_concurrency, work_depth, assess_batch or lane.<name>')
 
     def handle(self, *args, **options):
         if options['key'] not in scan_concurrency.BY_KEY:

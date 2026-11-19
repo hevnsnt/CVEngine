@@ -300,8 +300,7 @@ fails on any flag that is missing.
   - the Sentinel's default per-kind `max_concurrent` for `secrets_scan` (recommendation: 1);
   - the image's documented memory addition (expected about 200 to 400 MB, an assumption).
   
-  The server's `heavy_job` does not apply because there is no server path. If one is ever added, it must be `heavy_job('secrets', cost=<measured>)` with
-  `MAX_CONCURRENT 1` (`reNgine/resources.py:41-54`).
+  There is no server path: secrets scanning runs on Sentinels only, like every other scan.
 - **Exit codes.** 0, 200 and 205 are success, 3 means "no inputs", anything else is an error with Kingfisher's last stderr line (`docs/USAGE.md` "Exit
   Codes").
 

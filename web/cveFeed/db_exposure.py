@@ -133,7 +133,7 @@ def run_db_exposure_checks(scan_id, checks=None):
                 checked += 1
                 if result.get('open') is True:
                     found_open(host, number, label, subs, result.get('evidence') or '')
-    except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # the rest is checked on the next scan
+    except (resources.ScanAborted, resources.MemoryBusy) as exc:  # the rest is checked on the next scan
         if isinstance(exc, resources.ScannerUnavailable):  # a scanner that is offline is not memory pressure
             activity.settle(running, 'done', message=f'Database exposure check for {domain.name} is waiting: no scanner could take this work ({exc.kind}): '
                             f'{exposed} of {checked} service(s) open with no authentication so far; the rest is checked on the next scan')
