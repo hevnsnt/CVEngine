@@ -3233,6 +3233,11 @@ def _held_to_its_host(outcome):
     return outcome
 
 
+def _service_features(items):
+    from cvengine_scanner.features import clean_features
+    return clean_features(items)
+
+
 def clean_result(kind, body, task=None):
     """The typed, clipped result of a SentinelTask from a Sentinel's report, shaped for ``kind`` and validated against a
     strict schema: anything unexpected is dropped, every string is clipped and every list capped, before it is ever
@@ -3251,7 +3256,13 @@ def clean_result(kind, body, task=None):
     try:
         # evidence a probe copied from the host (a header, a script URL, a banner) can hold a NUL or a lone surrogate: Postgres refuses both, so the
         # whole result would never be stored (agentapi/storage_safe.py)
-        return storage_safe.clean(_bind_to_task(kind, {'outcome': 'done', **cleaner(body)}, task))
+        cleaned = {'outcome': 'done', **cleaner(body)}
+        # what the Sentinel read about features of the services (HTTP/2 ...): optional on every kind, validated by the shared vocabulary
+        # (cvengine_scanner.features.clean_features) and stored by the kind's ingest through cveFeed.service_features.ingest
+        features = _service_features(body.get('service_features'))
+        if features:
+            cleaned['service_features'] = features
+        return storage_safe.clean(_bind_to_task(kind, cleaned, task))
     except ApiError:
         raise
     except (TypeError, ValueError, KeyError):

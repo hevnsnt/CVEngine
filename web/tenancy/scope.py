@@ -30,6 +30,7 @@ SCOPES = {
     'cveFeed.DiscoveryEvent': 'domain__project_id',
     'cveFeed.AgentActivity': 'project_id',
     'cveFeed.TlsCertificate': 'domain__project_id',
+    'cveFeed.ServiceFeature': 'domain__project_id',
     'cveFeed.HygieneFinding': 'domain__project_id',
     'cveFeed.HostState': 'project_id',
     'cveFeed.HostAssessment': 'project_id',
