@@ -419,6 +419,38 @@ def tls_targets(domain, hosts=None):
     return targets
 
 
+SLP_PORT = 427
+MAX_SLP_TARGETS = 25
+# a host this names (a technology, a port's service or product, the OS the port scan read) may run VMware ESXi's OpenSLP: only such hosts, and hosts with
+# 427 open, are asked the one SLP question (cvengine_scanner.probes.service_reads.read_slp)
+ESXI_WORDS = re.compile(r'\besxi?\b|vmware[ _-]?(?:esx|vsphere|infrastructure|authentication daemon|auth)|vmware-auth|\bsvrloc\b|\bslp\b', re.I)
+
+
+def slp_targets(domain, hosts=None):
+    """``[(host, 427)]``: the target's hosts that are VMware ESXi as far as cvENGINE knows (``ESXI_WORDS`` in a technology, a port or the OS
+    guess), or have 427 open (TCP or UDP), at most ``MAX_SLP_TARGETS``, each a host the project may scan now."""
+    from startScan.models import Subdomain
+    from targetApp.target_types import scannable_hosts
+    selected = set(hosts) if hosts is not None else None
+    out = []
+    for sub in Subdomain.objects.filter(target_domain=domain).prefetch_related('ip_addresses__ports', 'technologies').order_by('name'):
+        if len(out) >= MAX_SLP_TARGETS:
+            break
+        if (selected is not None and sub.name not in selected) or not domain.includes_host(sub.name):
+            continue
+        words = [t.name for t in sub.technologies.all()]
+        listening = False
+        for ip in sub.ip_addresses.all():
+            for port in ip.ports.all():
+                if (port.state or 'open') != 'open':
+                    continue
+                listening = listening or port.number == SLP_PORT
+                words += [port.service_name or '', port.product or '', port.os_guess or '']
+        if (listening or ESXI_WORDS.search(' '.join(w for w in words if w)[:4000])) and scannable_hosts([sub.name], project=domain.project_id):
+            out.append((sub.name, SLP_PORT))
+    return out
+
+
 def mail_candidates(domain):
     """``(own, extra)``: the target's own name (none for an address) and up to 100 of its discovered hosts that may have mail of their own, before
     any DNS says so (``email_domains`` keeps the ones with an MX record that are not a CNAME)."""
@@ -545,14 +577,15 @@ def _remote_review(domain, targets, hosts):
     if hosts is not None:
         own, extra = ([domain.name] if domain.name in hosts and not is_ip(domain.name) else []), []
     mail = [(name, True) for name in own] + [(name, False) for name in extra]
+    slp = slp_targets(domain, hosts=hosts)
     try:
-        result = probe_dispatch.try_hygiene(domain, targets, mail)
+        result = probe_dispatch.try_hygiene(domain, targets, mail, slp=slp)
     except ScannerUnavailable as exc:
         logger.info('hygiene check of %s waits for a scanner: %s', domain.name, exc)
         return None, True
     rows = {(_norm(c['host']), c['port']): c for c in result.get('certs') or []}
     review = {'infos': {}, 'unknown_tls': set(), 'no_tls': set(), 'mail': {}, 'mail_hosts': [], 'unknown_mail': set(),
-              'service_features': result.get('service_features') or []}
+              'service_features': result.get('service_features') or [], 'slp': set(slp)}
     for host, port in targets:
         row = rows.get((_norm(host), port))
         if row is None or row.get('error'):
@@ -585,7 +618,9 @@ def _service_features(domain, review):
     from cveFeed import service_features
     answered = set(review['infos']) | set(review.get('no_tls') or ())
     try:
-        return service_features.ingest(domain.project_id, review.get('service_features') or [], 'hygiene_check', allowed=answered,
+        # the SLP endpoints asked (service_reads.read_slp) may carry an slp reading too; an SLP read that came back empty is unknown and removes nothing
+        return service_features.ingest(domain.project_id, review.get('service_features') or [], 'hygiene_check',
+                                       allowed=answered | set(review.get('slp') or ()),
                                        covered={(host, port, 'http2') for host, port in answered})
     except Exception:  # noqa: BLE001
         logger.exception('could not store the service features read by the hygiene check of %s', domain.name)

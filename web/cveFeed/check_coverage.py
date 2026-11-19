@@ -984,6 +984,8 @@ EXCLUDED = {
         'supplier': 'a third-party supplier host card; suppliers are not owned hosts and are deliberately kept out of this registry',
         'supplier-failed': 'the retry window of the supplier sweep',
         'udp-scan-noipv6': 'an IPv6 address a Sentinel had no route to, not scanned for a day (it is not a scan, so the udp check still calls the address due)',
+        'service-features': 'the service feature reads (HTTP/3, PHP on Windows, WebDAV, VPN portals) ride on the version probes of the same stage; '
+                            'they read a precondition of a CVE match, not a check a host is owed',
     },
     'sweeps': {
         'buckets': 'cloud storage candidates belong to the project, not to one host',

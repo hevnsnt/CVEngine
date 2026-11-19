@@ -73,6 +73,38 @@ SERVER = {
 }
 
 
+# --- web service features (Sentinel ``probes.service_reads``: the http_probe and hygiene_check kinds) ---------------------------------------
+def _vpn_port(number, service='', tunnel=''):
+    """A port an appliance serves its VPN portal on: the HTTPS ports, and the ones FortiGate, GlobalProtect and Connect Secure portals are often
+    moved to."""
+    return _https_port(number, service, tunnel) or number in (4433, 4443, 10443)
+
+
+SERVER.update({
+    'http3': Server('HTTP/3', _https_port, edge_sensitive=True,
+                    words={'exposed': 'advertises HTTP/3 (QUIC) in Alt-Svc', 'ruled_out': 'does not advertise HTTP/3'}),
+    # PHP and the operating system named by one answer's headers: one web port speaks for the machine
+    'php_windows': Server('PHP on Windows', None, edge_sensitive=True,
+                          words={'exposed': 'runs PHP on Windows', 'ruled_out': 'runs PHP on an operating system other than Windows'}),
+    # IIS turns WebDAV on for the server, so one port's OPTIONS answer speaks for it; a module's per-path WebDAV is a rule that never rules out
+    'webdav': Server('WebDAV', None, edge_sensitive=True, words={'exposed': 'answers WebDAV (a DAV header)', 'ruled_out': 'answers no WebDAV at /'}),
+    'http_methods': Server('HTTP methods listed', None, edge_sensitive=True),
+    'vpn_fortinet': Server('FortiGate SSL-VPN portal', _vpn_port, edge_sensitive=True,
+                           words={'exposed': 'answers its SSL-VPN web portal', 'ruled_out': 'serves no SSL-VPN web portal'}),
+    'vpn_globalprotect': Server('GlobalProtect portal or gateway', _vpn_port, edge_sensitive=True,
+                                words={'exposed': 'answers a GlobalProtect portal or gateway', 'ruled_out': 'serves no GlobalProtect portal or gateway'}),
+    'vpn_cisco': Server('Cisco WebVPN / AnyConnect', _vpn_port, edge_sensitive=True,
+                        words={'exposed': 'answers its WebVPN / AnyConnect login page', 'ruled_out': 'serves no WebVPN / AnyConnect login page'}),
+    'vpn_citrix': Server('NetScaler Gateway or AAA', _vpn_port, edge_sensitive=True,
+                         words={'exposed': 'answers a Gateway or AAA login page', 'ruled_out': 'serves no Gateway or AAA login page'}),
+    'vpn_ivanti': Server('Connect Secure sign-in page', _vpn_port, edge_sensitive=True,
+                         words={'exposed': 'answers its Connect Secure sign-in page', 'ruled_out': 'serves no Connect Secure sign-in page'}),
+    'slp': Server('SLP (TCP 427)', lambda number, service='', tunnel='': number == 427, edge_sensitive=False,
+                  words={'exposed': 'answers SLP on TCP 427', 'ruled_out': 'refuses TCP 427 (SLP)'}),
+})
+# --- end of the web service features
+
+
 def server(feature):
     return SERVER.get(feature) or Server(feature)
 
