@@ -2052,7 +2052,7 @@ def correlate_subdomains(subdomains, product_index, cve_by_id, min_confidence=0.
         if product_index:
             version_sources.prefetch_bundled(chunk)  # the hosts' bundled component readings in one query, not one per host
             source_versions.prefetch(chunk)  # their source readings (cveFeed.source_versions) in one query, not one per host
-            version_sources.prefetch_readings(chunk)  # their runtime, version range and Java runtime rows, one query each, not three per host
+            version_sources.prefetch_readings(chunk, cve_by_id)  # their runtime, version range and Java runtime rows, one query each, not one per host
         for sub in chunk:
             hosts += 1
             ids.add(sub.id)
