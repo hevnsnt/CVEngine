@@ -136,7 +136,12 @@ def host_siblings(sub_ids):
     current = Subdomain.objects.filter(latest_scan_q())
     keyed = list(with_host_key(Subdomain.objects.filter(id__in=sub_ids)).values('id', 'name', 'target_domain__project_id', 'host_key'))
     names_by_key = {}
-    for r in with_host_key(current).filter(host_key__in={k['host_key'] for k in keyed}).values('host_key', 'name'):
+    # only a row that could have one of these keys gets its key worked out (a correlated address set per row): one with one of these names, or one on
+    # one of their addresses (an address-set key equal to a row's is made of that row's addresses); every other current row of the inventory is left out
+    through = Subdomain.ip_addresses.through
+    near = Q(name__in={k['name'] for k in keyed}) | Q(id__in=through.objects.filter(
+        ipaddress_id__in=through.objects.filter(subdomain_id__in=sub_ids).values('ipaddress_id')).values('subdomain_id'))
+    for r in with_host_key(current.filter(near)).filter(host_key__in={k['host_key'] for k in keyed}).values('host_key', 'name'):
         names_by_key.setdefault(r['host_key'], set()).add(r['name'])
     wanted = {n for names in names_by_key.values() for n in names} | {k['name'] for k in keyed}
     rows = {}
@@ -323,7 +328,8 @@ def oldest_open(now=None):
                       .values_list('id', 'name', 'subdomain__target_domain', 'subdomain__name'))  # a host with no target never had its earliest discovery found (NULL is not equal to NULL)
     if candidates:
         earliest = {(name, domain, host): first for name, domain, host, first in
-                    Vulnerability.objects.filter(name__in={c[1] for c in candidates}, discovered_date__isnull=False)
+                    Vulnerability.objects.filter(name__in={c[1] for c in candidates}, discovered_date__isnull=False,  # the candidates' own names, targets and hosts only
+                                                 subdomain__target_domain__in={c[2] for c in candidates}, subdomain__name__in={c[3] for c in candidates})
                     .values_list('name', 'subdomain__target_domain', 'subdomain__name').annotate(first=Min('discovered_date')).order_by()}
         found = [(earliest[(name, domain, host)], row_id) for row_id, name, domain, host in candidates if (name, domain, host) in earliest]
         if found:
