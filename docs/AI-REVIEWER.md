@@ -98,7 +98,8 @@ reviewer is built on the assumption that every scanned byte is hostile.
    job runs at most once per scheduled slot. A task meant to burn tokens ends at the cap. A review the model refuses, answers with nothing,
    cuts off twice or answers outside the schema is recorded (with no verdict) and counts against the cap; the finding is asked about again
    only when its host changes or 24 hours have passed. Reporting it is idempotent: the same report again inside 24 hours returns the same
-   answer and adds no row, a state that already has a verdict takes none (409), no more than the daily cap are kept (429), and the body
+   answer and adds no row, a state that already has a verdict takes none (409), no more than the daily cap are kept (429; a verdict past the
+   cap is refused the same way), and the body
    is at most 4 KB (413). The operations job makes at most one model call an hour on every failure path (a refused report, an unreachable
    server, any error): the container notes the attempt before it calls the model. A verdict is applied under a row lock on the finding, so
    it cannot overwrite a person's change made at the same moment. A provider that is down (not the finding's fault) is not recorded; three failures in a row pause the work for 15 minutes.
@@ -153,7 +154,12 @@ when it lands.
 Nothing is lost on the way. A lease that runs out puts the job back in the queue (three times, then it fails and the stage asks again); an
 answer whose Celery task was lost is applied by the housekeeping pass every five minutes; a job nobody answers within a week expires and its
 stage asks again. Work that was in flight in the old code when an update restarted the server is simply asked again: its claim runs out
-after ten minutes and the triage sweep queues it.
+after ten minutes and the triage sweep (every hour) queues it. A validation that queued a triage question names its job (`ai_job_id`), and the
+answer, a refusal or an expiry updates the validation's `ai_state`.
+
+A detection record (`cve_detection`) answer the validator refuses is sent back once with why, like a triage answer; a second refusal counts as a
+failed ask (the record backs off and is asked again later, and gives up after its failures), never as an answer. The CVE guidance budget counts
+the authoring questions asked in the last 24 hours from the AI jobs themselves, so a revision that queues a record again hands nothing back.
 
 **When the reviewer is off.** With no AI provider configured, the stages queue nothing and behave as they always did without AI. With a
 provider but no reviewer to serve the queue (`CVENGINE_REVIEWER=0`, the container stopped, scanning paused), jobs wait and nothing fails.
@@ -221,8 +227,13 @@ Size of each system prompt, in characters (about 3.5 characters a token), before
 ## Finding review in detail
 
 - **Which findings.** Every finding with a triage record whose remediation status is open or in progress: CVE matches (Fire, Smoke and Ice),
-  scanner findings and hygiene findings. Web routes have no remediation workflow and are left out. Fire comes first, then Smoke, then the rest,
-  newest first. Each project with open findings gets an equal share of every batch, so one large project cannot use the whole daily cap while another has work.
+  scanner findings and hygiene findings. Web routes have no remediation workflow and are left out. Fire comes first, then Smoke, then the rest
+  (the finding's heat as every list shows it, a heat a person set included: a KEV match or a hot scanner finding before a cold CVE match), then
+  CVE matches before the other kinds, newest first. Each project with open findings gets an equal share of every batch, so one large project
+  cannot use the whole daily cap while another has work.
+- **The daily cap counts the finding reviewer's own reviews.** `review_daily_max` counts the reviews the finding reviewer wrote today, refusals
+  included; the verdicts a host review writes (up to 60 per host) count against `host_review_daily_max` only, so a few host reviews no longer use
+  up the finding reviewer's day.
 - **Once per state.** A review is keyed by the finding's evidence key and its host's state fingerprint (`HostState.fingerprint`: IPs, ports
   with service and version, technologies, HTTP status and title). The same key is never reviewed twice. A new port, a new version or new
   evidence makes a new key, and the finding is read again.
@@ -258,6 +269,8 @@ the numbers behind that state, and the actions it allows:
 | `memory` | A worker lane or a container uses 85 percent (warning) or 95 percent (problem) of its memory limit, a container was killed by the kernel for memory at least once in 24 hours (`oom_kills_24h`), or one worker lane restarted 3 or more times in 24 hours. The text names the lane or container (the web container, the worker container, the lane), the numbers, and the `.env` limit to raise (`WEB_MEM_LIMIT`, `CELERY_MEM_LIMIT`). A reading that is missing, stale or has no limit gives no verdict (`not_read` in the facts) | none |
 | `queue_starvation` | A scan has waited an hour or more while host assessments are running or queued, or a Sentinel task kind's oldest queued task has waited at least an hour and six times its own median wait of the last day while the Sentinels claimed other kinds in the last 30 minutes. Not judged while scanning is paused | none |
 | `sentinel_claims_refused` | The server's own rate limiter refused claim calls: 10 or more in the last two clock hours is a warning, 100 or more a problem. The text names the Sentinels and says that adding Sentinels will not help | none |
+| `ai_budget` | An AI cap is used up, so that work stops until its window resets: the configMaxxing caps (triage, validation, template drafts, auto-tuning, nuclei), the per-project triage cap (the busiest project), the finding review and host review caps, the CVE guidance budget and the validation planning budgets. A warning that names each cap with its use; a cap of 0 (switched off) is not reported | none |
+| `triage_backlog` | Findings of the current inventory waiting for their AI triage: the oldest pending or error row has waited 6 hours (warning) or 48 hours (problem). Rows of matches a later scan replaced and of closed findings are not counted. The text gives the counts and the next step (an AI provider, the reviewer container, the AI budget check) | none |
 
 A check in `problem` opens an **admin alert**, a banner on every page for App Admins similar to the update banner. A check that is `ok` again
 resolves its alert. A check can also be `unknown` when the numbers it needs could not be read: that is no verdict, it opens and resolves nothing, and the model is not asked about it. The checks run from the outer watchdog's tick in the web container (every 30 minutes, with no Celery lane involved) as well as from the beat task, so they continue when the lane that dies in an incident is gone; an alert that has not been re-checked for an hour is shown with "Not re-checked for ..." in front of its text. An admin can dismiss an alert, and it stays dismissed until the problem changes.
@@ -344,7 +357,7 @@ All routes are under `/api/v1/reviewer/` and need a `reviewer`-scope token. The 
 | `GET findings/next?limit=N` | Up to N review packets, each leased for 15 minutes |
 | `POST findings/<ref>/verdict` | One verdict. The answer says whether it was applied, recorded, held (and why) or stale |
 | `POST findings/<ref>/refusal` | The model gave no usable answer for the packet (`review_key`, `category`, `model`). Recorded with no verdict and counted against the daily cap; the finding is not handed out again for 24 hours unless its host changes |
-| `GET ops/snapshot` | The checks above that have a verdict, `codes`, `signals` (a bounded summary of the maintainer's measurements: lane and container memory, oom kills, restarts, queue ages, refused claims, database, Redis, AI spend), `tuning` (auto-tuning's mode and last five decisions, and `proposals`: what the AI may change now), `tuning_settings` (the keys a proposal may name), and (`watchdog`) the last ten things the outer watchdog did, so the diagnosis can explain them ([WATCHDOG.md](WATCHDOG.md)); no check or action depends on it |
+| `GET ops/snapshot` | The checks above that have a verdict, `codes`, `signals` (a bounded summary of the maintainer's measurements: lane and container memory, oom kills, restarts, queue ages, refused claims, database, Redis, AI spend, the triage backlog), `tuning` (auto-tuning's mode and last five decisions, and `proposals`: what the AI may change now), `tuning_settings` (the keys a proposal may name), and (`watchdog`) the last ten things the outer watchdog did, so the diagnosis can explain them ([WATCHDOG.md](WATCHDOG.md)); no check or action depends on it |
 | `POST ops/report` | Diagnoses, requested actions and optional `tuning` proposals. The answer says what was run and, for each proposal, whether it was applied, recommended, refused or held |
 | `GET jobs/next?limit=N` | Up to N (at most 20) of the pipeline's queued AI jobs, each leased with a fresh lease token |
 | `POST jobs/<id>/result` | The answer to one job, or its failure category, with the lease token and the calls' token counts |

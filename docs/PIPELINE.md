@@ -58,7 +58,13 @@ CVE matches, scanner findings, open databases, open admin routes, routes exposin
 
 **When nothing can be checked from outside**, cvENGINE asks the AI once for at most three short, read-only commands a person with shell access to the host could run themselves, such as checking for a package, a process, or a config path named in the advisory, with what the output would mean. It is suggestion only, unverified by this tool, shown under **Confirm it yourself** beside the usual "no check exists" message, never a classification or evidence of anything. The model is told never to suggest a command that changes the host or needs a credential, and to say so plainly when it is not confident of the exact way to detect a given product rather than invent one.
 
-A daily sweep (triage 04:41 UTC, validation 05:17 UTC) catches whatever is left.
+**Changed evidence is triaged again.** A correlation outside a scan (a version or identity probe, a version source, a panel version, a Recog reading, a KEV or range re-read) that creates a match or moves one (its version, its range result, the distribution's answer) tracks it once the write is committed and asks the question again within the triage caps (`retriage_matches`): its triage row takes the signature of what it holds now, so it is never left `triaged` on evidence it no longer has. A scan's own correlation leaves that to the scan's triage stage. A CVE whose record is refreshed has its matches tracked and asked, and findings the backfill gives a first triage row queue their project's sweep at once. A new detection record for a CVE (a new remote ceiling or new guidance, from the model or a person) asks its current matches that already hold an answer again, under a fresh-review nonce made from the record, so the same answer is clamped by the new ceiling; the record is deliberately not part of the evidence signature, which would re-ask (and hold at smoke) every match of every CVE with a record at the first scan after an update. Hot validation compares a finished validation with the finding's evidence as it is now, described afresh, not with the signature its row last stored.
+
+**A validation learns its AI answer.** A validation queues its triage question for the AI reviewer container and finishes before the answer lands, so its result read `deferred`. The record now names the question's AI job (`ai_job_id`), and the answer, a refusal or an expiry updates its `ai_state` (`completed`, `failed`, `unavailable`), status and classification.
+
+**The model is told when the evidence was shortened.** The triage payload is bounded (3,000 characters a text, 40 fields, 20 list items, four levels); when a bound cut something, the prompt says what, and that what was cut is unknown, not absent.
+
+A sweep catches whatever is left: triage every hour at minute 41 (the findings still pending, those in error after a provider failure, and the not-triaged ones once a provider is set), validation daily at 05:17 UTC. Rows outside the current inventory (a match a later scan replaced, a finding closed since) are not swept and are not counted as waiting: `list_triage?current=true` leaves them out, and the triage backlog signal counts only the current inventory.
 
 ### How the AI investigates a lead
 
@@ -782,7 +788,8 @@ A superuser can change CVE sync, certificate watch, the hygiene hour, and both t
 | Internal range discovery sweep (Sentinels, [details](#internal-networks)) | daily at 02:41 UTC, each range once a week |
 | Internal target scans (Sentinels, [details](#internal-networks)) | daily at 03:17 UTC, each target once a week |
 | Distro fix sync | daily at 03:17 UTC |
-| Triage and validation sweeps | daily at 04:41 and 05:17 UTC |
+| Triage sweep | hourly at minute 41 |
+| Validation sweep | daily at 05:17 UTC |
 | nuclei template update | 04:41, 10:41, 16:41, and 22:41 UTC |
 | CVE detection authoring | every 30 minutes, at :17 and :47 |
 | Daily statistics snapshot | daily at 02:11 UTC |

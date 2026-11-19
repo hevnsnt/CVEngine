@@ -3891,11 +3891,13 @@ def update_cve_detection(ctx, cve_id, guidance=None, strategy=None):
         clean, problems = detection.validate_strategy(strategy)
         if clean is None:
             raise ApiError(400, 'the strategy is not usable: ' + '; '.join(problems[:5]))
-        from cveFeed import locality
+        from cveFeed import locality, triage as triage_lib
         final = detection.finalize(clean, cve.cvss_vector)
+        before = triage_lib.strategy_key(row.strategy, row.source) if row.pk else triage_lib.strategy_key({}, '')
         CVEDetection.objects.update_or_create(cve_entry=cve, defaults={
             'strategy': final, 'source': 'manual', 'schema_version': detection.SCHEMA_VERSION, 'ai_problems': problems[:10]})
         locality.apply_scope(cve, final.get('scope', ''))
+        triage_lib.strategy_changed_after_commit(cve.pk, before, triage_lib.strategy_key(final, 'manual'))  # its matches are asked again
     else:
         if not isinstance(guidance, str) or not 10 <= len(guidance.strip()) <= 3000:
             raise ApiError(400, 'guidance must be text of 10 to 3000 characters')
@@ -5546,7 +5548,10 @@ def _triage_item(t):
 
 def list_triage(ctx, slug, params):
     """Triage of every finding: ?status= (pending, triaged, not_triaged, error), ?classification=, ?validation= (hit, clean, failed,
-    pending, no_check, skipped_blocked, none) and ?kind=. Findings classified as likely false positives are listed like any other."""
+    pending, no_check, skipped_blocked, none) and ?kind=. ``?current=true`` keeps the findings of the current inventory only (``triage.current_q``:
+    a match a later scan replaced, or a finding closed since, may stay pending for good and is not waiting for anything). Findings classified as
+    likely false positives are listed like any other. Newest first, a page at a time, read in the order of ``triage_proj_status_seen_idx``."""
+    from cveFeed import triage as triage_lib
     from cveFeed.models import Triage
     project, _ = get_one_project(ctx, slug)
     qs = Triage.objects.filter(project=project).select_related('verdict', 'match__cve_entry', 'vulnerability', 'route', 'hygiene')
@@ -5556,6 +5561,8 @@ def list_triage(ctx, slug, params):
             if allowed and params[param] not in allowed:
                 raise ApiError(400, f'{param} must be one of: {", ".join(allowed)}')
             qs = qs.filter(**{field: params[param]})
+    if str(params.get('current') or '').strip().lower() in ('1', 'true', 'yes', 'on'):
+        qs = qs.filter(triage_lib.current_q())
     return paginate(qs.order_by('-last_seen', '-id'), params, _triage_item)
 
 

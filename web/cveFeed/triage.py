@@ -1192,6 +1192,62 @@ def stable(value, tokens=True, depth=0):
     return value
 
 
+STRATEGY_NONCE = 'strategy:'  # the review nonce a changed detection strategy sets (``strategy_changed``), followed by ``strategy_key``
+
+
+def strategy_key(strategy, source=''):
+    """A short hash of what the triage reads from a CVE's detection record: the highest state a check from outside may give
+    (``detection.max_remote_state``, the clamp ``remote_limit`` applies) and the guidance shown to the model (``detection.prompt_guidance``).
+    ``strategy`` is the record's strategy dict and ``source`` who wrote it."""
+    from types import SimpleNamespace
+    from cveFeed import detection
+    cve = SimpleNamespace(detection=SimpleNamespace(strategy=strategy if isinstance(strategy, dict) else {}, source=source or ''))
+    blob = json.dumps([detection.max_remote_state(cve), detection.prompt_guidance(cve)], sort_keys=True, default=str)
+    return hashlib.sha1(blob.encode()).hexdigest()[:12]
+
+
+def strategy_changed(cve_entry_id, limit=2000):
+    """A CVE's detection record changed what the triage reads (``strategy_key``: a new remote ceiling or new guidance, written by the model or a
+    person): its current matches that already hold an answer are asked again. Each row gets a fresh review under a nonce made from the new key
+    (``request_fresh_review``: the record stays until the new answer replaces it, and the same nonce on every host keeps one question per
+    evidence), then the rows are tracked and triaged within the caps (``run_triage``). The strategy is deliberately not part of the evidence
+    signature itself: that would change the signature of every match of every CVE that has a record on the first scan after an update, holding
+    them all at smoke (``threat.triage_held_q``) and re-asking and re-validating the whole catalogue at once. Returns the run's counts."""
+    from cveFeed.correlation import latest_scan_q
+    from cveFeed.models import CVEMatch
+    matches = with_cves(CVEMatch.objects.filter(cve_entry_id=cve_entry_id).filter(latest_scan_q('subdomain__'))
+                        .exclude(ai_verdict='not_affected', ai_reason__startswith='Closed automatically:')
+                        .select_related('subdomain__target_domain').order_by('id')[:limit])
+    if not matches:
+        return {'rows': 0, 'asked_again': 0}
+    entry = matches[0].cve_entry
+    row = getattr(entry, 'detection', None)
+    nonce = STRATEGY_NONCE + strategy_key(row.strategy if row is not None else {}, row.source if row is not None else '')
+    again = 0
+    for triage_row, d in track(matches):
+        if triage_row.review_nonce != nonce and triage_row.status == 'triaged':
+            request_fresh_review(triage_row, d, nonce)
+            again += 1
+    if not again:
+        return {'rows': len(matches), 'asked_again': 0}
+    return {**run_triage(track(matches)), 'asked_again': again}
+
+
+def strategy_changed_after_commit(cve_entry_id, before, after):
+    """Queue ``strategy_changed`` for this CVE once the write commits, when the ``strategy_key`` moved (``before`` and ``after``)."""
+    if before == after or not cve_entry_id:
+        return
+    from django.db import transaction
+
+    def queue():
+        try:
+            from cveFeed.tasks import retriage_cve_strategy
+            retriage_cve_strategy.delay(cve_entry_id)
+        except Exception:  # noqa: BLE001 - the strategy is stored; the matches are asked again when their evidence next changes
+            logger.warning('could not queue the triage of the matches of CVE %s after its detection record changed', cve_entry_id, exc_info=True)
+    transaction.on_commit(queue)
+
+
 def request_fresh_review(row, d, nonce):
     """Ask for a fresh AI review of ``row`` (``d`` is its current description, from ``track``) under ``nonce``, as a validation request
     does, without erasing what the row already holds. The nonce is part of the evidence key, so setting it alone made the next ``track`` take
@@ -2132,6 +2188,50 @@ def _job_group(job):
     return group
 
 
+def open_job_id(kind, signature):
+    """The id of the open AIJob that asks the triage question of ``(kind, signature)`` (``_ask``'s dedupe key), or None."""
+    from cveFeed.models import AIJob
+    return (AIJob.objects.filter(kind='triage', dedupe=f'triage:{kind}:{signature}'[:80], status__in=AIJob.OPEN)
+            .order_by('-id').values_list('pk', flat=True).first())
+
+
+ROW_AI_STATE = {'triaged': 'completed', 'error': 'failed', 'not_triaged': 'unavailable'}  # a validation's ai_state read from its row's triage status
+
+
+def settle_validations(job, state=None):
+    """The validation records waiting on this triage question (``ai_job_id``, their result ``ai_state`` queued or deferred) take its outcome:
+    ``state`` (completed when the answer was applied, failed when it was refused or the call failed, unavailable when the job expired unanswered),
+    or, when ``state`` is None, what the row's triage status says now (``ROW_AI_STATE``; a row still pending is left waiting), with the row's
+    status and classification. Before, a validation's AI review always read "deferred": the triage is asked through the AI reviewer container,
+    and nothing linked its answer back to the record (and ``hot_validation._job_current`` held a deferred one for a day only)."""
+    from cveFeed.models import AutomaticValidation, OnDemandValidation, Triage
+    for model in (OnDemandValidation, AutomaticValidation):
+        for record in model.objects.filter(ai_job_id=job.pk):
+            result = dict(record.result or {})
+            if result.get('ai_state') not in ('queued', 'deferred'):
+                continue
+            row = (Triage.objects.filter(match_id=record.match_id).first() if model is OnDemandValidation
+                   else Triage.objects.filter(pk=record.triage_id).first())
+            now_state = state or (ROW_AI_STATE.get(row.status) if row is not None else None)
+            if not now_state:
+                continue
+            result['ai_state'] = now_state
+            if row is not None:
+                result['ai_status'], result['classification'] = row.status, row.classification or None
+            model.objects.filter(pk=record.pk).update(result=result)
+
+
+def settle_if_done(job_id):
+    """``settle_validations`` for a job that finished before its validation record was written with its id (the answer can land while the
+    validation is still saving): an applied job is read from the row it answered (an answer the validator refused left it in error), a failed one
+    is failed, an expired one unavailable. Nothing while the job is open."""
+    from cveFeed.models import AIJob
+    job = AIJob.objects.filter(pk=job_id).only('pk', 'status').first() if job_id else None
+    status = getattr(job, 'status', '')
+    if status in ('applied', 'failed', 'expired'):
+        settle_validations(job, {'failed': 'failed', 'expired': 'unavailable'}.get(status))
+
+
 def _job_error(job, claim, group, error):
     """What a provider error did to a group when the server asked itself: the claim fails, the rows go to ``error`` with a diagnostic that
     holds no reply, prompt, URL or key, and the activity feed says so. The sweep asks again."""
@@ -2164,6 +2264,7 @@ def _triage_answer(job, text):
     if parsed is None:
         _job_error(job, claim, group, SimpleNamespace(category='schema_invalid', output_length=len(str(text)), digest=ai_jobs.digest(text),
                                                       reason=reason, attempts=2))
+        settle_validations(job, 'failed')
         return None
     outcome = apply_rules(ctx['finding_kind'], ctx['facts'], parsed)
     verdict = _save_answer(claim, ctx['kind'], ctx['signature'], outcome, _job_model(job), tuple(ctx['origin'])) if claim else None
@@ -2171,6 +2272,7 @@ def _triage_answer(job, text):
         return None  # the claim was given up meanwhile: the rows stay pending and the sweep asks again
     released = []
     _after_apply(_apply(verdict, group, released, asked=ctx.get('asked')), released)
+    settle_validations(job, 'completed')
     return None
 
 
@@ -2193,6 +2295,7 @@ def job_failure(job, category, detail):
     error = SimpleNamespace(category=category, http_status=detail.get('http_status'), stop_reason=detail.get('stop_reason'),
                             attempts=job.attempt if job.attempt > 1 else None)
     _job_error(job, claim, _job_group(job), error)
+    settle_validations(job, 'failed')
 
 
 def job_admit(job):
@@ -2220,6 +2323,8 @@ def job_expired(job):
     claim = _claim_of(job)
     if claim is not None:
         _finish_call(claim, 'expired')
+    if job.kind == 'triage':
+        settle_validations(job, 'unavailable')
 
 
 def run_triage(pairs, provider=False, scan_id=None):
@@ -2402,6 +2507,23 @@ def triage_hygiene(domain_id, provider=False):
     from cveFeed.models import HygieneFinding
     rows = HygieneFinding.objects.filter(domain_id=domain_id, status='open', severity__gte=MEDIUM).select_related('domain')
     return run_triage(track(list(rows)), provider=provider)
+
+
+def closed_automatically(match):
+    """Whether a CVE match is closed by one of cvENGINE's own rules (``ai_verdict`` not_affected with a "Closed automatically:" reason: a range
+    that no longer covers it, a different product, a rejected CVE...): such a match is tracked but not asked, so an answer cannot reopen it."""
+    return bool(match is not None and match.ai_verdict == 'not_affected' and (match.ai_reason or '').startswith('Closed automatically:'))
+
+
+def current_q(prefix=''):
+    """The Triage rows of the current inventory: a CVE match of its host's current scan (``latest_scan_q``), a scanner finding still reported, an
+    open route and an open hygiene finding. A row outside it (a match a later scan replaced, a finding closed since) may stay ``pending`` for good,
+    because nothing asks about it any more (the sweep skips it): it is not part of the triage backlog and is not shown as waiting."""
+    from django.db.models import Q
+    from cveFeed.correlation import latest_scan_q
+    p = prefix
+    return ((Q(**{p + 'match__isnull': False}) & latest_scan_q(p + 'match__subdomain__')) | Q(**{p + 'vulnerability__open_status': True})
+            | Q(**{p + 'route__auth_state': 'open'}) | Q(**{p + 'hygiene__status': 'open'}))
 
 
 BACKFILL_LIMIT = 2000

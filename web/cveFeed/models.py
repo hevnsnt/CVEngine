@@ -309,9 +309,12 @@ class OnDemandValidation(models.Model):
     finished_at = models.DateTimeField(null=True, blank=True)
     attempts = models.PositiveSmallIntegerField(default=1)  # this try for the same evidence (hot_validation.MAX_ATTEMPTS)
     next_attempt_at = models.DateTimeField(null=True, blank=True)  # a failed job: when it may run again; None once exhausted
+    # the AIJob of the triage question this validation queued (result ai_state deferred): its answer updates the result (triage.settle_validations)
+    ai_job_id = models.PositiveBigIntegerField(null=True, blank=True)
 
     class Meta:
-        indexes = [models.Index(fields=['project', 'created_at'], name='ondemand_project_created_idx')]
+        indexes = [models.Index(fields=['project', 'created_at'], name='ondemand_project_created_idx'),
+                   models.Index(fields=['ai_job_id'], name='ondemand_ai_job_idx')]
         constraints = [models.UniqueConstraint(fields=['match'], condition=models.Q(status__in=['queued', 'running']),
                                            name='one_active_validation_per_match')]
 
@@ -370,9 +373,12 @@ class AutomaticValidation(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
+    # the AIJob of the triage question this validation queued (result ai_state queued or deferred): its answer updates the result
+    ai_job_id = models.PositiveBigIntegerField(null=True, blank=True)
 
     class Meta:
-        indexes = [models.Index(fields=['project', 'status', 'created_at'], name='autoval_project_status_idx')]
+        indexes = [models.Index(fields=['project', 'status', 'created_at'], name='autoval_project_status_idx'),
+                   models.Index(fields=['ai_job_id'], name='autoval_ai_job_idx')]
         constraints = [models.UniqueConstraint(fields=['triage'], condition=models.Q(status__in=['queued', 'running']),
                                            name='one_active_autoval_per_finding')]
 
@@ -1406,6 +1412,9 @@ class Triage(models.Model):
             models.Index(fields=["kind", "signature"], name="triage_kind_sig_idx"),
             models.Index(fields=["project", "host"], name="triage_proj_host_idx"),
             models.Index(fields=["project", "kind", "evidence_key"], name="triage_proj_kind_evkey_idx"),  # the reviewer's prior: the same evidence on other hosts (reviewer.same_evidence_prior)
+            models.Index(fields=["status", "updated_at"], name="triage_status_updated_idx"),  # the sweep's oldest-first read and the triage backlog signal
+            # list_triage's page (?status=, newest first): read in index order and stopped at the page, instead of joining and sorting every row of the status
+            models.Index(fields=["project", "status", "last_seen", "id"], name="triage_proj_status_seen_idx"),
         ]
         constraints = [
             models.CheckConstraint(

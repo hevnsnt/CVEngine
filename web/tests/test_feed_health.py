@@ -223,13 +223,13 @@ class CorrelationQueueTests(TestCase):
 		for n in range(7):
 			CVEEntry.objects.create(cve_id=f'CVE-2026-4{n}', affected=[], needs_recorrelation=True)
 		ticks = iter([0, 0, 0, 100, 100])
-		with mock.patch('cveFeed.tasks.correlate_cve_rows') as matched, mock.patch('cveFeed.tasks.correlate_refreshed_cves.delay') as again:
+		with mock.patch('cveFeed.tasks.correlate_cve_rows', return_value=2) as matched, mock.patch('cveFeed.tasks.correlate_refreshed_cves.delay') as again:
 			out = tasks.correlate_refreshed_cves(seconds=10, batch=3, clock=lambda: next(ticks))
-		self.assertEqual(out, {'correlated': 6, 'left': 1})
+		self.assertEqual(out, {'correlated': 6, 'left': 1, 'asked': 4})  # each walk's triage questions are added up
 		self.assertEqual(matched.call_count, 2)
 		again.assert_called_once()
-		with mock.patch('cveFeed.tasks.correlate_cve_rows'), mock.patch('cveFeed.tasks.correlate_refreshed_cves.delay') as again:
-			self.assertEqual(tasks.correlate_refreshed_cves(), {'correlated': 1, 'left': 0})
+		with mock.patch('cveFeed.tasks.correlate_cve_rows', return_value=0), mock.patch('cveFeed.tasks.correlate_refreshed_cves.delay') as again:
+			self.assertEqual(tasks.correlate_refreshed_cves(), {'correlated': 1, 'left': 0, 'asked': 0})
 		again.assert_not_called()
 
 	def test_marking_for_correlation_moves_the_pool_key(self):

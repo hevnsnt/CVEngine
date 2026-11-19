@@ -29,6 +29,10 @@ STALE_LANE_SECONDS = 3600  # a lane's memory record older than this was not writ
 STALE_CONTAINER_SECONDS = 180  # the same limit as the status's memory section (system_status.MEMORY_REPORT_STALE_SECONDS)
 EXPECTED_CONTAINERS = ('web', 'worker')
 AI_CAP_KEYS = ('triage_max_per_day', 'validate_max_per_day', 'template_gen_max_per_day', 'autotune_ai_max_per_day', 'nuclei_ai_max_per_day')
+# the AI caps that are not configMaxxing settings (``_other_caps``): the per-project triage cap (the busiest project's use), the finding review and the
+# host review (Settings > AI reviewer), the CVE guidance and the validation planning budgets (Settings > AI model)
+OTHER_AI_CAP_KEYS = ('triage_max_per_project_day', 'review_daily_max', 'host_review_daily_max', 'cve_guidance_daily', 'plan_daily_total',
+                     'plan_daily_per_project')
 MAX_REFUSAL_ROWS = 20
 
 
@@ -262,6 +266,58 @@ def redis_memory(client):
 
 # --- AI spend against its caps ------------------------------------------------------------------------------------------------------------
 
+def _busiest(queryset):
+    """The most rows one project has in ``queryset`` (0 when none)."""
+    from django.db.models import Count
+    top = queryset.order_by().values('project_id').annotate(n=Count('id')).order_by('-n').values_list('n', flat=True).first()
+    return int(top or 0)
+
+
+def _other_caps():
+    """``{key: (label, cap, used, window, scope)}`` for ``OTHER_AI_CAP_KEYS``; a source that cannot be read raises, and its row is unknown."""
+    from cveFeed import tunables
+    now = timezone.now()
+    day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    def triage_project():
+        from cveFeed import triage
+        return ('Triage questions per project a day', _number(tunables.value('triage_max_per_project_day')),
+                _busiest(triage._triage_calls_today()), 'utc_day', 'busiest project')
+
+    def review():
+        from cveFeed import reviewer
+        return 'AI finding reviews a day', reviewer.settings_row().review_daily_max, reviewer.reviews_today(now), 'utc_day', 'install'
+
+    def host_review():
+        from cveFeed import host_review as hr, reviewer
+        return 'AI host reviews a day', reviewer.settings_row().host_review_daily_max, hr.reviews_today(now), 'utc_day', 'install'
+
+    def guidance():
+        from cveFeed import detection_author
+        return 'CVE guidance records written by the model a day', detection_author.daily_limit(), detection_author.ai_used_last_day(now), 'rolling_day', 'install'
+
+    def planning():
+        from cveFeed import validation_plan
+        from cveFeed.models import TriageCall
+        total, per_project = validation_plan.daily_limits()
+        today = TriageCall.objects.filter(kind='validation_plan', started_at__gte=day)
+        return (('AI validation plans a day', total, today.count(), 'utc_day', 'install'),
+                ('AI validation plans per project a day', per_project, _busiest(today), 'utc_day', 'busiest project'))
+
+    out = {}
+    for keys, read in ((('triage_max_per_project_day',), triage_project), (('review_daily_max',), review), (('host_review_daily_max',), host_review),
+                       (('cve_guidance_daily',), guidance), (('plan_daily_total', 'plan_daily_per_project'), planning)):
+        try:
+            got = read()
+            for key, value in zip(keys, got if isinstance(got[0], tuple) else (got,)):
+                out[key] = value
+        except Exception as exc:  # noqa: BLE001 - one unreadable counter is that row's unknown, never the others'
+            logger.debug('maintainer signals: could not read the AI cap %s', keys, exc_info=True)
+            for key in keys:
+                out[key] = exc
+    return out
+
+
 def _ai_spend():
     from cveFeed import tunables
     used = tunables.usage_today()
@@ -275,6 +331,19 @@ def _ai_spend():
         else:
             row.update(state='known', used=today, percent_of_cap=_percent(today, cap))
         rows.append(row)
+    for key, value in _other_caps().items():
+        if isinstance(value, Exception):
+            rows.append({'key': key, 'label': key.replace('_', ' '), 'cap': None, 'window': None, 'state': 'unknown', 'used': None,
+                         'percent_of_cap': None, 'reason': f'the count could not be read ({type(value).__name__})'})
+            continue
+        label, cap, today, window, scope = value
+        cap, today = _number(cap), _number(today)
+        row = {'key': key, 'label': label, 'cap': cap, 'window': tunables.USED_SINCE.get(window), 'scope': scope}
+        if today is None or cap is None:
+            row.update(state='unknown', used=None, percent_of_cap=None, reason='the count could not be read')
+        else:
+            row.update(state='known', used=today, percent_of_cap=_percent(today, cap))
+        rows.append(row)
     known = [r for r in rows if r['state'] == 'known']
     result = {'state': 'known' if len(known) == len(rows) else 'partial' if known else 'unknown', 'caps': rows}
     if result['state'] != 'known':
@@ -283,8 +352,34 @@ def _ai_spend():
 
 
 def ai_spend():
-    """Each AI call cap with what has been used against it today (the counters the settings page shows). Reused for a minute."""
+    """Each AI call cap with what has been used against it today (the counters the settings page shows, and the caps of the finding review, the host
+    review, the CVE guidance, the validation planning and the per-project triage, whose ``scope`` says whether ``used`` is the install's or the busiest
+    project's). Reused for a minute."""
     return _cached('ai_spend', _ai_spend)
+
+
+# --- the triage backlog ---------------------------------------------------------------------------------------------------------------------
+
+def _triage_backlog():
+    from django.db.models import Count, Min, Q
+    from cveFeed import triage
+    from cveFeed.models import Triage
+    now = timezone.now()
+    with _bounded():
+        current = Triage.objects.filter(triage.current_q())
+        got = current.filter(status__in=('pending', 'error')).aggregate(
+            pending=Count('id', filter=Q(status='pending')), errors=Count('id', filter=Q(status='error')),
+            oldest=Min('updated_at', filter=Q(status='pending')), oldest_error=Min('updated_at', filter=Q(status='error')))
+    age = lambda when: int(max(0, (now - when).total_seconds())) if when else None  # noqa: E731
+    return {'state': 'known', 'pending': got['pending'], 'errors': got['errors'], 'oldest_pending_age_seconds': age(got['oldest']),
+            'oldest_error_age_seconds': age(got['oldest_error'])}
+
+
+def triage_backlog():
+    """The findings of the current inventory still waiting for their AI triage: how many are pending (queued over a cap, asked and not yet answered,
+    new) and in error (a provider failure the sweep retries), and how long the oldest of each has waited. Rows of matches a later scan replaced and of
+    findings no longer open are not counted (``triage.current_q``). Reused for a minute."""
+    return _cached('triage_backlog', _triage_backlog)
 
 
 # --- all of it ----------------------------------------------------------------------------------------------------------------------------
@@ -301,5 +396,6 @@ def collect(depths=None, client=None, now=None):
         'database': database(),
         'redis': _safe(lambda: redis_memory(client or _redis())),
         'ai_spend': ai_spend(),
+        'triage_backlog': triage_backlog(),
     }
     return {'at': int(now), 'signals': signals, 'unknown': sorted(name for name, s in signals.items() if s.get('state') != 'known')}

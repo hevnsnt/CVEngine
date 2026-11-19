@@ -856,18 +856,26 @@ def sync_threat_intel():
 
 def correlate_cve_rows(cves):
     """Match ``cves`` (CVEEntry rows) against the current inventory in one walk of the hosts, whatever their tier, and track the matches
-    of the latest scans for triage. What ``correlate_refreshed_cves`` does for a refreshed CVE."""
+    of the latest scans for triage, and ask them (within the triage caps). What ``correlate_refreshed_cves`` does for a refreshed CVE. Returns
+    how many triage questions were asked."""
     from cveFeed import triage
     from cveFeed.autofire import correlate_hot_cves
     from cveFeed.correlation import latest_scan_q
     from cveFeed.models import CVEMatch
     if not cves:
-        return
+        return 0
     correlate_hot_cves(cves)
     qs = CVEMatch.objects.filter(cve_entry__in=cves).filter(latest_scan_q('subdomain__')).select_related(
         'cve_entry', 'subdomain__target_domain').order_by('id')
+    asked = 0
     for start in range(0, qs.count(), 500):
-        triage.track(list(qs[start:start + 500]))
+        chunk = list(qs[start:start + 500])
+        closed = {m.pk for m in chunk if triage.closed_automatically(m)}
+        # tracked AND asked, within the triage caps: tracking alone left the rows pending until the triage sweep came round. A match the new
+        # range closed (correlation's own closure) is tracked, never asked: an answer must not reopen it
+        open_pairs = [(row, d) for row, d in triage.track(chunk) if row.match_id not in closed]
+        asked += triage.run_triage(open_pairs)['asked'] if open_pairs else 0
+    return asked
 
 
 RECORRELATE_BATCH = 100      # CVEs matched in one walk of the inventory
@@ -882,19 +890,19 @@ def correlate_refreshed_cves(seconds=RECORRELATE_SECONDS, batch=RECORRELATE_BATC
     from cveFeed.correlation import DEAD_STATUS_RE
     clock = clock or time.monotonic
     deadline = clock() + max(1, int(seconds))
-    done = 0
+    done = asked = 0
     while clock() < deadline:
         pending = list(CVEEntry.objects.filter(needs_recorrelation=True).order_by('synced_at', 'id')[:max(1, int(batch))])
         if not pending:
-            return {'correlated': done, 'left': 0}
+            return {'correlated': done, 'left': 0, 'asked': asked}
         live = [c for c in pending if not re.search(DEAD_STATUS_RE, c.status or '', re.I) and not c.local_only]
-        correlate_cve_rows(live)
+        asked += correlate_cve_rows(live) or 0
         CVEEntry.objects.filter(pk__in=[c.pk for c in pending]).update(needs_recorrelation=False)
         done += len(pending)
     left = CVEEntry.objects.filter(needs_recorrelation=True).count()
     if left:
         correlate_refreshed_cves.delay()
-    return {'correlated': done, 'left': left}
+    return {'correlated': done, 'left': left, 'asked': asked}
 
 
 NEW_CORRELATE_MAX = 2000  # new CVEs one run matches against the inventory (a run of the coverage walk creates up to 1,500)
@@ -910,9 +918,43 @@ def correlate_new_cves(cve_pks=None):
     from cveFeed.threat import FIRE, SMOKE
     rows = [c for c in CVEEntry.objects.filter(pk__in=list(cve_pks or [])[:NEW_CORRELATE_MAX]).exclude(status__iregex=DEAD_STATUS_RE)
             .exclude(local_only=True).order_by('id') if c.attention_tier not in (FIRE, SMOKE)]
+    asked = 0
     for start in range(0, len(rows), NEW_CORRELATE_CHUNK):
-        correlate_cve_rows(rows[start:start + NEW_CORRELATE_CHUNK])
-    return {'correlated': len(rows)}
+        asked += correlate_cve_rows(rows[start:start + NEW_CORRELATE_CHUNK]) or 0
+    return {'correlated': len(rows), 'asked': asked}
+
+@app.task(name='retriage_cve_strategy', bind=False, queue='cve_feed_queue')
+def retriage_cve_strategy(cve_entry_id):
+    """A CVE's detection record changed what the triage reads (its remote ceiling or guidance): ask its current matches again
+    (``triage.strategy_changed``)."""
+    from cveFeed import triage
+    try:
+        return triage.strategy_changed(int(cve_entry_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception('retriage after the detection record of CVE %s changed failed', cve_entry_id)
+        return {'error': str(exc)[:200]}
+
+
+@app.task(name='retriage_matches', bind=False, queue='cve_feed_queue')
+def retriage_matches(match_ids):
+    """Track and triage CVE matches a correlation outside a scan created or changed (``correlation.retriage_after_commit``): their Triage row takes the
+    signature of their current evidence (a changed version, range result or distribution answer resets it) and the question is asked within the
+    triage caps (``triage.run_triage``; what a cap holds back stays pending for the hourly sweep). Matches a later scan replaced are left alone."""
+    from cveFeed import triage
+    from cveFeed.correlation import latest_scan_q
+    from cveFeed.models import CVEMatch
+    ids = [int(pk) for pk in (match_ids or [])][:2000]
+    matches = triage.with_cves(CVEMatch.objects.filter(pk__in=ids).filter(latest_scan_q('subdomain__'))
+                               .select_related('subdomain__target_domain').order_by('id'))
+    if not matches:
+        return {'rows': 0}
+    try:
+        closed = {m.pk for m in matches if triage.closed_automatically(m)}
+        pairs = [(row, d) for row, d in triage.track(matches) if row.match_id not in closed]  # a closure is tracked, never asked
+        return triage.run_triage(pairs) if pairs else {'rows': 0}
+    except Exception as exc:  # noqa: BLE001 - the hourly sweep asks what this could not
+        logger.exception('retriage of %d match(es) failed', len(matches))
+        return {'error': str(exc)[:200]}
 
 
 FEED_RECOVERY_RUNS = 12
@@ -1334,6 +1376,8 @@ def validate_match_on_demand(request_id):
         if check_state == 'observed':
             plan_notes.append('The external checks observed service metadata only. They cannot identify software behind a frontend '
                               'or verify the affected product without specific evidence.')
+        # the triage question the review queued (asked now or already in flight): its answer updates this record (triage.settle_validations)
+        ai_job = triage.open_job_id(described['kind'], described['signature']) if ai_state == 'deferred' else None
         result = {'ai': ai_result, 'ai_state': ai_state, 'checks': check_result, 'check_state': check_state,
                   'plan': plan, 'plans': plans, 'template_candidate': candidate,
                   'check_notes': plan_notes, 'classification': row.classification or None,
@@ -1353,7 +1397,7 @@ def validate_match_on_demand(request_id):
         match.refresh_from_db()  # the review writes the match's ai_verdict, which closure_basis reads: key the state enqueue will read
         with transaction.atomic():
             done = OnDemandValidation.objects.filter(pk=job.pk, status='running').update(
-                status=status, result=result, finished_at=timezone.now(), evidence_signature=row.signature,
+                status=status, result=result, finished_at=timezone.now(), evidence_signature=row.signature, ai_job_id=ai_job,
                 next_attempt_at=retry_after(job.attempts, capped_only) if status == 'failed' else None,
                 error=('deferred until the daily validation cap resets' if capped_only else
                        'a check or AI review failed or was blocked') if status == 'failed' else '')
@@ -1382,6 +1426,8 @@ def validate_match_on_demand(request_id):
                     # a fresh review requested meanwhile). A classification below the floor is asked again.
                     Triage.objects.filter(pk=row.pk, signature=row.signature, review_nonce=row.review_nonce).update(
                         signature=signature, evidence_key=triage.evidence_key_for(after['kind'], after['signature_fields'], row.review_nonce))
+        if done and ai_job:
+            triage.settle_if_done(ai_job)
         if done:
             # Anything else that moved while the checks and the review ran (a lowered floor, a new banner, a new template result) is NOT
             # absorbed above: track the match as it is now, so a real change resets or queues the row as always, and the row and the finished
@@ -1687,6 +1733,7 @@ def automatic_validate_finding(job_id):
                     'unavailable' if ai.get('not_triaged') or row.status == 'not_triaged' else
                     'queued' if ai.get('asked') else  # the AI reviewer container answers it; the triage applies it when it lands
                     'deferred' if ai.get('queued') or row.status == 'pending' else 'completed')
+        ai_job = triage.open_job_id(described['kind'], described['signature']) if ai_state in ('queued', 'deferred') else None
         result = {'checks': checks, 'check_state': check_state, 'ai': ai, 'ai_state': ai_state,
                   'classification': row.classification, 'validation_status': row.validation_status,
                   'priority': job.priority}
@@ -1698,8 +1745,10 @@ def automatic_validate_finding(job_id):
             result['deferred_by_cap'] = True  # retried once the per-day caps reset, without spending an attempt
         retry_at = hot_validation.retry_after(job.attempts, capped_only) if failed else None  # None once the attempts are spent
         AutomaticValidation.objects.filter(pk=job.pk, status='running').update(
-            status=status, result=result, finished_at=timezone.now(),
+            status=status, result=result, finished_at=timezone.now(), ai_job_id=ai_job,
             next_attempt_at=retry_at, error='a check or AI review failed or was deferred by a cap' if failed else '')
+        if ai_job:
+            triage.settle_if_done(ai_job)
         line_status, outcome = hot_validation.line_outcome(checks, check_state, ai_state, capped_only)
         activity.settle(progress, line_status,
                         f'Automatic validation #{job.pk} {outcome}: checks {check_state}; ' +

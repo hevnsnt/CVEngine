@@ -1187,19 +1187,35 @@ def parse_triage(text):
 	return validate_triage(text)[0]
 
 
-def _triage_clean(value, depth=0):
+TRIAGE_TEXT_MAX, TRIAGE_KEYS_MAX, TRIAGE_ITEMS_MAX, TRIAGE_DEPTH_MAX = 3000, 40, 20, 4
+
+
+def _triage_clean(value, depth=0, cut=None):
 	"""A payload with every string cleaned and capped, forbidden keys dropped, and the size bounded (defence in depth: the
-	builders in cveFeed.triage already clean what they select)."""
+	builders in cveFeed.triage already clean what they select). ``cut`` (a set) collects what the bounds shortened, so the prompt can say so."""
 	if isinstance(value, str):
-		return clean_text(redact_text(value), 3000)  # masked before the cleaning can mangle a secret into something no pattern knows
-	if isinstance(value, dict) and depth < 4:
-		return {clean_text(k, 60, strict=True): _triage_clean(v, depth + 1) for k, v in list(value.items())[:40]
+		text = redact_text(value)  # masked before the cleaning can mangle a secret into something no pattern knows
+		if cut is not None and len(text) > TRIAGE_TEXT_MAX:
+			cut.add(f'text longer than {TRIAGE_TEXT_MAX} characters')
+		return clean_text(text, TRIAGE_TEXT_MAX)
+	if isinstance(value, dict) and depth < TRIAGE_DEPTH_MAX:
+		if cut is not None and len(value) > TRIAGE_KEYS_MAX:
+			cut.add(f'more than {TRIAGE_KEYS_MAX} fields')
+		return {clean_text(k, 60, strict=True): _triage_clean(v, depth + 1, cut) for k, v in list(value.items())[:TRIAGE_KEYS_MAX]
 				if str(k).lower() not in TRIAGE_FORBIDDEN_KEYS}
-	if isinstance(value, (list, tuple)) and depth < 4:
-		return [_triage_clean(v, depth + 1) for v in list(value)[:20]]
+	if isinstance(value, (list, tuple)) and depth < TRIAGE_DEPTH_MAX:
+		if cut is not None and len(value) > TRIAGE_ITEMS_MAX:
+			cut.add(f'lists longer than {TRIAGE_ITEMS_MAX} items')
+		return [_triage_clean(v, depth + 1, cut) for v in list(value)[:TRIAGE_ITEMS_MAX]]
 	if value is None or isinstance(value, (bool, int, float)):
 		return value
+	if cut is not None and isinstance(value, (dict, list, tuple)):
+		cut.add(f'data nested deeper than {TRIAGE_DEPTH_MAX} levels')
 	return clean_text(value, 200, strict=True)
+
+
+TRIAGE_CUT_NOTE = ('Note: cvENGINE shortened the FINDING data to fit ({}). Judge only what is shown; what was cut is unknown, not absent, '
+				   'so it is no reason to call the finding a false positive.')
 
 
 def triage_parts(kind, payload, host_context=None):
@@ -1207,7 +1223,10 @@ def triage_parts(kind, payload, host_context=None):
 	evidence, which the AI reviewer container fences between nonce markers. No hostname, no raw request or response, no secret ever goes
 	in: ``payload`` is built from structured columns and is cleaned again here. ``host_context`` (cveFeed.host_context, already cleaned)
 	is a second fenced block: what is known about the host."""
-	parts = [{'text': f'Finding kind: {clean_text(kind, 20, strict=True)}'}, {'fence': 'FINDING', 'data': _triage_clean(payload)}]
+	cut = set()
+	parts = [{'text': f'Finding kind: {clean_text(kind, 20, strict=True)}'}, {'fence': 'FINDING', 'data': _triage_clean(payload, cut=cut)}]
+	if cut:  # the model is told the evidence it reads is not all there is (it was not, and read a cut list as the whole of it)
+		parts.append({'text': TRIAGE_CUT_NOTE.format(', '.join(sorted(cut)))})
 	if host_context:
 		parts.append({'fence': 'HOST_CONTEXT', 'data': host_context})
 	return parts

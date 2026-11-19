@@ -1,4 +1,5 @@
-"""The verdicts of the maintainer's three checks: ``memory``, ``queue_starvation`` and ``sentinel_claims_refused`` (docs/AI-REVIEWER.md), and the corrected
+"""The verdicts of the maintainer's checks: ``memory``, ``queue_starvation``, ``sentinel_claims_refused``, ``ai_budget`` and ``triage_backlog``
+(docs/AI-REVIEWER.md), and the corrected
 reason of ``sentinel_waiting``. ``cveFeed.reviewer.ops_checks`` gathers the numbers (``system.signals`` of the status, ``agentapi.maintainer_signals``, and a few
 counts from the database) and each function here turns them into ``{state, title, detail, facts}``; nothing here reads a source or changes anything.
 
@@ -30,6 +31,10 @@ CLAIM_REFUSED_PROBLEM = 100      # ...and a problem (every claim of one Sentinel
 
 # sentinel_waiting: tasks expiring unclaimed while the slots are free
 NOT_CLAIMING_SLOT_SHARE = 0.5    # slots in use at or below this share of all slots, while tasks expire unclaimed, means the Sentinels are not claiming work
+
+# the AI budgets and the triage backlog
+TRIAGE_BACKLOG_WARN_SECONDS = 6 * 3600     # the oldest finding of the current inventory waiting this long for its AI triage is a warning (the sweep runs hourly)
+TRIAGE_BACKLOG_PROBLEM_SECONDS = 48 * 3600  # ...and this long, a problem: findings are shown without an AI verdict for days
 
 
 def unknown(why):
@@ -227,6 +232,59 @@ def claim_refusals(signals):
             'facts': facts}
 
 
+# --- AI budgets used up ------------------------------------------------------------------------------------------------------------
+
+def ai_budget(signals):
+    """The AI caps whose use reached the cap (``ai_spend``): that work stops until the window resets, silently unless this says so. A cap of 0 is
+    switched off on purpose and is not reported. A part that could not be read is listed in ``not_read``; nothing read is ``unknown``."""
+    signal = (signals or {}).get('ai_spend')
+    if not _known(signal):
+        return unknown('the AI calls used against their caps could not be read')
+    rows = [r for r in signal.get('caps') or [] if isinstance(r, dict)]
+    known = [r for r in rows if r.get('state') == 'known']
+    not_read = [r.get('key') for r in rows if r.get('state') != 'known']
+    full = [r for r in known if (_num(r.get('cap')) or 0) > 0 and (_num(r.get('used')) or 0) >= r['cap']]
+    facts = {'exhausted': [{'key': r.get('key'), 'used': r.get('used'), 'cap': r.get('cap'), 'scope': r.get('scope') or 'install', 'window': r.get('window')}
+                           for r in full], 'not_read': not_read}
+    if not full:
+        if not known:
+            return unknown('none of the AI call counters could be read')
+        return {'state': 'ok', 'title': 'AI budgets have room', 'detail': '', 'facts': facts}
+    parts = [f"{r.get('label') or r.get('key')}: {r.get('used')} of {r.get('cap')}" + (' (the busiest project)' if r.get('scope') == 'busiest project' else '')
+             + (f" {r['window']}" if r.get('window') else '') for r in full]
+    return {'state': 'warning', 'title': 'An AI budget is used up',
+            'detail': ('The AI work below has used its whole cap, so it stops until the window resets and nothing else says so: ' + '; '.join(parts)
+                       + '. Findings it would have judged wait (the triage backlog check shows how long). Next step: raise the cap where it is set '
+                       '(Settings, configMaxxing for the triage, validation, template and other per-day call caps; Settings, AI reviewer for the finding and host '
+                       'reviews; Settings, AI model for the CVE guidance and validation planning), or accept the wait.'),
+            'facts': facts}
+
+
+# --- the triage backlog -----------------------------------------------------------------------------------------------------------------
+
+def triage_backlog(signals):
+    """How long the oldest finding of the current inventory has waited for its AI triage (``triage_backlog``)."""
+    signal = (signals or {}).get('triage_backlog')
+    if not _known(signal):
+        return unknown('the triage backlog could not be read')
+    pending, errors = _num(signal.get('pending')) or 0, _num(signal.get('errors')) or 0
+    oldest = _num(signal.get('oldest_pending_age_seconds'))
+    oldest_error = _num(signal.get('oldest_error_age_seconds'))
+    worst = max(x for x in (oldest, oldest_error, 0) if x is not None)
+    facts = {'pending': pending, 'errors': errors, 'oldest_pending_age_seconds': oldest, 'oldest_error_age_seconds': oldest_error,
+             'thresholds': {'warn_seconds': TRIAGE_BACKLOG_WARN_SECONDS, 'problem_seconds': TRIAGE_BACKLOG_PROBLEM_SECONDS}}
+    if worst < TRIAGE_BACKLOG_WARN_SECONDS:
+        return {'state': 'ok', 'title': 'AI triage keeps up', 'detail': '', 'facts': facts}
+    return {'state': 'problem' if worst >= TRIAGE_BACKLOG_PROBLEM_SECONDS else 'warning', 'title': 'Findings are waiting for their AI triage',
+            'detail': (f"{_plural(pending, 'finding')} of the current inventory wait for their AI triage"
+                       + (f', the oldest for {span(oldest)}' if oldest is not None else '')
+                       + ((f", and {_plural(errors, 'finding')} failed with a provider error" + (f' (the oldest {span(oldest_error)} ago)' if oldest_error is not None else ''))
+                          if errors else '')
+                       + '. Until they are answered they are shown without an AI verdict and held at smoke. Next step: check that an AI provider is set and '
+                       'the AI reviewer container is answering (Settings, AI reviewer), and whether an AI budget is used up (the AI budget check).'),
+            'facts': facts}
+
+
 def not_claiming(slots, in_use, claimed_2h, refused_2h):
     """For ``sentinel_waiting``: whether tasks that expired unclaimed mean the Sentinels are not claiming (slots are free), and why. ``(flag, reason)``;
     the reason is a sentence ending in a full stop, or '' when nothing says why."""
@@ -254,7 +312,8 @@ def brief(signals, tuning=None):
     def pick(d, keys):
         return {k: (d[k][:160] if isinstance(d[k], str) else d[k]) for k in keys if isinstance(d, dict) and d.get(k) is not None}
 
-    out = {'unknown': [], 'lanes': [], 'containers': [], 'queues': {}, 'claim_refusals': {}, 'database': {}, 'redis': {}, 'ai_spend': []}
+    out = {'unknown': [], 'lanes': [], 'containers': [], 'queues': {}, 'claim_refusals': {}, 'database': {}, 'redis': {}, 'ai_spend': [],
+           'triage_backlog': {}}
     for name, signal in signals.items():
         if not _known(signal):
             out['unknown'].append(name)
@@ -281,7 +340,11 @@ def brief(signals, tuning=None):
         out['redis'] = pick(signals['redis'], ('used_mb', 'limit_mb', 'percent_of_limit', 'evicted_keys'))
     spend = signals.get('ai_spend')
     if _known(spend):
-        out['ai_spend'] = [pick(r, ('key', 'used', 'cap', 'percent_of_cap')) for r in spend.get('caps') or [] if isinstance(r, dict) and r.get('state') == 'known']
+        # a per-project cap's row is left out: it is about one project (its use is the busiest project's), and the brief holds no tenant data
+        out['ai_spend'] = [pick(r, ('key', 'used', 'cap', 'percent_of_cap')) for r in spend.get('caps') or []
+                           if isinstance(r, dict) and r.get('state') == 'known' and r.get('scope') != 'busiest project']
+    if _known(signals.get('triage_backlog')):
+        out['triage_backlog'] = pick(signals['triage_backlog'], ('pending', 'errors', 'oldest_pending_age_seconds', 'oldest_error_age_seconds'))
     result = {'signals': out}
     if isinstance(tuning, dict):
         result['tuning'] = {'mode': tuning.get('effective_mode') or tuning.get('mode'), 'pinned': (tuning.get('pinned') or [])[:15],

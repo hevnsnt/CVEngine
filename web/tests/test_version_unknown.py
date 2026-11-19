@@ -150,7 +150,7 @@ class VersionUnknownTests(Fixture):
 		self.entry.affected = WITH_RANGE
 		self.entry.needs_recorrelation = True
 		self.entry.save()
-		correlate_refreshed_cves()
+		self.assertEqual(correlate_refreshed_cves()['asked'], 1)  # tracked and asked at once (the question waits for the AI reviewer container)
 		match = self.only_match()
 		self.assertEqual((match.version_in_range, match.evidence.get('unbounded')), (True, None))
 		self.assertFalse(match_policy.version_unknown(match))
@@ -163,7 +163,7 @@ class VersionUnknownTests(Fixture):
 		# and it is now an ordinary match: the model is asked, and it cannot clear a version inside the range
 		p = provider()
 		p.complete.return_value = '{"classification": "not_applicable", "reason": "no"}'
-		self.assertEqual(self.triage_all(p)['asked'], 1)
+		self.assertEqual(ai_queue.serve(p), 1)
 		self.assertEqual(Triage.objects.get(match=match).classification, 'needs_validation')
 
 	def test_a_later_range_that_excludes_the_version_closes_it(self):

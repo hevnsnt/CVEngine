@@ -53,6 +53,7 @@ BACKFILLS = (
     'neutralise_screenshots',             # stored discovery screenshots named by a Sentinel (x.html, x.svg): renamed to a picture name or removed
     'backfill_shodan_cpes',               # every Shodan InternetDB CPE a reported reading ("vendor product"), CPE technologies removed (re-correlated)
     'backfill_technology_names',          # technology rows folded onto one spelling, MariaDB's "5.5.5-" prefix off port versions (re-correlated)
+    'recheck_openvas_generic_checks',     # OpenVAS matches a behaviour check (TRACE enabled) confirmed on a CVE whose record names no vendor or product
     'rerate_findings',                    # 1.3.5: rescore hosts for the new heat rules, clear stale fire marks (last: counts everything above)
 )
 MAX_ATTEMPTS = 3

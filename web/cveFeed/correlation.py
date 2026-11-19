@@ -1688,11 +1688,17 @@ def _carry_remediation(fresh):
                     match.fire_notified_at, match.fire_notified_rule = now, rule
 
 
-def save_matches(rows, covered=None):
+def save_matches(rows, covered=None, retriage=True):
     """Upsert CVEMatch rows in two statements: bulk_create(ignore_conflicts) for the new ones, bulk_update for the
     existing ones whose evidence changed. Remediation fields are never touched. When the version or its range result
     changes, the AI verdict of the old evidence is replaced by the stored verdict for the new one (or cleared), so the new
     signature is judged, not inherited.
+
+    ``retriage``: once the write is committed, the new matches and the ones whose evidence changed are tracked and triaged again
+    (``retriage_after_commit``): their Triage row takes the signature of what they hold now (a changed version, range result or
+    distribution answer resets it) and the question is asked within the triage caps. Without it a panel version, a Recog reading, a
+    version source, a probe or a KEV re-read that moved a match left its row ``triaged`` on the old evidence, which no sweep looks at. A
+    scan's own correlation passes ``False``: the scan's triage stage tracks everything the scan produced.
 
     ``covered`` is ``(subdomain_ids, cve_ids)``: the hosts these rows were computed for and the CVE pool they were checked
     against. Matches of those hosts and CVEs that the rows no longer contain (the version moved out of range, the product is
@@ -1792,6 +1798,9 @@ def save_matches(rows, covered=None):
         CVEMatch.objects.bulk_create(fresh, ignore_conflicts=True, batch_size=1000)
     if changed:
         CVEMatch.objects.bulk_update(changed, [*_MATCH_FIELDS, "ai_verdict", "ai_reason", "ai_model", "updated_at"], batch_size=1000)
+    if retriage and (fresh or changed):
+        retriage_after_commit([m.pk for m in changed],
+                              [(m.cve_entry_id, m.subdomain_id, m.source, m.matched_product) for m in fresh])
     touched |= {k[1] for k in moved}
     if touched:
         from cveFeed import scoring
@@ -1811,6 +1820,38 @@ def save_matches(rows, covered=None):
             notify.fire_confirmed(proved)
         transaction.on_commit(follow_up)
     return len(unique)
+
+
+RETRIAGE_CHUNK = 500  # matches per retriage task
+
+
+def _fresh_ids(keys):
+    """The ids of the matches ``keys`` (``(cve_entry_id, subdomain_id, source, matched_product)``) name: a conflict-tolerant insert sets none."""
+    from cveFeed.models import CVEMatch
+    wanted = set(keys)
+    if not wanted:
+        return []
+    rows = CVEMatch.objects.filter(subdomain_id__in={k[1] for k in wanted}, cve_entry_id__in={k[0] for k in wanted}).values_list(
+        "pk", "cve_entry_id", "subdomain_id", "source", "matched_product")
+    return [pk for pk, *key in rows if tuple(key) in wanted]
+
+
+def retriage_after_commit(changed_ids, fresh_keys=()):
+    """Once the surrounding transaction commits, queue ``retriage_matches`` for these matches (``RETRIAGE_CHUNK`` a task): the changed ones by id,
+    the new ones by their key. A broker that is down loses nothing for good: the hourly triage sweep's backfill gives a new match its row, and the
+    next correlation that reads the host tracks a changed one."""
+    from django.db import transaction
+    changed_ids, fresh_keys = list(changed_ids), list(fresh_keys)
+
+    def queue():
+        try:
+            from cveFeed.tasks import retriage_matches
+            ids = sorted(set(changed_ids) | set(_fresh_ids(fresh_keys)))
+            for start in range(0, len(ids), RETRIAGE_CHUNK):
+                retriage_matches.delay(ids[start:start + RETRIAGE_CHUNK])
+        except Exception:  # noqa: BLE001 - the write is committed; the sweep and the next correlation catch up
+            logger.warning('could not queue the triage of %d changed and %d new match(es)', len(changed_ids), len(fresh_keys), exc_info=True)
+    transaction.on_commit(queue)
 
 
 _CORRELATED_SOURCES = ("tech", "port", "java", "runtime", "bundled", "build_range", "windows")  # java: cveFeed.java_runtime; runtime, bundled: cveFeed.version_sources; build_range: cveFeed.edge_builds; windows: cveFeed.windows_builds
@@ -2055,14 +2096,16 @@ def correlate_subdomain(subdomain, product_index, cve_by_id, min_confidence=0.0,
     """Create/update CVEMatch rows for one subdomain. Returns number of matches."""
     return save_matches(collect_subdomain_matches(
         subdomain, product_index, cve_by_id, min_confidence=min_confidence, scan_history=scan_history, fix_lookup=fix_lookup),
-        covered=({subdomain.id}, set(cve_by_id)))
+        covered=({subdomain.id}, set(cve_by_id)), retriage=scan_history is None)
 
 
 def correlate_subdomains(subdomains, product_index, cve_by_id, min_confidence=0.0, scan_history=None, batch=500,
-                         fix_lookup=None, leads=None):
+                         fix_lookup=None, leads=None, retriage=None):
     """Correlate an iterable of subdomains, writing the matches ``batch`` hosts at a time. ``leads`` (a dict) receives the
-    hosts that run a CVE's product with no version found (see ``_record_matches``).
+    hosts that run a CVE's product with no version found (see ``_record_matches``). ``retriage`` (``save_matches``) defaults to true outside a
+    scan: a scan's triage stage tracks what the scan produced, every other caller (a probe, a version source, a KEV re-read) has no stage after it.
     Returns (hosts walked, matches recorded)."""
+    retriage = scan_history is None if retriage is None else retriage
     hosts = matches = 0
     rows, ids = [], set()
     pool = set(cve_by_id)
@@ -2084,9 +2127,9 @@ def correlate_subdomains(subdomains, product_index, cve_by_id, min_confidence=0.
             ids.add(sub.id)
             collect_subdomain_matches(sub, product_index, cve_by_id, min_confidence, scan_history, rows, fix_lookup, leads)
             if hosts % batch == 0:
-                matches += save_matches(rows, covered=(ids, pool))
+                matches += save_matches(rows, covered=(ids, pool), retriage=retriage)
                 rows, ids = [], set()
-    return hosts, matches + save_matches(rows, covered=(ids, pool))
+    return hosts, matches + save_matches(rows, covered=(ids, pool), retriage=retriage)
 
 
 # One product index per process, rebuilt only when the CVE table changes (a new or re-synced entry moves the key).

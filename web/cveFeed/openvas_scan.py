@@ -757,20 +757,36 @@ def identified(ev):
     return {'product': product, 'cpe': cpe, 'installed_version': installed, 'fixed_version': _version_from(ev.get('result'), 'fixed')}
 
 
+UNNAMED = ('', 'n/a', 'na', '*', '-', 'unknown', 'none', 'unspecified')  # what a CVE record writes when it names no vendor or product
+
+
+def _named(value):
+    value = str(value or '').strip().lower()
+    return '' if value in UNNAMED else value
+
+
 def generic_check(seen, cves):
-    """Whether an NVT checks a behaviour several vendors' advisories share rather than one product: it identified no product and no version
-    (``identified``), and the CVEs it lists name more than one vendor. "HTTP Debugging Methods (TRACE/TRACK) Enabled" (1.3.6.1.4.1.25623.1.0.11213)
-    is one: its result is only "TRACE is enabled", and it lists Solaris, IIS and HP UCMDB advisories. Its QoD says how reliably it saw the behaviour,
-    never whether a CVE about a particular product applies to this host, so those CVE links are not confirmed by it (the scanner finding itself
-    stands either way). A check that tests one product (its CVEs all name the same vendor) is unaffected, whatever its result text says."""
+    """Whether an NVT checks a behaviour rather than one product's flaw, so its QoD cannot confirm the CVEs it lists: it identified no product and
+    no version (``identified``), and its CVEs either name more than one vendor or include one whose record names no vendor and no product.
+    "HTTP Debugging Methods (TRACE/TRACK) Enabled" (1.3.6.1.4.1.25623.1.0.11213) is the case: its result is only "TRACE is enabled", and it lists
+    Solaris, IIS and HP UCMDB advisories and CVE-2005-3398, whose CVE List record says ``vendor: n/a, product: n/a`` (an old record names nobody,
+    so nothing ties it to what the NVT saw; it used to pass as one vendor and was confirmed on every host with TRACE on). Its QoD says how reliably
+    it saw the behaviour, never whether a CVE about a particular product applies to this host, so those CVE links are not confirmed by it (the
+    scanner finding itself stands either way, and the AI triage judges the match). A check that names what it tested (a product or a version)
+    and one whose CVEs all name the same single vendor are unaffected, whatever the result text says."""
     if seen.get('product') or seen.get('installed_version'):
         return False
     vendors = set()
     for cve in cves:
-        for item in getattr(cve, 'affected', None) or []:
-            vendor = str(item.get('vendor') or '').strip().lower() if isinstance(item, dict) else ''
-            if vendor and vendor not in ('n/a', '*', '-', 'unknown'):
+        items = [item for item in getattr(cve, 'affected', None) or [] if isinstance(item, dict)]
+        named = False
+        for item in items:
+            vendor, product = _named(item.get('vendor')), _named(item.get('product'))
+            if vendor:
                 vendors.add(vendor)
+            named = named or bool(vendor or product)
+        if items and not named:
+            return True  # a record that says n/a for every vendor and product: nothing ties it to this host's software (no record at all decides nothing)
     return len(vendors) > 1
 
 
