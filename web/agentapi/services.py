@@ -1648,6 +1648,8 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'java_runtimes': ((shared or {}).get('java') or {}).get(host_key) or [],
             # what the host's version sources state (cveFeed.version_sources): products and language runtimes, with source and confidence
             'version_sources': ((shared or {}).get('versions') or {}).get(host_key) or [],
+            # what Sentinels read about the features of the host's services (cveFeed.service_features): HTTP/2 per TLS port, with when and how
+            'service_features': ((shared or {}).get('features') or {}).get(host_key) or [],
             'wordpress': host_context.wordpress_summary(probe_rows), 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
             'target': sub.target_domain.name if sub.target_domain else None, 'target_id': sub.target_domain_id,
             'http_status': http['status'], 'title': http['title'], 'score': display_score, 'score_detail': score_detail, 'zombie': False,
@@ -1955,13 +1957,16 @@ def _shared_for(project, subs):
     versions = version_sources.readings_for(_pids_of(project, subs), {s.name.lower() for s in subs})  # what its version sources state (one query)
     from agentapi import dns_crosscheck
     unconfirmed = dns_crosscheck.held_for(_pids_of(project, subs), {s.name for s in subs})  # DNS answers one source gave that are not on the host yet (one query)
+    from cveFeed import service_features
+    features = service_features.readings_for(_pids_of(project, subs), {s.name.lower() for s in subs})  # HTTP/2 and later features per port (one query)
     from startScan.models import SubdomainTechnology
     link_cpes = {}  # the CPE a technology template named for a host's technology (cveFeed.nuclei_scan.tech_cpe_from), one query
     for sub_id, name, version, cpe in SubdomainTechnology.objects.filter(subdomain_id__in=[s.pk for s in subs]).exclude(cpe='') \
             .values_list('subdomain_id', 'technology__name', 'technology__version', 'cpe'):
         link_cpes.setdefault(sub_id, []).append((name or '', version or '', cpe))
     return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots, 'shots': shots, 'legacy_shots': legacy_shots,
-            'probes': probe_rows, 'vhosts': vhosts, 'java': java, 'versions': versions, 'unconfirmed': unconfirmed, 'link_cpes': link_cpes}
+            'probes': probe_rows, 'vhosts': vhosts, 'java': java, 'versions': versions, 'unconfirmed': unconfirmed, 'link_cpes': link_cpes,
+            'features': features}
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}
@@ -3336,7 +3341,10 @@ def _cert(c):
     return {'id': c.id, 'host': c.host, 'port': c.port, 'subject': c.subject, 'issuer': c.issuer, 'sans': c.sans[:10],
             'not_before': _iso(c.not_before), 'not_after': _iso(c.not_after), 'days_left': c.days_left,
             'signature_algorithm': c.signature_algorithm, 'key': c.key_description, 'protocol': c.protocol,
-            'chain_error': c.chain_error, 'legacy_tls': c.legacy_tls, 'checked': _iso(c.checked_at)}
+            'chain_error': c.chain_error, 'legacy_tls': c.legacy_tls, 'checked': _iso(c.checked_at),
+            # whether the service offers HTTP/2: the ALPN protocol it chose in the hygiene check's handshake (cveFeed.service_features), or null
+            'http2': ({'offered': c.http2_value == 'yes', 'reading': c.http2_detail or '', 'observed_at': _iso(c.http2_at)}
+                      if getattr(c, 'http2_value', None) else None)}
 
 
 def list_certificates(ctx, slug, params):
@@ -3345,6 +3353,11 @@ def list_certificates(ctx, slug, params):
     project, _ = get_project(ctx, slug)
     everywhere = _is_all(project)
     qs = _scoped(TlsCertificate.objects.all(), project, 'domain__project').order_by('not_after', 'id')
+    from django.db.models import OuterRef, Subquery
+    from cveFeed.models import ServiceFeature
+    http2 = ServiceFeature.objects.filter(domain_id=OuterRef('domain_id'), host=OuterRef('host'), port=OuterRef('port'), feature='http2')
+    qs = qs.annotate(http2_value=Subquery(http2.values('value')[:1]), http2_detail=Subquery(http2.values('detail')[:1]),
+                     http2_at=Subquery(http2.values('observed_at')[:1]))
     if everywhere:
         qs = qs.select_related('domain__project')
     if _digits(params.get('expiring_within'), 6):

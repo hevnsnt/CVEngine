@@ -532,10 +532,17 @@ def describe_cve_match(m):
         if facts['template_result'] == 'vulnerable':
             facts['checked_by'] = 'openvas'
             facts['check_qod'], facts['check_qod_type'] = scanner.get('qod'), scanner.get('qod_type') or ''
+    preconditions = precondition_brief(m, evidence, names)
+    if preconditions:
+        # the service features the advisory says the flaw needs, and what the host's readings say of each (cveFeed.service_features): a feature that
+        # is on is a precondition, never proof, and the ceiling still holds a version-only match at needs validation
+        payload['preconditions'] = preconditions
+        facts['preconditions'] = {p['feature']: p['host_reading'] for p in preconditions}
     floor, _ = hard_evidence('cve_match', facts)
     fields = {'cve': getattr(m, 'cve_entry_id', None), 'product': m.matched_product, 'version': m.matched_version, 'in_range': m.version_in_range,
               'source': m.source, 'distro': facts['distro_status'], 'template_vulnerable': facts['template_result'] == 'vulnerable',
               **({'version_unknown': True} if facts['version_unknown'] else {}),
+              **({'preconditions': facts['preconditions']} if preconditions else {}),  # a new reading of a needed feature asks again
               **({'library': hashlib.sha1(json.dumps(library, sort_keys=True).encode()).hexdigest()[:16]} if library else {}),
               **({'openvas': [scanner.get('qod'), scanner.get('qod_type'), scanner.get('fixed_version', '')]} if scanner else {}),
               'intelligence': hashlib.sha1(json.dumps([cve.affected, cve.cvss, cve.kev, cve.epss_reached, cve.exploit_db,
@@ -547,6 +554,32 @@ def describe_cve_match(m):
     backport = facts['distro_status'] == 'backport' and facts['version_only']
     return {'kind': 'cve_match', 'facts': facts, 'payload': payload, 'signature_fields': fields, 'severity': base,
             'priority': (9, 0) if facts['version_unknown'] else (8, -base) if backport else (0 if floor else 3, -base)}
+
+
+def precondition_brief(m, evidence, names=()):
+    """``[{feature, advisory_says, host_reading, reading, absent_rules_out, note}]`` for the prompt: each service feature the match's CVE needs
+    (``service_features.requirements``) with the state the match's evidence stores (``evidence['preconditions']``, written by correlation and by
+    ``service_features.reevaluate``), or [] when the CVE needs none."""
+    from cveFeed import service_features
+    stored = evidence.get('preconditions') if isinstance(evidence.get('preconditions'), dict) else None
+    if stored is None and not service_features.is_precondition_closure(m):
+        return []  # correlation stores the state of every needed feature on the match (unknown included): none stored, none needed
+    needs = service_features.requirements(m.cve_entry)
+    if not needs:
+        return []
+    stored = stored or {}
+    out = []
+    for key, need in needs.items():
+        spec = service_features.server(key)
+        seen = stored.get(key) if isinstance(stored.get(key), dict) else {}
+        state = seen.get('state') if seen.get('state') in service_features.STATES else 'unknown'
+        out.append({'feature': spec.label, 'advisory_says': _prose(need.get('quote'), 300, names), 'host_reading': state,
+                    'reading': _s(seen.get('detail'), 120, names),
+                    'absent_rules_out': bool(need.get('rule_out')),
+                    'note': (f'{spec.label} being on is a precondition of the flaw, not proof of it.' if state == 'exposed' else
+                             f'No fresh, direct reading says whether the host offers {spec.label} (behind a CDN or proxy the edge answers).'
+                             if state == 'unknown' else f'The readings of every port where {spec.label} would be served rule it out.')})
+    return out
 
 
 OPENVAS_RESULT_LIMIT = 600  # how much of an NVT's result text a prompt quotes

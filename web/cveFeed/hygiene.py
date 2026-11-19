@@ -551,13 +551,16 @@ def _remote_review(domain, targets, hosts):
         logger.info('hygiene check of %s waits for a scanner: %s', domain.name, exc)
         return None, True
     rows = {(_norm(c['host']), c['port']): c for c in result.get('certs') or []}
-    review = {'infos': {}, 'unknown_tls': set(), 'mail': {}, 'mail_hosts': [], 'unknown_mail': set()}
+    review = {'infos': {}, 'unknown_tls': set(), 'no_tls': set(), 'mail': {}, 'mail_hosts': [], 'unknown_mail': set(),
+              'service_features': result.get('service_features') or []}
     for host, port in targets:
         row = rows.get((_norm(host), port))
         if row is None or row.get('error'):
             review['unknown_tls'].add(f'{host}:{port}')
         elif row.get('found'):
             review['infos'][(host, port)] = _cert_info(host, port, row['cert'])
+        else:
+            review['no_tls'].add((host, port))  # the scanner asked and nothing there speaks TLS
     reviews = {_norm(m['name']): m for m in result.get('mail') or []}
     # a name whose lookup failed on the scanner (a resolver timeout is not "no MX record"): its open findings stay open, whether or not it is an own name
     lookup_failed = {_norm(n) for n in result.get('unknown_names') or [] if isinstance(n, str)}
@@ -572,6 +575,21 @@ def _remote_review(domain, targets, hosts):
         elif always:
             review['unknown_mail'].add(name)
     return review, False
+
+
+def _service_features(domain, review):
+    """Store what the certificate handshakes read about the services' features (``service_features``: HTTP/2 from ALPN), through the one ingest
+    every kind uses (``cveFeed.service_features.ingest``), which re-evaluates the CVE matches of the hosts whose readings changed. Only the
+    endpoints this check asked about count; an endpoint that answered (a certificate, or nothing speaking TLS) and has no reading now loses its
+    old one (unknown, never "no"). Never fatal: the hygiene review stands without it."""
+    from cveFeed import service_features
+    answered = set(review['infos']) | set(review.get('no_tls') or ())
+    try:
+        return service_features.ingest(domain.project_id, review.get('service_features') or [], 'hygiene_check', allowed=answered,
+                                       covered={(host, port, 'http2') for host, port in answered})
+    except Exception:  # noqa: BLE001
+        logger.exception('could not store the service features read by the hygiene check of %s', domain.name)
+        return None
 
 
 def run_hygiene(domain_id, now=None, hosts=None):
@@ -611,6 +629,7 @@ def run_hygiene(domain_id, now=None, hosts=None):
         if changes.record_cert_change(domain, info['host'], info['port'], before=prev, after=info, project_id=project):
             cert_changes += 1
         found += evaluate_cert(info, now=now)
+    _service_features(domain, review)
     mail_hosts, emailer = review['mail_hosts'], (lambda name: review['mail'][name])
     if mail_hosts:  # the email review includes the checks adapted from MailFail: credit it where people watch the work
         from cveFeed.mailfail import CREDIT
