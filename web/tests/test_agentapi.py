@@ -533,11 +533,16 @@ class AgentApiTests(TestCase):
 		path = f'/api/v1/projects/proj-a/matches/{self.match.id}/validate'
 		with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'):
 			job_id = call(self.t_alice, 'POST', path)[1]['id']
+		ai_queue.configure()
 		with mock.patch('targetApp.target_types.scannable_hosts', return_value=['www.a.example']), \
 				mock.patch('cveFeed.validation.resolve_template', return_value=('', 'no template covers this CVE')), \
-				mock.patch('reNgine.ai_settings.get_configured_provider', return_value=provider), \
 				mock.patch('cveFeed.validation.run_validation', return_value={'ran': 1, 'reused': 0}) as checks, \
-				mock.patch('cveFeed.triage.run_triage', return_value={'not_triaged': 1}):
+				mock.patch('cveFeed.triage.run_triage', return_value={'not_triaged': 1}), \
+				mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async') as resumed:
+			self.assertEqual(validate_match_on_demand(job_id)['waiting'], 'validation_plan')  # parked: the reviewer container asks the model
+			checks.assert_not_called()
+			ai_queue.serve(provider)
+			resumed.assert_called_once_with(args=[job_id], priority=3)  # the answer sends the request on
 			validate_match_on_demand(job_id)
 		# the model's choice, plus the identity probes (nginx next to ingress-nginx or nginx-ui) that always accompany a plan when one applies
 		self.assertEqual(checks.call_args.kwargs['selected_kinds'], {'nmap_sv', 'fact_probe'})
@@ -583,15 +588,18 @@ class AgentApiTests(TestCase):
 		path = f'/api/v1/projects/proj-a/matches/{self.match.id}/validate'
 		with mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'):
 			job_id = call(self.t_alice, 'POST', path)[1]['id']
+		ai_queue.configure()
 		with mock.patch('targetApp.target_types.scannable_hosts', return_value=['www.a.example']), \
 				mock.patch('cveFeed.validation.resolve_template', return_value=('', 'no template covers this CVE')), \
-				mock.patch('reNgine.ai_settings.get_configured_provider', return_value=provider), \
 				mock.patch('cveFeed.validation_plan.generate_candidate', return_value={'id': 7, 'status': 'draft'}) as draft, \
 				mock.patch('cveFeed.validation.run_validation', return_value={'ran': 0, 'no_check': 1}) as checks, \
-				mock.patch('cveFeed.triage.run_triage', return_value={'not_triaged': 1}):
+				mock.patch('cveFeed.triage.run_triage', return_value={'not_triaged': 1}), \
+				mock.patch('cveFeed.tasks.validate_match_on_demand.apply_async'):
+			validate_match_on_demand(job_id)
+			ai_queue.serve(provider)
 			validate_match_on_demand(job_id)
 		self.assertEqual(checks.call_args.kwargs['selected_kinds'], set())
-		draft.assert_called_once_with(self.pa.id, self.cve, provider)
+		draft.assert_called_once_with(self.pa.id, self.cve, True)  # True: AI is on (the draft is the reviewer container's job too)
 		job = OnDemandValidation.objects.get(pk=job_id)
 		self.assertEqual(job.result['template_candidate']['status'], 'draft')
 		self.assertEqual(job.result['check_state'], 'no_check')

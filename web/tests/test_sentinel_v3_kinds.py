@@ -386,7 +386,7 @@ class NucleiValidateTests(StageBase):
             templategen.generate_template(self._cve(), project=self.project.id)
         self.assertFalse(AIJob.objects.exists())  # the AI reviewer was never asked for a template nothing could check
 
-    def test_a_template_whose_scanner_went_away_before_its_check_is_never_a_draft(self):
+    def test_a_template_whose_scanner_went_away_before_its_check_waits_for_it_and_is_never_valid(self):
         from types import SimpleNamespace
         from cveFeed.models import GeneratedTemplate
         cve = self._cve()
@@ -395,8 +395,10 @@ class NucleiValidateTests(StageBase):
                 mock.patch.object(templategen, 'validate_anywhere', side_effect=resources.ScannerUnavailable('nuclei_validate', 'gone')):
             templategen.job_answer(job, self.TEMPLATE)
         saved = GeneratedTemplate.objects.get(cve_entry=cve)
-        self.assertEqual(saved.status, GeneratedTemplate.STATUS_INVALID)
-        self.assertIn('not validated: no scanner could take this work (nuclei_validate)', saved.validation_output)
+        # the paid answer is kept, as a draft that waits for its syntax check (cveFeed.templatevalidate runs it again): never valid, never run
+        self.assertEqual((saved.status, saved.validation_stage, saved.path), (GeneratedTemplate.STATUS_DRAFT, 'syntax', ''))
+        self.assertIn('no Sentinel can run template checks (nuclei_validate)', saved.validation_reason)
+        self.assertIn('not validated yet', saved.validation_output)
 
     def test_an_approved_template_is_run_against_the_project_hosts_on_the_scanner(self):
         self.arm('nuclei_validate')

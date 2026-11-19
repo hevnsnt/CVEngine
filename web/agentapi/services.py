@@ -5648,8 +5648,9 @@ def validate_match_now(ctx, slug, match_id):
     with transaction.atomic():
         Project.objects.select_for_update().get(pk=project.pk)
         now = timezone.now()
-        OnDemandValidation.objects.filter(project=project, status='queued', created_at__lt=now - timedelta(minutes=10)).update(
-            status='failed', error='queue request expired before a worker accepted it', finished_at=now)
+        # a request parked on its AI plan (cveFeed.validation_plan.park) is queued on purpose: its own wait ends it (PLAN_WAIT and the nudge)
+        OnDemandValidation.objects.filter(project=project, status='queued', created_at__lt=now - timedelta(minutes=10)).exclude(
+            result__has_key='waiting').update(status='failed', error='queue request expired before a worker accepted it', finished_at=now)
         OnDemandValidation.objects.filter(project=project, status='running', started_at__lt=now - timedelta(minutes=30)).update(
             status='failed', error='worker lease expired; request may be retried', finished_at=now)
         active = OnDemandValidation.objects.filter(match=match, status__in=('queued', 'running')).order_by('-id').first()

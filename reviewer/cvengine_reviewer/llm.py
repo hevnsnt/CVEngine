@@ -690,35 +690,83 @@ def _attempt(target, system, user, schema, options, image, factor, calls):
         calls.append(record)
 
 
+_HAIKU = {}  # (provider, base_url) -> (expires, model id or None): the cheapest haiku a provider lists
+MODEL_OPTION = re.compile(r'^[A-Za-z0-9._:/@+\-]{1,200}$')
+HAIKU_RETRY = ('refused', 'empty_response')  # the answers a smaller model may give where the chosen one gave none
+
+
+def pick_haiku(models):
+    """The haiku of ``[{'id', 'created'}]`` (a provider's list), or None: an undated alias before a dated snapshot, then the newest."""
+    pool = [m for m in models or [] if isinstance(m, dict) and isinstance(m.get('id'), str) and 'haiku' in m['id'].lower()]
+    if not pool:
+        return None
+    return min(pool, key=lambda m: (1 if _DATED.search(m['id']) else 0, -(m.get('created') or 0), m['id']))['id']
+
+
+def haiku_of(target):
+    """The provider's haiku (an hour in memory), or None when it lists none or the list cannot be read."""
+    key = (target.name, target.base_url)
+    cached = _HAIKU.get(key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+    try:
+        chosen = pick_haiku(list_models(target))
+    except ModelError:
+        chosen = None
+    _HAIKU[key] = (time.time() + (3600 if chosen else 60), chosen)
+    return chosen
+
+
+def _answer(target, system, user, schema, options, image, calls):
+    """One answer on ``target``'s model: the request, and ONCE more with a larger limit when it was cut off (see ``complete``)."""
+    try:
+        return _attempt(target, system, user, schema, options, image, None, calls)
+    except ModelError as error:
+        if error.category != 'output_truncated' or options.get('retry_truncated') is False:
+            raise
+        sent, why = reply_limit(target, options), error.stop_reason
+        bigger = retry_limit(target, options, sent) if sent else 0
+        if not bigger:  # nothing was sent to lengthen, or it is at the ceiling already
+            raise
+    logger.info('%s: reply cut off at %s tokens (stop reason %s); asking once more with %s', target.name, sent, why, bigger)
+    calls[-1]['retried'] = True  # the server records it as recovered, not failed, once it sees the retry
+    return _attempt(target, system, user, schema, {**options, '_reply_limit': bigger}, image, None, calls)
+
+
 def complete(block, system, user, schema=None, options=None, image=None):
     """One answer for a pipeline job: ``(text, calls, model)``. ``block`` is the job block of the server's configuration, ``options`` the
     job's (``temperature`` and ``seed`` pinned for a self-hosted server, ``max_tokens`` the stage's own answer room, ``retry_truncated``,
-    ``schema_name``), ``image`` ``{media_type, data (base64)}``. A reply cut off at a limit that was sent is asked ONCE more with a larger
-    limit (``profiles.retry_total``: ``RETRY_FACTOR`` times the answer room plus the thinking reserve, never past ``RETRY_CEILING``), for every
-    stage unless the job says ``retry_truncated: false``; no third request is ever made. Both requests are entries in ``calls``, and the
-    first is marked ``retried`` (it was cut off and was asked again: the server records it as ``truncated_retried``) so only a cut-off that survived the retry counts as a failure.
-    Raises ModelError, with the calls made so far in ``error.calls``."""
+    ``schema_name``, and for the nuclei targeting job ``model`` and ``haiku``), ``image`` ``{media_type, data (base64)}``. A reply cut off at a
+    limit that was sent is asked ONCE more with a larger limit (``profiles.retry_total``: ``RETRY_FACTOR`` times the answer room plus the
+    thinking reserve, never past ``RETRY_CEILING``), for every stage unless the job says ``retry_truncated: false``. Both requests are entries
+    in ``calls``, and the first is marked ``retried`` (it was cut off and was asked again: the server records it as ``truncated_retried``) so
+    only a cut-off that survived the retry counts as a failure.
+
+    ``model`` (a model the owner chose for this job) replaces the configured one. ``haiku``: with no ``model``, the cheapest haiku the provider
+    lists is used (else the configured model); and when the job ran on another model and that model refused it or answered nothing, the haiku
+    is asked ONCE more (the server's rule for the nuclei jobs before 1.4, ``reNgine.ai_nuclei_model``). Raises ModelError, with the calls made
+    so far in ``error.calls``."""
     options = dict(options or {})
     calls = []
     try:
         target = Target(block)
+        chosen = options.get('model') if isinstance(options.get('model'), str) and MODEL_OPTION.match(options['model']) else ''
+        haiku = haiku_of(target) if options.get('haiku') is True else None
+        if chosen or haiku:
+            target.model = chosen or haiku
         try:
             resolve_model(target)
         except ModelError as error:
             calls.append({'status': 'failed', 'category': error.category, 'model': target.model, 'started_at': int(time.time()), 'duration_ms': 0})
             raise
         try:
-            return _attempt(target, system, user, schema, options, image, None, calls), calls, target.model
+            return _answer(target, system, user, schema, options, image, calls), calls, target.model
         except ModelError as error:
-            if error.category != 'output_truncated' or options.get('retry_truncated') is False:
+            if not haiku or haiku == target.model or error.category not in HAIKU_RETRY:
                 raise
-            sent, why = reply_limit(target, options), error.stop_reason
-            bigger = retry_limit(target, options, sent) if sent else 0
-            if not bigger:  # nothing was sent to lengthen, or it is at the ceiling already
-                raise
-        logger.info('%s: reply cut off at %s tokens (stop reason %s); asking once more with %s', target.name, sent, why, bigger)
-        calls[-1]['retried'] = True  # the server records it as recovered, not failed, once it sees the retry
-        return _attempt(target, system, user, schema, {**options, '_reply_limit': bigger}, image, None, calls), calls, target.model
+            logger.info('%s: %s by %s, asked once more on %s', target.name, error.category, target.model, haiku)
+        target.model = haiku
+        return _answer(target, system, user, schema, options, image, calls), calls, target.model
     except ModelError as error:
         error.calls = calls
         raise
