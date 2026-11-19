@@ -56,6 +56,24 @@ class SentinelTokenScopeTests(SentinelBase):
         self.assertEqual((status, out['task']), (200, None))
         self.assertEqual(call(raw, 'GET', '/api/v1/sentinel/tasks/1')[0], 404)  # allowed by the scope, no such task of its own
 
+    def test_a_sentinel_token_can_fetch_the_custom_secret_rules_bundle(self):
+        """``GET sentinel/secret-rules/bundle`` is documented as Sentinel-token-only and the Sentinel client calls it for a ``secrets_scan`` task with
+        custom rules, but the path was missing from ``auth.SENTINEL_PATH``, so every Sentinel was answered 403 and ran without the rules."""
+        from cveFeed import secret_rules
+        raw = enroll(self.t['dana'])['token']
+        bundle = '/api/v1/sentinel/secret-rules/bundle'
+        self.assertTrue(auth.SENTINEL_PATH.match(bundle))
+        self.assertEqual(Client().get(bundle, HTTP_AUTHORIZATION=f'Bearer {raw}').status_code, 404)  # allowed through; there are no custom rules yet
+        good = 'rules:\n- name: Example\n  id: custom.example\n  pattern: exm_[a-z0-9]{20}\n'
+        saved = secret_rules.save(self.root, good, [], [])
+        response = Client().get(bundle, HTTP_AUTHORIZATION=f'Bearer {raw}')
+        self.assertEqual((response.status_code, response.content.decode()), (200, good))
+        self.assertEqual(response['ETag'], f'"{saved["bundle_sha256"]}"')
+        self.assertEqual(Client().get(bundle, HTTP_AUTHORIZATION=f'Bearer {raw}', HTTP_IF_NONE_MATCH=response['ETag']).status_code, 304)
+        self.assertEqual(Client().get(bundle, HTTP_AUTHORIZATION=f'Bearer {self.t["dana"]}').status_code, 403)  # a person's token is not a Sentinel's
+        for other in ('/api/v1/sentinel/secret-rules', '/api/v1/sentinel/secret-rules/bundle/x', '/api/v1/sentinel/secret-rules/other'):
+            self.assertFalse(auth.SENTINEL_PATH.match(other), other)
+
     def test_a_person_cannot_ask_for_a_sentinel_token(self):
         client = Client()
         client.force_login(self.dana)

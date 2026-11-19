@@ -41,10 +41,7 @@ if [ -n "${COMPOSE_ENV_FILE:-}" ] && [ "$COMPOSE_ENV_FILE" != .env ]; then
 fi
 services=(redis web celery celery-beat)
 grep -qx proxy < <(compose config --services) && services+=(proxy)
-# the Tailscale sidecar shares celery's network namespace and is orphaned when celery is recreated (only present with the tailscale profile)
-grep -qx tailscale < <(compose config --services) && services+=(tailscale)
-# The built-in scanner (when it runs) is in celery's network namespace (network_mode: service:celery), and the namespace goes with the old celery container:
-# left alone, it keeps a dead one in which `web` no longer resolves (heartbeats and results fail) until someone restarts it. Compose starts it after celery.
-[ -z "$(compose ps -q --status running scanner 2>/dev/null)" ] || services+=(scanner)
+# The built-in scanner and the Tailscale sidecar are left as they are: they have a network of their own, need neither this setting nor celery's
+# namespace, and reach the server by name (http://web:8000) whatever container answers there.
 compose up -d --force-recreate "${services[@]}"
 echo "Done. Redis now refuses connections without the password."

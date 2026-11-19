@@ -66,6 +66,77 @@ class FeedEntryStorageTests(TestCase):
 		self.assertEqual(stored.references, ['https://example.com/a'])
 
 
+	def test_the_exploitation_objects_of_the_current_feed_are_stored_as_flags(self):
+		# cve.now states each signal as an object or null since 2026-11; saving the object into the flag column lost the whole entry
+		obj, _ = CVEEntry.from_api(self._entry(exploitation={
+			'kev': {'dateAdded': '2021-12-10', 'dueDate': '2021-12-24', 'requiredAction': 'Apply updates'}, 'epssReached': {'date': '2026-10-22'},
+			'exploitDb': {'ids': ['50592'], 'publishedAt': '2021-12-14'}, 'metasploit': {'modules': ['x']}, 'nuclei': None, 'githubPoc': None}))
+		stored = CVEEntry.objects.get(pk=obj.pk)
+		self.assertEqual((stored.kev, stored.epss_reached, stored.exploit_db), (True, True, True))
+		obj, _ = CVEEntry.from_api(self._entry(exploitation={'kev': None, 'epssReached': None, 'exploitDb': None}))
+		stored = CVEEntry.objects.get(pk=obj.pk)
+		self.assertEqual((stored.kev, stored.epss_reached, stored.exploit_db), (None, None, None))
+
+	def test_an_entry_with_other_intel_keeps_the_flags_as_flags(self):
+		CVEEntry.objects.create(cve_id='CVE-2026-109618', intel={'epss': {'score': 0.02}})
+		obj, _ = CVEEntry.from_api(self._entry(exploitation={'kev': {'dateAdded': '2026-11-01'}, 'epssReached': {'date': '2026-10-22'}, 'exploitDb': None}))
+		stored = CVEEntry.objects.get(pk=obj.pk)
+		self.assertIs(stored.kev, True)
+		self.assertIs(stored.epss_reached, False)  # EPSS, when it scores the CVE, is today's value
+
+	def test_the_other_fields_of_the_current_entry_shape_are_read(self):
+		obj, _ = CVEEntry.from_api(self._entry(
+			statedSeverity={'value': 'high', 'source': 'cna'}, summary={'text': 'Plain words.', 'model': 'm', 'promptVersion': 'v3'},
+			references=[{'url': 'https://httpd.apache.org/security/vulnerabilities_24.html', 'type': 'other', 'role': 'vendor'},
+						{'url': 'javascript:alert(1)', 'type': 'other'}, 'https://example.com/old', {'type': 'advisory'}, 7],
+			sources=[{'name': 'cvelistV5', 'url': 'https://www.cve.org/CVERecord?id=CVE-2026-109618', 'license': 'CVE Terms of Use'}]))
+		stored = CVEEntry.objects.get(pk=obj.pk)
+		self.assertEqual(stored.stated_severity, 'high')
+		self.assertEqual(stored.summary, 'Plain words.')
+		self.assertEqual(stored.references, [{'url': 'https://httpd.apache.org/security/vulnerabilities_24.html', 'type': 'other', 'role': 'vendor'},
+											 'https://example.com/old'])
+		from cveFeed.cve_explorer import _references
+		self.assertEqual([r['url'] for r in _references(stored)], ['https://httpd.apache.org/security/vulnerabilities_24.html', 'https://example.com/old'])
+		obj, _ = CVEEntry.from_api(self._entry(severity='critical', statedSeverity=None, summary='An early warning summary'))
+		stored = CVEEntry.objects.get(pk=obj.pk)
+		self.assertEqual((stored.cvss, stored.stated_severity, stored.summary), (None, '', 'An early warning summary'))
+
+
+class RefreshQueueTests(TestCase):
+	"""The scheduled sync refreshes the oldest-synced matched CVEs: one that fails must go to the back, not hold the first places for good."""
+
+	def test_a_failed_refresh_goes_to_the_back_of_the_queue(self):
+		import datetime
+		from unittest import mock
+		from cveFeed import tasks
+		old = timezone.now() - datetime.timedelta(days=3)
+		CVEEntry.objects.create(cve_id='CVE-2026-1', affected=[], published_at=timezone.now())
+		CVEEntry.objects.filter(cve_id='CVE-2026-1').update(synced_at=old)
+		client = mock.Mock()
+		client.iter_entries.return_value = iter([])
+		client.get_entry.side_effect = RuntimeError('unreadable')
+		with mock.patch('cveFeed.tasks.CVENowClient', return_value=client), mock.patch('cveFeed.tasks.correlate_refreshed_cves.delay'):
+			out = tasks.sync_cve_now_feed()
+		self.assertEqual(out['failed'], 1)
+		self.assertGreater(CVEEntry.objects.get(cve_id='CVE-2026-1').synced_at, timezone.now() - datetime.timedelta(minutes=5))
+
+	def test_a_refresh_with_the_current_exploitation_shape_succeeds(self):
+		import datetime
+		from unittest import mock
+		from cveFeed import tasks
+		CVEEntry.objects.create(cve_id='CVE-2026-2', affected=[], published_at=timezone.now(), kev=False)
+		CVEEntry.objects.filter(cve_id='CVE-2026-2').update(synced_at=timezone.now() - datetime.timedelta(days=3))
+		client = mock.Mock()
+		client.iter_entries.return_value = iter([])
+		client.get_entry.return_value = {'id': 'CVE-2026-2', 'title': 't', 'affected': [], 'severity': {'cvss': 7.5},
+										 'exploitation': {'kev': {'dateAdded': '2026-11-10'}, 'epssReached': None, 'exploitDb': None}}
+		with mock.patch('cveFeed.tasks.CVENowClient', return_value=client), mock.patch('cveFeed.tasks.correlate_refreshed_cves.delay'), \
+				mock.patch('cveFeed.tasks._follow_signal_changes'):
+			out = tasks.sync_cve_now_feed()
+		self.assertEqual((out['refreshed'], out['failed']), (1, 0))
+		self.assertIs(CVEEntry.objects.get(cve_id='CVE-2026-2').kev, True)
+
+
 class ActivityPagingTests(TestCase):
 	def test_150_new_rows_come_back_in_two_pages_oldest_first_with_no_gaps(self):
 		from django.contrib.auth.models import User

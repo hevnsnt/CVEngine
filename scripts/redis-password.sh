@@ -5,8 +5,8 @@
 # Returns 0 when it wrote a password (the caller recreates Redis together with its clients, which an update does anyway), 1 when the
 # installation already has one or there is no .env. The password is written to .env and, when the installation runs with another Compose
 # env file (ENV_FILE, an overlay's .env.vps), to that file too: Compose reads ${REDIS_PASSWORD} from the env file it is given. An open broker
-# lets anything that reaches it queue work the workers run as root, and the host network overlay publishes it on the host's loopback, so a
-# headless installation gets one by itself instead of waiting for someone to run `make redis-auth`.
+# lets anything that reaches it queue work the workers run as root, so a headless installation gets one by itself instead of waiting for
+# someone to run `make redis-auth`.
 cvengine_redis_value() { [ -f "$2" ] && grep -E "^$1=" "$2" | tail -n 1 | cut -d= -f2- | tr -d '\r' || true; }
 
 cvengine_redis_set() {  # cvengine_redis_set KEY VALUE FILE: replace or append, without the value on a command line (`ps` shows those)

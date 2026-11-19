@@ -1,36 +1,27 @@
-# Run the scanners on the host's own network, so nmap's operating system probes reach the targets unchanged.
+# Run the built-in scanner on the host's own network, so nmap's operating system probes reach the targets unchanged.
 #
 #   docker compose -f docker-compose.yml -f docker-compose.hostnet.yml up -d
 #
 # On Docker's default bridge network every scan is address-translated, and the translation loses some of nmap's malformed probes (conntrack
 # marks them INVALID and does not translate them), so operating system detection is unreliable and CVEngine stops using it (Settings, or
-# get_system_status: os_detection). With the celery container on the host network the same scan gave the exact direct result. See
+# get_system_status: os_detection). With the scanning container on the host network the same scan gave the exact direct result. See
 # docs/DEPLOYMENT.md, "Operating system detection and the scan path".
 #
-# Linux only: host networking on Docker Desktop (macOS, Windows) works at layer 4 and cannot send these probes. Without Docker's DNS the
-# container reaches Redis and PostgreSQL on the host's loopback, where this file publishes them. The optional tailscale profile joins the
-# celery container's namespace, which would then be the host's: do not combine the two (run Tailscale on the host instead). If something
-# on the host already uses port 6379, set CVENGINE_REDIS_HOST_PORT in .env to another one.
+# Only the built-in scanner moves: it is where every scan runs. The server's containers (celery included) stay on the compose network, carry
+# no scan traffic and reach Redis and PostgreSQL by name as always. The scanner reaches the server on the host's loopback, where web is
+# published (127.0.0.1:8000; CVENGINE_WEB_HOST_PORT moves it), and the server writes that address into the scanner's enrollment.
 #
-# The built-in scanner joins celery's namespace, so it scans from the host network too. It reaches the server on the host's loopback, where this
-# file publishes the web service (127.0.0.1:8000; CVENGINE_WEB_HOST_PORT moves it).
-#
-# The published broker must have a password (on the host's loopback any local user or process could otherwise queue work the workers run
-# as root): `make up` and every update generate REDIS_PASSWORD when it is empty (scripts/redis-password.sh) and recreate Redis with it.
+# Linux only: host networking on Docker Desktop (macOS, Windows) works at layer 4 and cannot send these probes. The optional tailscale profile
+# joins the scanner's namespace, which would then be the host's: do not combine the two (run Tailscale on the host instead).
 services:
-  celery:
+  scanner:
     network_mode: host
     networks: !reset []
+  celery:
     environment:
-      - CELERY_BROKER=redis://:${REDIS_PASSWORD:-}@127.0.0.1:${CVENGINE_REDIS_HOST_PORT:-6379}/0
-      - CELERY_BACKEND=redis://:${REDIS_PASSWORD:-}@127.0.0.1:${CVENGINE_REDIS_HOST_PORT:-6379}/0
-      - POSTGRES_HOST=127.0.0.1
-      # the built-in scanner shares celery's network namespace, here the host's, where the name "web" does not resolve: its enrollment points it at
-      # the web service published below instead
+      # the built-in scanner is on the host network, where the name "web" does not resolve: the enrollment celery writes for it
+      # (agentapi/builtin_scanner.py) points it at the web service published below instead
       - CVENGINE_SCANNER_SERVER_URL=http://127.0.0.1:${CVENGINE_WEB_HOST_PORT:-8000}
   web:
     ports:
       - "127.0.0.1:${CVENGINE_WEB_HOST_PORT:-8000}:8000"
-  redis:
-    ports:
-      - "127.0.0.1:${CVENGINE_REDIS_HOST_PORT:-6379}:6379"

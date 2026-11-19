@@ -255,9 +255,9 @@ class ScreenshotPersistenceTests(TestCase):
 		scan = self._scan()
 		Subdomain.objects.create(scan_history=scan, name='www.example.test')
 		with self.settings(MEDIA_ROOT=self.media_root):
-			discovery.persist_screenshot_blobs(scan, [{'host': 'www.example.test', 'filename': 'shot.png', 'data': self.PNG}])
+			discovery.persist_screenshot_blobs(scan, [{'host': 'www.example.test', 'filename': 'shot.png', 'content_type': 'image/png', 'data': self.PNG}])
 		sub = Subdomain.objects.get(scan_history=scan, name='www.example.test')
-		self.assertEqual(sub.screenshot_path, f'example.test_{scan.id}/screenshots/sentinel-shot.png')
+		self.assertRegex(sub.screenshot_path, rf'^example\.test_{scan.id}/screenshots/sentinel-[0-9a-f]{{32}}\.png$')  # the server's name, never the Sentinel's
 		with open(os.path.join(self.media_root, sub.screenshot_path), 'rb') as f:
 			self.assertEqual(f.read(), b'\x89PNG\r\n\x1a\nfake-bytes')
 
@@ -265,9 +265,11 @@ class ScreenshotPersistenceTests(TestCase):
 		scan = self._scan()
 		Subdomain.objects.create(scan_history=scan, name='www.example.test')
 		with self.settings(MEDIA_ROOT=self.media_root):
-			discovery.persist_screenshot_blobs(scan, [{'host': 'nobody.example.test', 'filename': 'x.png', 'data': self.PNG},
-													  {'host': 'www.example.test', 'filename': '.hidden.png', 'data': self.PNG},
-													  {'host': 'www.example.test', 'filename': 'x.png', 'data': '!!not base64!!'}])
+			discovery.persist_screenshot_blobs(scan, [{'host': 'nobody.example.test', 'filename': 'x.png', 'content_type': 'image/png', 'data': self.PNG},
+													  {'host': 'www.example.test', 'filename': 'x.png', 'content_type': 'image/png', 'data': '!!not base64!!'},
+													  {'host': 'www.example.test', 'filename': 'x.png', 'content_type': 'image/jpeg', 'data': self.PNG},
+													  {'host': 'www.example.test', 'filename': 'x.png', 'content_type': 'image/png',
+													   'data': __import__('base64').b64encode(b'<svg onload=alert(1)>').decode()}])
 		self.assertEqual(Subdomain.objects.filter(screenshot_path__isnull=False).count(), 0)
 
 

@@ -528,7 +528,9 @@ class ContractMatchesTheServerTests(SimpleTestCase):
         self.assertEqual(nuclei['items']['properties']['tags']['maxItems'], broker.MAX_TAGS)
         self.assertEqual(nuclei['items']['properties']['cve_ids']['maxItems'], broker.MAX_CVE_IDS)
         self.assertEqual(self.body('testssl')['items']['maxItems'], broker.MAX_TESTSSL_ITEMS)
-        self.assertEqual(self.body('nmap_udp')['xml']['maxLength'], broker.MAX_NMAP_UDP_XML)
+        # the server's UDP cap was lowered below the contract's (security review, MEDIUM 1): never above it, so a good Sentinel's report is never refused
+        # for its size alone; the contract follows in a Sentinel release
+        self.assertLessEqual(broker.MAX_NMAP_UDP_XML, self.body('nmap_udp')['xml']['maxLength'])
         self.assertEqual(self.body('discover')['hosts']['maxItems'], broker.MAX_DISCOVER_HOSTS)
         openvas = self.body('openvas')
         self.assertEqual(openvas['results']['maxItems'], broker.MAX_OPENVAS_RESULTS)
