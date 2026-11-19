@@ -479,6 +479,8 @@ class Vulnerability(models.Model):
 		indexes = [
 			models.Index(fields=['subdomain', 'open_status', 'severity'], name='vuln_sub_open_sev_idx'),
 			models.Index(fields=['scan_history', 'name'], name='vuln_scan_name_idx'),
+			# the Vulnerabilities list's order (worst first, then newest): its page of ids is read in this order and cut after 50 rows
+			models.Index(fields=['-severity', '-id'], name='vuln_severity_id_idx'),
 		]
 		constraints = [
 			# one row per finding (see save_vulnerability); md5 keeps long names and URLs inside the btree row limit
