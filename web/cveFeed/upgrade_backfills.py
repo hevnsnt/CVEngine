@@ -44,6 +44,7 @@ BACKFILLS = (
     'backfill_name_versions',             # Server-header tokens stored as names ("nginx/1.28.3") split into product and version (re-correlated)
     'backfill_protocol_versions',         # a connector's version read as the product's (Tomcat's "Coyote JSP engine 1.1") closes (re-correlated)
     'backfill_recog_readings',            # the products, versions and CPEs Rapid7 Recog reads in the banners hosts already store (re-correlated)
+    'backfill_identities',                # service fingerprints decoded; network OS, appliance certificate, Recog and SSH identities read (re-correlated)
     'backfill_windows_builds',            # the Windows release stored NTLM and SMB script output states, and its KEV/critical candidates (re-correlated)
     'backfill_panel_versions',            # the version a stored panel template finding extracted, read as a version reading of its host (re-correlated)
     'recover_feed_gap',                   # the cve.now window a walk declared covered after the feed renamed its cursor: read again and matched

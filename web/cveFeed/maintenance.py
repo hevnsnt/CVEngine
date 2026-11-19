@@ -25,6 +25,11 @@ RETENTION = {
     'TriageCall': ('CVENGINE_TRIAGE_CALL_RETENTION_DAYS', 90, 'started_at'),
     'AIUsage': ('CVENGINE_AI_USAGE_RETENTION_DAYS', 400, 'started_at'),  # a year of cost history for the AI usage page
 }
+# The routine audit rows of the Sentinel queue: one claim, accept and completion per task, nearly all of the audit log on an instance with Sentinels
+# (a million rows in a few weeks at 3000 targets). They are archived and deleted with the log tables once older than this; every other audit action
+# (who changed what, expiries, cancels, late and adopted results, secret reads) is kept.
+ROUTINE_AUDIT_ACTIONS = ('sentinel.task.claim', 'sentinel.task.accept', 'sentinel.task.complete')
+ROUTINE_AUDIT_RETENTION = ('CVENGINE_SENTINEL_AUDIT_RETENTION_DAYS', 90)
 ARCHIVE_PREFIX = 'cvengine-logs-'
 DELETE_CHUNK = 5000
 
@@ -66,6 +71,20 @@ def _delete(qs):
         deleted += qs.model.objects.filter(id__in=ids).delete()[0]
 
 
+def _routine_audit(now):
+    """The routine Sentinel task audit rows older than ``CVENGINE_SENTINEL_AUDIT_RETENTION_DAYS`` (``ROUTINE_AUDIT_ACTIONS``), in id order, or None
+    when there are none. Bounded by the newest id older than the cutoff, so rows written while this runs wait for next week."""
+    from django.db.models import Max
+
+    from dashboard.models import AuditLog
+    setting, default = ROUTINE_AUDIT_RETENTION
+    cutoff = now - datetime.timedelta(days=_days(setting, default))
+    top = AuditLog.objects.filter(created_at__lt=cutoff).order_by().aggregate(top=Max('id'))['top']
+    if top is None:
+        return None
+    return AuditLog.objects.filter(id__lte=top, created_at__lt=cutoff, action__in=ROUTINE_AUDIT_ACTIONS).order_by('id')
+
+
 def prune_archives(directory, now):
     keep = datetime.timedelta(days=_days('CVENGINE_LOG_ARCHIVE_DAYS', 365))
     removed = 0
@@ -100,6 +119,10 @@ def run(now=None):
                 qs = qs.filter(id__lte=top)  # rows that age past the cutoff while this runs wait for next week, unarchived and kept
                 plan[name] = qs
                 archived[name] = _export(tar, name, qs.order_by('id').values().iterator(chunk_size=2000))
+            routine = _routine_audit(now)
+            if routine is not None:
+                plan['AuditLog'] = routine
+                archived['AuditLog'] = _export(tar, 'AuditLog', routine.values().iterator(chunk_size=2000))
     except BaseException:
         if os.path.exists(partial):
             os.unlink(partial)
