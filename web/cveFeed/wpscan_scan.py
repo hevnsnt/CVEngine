@@ -435,12 +435,9 @@ def persist_report(scan, sub, url, report):
         finding_lifecycle.close_fixed_wpscan_rows(scan, sub, report, seen)
     except Exception:  # noqa: BLE001 - closing what a newer version fixed never fails the stage; the next scan tries again
         logger.exception('could not close the fixed WordPress scan findings of %s', getattr(sub, 'name', ''))
-    added = 0
-    for tech_name in _technologies(report):
-        tech = tech_rows.technology(tech_name)  # one row per spelling (cveFeed.tech_rows)
-        if not sub.technologies.filter(pk=tech.pk).exists():
-            sub.technologies.add(tech)
-            added += 1
+    from cveFeed import tech_links
+    # one row per spelling (cveFeed.tech_rows); a technology the host already has is confirmed (its link's time)
+    added = tech_links.link_host(sub, [tech_rows.technology(name) for name in _technologies(report)], tech_links.WPSCAN)
     try:  # the headers the scan read (its "headers" interesting finding: Server, X-Powered-By) as version readings (cveFeed.source_versions)
         from cveFeed import source_versions
         source_versions.store_wpscan(sub, url, report)
@@ -706,7 +703,7 @@ def detect(scan, subs, candidates, force=False, only=None):
             from cveFeed import wp_core
             wp_core.record_exposure(scan, sub, found[1].get('variant'), found[0].get('version', ''))
         if found[0]['outcome'] == 'found':
-            probes.apply_to_subdomain(sub, found)
+            probes.apply_to_subdomain(sub, found)  # the WordPress probe: source probe
         ledger.record(PROBE_SERVICE, [host], project, scan, 'failed' if found[0]['outcome'] == 'challenged' else 'done')
         results[host] = found[0]
     return results

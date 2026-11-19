@@ -492,7 +492,7 @@ def store_readings(sub, probe_id, readings, port=0, now=None):
     """Store ``readings`` of one host: products and runtimes as ``ProbeObservation`` rows (a product the host stated exactly is also added to
     its technologies), a Java runtime reading in ``JavaRuntime``. The components the vendor bundles with an exact product reading are inferred and
     stored with it (``expand``). Returns ``(rows stored, whether something new or changed was stored)``."""
-    from cveFeed import java_runtime, probes
+    from cveFeed import java_runtime, probes, tech_links
     from cveFeed.models import ProbeObservation
     from cvengine_scanner import java
     project_id = sub.target_domain.project_id
@@ -517,7 +517,7 @@ def store_readings(sub, probe_id, readings, port=0, now=None):
         stored += len(observations)
         changed = changed or any(before.get((o['kind'], o['product'], o['port'])) != (o['version'], o['evidence'].get('range'))
                                  for o in observations)
-        if probes.apply_to_subdomain(sub, observations):
+        if probes.apply_to_subdomain(sub, observations, tech_links.VERSION_SOURCE):
             changed = True
     return stored, changed
 

@@ -15,6 +15,8 @@ import tempfile
 
 from cvengine_scanner.flags import NUCLEI_DEFAULT_PORTS, host_of
 
+from cveFeed import tech_links
+
 logger = logging.getLogger(__name__)
 
 NUCLEI_CHUNK = 100  # targets handed to a stream per call: the ledger is written after each call, so a failure part way marks only the later ones
@@ -477,17 +479,18 @@ def tech_name_from(line):
     return name
 
 
-TECH_SOURCE = 'nuclei'  # SubdomainTechnology.source of a technology the technology templates named
+TECH_SOURCE = tech_links.NUCLEI  # SubdomainTechnology.source of a technology the technology templates named
 
 
 def tech_cpe_from(line, index=None):
     """The CPE prefix the template of a ``http/technologies`` result names for the technology it reports (``cpe:2.3:a:apache:tomcat``), or '': its
     ``info.metadata`` vendor and product, else its ``classification.cpe``, else those of the installed template of that id
     (``nuclei_templates.technology_products``: a Sentinel's line carries no metadata). A template that names the product by its matcher
-    (``tech-detect``, the WAF and favicon templates) names many products, so its metadata says nothing about the one that fired: none."""
+    (``tech-detect``, the WAF and favicon templates) names many products, so its metadata says nothing about the one that fired: none (the server
+    may derive one from the name: ``TechLinks``, ``tech_links.derived_cpe``)."""
     from cveFeed import nuclei_templates
     template = str(line.get('template-id') or '')
-    if not template or template == 'tech-detect' or MATCHER_NAMED.search(template):
+    if not template or matcher_named(template):
         return ''
     if index is None:
         index = nuclei_templates.technology_products()
@@ -495,22 +498,64 @@ def tech_cpe_from(line, index=None):
     return nuclei_templates.cpe_prefix(vendor, product, part)
 
 
-def link_technologies(links, source=TECH_SOURCE, now=None):
-    """Write host technology links ``{(subdomain id, technology id): cpe}`` with their ``source`` and ``observed_at`` (one statement each way). A link
-    that names a CPE takes it (and this source and time) also when the host already had the technology from elsewhere; one that names none is only
-    added where missing, so it never clears a CPE another template gave the same technology."""
-    from django.utils import timezone
+def matcher_named(template):
+    """Whether a template names the product by the matcher that fired (``tech-detect``, the WAF and favicon templates) rather than in its metadata."""
+    return template == 'tech-detect' or bool(MATCHER_NAMED.search(template or ''))
 
-    from startScan.models import SubdomainTechnology
-    now = now or timezone.now()
-    rows = [SubdomainTechnology(subdomain_id=s, technology_id=t, source=source, cpe=(cpe or '')[:255], observed_at=now) for (s, t), cpe in links.items()]
-    named, bare = [r for r in rows if r.cpe], [r for r in rows if not r.cpe]
-    if named:
-        SubdomainTechnology.objects.bulk_create(named, update_conflicts=True, unique_fields=['subdomain', 'technology'],
-                                                update_fields=['source', 'cpe', 'observed_at'])
-    if bare:
-        SubdomainTechnology.objects.bulk_create(bare, ignore_conflicts=True)
-    return len(rows)
+
+def link_technologies(links, source=TECH_SOURCE, now=None):
+    """Write host technology links ``{(subdomain id, technology id): cpe}`` with their ``source`` and ``observed_at`` (``tech_links.link``: a stated
+    CPE is written also when the host already had the technology from elsewhere; a link that names none never clears one)."""
+    return tech_links.link(links, source, now=now)
+
+
+class TechLinks:
+    """The technology links of the light pass's result lines, written when a chunk is in (``flush``); the stage and an adopted Sentinel result
+    (``agentapi.sentinel_adopt``) both read their lines through it. Each line names a technology (``tech_name_from``) with the CPE its template
+    states (``tech_cpe_from``, source ``nuclei``); a template that names products by matcher states none, and the CPE the server derives from the
+    name (``tech_links.derived_cpe``) is written under ``nuclei:derived``, never over a stated one. ``found`` is ``{host name: {technology names}}``."""
+
+    def __init__(self, products=None):
+        from cveFeed import nuclei_templates
+        self.products = nuclei_templates.technology_products() if products is None else products
+        self.rows, self.derived_of = {}, {}  # one Technology lookup and one derivation per name per pass
+        self.stated, self.derived = {}, {}  # {(host id, technology id): cpe}, by source
+        self.found = {}
+
+    def offer(self, line, sub):
+        """Take one result line of host row ``sub``; returns the technology name it gave, or ''."""
+        from cveFeed import tech_rows
+        name = tech_name_from(line)
+        if not (name and sub is not None):
+            return ''
+        if name not in self.rows:
+            self.rows[name] = tech_rows.technology(name)  # one row per spelling (cveFeed.tech_rows)
+        key = (sub.pk, self.rows[name].pk)
+        self.found.setdefault(sub.name, set()).add(name)
+        cpe = tech_cpe_from(line, self.products)
+        if not cpe and matcher_named(str(line.get('template-id') or '')) and not self.stated.get(key):
+            if name not in self.derived_of:
+                self.derived_of[name] = tech_links.derived_cpe(name)
+            if self.derived_of[name]:
+                self.derived[key] = self.derived_of[name]
+                self.stated.pop(key, None)  # a derived CPE says more than none
+                return name
+        if cpe or key not in self.derived:
+            self.stated[key] = self.stated.get(key) or cpe  # the CPE the template names (one with a CPE wins)
+        if cpe:
+            self.derived.pop(key, None)  # a stated CPE outranks a derived one
+        return name
+
+    def flush(self):
+        if self.stated:
+            tech_links.link(self.stated, tech_links.NUCLEI)
+        if self.derived:
+            tech_links.link(self.derived, tech_links.NUCLEI_DERIVED)
+        self.stated.clear()
+        self.derived.clear()
+
+    def techs(self):
+        return {h: sorted(v) for h, v in self.found.items()}
 
 
 def _version_order(text):
@@ -532,7 +577,6 @@ def run_light_nuclei(scan_id, stream, force=False):
     and the AI see them. Hosts this project's light pass covered inside the TTL are not scanned again: they take the
     technologies recorded then. Returns ``{'targets', 'technologies', 'hosts', 'techs': {host: [names]}}``."""
     from cveFeed import activity, ledger
-    from cveFeed import tech_rows as rows_of
     from reNgine.resources import ScannerUnavailable
     from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
@@ -552,15 +596,9 @@ def run_light_nuclei(scan_id, stream, force=False):
     for sub in by_name.values():
         for ip in sub.ip_addresses.all():
             by_ip.setdefault(ip.address, sub)
-    found, scanned = {}, []
-    tech_rows, pending = {}, {}  # one Technology lookup per name per run; the host links ({(host, technology): CPE}) are written once per chunk
-    from cveFeed import nuclei_templates
-    products = nuclei_templates.technology_products()
-
-    def flush_links():
-        if pending:
-            link_technologies(pending)
-            pending.clear()
+    scanned = []
+    links = TechLinks()  # the host links are written once per chunk
+    found = links.found
     with ledger.claim_many(f'{service}@{project}', todo) as won:
         won_targets = [t for t in todo if t in set(won)]
         if not won_targets:
@@ -582,18 +620,10 @@ def run_light_nuclei(scan_id, stream, force=False):
                     path = f.name
                 try:
                     for line in stream(path):
-                        name = tech_name_from(line)
-                        sub = by_name.get(host_of(line)) or by_ip.get(host_of(line))
-                        if not (name and sub):
-                            continue
-                        if name not in tech_rows:
-                            tech_rows[name] = rows_of.technology(name)  # one row per spelling (cveFeed.tech_rows)
-                        key = (sub.pk, tech_rows[name].pk)
-                        pending[key] = pending.get(key) or tech_cpe_from(line, products)  # the CPE the template names (one with a CPE wins)
-                        found.setdefault(sub.name, set()).add(name)
+                        links.offer(line, by_name.get(host_of(line)) or by_ip.get(host_of(line)))
                 finally:
                     os.unlink(path)
-                    flush_links()  # what a killed chunk already saw is kept
+                    links.flush()  # what a killed chunk already saw is kept
                 record_reached(service, chunk, project, scan, stream)
                 scanned += chunk
         except ScannerUnavailable as exc:  # no scanner could take it and this kind may not run here: not the targets' failure, they stay due

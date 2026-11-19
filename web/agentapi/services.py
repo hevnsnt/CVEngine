@@ -1623,7 +1623,12 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
     if not ips:
         score_detail = [line for line in score_detail if not str(line.get('label', '')).startswith(('Reachable on a public IP', 'Public IP observed'))]
     display_score = min(100, sum(int(line.get('points') or 0) for line in score_detail)) if score_detail else 0
-    http, hosting_info, details = _host_record(sub, ips, techs, root)
+    links = {}  # where each technology came from: the other rows' first, so this row's own link speaks last
+    other_links = _technology_links([o.pk for o in others]) if others else {}
+    for other in others:
+        links.update(other_links.get(other.pk) or {})
+    links.update((shared['links'] if shared and 'links' in shared else _technology_links([sub.pk])).get(sub.pk) or {})
+    http, hosting_info, details = _host_record(sub, ips, techs, root, links)
     on_ip = (shared or {}).get('names_on_ip', {})
     countries = (shared or {}).get('countries', {})
     archived = ((shared or {}).get('archive') or {}).get((sub.target_domain.project_id if sub.target_domain else None, sub.name.lower())) or {}
@@ -1851,13 +1856,15 @@ def _rdp_screenshot_field(sub, shot, static=None):
             'captured_at': shot.captured_at.isoformat() if shot.captured_at else None}
 
 
-def _host_record(sub, ips, techs, root):
+def _host_record(sub, ips, techs, root, links=None):
     """``(http, hosting, technology_details)`` for one host: the Shodan-style part of the record. What the host row stores wins; what
     the web route check saw on the root page (its status, title, Server and X-Powered-By headers) fills what the row lacks, so a host
-    the route check reached is never shown as unprobed."""
+    the route check reached is never shown as unprobed. ``links`` (``_technology_links`` of the host's rows) says where each technology came
+    from: a technology's ``source`` is the front-page header that showed it, else its link's source (``cveFeed.tech_links.SOURCES``), else
+    ``scan`` (a link stored before sources were recorded); ``cpe``, ``cpe_derived`` and ``observed_at`` are its link's."""
     from cvengine_scanner import cms, fingerprint
 
-    from cveFeed import cms_evidence, hosting, js_libraries
+    from cveFeed import cms_evidence, hosting, js_libraries, tech_links
     from cveFeed.correlation import split_name_version
     evidence = dict((root.evidence or {}) if root else {})
     http = {'url': sub.http_url or (root.url if root else None),
@@ -1878,8 +1885,15 @@ def _host_record(sub, ips, techs, root):
     details = []
     for name in sorted(techs | set(from_page)):
         base, version = split_name_version(name)
+        link = (links or {}).get(name) or {}
         row = {'name': base or name, 'version': version, 'category': fingerprint.categorize(name),
-               'source': from_page.get(name, 'scan'), **({'superseded': True} if (cms.key(base), version) in wrong else {})}
+               'source': from_page.get(name) or link.get('source') or 'scan', **({'superseded': True} if (cms.key(base), version) in wrong else {})}
+        if link.get('cpe'):
+            row['cpe'] = link['cpe']
+            if tech_links.is_derived(link.get('source')):
+                row['cpe_derived'] = True  # derived from the name by the server, not stated by a template
+        if link.get('observed_at'):
+            row['observed_at'] = link['observed_at'].isoformat()
         record = libraries.get((base or '').lower()) if js_libraries.is_library(name) else None
         if record:  # every copy of the library on the front page and the one that runs (cveFeed.js_libraries)
             row.update(library_details(record, version))
@@ -1959,14 +1973,26 @@ def _shared_for(project, subs):
     unconfirmed = dns_crosscheck.held_for(_pids_of(project, subs), {s.name for s in subs})  # DNS answers one source gave that are not on the host yet (one query)
     from cveFeed import service_features
     features = service_features.readings_for(_pids_of(project, subs), {s.name.lower() for s in subs})  # HTTP/2 and later features per port (one query)
-    from startScan.models import SubdomainTechnology
-    link_cpes = {}  # the CPE a technology template named for a host's technology (cveFeed.nuclei_scan.tech_cpe_from), one query
-    for sub_id, name, version, cpe in SubdomainTechnology.objects.filter(subdomain_id__in=[s.pk for s in subs]).exclude(cpe='') \
-            .values_list('subdomain_id', 'technology__name', 'technology__version', 'cpe'):
-        link_cpes.setdefault(sub_id, []).append((name or '', version or '', cpe))
+    link_cpes, links = {}, _technology_links([s.pk for s in subs])  # where each technology came from (cveFeed.tech_links), one query
+    for sub_id, by_name in links.items():
+        for name, info in by_name.items():
+            if info['cpe']:  # the CPE a template named for a host's technology (cveFeed.nuclei_scan.tech_cpe_from), or one derived from its name
+                link_cpes.setdefault(sub_id, []).append((name, info['version'], info['cpe']))
     return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots, 'shots': shots, 'legacy_shots': legacy_shots,
             'probes': probe_rows, 'vhosts': vhosts, 'java': java, 'versions': versions, 'unconfirmed': unconfirmed, 'link_cpes': link_cpes,
-            'features': features}
+            'links': links, 'features': features}
+
+
+def _technology_links(sub_ids):
+    """``{host row id: {technology name: {source, cpe, observed_at, version}}}``: what the technology links of these rows record (one query)."""
+    from startScan.models import SubdomainTechnology
+    out = {}
+    if not sub_ids:
+        return out
+    for sub_id, name, version, source, cpe, seen in SubdomainTechnology.objects.filter(subdomain_id__in=list(sub_ids)) \
+            .values_list('subdomain_id', 'technology__name', 'technology__version', 'source', 'cpe', 'observed_at').order_by('id'):
+        out.setdefault(sub_id, {})[name or ''] = {'source': source or '', 'cpe': cpe or '', 'observed_at': seen, 'version': version or ''}
+    return out
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}
@@ -2798,7 +2824,9 @@ def _tech_reasons(sub, spec, routes=None, archive=None, shared=None):
             runs_on.append(' '.join(x for x in split_name_version(name) if x))
     for name, version, cpe in ((shared or {}).get('link_cpes') or {}).get(sub.pk, []):
         if spec.matches('cpe', cpe) and f'technology {name}' not in shown:  # named by its template's CPE, not by its own name
-            add(f'technology {name} ({cpe})', spec.version_ok(version))
+            from cveFeed import tech_links
+            derived = tech_links.is_derived((((shared or {}).get('links') or {}).get(sub.pk, {}).get(name) or {}).get('source'))
+            add(f'technology {name} ({cpe}{", derived from its name" if derived else ""})', spec.version_ok(version))
     if sub.webserver and (v in sub.webserver.lower() or spec.matches('header', sub.webserver)):
         add(f'web server {sub.webserver}', spec.matches('header_v', sub.webserver))
     if sub.webserver and spec.matches('platform', sub.webserver):
