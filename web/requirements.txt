@@ -41,4 +41,4 @@ packaging==26.3
 # readers this server shares with every Sentinel. Pinned to a full commit sha of the Sentinel main branch (the release tag v1.4.0 predates most kinds; a sha pin is not a version change). The
 # result contract (cvengine_scanner/contract/sentinel_contract.json) is read from this install: a contract change is a Sentinel pull request first,
 # then a pull request here that bumps this sha (docs/SENTINELS.md, "The result contract"). Bumping it is a pull request of its own.
-cvengine-scanner @ git+https://github.com/hevnsnt/cvENGINE-sentinel@5cbc0d201080d98383bfc113ace9cf62aeb633ba
+cvengine-scanner @ git+https://github.com/hevnsnt/cvENGINE-sentinel@0e8a7927d58ed47fdf13ca91b26eda58a8be4ff8
