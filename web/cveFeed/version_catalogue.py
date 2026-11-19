@@ -96,6 +96,8 @@ class Exposure:
     impact: str
     remediation: str
     twins: tuple = ()                  # template check ids that already report the same exposure: then it is not filed twice
+    rate: object = None                # rate(answers) -> the severity of what this answer shows is open, or None when it shows the door shut
+                                       # (a key or a sign-in asked for): nothing is filed and an earlier finding is closed. Without it: ``severity``
 
 
 @dataclass(frozen=True)
@@ -114,6 +116,8 @@ class Source:
     note: str = ''
     discovered: bool = False           # asked only at a page a scan already found on the host (``version_sources.discovered_pages``), never at
                                        # its own path: ``requests[0].path`` is a placeholder the found page's path replaces (``at_page``)
+    servers: str = ''                  # the web frameworks (a port product: uvicorn, aiohttp, Node.js) the product runs on: on one of the entry's
+                                       # own ``ports``, a service named one of these warrants it as a generic one would (``ai_servers.APP_SERVERS``)
 
     def lead_re(self):
         return re.compile(self.leads, re.I) if self.leads else None
@@ -375,6 +379,11 @@ def nomad_acl_enabled(answers):
     doc = _json(answers[0]) if answers else None
     value = (doc or {}).get('config.ACL.Enabled')
     return value if isinstance(value, bool) else None
+
+
+def rate_nomad(answers):
+    """A Nomad agent with ACLs on answers anonymously only when its anonymous policy may read the agent: medium, not critical."""
+    return 2 if nomad_acl_enabled(answers) is True else 4
 
 
 def read_aspnet_error(answers):
@@ -838,7 +847,7 @@ SOURCES = (
                              'A Nomad agent answers its HTTP API without a token.',
                              'With ACLs off, anyone who reaches it can submit a job: code execution on every client node.',
                              'Turn ACLs on (acl { enabled = true }) and bootstrap them, require mTLS for the HTTP API, and keep port 4646 off '
-                             'networks that do not need it.')),
+                             'networks that do not need it.', rate=rate_nomad)),
     Source('prometheus-metrics', 'Prometheus metrics', 'metrics', (Request('/metrics', read='metrics'),), read_metrics,
            leads=r'prometheus|exporter|alertmanager|pushgateway', ports=(9090, 9091, 9093, 9100, 9115, 15692), control=True,
            verified='https://prometheus.io/docs/instrumenting/exposition_formats/ (client_golang go_info and *_build_info, client_java jvm_info, '
@@ -910,6 +919,9 @@ SOURCES = SOURCES + (
                              'Delete the page, or restrict it to the addresses that need it.',
                              twins=('phpinfo-files', 'phpinfo', 'php-info', 'phpinfo-page', 'phpinfo-detect'))),
 )
+# AI model servers and agent dashboards: Ollama, llama.cpp, vLLM, LM Studio, KoboldCpp, Gradio, Langflow, ComfyUI, LiteLLM, Ray, Open WebUI,
+# Flowise, AnythingLLM, OpenClaw and Hermes Agent (cveFeed.ai_servers)
+SOURCES = SOURCES + __import__('cveFeed.ai_servers', fromlist=['sources']).sources()
 BY_ID = {s.id: s for s in SOURCES}
 assert all(len(s.requests) + int(s.control) <= MAX_REQUESTS for s in SOURCES)
 
@@ -934,7 +946,8 @@ def read_entry(source, answers):
     ``state`` is ``read`` (a reading), ``absent`` (every request answered and none in the expected shape: the product is not there, or does
     not say), ``catch_all`` (the control path read the same way: nothing is believed) or ``unknown`` (a request got no answer: nothing is
     concluded). ``exposed`` is True when the entry's exposure answered in its shape, False when a complete read shows it does not, None when
-    it cannot be told."""
+    it cannot be told. An exposure that rates its answer (``Exposure.rate``) also gives ``severity``, and a product that answered with its door
+    shut (a key or a sign-in asked for) is ``exposed`` False."""
     own = list(answers[:len(source.requests)]) + [None] * max(0, len(source.requests) - len(answers))
     complete = all(isinstance(a, dict) and not a.get('error') and a.get('status') for a in own)
     readings = [r for r in (source.reader(own) or []) if r]
@@ -944,6 +957,9 @@ def read_entry(source, answers):
             return {'state': 'unknown', 'readings': [], 'exposed': None}
         if source.reader([control] + [None] * (len(source.requests) - 1)):
             return {'state': 'catch_all', 'readings': [], 'exposed': False}
+    if readings and source.exposure and source.exposure.rate:
+        severity = source.exposure.rate(own)
+        return {'state': 'read', 'readings': readings, 'exposed': severity is not None, **({'severity': severity} if severity is not None else {})}
     if readings:
         return {'state': 'read', 'readings': readings, 'exposed': True if source.exposure else None}
     if complete:

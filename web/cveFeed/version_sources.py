@@ -109,10 +109,13 @@ def wanted(host, products, ports, web_bases, pages=None):
                 if lead.search(getattr(port, 'product', '') or '') or lead.search(getattr(port, 'service_name', '') or ''):
                     bases.append(_port_base(host, port))
             if not bases and web_bases and any(lead.search(name or '') for name, _v in products):
-                bases.append(web_bases[0])
+                # a product the host shows (a technology names no port): on the entry's own port when the host serves web pages there
+                own = [b for b in web_bases if _port_of(b) in source.ports]
+                bases.append((own or web_bases)[0])
         for port in tcp:
             product = (getattr(port, 'product', '') or '').strip()
-            generic = GENERIC_SERVICES.match((getattr(port, 'service_name', '') or '').lower()) and (not product or re.search(r'golang|net/http', product, re.I))
+            generic = GENERIC_SERVICES.match((getattr(port, 'service_name', '') or '').lower()) and (
+                not product or re.search(r'golang|net/http', product, re.I) or (source.servers and re.search(source.servers, product, re.I)))
             if port.number in source.ports and (generic or (lead is not None and lead.search(product))):
                 bases.append(_port_base(host, port))
         for base in list(dict.fromkeys(bases))[:MAX_BASES_PER_ENTRY]:
@@ -548,9 +551,8 @@ def store_answers(project_id, scan, item, answered):
             if source.exposure and scan is not None:
                 path = source.requests[0].path
                 if verdict['exposed'] is True:
-                    # a Nomad agent with ACLs on answers anonymously only when its anonymous policy may read the agent: medium, not critical
-                    severity = 2 if source.id == 'nomad' and catalogue.nomad_acl_enabled(verdict.get('answers') or []) is True else None
-                    exposed += file_exposure(scan, sub, source, base + path, verdict['readings'], severity=severity)
+                    # rated by what the answer shows is open (``Exposure.rate``: a Nomad agent with ACLs on, an agent that asks for a sign-in)
+                    exposed += file_exposure(scan, sub, source, base + path, verdict['readings'], severity=verdict.get('severity'))
                 elif verdict['exposed'] is False:
                     close_exposure(scan, sub, source, base + path)
         if changed:
