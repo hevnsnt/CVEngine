@@ -5,6 +5,8 @@ Found on cvedemo: IPv6 addresses went round forever as ``a Sentinel scanned the 
 leaves a down on-link host out too; the old reader read both as "no host" and the address waited again at every firing."""
 from unittest import mock
 
+from django.test import SimpleTestCase
+
 from cveFeed import ledger, udp_scan
 from reNgine.resources import ScannerReportedNothing, ScannerUnavailable
 from tests.test_udp_scan import UdpBase, run_udp
@@ -116,3 +118,42 @@ class RealReportTests(UdpBase):
 
     def test_the_report_of_a_down_on_link_host_is_a_clean_empty_result(self):
         self.assertEqual(udp_scan.host_from_report(REAL_DOWN_ON_LINK, 'fd00:dead:beef:77::99')['status'], 'down')
+
+
+class HostileReportTests(SimpleTestCase):
+    """A Sentinel's report is read in time linear in its length (security review, MEDIUM 1): ``<hosts\\b[^>]*>`` and ``<finished\\b[^>]*\\bexit="success"``
+    rescanned the rest of the text from every ``<hosts`` or ``<finished`` with no ``>``, 27 seconds for 200 KB under a 4 MiB cap."""
+
+    SHAPES = ('<hosts ', '<finished ', '<finished exit="x" ', '<hosts up="1" ', ' up="1"', '<hostsx ', '<')
+
+    def test_every_hostile_shape_at_the_cap_is_read_in_well_under_a_second(self):
+        import time
+        from agentapi import sentinel_broker
+        for shape in self.SHAPES:
+            text = (shape * (sentinel_broker.MAX_NMAP_UDP_XML // len(shape) + 1))[:sentinel_broker.MAX_NMAP_UDP_XML]
+            started = time.monotonic()
+            self.assertIsNone(udp_scan.report_counts(text), shape)
+            with self.assertRaises(ScannerReportedNothing):
+                udp_scan.host_from_report(text, '192.0.2.10')  # the whole reader, the XML parse included
+            self.assertLess(time.monotonic() - started, 1.0, shape)
+
+    def test_the_cap_is_far_above_a_real_report_and_below_the_full_tcp_reports(self):
+        import json
+        import os
+        from agentapi import sentinel_broker
+        with open(os.path.join(os.path.dirname(__file__), 'fixtures', 'sentinel_lab', 'nmap_udp.json'), encoding='utf-8') as handle:
+            real = json.load(handle)['payload']['xml']
+        self.assertLess(len(real) * 50, sentinel_broker.MAX_NMAP_UDP_XML)
+        self.assertLess(sentinel_broker.MAX_NMAP_UDP_XML, sentinel_broker.MAX_NMAP_REPORT_XML)
+        self.assertEqual(sentinel_broker.clean_result('nmap_udp', {'outcome': 'done', 'xml': real})['xml'], real)
+        with self.assertRaises(sentinel_broker.ApiError):
+            sentinel_broker.clean_result('nmap_udp', {'outcome': 'done', 'xml': ' ' * (sentinel_broker.MAX_NMAP_UDP_XML + 1)})
+
+    def test_the_counts_are_still_read_from_a_real_report(self):
+        self.assertEqual(udp_scan.report_counts(REAL_DOWN_ON_LINK), (0, 1, 1))
+        self.assertEqual(udp_scan.report_counts(report(up=1, down=0, total=1)), (1, 0, 1))
+        self.assertIsNone(udp_scan.report_counts(REAL_NO_ROUTE.replace('exit="success"', 'exit="error"')))
+        self.assertIsNone(udp_scan.report_counts(REAL_NO_ROUTE.replace('<hosts ', '<hostsx ')))
+        self.assertIsNone(udp_scan.report_counts(REAL_NO_ROUTE.replace('total="0"', '')))
+        spaced = REAL_NO_ROUTE.replace('<finished time="1794110654" exit="success"', '<finished\n  time="1794110654"\n  exit="success"')
+        self.assertEqual(udp_scan.report_counts(spaced), (0, 0, 0))

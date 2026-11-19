@@ -249,23 +249,41 @@ def normalize_address(value):
         return text
 
 
-_HOSTS = re.compile(r'<hosts\b[^>]*>')
-_FINISHED = re.compile(r'<finished\b[^>]*\bexit="success"')
+MAX_TAG = 2000  # the most of a start tag read after its name: nmap's <finished .../> and <hosts .../> are a few hundred characters
+_COUNT = {k: re.compile(rf'(?:^|\s){k}="(\d{{1,9}})"') for k in ('up', 'down', 'total')}
+
+
+def _tags(text, name):
+    """The attributes of each start tag ``<name ...>`` of ``text`` (the text up to its ``>``, or ``MAX_TAG`` characters when there is none), in order.
+    Linear: a tag name is found with ``str.find``, only a bounded slice after it is looked at, and the next search starts where that slice ended, so no
+    character is read more than twice. A report of a million ``<hosts`` with no ``>`` costs one pass, never one pass per position (the regexes this
+    replaced, ``<hosts\\b[^>]*>`` and ``<finished\\b[^>]*\\bexit="success"``, took 27 seconds on 200 KB a Sentinel could send)."""
+    opening = f'<{name}'
+    at = text.find(opening)
+    while at != -1:
+        start = end = at + len(opening)
+        if start == len(text) or text[start] in ' \t\r\n/>':  # the whole name, not <hostsx
+            close = text.find('>', start, start + MAX_TAG)
+            end = close if close != -1 else start + MAX_TAG
+            yield text[start:end]
+        at = text.find(opening, end)
 
 
 def report_counts(xml_text):
     """``(up, down, total)`` hosts nmap says it scanned, or None when the report has no ``finished ... exit="success"`` marker (cut short or
-    not nmap's)."""
+    not nmap's). Read with ``_tags``, in time linear in the report's length whatever a Sentinel sends."""
     xml_text = xml_text or ''
-    if not _FINISHED.search(xml_text):
+    if not any(re.search(r'(?:^|\s)exit="success"', tag) for tag in _tags(xml_text, 'finished')):
         return None
-    found = _HOSTS.search(xml_text)
-    if not found:
+    found = next(_tags(xml_text, 'hosts'), None)
+    if found is None:
         return None
-    try:
-        values = {k: int(re.search(rf'\b{k}="(\d+)"', found.group(0)).group(1)) for k in ('up', 'down', 'total')}
-    except (AttributeError, ValueError):
-        return None
+    values = {}
+    for key, pattern in _COUNT.items():
+        match = pattern.search(found)
+        if not match:
+            return None
+        values[key] = int(match.group(1))
     return values['up'], values['down'], values['total']
 
 

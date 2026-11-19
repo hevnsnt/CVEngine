@@ -32,7 +32,7 @@ class HostScreenshotTests(TestCase):
 		self.media_root = tempfile.mkdtemp()
 		self.addCleanup(lambda: __import__('shutil').rmtree(self.media_root, ignore_errors=True))
 
-	def _plant(self, rel_path, content=b'jpeg-bytes'):
+	def _plant(self, rel_path, content=b'\xff\xd8\xff\xe0jpeg-bytes'):
 		full = os.path.join(self.media_root, rel_path)
 		os.makedirs(os.path.dirname(full), exist_ok=True)
 		with open(full, 'wb') as f:
@@ -44,8 +44,8 @@ class HostScreenshotTests(TestCase):
 		sub = Subdomain.objects.create(scan_history=self.scan_a, target_domain=self.domain_a, name='www.a.example', screenshot_path=rel)
 		with self.settings(MEDIA_ROOT=self.media_root):
 			resp = client_for(self.member_a).get(f'/cve/{self.project_a.slug}/hosts/{sub.id}/screenshot/')
-		self.assertEqual(resp.status_code, 200)
-		self.assertEqual(b''.join(resp.streaming_content), b'jpeg-bytes')
+		self.assertEqual((resp.status_code, resp['Content-Type']), (200, 'image/jpeg'))
+		self.assertEqual(b''.join(resp.streaming_content), b'\xff\xd8\xff\xe0jpeg-bytes')
 
 	def test_404_for_a_subdomain_in_a_project_the_caller_cannot_see(self):
 		rel = 'b.example_1/screenshots/shot.jpeg'
@@ -124,11 +124,17 @@ class HostScreenshotThumbnailTests(HostScreenshotTests):
 		with Image.open(BytesIO(b''.join(self._get(self._sub(rel)).streaming_content))) as image:
 			self.assertEqual(image.size, (200, 100))
 
-	def test_a_file_that_is_not_an_image_falls_back_to_the_full_bytes(self):
+	def test_a_picture_that_cannot_be_thumbnailed_falls_back_to_the_full_bytes(self):
 		rel = 'a.example_1/screenshots/bad.jpeg'
-		self._plant(rel, b'not an image')
+		self._plant(rel, b'\xff\xd8\xff\xe0 truncated')  # a JPEG's first bytes, nothing Pillow can read
 		resp = self._get(self._sub(rel))
-		self.assertEqual((resp.status_code, b''.join(resp.streaming_content)), (200, b'not an image'))
+		self.assertEqual((resp.status_code, resp['Content-Type'], b''.join(resp.streaming_content)), (200, 'image/jpeg', b'\xff\xd8\xff\xe0 truncated'))
+
+	def test_a_file_that_is_not_a_picture_is_never_served(self):
+		rel = 'a.example_1/screenshots/bad.jpeg'
+		self._plant(rel, b'<html><script>alert(1)</script></html>')
+		self.assertEqual(self._get(self._sub(rel)).status_code, 404)
+		self.assertEqual(self._get(self._sub(rel), '').status_code, 404)
 
 	def test_a_bad_size_is_400_and_tenancy_still_applies_to_thumbs(self):
 		rel = 'a.example_1/screenshots/big.png'

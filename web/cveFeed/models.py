@@ -22,6 +22,22 @@ def _clean_affected(value):
     return clean_affected(value)
 
 
+def _clean_references(value):
+    """The references as every reader takes them (the explorer, the advisory panel, the AI context and detection prompts): cve.now states each
+    as ``{url, type, role}`` since 2026-11 (a bare URL before, kept as it is). Only http(s) links are kept, each dict with text fields only,
+    at most 200."""
+    out = []
+    for ref in value if isinstance(value, list) else []:
+        url = ref if isinstance(ref, str) else ref.get("url") if isinstance(ref, dict) else None
+        if not isinstance(url, str) or len(url) > 2000 or not url.lower().startswith(("http://", "https://")):
+            continue
+        out.append(url if isinstance(ref, str) else
+                   {"url": url, **{k: ref[k][:64] for k in ("type", "role") if isinstance(ref.get(k), str) and ref.get(k)}})
+        if len(out) >= 200:
+            break
+    return out
+
+
 def _feed_time(value):
     """A feed timestamp, or None when it is missing or not a real date: one malformed entry must not stop the sync."""
     try:
@@ -110,27 +126,32 @@ class CVEEntry(models.Model):
     def from_api(cls, entry):
         """Upsert a CVEEntry from a full cve.now entry dict. Returns (obj, created)."""
         summary = entry.get("summary") or {}
+        if isinstance(summary, str):
+            summary = {"text": summary}
         if not isinstance(summary, dict):
             summary = {}
         severity = entry.get("severity")
         severity = severity if isinstance(severity, dict) else {}
-        exploitation = entry.get("exploitation")
-        exploitation = exploitation if isinstance(exploitation, dict) else {}
-        exploit_db = exploitation.get("exploitDb")
+        # cve.now states each exploitation signal as an object ({"dateAdded": ...}, {"date": ...}, {"ids": [...]}) or null since 2026-11:
+        # the columns hold whether it is there (cve_now.exploitation_flags), never the object (a BooleanField refuses it and the entry is lost)
+        from cveFeed.cve_now import exploitation_flags
+        exploitation = exploitation_flags(entry.get("exploitation"))
+        stated = entry.get("statedSeverity")
+        stated = stated.get("value") if isinstance(stated, dict) else stated  # {value, source} since 2026-11, a word before
         defaults = {
             "title": entry.get("title") or "",
             "summary": summary.get("text") or "",
             "summary_model": summary.get("model") or "",
             "original_description": entry.get("originalDescription") or "",
-            "cvss": severity.get("cvss"),
-            "cvss_vector": severity.get("vector") or "",
-            "severity_source": severity.get("source") or "",
-            "stated_severity": entry.get("statedSeverity") or "",
-            "kev": exploitation.get("kev"),
-            "epss_reached": exploitation.get("epssReached"),
-            "exploit_db": None if exploit_db is None else bool(exploit_db),
+            "cvss": severity.get("cvss") if isinstance(severity.get("cvss"), (int, float)) and not isinstance(severity.get("cvss"), bool) else None,
+            "cvss_vector": severity.get("vector") if isinstance(severity.get("vector"), str) else "",
+            "severity_source": severity.get("source") if isinstance(severity.get("source"), str) else "",
+            "stated_severity": stated if isinstance(stated, str) else "",
+            "kev": exploitation["kev"],
+            "epss_reached": exploitation["epssReached"],
+            "exploit_db": exploitation["exploitDb"],
             "affected": _clean_affected(entry.get("affected")),
-            "references": entry.get("references") if isinstance(entry.get("references"), list) else [],
+            "references": _clean_references(entry.get("references")),
             "sources": entry.get("sources") if isinstance(entry.get("sources"), list) else [],
             "status": entry.get("status") or "",
             "published_at": _feed_time(entry.get("publishedAt")),

@@ -468,7 +468,7 @@ def _observation(r, port):
     outcome = 'found' if r['version'] else 'hidden'
     evidence = {'confidence': r['confidence'], 'line_only': r['line_only'], 'component': r['component'], 'source': r['source'],
                 'said': r['evidence'], 'version_source': True, **({'cpe': r['cpe']} if r.get('cpe') else {}),
-                **({'bundled': r['bundled']} if isinstance(r.get('bundled'), dict) else {})}
+                **({'bundled': r['bundled']} if isinstance(r.get('bundled'), dict) else {}), **({'on_port': True} if r.get('on_port') else {})}
     if r.get('release_only') and isinstance(r.get('windows'), dict):
         # the Windows release an NTLM challenge states (cveFeed.windows_builds): the release, never its update revision
         evidence.update(release_only=True, windows=r['windows'])
@@ -913,6 +913,37 @@ def prefetch_bundled(subs):
         sub._bundled_rows = by_key.get((project_of.get(sub.target_domain_id), sub.name.lower().rstrip('.')), [])
 
 
+def prefetch_readings(subs, cve_by_id):
+    """Give each of ``subs`` the other per-host rows correlation reads, one query per table for the whole chunk instead of one per host: its
+    runtime readings (``_runtime_rows``, ``host_runtimes``), its version range readings (``_range_rows``, ``edge_builds.range_readings``) and its
+    Java runtimes (``_java_runtimes``, ``java_runtime.host_runtimes``), and its target, so ``sub.target_domain`` is not one query per host. A table
+    is read only when the pool holds a CVE its reader would test (the same gate each ``collect_matches`` applies before reading): a pool with none
+    costs no query."""
+    from django.db.models import prefetch_related_objects
+
+    from cveFeed import edge_builds, java_runtime
+    from cveFeed.models import JavaRuntime, ProbeObservation
+    wanted = {'runtime': bool(runtime_cves(cve_by_id)), 'range': bool(edge_builds.range_cves(cve_by_id)), 'java': bool(java_runtime.java_cves(cve_by_id))}
+    subs = [s for s in subs if getattr(s, 'target_domain_id', None)]
+    if not subs or not any(wanted.values()):
+        return
+    prefetch_related_objects(subs, 'target_domain')
+    hosts = {s.name.lower().rstrip('.') for s in subs}
+    projects = {s.target_domain.project_id for s in subs}
+    tables = {'runtime': ('_runtime_rows', lambda: ProbeObservation.objects.filter(project_id__in=projects, host__in=hosts, kind=RUNTIME_KIND)),
+              'range': ('_range_rows', lambda: ProbeObservation.objects.filter(project_id__in=projects, host__in=hosts, probe__startswith=PROBE_PREFIX,
+                                                                              outcome=edge_builds.RANGE_OUTCOME)),
+              'java': ('_java_runtimes', lambda: JavaRuntime.objects.filter(project_id__in=projects, host__in=hosts))}
+    for name, (attr, read) in tables.items():
+        if not wanted[name]:
+            continue  # its reader returns before reading: the hosts keep no attribute, as before
+        found = {}
+        for row in read():
+            found.setdefault((row.project_id, row.host), []).append(row)
+        for sub in subs:
+            setattr(sub, attr, found.get((sub.target_domain.project_id, sub.name.lower().rstrip('.')), []))
+
+
 def collect_bundled(subdomain, product_index, cve_by_id, rows, scan_history=None, min_confidence=0.0):
     """Append the candidates of the components a vendor bundles on ``subdomain`` (``host_bundled``) to ``rows``: the product named like any
     technology (``correlation._match_candidates``), but its version is an inference, so a version inside an affected range is never
@@ -1044,7 +1075,8 @@ def readings_for(project_ids, hosts):
 def search_rows(field, value):
     """The reading rows a search term names, or None for a value it cannot read.
 
-    ``component:<name>`` (a product or runtime read from a version source: ``component:grafana``, ``component:docker``; ``component:any``),
+    ``component:<name>`` (a product or runtime read from a version source: ``component:grafana``, ``component:docker``, any name ``tech:`` takes
+    through ``cveFeed.tech_search``: ``component:"apache httpd"``; ``component:any``),
     ``runtime:<name>`` (a language runtime: ``runtime:python``, ``runtime:go``, ``runtime:dotnet``; ``runtime:any``), each optionally with a
     version prefix after ``@`` (``runtime:python@3.8`` finds 3.8.10, never 3.80); ``vsource:<entry>`` (where it was read: ``vsource:prometheus-metrics``,
     ``vsource:header``, ``vsource:snmp`` for an SNMP agent's sysDescr, ``vsource:bundled`` for a component inferred from a vendor's bundle,
@@ -1079,7 +1111,18 @@ def search_rows(field, value):
         name = aliases.get(name, name)
         if name != 'any' and name not in catalogue.RUNTIMES:
             return None
-    if name != 'any':
+    if name != 'any' and field == 'component':
+        # a product by any name tech: takes (cveFeed.tech_search: its aliases, a vendor in front, an edition or a detector's word behind,
+        # a quoted name with spaces), its component slug, or the product as stored
+        from cveFeed import tech_search
+        name = name.strip().strip('"').strip()
+        if not re.fullmatch(r'[a-z0-9][a-z0-9 ._/+-]{0,60}', name):
+            return None
+        spec = tech_search.parse(name)
+        named = Q(evidence__component=name) | Q(evidence__component=re.sub(r'[^a-z0-9]+', '-', name).strip('-')) | Q(product__iexact=name)
+        pattern = spec.name_re() if spec is not None else ''
+        rows = rows.filter(named | Q(product__iregex=pattern) if pattern else named)
+    elif name != 'any':
         if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,40}', name):
             return None
         rows = rows.filter(Q(evidence__component=name) | Q(product__iexact=name))

@@ -287,10 +287,12 @@ class IngestTests(Base):
         self.assertIn('Dropbear sshd:2020.81', {t.name for t in Subdomain.objects.get(pk=self.sub.pk).technologies.all()})
         self.assertEqual(got['readings'], 1)
 
-    def test_an_unversioned_product_on_a_port_nmap_named_changes_nothing(self):
+    def test_an_unversioned_product_on_a_port_nmap_named_is_an_identity_reading(self):
         self.ingest('vnc-service-detect', port=22)
         self.assertEqual(self.port(22).product, 'OpenSSH')
-        self.assertFalse(ProbeObservation.objects.filter(probe=source_versions.NUCLEI_PROBE).exists())
+        row = ProbeObservation.objects.get(probe=source_versions.NUCLEI_PROBE, port=22)
+        self.assertEqual((row.kind, row.product, row.version, row.outcome), ('version', 'VNC', '', 'hidden'))  # shown and searched, a lead
+        self.assertNotIn('VNC', {t.name for t in Subdomain.objects.get(pk=self.sub.pk).technologies.all()})  # never a technology
 
     def test_a_line_about_a_port_the_task_did_not_name_is_not_read(self):
         got = self.ingest('redis-detect', targets=[f'{HOST}:22'])

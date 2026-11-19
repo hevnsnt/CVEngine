@@ -35,6 +35,7 @@ import tempfile
 logger = logging.getLogger(__name__)
 
 SERVICE = 'nuclei-netdetect'
+FILL_KEY = 'nuclei_detect'  # Port.extra: what the pass filled into the row
 STAGE = 'nuclei_netdetect_scan'
 TITLE = 'Nuclei network detection pass'
 BOUNTY_REASON = 'the bug bounty engagement has not confirmed automated testing'
@@ -255,21 +256,38 @@ def ingest(scan, lines, targets):
         for product, version, _template in found:
             out['hosts'].setdefault(host, []).append(f'{product}:{version}' if version else product)
         for sub, port in rows:
-            leftover = []
+            readings = []
             for product, version, template in found:
                 if apply_to_port(port, product, version, template):
                     out['ports'] += 1
                     if sub not in out['changed']:
                         out['changed'].append(sub)
-                elif version and not _same_product(port.product or '', product):
-                    leftover.append(source_versions.product_reading(product, version, f'nuclei:{template}'[:48],
-                                                                     evidence=f'nuclei {template} on port {number}'))
-            readings = [r for r in leftover if r]
-            if readings and source_versions.store_port(sub, source_versions.NUCLEI_PROBE, number, readings):
+                readings.append(_port_reading(port, product, version, template, number))
+            readings = [r for r in readings if r]
+            if source_versions.store_port(sub, source_versions.NUCLEI_PROBE, number, readings):
                 out['readings'] += len(readings)
                 if sub not in out['changed']:
                     out['changed'].append(sub)
     return out
+
+
+def _port_reading(port, product, version, template, number):
+    """The first-party reading (``vsrc:nuclei``) one result is for a port, or None: the version this pass filled into the port row (so a later
+    port scan that names the product without a version keeps it while the reading is fresh: ``port_inventory.persist_inventory``), a versioned
+    product other than the port's own, or an unversioned one as an identity reading (shown, searched and a lead, never a technology). A product
+    nmap itself stated is not read twice."""
+    from cveFeed import source_versions
+    said = f'nuclei {template} on port {number}'
+    source = f'nuclei:{template}'[:48]
+    if _same_product(port.product or '', product):
+        fill = (port.extra or {}).get('nuclei_detect') if isinstance(port.extra, dict) else None
+        if version and isinstance(fill, dict) and fill.get('version') == version and (port.version or '').strip() == version:
+            got = source_versions.product_reading(product, version, source, evidence=said)
+            return {**got, 'on_port': True} if got else None  # the port row states it and is matched: no second technology
+        return None
+    if version:
+        return source_versions.product_reading(product, version, source, evidence=said)
+    return source_versions.identity_reading(product, source, evidence=said)
 
 
 # ----------------------------------------------------------------------------- the pipeline stage

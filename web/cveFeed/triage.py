@@ -930,6 +930,38 @@ def _port_for(sub, number):
 
 # one host's context is read once while ``track`` runs; outside it nothing is remembered (a long-lived worker must never serve a stale context)
 _CONTEXT_MEMO = contextvars.ContextVar('triage_context_memo', default=None)
+_PORTS = '_ports'  # the memo's entry for the evidence ports ``_prime`` read (``{port id: (service_name, number, extra) or None}``)
+
+
+def _prime(findings):
+    """Read, for the CVE matches of one chunk, what describing them asks of each host and match, all at once: the host contexts of their hosts
+    (``host_context.host_contexts``, one read per table for the chunk instead of a dozen per host), the ports their evidence names
+    (``_web_evidence``) and whether a person vouches for each (``match_policy.prime_standing``). Only inside ``track`` (its memo); never fatal,
+    since ``attach_host_context`` reads whatever is missing itself."""
+    from cveFeed import host_context, match_policy
+    from cveFeed.models import CVEMatch
+    from startScan.models import Port
+    memo = _CONTEXT_MEMO.get()
+    matches = [f for f in findings if isinstance(f, CVEMatch)]
+    if memo is None or not matches:
+        return
+    try:
+        subs = [m.subdomain for m in matches if m.subdomain is not None and m.subdomain.target_domain_id is not None]
+        if subs:
+            host_context.prefetch_hosts(subs)  # every match's own copy of its host (the look-alike check reads it too)
+            memo.update(host_context.host_contexts([sub for sub in subs if sub.pk not in memo]))
+        ids = {(m.evidence or {}).get('source_id') for m in matches if m.source == 'port'} - {None} - set(memo.get(_PORTS) or {})
+        ids = {i for i in ids if isinstance(i, int) and not isinstance(i, bool)}
+        if ids:
+            found = {pk: row for pk, *row in Port.objects.filter(pk__in=ids).values_list('pk', 'service_name', 'number', 'extra')}
+            memo.setdefault(_PORTS, {}).update({pk: tuple(found[pk]) if pk in found else None for pk in ids})
+        match_policy.prime_standing(matches)
+        entries = {m.cve_entry_id: m._state.fields_cache['cve_entry'] for m in matches if m._state.fields_cache.get('cve_entry') is not None}
+        if entries:
+            from django.db.models import prefetch_related_objects
+            prefetch_related_objects(list(entries.values()), 'detection')  # each CVE's detection record (``detection.max_remote_state``), read once
+    except Exception:  # noqa: BLE001 - each match is then read on its own, as before
+        logger.exception('could not read the host contexts of %d matches together', len(matches))
 
 
 def _web_evidence(match):
@@ -941,7 +973,12 @@ def _web_evidence(match):
     if match.source != 'port':
         return False
     from startScan.models import Port
-    row = Port.objects.filter(pk=(match.evidence or {}).get('source_id')).values_list('service_name', 'number', 'extra').first()
+    source_id = (match.evidence or {}).get('source_id')
+    primed = (_CONTEXT_MEMO.get() or {}).get(_PORTS)  # ``track`` reads the evidence ports of a chunk at once (``_prime``)
+    if primed is not None and source_id in primed:
+        row = primed[source_id]
+    else:
+        row = Port.objects.filter(pk=source_id).values_list('service_name', 'number', 'extra').first()
     if row is None:
         return False
     service, number, extra = (row[0] or '').lower(), row[1], row[2] or {}
@@ -1298,7 +1335,10 @@ def _track(findings):
     pairs, reset_matches, carried_hits, carried_verdicts = [], [], [], []
     findings = [f for f in findings if f is not None]
     for start in range(0, len(findings), CHUNK):
+        _prime(findings[start:start + CHUNK])
         described = [(f, describe(f)) for f in findings[start:start + CHUNK]]
+        for f in findings[start:start + CHUNK]:
+            f.__dict__.pop('_worked_on', None)  # read for this description only: a later caller of has_standing asks the database again
         described = [(f, d) for f, d in described if d['project_id'] is not None]
         existing = {}
         for fk in set(KIND_FK[d['kind']] for _, d in described):

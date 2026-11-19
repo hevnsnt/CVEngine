@@ -296,7 +296,7 @@ class DiscoveryOnSentinelTests(StreamBase):
         self.assertLessEqual({'www.a.example', 'api.a.example'}, names)
         self.assertEqual(DiscoveryEvent.objects.filter(scan=self.scan).count(), 2)
         shot = Subdomain.objects.filter(scan_history=self.scan, name='www.a.example').exclude(screenshot_path=None).exclude(screenshot_path='').first().screenshot_path
-        self.assertTrue(shot.endswith('sentinel-https-www.a.example-443.png'), shot)
+        self.assertRegex(shot, r'/sentinel-[0-9a-f]{32}\.png$')  # stored under the server's own name, never the Sentinel's (https-www.a.example-443.png)
         from django.conf import settings
         self.assertTrue(os.path.isfile(os.path.join(settings.MEDIA_ROOT, shot)))
         self.assertEqual(ScanHistory.objects.get(pk=self.scan.pk).scan_status, discovery.SUCCESS)
