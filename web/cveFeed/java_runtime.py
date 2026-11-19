@@ -974,7 +974,7 @@ def runtime_cves_among(pks, exclude=()):
     pks = [pk for pk in (pks or ()) if pk not in set(exclude)]
     if not pks:
         return []
-    rows = list(CVEEntry.objects.filter(pk__in=pks).exclude(status__icontains='reject').exclude(local_only=True).only(*_CVE_FIELDS))
+    rows = list(CVEEntry.objects.filter(pk__in=pks).exclude(status__iregex=r'reject|withdrawn|merged|superseded').exclude(local_only=True).only(*_CVE_FIELDS))
     for row in rows:
         row.affected = clean_affected(row.affected)
     return [row for row in rows if runtime_items(row)]

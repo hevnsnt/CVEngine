@@ -39,8 +39,8 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
-CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,7}$")
-CVE_IN_TEXT = re.compile(r"CVE-\d{4}-\d{4,7}", re.I)
+CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,19}$")  # the CVE JSON 5 schema allows up to 19 digits; a cap of 7 would cut an id short
+CVE_IN_TEXT = re.compile(r"CVE-\d{4}-\d{4,19}(?!\d)", re.I)
 USER_AGENT = "CVEngine threat intelligence (+https://github.com/hevnsnt/CVEngine)"
 MAX_BYTES = 64 * 1024 * 1024
 MAX_DECOMPRESSED = 512 * 1024 * 1024  # what a feed file may expand to (the real EPSS file is about 20 MB)
@@ -313,6 +313,18 @@ def intel_for(cve, data):
     return out
 
 
+CISA_KEV_COMPLETE = 1000  # a CISA KEV catalog read with fewer entries than this is not taken as the whole list (it holds about 1,500)
+
+
+def kev_removed(stored_intel, data):
+    """Whether a CVE stored as known exploited because CISA listed it has left CISA's catalog: the catalog was read whole this run
+    (``CISA_KEV_COMPLETE``), the stored detail shows CISA listed it before, and the catalog does not list it now. Anything less certain (a
+    flag only cve.now gave, a catalog that did not load) keeps the flag."""
+    listed = ((stored_intel or {}).get("kev") or {}) if isinstance(stored_intel, dict) else {}
+    catalog = data.get("cisa_kev") or {}
+    return "cisa_kev" in listed and len(catalog) >= CISA_KEV_COMPLETE
+
+
 def merged_flags(feed, intel):
     """(kev, epss_reached, exploit_db) from cve.now's exploitation block and the CVE's intel. A source only adds evidence;
     EPSS, when it scores the CVE, is today's value."""
@@ -347,6 +359,8 @@ def reconcile(data, since=None, now=None, chunk=2000, turned_hot=None):
             intel = intel_for(r["cve_id"].upper(), data)
             # the stored flags are what cve.now last said (from_api writes them), so they are the baseline the sources add to
             kev, epss_reached, exploit_db = merged_flags({"kev": r["kev"], "epssReached": r["epss_reached"], "exploitDb": r["exploit_db"]}, intel)
+            if kev and not intel.get("kev") and kev_removed(r["intel"], data):
+                kev = False  # CISA took it off its catalog, which listed it before, and no other source lists it: the flag stood on that listing
             flags_moved = (kev, epss_reached, exploit_db) != (r["kev"], r["epss_reached"], r["exploit_db"])
             if not flags_moved and intel == (r["intel"] or {}):
                 continue
@@ -684,6 +698,28 @@ def _normalized_range(rng):
     return [clean]
 
 
+# a bound that is a distribution package build, not an upstream release: an rpm epoch ("0:8.7p1-38.el9_4.4"), Red Hat's and Fedora's dist tags,
+# Debian's and Ubuntu's revisions ("1:9.2p1-2+deb12u3", "8.9p1-3ubuntu0.10"), Amazon Linux's
+_DISTRO_EVR_RE = re.compile(r"^\d+:\S|[.-](?:el|fc|amzn|module\+el)\d|ubuntu\d|[+~]deb\d|\+b\d+$", re.IGNORECASE)
+DISTRO_RANGE_TYPES = {"rpm": "RPM", "deb": "DEB", "dpkg": "DEB", "debian": "DEB"}  # CVE 5 versionType values of distribution package builds
+
+
+def _distro_evr(value):
+    return bool(value) and isinstance(value, str) and bool(_DISTRO_EVR_RE.search(value.strip()))
+
+
+def _distro_typed(rng):
+    """A range whose bounds are distribution package builds is typed ``RPM`` (or ``DEB``), which correlation never compares with an upstream
+    version (``version_in_range`` reads only SEMVER and ECOSYSTEM): read as upstream, "0:8.7p1-38.el9_4.4" put every RHEL 9 OpenSSH 8.7 in
+    range. The distribution's own data (cveFeed.distro_sync) decides those hosts."""
+    if not isinstance(rng, dict) or str(rng.get("type") or "SEMVER").upper() not in ("SEMVER", "ECOSYSTEM"):
+        return rng
+    bounds = [str(rng.get(k)) for k in _RANGE_BOUNDS if rng.get(k) and str(rng.get(k)) not in _ZERO]
+    if bounds and any(_distro_evr(b) for b in bounds):
+        return {**rng, "type": "DEB" if any(re.search(r"ubuntu|deb\d|\+b\d", b, re.I) for b in bounds) else "RPM"}
+    return rng
+
+
 def normalize_feed_ranges(affected):
     """cve.now's ``affected`` with the ranges its CVE List source gave in the forms correlation cannot read made readable: the two halves of a
     branch joined (Confluence CVE-2022-26134: ``{introduced 7.13.0, fixed unspecified}`` and ``{introduced unspecified, fixed 7.13.7}``),
@@ -694,6 +730,7 @@ def normalize_feed_ranges(affected):
         ranges = item.get("ranges") if isinstance(item, dict) else None
         if isinstance(ranges, list) and ranges:
             new = [r for rng in _joined_feed_ranges(ranges) for r in _normalized_range(rng)][:100]
+            new = [_distro_typed(r) for r in new]
             if new != ranges:
                 item = {**item, "ranges": new}
         out.append(item)
@@ -758,7 +795,7 @@ def _ranges(entry):
             # in a ``defaultStatus: affected`` entry read above, a bare affected version is where the flaw began (the kernel CNA's "5.2"),
             # already inside the ranges: read as one exact version it would only add a range of a single release
             continue
-        kind = "GIT" if str(v.get("versionType") or "").lower() == "git" else "SEMVER"
+        kind = "GIT" if str(v.get("versionType") or "").lower() == "git" else DISTRO_RANGE_TYPES.get(str(v.get("versionType") or "").lower(), "SEMVER")
         textual = _text_range(v.get("version")) if not (v.get("lessThan") or v.get("lessThanOrEqual")) else None
         if textual:  # the range is written in the version field itself
             out.append({"type": kind, **textual})
@@ -800,9 +837,25 @@ def _ranges(entry):
                 affected = False
             elif change.get("status") == "affected" and not affected:
                 seg_start, affected = at, True
-        if affected and (seg_start or upper):
+        # an upper bound that was written but cannot be read ("Apache HTTP Server 2.4*", "publication": issue 696) ends nowhere: the range is
+        # left out rather than made open, so every later release is never "in range". Only "*" says the range is open on purpose
+        if affected and (seg_start or upper) and (upper or _open_upper(v)):
             out.append({k: x for k, x in {"type": kind, "introduced": seg_start, **upper}.items() if x})
-    return out[:30]
+    return [_distro_typed(r) for r in out[:30]]
+
+
+def _open_upper(v):
+    """Whether a CVE 5 ``versions`` entry's upper bound is readable as "no upper bound": none is written, or it is "*"."""
+    upper = v.get("lessThan") or v.get("lessThanOrEqual")
+    return not upper or str(upper).strip() == "*"
+
+
+def _unreadable_upper(v):
+    """Whether a CVE 5 ``versions`` entry states an upper bound that cannot be read as a version (issue 696)."""
+    upper = v.get("lessThan") or v.get("lessThanOrEqual")
+    if not upper or _open_upper(v) or _wildcard_base(upper):
+        return False
+    return not _bound(upper)[0]
 
 
 def _exact_builds(entry):
@@ -1122,6 +1175,103 @@ def overlay_exact_versions(cve_id, affected, get=None):
     return overlay_from_record(affected, doc) if doc else (affected, False)
 
 
+# ----------------------------------------------------------------------------- open ranges from an unreadable upper bound (issue 696)
+
+def _open_range(rng):
+    """A comparable range with a lower bound and no upper one: every release from ``introduced`` on is in it."""
+    return (isinstance(rng, dict) and str(rng.get("type") or "SEMVER").upper() in ("SEMVER", "ECOSYSTEM") and rng.get("introduced")
+            and not rng.get("fixed") and not rng.get("lastAffected"))
+
+
+def _record_block(item):
+    """A cve.now block taken from a CVE List record (a vendor's product), not an ecosystem package's (OSV's open ranges are meant open)."""
+    return isinstance(item, dict) and bool(item.get("product")) and not item.get("package") and not item.get("ecosystem")
+
+
+def _unchecked_open(item):
+    """The lower bounds of ``item``'s open ranges that no reading of its CVE List record has accounted for yet."""
+    if not _record_block(item):
+        return []
+    seen = set(item.get("open_checked") or []) | set(item.get("upper_unreadable") or [])
+    return [r["introduced"] for r in item.get("ranges") or [] if _open_range(r) and r["introduced"] not in seen]
+
+
+def keep_open_checks(affected, stored):
+    """``affected`` (what cve.now says now) with what an earlier reading of the CVE List record found about each block's open ranges
+    (``close_open_ranges``) carried over from the same stored block: a range whose upper bound the record writes as text is left out again
+    without a request, and a range the record means open is not asked about again."""
+    from cveFeed.correlation import affected_product_tokens
+    out = list(affected or [])
+    for i, item in enumerate(out):
+        if not _record_block(item):
+            continue
+        wanted = affected_product_tokens(item)
+        old = next((o for o in stored or [] if _record_block(o) and (o.get("open_checked") or o.get("upper_unreadable"))
+                    and wanted & affected_product_tokens(o) and _same_vendor(item, o)), None)
+        if not old:
+            continue
+        dropped = set(old.get("upper_unreadable") or [])
+        out[i] = {**item, "ranges": [r for r in item.get("ranges") or [] if not (_open_range(r) and r["introduced"] in dropped)],
+                  **{k: old[k] for k in ("open_checked", "upper_unreadable") if old.get(k)}}
+    return out
+
+
+def close_open_ranges(affected, doc):
+    """``(affected, changed)``: each open range of a CVE List block (``_open_range``) checked against the record ``doc``. When the record's entry
+    for that product writes the upper bound of the version the range starts at as text that is no version ("Apache HTTP Server 2.4*" in
+    CVE-2021-44224, "Apache APISIX 1.5*" in CVE-2021-43557), cve.now passed it on as an open range, and every later release would be "in
+    range": the range is left out and its lower bound kept in the block's ``upper_unreadable`` (the block then has no usable bound for it:
+    version unknown, never a match on its own). A range the record means open ("*", or no upper bound) is noted in ``open_checked`` so it is
+    not asked about again. ``changed`` is True when a range was left out."""
+    from cveFeed.correlation import affected_product_tokens, parse_version
+    if not isinstance(doc, dict) or not any(_unchecked_open(item) for item in affected or []):
+        return affected, False
+    entries = ((doc.get("containers") or {}).get("cna") or {}).get("affected") or []
+    out, changed = list(affected), False
+    for i, item in enumerate(out):
+        starts = _unchecked_open(item)
+        if not starts:
+            continue
+        wanted = affected_product_tokens(item)
+        unreadable, readable = set(), set()
+        for entry in entries:
+            if not isinstance(entry, dict) or not (wanted & affected_product_tokens(entry)) or not _same_vendor(item, entry):
+                continue
+            entry = _without_product_name(entry)
+            for v in entry.get("versions") or []:
+                if not isinstance(v, dict) or v.get("status") != "affected":
+                    continue
+                text = _version_text(v.get("version"))
+                start = _wildcard_base(text) or _bound(text)[0]
+                if not start:
+                    continue
+                (unreadable if _unreadable_upper(v) else readable).add(parse_version(start, strict=True) or start)
+        drop = [s for s in starts if (parse_version(s, strict=True) or s) in unreadable and (parse_version(s, strict=True) or s) not in readable]
+        keep = [s for s in starts if s not in drop]
+        item = {**item}
+        if drop:
+            item["ranges"] = [r for r in item.get("ranges") or [] if not (_open_range(r) and r["introduced"] in drop)]
+            item["upper_unreadable"] = sorted(set(item.get("upper_unreadable") or []) | set(drop))[:50]
+            changed = True
+        if keep:
+            item["open_checked"] = sorted(set(item.get("open_checked") or []) | set(keep))[:50]
+        out[i] = item
+    return out, changed
+
+
+def overlay_open_ranges(cve_id, affected, get=None):
+    """``(affected, changed)``: ``close_open_ranges`` with the CVE List record of ``cve_id`` read when a block has an open range no earlier reading
+    accounted for. A record that cannot be read leaves the blocks as they were (a later refresh or the ``open-ranges`` walk asks again)."""
+    if not str(cve_id or "").upper().startswith("CVE-") or not any(_unchecked_open(item) for item in affected or []):
+        return affected, False
+    try:
+        doc = fetch_cve5(cve_id, get=get)
+    except Exception as exc:  # noqa: BLE001 - the feed's blocks stand; a later refresh or the walk asks again
+        logger.info("CVE List record of %s not read for its open ranges: %s", cve_id, exc)
+        return affected, False
+    return close_open_ranges(affected, doc) if doc else (affected, False)
+
+
 CVSS_PREFERENCE = ("cvssV3_1", "cvssV3_0", "cvssV4_0", "cvssV2_0")
 
 
@@ -1298,7 +1448,7 @@ def repair_ranges(limit=200, get=None, workers=8, scan=1000, now=None):
             sources = list(row.sources or [])
             if from_record and "CVE List V5" not in sources:
                 sources.append("CVE List V5")
-            CVEEntry.objects.filter(pk=row.pk).update(affected=new, sources=sources, needs_recorrelation=True)
+            CVEEntry.objects.filter(pk=row.pk).update(affected=new, sources=sources, needs_recorrelation=True, synced_at=timezone.now())
             MatchVerdict.objects.filter(cve_entry_id=row.pk).delete()
             out["repaired" if from_record else "normalized"] += 1
     marker.cves = max(marker.cves, min(last, hold) if hold is not None else last)
@@ -1349,7 +1499,7 @@ def backfill_exact_builds(limit=200, get=None, workers=4, wide=False):
     return _reread_walk(BUILDS_LANE, builds_candidates(wide), reread, limit=limit, get=get, workers=workers)
 
 
-def _reread_walk(lane, candidates, reread, limit=200, get=None, workers=4):
+def _reread_walk(lane, candidates, reread, limit=200, get=None, workers=4, material=None):
     """One bounded, resumable step of reading the CVE List record of stored entries again: the first ``limit`` of ``candidates`` (in id order,
     past the ``lane`` cursor) are fetched, ``reread(row, doc)`` gives each its new ``affected`` (None: unchanged), and an entry that changes is
     stored with the "CVE List V5" label (what lets a cve.now refresh keep what the record gave, ``keep_published_ranges``), marked for
@@ -1387,7 +1537,12 @@ def _reread_walk(lane, candidates, reread, limit=200, get=None, workers=4):
             sources = list(row.sources or [])
             if "CVE List V5" not in sources:
                 sources.append("CVE List V5")
-            CVEEntry.objects.filter(pk=row.pk).update(affected=new, sources=sources, needs_recorrelation=True)
+            if material is not None and not material(row.affected, new):
+                # only what the walk notes about a block changed (``open_checked``): stored, nothing to correlate again
+                CVEEntry.objects.filter(pk=row.pk).update(affected=new)
+                continue
+            # synced_at moves with the ranges, so the per-process product index (correlation.cve_pool) is built again from them
+            CVEEntry.objects.filter(pk=row.pk).update(affected=new, sources=sources, needs_recorrelation=True, synced_at=timezone.now())
             MatchVerdict.objects.filter(cve_entry_id=row.pk).delete()
             out["updated"] += 1
     cursor, _ = BackgroundCursor.objects.get_or_create(lane=lane)
@@ -1448,6 +1603,98 @@ def reset_bare_versions():
     BackgroundCursor.objects.filter(lane=BARE_LANE).delete()
 
 
+OPEN_LANE = "open-ranges"  # the BackgroundCursor lane of ``backfill_open_ranges``
+# a CVE List block (a product, no package) with a range that has a lower bound and no upper one, not yet accounted for by a record reading
+_OPEN_SQL = """jsonb_path_exists(affected, '$[*] ? (exists(@.product) && !exists(@.package) && !exists(@.ecosystem)
+    && !exists(@.open_checked) && !exists(@.upper_unreadable)
+    && exists(@.ranges[*] ? (exists(@.introduced) && !exists(@.fixed) && !exists(@.lastAffected))))')"""
+
+
+def open_candidates():
+    """The stored entries ``backfill_open_ranges`` reads the CVE List record of, from where the last run stopped."""
+    from cveFeed.models import BackgroundCursor, CVEEntry
+    cursor = BackgroundCursor.objects.filter(lane=OPEN_LANE).values_list("last_pk", flat=True).first() or 0
+    return CVEEntry.objects.extra(where=[_OPEN_SQL]).filter(pk__gt=cursor, cve_id__startswith="CVE-").order_by("pk")
+
+
+def _dropped_a_range(old, new):
+    """Whether a block lost a range (what correlation reads), not only gained an ``open_checked`` note."""
+    def ranges(affected):
+        return [[r for r in (i.get("ranges") or [])] if isinstance(i, dict) else i for i in affected or []]
+    return ranges(old) != ranges(new)
+
+
+def backfill_open_ranges(limit=200, get=None, workers=4):
+    """One bounded step of checking the stored open ranges of CVE List blocks against their record (``close_open_ranges``, issue 696): a range
+    cve.now or an older conversion made open from an upper bound the record writes as text is left out, and the CVE is marked for
+    re-correlation (its open matches outside the real range close). The same walk as ``backfill_bare_versions``."""
+    return _reread_walk(OPEN_LANE, open_candidates(), lambda row, doc: close_open_ranges(row.affected, doc)[0] if doc else None,
+                        limit=limit, get=get, workers=workers, material=_dropped_a_range)
+
+
+def reset_open_ranges():
+    from cveFeed.models import BackgroundCursor
+    BackgroundCursor.objects.filter(lane=OPEN_LANE).delete()
+
+
+def retype_distro_ranges(apply=False, chunk=500):
+    """Type the stored ranges whose bounds are distribution package builds (``_distro_typed``): "0:8.7p1-38.el9_4.4" was read as the upstream
+    release 8.7p1 and put every RHEL 9 OpenSSH 8.7 in range. Reads only the stored data (no request). Returns ``{"cves": n, "ids": [...]}``;
+    with ``apply`` each changed CVE is written and marked for re-correlation."""
+    from cveFeed.models import CVEEntry, MatchVerdict
+    out = {"cves": 0, "ids": []}
+    last = 0
+    qs = CVEEntry.objects.extra(where=["affected::text ~ %s"], params=[r'"(introduced|fixed|lastAffected)": "[^"]*([0-9]+:[0-9]|[.-](el|fc|amzn)[0-9]|ubuntu[0-9]|[+~]deb[0-9])'])
+    while True:
+        rows = list(qs.filter(pk__gt=last).order_by("pk").only("id", "cve_id", "affected")[:chunk])
+        if not rows:
+            return out
+        last = rows[-1].pk
+        for row in rows:
+            new = [{**item, "ranges": [_distro_typed(r) for r in item["ranges"]]} if isinstance(item, dict) and isinstance(item.get("ranges"), list)
+                   else item for item in row.affected or []]
+            if new == row.affected:
+                continue
+            out["cves"] += 1
+            if len(out["ids"]) < 50:
+                out["ids"].append(row.cve_id)
+            if apply:
+                CVEEntry.objects.filter(pk=row.pk).update(affected=new, needs_recorrelation=True, synced_at=timezone.now())
+                MatchVerdict.objects.filter(cve_entry_id=row.pk).delete()
+
+
+RECORD_WALKS = (("bare-versions", BARE_LANE, "backfill_bare_versions"), ("exact-builds", BUILDS_LANE, "backfill_exact_builds"),
+                ("open-ranges", OPEN_LANE, "backfill_open_ranges"))
+WALK_HOLD_TRIES = 3
+
+
+def record_walks_step(limit, get=None):
+    """One bounded step of each CVE List re-read walk (bare versions, exact builds, open ranges), run with every threat-intel pass: the walks
+    follow the catalog as it grows (their cursor is the last CVE id looked at), so a CVE whose record could not be read when it was stored is
+    read here instead of never. A record that failed for a reason that passes holds its walk at that CVE for up to ``WALK_HOLD_TRIES`` passes.
+    Returns ``{walk: counts}``; a walk that fails is reported and never stops the others."""
+    from django.core.cache import cache
+    from cveFeed.models import BackgroundCursor, CVEEntry
+    out = {}
+    for name, lane, func in RECORD_WALKS:
+        try:
+            before = BackgroundCursor.objects.filter(lane=lane).values_list("last_pk", flat=True).first() or 0
+            got = globals()[func](limit=limit, get=get)
+            failed = [i for i in got.get("failed_ids") or []]
+            if failed:
+                first = CVEEntry.objects.filter(cve_id__in=failed).order_by("pk").values_list("pk", flat=True).first()
+                key = f"cvengine:record-walk-hold:{lane}:{first}"
+                tries = (cache.get(key) or 0) + 1
+                cache.set(key, tries, 7 * 86400)
+                if first and tries < WALK_HOLD_TRIES:
+                    BackgroundCursor.objects.filter(lane=lane).update(last_pk=max(before, first - 1))
+            out[name] = {k: got.get(k) for k in ("scanned", "updated", "failed", "done")}
+        except Exception as exc:  # noqa: BLE001 - one walk must not stop the others or the intel run
+            logger.warning("threat intel: the %s walk failed: %s", name, exc)
+            out[name] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+    return out
+
+
 # ----------------------------------------------------------------------------- one run
 
 def run(now=None, get=None):
@@ -1480,9 +1727,13 @@ def run(now=None, get=None):
             repaired = repair_ranges(per_run, get=get, now=now)
         except Exception as exc:  # noqa: BLE001
             logger.warning("threat intel: ranges repair failed: %s", exc)
+    walks = {}
+    per_walk = _int_env("CVENGINE_RECORD_REREAD_PER_RUN", 100, 0, 2000)
+    if per_walk:  # the record re-read walks follow the catalog (0 turns them off; the update steps and commands still run them by hand)
+        walks = record_walks_step(per_walk, get=get)
     if LAST_IMPORT["default_status"]:
         logger.info("threat intel: %s of the %s imported CVE records state their affected releases as unaffected ranges of a default-affected "
                     "product (defaultStatus), which are now read as the releases between those ranges", LAST_IMPORT["default_status"], len(created))
     return {"sources": {n: len(data.get(n) or {}) for n in names}, "errors": errors, "reconciled": updated,
             "signals_changed": changed_ids, "signals_turned_hot": turned_hot, "imported": created, "default_status_records": LAST_IMPORT["default_status"],
-            "ranges_repaired": repaired.get("repaired", 0) + repaired.get("normalized", 0)}
+            "ranges_repaired": repaired.get("repaired", 0) + repaired.get("normalized", 0), "record_walks": walks}
