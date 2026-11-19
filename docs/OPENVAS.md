@@ -14,7 +14,7 @@ An **App Admin** opens **Administration > OpenVAS** (or the Settings tab) and pr
 
 Who can do what: only an **App Admin** switches the add-on on or off for the instance (the choices are kept when it is off). While it is off nobody can choose anything, and an Org Admin is told an App Admin has to switch it on first. Once it is on, an App Admin sees every organization and an **Org Admin** sees only the organizations they administer and those organizations' projects. Members and auditors see nothing. Every choice is in the audit log.
 
-A run an earlier version started against this server's own gvmd (no Sentinel task) is closed as failed at the next step and marks no host failed: the hosts stay due and go to a Sentinel. Retire the old stack by hand when convenient (`make openvas-down`; the data volumes stay).
+A run an earlier version started against this server's own gvmd (no Sentinel task) is closed as failed at the next step and marks no host failed: the hosts stay due and go to a Sentinel. The old in-stack containers are removed by the update ([below](#images-pins-and-updating)); their data volumes stay until you remove them.
 
 ## What gets scanned
 
@@ -92,38 +92,19 @@ Only one GVM task runs at a time. See [AGENT-API.md](AGENT-API.md#sentinels-scan
 
 ## Images, pins and updating
 
-**Which stack scans.** The Greenbone stack that scans is the one in the **Sentinel repository's** `docker-compose.yml` (the `openvas` profile of a Full Sentinel: `COMPOSE_PROFILES=openvas` in the Sentinel's `.env`). This repository's `docker-compose.yml` still carries the same 15 `openvas-*` services under the `openvas` profile, but the application no longer uses them (`make openvas-up` starts them by hand); they are off unless you ask. The digests below are this repository's. The two files pin the same images, `openvas-scanner` included (`sha256:5b2043df…` since 11/10, when Greenbone removed both earlier digests from its registry). Greenbone publishes no version tags and replaces the images behind `stable`, so a pin can disappear: the Sentinel's `scripts/greenbone-digests.sh` checks every pin and prints the current digest. Read the Sentinel's file for what actually scans. Software list with versions and licenses: the About page and THIRD-PARTY.md.
+**Which stack scans.** The Greenbone stack that scans is the one in the **Sentinel repository's** `docker-compose.yml` (the `openvas` profile of a Full Sentinel: `COMPOSE_PROFILES=openvas` in the Sentinel's `.env`). It pins the program images (the manager, the scanner, its database and cache) by digest and lets the feed data images follow Greenbone's moving `community` tag on purpose, so the vulnerability definitions keep updating; Greenbone publishes no version tags and replaces the images behind `stable`, so a pin can disappear, and the Sentinel's `scripts/greenbone-digests.sh` checks every pin and prints the current digest. The GMP client, `python-gvm`, is pinned in the Sentinel's `requirements.txt`. Read the Sentinel repository for the digests, how to update them and its software bill of materials. Software list with versions and licenses: the About page and THIRD-PARTY.md.
 
-**Some of these images float, on purpose.** The program images (the manager, the scanner, its database and cache) are pinned by digest. The **feed data images are not**: they follow Greenbone's moving `community` tag so the vulnerability definitions keep updating. The cost is that what they contain changes without a cvENGINE release and cannot be reproduced from a cvENGINE version; the software bill of materials (`scripts/generate_sbom.py`) lists them as unpinned and says why. If you need a frozen set, pin those digests yourself and accept that the definitions then go stale.
+**This server carries no Greenbone stack.** Its `docker-compose.yml` used to define the same 15 `openvas-*` services under an `openvas` profile (`make openvas-up`), which the application had stopped using once OpenVAS moved to a Sentinel. They are gone, with `python-gvm` from the server image. On an install that still had them running, the update (and `make up`) stops and removes those containers and the `openvas_network` (`scripts/retire-openvas.sh`). Their **data volumes are kept** (the feeds and the gvmd database, about 60 GB); the update prints the one command that removes them:
 
-**What a cvENGINE update does to the add-on.** An update rebuilds the cvENGINE images and recreates only `web`, `celery`, `celery-beat` and `proxy`. It does not start, stop, pull or recreate any `openvas-*` service: with `COMPOSE_PROFILES=openvas` in `.env` the old in-stack Greenbone containers keep running as they were (this server no longer uses them: a Sentinel scans, so they only cost memory and disk and can be stopped with `make openvas-down`), without it nothing of them exists. Greenbone's images on this host are changed only by you (see To update below).
+```
+docker volume ls -q --filter label=com.docker.compose.project=<project> | grep '_openvas_' | xargs -r docker volume rm
+```
 
-Greenbone publishes **no version tags**: the registry lists only the moving tags `stable`, `community`, `latest` and `edge` (read 2026-10-27), so the program images are pinned by `tag@digest` in `docker-compose.yml`, which is what runs. The feed data images (`vulnerability-tests`, `notus-data`, `scap-data`, `cert-bund-data`, `dfn-cert-data`, `data-objects`, `report-formats`) follow `:community` on purpose: they are data that Greenbone refreshes daily and that is checked against its GPG signing keys, and a pinned feed would be a stale one. The set is the minimal one that exposes GMP, from Greenbone's own compose file (greenbone.github.io/docs, Greenbone Community Containers, `FEED_RELEASE` 24.10): without the web interface (`gsa`, `gsad`, `nginx`), the certificate generator and the `gvm-tools` shell. There is **no MQTT broker** in Greenbone's current compose file (older layouts ran a mosquitto broker for a separate notus-scanner); notus is served by `openvasd` in `OPENVASD_MODE=service_notus`.
-
-Digests read from `registry.community.greenbone.net` on 2026-10-27 (multi-architecture index digests), `openvas-scanner` again on 2026-11-02: Greenbone removed the digest pinned before (`sha256:5067aa68...`, which the registry now answers with 404), so a fresh pull failed. The `stable` rows are what `docker-compose.yml` pins; the `community` rows are for reference only, since the compose file follows that tag:
-
-| Image | Tag | Digest |
-| --- | --- | --- |
-| `gvmd` | `stable` | `sha256:e59a6a684b112ea77fe4ddd7e5ca35e6a07d36bf854f1b411d11d12f9b0c608a` |
-| `pg-gvm` | `stable` | `sha256:a18d9e2f0cbba7839e65547a2331ce8f984500e8c4fbe91d08f9a48036d03fa2` |
-| `pg-gvm-migrator` | `stable` | `sha256:8fc1cc11cac0481674527e01ec7610a8195110cf117d700bd47fe3af7012b34d` |
-| `redis-server` | `stable` | `sha256:83227e34b276bf7c7453a91bbfc070341af58f7ff40eb707ed6724965fe3846c` |
-| `ospd-openvas` | `stable` | `sha256:31a85272abc77521c98451ce6834ed7d2f887e98ff1b26ff3fd94f00d000b169` |
-| `openvas-scanner` | `stable` | `sha256:5b2043df8abed6acff7cd4c08636ea87c57f73b95cd406c88dc2adcec24426dd` |
-| `gpg-data` | `stable` | `sha256:c18618252f7d874cd1fe09413b043cfc40b57e6464d8c5973d4a93b074d5d91a` |
-| `vulnerability-tests` | `community` | `sha256:d0a8df253c177321c03c24ca5be051ca22da547756f684a96a2153c2ff0c9bd7` |
-| `notus-data` | `community` | `sha256:f84397aede60d158e47ac199e0fe5108f707ed75657406e4e9aad37b92cb0c9a` |
-| `scap-data` | `community` | `sha256:fff27d3994c6a559241719547be5dc8992bd50b1c6bf44de48588adcf2e7a567` |
-| `cert-bund-data` | `community` | `sha256:b3dc178aca3c874c48529ca1ba877900b8069fd715a5831c4c3539642c57ec8a` |
-| `dfn-cert-data` | `community` | `sha256:f0c2f33101616bf956ccb605c89449b8fcd85c47226347fc8961eb5661b7f8c6` |
-| `data-objects` | `community` | `sha256:192188bcf92ac440a45556731243a6ab7255a52aff94bd78901ceed452b608da` |
-| `report-formats` | `community` | `sha256:5a74234489215f4d7e26d9b481293cc51ab7efcebb683de8bc5dfe06cd68e549` |
-
-To update: read the new digest (`docker buildx imagetools inspect registry.community.greenbone.net/community/gvmd:stable`), change it in `docker-compose.yml`, read [Greenbone's release notes](https://greenbone.github.io/docs/latest/) for the manager and scanner first, and `docker compose --profile openvas up -d` (on the Sentinel, in its own checkout, for the stack that scans). Update `python-gvm` (pinned in `web/requirements.txt` here and in the Sentinel's `requirements.txt`) with it: a gvmd that speaks a GMP version newer than the client knows (22.8 and later) makes python-gvm warn. `scripts/check_tool_versions.py` watches python-gvm; it cannot watch the Greenbone images, which have no version to compare.
+`<project>` is the Compose project name, usually the name of the checkout's directory. `COMPOSE_PROFILES=openvas` left in `.env` is harmless and can be removed.
 
 ## Licenses
 
-The add-on runs Greenbone's software as separate containers and talks to it over a socket; nothing is linked into cvENGINE except the client library. gvmd and ospd-openvas are AGPL-3.0-or-later, openvas-scanner GPL-2.0 (its Rust parts GPL-2.0-or-later), pg-gvm GPL-3.0. [python-gvm](https://github.com/greenbone/python-gvm) is GPL-3.0-or-later, which fits cvENGINE's GPL-3.0; it brings `paramiko` (LGPL-2.1), `PyNaCl` and `bcrypt` (Apache-2.0), `invoke` (BSD) and `h2`, `hpack` and `hyperframe` (MIT) as dependencies. The feed content has its own terms, which the data containers print when they start; read them before offering cvENGINE to others as a service. See THIRD-PARTY.md.
+The add-on runs Greenbone's software as separate containers on the Sentinel, which talks to it over a socket with a client library; nothing of it is linked into the cvENGINE server. gvmd and ospd-openvas are AGPL-3.0-or-later, openvas-scanner GPL-2.0 (its Rust parts GPL-2.0-or-later), pg-gvm GPL-3.0. [python-gvm](https://github.com/greenbone/python-gvm) is GPL-3.0-or-later, which fits cvENGINE's GPL-3.0; it brings `paramiko` (LGPL-2.1), `PyNaCl` and `bcrypt` (Apache-2.0), `invoke` (BSD) and `h2`, `hpack` and `hyperframe` (MIT) as dependencies. The feed content has its own terms, which the data containers print when they start; read them before offering cvENGINE to others as a service. See THIRD-PARTY.md.
 
 ## Not verified against a real GVM
 

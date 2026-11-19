@@ -24,7 +24,6 @@ Pillow>=13.0.0,<14
 PyYAML==6.0.3
 PySocks==1.7.1
 psycopg2==2.9.13
-python-gvm==27.10.1
 redis==8.1.0
 requests==2.34.2
 tldextract==5.4.0

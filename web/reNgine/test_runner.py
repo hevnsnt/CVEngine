@@ -54,10 +54,6 @@ def isolate_redis(worker_id):
         redis.Redis.from_url(url).flushdb()
 
 
-# The egress governor (cveFeed.local_egress) keep shared state in Redis, which a test database does not roll back:
-# a bucket drained by one test would change the nmap and naabu command lines another test asserts. Outside tests.test_local_egress (which sets
-# what it needs) they are off, and that module's Redis keys are cleared before every test.
-EGRESS_TEST_ENV = {'CVENGINE_LOCAL_PORT_BUDGETS': ''}
 # cveFeed.tunables.VALUES_KEY, reNgine.resources.SAVED_VALUES_KEY and AUTO_VALUES_KEY (tests.test_hermetic_runner pins that they still match)
 SAVED_SETTINGS_KEYS = ('cvengine:tunables:values', 'cvengine:scanconc:values', 'cvengine:autotune:values')
 
@@ -88,7 +84,6 @@ def hermetic_egress():
     Stages also run blocking in tests (``CVENGINE_ASYNC_STAGES=0`` unless the run sets it): a test's transaction never commits, so a StageRun's
     callback is never queued, and a test that calls a pipeline expects its result. The tests of asynchronous stages switch it on themselves
     (``tests.fake_scanner.FakeScanner(async_stages=True)`` and ``drain``)."""
-    os.environ.update(EGRESS_TEST_ENV)
     os.environ.setdefault('CVENGINE_ASYNC_STAGES', '0')
     from django.test import SimpleTestCase
     if getattr(SimpleTestCase, '_egress_hermetic', False):

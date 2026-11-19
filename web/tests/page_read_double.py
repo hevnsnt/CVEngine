@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from unittest import mock
 from urllib.parse import urljoin, urlsplit
 
-from cveFeed import js_libraries, local_egress, validation
+from cveFeed import js_libraries, validation
 
 REQUEST_GAP = 0
 
@@ -85,9 +85,7 @@ def read_host_libraries(project_id, sub, bases, get, sleep=time.sleep, unattende
     scope rules of ``scope_hop`` (host scope, a one-host target, the bug bounty program; ``unattended`` for a run the system started).
     Nothing is stored. ``get(url, headers=None)`` replaces the network (tests). Returns ``{'pages': [...], 'scanned': {url: _scanned},
     'budget_left': n}``, one page per base: ``outcome`` is ``read`` (the host's own page answered 2xx and its scripts were read),
-    ``redirect`` (``status`` and ``location``), ``challenged``, ``error_page``, ``unanswered``, ``refused`` (the gate refused the address)
-    or ``held`` (this server's egress governor or skip list held the port: ``cveFeed.local_egress``; nothing was sent). Every connection
-    goes through the pinned transport, so it is counted, logged and paced like any in-process connection; a read page carries ``records``
+    ``redirect`` (``status`` and ``location``), ``challenged``, ``error_page``, ``unanswered``, or ``refused`` (the gate refused the address). Every connection goes through the pinned transport; a read page carries ``records``
     (``js_libraries.resolve``), ``entries`` (its scripts with a source: ``_entry_kinds``), ``skipped`` (scripts it wanted and did not read,
     with why), ``truncated`` (scripts read only up to the size cap), ``read_whole`` (scripts whose file was read whole), ``capped`` (the
     parse could not see every script), ``page_truncated`` (the page itself was cut at the read limit), ``inline`` (``[library key,
@@ -100,9 +98,6 @@ def read_host_libraries(project_id, sub, bases, get, sleep=time.sleep, unattende
         # asked in full, never revalidated with an ETag: a 304 would leave nothing to search whole
         try:
             got = raw_get(url)
-        except local_egress.PortHeld:
-            scanned[url] = {'status': 0, 'whole': False, 'held': True, 'error': 'held by this server\'s egress governor'}
-            raise
         except (OSError, ValueError) as exc:
             scanned[url] = {'status': 0, 'whole': False, 'error': 'refused by the scope gate' if isinstance(exc, ValueError) else type(exc).__name__}
             raise
@@ -117,10 +112,6 @@ def read_host_libraries(project_id, sub, bases, get, sleep=time.sleep, unattende
             first = page_get(base.rstrip('/') + '/') or {}
         except ValueError:
             page['outcome'] = 'refused'
-            pages.append(page)
-            continue
-        except local_egress.PortHeld as exc:  # this server's egress governor or skip list held the port: nothing was sent (cveFeed.local_egress)
-            page.update(outcome='held', error=str(exc)[:200])
             pages.append(page)
             continue
         except OSError as exc:
@@ -174,8 +165,6 @@ def refetch_script(project_id, sub, url, get=None, sleep=time.sleep, page_url=No
     getter = get
     try:
         got = getter(url)
-    except local_egress.PortHeld:
-        return {'status': 0, 'whole': False, 'held': True, 'error': 'held by this server\'s egress governor'}
     except ValueError:
         return {'status': 0, 'whole': False, 'error': 'refused by the scope gate'}
     except OSError as exc:

@@ -155,10 +155,9 @@ class DbProbeTests(VersionFixture, TestCase):
         scan = self.host_scan(names=('db.rt.test',), web=False, ports=((6379, 'redis', '', ''),))
         sub = scan.subdomain_set.get()
 
-        def check(host, port):
-            db_exposure._note(host, port, fixture('db_probe_replies.json')['redis']['evidence'])
-            return True
-        db_exposure.run_db_exposure_checks(scan.id, checks={'redis': ('Redis', check)})
+        from tests.test_db_exposure import db_probe_dispatch
+        with db_probe_dispatch(lambda host, port: (True, fixture('db_probe_replies.json')['redis']['evidence'])):
+            db_exposure.run_db_exposure_checks(scan.id)
         self.assertTrue(Vulnerability.objects.filter(source='db_exposure').exists())
         self.assertEqual(rows(source_versions.DB_PROBE)[('version', 'Redis', 6379)].version, '7.2.4')
         self.assertIn('Redis:7.2.4', names(sub))

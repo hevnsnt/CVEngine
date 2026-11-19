@@ -211,23 +211,6 @@ class ScanControlTests(OwnUpdateLock, TestCase):
                     release_update_pause()
                 fcntl.flock(hold, fcntl.LOCK_UN)
 
-    def test_legacy_process_monitor_stops_process_group_on_global_pause(self):
-        from reNgine.resources import LegacyProcessMonitor
-        proc = subprocess.Popen(['sleep', '10'], start_new_session=True)
-        try:
-            with mock.patch('reNgine.resources.global_pause_requested', return_value=True):
-                monitor = LegacyProcessMonitor(proc)
-                deadline = time.monotonic() + 4
-                while proc.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.05)
-                monitor.close()
-            self.assertIsNotNone(proc.poll())
-            self.assertTrue(monitor.aborted)
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-            proc.wait()
-
     def test_modern_heavy_job_stops_even_without_a_scan_id(self):
         from reNgine import resources
         ScanControl.objects.update_or_create(pk=1, defaults={'paused': True})

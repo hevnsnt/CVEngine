@@ -35,9 +35,7 @@ class HostPipelineTests(TestCase):
 		self.project = Project.objects.create(name='P', slug='ph', insert_date=timezone.now(), org=org)
 		self.domain = Domain.objects.create(name='hp.test', project=self.project, insert_date=timezone.now())
 		EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
-		patches = [mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay')]
-		self.hygiene = patches[1].start()
-		patches[0].start()
+		self.hygiene = mock.patch('cveFeed.tasks.run_hygiene_task.delay').start()
 		self.addCleanup(mock.patch.stopall)
 
 	def test_new_hosts_are_resolved_recorded_and_taken_through_the_stages_without_bbot(self):

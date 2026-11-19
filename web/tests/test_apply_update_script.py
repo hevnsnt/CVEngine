@@ -1790,29 +1790,6 @@ class ApplyUpdateScriptTests(unittest.TestCase):
         self.assertGreaterEqual(len(seen), 3, 'the heartbeat must keep moving during the update')
         self.assertEqual(self.head(), self.new)
 
-    def test_the_openvas_switch_never_writes_through_a_link_the_web_container_planted(self):
-        import json
-        self.install_watcher()
-        shutil.copy(SCRIPTS / 'openvas-sync.sh', self.work / 'scripts' / 'openvas-sync.sh')
-        shutil.copy(SCRIPTS / 'compose-layout.sh', self.work / 'scripts' / 'compose-layout.sh')
-        shutil.copy(SCRIPTS / 'openvas-disk-check.sh', self.work / 'scripts' / 'openvas-disk-check.sh')
-        (self.work / 'scripts' / 'openvas-sync.sh').chmod(0o755)
-        victim = self.tmp / 'host-only'
-        victim.write_text('keep me')
-        for name in ('.openvas-applied.tmp', '.openvas-log', '.openvas-applied'):
-            (self.work / 'web' / name).symlink_to(victim)
-        (self.work / 'web' / '.openvas-wanted').write_text('on\n')
-        result = subprocess.run(['bash', 'scripts/update-watch.sh', '6'], cwd=self.work, env={**self.env, 'CVENGINE_OPENVAS_MIN_AVAILABLE_MB': '0',
-                                                                                             'CVENGINE_OPENVAS_MIN_FREE_GB': '0'},
-                                capture_output=True, text=True, timeout=60)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(victim.read_text(), 'keep me')
-        answer = self.work / 'web' / '.openvas-applied'
-        self.assertFalse(answer.is_symlink())
-        self.assertEqual(json.loads(answer.read_text())['state'], 'ok')
-        self.assertTrue(any('--profile openvas up -d' in c for c in self.calls()))
-        self.assertFalse((self.work / 'web' / '.openvas-log').is_symlink())
-
     def test_the_scan_check_asks_a_one_off_container_when_web_is_down(self):
         (self.stub / 'web_down').write_text('')
         self.approve()

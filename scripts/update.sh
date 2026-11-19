@@ -882,6 +882,12 @@ if [[ -f scripts/renew-certs.sh ]]; then
 fi
 "${compose[@]}" up -d --no-deps --force-recreate "${services[@]}"
 app_recreated=1
+# The old in-stack OpenVAS containers, which docker-compose.yml no longer defines, are stopped and removed; their volumes are kept (scripts/retire-openvas.sh).
+if [[ -f scripts/retire-openvas.sh ]]; then
+    # shellcheck source=scripts/retire-openvas.sh
+    . scripts/retire-openvas.sh
+    cvengine_retire_openvas || true
+fi
 # The AI reviewer is recreated after the application (it waits for the server's token on its own); its failing to start never fails the update.
 if grep -qx reviewer < <("${compose[@]}" config --services 2>/dev/null); then
     "${compose[@]}" up -d --no-deps --force-recreate reviewer || echo 'Could not start the AI reviewer: docker compose up -d reviewer; scanning is not affected.' >&2

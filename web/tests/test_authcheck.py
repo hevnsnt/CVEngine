@@ -636,7 +636,6 @@ class SignedRouteTests(Fixture):
 	def setUp(self):
 		patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)
 		patcher.start()
-		mock.patch('reNgine.tasks.geo_localize.delay').start()
 		self.asked = mock.patch.object(auth_routes, '_ask', side_effect=self.ask).start()
 		self.addCleanup(mock.patch.stopall)
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)

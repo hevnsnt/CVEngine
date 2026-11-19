@@ -829,36 +829,6 @@ def terminate_group(proc, grace=10):
         send(signal.SIGKILL)
 
 
-class LegacyProcessMonitor:
-    """Cooperatively stop older scanner commands that do not use heavy_job."""
-
-    def __init__(self, proc, scan_id=None):
-        self.proc, self.scan_id = proc, scan_id
-        self.aborted = False
-        self.stop_event = threading.Event()
-        self.thread = threading.Thread(target=self._watch, name='legacy-scan-stop', daemon=True)
-        self.thread.start()
-
-    def _watch(self):
-        try:
-            while self.proc.poll() is None and not self.stop_event.wait(1):
-                if global_pause_requested() or (self.scan_id is not None and abort_requested(self.scan_id)):
-                    self.aborted = True
-                    terminate_group(self.proc, grace=5)
-                    return
-        finally:
-            from django.db import connections
-            connections.close_all()
-
-    def close(self):
-        self.stop_event.set()
-        self.thread.join(timeout=2)
-
-    def raise_if_aborted(self):
-        if self.aborted:
-            raise ScanAborted('scanner process stopped by a scan or global pause')
-
-
 class Job:
     """One admitted heavy job: tracks the attached process and stops it under memory pressure."""
 

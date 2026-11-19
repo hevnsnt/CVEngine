@@ -225,6 +225,12 @@ deploy_steps() {
     "${compose[@]}" up -d --no-deps --force-recreate reviewer || log "could not start the AI reviewer (docker compose up -d reviewer); scanning is not affected"
   fi
   verify_running "${services[@]}" || return 1
+  # The old in-stack OpenVAS containers, which docker-compose.yml no longer defines, are stopped and removed; their volumes are kept.
+  if [ -f scripts/retire-openvas.sh ]; then
+    # shellcheck source=scripts/retire-openvas.sh
+    . scripts/retire-openvas.sh
+    cvengine_retire_openvas || true
+  fi
   # still DEPLOY_STAGE=migrated: a failure here is a failure AFTER the migration, and the script that applies the update (the copy already on
   # the host, which only knows build, datastores, migrate and migrated) must keep the new code and retry, never put the old code on the new schema
   phase applying verifying

@@ -24,9 +24,9 @@ python3 manage.py ensure_reviewer_token >/dev/null 2>&1 || true
 # container took to get here (a crash loop kept it empty). The update publishes the new files first (collectstatic in update-deploy.sh).
 python3 manage.py collectstatic --no-input
 
-# Load the default engines, keywords and external tools the install does not have yet. A row that is already there is never overwritten: an
-# administrator's edit to a built-in engine must survive every restart and update (this used to be `loaddata`, which rewrote every field).
-python3 manage.py load_default_fixtures fixtures/default_scan_engines.yaml fixtures/external_tools.yaml
+# Load the default engines (labels a scan records; every scan runs the same pipeline) the install does not have yet. A row that is already there
+# is never overwritten (this used to be `loaddata`, which rewrote every field).
+python3 manage.py load_default_fixtures fixtures/default_scan_engines.yaml
 
 # Temporary fix for whatportis bug - See https://github.com/yogeshojha/rengine/issues/984
 # (path looked up, not hard-coded: it depends on the Python version and the virtual environment)
@@ -101,7 +101,7 @@ echo "Starting Celery Workers..."
 # it kills any scan in flight.
 # api_queue has no tasks any more (the legacy /api/ surface that used it is gone), but the classic worker keeps consuming it: the
 # status page, the update script and the admin worker panel recognise this worker by that queue name.
-classic_queues="send_notif_queue,send_task_notif_queue,geo_localize_queue"
+classic_queues="send_notif_queue,send_task_notif_queue"
 # wpscan_queue: a long, per-site, one-per-project-at-a-time pass must not hold a feed worker
 # testssl_queue: the daily TLS audit (a minute per port, one sweep at a time) likewise
 # bucketscan_queue: the daily cloud storage sweep (a few requests per second, one sweep at a time) likewise
@@ -114,7 +114,7 @@ classic_queues="send_notif_queue,send_task_notif_queue,geo_localize_queue"
 # (a long sweep ahead of it in another queue never blocks it) on this worker, not the discovery, feed or validation ones, whose slots scan work holds for
 # hours; the slots here are greenlets (10, CLASSIC_CONCURRENCY; a certificate lookup may sleep up to 30 s in one waiting for crt.sh's pacing), of which the one-at-a-time sweeps above hold a handful. A worker per lane is capped at four (memory, see
 # tests/test_entrypoint.py). A refresh that finds no free slot expires (three intervals) and the Live screen computes on request until the next one runs.
-classic_queues+=",run_command_queue,api_queue,wpscan_queue,testssl_queue,bucketscan_queue,vhost_queue,udp_queue,openvas_queue,supplier_queue,live_cache_queue,ctwatch_queue"
+classic_queues+=",api_queue,wpscan_queue,testssl_queue,bucketscan_queue,vhost_queue,udp_queue,openvas_queue,supplier_queue,live_cache_queue,ctwatch_queue"
 # screenshot_queue: the web screenshot drain and the hourly sweep (they hand pages to Sentinels and wait for them, one drain at a time: a second task returns at once; no browser runs here)
 classic_queues+=",screenshot_queue"
 # planner_queue: the work planner's batches (cveFeed/work_planner.py): each is one Sentinel task of due checks waited for here, at most a dozen at once, and their own queue keeps a

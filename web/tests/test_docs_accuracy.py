@@ -57,7 +57,7 @@ class KindListTests(SimpleTestCase):
 
     def test_every_kind_is_dispatched_or_sentinel_only(self):
         from agentapi import sentinel_dispatch
-        self.assertEqual(sorted(set(contract_kinds()) - set(sentinel_dispatch.NEVER_LOCAL)), ['discover'])
+        self.assertEqual(sorted(set(contract_kinds()) - set(sentinel_dispatch.NEVER_LOCAL)), [])  # discover included: an external Sentinel's by design
 
 
 class EnvironmentVariableTests(SimpleTestCase):

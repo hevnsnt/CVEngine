@@ -801,15 +801,6 @@ def _sentinels(problems):
 STAGE_RUN_OLD_SECONDS = 4 * 3600  # a stage waiting longer than the longest completion budget (an hour) plus its queue wait is a problem worth a line
 
 
-def _egress(problems):
-    """Outbound connections from this server's own scanners (``cveFeed.local_egress``): the last hour, 24 hours and seven days per watched
-    port (25, 465, 587, 23, 3389 by default) and for all ports, the budget of each paced port and its use this hour, ports owed to the paced
-    pass, the top sources (scan kind and project), and how many Sentinel tasks fell back to local execution in the last hour (a problem while it
-    stays high). nmap, naabu and nuclei are counted from their probe plan, an estimate."""
-    from cveFeed import local_egress
-    return local_egress.status(problems)
-
-
 def _work():
     """What the work conductor (cveFeed.conductor) is doing: scans running and queued against the depth it keeps, and its last round."""
     from cveFeed import conductor
@@ -899,7 +890,6 @@ def _system_probes(user):
         Probe('udp_scan', lambda p, n, d: _udp_scan(p)),
         Probe('screenshots', lambda p, n, d: _screenshots(p, n)),
         Probe('sentinels', lambda p, n, d: _sentinels(p)),
-        Probe('egress', lambda p, n, d: _egress(p), db=False),
         Probe('live_cache', lambda p, n, d: _live_cache(n), db=False),
         Probe('tools', lambda p, n, d: _tools()),
     ]
@@ -981,7 +971,6 @@ def _system(user, problems, notes, run=None):
     out['udp_scan'] = take('udp_scan')
     out['screenshots'] = take('screenshots')
     out['sentinels'] = take('sentinels')
-    out['egress'] = take('egress')
     out['live_cache'] = take('live_cache')
     out['tools'] = take('tools')
     out['timings'] = run.timings()

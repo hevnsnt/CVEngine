@@ -251,8 +251,6 @@ class HarnessGuardTests(TestCase):
 
     def test_the_resource_gate_is_closed_for_the_kinds_tools_and_open_for_everything_else(self):
         from contextlib import contextmanager
-
-        from cveFeed import heavy_process
         entered = []
 
         @contextmanager
@@ -263,14 +261,15 @@ class HarnessGuardTests(TestCase):
             case, guard = self.guarded('testssl')
             try:
                 with self.assertRaises(LocalRunDetected):
-                    heavy_process.run('testssl', ['testssl.sh', 'example.test'], 5)
+                    with resources.heavy_job('testssl', label='x'):
+                        pass
                 with resources.heavy_job('route-probe', label='x'):  # another tool's job goes through the real gate
                     pass
             finally:
                 failures = self.finish(case)
         self.assertEqual(entered, ['route-probe'])
         self.assertEqual(len(guard.calls), 1)
-        self.assertTrue(guard.calls[0][0].startswith('heavy_process.run'), guard.calls)
+        self.assertTrue(guard.calls[0][0].startswith('resources.heavy_job'), guard.calls)
         self.assertEqual(len(failures), 1)
 
     def test_every_kind_has_a_local_path_and_a_gate(self):

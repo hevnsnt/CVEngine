@@ -24,7 +24,7 @@ class ToolVersionCheckTests(SimpleTestCase):
 				return [{'version': 'go99.1rc1', 'stable': False}, {'version': 'go99.0.1', 'stable': True}]
 			return {'results': [{'name': 'stable'}, {'name': 'v99.2.0'}, {'name': 'v1.0.0'}]}
 		rows = {r['tool']: r for r in tools.collect(get)}
-		for tool in ('nuclei', 'go (toolchain)', 'python-gvm (OpenVAS add-on client)'):
+		for tool in ('nuclei', 'go (toolchain)'):
 			self.assertTrue(rows[tool]['behind'], tool)
 		self.assertEqual((rows['nuclei']['latest'], rows['go (toolchain)']['latest']), ('99.0.0', '99.0.1'))
 		self.assertIn('| nuclei |', tools.report(list(rows.values())))
@@ -43,7 +43,7 @@ class ToolVersionCheckTests(SimpleTestCase):
 
 	def test_every_image_build_tool_is_pinned_to_a_version(self):
 		rows = {r['tool']: r for r in tools.collect(lambda url, as_json=True: {})}
-		for tool in ('nuclei', 'go (toolchain)', 'python-gvm (OpenVAS add-on client)'):
+		for tool in ('nuclei', 'go (toolchain)'):
 			self.assertRegex(rows[tool]['pinned'], r'^\d+(\.\d+)+$', tool)
 
 	def test_a_tool_missing_from_the_checkout_is_skipped_but_a_required_one_is_not(self):

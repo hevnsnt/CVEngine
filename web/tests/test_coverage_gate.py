@@ -87,7 +87,7 @@ class FullScanGateTests(TestCase):
         self.domain = Domain.objects.create(name='fullgate.example', project=self.project, insert_date=now)
         self.engine = EngineType.objects.create(engine_name='fullgate-engine', yaml_configuration='x')
         for p in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False),
-                  mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'),
+                  mock.patch('cveFeed.tasks.run_hygiene_task.delay'),
                   mock.patch('cveFeed.fullscan.CLAIM_KEY', 'cvengine:fullscan:gate-test'),
                   mock.patch.dict(os.environ, {}, clear=False)):
             p.start()
@@ -130,7 +130,7 @@ class UdpScanGateTests(TestCase):
         self.domain = Domain.objects.create(name='udpgate.example', project=self.project, insert_date=now)
         self.engine = EngineType.objects.create(engine_name='udpgate-engine', yaml_configuration='x')
         for p in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False),
-                  mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'),
+                  mock.patch('cveFeed.tasks.run_hygiene_task.delay'),
                   mock.patch('cveFeed.udp_scan.CLAIM_KEY', 'cvengine:udpscan:gate-test'),
                   mock.patch.dict(os.environ, {}, clear=False)):
             p.start()

@@ -81,16 +81,6 @@ while :; do
   watchdog
   disk_report
   refresh_upstream
-  # an OpenVAS switch flipped in the app (web/.openvas-wanted newer than the answer): carry it out in the background, so a first start that pulls
-  # several GB neither delays an update nor stops the heartbeat. The script takes its own lock. Its output goes to a host-private log (it
-  # publishes the tail as web/.openvas-log): this runs as root, and a path inside the web mount could be a link to a host file.
-  if [ -f web/.openvas-wanted ] && [ web/.openvas-wanted -nt web/.openvas-applied ]; then
-    setsid nohup scripts/openvas-sync.sh >>"$STATE/openvas.log" 2>&1 </dev/null &
-  fi
-  # gvmd's NVT cache found out of date by an import (web/.openvas-restart newer than its answer): restart gvmd, nothing else
-  if [ -f web/.openvas-restart ] && [ ! -L web/.openvas-restart ] && [ web/.openvas-restart -nt web/.openvas-restarted ]; then
-    setsid nohup scripts/openvas-sync.sh restart-gvmd >>"$STATE/openvas.log" 2>&1 </dev/null &
-  fi
   # "Which scanners run" changed in Settings > Sentinels (web/.scanner-plan-wanted): carried out in the background, with a log of its own. It exits 3 while a
   # scan is running (the server's processes are recreated to read the new setting) and is asked again at the next round.
   if { [ -f web/.scanner-plan-wanted ] || [ -L web/.scanner-plan-wanted ]; } && (( SECONDS >= next_plan )); then

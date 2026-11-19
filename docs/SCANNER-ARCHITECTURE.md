@@ -116,7 +116,7 @@ which send nothing to the target and need no vantage point.
   version 3, in `NEVER_LOCAL`; the project's own Sentinels take it when there is no built-in scanner, contract 4); the local runners, the maintainer's loopback-fixture approval of a draft
   (`approve_reviewed_template`) and the signed-in template run were deleted with the local nuclei paths (T8). Still on the server:
   `nuclei -update-templates` in `cveFeed/tasks.py`, which keeps the template library the Sentinel bundle is packed from fresh.
-- `reNgine/resources.py` and `reNgine/tasks.py` still start subprocesses (legacy `run_command`); check what remains of them.
+- `reNgine/tasks.py` starts no subprocess any more (the legacy `run_command` and its `geoiplookup` caller are gone); `reNgine/resources.py` keeps the memory gate (`heavy_job`), which no production code enters.
 - Anything run from `fullscan`, `probes` and `route_auth` that today shares Redis claims or ledgers with the server needs those
   claims moved to the server side of the contract (the server takes the claim, the task carries the answer).
 

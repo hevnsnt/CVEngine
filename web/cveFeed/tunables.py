@@ -69,10 +69,6 @@ GROUPS = [
     Group('retention', 'Data retention',
           'How long finished work is kept before the weekly cleanup deletes it. Shorter keeps the database smaller on a small server; longer keeps more '
           'history for the Sentinels page. The audit log keeps who did what either way.'),
-    Group('egress', 'Outbound connections',
-          'What this server\'s own scanners may send when a stage runs here instead of on a Sentinel. Hosting providers watch outbound port 25 '
-          'and may block it after a burst; these numbers pace it (nothing is dropped: a port over budget is probed later) and cap how often a stage '
-          'falls back to local execution. Sentinels are never paced by these. The counts per port are in get_system_status (egress).'),
     Group('planner', 'Work planner',
           'The work planner keeps the Sentinels busy with checks that are due (SSH inspection, secrets scan) on hosts a scan has not reached yet, instead of '
           'waiting for a whole target to be rescanned. It runs every minute, uses no AI, and queues work behind everything a scan or a validation sends. '
@@ -161,12 +157,6 @@ TUNABLES = [
             'How often the auto-tuner asks the AI advisor for a second opinion, when an AI provider is set up and the advisor is on. Between questions, '
             'and whenever the advisor is unavailable or over its daily budget, the deterministic controller tunes alone.',
             'autotune_pace', 'CVENGINE_AUTOTUNE_AI_INTERVAL_HOURS', 3, 1, 24, 'hours', auto_tunable=False),
-    Tunable('egress_port25_per_hour', 'Local connections to port 25 per hour',
-            'New connection attempts to port 25 this server\'s own scans may start: at most this many in any 60 minutes, and at most a quarter of it '
-            'in any 15, or one whole run larger than that quarter alone; charged when each process starts, shared by every worker. '
-            'Hosts over the budget are scanned without port 25 and port 25 is probed later by a paced pass, so nothing is skipped. '
-            'Providers do not publish their limit; 400 is a cautious starting point. 0 turns the pacing off. Other ports: CVENGINE_LOCAL_PORT_BUDGETS.',
-            'egress', 'CVENGINE_LOCAL_PORT25_PER_HOUR', 400, 0, 100000, 'connections', caution='cap', window='utc_hour', auto_tunable=False),
     Tunable('sentinel_task_retention_days', 'Days finished Sentinel and agent tasks are kept',
             'A finished, failed or expired Sentinel task (and a finished agent task) is deleted by the weekly cleanup once it is older than this. A task is a '
             'row of about a kilobyte; at 3000 targets a day of scanning adds tens of thousands of them. In .env it is CVENGINE_AGENT_TASK_RETENTION_DAYS.',
@@ -511,9 +501,8 @@ def usage_today():
     from cveFeed import nuclei_templates, triage, validation
     out = {}
     from cveFeed import autotune
-    from cveFeed import local_egress
     for key, read in (('triage_max_per_day', triage.asked_today), ('validate_max_per_day', validation.ran_today), ('template_gen_max_per_day', _drafts_last_day),
-                      ('autotune_ai_max_per_day', autotune.advisor_calls_today), ('nuclei_ai_max_per_day', nuclei_templates.ai_calls_today), ('egress_port25_per_hour', lambda: local_egress.used_this_hour(25))):
+                      ('autotune_ai_max_per_day', autotune.advisor_calls_today), ('nuclei_ai_max_per_day', nuclei_templates.ai_calls_today)):
         try:
             out[key] = int(read())
         except Exception:  # noqa: BLE001

@@ -25,7 +25,6 @@ class RetestFixture(ChangeFixture):
 	def setUp(self):
 		super().setUp()
 		self.delay = mock.patch('cveFeed.tasks.retest_hosts.delay').start()
-		mock.patch('reNgine.tasks.geo_localize.delay').start()
 		mock.patch('cveFeed.tasks.run_hygiene_task.delay').start()
 		self.addCleanup(mock.patch.stopall)
 

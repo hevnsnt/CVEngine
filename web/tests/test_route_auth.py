@@ -276,7 +276,6 @@ class RouteFixture:
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)
 		self.blocked = patcher.start()
-		mock.patch('reNgine.tasks.geo_localize.delay').start()
 		mock.patch('cveFeed.tasks.run_hygiene_task.delay').start()
 		self.addCleanup(mock.patch.stopall)
 		self.asked = []

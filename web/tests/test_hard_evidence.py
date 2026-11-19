@@ -85,29 +85,28 @@ class DbExposureEvidenceTests(TestCase):
 			sub.ip_addresses.add(ip)
 			self.subs.append(sub)
 
+	def check(self, answer):
+		from tests.test_db_exposure import db_probe_dispatch
+		with db_probe_dispatch(answer):
+			return dbx.run_db_exposure_checks(self.scan.id)
+
 	def test_thirty_names_on_one_address_are_probed_once(self):
 		calls = []
 
 		def probe(host, port):
 			calls.append((host, port))
-			dbx._note(host, port, 'PONG (redis 6.2.6)')
-			return True
-		out = dbx.run_db_exposure_checks(self.scan.id, checks={'redis': ('Redis', probe)})
+			return True, 'PONG (redis 6.2.6)'
+		out = self.check(probe)
 		self.assertEqual(calls, [('203.0.113.50', 6379)])
 		self.assertEqual(out, {'checked': 1, 'exposed': 1})
 
 	def test_each_host_keeps_a_finding_with_the_same_reply_as_evidence(self):
-		def probe(host, port):
-			dbx._note(host, port, 'PONG (redis 6.2.6)')
-			return True
-		dbx.run_db_exposure_checks(self.scan.id, checks={'redis': ('Redis', probe)})
+		self.check(lambda host, port: (True, 'PONG (redis 6.2.6)'))
 		self.assertEqual(Vulnerability.objects.filter(source='db_exposure').count(), 30)
 		vuln = Vulnerability.objects.filter(source='db_exposure').first()
 		self.assertEqual(vuln.extracted_results, ['PONG (redis 6.2.6)'])
 		self.assertIn('PONG (redis 6.2.6)', vuln.description)
 
-	def test_a_probe_that_found_nothing_open_makes_no_finding_and_no_stale_reply(self):
-		dbx.EVIDENCE[('203.0.113.50', 6379)] = 'left over'
-		out = dbx.run_db_exposure_checks(self.scan.id, checks={'redis': ('Redis', lambda h, p: False)})
+	def test_a_probe_that_found_nothing_open_makes_no_finding(self):
+		out = self.check(lambda h, p: False)
 		self.assertEqual((out, Vulnerability.objects.count()), ({'checked': 1, 'exposed': 0}, 0))
-		self.assertEqual(dbx.EVIDENCE, {})

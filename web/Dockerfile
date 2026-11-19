@@ -71,10 +71,6 @@ RUN apt-get update -y && \
     tzdata && \
     rm -rf /var/lib/apt/lists/*
 
-# Legacy GeoIP lookups (geoiplookup); the package is not in every release, so its absence is not fatal.
-RUN apt-get update -y && (apt-get install -y --no-install-recommends geoip-bin geoip-database || echo "geoip packages not available: IP geolocation is skipped") && \
-    rm -rf /var/lib/apt/lists/*
-
 # nuclei, from the build stage
 COPY --from=nuclei-build /out/nuclei /usr/local/bin/nuclei
 

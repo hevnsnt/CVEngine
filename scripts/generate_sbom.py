@@ -98,8 +98,6 @@ def python_packages(requirements):
 
 
 def image_note(name):
-    if name.split('/', 1)[0] == 'registry.community.greenbone.net':
-        return 'optional OpenVAS add-on feed image: a moving tag on purpose, so the vulnerability definitions keep updating (what it holds changes without a cvENGINE release)'
     return 'a moving tag, by design: refreshed with every update' if name == 'nginx' else 'a moving tag'
 
 

@@ -247,9 +247,6 @@ LOGIN_URL = 'login'
 LOGIN_REDIRECT_URL = 'cve_dashboard'
 LOGOUT_REDIRECT_URL = 'login'
 
-# Tool Location
-TOOL_LOCATION = '/usr/src/app/tools/'
-
 # Number of endpoints that have the same content_length
 DELETE_DUPLICATES_THRESHOLD = 10
 

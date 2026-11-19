@@ -4,10 +4,10 @@ from pathlib import Path
 from django.core.management import call_command
 from django.test import TestCase
 
-from scanEngine.models import EngineType, InstalledExternalTool
+from scanEngine.models import EngineType
 
 FIXTURES = [str(Path(__file__).resolve().parent.parent / 'fixtures' / name)
-            for name in ('default_scan_engines.yaml', 'external_tools.yaml')]
+            for name in ('default_scan_engines.yaml',)]
 
 
 def load():
@@ -22,13 +22,21 @@ class LoadDefaultFixturesTests(TestCase):
 
     def setUp(self):
         EngineType.objects.all().delete()
-        InstalledExternalTool.objects.all().delete()
 
     def test_an_empty_install_gets_the_defaults(self):
-        self.assertIn('9 added', load())
+        self.assertIn('6 added', load())
         self.assertEqual(EngineType.objects.count(), 6)
-        self.assertEqual(InstalledExternalTool.objects.count(), 3)
         self.assertTrue(EngineType.objects.filter(default_engine=True).exists())
+
+    def test_the_engines_are_labels_and_no_tool_registry_is_loaded(self):
+        # every scan runs the same fixed pipeline: the engines carry no reNgine tool configuration, and the external tool registry is gone
+        load()
+        for engine in EngineType.objects.all():
+            self.assertNotIn('uses_tools', engine.yaml_configuration)
+        fixtures = Path(__file__).resolve().parent.parent / 'fixtures'
+        self.assertFalse((fixtures / 'external_tools.yaml').exists())
+        self.assertFalse((fixtures / 'extensions.txt').exists())
+        self.assertNotIn('external_tools.yaml', (fixtures.parent / 'celery-entrypoint.sh').read_text())
 
     def test_an_edited_default_engine_survives_a_second_load(self):
         load()

@@ -132,45 +132,35 @@ class BypassTests(SimpleTestCase):
 
 
 class SelectionTests(ProxyOn, TestCase):
-    def test_off_means_direct_and_a_row_with_only_bad_lines_is_off(self):
-        self.assertIsNone(egress_proxy.pick('www.example.com'))
-        self.assertEqual(egress_proxy.requests_proxies('www.example.com'), {})
+    def test_off_means_no_proxy_and_a_row_with_only_bad_lines_is_off(self):
+        self.assertEqual(egress_proxy.configured(), ())
         self.turn_on(HTTP_PROXY, use=False)
-        self.assertIsNone(egress_proxy.pick('www.example.com'))
+        self.assertFalse(egress_proxy.configured())
         self.turn_on('socks4://203.0.113.1:1080', 'garbage')
-        self.assertIsNone(egress_proxy.pick('www.example.com'))
+        self.assertFalse(egress_proxy.configured())
         self.assertFalse(egress_proxy.enabled())
 
-    def test_round_robin_over_the_valid_lines_and_bad_lines_are_skipped(self):
+    def test_only_the_valid_lines_are_configured(self):
         self.turn_on(HTTP_PROXY, 'garbage', SOCKS_PROXY, 'socks4://203.0.113.9:1')
-        seen = [egress_proxy.pick('www.example.com').plain_url for _ in range(6)]
-        self.assertEqual(set(seen), {HTTP_PROXY, SOCKS_PROXY})
-        self.assertEqual(seen[0::2].count(seen[0]), 3)  # alternates
-        self.assertNotEqual(seen[0], seen[1])
+        self.assertEqual([spec.plain_url for spec in egress_proxy.configured()], [HTTP_PROXY, SOCKS_PROXY])
 
     def test_a_bypassed_destination_is_direct(self):
         self.turn_on(HTTP_PROXY)
-        self.assertIsNone(egress_proxy.pick('127.0.0.1'))
-        self.assertEqual(egress_proxy.requests_proxies('localhost'), {})
-        self.assertEqual(egress_proxy.requests_proxies('www.example.com'), {'http': HTTP_PROXY, 'https': HTTP_PROXY})
-
-    def test_a_proxy_no_client_can_use_fails_closed(self):
-        self.turn_on('https://203.0.113.5:443')
-        with self.assertRaises(egress_proxy.ProxyUnavailable):
-            egress_proxy.pick('www.example.com', schemes=egress_proxy.IN_PROCESS_SCHEMES)
-        self.assertEqual(egress_proxy.pick('www.example.com').scheme, 'https')
+        self.assertTrue(egress_proxy.bypass('127.0.0.1'))
+        self.assertTrue(egress_proxy.bypass('localhost'))
+        self.assertFalse(egress_proxy.bypass('www.example.com'))
 
     def test_the_setting_is_cached_for_a_few_seconds_not_read_per_call(self):
         self.turn_on(HTTP_PROXY)
         with self.assertNumQueries(1):
             for _ in range(20):
-                egress_proxy.pick('www.example.com')
+                egress_proxy.configured()
         Proxy.objects.update(use_proxy=False)
-        self.assertIsNotNone(egress_proxy.pick('www.example.com'))  # still the cached answer
+        self.assertTrue(egress_proxy.configured())  # still the cached answer
         with mock.patch('cveFeed.egress_proxy.time.monotonic', return_value=time.monotonic() + egress_proxy.CACHE_SECONDS + 1):
-            self.assertIsNone(egress_proxy.pick('www.example.com'))
+            self.assertFalse(egress_proxy.configured())
         egress_proxy.reset_cache()
-        self.assertIsNone(egress_proxy.pick('www.example.com'))
+        self.assertFalse(egress_proxy.configured())
 
     @expiring_caches
     def test_a_database_failure_keeps_the_last_known_setting_and_logs_no_url(self):
@@ -554,14 +544,14 @@ class SettingsApplyTests(ProxyOn, TestCase):
 
     def test_a_save_takes_effect_at_once_and_is_stored_encrypted(self):
         from tests.test_settings import send
-        self.assertIsNone(egress_proxy.pick('www.example.com'))  # primes the cache with "off"
+        self.assertFalse(egress_proxy.configured())  # primes the cache with "off"
         self.assertEqual(send(self.c, 'PUT', 'proxy', {'use_proxy': True, 'proxies': 'http://bob:hunter2@203.0.113.5:8080'})[0], 200)
-        self.assertEqual(egress_proxy.pick('www.example.com').url, 'http://bob:hunter2@203.0.113.5:8080')
+        self.assertEqual(egress_proxy.configured()[0].url, 'http://bob:hunter2@203.0.113.5:8080')
         with connection.cursor() as cursor:
             cursor.execute('SELECT proxies FROM "scanEngine_proxy"')
             self.assertTrue(cursor.fetchone()[0].startswith(crypto_fields.PREFIX))
         send(self.c, 'PUT', 'proxy', {'use_proxy': False})
-        self.assertIsNone(egress_proxy.pick('www.example.com'))
+        self.assertFalse(egress_proxy.configured())
 
     def test_only_the_kinds_the_scanners_speak_are_accepted(self):
         from tests.test_settings import send

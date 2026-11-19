@@ -12,7 +12,7 @@ The server runs no scan of its own. Every install starts a built-in scanner next
 
 ## What a Sentinel runs
 
-Forty kinds of work (`contract_version` 9), each a capability the Sentinel declares. The list is `kind_since` in the contract, `cvengine_scanner/contract/sentinel_contract.json` in the [Sentinel repository](https://github.com/hevnsnt/cvENGINE-sentinel) (ten kinds since contract version 1, one since 2, twenty-five since 3, one since 6, one since 7, one since 8, one since 9); the code reads it from the installed library, and `tests/test_docs_accuracy.py` fails when this table and the contract disagree. **The server runs none of them**: every kind but `discover` is in `sentinel_dispatch.NEVER_LOCAL`, and `discover` is Sentinel-only by design.
+Forty kinds of work (`contract_version` 9), each a capability the Sentinel declares. The list is `kind_since` in the contract, `cvengine_scanner/contract/sentinel_contract.json` in the [Sentinel repository](https://github.com/hevnsnt/cvENGINE-sentinel) (ten kinds since contract version 1, one since 2, twenty-five since 3, one since 6, one since 7, one since 8, one since 9); the code reads it from the installed library, and `tests/test_docs_accuracy.py` fails when this table and the contract disagree. **The server runs none of them**: every kind is in `sentinel_dispatch.NEVER_LOCAL` (`discover` included, Sentinel-only by design).
 
 | Kind                                             | Work (the tool that does it)                                                 |
 | ------------------------------------------------ | ---------------------------------------------------------------------------- |
