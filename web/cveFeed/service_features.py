@@ -167,8 +167,21 @@ def readings_for(project_ids, hosts):
             continue
         out.setdefault((row['domain__project_id'], row['host']), []).append({
             'port': row['port'], 'transport': row['transport'], 'feature': row['feature'], 'label': server(row['feature']).label, 'value': row['value'],
-            'detail': row['detail'], 'source': row['source'], 'observed_at': row['observed_at'].isoformat(), 'fresh': row['observed_at'] >= now - FRESH})
+            'meaning': meaning(row['feature'], row['value']), 'detail': row['detail'], 'source': row['source'],
+            'observed_at': row['observed_at'].isoformat(), 'fresh': row['observed_at'] >= now - FRESH})
     return out
+
+
+def meaning(feature, value):
+    """What one reading does for a CVE that needs ``feature``, by the feature's first rule (``detection_classes.feature_rule``): ``exposed``,
+    ``ruled_out`` or ``unknown`` (neither), or '' when no rule reads the feature. For one port only: whether a match is ruled out also needs every
+    relevant port of the host read, recently and directly (``assess``)."""
+    from cveFeed.detection_classes import feature_rule
+    rule = feature_rule(feature)
+    if rule is None:
+        return ''
+    need = {'exposed': tuple(rule['exposed']), 'clears': tuple(rule['rule_out']) if rule['rule_out'] is not None else None}
+    return 'exposed' if _exposes(value, need) else 'ruled_out' if _clears(value, need) else 'unknown'
 
 
 # --- which CVEs need a feature ---------------------------------------------------------------------------------------------------------
