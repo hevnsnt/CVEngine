@@ -326,8 +326,9 @@ class ShownTests(FeatureCase):
         status, data = call(self.tok, 'GET', '/api/v1/projects/sf/hosts')
         self.assertEqual(status, 200)
         row = next(h for h in data['results'] if h['host'] == self.sub.name)
-        self.assertEqual([(f['port'], f['feature'], f['value'], f['detail'], f['fresh']) for f in row['service_features']],
-                         [(443, 'http2', 'yes', 'ALPN h2', True)])
+        self.assertEqual([(f['port'], f['feature'], f['value'], f['meaning'], f['detail'], f['fresh']) for f in row['service_features']],
+                         [(443, 'http2', 'yes', 'exposed', 'ALPN h2', True)])
+        self.assertEqual((service_features.meaning('http2', 'no'), service_features.meaning('http9', 'x')), ('ruled_out', ''))
 
     def test_purging_the_host_removes_its_readings(self):
         from agentapi import host_manage

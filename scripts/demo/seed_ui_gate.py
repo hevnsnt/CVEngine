@@ -133,11 +133,13 @@ tuning(22, setting='assess_batch', old_value=16, new_value=20, applied=False, mo
 tuning(48, setting='stage_parallel', old_value=6, new_value=8, source='agent', actor=admin_user, reason='asked by an agent: Sentinel slots are idle while chunks wait',
        verify_at=NOW - timedelta(minutes=18), verified_at=NOW - timedelta(minutes=16), outcome='helped', outcome_detail='share of Sentinel slots idle: 0.5 before, 0.1 after',
        baseline={'metric': 'sentinel_idle_share', 'value': 0.5, 'after': after('sentinel_idle_share', 0.1)})
-bad = tuning(130, setting='heavy.nmap', old_value=4, new_value=6, phase='probe', reason='two healthy hours, work waiting in 3 measurements in a row: probed 4 to 6', resolution='reverted',
+bad = tuning(130, setting='lane.classic', old_value=9, new_value=10, phase='probe', reason='two healthy hours, the lane holds 40% of its memory limit: probed 9 to 10', resolution='reverted',
              resolved_by='auto-tune', resolved_at=NOW - timedelta(minutes=95), verify_at=NOW - timedelta(minutes=100), verified_at=NOW - timedelta(minutes=96), outcome='regressed',
-             outcome_detail='2 memory kill(s) after the change, 0 before', baseline={'metric': 'wait_share', 'value': 0.4, 'after': after('wait_share', 0.4, kills=2)})
-tuning(96, setting='heavy.nmap', old_value=6, new_value=4, action='revert', phase='verify', pressure=True, outcome='reverted', verified_at=NOW - timedelta(minutes=96),
-       outcome_detail=f'undid decision {bad.pk}: 2 memory kill(s) after the change', reason='verification of the change: put 6 back to 4', signals={'verified_decision': bad.pk})
+             outcome_detail='2 kernel oom kills and Celery lane restarts in the last day after the change, 0 before',
+             baseline={'metric': 'trouble', 'value': 0.0, 'after': after('trouble', 0.0, oom=2)})
+tuning(96, setting='lane.classic', old_value=10, new_value=9, action='revert', phase='verify', pressure=True, outcome='reverted', verified_at=NOW - timedelta(minutes=96),
+       outcome_detail=f'undid decision {bad.pk}: 2 kernel oom kills and Celery lane restarts after the change', reason='verification of the change: put 10 back to 9',
+       signals={'verified_decision': bad.pk})
 tuning(260, setting='work_depth', old_value=6, new_value=7, phase='probe', reason='two healthy hours: probed 6 to 7', verify_at=NOW - timedelta(hours=3), verified_at=NOW - timedelta(hours=3),
        outcome='no_effect', outcome_detail='x', baseline={'metric': 'conductor_saturated_share', 'value': 0.1, 'after': after('conductor_saturated_share', 0.1)})
 tuning(600, setting='discovery_concurrency', old_value=20, new_value=12, action='lower', pressure=True, phase='back_off', reason='the scanning container has 6% memory free: backed off 20 to 12',
@@ -147,11 +149,11 @@ tuning(600, setting='discovery_concurrency', old_value=20, new_value=12, action=
 tuning(14, setting='assess_batch', old_value=16, new_value=12, action='lower', source='ai', reason='The worker lane is at 93 percent of its memory limit', verify_at=NOW + timedelta(minutes=16),
        expected='trouble', baseline={'metric': 'trouble', 'value': 1.0}, signals={'alerts': ['memory']})
 tuning(30, setting='stage_parallel', old_value=6, new_value=4, action='lower', source='ai', mode='suggest', applied=False, layer='', reason='Sentinel tasks of one kind wait 40 minutes')
-tuning(70, setting='heavy.testssl', old_value=3, new_value=2, action='lower', source='ai', applied=False, layer='', resolution='held', resolved_by='auto-tune', resolved_at=NOW - timedelta(minutes=70),
+tuning(70, setting='work_depth', old_value=7, new_value=6, action='lower', source='ai', applied=False, layer='', resolution='held', resolved_by='auto-tune', resolved_at=NOW - timedelta(minutes=70),
        reason='Memory is at 94 percent', outcome_detail='text aimed at an AI may be in what it read (instructions to an AI), so nothing was applied')
 tuning(85, setting='discovery_concurrency', old_value=12, new_value=40, source='ai', applied=False, layer='', resolution='refused', resolved_by='auto-tuning', resolved_at=NOW - timedelta(minutes=85),
        reason='The discovery queue holds 30 scans', outcome_detail='outside what the controller allows now (4 to 12)')
-tuning(1500, setting='heavy.nuclei', old_value=2, new_value=3, source='person', action='apply', actor=admin_user, reason='admin applied the recommendation')
+tuning(1500, setting='work_min_gap_hours', old_value=2, new_value=1, source='person', action='apply', actor=admin_user, reason='admin applied the recommendation')
 AdminAlert.objects.create(code='memory', severity='warning', title='A worker lane is close to its memory limit', detail='The cve_feed lane uses 91% of its limit.',
                           first_seen=NOW - timedelta(hours=11), last_seen=NOW - timedelta(minutes=3))
 Agent.objects.filter(name='edge-sentinel').update(last_seen=NOW-timedelta(hours=3), status_note='Update failed: could not pull image')

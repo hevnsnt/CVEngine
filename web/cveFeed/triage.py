@@ -561,10 +561,13 @@ def precondition_brief(m, evidence, names=()):
     (``service_features.requirements``) with the state the match's evidence stores (``evidence['preconditions']``, written by correlation and by
     ``service_features.reevaluate``), or [] when the CVE needs none."""
     from cveFeed import service_features
+    stored = evidence.get('preconditions') if isinstance(evidence.get('preconditions'), dict) else None
+    if stored is None and not service_features.is_precondition_closure(m):
+        return []  # correlation stores the state of every needed feature on the match (unknown included): none stored, none needed
     needs = service_features.requirements(m.cve_entry)
     if not needs:
         return []
-    stored = evidence.get('preconditions') if isinstance(evidence.get('preconditions'), dict) else {}
+    stored = stored or {}
     out = []
     for key, need in needs.items():
         spec = service_features.server(key)

@@ -10,6 +10,7 @@ import { attachRowMenu } from "/staticfiles/cve/rowmenu.js";
 import { fold, glance } from "/staticfiles/cve/finding-glance.js";
 import { fmtDateTime, fmtDay, fmtTime, zoneLabel } from "/staticfiles/cve/prefs.js";
 import { isNewSince, newTag, newToggle, sinceLastVisit } from "/staticfiles/cve/seen.js";
+import { featureLine } from "/staticfiles/cve/service-features-logic.js";
 import {
   ask,
   button as uiButton,
@@ -1047,13 +1048,6 @@ const surfaceCard = (h, openServices) => {
   });
   return box;
 };
-// What a Sentinel read about the features of the service on one port (cveFeed.service_features): "HTTP/2 offered (ALPN h2, read 2026-11-19)".
-// A stale reading says so: correlation no longer uses it.
-const featureLine = (features, port) =>
-  (features || [])
-    .filter((f) => f.port === port)
-    .map((f) => `${f.label} ${f.offered ? "offered" : "not offered"} (${[f.detail, `read ${String(f.observed_at || "").slice(0, 10)}`].filter(Boolean).join(", ")}${f.fresh ? "" : ", stale"})`)
-    .join("; ");
 // "14 of 22 applicable checks done" (cveFeed.check_coverage): only the checks that apply to this host are counted; the ones still due are named.
 const coverageLine = (c) => {
   if (!c) return "";

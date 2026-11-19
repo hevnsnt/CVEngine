@@ -14,7 +14,7 @@ from django.http.response import HttpResponseBase
 from cveFeed import egress_proxy, mailer, openvas_admin, seed_admin, tailscale_admin
 from reNgine import ai_prompts
 from reNgine.ai_profiles import (KEEP_ALIVE_PATTERN, NUMBER_SETTINGS, REASONING_CHOICES, SETTING_APPLIES, SETTING_ENV, STRUCTURED_MODES, AIRuntime, same_service)
-from dashboard.models import (AIProviderSettings, ChaosAPIKey, HackerOneAPIKey, NetlasAPIKey, OpenAiAPIKey)
+from dashboard.models import AIProviderSettings, ChaosAPIKey
 from scanEngine.models import Notification, Proxy, VulnerabilityReportSetting
 
 
@@ -596,14 +596,11 @@ def ai_usage_rate_put(request):
 
 # --- API vault ------------------------------------------------------------------
 
-KEY_MODELS = {'openai': OpenAiAPIKey, 'netlas': NetlasAPIKey, 'chaos': ChaosAPIKey, 'hackerone': HackerOneAPIKey}
+KEY_MODELS = {'chaos': ChaosAPIKey}  # the instance-wide Chaos fallback (cveFeed.api_credentials); the OpenAI, Netlas and HackerOne entries nothing read were dropped
 
 
 def keys_get(request):
-    out = {name: {'has_key': model.objects.exclude(key='').exists()} for name, model in KEY_MODELS.items()}
-    h1 = HackerOneAPIKey.objects.first()
-    out['hackerone']['username'] = h1.username if h1 else ''
-    return out
+    return {name: {'has_key': model.objects.exclude(key='').exists()} for name, model in KEY_MODELS.items()}
 
 
 def keys_put(request):
@@ -617,8 +614,6 @@ def keys_put(request):
             continue
         row = model.objects.first() or model()
         row.key = _text(entry, 'key', row.key, secret=True)
-        if name == 'hackerone':
-            row.username = _text(entry, 'username', row.username)
         if row.key:
             row.save()
     return keys_get(request)
@@ -924,7 +919,7 @@ def scan_concurrency_get(request):
 
 
 def scan_concurrency_put(request):
-    """Save a partial change: {"values": {"heavy.nmap": 4, "work_depth": null}}. A number sets a field, null puts it back to the default."""
+    """Save a partial change: {"values": {"discovery_concurrency": 12, "work_depth": null}}. A number sets a field, null puts it back to the default."""
     from cveFeed import scan_concurrency
     data = _body(request)
     values = data.get('values')

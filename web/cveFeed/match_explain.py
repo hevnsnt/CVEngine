@@ -918,12 +918,13 @@ def precondition_words(match):
     the precondition closure holds the match. [] when the CVE needs none."""
     from cveFeed import service_features
     cve = getattr(match, 'cve_entry', None)
-    if cve is None:
-        return []
+    stored = _ev(match).get('preconditions') if isinstance(_ev(match).get('preconditions'), dict) else None
+    if cve is None or (stored is None and not service_features.is_precondition_closure(match)):
+        return []  # correlation stores the state of every needed feature on the match (unknown included): none stored, none needed
     needs = service_features.requirements(cve)
     if not needs:
         return []
-    stored = _ev(match).get('preconditions') if isinstance(_ev(match).get('preconditions'), dict) else {}
+    stored = stored or {}
     closed_reason = str(match.ai_reason or '') if service_features.is_precondition_closure(match) else ''
     out = []
     for key, need in needs.items():

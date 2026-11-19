@@ -55,7 +55,7 @@ _WORD = re.compile(r'[^A-Za-z0-9 ._:/;,()+@-]')
 
 
 def _https_port(number, service='', tunnel=''):
-    """A port a TLS web server (nginx, Apache, Tomcat ...) answers HTTPS on: the usual numbers, or a TLS tunnel nmap read as HTTP."""
+    """A port a TLS web server (nginx, Apache, Tomcat ...) answers HTTPS on: the usual numbers, or a TLS tunnel the port scan read as HTTP."""
     service = str(service or '').lower()
     return number in (443, 8443, 9443) or (tunnel == 'ssl' and 'http' in service) or service in ('https', 'https-alt', 'ssl/http', 'ssl/https')
 
@@ -215,8 +215,21 @@ def readings_for(project_ids, hosts):
             continue
         out.setdefault((row['domain__project_id'], row['host']), []).append({
             'port': row['port'], 'transport': row['transport'], 'feature': row['feature'], 'label': server(row['feature']).label, 'value': row['value'],
-            'detail': row['detail'], 'source': row['source'], 'observed_at': row['observed_at'].isoformat(), 'fresh': row['observed_at'] >= now - FRESH})
+            'meaning': meaning(row['feature'], row['value']), 'detail': row['detail'], 'source': row['source'],
+            'observed_at': row['observed_at'].isoformat(), 'fresh': row['observed_at'] >= now - FRESH})
     return out
+
+
+def meaning(feature, value):
+    """What one reading does for a CVE that needs ``feature``, by the feature's first rule (``detection_classes.feature_rule``): ``exposed``,
+    ``ruled_out`` or ``unknown`` (neither), or '' when no rule reads the feature. For one port only: whether a match is ruled out also needs every
+    relevant port of the host read, recently and directly (``assess``)."""
+    from cveFeed.detection_classes import feature_rule
+    rule = feature_rule(feature)
+    if rule is None:
+        return ''
+    need = {'exposed': tuple(rule['exposed']), 'clears': tuple(rule['rule_out']) if rule['rule_out'] is not None else None}
+    return 'exposed' if _exposes(value, need) else 'ruled_out' if _clears(value, need) else 'unknown'
 
 
 # --- which CVEs need a feature ---------------------------------------------------------------------------------------------------------
@@ -402,8 +415,8 @@ def closure_reason(match, now=None):
 
 
 def is_precondition_closure(match):
-    return (match.ai_verdict == 'not_affected' and (match.ai_reason or '').startswith(CLOSED)
-            and (match.ai_model or '') == AUTOMATIC_MODEL)
+    return (getattr(match, 'ai_verdict', '') == 'not_affected' and (getattr(match, 'ai_reason', '') or '').startswith(CLOSED)
+            and (getattr(match, 'ai_model', '') or '') == AUTOMATIC_MODEL)
 
 
 def evidence_of(items, boost):
