@@ -26,7 +26,7 @@ class WeeklyDeepNucleiTests(TestCase):
         self.stream = object()  # what a scanner-backed stream is to the sweep: handed to run_nuclei untouched
 
     def run_sweep(self, result=None, allowed=True):
-        with mock.patch('agentapi.sentinel_dispatch.wrap_nuclei_stream', return_value=self.stream) as self.wrapped, mock.patch('cveFeed.nuclei_scan.approved_templates', return_value=('/tmp/approved', 'rev1', 1)), \
+        with mock.patch('agentapi.sentinel_dispatch.wrap_nuclei_stream', return_value=self.stream) as self.wrapped, mock.patch('cveFeed.nuclei_scan.approved_revision', return_value='rev1'), \
                 mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda names, **kw: names if allowed else []), \
                 mock.patch('cveFeed.nuclei_scan.scan_targets', return_value=(
                     {self.first.name, self.second.name}, set(), {(self.first.name, 8443), (self.second.name, 9443)})), \

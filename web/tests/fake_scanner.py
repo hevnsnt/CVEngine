@@ -234,7 +234,7 @@ class FakeScanner:
         token, _ = create_token(admin, f'fake-external-{self.name}'[:100], scope=SCOPE_SENTINEL)
         return Agent.objects.create(token=token, name=self.name, kind='scanner', status='active', capabilities=scope_lib.clean_capabilities(self.kinds),
                                     max_concurrent=self.max_concurrent, last_seen=timezone.now(),
-                                    scope=self.scope or {'orgs': [], 'projects': [], 'hosts': [], 'instance': True}, info={'features': ['credential_filter']})
+                                    scope=self.scope or {'orgs': [], 'projects': [], 'hosts': [], 'instance': True}, info={'features': ['credential_filter'], 'contract_version': 11})
 
     @staticmethod
     def _admin():

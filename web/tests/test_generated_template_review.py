@@ -109,7 +109,7 @@ class World(TestCase):
         now = timezone.now()
         self.dir = tempfile.mkdtemp()
         for patcher in (mock.patch.object(templategen, 'GENERATED_DIR', str(Path(self.dir) / 'generated')),
-                        mock.patch.object(templategen, 'TEMPLATES_ROOT', str(Path(self.dir) / 'installed')),
+                        mock.patch('cvengine_scanner.template_index.load', return_value={'nuclei_templates': '', 'rules': 0, 'reasons': [], 'templates': {}, 'sha256': ''}),
                         mock.patch('cveFeed.ai_jobs.ai_on', return_value=True)):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -476,7 +476,7 @@ class IndexTests(TestCase):
         installed.mkdir()
         (generated / 'cve-2024-38475-r2.yaml').write_text('x')
         (installed / 'cve-2024-38475-r3.yaml').write_text('x')
-        with mock.patch.object(templategen, 'GENERATED_DIR', str(generated)), mock.patch.object(templategen, 'TEMPLATES_ROOT', str(installed)):
+        with mock.patch.object(templategen, 'GENERATED_DIR', str(generated)), mock.patch('cvengine_scanner.template_index.load', return_value={'nuclei_templates': '', 'rules': 0, 'reasons': [], 'templates': {}, 'sha256': ''}):
             templategen.invalidate_template_index()
             self.assertEqual(templategen.find_existing_template(CVE_ID), [str(generated / 'cve-2024-38475-r2.yaml')])
         templategen.invalidate_template_index()

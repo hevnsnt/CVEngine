@@ -331,7 +331,7 @@ check_disk() {
   return 1
 }
 
-# The cold build of the server image needs about 2 GiB (a 1 GiB cap fails in the nuclei compile). On a host under 7 GB (the rule of scripts/host-fit.sh) the
+# The cold build of the server image needs about 2 GiB (it used to compile nuclei; its Python packages still need room to build). On a host under 7 GB (the rule of scripts/host-fit.sh) the
 # heavy containers that can come back safely are stopped for the build and started again right after it, with or without a build that worked: the
 # built-in scanner and the celery workers (their memory stays resident after the scans drain, and the build then competes with it, swaps or is killed).
 # Never db, redis, web or proxy, and beat is small. CVENGINE_UPDATE_STOP_CELERY=0 (environment or .env) turns it off.

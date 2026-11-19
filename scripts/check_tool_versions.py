@@ -3,10 +3,10 @@
 
   python3 scripts/check_tool_versions.py [--json] [--fail-if-behind]
 
-Every tool the images are built from is pinned (web/Dockerfile, web/requirements.txt, docker-compose.yml). This compares each pin with the newest release: nuclei,
-the Go toolchain that builds it and, when the Tailscale profile is present, its sidecar image. The scan tools (nmap, WPScan, naabu, bbot, testssl.sh, wafw00f and the rest) run on
-the Sentinels, so the server image pins none of them. The cvENGINE-sentinel repository pins them in its own Dockerfile; nothing in this repository
-watches those pins any more, nor the OpenVAS add-on's Greenbone images and python-gvm, which only the Sentinel runs. Nuclei's templates are not pinned: they refresh at runtime.
+Every tool the images are built from is pinned (web/Dockerfile, web/requirements.txt, docker-compose.yml). This compares each pin with the newest release:
+when the Tailscale profile is present, its sidecar image. Every scan tool (nmap, nuclei, WPScan, naabu, bbot, testssl.sh, wafw00f and the rest) and the nuclei
+templates run on the Sentinels, so the server image pins none of them. The cvENGINE-sentinel repository pins them in its own Dockerfile; nothing in this repository
+watches those pins any more, nor the OpenVAS add-on's Greenbone images and python-gvm, which only the Sentinel runs.
 Exit status is 0 whatever the answer, or 1 with --fail-if-behind when any tool is behind, a pin cannot be found in its file or a newest
 version cannot be read (the gate fails closed: a renamed pin or an unreachable site must not pass a release; the weekly report, which
 runs without the flag, shows such a row as "?" and never calls it behind). The weekly workflow (.github/workflows/tool-releases.yml) turns "behind" into an issue; the release workflows use --fail-if-behind.
@@ -94,9 +94,6 @@ def safely(get, url, as_json=True):
 GO_PROXY = 'https://proxy.golang.org/{}/@latest'
 # (label, file, regex for the pinned version, where the newest version is read from, how to read it, optional: omit when the pin is absent)
 TOOLS = [
-    ('nuclei', 'web/Dockerfile', r'ARG NUCLEI_VERSION=([0-9.]+)', GO_PROXY.format('github.com/projectdiscovery/nuclei/v3'),
-     latest_go_module, True, False),
-    ('go (toolchain)', 'web/Dockerfile', r'ARG GOVERSION=([0-9.]+)', 'https://go.dev/dl/?mode=json', latest_go_toolchain, True, False),
     ('tailscale (sidecar image)', 'docker-compose.yml', r'tailscale/tailscale:v([0-9.]+)',
      'https://hub.docker.com/v2/repositories/tailscale/tailscale/tags/?page_size=50&ordering=last_updated', latest_docker_tag, True, True),
 ]

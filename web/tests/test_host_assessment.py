@@ -134,8 +134,7 @@ class HostAssessmentTests(TestCase):
 
     def test_explicit_request_bypasses_freshness_and_runs_host_hygiene(self):
         nmap, kwargs = _stages(resolver=lambda names: {(name, '8.8.8.8') for name in names})
-        with mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), \
-             mock.patch('cveFeed.hygiene.run_hygiene', return_value={'tls_hosts': 1}) as hygiene:
+        with mock.patch('cveFeed.hygiene.run_hygiene', return_value={'tls_hosts': 1}) as hygiene:
             first_job = self._running_job()
             first = discovery.run_host_pipeline(self.domain.pk, [self.host.name], force=True,
                                                 hygiene=True, assessment_id=first_job, **kwargs)

@@ -285,22 +285,21 @@ class CreateHostsTests(Base):
 
 	def test_a_name_the_machine_does_not_own_is_not_scanned(self):
 		rep = report(host=machine('a', fqdn='bank.victim.test', hostname='bank'))
-		with mock.patch('agentapi.inventory._resolves_to', return_value=False):
-			status, data = self.post(self.t_rep, rep)
+		status, data = self.post(self.t_rep, rep)
 		self.assertEqual((status, data['status']), (201, 'unmatched'))
 		self.assertFalse(Domain.objects.filter(name='bank.victim.test').exists())
 
-	def test_a_name_that_resolves_to_the_reporting_address_is_added(self):
-		with mock.patch('agentapi.inventory._resolves_to', return_value=True) as resolves:
+	def test_a_name_the_projects_scans_stored_at_the_reporting_address_is_added(self):
+		# the name is never looked up here: it is added when a scan already recorded it at the address the report came from
+		with mock.patch('agentapi.inventory._stored_at', return_value=True) as stored, mock.patch('socket.getaddrinfo', side_effect=AssertionError('looked up')):
 			status, data = self.post(self.t_rep, report(host=machine('a', fqdn='mine.other.test')))
 		self.assertEqual(data['status'], 'created')
 		self.assertTrue(Domain.objects.filter(name='mine.other.test', project=self.project).exists())
-		self.assertEqual(resolves.call_args.args[0], 'mine.other.test')
+		self.assertEqual(stored.call_args.args[1], 'mine.other.test')
 
 	def test_a_name_inside_a_domain_the_project_already_has_is_added(self):
-		with mock.patch('agentapi.inventory._resolves_to', return_value=False):
-			self.assertEqual(self.post(self.t_rep, report(host=machine('a', fqdn='new.example.test', hostname='new')))[1]['status'], 'created')
-			self.assertEqual(self.post(self.t_rep, report(host=machine('b', fqdn='new.notexample.test', hostname='x')))[1]['status'], 'unmatched')
+		self.assertEqual(self.post(self.t_rep, report(host=machine('a', fqdn='new.example.test', hostname='new')))[1]['status'], 'created')
+		self.assertEqual(self.post(self.t_rep, report(host=machine('b', fqdn='new.notexample.test', hostname='x')))[1]['status'], 'unmatched')
 
 	def test_a_machine_without_a_name_must_report_from_its_own_address(self):
 		lone = report(host={'hostname': 'nas', 'machine_id': 'e' * 64, 'ips': ['127.0.0.1', '198.51.100.7']})
@@ -310,7 +309,7 @@ class CreateHostsTests(Base):
 			self.assertEqual(self.post(self.t_rep, lone)[1]['status'], 'created')
 
 	def test_the_day_is_capped(self):
-		with mock.patch('agentapi.inventory._resolves_to', return_value=True), mock.patch.object(inventory_api, 'MAX_CREATED_PER_DAY', 2):
+		with mock.patch('agentapi.inventory._stored_at', return_value=True), mock.patch.object(inventory_api, 'MAX_CREATED_PER_DAY', 2):
 			states = [self.post(self.t_rep, report(host=machine(str(i), fqdn=f'h{i}.free.test', hostname=f'h{i}')))[1]['status'] for i in range(4)]
 		self.assertEqual(states, ['created', 'created', 'unmatched', 'unmatched'])
 

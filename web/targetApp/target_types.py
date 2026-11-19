@@ -353,11 +353,6 @@ def sentinel_only_target(name, project, networks=None):
     return bool(nets) and in_internal_range(name, nets) and not is_scannable_ip(name, project=project)
 
 
-RESOLVE_TIMEOUT = 5  # seconds one name may take to answer; names come from DNS the target owner controls
-RESOLVE_WORKERS = 16
-RESOLVE_BATCH_SECONDS = 120  # the most a whole list of names may take
-
-
 def _literal_ip(value):
     """``value`` as an address string when it is one (an IP literal, bracketed or not), else None."""
     try:
@@ -366,57 +361,14 @@ def _literal_ip(value):
         return None
 
 
-def _lookup_blocked(hostname):
-    import socket
-    try:
-        infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
-    except (socket.gaierror, UnicodeError, OSError):
-        return False
-    return any(not is_scannable_ip(info[4][0]) for info in infos)  # an answer from DNS is never tailnet authority: no project is passed
-
-
-def resolves_to_blocked(hostname, timeout=RESOLVE_TIMEOUT, project=None):
-    """True if ``hostname`` currently resolves to any address a scanner must not touch. A name that does not exist is not blocked:
-    the scanners cannot reach it either. A name whose nameserver does not answer within ``timeout`` seconds is treated as blocked,
-    because a nameserver that stalls the check and then answers the scanner with an internal address would otherwise get through;
-    the host is checked again on the next pass. (Resolution can change between this check and the scan, so this narrows the
-    DNS-rebinding window rather than closing it; the IPs are re-filtered when stored.) A name that is an address is judged as that address,
-    with ``project`` as its possible tailnet authority; an address a name resolves to never has any."""
-    import threading
-    literal = _literal_ip(hostname)
-    if literal is not None:  # an address presented as itself: no lookup, and no thread (the tailnet check reads the database)
-        return not is_scannable_ip(literal, project=project)
-    answer = []
-    worker = threading.Thread(target=lambda: answer.append(_lookup_blocked(hostname)), daemon=True)
-    worker.start()
-    worker.join(timeout)
-    return not answer or bool(answer[0])
-
-
-def blocked_names(names, workers=RESOLVE_WORKERS, budget=RESOLVE_BATCH_SECONDS, timeout=RESOLVE_TIMEOUT, project=None):
-    """The subset of ``names`` that resolves to something a scanner must not touch. Names are looked up in parallel, each bounded
-    by ``timeout`` and the whole list by ``budget`` seconds, so thousands of names with dead nameservers cannot hold a worker for
-    hours; a name still unanswered at the deadline counts as blocked, as in resolves_to_blocked. A name that is an address is judged
-    in this thread (``project`` may authorise a tailnet one); only real names go to the pool, which never touches the database."""
-    import time
-    from concurrent.futures import ThreadPoolExecutor
-    names = list(dict.fromkeys(names))
-    literals = {name for name in names if _literal_ip(name) is not None}
-    blocked = {name for name in literals if resolves_to_blocked(name, project=project)}
-    names = [name for name in names if name not in literals]
-    if not names:
-        return blocked
-    pool = ThreadPoolExecutor(max_workers=max(1, min(workers, len(names))), thread_name_prefix='dnscheck')
-    futures = {name: pool.submit(resolves_to_blocked, name) for name in names}  # each bounded by RESOLVE_TIMEOUT itself
-    deadline = time.monotonic() + budget
-    for name, future in futures.items():
-        try:
-            if future.result(timeout=max(0.0, min(timeout * (1 + len(names) // max(1, workers)), deadline - time.monotonic()))):
-                blocked.add(name)
-        except Exception:  # noqa: BLE001 - a lookup that runs out of time is "blocked" (not verified), like resolves_to_blocked
-            blocked.add(name)
-    pool.shutdown(wait=False, cancel_futures=True)
-    return blocked
+def blocked_address(value, project=None):
+    """True when ``value`` is an address (an IP literal, bracketed or not) a scanner must not touch; ``project`` may authorise a tailnet device of its own.
+    A host name is never blocked here: this server looks no target name up (all scanning runs on the Sentinels, and only the Sentinel that runs the work
+    resolves the name, at the moment it connects, and refuses it when any address it resolves to is one no Sentinel may scan:
+    ``cvengine_scanner.scope.check_host``). Outside work is sent as such (``external``), so a name that now points into a private network is refused
+    there too, and the stage says so."""
+    literal = _literal_ip(value)
+    return literal is not None and not is_scannable_ip(literal, project=project)
 
 
 def bare_host(value):
@@ -431,16 +383,12 @@ def bare_host(value):
 
 def scannable_hosts(names, resolver=None, project=None):
     """The entries of ``names`` (hosts, host:port, URLs) a scanner may be pointed at, in order, without repeats. An address must pass
-    is_scannable_ip; a name must not resolve to anything blocked (resolves_to_blocked, once per distinct name). Every path that
-    aims a scanner at a stored host list (auto-fire, CVE re-tests, TLS checks) goes through this, because a name a tenant controls
-    can be pointed at 169.254.169.254 or an internal range after it was stored. ``resolver`` replaces the DNS check in tests.
+    is_scannable_ip; a name must be a plain host name. No name is looked up here (``blocked_address``): the Sentinel that runs the work judges every
+    address a name resolves to when it connects. Every path that aims a scanner at a stored host list (auto-fire, CVE re-tests, TLS checks) goes
+    through this. ``resolver`` (a ``name -> blocked`` callable) adds a refusal of names a caller already knows, and tests use it.
     ``project`` (an id) also drops every host its organization excluded for good (cveFeed.exclusions: the exact name only)."""
     names = list(names)
-    if resolver:
-        check = resolver
-    else:  # one parallel, bounded pass over the distinct names, then a lookup in the result
-        blocked = blocked_names([bare_host(n) for n in names if bare_host(n) and classify_target(bare_host(n)) != IP])
-        check = blocked.__contains__
+    check = resolver or (lambda _name: False)
     banned = frozenset()
     if project:
         from cveFeed.exclusions import excluded_names
@@ -459,7 +407,7 @@ def scannable_hosts(names, resolver=None, project=None):
         if host not in verdict:
             if classify_target(host) == IP:
                 verdict[host] = is_scannable_ip(host, project=project or None)
-            else:  # anything that is not a plain host name cannot be judged by a lookup: refuse it (fail closed)
+            else:  # anything that is not a plain host name is refused (fail closed); a name is judged by the Sentinel when it connects
                 verdict[host] = bool(_HOST_NAME.match(host)) and not check(host)
         if verdict[host] and '\\' not in str(entry):  # tools disagree on where an authority with a backslash ends
             out.append(entry)

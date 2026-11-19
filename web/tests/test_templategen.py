@@ -142,12 +142,6 @@ class GateEvidenceTests(unittest.TestCase):
 class RunOnScannerTests(unittest.TestCase):
 	"""``run_template`` hands the template to the built-in scanner and returns what it reports; nothing runs on this server."""
 
-	def setUp(self):
-		# run_template resolves every name again at launch and treats one it cannot resolve in time as blocked; these tests are about what is
-		# done with the scanner's outcomes, so they must not depend on a real DNS lookup answering (it did not, once, on a busy CI runner)
-		patcher = mock.patch('targetApp.target_types.blocked_names', return_value=set())
-		patcher.start()
-		self.addCleanup(patcher.stop)
 
 	def _run(self, outcomes, project=1):
 		with mock.patch('cveFeed.validation.approved_template', return_value=(GOOD, '')), \
@@ -362,24 +356,19 @@ class ProviderFailureLedgerTests(TestCase):
 
 
 class LaunchTimeResolutionTests(TestCase):
-	def test_a_name_that_now_resolves_to_a_blocked_address_is_not_handed_to_a_scanner(self):
+	def test_no_name_is_looked_up_here_every_host_goes_to_the_scanner(self):
+		"""The server resolves no target name (contract 11): the Sentinel judges every address a name resolves to and reports a refused host as not
+		tested, so ``run_template`` hands every host on."""
 		seen = []
 
 		def fake(path, hosts, project):
 			seen.append(list(hosts))
 			return [{'host': h, 'vulnerable': False, 'output': ''} for h in hosts]
-		with mock.patch.object(templategen, '_run_on_scanner', side_effect=fake), \
-				mock.patch('targetApp.target_types.blocked_names', return_value={'rebind.example.test'}):
+		with mock.patch.object(templategen, '_run_on_scanner', side_effect=fake):
 			out = templategen.run_template('/t.yaml', ['ok.example.test', 'rebind.example.test', '203.0.113.7:8443'])
-		self.assertEqual(seen, [['ok.example.test', '203.0.113.7:8443']])
+		self.assertEqual(seen, [['ok.example.test', 'rebind.example.test', '203.0.113.7:8443']])
 		self.assertEqual([o['host'] for o in out], ['ok.example.test', 'rebind.example.test', '203.0.113.7:8443'])
-		self.assertIn('may not be scanned', out[1]['error'])
-		self.assertNotIn('error', out[0])
-		with mock.patch.object(templategen, '_run_on_scanner', side_effect=fake) as run, \
-				mock.patch('targetApp.target_types.blocked_names', return_value={'rebind.example.test'}):
-			out = templategen.run_template('/t.yaml', ['rebind.example.test'])
-		run.assert_not_called()
-		self.assertIn('error', out[0])
+		self.assertEqual(templategen.run_template('/t.yaml', []), [])
 
 
 class ValidateBeforeSaveTests(TestCase):

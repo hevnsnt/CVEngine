@@ -29,7 +29,7 @@ OpenVAS is slow (about 4% an hour on one host with the safest settings, so one h
 Every host, chosen or not, is vetted at every sweep:
 
 - each name must be a host of that project (another project's host is never scanned);
-- hosts excluded for the organization or archived are dropped (`cveFeed.exclusions`), as is any name that resolves to an address a scanner may not be pointed at (`scannable_hosts`, `pinned_transport.resolve`);
+- hosts excluded for the organization or archived are dropped (`cveFeed.exclusions`), as is any host whose stored address is one a scanner may not be pointed at (`scannable_hosts`, the newest stored address: the server looks no name up, and the Sentinel judges the address again);
 - GVM is given the **numeric address** that was vetted, never a name, so a name re-pointed after it was stored cannot redirect the scan;
 - **tailnet addresses (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) are never given to OpenVAS**, even for a project with a connected tailnet. The scanner containers have no Tailscale interface, so the packets would leave by the Docker host's default route.
 - **shared infrastructure is never given to OpenVAS**: a name or address recorded as a CDN edge or a vendor's shared front (Microsoft 365 autodiscover and device enrolment, Google Workspace, a PaaS such as Netlify or Heroku, `cveFeed.hosting`), and any other name recorded on such an address. These are other customers' machines, not the project's to test;

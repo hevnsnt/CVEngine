@@ -37,9 +37,7 @@ class Gated(TestCase):
         self.program = BountyProgram.objects.create(platform='hackerone', handle='acme', name='Acme')
         for kind, ident, inside in (('wildcard', '*.acme.test', True), ('domain', 'exact.test', True), ('domain', 'admin.acme.test', False)):
             BountyAsset.objects.create(program=self.program, kind=kind, identifier=ident, in_scope=inside)
-        for patcher in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False),
-                        mock.patch('targetApp.target_types.blocked_names', return_value=set()),
-                        
+        for patcher in (
                         mock.patch('cveFeed.scan_control.pause_requested', return_value=False),
                         mock.patch('cveFeed.ledger.sweep_claim', return_value=True),
                         mock.patch('cveFeed.coverage_topup.backlog_exists', return_value=False)):
@@ -135,7 +133,7 @@ def full_port_sweep(self, w):
 def weekly_deep_nuclei(self, w):
     from cveFeed.tasks import weekly_deep_nuclei as sweep
     with mock.patch('agentapi.sentinel_dispatch.wrap_nuclei_stream', return_value=object()), \
-            mock.patch('cveFeed.nuclei_scan.approved_templates', return_value=('/tmp/approved', 'rev1', 1)), \
+            mock.patch('cveFeed.nuclei_scan.approved_revision', return_value='rev1'), \
             mock.patch('cveFeed.nuclei_scan.scan_targets', return_value=({w.host}, set(), set())), \
             mock.patch('cveFeed.nuclei_scan.run_nuclei', return_value={'targets': 1, 'findings': 0}) as run:
         sweep()

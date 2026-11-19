@@ -172,15 +172,3 @@ class WrapperPolicyTests(DispatchBase):
                 runner = dispatch.wrap_naabu_runner(self.project, self.scan, timeout=5)
                 with self.assertRaises(resources.ScannerUnavailable):
                     runner(many)
-
-    def test_nuclei_does_not_send_unresolvable_targets_anywhere(self):
-        self.make_sentinel(['nuclei_light'])
-        with mock.patch('agentapi.sentinel_dispatch.resolvable_targets', return_value=[]), \
-                mock.patch('agentapi.sentinel_dispatch.any_scanner_for', return_value=True), \
-                mock.patch('agentapi.sentinel_dispatch.dispatch_or_none') as sent:
-            import tempfile
-            with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as handle:
-                handle.write('nothing.invalid\n')
-            stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light')
-            self.assertEqual(list(stream(handle.name)), [])
-        sent.assert_not_called()

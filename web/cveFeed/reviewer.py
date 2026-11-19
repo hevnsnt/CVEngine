@@ -825,7 +825,7 @@ def summary_from_row(obj):
 
 # --------------------------------------------------------------------------------------------------------------- operations
 
-ACTIONS = {'feed_sentinels': timedelta(minutes=15), 'refresh_nuclei_templates': timedelta(hours=1)}
+ACTIONS = {'feed_sentinels': timedelta(minutes=15)}
 ACTIVITY_ERROR_PROBLEM = 20     # failed activity lines of one kind in six hours
 SENTINEL_FAILED_PROBLEM = 5     # failed or expired Sentinel tasks of one Sentinel and kind in six hours
 SENTINEL_ERROR_SHARE = 0.05     # ...the overall rule: that many in a group and this share of all the tasks that finished (or no Sentinel is live, or none completed) is an alert
@@ -840,14 +840,13 @@ def _admin():
 
 
 def installed_templates_version():
-    """The nuclei-templates release installed on this server, from nuclei's own config file, or ''."""
-    root = os.environ.get('NUCLEI_CONFIG_DIR', '/root/.config/nuclei')
+    """The nuclei-templates release the Sentinels run: the one the scanner library's template index describes (``cvengine_scanner.template_index``),
+    which is the release the Sentinel image pins. This server keeps no copy of the templates. '' when the library has no index."""
     try:
-        with open(os.path.join(root, '.templates-config.json'), encoding='utf-8') as handle:
-            data = json.load(handle)
-    except (OSError, ValueError):
+        from cvengine_scanner import template_index
+    except ImportError:
         return ''
-    return str(data.get('nuclei-templates-version') or '')[:40] if isinstance(data, dict) else ''
+    return str(template_index.release() or '')[:40]
 
 
 # Every code ops_checks can return, in the order it computes them. The snapshot sends it to the reviewer container, which builds the model's answer
@@ -975,32 +974,22 @@ def ops_checks(now=None, templates_release=None, _out=None):
     else:
         checks.append(_check('workers_down', 'ok', 'Background workers answer', '', {'state': workers.get('state')}))
 
-    # nuclei templates
-    templates = ((system.get('tools') or {}).get('nuclei_templates')) or {}
-    refresh = templates.get('last_refresh') or {}
+    # nuclei templates: this server keeps none; the Sentinels run the release their library's template index describes (the Sentinel image's pin)
     installed = installed_templates_version()
     newer = ''
     if isinstance(templates_release, dict) and re.fullmatch(r'v?\d+(?:\.\d+){1,3}', str(templates_release.get('tag') or '')):
         tag = str(templates_release['tag'])
         if installed and tag.lstrip('v') != installed.lstrip('v'):
             newer = tag
-    hours = None
-    try:
-        hours = (now - datetime.fromisoformat(refresh['at'])).total_seconds() / 3600 if refresh.get('at') else None
-    except (TypeError, ValueError):
-        hours = None
-    failed = bool(refresh) and not refresh.get('ok')
-    if failed or newer or (hours is not None and hours > 24):
-        detail = []
-        if failed:
-            detail.append(f"The last refresh failed: {str(refresh.get('result') or 'no detail')[:200]}.")
-        if hours is not None and hours > 24:
-            detail.append(f'No successful refresh for {int(hours)} hours.')
-        if newer:
-            detail.append(f'nuclei-templates {newer} is out; this server has {installed}.')
-        checks.append(_check('nuclei_templates', 'problem' if failed else 'warning', 'nuclei templates are out of date', ' '.join(detail),
-                             {'installed': installed, 'latest': newer or installed, 'hours_since_refresh': round(hours or 0, 1), 'failed': failed},
-                             actions=('refresh_nuclei_templates',)))
+    if not installed:
+        checks.append(_check('nuclei_templates', 'problem', 'The scanner library has no nuclei template index',
+                             'The Sentinel library this server installed carries no template index, so no nuclei work can be planned: update the '
+                             'server (it installs the Sentinel library with the index).', {'installed': ''}))
+    elif newer:
+        checks.append(_check('nuclei_templates', 'warning', 'A newer nuclei-templates release exists',
+                             f'nuclei-templates {newer} is out; the Sentinels run {installed}, the release the Sentinel image pins with its template index. '
+                             'A newer set arrives with a Sentinel release that moves the pin and regenerates the index.',
+                             {'installed': installed, 'latest': newer}))
     else:
         checks.append(_check('nuclei_templates', 'ok', 'nuclei templates are current', '', {'installed': installed}))
 
@@ -1313,8 +1302,6 @@ def _run_action(name):
     from cveFeed import tasks
     if name == 'feed_sentinels':
         tasks.feed_sentinels.apply_async()
-    elif name == 'refresh_nuclei_templates':
-        tasks.update_nuclei_templates.apply_async()
 
 
 # The reviewer container's own two jobs call the model themselves, so it tells the server about each call (this route) and the usage page

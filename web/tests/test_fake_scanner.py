@@ -479,7 +479,7 @@ class NucleiDeepServedTests(StageBase, NoScannerBase):
         self.sub = Subdomain.objects.get(scan_history=self.scan, name=HOST)
         ScanHistory.objects.filter(pk=self.scan.pk).update(scan_status=2)  # weekly_deep_nuclei reads finished scans only
         Subdomain.objects.filter(pk=self.sub.pk).update(target_domain=self.domain)
-        for patcher in (mock.patch('cveFeed.nuclei_scan.approved_templates', return_value=('/tmp/approved', 'rev1', 1)),
+        for patcher in (mock.patch('cveFeed.nuclei_scan.approved_revision', return_value='rev1'),
                         mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda names, **kw: names),
                         mock.patch('cveFeed.nuclei_scan.scan_targets', return_value=({HOST}, set(), set()))):
             patcher.start()

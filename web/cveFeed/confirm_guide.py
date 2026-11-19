@@ -419,20 +419,20 @@ def _template_section(match, host, bases):
         return None
     out = {'template_id': template_id, 'result': match.template_result}
     try:
-        from cveFeed.templategen import GENERATED_DIR, TEMPLATES_ROOT, find_existing_template
+        from cveFeed.templategen import GENERATED_DIR, find_existing_template, installed_relative
         import os
         for path in find_existing_template(match.cve_entry.cve_id):
             stem = os.path.splitext(os.path.basename(path))[0]
             if stem.lower() != template_id.lower():
                 continue
-            if path.startswith(TEMPLATES_ROOT.rstrip('/') + '/'):
-                rel = path[len(TEMPLATES_ROOT.rstrip('/')) + 1:]
+            rel = installed_relative(path)  # a template of the pinned release, from the scanner library's template index
+            if rel is not None:
                 if re.match(r'^[A-Za-z0-9._/-]{1,300}\Z', rel) and '..' not in rel:
                     out['template_url'] = f'https://github.com/projectdiscovery/nuclei-templates/blob/main/{rel}'
             elif path.startswith(GENERATED_DIR.rstrip('/') + '/'):
                 out['generated'] = True  # on the cvENGINE server only: ``nuclei -id`` elsewhere cannot find it
             break
-    except Exception:  # noqa: BLE001 - a missing templates directory only costs the link
+    except Exception:  # noqa: BLE001 - a missing template index only costs the link
         pass
     if 'template_url' not in out and not out.get('generated'):
         out['template_search_url'] = f'https://github.com/projectdiscovery/nuclei-templates/search?q={template_id}'

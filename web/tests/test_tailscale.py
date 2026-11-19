@@ -579,11 +579,8 @@ class ScopePolicyTests(ScopeFixture, TestCase):
         self.assertFalse(self.ok('100.64.0.5', project=self.other_project.id))
 
     def test_an_address_a_name_resolved_to_is_never_tailnet_authority(self):
-        import socket
-        from targetApp.target_types import resolves_to_blocked
-        answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('100.64.0.5', 0))]
-        with mock.patch('socket.getaddrinfo', return_value=answer):
-            self.assertTrue(resolves_to_blocked('evil.example.test', project=self.project.id))  # a name pointed at a tailnet device is refused
+        # the server looks no name up (the Sentinel judges what a name resolves to, never with tailnet authority); an address a scan stored for a name
+        # is not stored with it either
         from reNgine.tasks import save_ip_address
         sub = Subdomain.objects.create(target_domain=self.domain, name='evil.example.test')
         self.assertEqual(save_ip_address('100.64.0.5', subdomain=sub, project_id=self.project.id), (None, False))
@@ -613,19 +610,6 @@ class ScopePolicyTests(ScopeFixture, TestCase):
         self.assertEqual(list(IpAddress.objects.filter(address='100.64.0.5').values_list('org_id', flat=True)), [self.org.id])
         self.assertTrue(Port.objects.filter(number=22).exists())
 
-    def test_probe_transport_pins_a_tailnet_literal_of_its_project_but_not_a_name_that_resolves_there(self):
-        import socket
-        from cveFeed import pinned_transport
-        answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('100.64.0.5', 80))]
-        with mock.patch('socket.getaddrinfo', return_value=answer):
-            self.assertEqual(pinned_transport.resolve('100.64.0.5', 80, project=self.project.id), ((socket.AF_INET, ('100.64.0.5', 80)),))
-            with self.assertRaises(ValueError):
-                pinned_transport.resolve('100.64.0.5', 80)  # no project
-            with self.assertRaises(ValueError):
-                pinned_transport.resolve('100.64.0.5', 80, project=self.other_project.id)
-            with self.assertRaises(ValueError):
-                pinned_transport.resolve('evil.example.test', 80, project=self.project.id)
-
     def test_archived_host_rediscovery_judges_dns_answers_without_tailnet_authority(self):
         from cveFeed import archive_rediscovery
         row = mock.Mock(host='evil.example.test', pk=1, project_id=self.project.id)
@@ -633,12 +617,12 @@ class ScopePolicyTests(ScopeFixture, TestCase):
         self.assertEqual(result['status'], 'blocked')
 
     def test_the_other_scan_gates_are_bound_to_the_project(self):
-        from targetApp.target_types import blocked_names, scannable_hosts
+        from targetApp.target_types import blocked_address, scannable_hosts
         self.assertEqual(scannable_hosts(['100.64.0.5', '100.64.0.6', '10.0.0.1'], project=self.project.id), ['100.64.0.5'])
         self.assertEqual(scannable_hosts(['100.64.0.5'], project=self.other_project.id), [])
         self.assertEqual(scannable_hosts(['100.64.0.5']), [])
-        self.assertEqual(blocked_names(['100.64.0.5', '100.64.0.6'], project=self.project.id), {'100.64.0.6'})
-        self.assertEqual(blocked_names(['100.64.0.5'], project=self.sibling.id), {'100.64.0.5'})
+        self.assertEqual([a for a in ('100.64.0.5', '100.64.0.6') if blocked_address(a, project=self.project.id)], ['100.64.0.6'])
+        self.assertTrue(blocked_address('100.64.0.5', project=self.sibling.id))
         from cveFeed import route_auth
         self.assertTrue(route_auth.host_allowed('100.64.0.5', self.project.id))
         self.assertFalse(route_auth.host_allowed('100.64.0.5', self.other_project.id))
@@ -751,10 +735,10 @@ class PipelineReachTests(ScopeFixture, TestCase):
         self.assertEqual(nmap, [])
 
     def test_resolution_checks_agree(self):
-        from targetApp.target_types import resolves_to_blocked
-        self.assertFalse(resolves_to_blocked('100.64.0.5', project=self.project.id))
-        self.assertTrue(resolves_to_blocked('100.64.0.5'))
-        self.assertTrue(resolves_to_blocked('100.64.0.99', project=self.project.id))
+        from targetApp.target_types import blocked_address
+        self.assertFalse(blocked_address('100.64.0.5', project=self.project.id))
+        self.assertTrue(blocked_address('100.64.0.5'))
+        self.assertTrue(blocked_address('100.64.0.99', project=self.project.id))
 
 
 class SyncBase(TestCase):

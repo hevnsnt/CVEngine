@@ -54,7 +54,7 @@ def responder(probe=None, emailer=None, mx=None):
 def run_hygiene(domain_id, probe=None, emailer=None, mx=None, hosts=None, now=None):
     """``hygiene.run_hygiene`` for ``domain_id`` with a scanner that answers from ``probe``, ``emailer`` and ``mx``."""
     from cveFeed import hygiene
-    patches = (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True))
+    patches = ()
     for patch in patches:
         patch.start()
     try:

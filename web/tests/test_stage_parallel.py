@@ -125,7 +125,7 @@ class StageBase(DispatchBase):
         return Agent.objects.create(token=token, name=name, kind='scanner', status='active', max_concurrent=slots,
                                     scope={'orgs': [], 'projects': [self.project.slug], 'hosts': []},
                                     capabilities=list(capabilities), last_seen=timezone.now(),
-                                    network='internal' if 'network:internal' in capabilities else 'external', info={'features': ['credential_filter']})
+                                    network='internal' if 'network:internal' in capabilities else 'external', info={'features': ['credential_filter'], 'contract_version': 11})
 
     def two_agents(self, slots=2):
         return [self.agent('sentinel-a', slots=slots), self.agent('sentinel-b', slots=slots)]
@@ -453,7 +453,7 @@ class CallerTests(StageBase):
                     hosts.append(line['host'])
             except ScannerUnavailable:  # the chunk a Sentinel failed may not run here: the stage waits, after the finished chunks are in
                 return 'waiting'
-        with mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True):
+        with contextlib.nullcontext():
             stream = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light')
             self.assertEqual(fake.run(drain), 'waiting')
         self.assertEqual(sorted(hosts), sorted(chunks[0] + chunks[2] + chunks[3]))
@@ -492,7 +492,7 @@ class CallerTests(StageBase):
             fake.answer = lambda task: {'outcome': 'done', 'findings': []}
             return fake
         agents = self.two_agents()
-        with mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True):
+        with contextlib.nullcontext():
             real = dispatch.wrap_nuclei_stream(self.scan, 'nuclei_light')
             fake = sentinels()
             out = fake.run(lambda: nuclei_scan.run_light_nuclei(self.scan.id, stream=spy(real)))
@@ -504,7 +504,7 @@ class CallerTests(StageBase):
 
         SentinelTask.objects.all().delete()
         seen.clear()
-        with mock.patch.dict(os.environ, {'CVENGINE_STAGE_PARALLEL': '1'}), mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True):
+        with mock.patch.dict(os.environ, {'CVENGINE_STAGE_PARALLEL': '1'}):
             fake = sentinels()
             fake.run(lambda: nuclei_scan.run_light_nuclei(self.scan.id, stream=spy(real), force=True))
         self.assertEqual((len(seen), seen[0]), (2, nuclei_scan.NUCLEI_CHUNK))  # the serial behaviour exactly: 100, then the rest

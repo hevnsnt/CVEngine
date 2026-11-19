@@ -25,7 +25,6 @@ CANARY = 'canary-sign-in-7c41d9e2b8'
 
 class SignedRouteStageBase(Fixture):
     def setUp(self):
-        mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False).start()
         self.addCleanup(mock.patch.stopall)
         LocalFallback('none').apply(self)
         self.guard = assert_ran_nowhere_locally(self, KIND)

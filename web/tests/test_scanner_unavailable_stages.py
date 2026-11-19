@@ -55,9 +55,6 @@ class WaitsMixin:
 class NoScannerBase(WaitsMixin, DispatchBase):
     def setUp(self):
         super().setUp()
-        patcher = mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True)  # example.test never resolves in a sandbox
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
 
 class NmapFastTests(NoScannerBase):
@@ -202,7 +199,7 @@ class NucleiStageTests(NoScannerBase):
         ScanHistory.objects.filter(pk=self.scan.pk).update(scan_status=2)  # weekly_deep_nuclei reads finished scans only
         Subdomain.objects.filter(pk=sub.pk).update(target_domain=self.domain)
         assert_ran_nowhere_locally(self, 'nuclei_deep')
-        with mock.patch('cveFeed.nuclei_scan.approved_templates', return_value=('/tmp/approved', 'rev1', 1)), \
+        with mock.patch('cveFeed.nuclei_scan.approved_revision', return_value='rev1'), \
                 mock.patch('targetApp.target_types.scannable_hosts', side_effect=lambda names, **kw: names), \
                 mock.patch('cveFeed.nuclei_scan.scan_targets', return_value=({sub.name}, set(), set())):
             result = weekly_deep_nuclei()

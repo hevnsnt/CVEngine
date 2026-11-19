@@ -59,8 +59,7 @@ class Fixture:
         self.org1, self.org2 = Org.objects.create(name='One', slug='sup-one'), Org.objects.create(name='Two', slug='sup-two')
         self.project = Project.objects.create(name='Alpha', slug='sup-a', insert_date=now, org=self.org1)
         self.other_project = Project.objects.create(name='Beta', slug='sup-b', insert_date=now, org=self.org2)
-        for patch in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), 
-                      mock.patch('cveFeed.tasks.run_hygiene_task.delay'), mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async'), mock.patch('cveFeed.ct_queue._client', return_value=None)):
+        for patch in (mock.patch('cveFeed.tasks.run_hygiene_task.delay'), mock.patch('cveFeed.tasks.watch_certificate_transparency.apply_async'), mock.patch('cveFeed.ct_queue._client', return_value=None)):
             patch.start()
         self.addCleanup(mock.patch.stopall)
         self.own = Domain.objects.create(name='example.test', project=self.project, insert_date=now)

@@ -277,9 +277,9 @@ class ManualOnlyHostsTests(DiscoveryModeBase):
 		for sub, domain in ((self.manual_host, self.manual), (self.auto_host, self.auto)):
 			scan = ScanHistory.objects.create(domain=domain, scan_type=self.engine, start_scan_date=NOW, scan_status=2, results_dir='/tmp')
 			Subdomain.objects.filter(pk=sub.pk).update(scan_history=scan)
-		with mock.patch('cveFeed.nuclei_scan.approved_templates', side_effect=RuntimeError('no library')):
+		with mock.patch('cveFeed.nuclei_scan.approved_revision', side_effect=RuntimeError('no template index')):
 			result = tasks.weekly_deep_nuclei()
-			self.assertEqual(result['status'], 'failed')  # the other project's host is in the lane: it got as far as the template library
+			self.assertEqual(result['status'], 'failed')  # the other project's host is in the lane: it got as far as the template index
 			self.assertEqual(BackgroundCursor.objects.get(lane='weekly_nuclei').last_pk, 0)
 			Subdomain.objects.filter(pk=self.auto_host.pk).delete()
 			self.assertEqual(tasks.weekly_deep_nuclei()['status'], 'no_inventory')  # only the manual only target's host is left

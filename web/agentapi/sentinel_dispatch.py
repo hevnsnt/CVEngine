@@ -16,7 +16,6 @@ through ``dispatch_many``: a bounded window of chunk tasks, created up front and
 """
 import contextlib
 import contextvars
-import ipaddress
 import logging
 import os
 import re
@@ -26,8 +25,6 @@ from cveFeed import result_cuts
 
 MAX_ADDRESSES = 64  # kept equal to sentinel_broker.MAX_ADDRESSES: the most addresses one dispatched task names (a longer list goes in several)
 DISPATCH_POLL_INTERVAL = 0.5  # seconds between checks while waiting for a dispatched task to finish
-RESOLVE_WORKERS = 16  # matches targetApp.target_types.blocked_names: one bounded parallel pass, never one lookup per target serially
-RESOLVE_TIMEOUT = 5  # seconds one target's lookup may take
 
 
 # The longest a stage waits for a Sentinel that has claimed its task, by kind: a Sentinel that keeps heartbeating a running task is
@@ -1105,61 +1102,6 @@ def _bare_host(target):
     return target.rsplit(':', 1)[0].strip() if target.count(':') == 1 else target.strip()
 
 
-REFUSED = 'refused'  # what ``_resolves`` answers for a name that resolves, but to an address a Sentinel will not scan
-
-
-def _resolves(host, timeout):
-    """True when ``host`` resolves to addresses a scanner may touch (or is an address itself), ``False`` when it does not resolve, ``REFUSED`` when any
-    answer is an address a Sentinel refuses (loopback, link-local, metadata, a private range: ``target_types.is_scannable_ip``, the rule the Sentinel
-    applies to a name it is handed). A name never has tailnet authority, so no project is passed."""
-    import socket
-    from targetApp.target_types import is_scannable_ip
-    try:
-        ipaddress.ip_address(host)
-        return True  # a literal address needs no lookup: the stage that built the target judged it
-    except ValueError:
-        pass
-    try:
-        answers = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-    except (socket.gaierror, UnicodeError, OSError):
-        return False
-    if not answers:
-        return False
-    return REFUSED if any(not is_scannable_ip(answer[4][0]) for answer in answers) else True
-
-
-def resolvable_targets(targets, workers=RESOLVE_WORKERS, timeout=RESOLVE_TIMEOUT, refused=None):
-    """The entries of ``targets`` whose host currently resolves, in order: a Sentinel is never handed a target this
-    process cannot even look up, which would otherwise dispatch work for nothing and - because the stage that sent it
-    marks its whole chunk scanned once the dispatched call returns, not target by target - leave a host that was never
-    actually reached looking checked. A stale or deleted DNS record is the common case here (a host that resolved when
-    it was first discovered may not resolve months later), not a name a tenant never controlled, so this is a plain
-    resolvability check: a target already passed the prohibited-range gate when it was added. A name that resolves to an address a Sentinel refuses is
-    the other case (its answer changed since, or it was never a host of ours): the Sentinel would fail the task on every scan, so it is dropped here
-    too and, when ``refused`` (a set) is given, added to it so the stage can say why it was not scanned. One bounded parallel pass, like
-    ``target_types.blocked_names``; never one lookup per target serially."""
-    from concurrent.futures import ThreadPoolExecutor, wait
-    targets = list(targets)
-    if not targets:
-        return []
-    hosts = {t: _bare_host(t) for t in targets}
-    unique = sorted(set(hosts.values()))
-    n_workers = max(1, min(workers, len(unique)))
-    pool = ThreadPoolExecutor(max_workers=n_workers, thread_name_prefix='sentinel-resolve')
-    try:
-        futures = {h: pool.submit(_resolves, h, timeout) for h in unique}
-        # ``getaddrinfo`` cannot be interrupted, so the bound is on the wait: every lookup gets ``timeout`` per round of ``workers`` hosts, and a
-        # name still unanswered then counts as not resolving (its thread ends when the resolver gives up), instead of one slow resolver holding
-        # the whole stage.
-        wait(futures.values(), timeout=timeout * -(-len(unique) // n_workers))
-        state = {h: f.result() if f.done() and not f.cancelled() and f.exception() is None else False for h, f in futures.items()}
-        live = {h: answer is True for h, answer in state.items()}
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
-    if refused is not None:
-        refused.update(t for t in targets if state.get(hosts[t]) == REFUSED)
-    return [t for t in targets if live.get(hosts[t])]
-
 def _finding_to_nuclei_line(finding):
     """One Sentinel-reported template finding, reshaped into the same dict ``reNgine.tasks.parse_nuclei_result`` and
     ``cveFeed.nuclei_scan.host_of`` read from the scanner's own ``-jsonl`` output. Fields the full output carries
@@ -1179,21 +1121,20 @@ def _finding_to_nuclei_line(finding):
                      'tags': finding.get('tags') or []}}
 
 
-def _nuclei_target(kind, targets, kwargs, scan=None, labels=None):
+def _nuclei_target(kind, targets, kwargs, scan=None, labels=None, internal=False):
     """The target of a dispatched template task: the targets, the tags and severities the pass runs with, and the template policy it applies. The
     light pass is the technology fingerprint (tags ``tech``, severity ``info``), so the Sentinel is told that here, or it would run the whole
     template library at every severity and the stage would time out. ``etags`` are the tags every run leaves out (``cvengine_scanner.flags.NUCLEI_EXCLUDED_TAGS``, ``dos``) and
-    ``template_policy`` names the template policy in force (the read-only set, or everything when an administrator allowed it), so the client runs
-    nothing this server would not; its ``bundle_sha256`` is the sha256 of the approved template archive the client fetches from
-    ``GET /api/v1/sentinel/template-policy/bundle`` (``None`` until that archive exists: it is packed here when the approved snapshot is already
-    cached, else on the first policy request). ``budget`` is what one host:port may receive from the task (``cvengine_scanner.flags.NUCLEI_SERVICE_BUDGET``: the pause between
+    ``template_policy`` names the template policy in force (the read-only set, or everything when an administrator allowed it) with ``source: "index"``
+    (contract 11): the Sentinel builds the approved set itself, from the templates baked into its image and its library's template index
+    (``cvengine_scanner.template_index``), so it runs nothing this server would not and this server keeps no copy of the templates. ``budget`` is what one host:port may receive from the task (``cvengine_scanner.flags.NUCLEI_SERVICE_BUDGET``: the pause between
     template runs on a non-web port, the seconds one is kept busy, and the per-host request rate of a web host) and ``services`` labels each ``host:port`` of
     the targets with what speaks there (``cveFeed.nuclei_services``: ``web``, ``unknown`` or a protocol class), so a Sentinel sends a port only the templates
     of its protocol: a bare host, an address or a URL has no label and is web. ``labels`` are the labels of the whole stream, read once
-    (``nuclei_services.labels_for``); without them (and given ``scan``) they are read here for ``targets``."""
+    (``nuclei_services.labels_for``); without them (and given ``scan``) they are read here for ``targets``. ``external`` (contract 11) is set unless the
+    work is ``internal``: the Sentinel then judges every target as one that is not internal does, whatever its own setting."""
     from cvengine_scanner import flags as scan_flags
 
-    from agentapi import template_bundle
     from cveFeed import nuclei_scan, nuclei_services, validation
     # no severities given: the default (``cvengine_scanner.flags.NUCLEI_SEVERITIES``, info to critical), sent as a list, since a client given none
     # would run every severity, ``unknown`` included
@@ -1206,10 +1147,12 @@ def _nuclei_target(kind, targets, kwargs, scan=None, labels=None):
         etags += list(scan_flags.NUCLEI_CREDENTIAL_TAGS)
     rev = nuclei_scan.policy_rev()
     target = {'targets': targets, 'tags': tags, 'severities': severities, 'etags': etags,
-              'template_policy': {'rev': rev, 'read_only': rev == nuclei_scan.TEMPLATE_POLICY_REV, 'bundle_sha256': template_bundle.sha256_if_ready()},
+              'template_policy': {'rev': rev, 'read_only': rev == nuclei_scan.TEMPLATE_POLICY_REV, 'source': scan_flags.TEMPLATE_INDEX_SOURCE},
               'budget': dict(scan_flags.NUCLEI_DETECTION_BUDGET if detection else scan_flags.NUCLEI_SERVICE_BUDGET)}
     if detection:  # contract 10: the network/detection templates on the non-web ports (cveFeed.network_detection); the broker hands it only to a Sentinel that runs it
         target['network_detection'] = True
+    if not internal:  # contract 11: outside work is judged as on a Sentinel that is not internal, so a name that now points inside is refused there (this server looks none up)
+        target['external'] = True
     if validation.credential_checks_allowed():  # only when an App Admin turned it on: absent means off, and a Sentinel that does not know the field never runs them
         target['allow_credential_checks'] = True
     if labels is None:
@@ -1277,6 +1220,14 @@ def _not_checked_of(result):
     return [row for row in (result.get('not_checked') or []) if isinstance(row, dict) and row.get('target')]
 
 
+def _refused_of(named, chunk):
+    """The targets of ``chunk`` the Sentinel refused by scope (contract 11: a ``not_checked`` reason that starts with ``flags.NUCLEI_REFUSED_PREFIX``, a name
+    that resolves to an address no Sentinel may scan). This server never looks the names up itself: the Sentinel's judgement is the one."""
+    from cvengine_scanner import flags as scan_flags
+    refused = {str(row.get('target') or '').strip().lower() for row in named if str(row.get('reason') or '').startswith(scan_flags.NUCLEI_REFUSED_PREFIX)}
+    return {t for t in chunk if t.strip().lower() in refused} if refused else set()
+
+
 def _cut_check_of(result, chunk, named=()):
     """``[{'target', 'reason'}]`` for the targets of ``chunk`` when its result was cut so that it is only part of the answer (``cveFeed.result_cuts.partial``: the
     tool stopped at its time limit, or findings were dropped above the cap): they were not fully checked, so they are not recorded as scanned clean and are asked again
@@ -1307,7 +1258,8 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
     """A ``stream(targets_file, **kwargs) -> iterable of result-line dicts`` for ``run_light_nuclei``/``run_targeted_nuclei``/``run_nuclei``'s
     ``stream`` parameter: it hands the targets to a Sentinel in chunk tasks and yields the findings they report. The kind never runs on this
     server (``NEVER_LOCAL``): with no live scanner able to take it, ``ScannerUnavailable`` is raised here, and from the stream when a chunk could
-    not be done, so the stage waits and the targets stay due. A chunk none of whose names resolves is not sent and not reported (nothing to run)."""
+    not be done, so the stage waits and the targets stay due. A name is never looked up here: the Sentinel judges every address a name resolves to
+    and names a target it refuses in ``not_checked`` (``flags.NUCLEI_REFUSED_PREFIX``), which stays due and is said in the activity feed."""
     from cveFeed import nuclei_services
     project = scan.domain.project
     if internal:  # the target is inside a private network: only a Sentinel there can run it
@@ -1319,21 +1271,24 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
                 targets = []
             internal_stream.unreached = set()
             internal_stream.not_checked = []
+            internal_stream.refused = set()
             _require_network_detection(project, kind, kwargs, internal=True)
             labels = nuclei_services.labels_for(scan, targets)  # once for the whole stream, not once per chunk
             chunks = _stream_chunks(kind, targets, labels, kwargs)  # every target is sent: a stage that marks its whole list scanned must not have dropped the tail
-            with contextlib.closing(dispatch_many(project, kind, chunks, prepare=lambda chunk: (_nuclei_target(kind, chunk, kwargs, scan, labels), []), scan=scan,
+            with contextlib.closing(dispatch_many(project, kind, chunks, prepare=lambda chunk: (_nuclei_target(kind, chunk, kwargs, scan, labels, internal=True), []), scan=scan,
                                                   internal=True, timeout=timeout, labeler=_targets_label)) as results:
                 for _index, result in results:
                     if result is None:
                         raise RuntimeError('no Sentinel inside the network answered (one must declare network:internal and cover this project)')
                     internal_stream.unreached.update(_unreachable_of(result, chunks[_index]))
                     named = _not_checked_of(result)
+                    internal_stream.refused.update(_refused_of(named, chunks[_index]))
                     internal_stream.not_checked += named + _no_check_of(result, chunks[_index], labels, kind, kwargs, named) + _cut_check_of(result, chunks[_index], named)
                     for finding in result.get('findings', []):
                         yield _finding_to_nuclei_line(finding)
         internal_stream.unreached = set()
         internal_stream.not_checked = []
+        internal_stream.refused = set()
         internal_stream.chunks_itself = True  # the caller hands over the whole list: this splits it and runs the chunks side by side
         return internal_stream
     if not any_scanner_for(project, kind):
@@ -1342,7 +1297,7 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
     def stream(targets_file, **kwargs):
         stream.unreached = set()  # what this call could not reach (read by ``cveFeed.nuclei_scan.record_reached``): not scanned, whatever the call returns
         stream.not_checked = []  # the ports a Sentinel named as not fully checked, with the reason (``record_reached`` writes them to the activity feed)
-        stream.refused = set()  # the part of it whose name resolves to an address a Sentinel refuses: never sent, and the stage says why
+        stream.refused = set()  # the part of it whose name the Sentinel refused (it resolves to an address no Sentinel scans): not scanned, and the stage says why
         try:
             with open(targets_file, encoding='utf-8') as handle:
                 targets = [line.strip() for line in handle if line.strip()]
@@ -1356,25 +1311,17 @@ def wrap_nuclei_stream(scan, kind, timeout=None, internal=False):
         # scanned, so none may be dropped
         chunks = _stream_chunks(kind, targets, labels, kwargs)
 
-        unresolved = set()  # the chunks (as tuples) nothing of which resolves: never offered to a Sentinel
-
         def prepare(chunk):
-            live = resolvable_targets(chunk, refused=stream.refused)
-            stream.unreached.update(set(chunk) - set(live))  # a name that does not resolve was not scanned: the stage must not record it as done
-            if not live:
-                unresolved.add(tuple(chunk))
-                return None  # nothing in the chunk resolves: a Sentinel would be asked to do nothing, and nothing can run here
-            return _nuclei_target(kind, live, kwargs, scan, labels), []
+            return _nuclei_target(kind, chunk, kwargs, scan, labels), []
         with contextlib.closing(dispatch_many(project, kind, chunks, prepare=prepare, scan=scan, timeout=timeout, labeler=_targets_label)) as results:
             for index, result in results:
                 if result is None:
-                    if tuple(chunks[index]) in unresolved:
-                        continue
                     # the dispatcher raises ScannerUnavailable for a chunk no Sentinel finished; one that comes back empty anyway is never read as scanned
                     from reNgine.resources import ScannerUnavailable
                     raise ScannerUnavailable(kind, 'no scanner returned a result for a chunk')
                 stream.unreached.update(_unreachable_of(result, chunks[index]))
                 named = _not_checked_of(result)
+                stream.refused.update(_refused_of(named, chunks[index]))
                 stream.not_checked += named + _no_check_of(result, chunks[index], labels, kind, kwargs, named) + _cut_check_of(result, chunks[index], named)
                 for finding in result.get('findings', []):
                     yield _finding_to_nuclei_line(finding)
@@ -1776,6 +1723,59 @@ def try_nuclei_validate(text, project=None):
 
 
 NOT_REPORTED = 'not tested: the scanner reported no result for this host'
+
+
+TEMPLATE_INDEX_WAIT = ('no live Sentinel runs installed templates from the template index yet (it needs Sentinel contract {since} or later); update a Sentinel '
+                       'that covers this project')
+
+
+def try_installed_template_test(relative, sha256, hosts, project):
+    """``(outcomes, text)`` of the installed template at ``relative`` (its path in the pinned release, with the ``sha256`` the template index records) run on
+    a scanner against ``hosts`` of ``project``, as ``try_template_test`` does for a text. The task names the path and hash, never the text (contract 11:
+    this server keeps no copy of the templates); the Sentinel reads exactly that file from its own image and sends its text back, which is checked against
+    the hash here and returned for reading what a hit showed (``text`` is '' when no result carried it). Only a Sentinel of contract 11 or later is given
+    such a task (``sentinel_broker.installed_check_task``); with none live every host is reported as not tested and stays due."""
+    from cvengine_scanner import flags as scan_flags
+
+    from agentapi import ai_checks, sentinel_broker
+    from reNgine.resources import ScannerUnavailable
+    project = _project_of(project) if isinstance(project, int) else project
+    hosts = list(hosts)
+    builtin = ai_checks.builtin_in_use()
+    problem = ai_checks.installed_problem(relative, sha256, builtin=builtin, project=project, targets=None if builtin else hosts)
+    if problem:
+        why = problem if problem.startswith('not tested') else f'not tested: {problem}'
+        return [{'host': host, 'vulnerable': False, 'output': '', 'error': why[:300]} for host in hosts], ''
+    chunks = _chunks(hosts)
+    by_host, waiting, text = {}, None, ''
+    try:
+        scanner_or_local(project, 'nuclei_validate')  # raises ScannerUnavailable when no scanner is live
+        if not sentinel_broker.installed_check_scanner(project):
+            raise ScannerUnavailable('nuclei_validate', TEMPLATE_INDEX_WAIT.format(since=scan_flags.TEMPLATE_INDEX_SINCE))
+    except ScannerUnavailable as exc:
+        waiting = exc
+        chunks = []
+    try:
+        with contextlib.closing(dispatch_many(project, 'nuclei_validate', chunks, labeler=_targets_label,
+                                              prepare=lambda chunk: (ai_checks.installed_target(relative, sha256, chunk), []))) as results:
+            for _index, result in results:
+                if result is None:
+                    continue
+                ran = result.get('template')
+                if isinstance(ran, str) and ai_checks.same_hash(ai_checks.digest(ran), sha256):
+                    text = ran
+                for outcome in result.get('outcomes') or []:
+                    by_host.setdefault(outcome['host'], outcome)
+    except ScannerUnavailable as exc:
+        waiting = exc
+    out = []
+    for host in hosts:
+        if host in by_host:
+            out.append(by_host[host])
+        else:
+            error = f'not tested: no scanner could take this work ({waiting.kind})' if waiting else NOT_REPORTED
+            out.append({'host': host, 'vulnerable': False, 'output': '', 'error': error})
+    return out, text
 
 
 def try_template_test(text, hosts, project):

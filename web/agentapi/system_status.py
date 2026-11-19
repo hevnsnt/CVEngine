@@ -626,83 +626,22 @@ def _autotune():
                                for d in full['recent_decisions'][:5]]}
 
 
-TEMPLATE_STALE_HOURS = 36  # the refresh runs every six hours: a day and a half without a successful one means it is failing
-TEMPLATE_REFRESH_KEY = 'nuclei_templates_refresh'  # written by the cveFeed.tasks.update_nuclei_templates worker task, read here
-_VERSION_CACHE = {}
-_VERSION_LINE = re.compile(r'\d+\.\d+')
-
-
-def _tool_version(argv):
-    """The version line of ``<tool> -version``, cached for ten minutes; None when the tool is missing or slow. A tool may print a
-    warning of its own first (nuclei does, on a Go release its JSON library has not caught up with): the first line that is not a
-    warning and carries a version number, else the first line that is not a warning."""
-    import subprocess
-    now = time.monotonic()
-    cached = _VERSION_CACHE.get(argv)
-    if cached and now - cached[0] < 600:
-        return cached[1]
+def _tools():
+    """What the nuclei templates the Sentinels run are: this server keeps no copy of them and runs no scan tool. The release and size of the template
+    index of the Sentinel library this server installed (``cvengine_scanner.template_index``), which is the release the Sentinel image pins; what a
+    Sentinel runs is in its own ``info.tool_versions`` (the Sentinels page)."""
     try:
-        proc = subprocess.run(list(argv), capture_output=True, text=True, timeout=5, check=False)
-        text = re.sub(r'\x1b\[[0-9;]*m', '', (proc.stdout or '') + (proc.stderr or ''))  # a tool may colour its banner
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        lines = [line for line in lines if not line.lower().startswith(('warning', '[wrn]', 'warn'))] or lines
-        value = next((line[:120] for line in lines if _VERSION_LINE.search(line)), lines[0][:120] if lines else None)
-    except (OSError, subprocess.SubprocessError):
-        value = None
-    _VERSION_CACHE[argv] = (now, value)
-    return value
-
-
-def _template_refresh():
-    """What the last ``nuclei -update-templates`` run said, as the worker recorded it: ``{'at', 'ok', 'result'}`` or None."""
-    from django.core.cache import cache
-    try:
-        record = cache.get(TEMPLATE_REFRESH_KEY)
-    except Exception:  # noqa: BLE001 - a cache that is down must not take the status with it
-        return None
-    return record if isinstance(record, dict) and record.get('at') else None
+        from cvengine_scanner import template_index
+        index = template_index.load()
+    except ImportError:
+        index = {'nuclei_templates': '', 'templates': {}}
+    return {'nuclei_templates': {'release': index['nuclei_templates'] or None, 'templates': len(index['templates']),
+                                 'source': 'the template index of the Sentinel library'}}
 
 
 def _template_problem(templates):
-    """The status line for stale nuclei templates, or ''. The template files only change when a new release is published, so their age
-    says nothing about whether the refresh works; it is judged on the refresh's own last run when there is one, and on the files only
-    when no run has been recorded and none has been dispatched for a day and a half either."""
-    refresh = templates.get('last_refresh')
-    if refresh:
-        try:
-            hours = (timezone.now() - datetime.fromisoformat(refresh['at'])).total_seconds() / 3600
-        except (KeyError, TypeError, ValueError):
-            hours = None
-        if hours is not None and not refresh.get('ok'):
-            return f"nuclei templates: the last refresh failed ({str(refresh.get('result') or 'no detail')[:100]})"
-        if hours is not None and hours > TEMPLATE_STALE_HOURS:
-            return f'nuclei templates: no successful refresh for {int(hours)} hours'
-        return ''
-    age, dispatched = templates.get('age_hours'), templates.get('last_refresh_dispatch')
-    if age is None or age <= TEMPLATE_STALE_HOURS:
-        return ''
-    if dispatched and (timezone.now() - datetime.fromisoformat(dispatched)).total_seconds() / 3600 <= TEMPLATE_STALE_HOURS:
-        return ''  # the refresh was dispatched recently and has not reported yet (right after an update): not a failure
-    return f'nuclei templates: not refreshed for {int(age)} hours'
-
-
-def _tools():
-    """How current the detection tools are: the nuclei templates (when they were last refreshed) and the scanner versions."""
-    import os
-    from django_celery_beat.models import PeriodicTask
-    root = os.environ.get('NUCLEI_TEMPLATES_DIR', '/root/nuclei-templates')
-    marker = os.path.join(root, '.checksum')
-    try:
-        updated = datetime.fromtimestamp(os.stat(marker).st_mtime, tz=dt_timezone.utc)
-    except OSError:
-        updated = None
-    last_run = PeriodicTask.objects.filter(task='update_nuclei_templates').values_list('last_run_at', flat=True).first()
-    refresh = _template_refresh()
-    return {'nuclei_templates': {'updated_at': _iso(updated),  # when the template files last changed: nothing changes between releases
-                                 'age_hours': round((timezone.now() - updated).total_seconds() / 3600, 1) if updated else None,
-                                 'last_refresh_dispatch': _iso(last_run),
-                                 'last_refresh': refresh},  # the last run of the refresh itself and what it said
-            'versions': {'nuclei': _tool_version(('nuclei', '-version'))}}
+    """The status line when the installed Sentinel library has no template index (no nuclei work can be planned without it), or ''."""
+    return '' if templates.get('templates') else 'nuclei templates: the installed Sentinel library has no template index'
 
 
 def _runzero(problems):

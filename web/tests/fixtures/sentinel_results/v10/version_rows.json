@@ -1,0 +1,54 @@
+{
+  "outcome": "done",
+  "reads": [
+    {
+      "id": "www.example.com|vsrc|apache-server-status|https://www.example.com",
+      "answers": [
+        {
+          "path": "/server-status?auto",
+          "status": 200,
+          "content_type": "text/plain",
+          "bytes": 1004,
+          "truncated": false,
+          "headers": {
+            "server": "Apache"
+          },
+          "rows": {
+            "ServerVersion": "Apache/2.4.57 (Debian) OpenSSL/3.0.11"
+          }
+        }
+      ]
+    },
+    {
+      "id": "shop.example.com|vsrc|phpinfo|https://shop.example.com",
+      "answers": [
+        {
+          "path": "/info.php",
+          "status": 200,
+          "content_type": "text/html",
+          "bytes": 3478,
+          "truncated": false,
+          "headers": {
+            "server": "Apache",
+            "x-powered-by": "PHP/8.2.12"
+          },
+          "rows": {
+            "Apache Version": "Apache/2.4.57 (Debian)",
+            "PHP Version": "8.2.12",
+            "cURL Information": "7.88.1",
+            "libXML Compiled Version": "2.9.14",
+            "libXML Loaded Version": "20914",
+            "OpenSSL Library Version": "OpenSSL 3.0.11 19 Sep 2023",
+            "PCRE Library Version": "10.42 2022-12-11",
+            "SQLite Library": "3.40.1"
+          }
+        }
+      ]
+    }
+  ],
+  "touched": [
+    "www.example.com",
+    "shop.example.com"
+  ],
+  "refused": []
+}

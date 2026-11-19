@@ -1,31 +1,8 @@
 # CVEngine application image (web, celery, celery-beat).
-# Based on the Ubuntu LTS; Python from the distribution. The server runs no scan tool: every probe runs on a Sentinel (the built-in scanner
-# container or an external one). What stays is nuclei, whose template set the server keeps current (the update_nuclei_templates task) and
-# reads to write and check templates. It is built in a throwaway stage, so the Go toolchain is not part of the image.
-
-# Versions are pinned so builds are reproducible. nuclei is pinned to the version the CI smoke test uses and bumped on purpose, after
-# scripts/check_tool_versions.py says a newer one exists: see "Pinned tools" in docs/UPDATES.md. Its TEMPLATES are not pinned: they refresh at runtime.
-ARG GOVERSION=1.27.4
-ARG GO_SHA256_AMD64=7226736c2339719cda28fbf3a54d71aa63bcefe376e98cef00034268dab24840
-ARG GO_SHA256_ARM64=3392582988a273a87ab5043ee1b2c9c17a2c3c00580bf9326c47a2e0aaaeac92
-ARG NUCLEI_VERSION=3.11.1
-
-# Build stage: the Go toolchain (checksum verified) compiles nuclei; only the binary is copied on.
-FROM ubuntu:26.04 AS nuclei-build
-ARG GOVERSION
-ARG GO_SHA256_AMD64
-ARG GO_SHA256_ARM64
-ARG NUCLEI_VERSION
-ENV DEBIAN_FRONTEND="noninteractive" GOROOT="/usr/local/go" GOPATH="/root/go" GO111MODULE=on
-ENV PATH="${PATH}:/usr/local/go/bin"
-RUN apt-get update -y && apt-get install -y --no-install-recommends ca-certificates curl git gcc libc6-dev && rm -rf /var/lib/apt/lists/*
-RUN ARCH=$(dpkg --print-architecture) \
-    && if [ "${ARCH}" = "arm64" ]; then GO_SHA="${GO_SHA256_ARM64}"; else GO_SHA="${GO_SHA256_AMD64}"; fi \
-    && curl -fsSLo /tmp/go.tgz https://go.dev/dl/go${GOVERSION}.linux-${ARCH}.tar.gz \
-    && echo "${GO_SHA}  /tmp/go.tgz" | sha256sum -c - \
-    && tar -xzC /usr/local -f /tmp/go.tgz \
-    && rm /tmp/go.tgz
-RUN GOBIN=/out go install -ldflags="-s -w" -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@v${NUCLEI_VERSION}
+# Based on the Ubuntu LTS; Python from the distribution. The server runs no scan tool and ships none, nor any template set: every probe, template
+# run and template check runs on a Sentinel (the built-in scanner container or an external one), and what the server knows about the templates comes
+# from the template index of the Sentinel library it installs (cvengine_scanner.template_index). tests/test_no_local_tools.py fails a build that adds
+# a scan tool back.
 
 FROM ubuntu:26.04
 
@@ -71,14 +48,9 @@ RUN apt-get update -y && \
     tzdata && \
     rm -rf /var/lib/apt/lists/*
 
-# nuclei, from the build stage
-COPY --from=nuclei-build /out/nuclei /usr/local/bin/nuclei
 
 # Make directory for app
 WORKDIR /usr/src/app
-
-# Update Nuclei and Nuclei-Templates (refreshed daily at runtime by the update_nuclei_templates task)
-RUN nuclei -update-templates
 
 # Application dependencies in a virtual environment (the distribution Python is externally managed)
 RUN python3 -m venv /opt/venv

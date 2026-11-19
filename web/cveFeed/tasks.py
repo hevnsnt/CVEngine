@@ -2255,10 +2255,10 @@ def weekly_deep_nuclei():
                 cursor.save(update_fields=['last_pk', 'updated_at'])
                 return {'status': 'no_inventory'}
         try:
-            revision = nuclei_scan.approved_templates()[1]
+            revision = nuclei_scan.approved_revision()  # the policy and the scanner library's template index: the server keeps no templates
         except Exception:
-            logger.exception('weekly deep Nuclei has no approved template library')
-            return {'status': 'failed', 'error': 'approved template library unavailable'}
+            logger.exception('weekly deep Nuclei has no template index to plan from')
+            return {'status': 'failed', 'error': 'the installed Sentinel library has no nuclei template index'}
         host_service = f'nuclei-deep-host:{revision}'
         target_service = f'nuclei-deep-target:{revision}'
         for sub in rows:
@@ -2490,37 +2490,6 @@ def refresh_sentinel_version():
     return {"latest": (out.get("sha") or "")[:12], "error": out.get("error", "")}
 
 
-@app.task(name="update_nuclei_templates", bind=False, queue="cve_feed_queue")
-def update_nuclei_templates():
-    """Daily: pull the current nuclei templates. CVEngine's own scans run nuclei with -duc (no update check), so without
-    this the template set stays as old as the first image build and newer checks never run."""
-    import subprocess
-    from cveFeed import activity
-    try:
-        proc = subprocess.run(["nuclei", "-update-templates", "-silent", "-nc"], capture_output=True, text=True, timeout=900, check=False)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning("nuclei template update failed: %s", exc)
-        return {"updated": False, "error": str(exc)[:200]}
-    # the line that says what happened, not a warning nuclei prints about its JSON library on a newer Go release (it was recorded as the result)
-    lines = [line.strip() for line in (proc.stdout + proc.stderr).splitlines() if line.strip()]
-    said = [line for line in lines if not re.match(r"(?:\[wrn\]|(?:warning|warn)\b)", line, re.I)]
-    tail = said[-1:] or ["ran with no message (the templates were already current)" if proc.returncode == 0 else "no message"]
-    from cveFeed.templategen import invalidate_template_index
-    invalidate_template_index()
-    try:  # system_status judges the refresh on this, not on the age of the files (they only change when a release is published)
-        from django.core.cache import cache
-        from django.utils import timezone
-        from agentapi.system_status import TEMPLATE_REFRESH_KEY
-        cache.set(TEMPLATE_REFRESH_KEY, {'at': timezone.now().isoformat(), 'ok': proc.returncode == 0, 'result': tail[0][:200]}, None)
-    except Exception:  # noqa: BLE001 - recording the outcome never fails the refresh
-        logger.warning("could not record the nuclei template refresh", exc_info=True)
-    if proc.returncode == 0:
-        activity.log("feed", "Updated the nuclei templates", detail_line=tail[0][:200])
-    else:
-        logger.warning("nuclei -update-templates exited %s: %s", proc.returncode, tail[0])
-    return {"updated": proc.returncode == 0, "returncode": proc.returncode}
-
-
 @app.task(name='runzero_sync_due', bind=False, queue='cve_feed_queue')
 def runzero_sync_due():
     """Queue a runZero sync for every project with a token that is due one (CVENGINE_RUNZERO_SYNC_HOURS, default 6). Starts are
@@ -2554,7 +2523,6 @@ def author_cve_detections():
     out['local_closed'] = locality.close_local_matches()  # a CVE the model just judged local-only is never a finding
     from cveFeed import match_policy
     out['no_evidence_closed'] = match_policy.close_policy_matches()
-    out['template_refresh_for'] = len(detection_author.refresh_templates_for_new_hot_cves(update_nuclei_templates.delay))
     try:  # the system status shows this progress; counting the catalogue there ran past the status probe's budget
         from django.core.cache import cache
         cache.set('cvengine:cve-guidance-progress', detection_author.progress(), 6 * 3600)

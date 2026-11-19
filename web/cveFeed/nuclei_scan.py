@@ -3,17 +3,15 @@
 Targets are every discovered host plus its IPs, and host:port for each open port discovery reported on a
 non-default port, so every service is probed rather than just the front door. Nothing here runs a scan tool: every pass takes a ``stream``
 (``agentapi.sentinel_dispatch.wrap_nuclei_stream``) that hands the targets to a Sentinel, and with no scanner able to take the work the stream
-raises ``ScannerUnavailable`` and the targets stay due. This module builds the target list, keeps the approved template snapshot a Sentinel is
-sent (``template_bundle``), and turns the lines a Sentinel reported into findings.
+raises ``ScannerUnavailable`` and the targets stay due. This module builds the target list, names the template policy in force, and turns the lines a
+Sentinel reported into findings. The server keeps no copy of the templates: the Sentinel builds the approved set from its own baked templates and the
+template index of the scanner library (``cvengine_scanner.template_index``), which is also what this server reads about them.
 """
 import hashlib
 import logging
 import os
 import re
-import shutil
 import tempfile
-import threading
-import time
 
 from cvengine_scanner.flags import NUCLEI_DEFAULT_PORTS, host_of
 
@@ -23,42 +21,6 @@ NUCLEI_CHUNK = 100  # targets handed to a stream per call: the ledger is written
 # A run's flags and the ports a bare host is probed on are the scanner library's (cvengine_scanner.flags), shared with every Sentinel.
 TEMPLATE_POLICY_REV = 'readonly-5'  # readonly-5 also reads a pw field, a multipart password part, a body written inside a string and a URL-encoded field name; readonly-3 also refused a template that sends a credential of its own (a fixed Authorization or Cookie header, a user name in a URL)
 ALL_TEMPLATES_REV = 'all-5'  # all-5 also reads a pw field, a multipart password part, a body written inside a string and a URL-encoded field name, and (with credential checks off) leaves out a template it cannot parse; all-1 ran default-login and bruteforce templates; all-2 left them out unless a person allowed them; all-3 also left out a fixed credential header or user name in a URL; all-4 also a fixed password in a body, a placeholder over a fixed value, and the default-login and bruteforce tags themselves (``all-4-cred`` lifts all of it)
-_APPROVED = {'root': None, 'at': 0, 'value': None}
-_APPROVED_LOCK = threading.Lock()
-
-
-# Templates whose absence quietly removes a whole capability: their exclusion is an error, not a policy statistic.
-ESSENTIAL_TEMPLATES = ('http/technologies/tech-detect.yaml',)
-
-
-def _policy_reason(problem):
-    """A skip reason without the per-template detail, so equal reasons count together ("forbidden key 'payloads'")."""
-    reason = re.sub(r'^template not validated: ', '', str(problem)).strip()
-    return re.sub(r'\d+', 'N', reason)[:90]
-
-
-def _report_policy(revision, count, skipped, essential_skipped):
-    """Put the outcome of a template-policy snapshot in the activity and error log, once per snapshot revision for all processes.
-    An empty snapshot, or an essential template the policy excluded, is logged as failed; otherwise a done line with the counts."""
-    total = count + sum(skipped.values())
-    top = ', '.join(f'{reason} ({n})' for reason, n in sorted(skipped.items(), key=lambda kv: -kv[1])[:4])
-    message = f'Nuclei template policy approved {count:,} of {total:,} installed templates'
-    if skipped:
-        message += f'; skipped: {top}'
-    failed = not count or bool(essential_skipped)
-    if essential_skipped:
-        message = (f'Nuclei template policy excludes {", ".join(sorted(essential_skipped))} '
-                   f'({"; ".join(sorted(set(essential_skipped.values())))}), so that detection does not run. ' + message)
-    (logger.error if failed else logger.info)('%s', message)
-    try:
-        from django.core.cache import cache
-        if not cache.add(f'cvengine:nuclei-policy-logged:{revision}', 1, timeout=7 * 86400):
-            return
-    except Exception:  # noqa: BLE001 - without the cache every process logs its own snapshot
-        pass
-    from cveFeed import activity
-    activity.log('run_check', message, status='failed' if failed else 'done', approved=count, installed=total,
-                 skipped=dict(sorted(skipped.items(), key=lambda kv: -kv[1])[:10]), essential_excluded=essential_skipped)
 
 
 def policy_rev():
@@ -69,107 +31,28 @@ def policy_rev():
     return TEMPLATE_POLICY_REV
 
 
-def approved_templates():
-    with _APPROVED_LOCK:
-        return _approved_templates_locked()
+def policy_flags():
+    """``(read_only, allow_credentials)`` of the policy in force, as the template index reads them (``cvengine_scanner.template_index.policy_problem``)."""
+    from cveFeed import validation
+    return not validation.all_templates_allowed(), validation.credential_checks_allowed()
 
 
-def with_approved_snapshot(use):
-    """``use(directory, revision, count, rev)`` for the current approved snapshot, called while the snapshot lock is held, so what ``use`` does
-    with the directory (the Sentinel template bundle is packed from it) cannot race a rebuild of the snapshot."""
-    with _APPROVED_LOCK:
-        directory, revision, count = _approved_templates_locked()
-        return use(directory, revision, count, _APPROVED.get('rev'))
-
-
-def approved_snapshot_cached():
-    """The current snapshot ``(directory, revision, count)`` when it is already built and still fresh, else ``None``: never builds one, never
-    waits for the lock (a snapshot build can take a while), for a caller that only wants what is cheap to know."""
-    from cveFeed import templategen
-    value = _APPROVED['value']
-    if (value and _APPROVED['root'] == os.path.realpath(templategen.TEMPLATES_ROOT) and _APPROVED.get('rev') == policy_rev()
-            and os.path.isdir(value[0]) and time.monotonic() - _APPROVED['at'] < 3600):
-        return value
-    return None
-
-
-def _approved_templates_locked():
-    """Snapshot only installed templates passing the same destination/read-only gate as targeted checks."""
-    from cveFeed import templategen, validation
-    root = os.path.realpath(templategen.TEMPLATES_ROOT)
-    rev = policy_rev()
-    if (_APPROVED['root'] == root and _APPROVED.get('rev') == rev and _APPROVED['value'] and os.path.isdir(_APPROVED['value'][0])
-            and time.monotonic() - _APPROVED['at'] < 3600):
-        return _APPROVED['value']
-    if not os.path.isdir(root):
-        raise RuntimeError('Nuclei template library is unavailable')
-    dest = tempfile.mkdtemp(prefix='cvengine-approved-templates-')
-    digest = hashlib.sha256(rev.encode())
-    count, skipped, essential_skipped = 0, {}, {}
-    try:
-        for base, dirs, files in os.walk(root):
-            dirs[:] = sorted(d for d in dirs if not os.path.islink(os.path.join(base, d)))
-            for name in sorted(files):
-                if not name.endswith(('.yaml', '.yml')):
-                    continue
-                path = os.path.join(base, name)
-                try:
-                    if os.path.islink(path) or os.path.getsize(path) > validation.MAX_INSTALLED_TEMPLATE_BYTES:
-                        continue
-                    with open(path, 'rb') as source:
-                        content = source.read(validation.MAX_INSTALLED_TEMPLATE_BYTES + 1)
-                except OSError:
-                    continue
-                relative = os.path.relpath(path, root)
-                problem = ('larger than the template size limit' if len(content) > validation.MAX_INSTALLED_TEMPLATE_BYTES
-                           else validation.installed_template_problem(content.decode('utf-8', 'replace')))
-                if problem:
-                    reason = _policy_reason(problem)
-                    skipped[reason] = skipped.get(reason, 0) + 1
-                    if relative in ESSENTIAL_TEMPLATES:
-                        essential_skipped[relative] = reason
-                    continue
-                target = os.path.join(dest, relative)
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                with open(target, 'wb') as copy:
-                    copy.write(content)
-                digest.update(relative.encode())
-                digest.update(content)
-                count += 1
-        if not count:
-            _report_policy(rev, 0, skipped, essential_skipped)
-            raise RuntimeError('No installed Nuclei templates passed the read-only policy')
-    except Exception:
-        shutil.rmtree(dest, ignore_errors=True)
-        raise
-    old = _APPROVED['value']
-    revision = digest.hexdigest()[:12]
-    _report_policy(revision, count, skipped, essential_skipped)
-    if old and old[1] == revision and os.path.isdir(old[0]):
-        shutil.rmtree(dest, ignore_errors=True)
-        _APPROVED['at'] = time.monotonic()
-        return old
-    retained = _APPROVED.setdefault('retained', [])
-    if old:
-        retained.append((old[0], time.monotonic()))
-    # A Sentinel's template bundle can be packed from an immutable snapshot for hours after the next one is built.
-    for path, created in list(retained):
-        if time.monotonic() - created > 6 * 3600:
-            shutil.rmtree(path, ignore_errors=True)
-            retained.remove((path, created))
-    _APPROVED.update(root=root, at=time.monotonic(), value=(dest, revision, count), rev=rev)
-    return _APPROVED['value']
+def approved_revision():
+    """A short name of the approved template set in force: the policy and the template index it is read from (a new release, a new rule or another policy
+    is another set, so the hosts are due for it). Raises ``RuntimeError`` when the installed scanner library has no template index: no nuclei work can be
+    planned without one, and nothing falls back to a set this server would have to keep."""
+    from cvengine_scanner import template_index
+    index = template_index.load()
+    if not index['templates']:
+        raise RuntimeError('the installed Sentinel library has no nuclei template index')
+    return hashlib.sha256(f'{policy_rev()}:{index["sha256"]}'.encode()).hexdigest()[:12]
 
 
 def cve_service(cve_id):
     """Coverage key changes when this CVE's selected template or execution policy changes."""
-    from cveFeed.validation import resolve_template
+    from cveFeed.validation import resolve_template, template_fingerprint
     template_path, _ = resolve_template(cve_id)
-    try:
-        with open(template_path, 'rb') as source:
-            revision = hashlib.sha256(policy_rev().encode() + source.read(200_001)).hexdigest()[:10]
-    except OSError:
-        revision = hashlib.sha256(policy_rev().encode()).hexdigest()[:10]
+    revision = hashlib.sha256(policy_rev().encode() + template_fingerprint(template_path).encode()).hexdigest()[:10]
     return f'nuclei-cve:{cve_id}:{revision}'[:64]
 
 
@@ -195,7 +78,7 @@ def build_targets(hostnames, ips, ports):
 def scan_targets(scan):
     """Hostnames, IPs and (host, port) pairs discovered for ``scan``."""
     from startScan.models import Subdomain, open_ports
-    from targetApp.target_types import blocked_names, internal_scope_active, is_scannable_ip, sentinel_only_target
+    from targetApp.target_types import blocked_address, internal_scope_active, is_scannable_ip, sentinel_only_target
     from cveFeed.exclusions import excluded_names, normalize
     hostnames, ips, ports = set(), set(), set()
     internal = internal_scope_active()  # an internal scan (cveFeed.internal_scan) may target the project's own internal addresses: its stream is a Sentinel's
@@ -207,11 +90,11 @@ def scan_targets(scan):
     subs = [s for s in Subdomain.objects.filter(scan_history=scan).prefetch_related('ip_addresses__ports')
             if not (banned and normalize(s.name) in banned) and gate.allows(project, s.name, unattended=False)
             and (not scan.domain.exact_host_only() or scan.domain.includes_host(s.name))]  # =example.com: only that host is ever a target
-    # a discovered name is attacker-controlled DNS: never hand a scanner one that points inside (one parallel, bounded pass)
-    pointing_inside = blocked_names([s.name for s in subs], project=scan.domain.project_id)
+    # a discovered name is attacker-controlled DNS, and this server looks none up: the Sentinel judges every address a name resolves to when it runs, and an
+    # outside pass is sent as external work (``sentinel_dispatch._nuclei_target``), so a name that points inside is refused there and named, never scanned
     for sub in subs:
-        if sub.name in pointing_inside and not (internal and sentinel_only_target(sub.name, scan.domain.project_id)):
-            continue
+        if blocked_address(sub.name, project=scan.domain.project_id) and not (internal and sentinel_only_target(sub.name, scan.domain.project_id)):
+            continue  # a host named by an address is judged as that address (no lookup: a name is judged by the Sentinel)
         hostnames.add(sub.name)
         for ip in sub.ip_addresses.all():
             if gate.refusal(project, ip.address, unattended=False, derived=True):

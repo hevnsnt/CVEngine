@@ -634,8 +634,6 @@ class SignedRouteTests(Fixture):
 	redirects to a login page. Nothing here is sent from this server: the pass is handed no credential value, only the reference."""
 
 	def setUp(self):
-		patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)
-		patcher.start()
 		self.asked = mock.patch.object(auth_routes, '_ask', side_effect=self.ask).start()
 		self.addCleanup(mock.patch.stopall)
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
@@ -809,10 +807,9 @@ class SignedRouteTests(Fixture):
 		scan = self.scan(names=('app.example.test', 'api.app.example.test'))
 		ra.run_route_auth(scan.id)
 		self.calls.clear()
-		with mock.patch('targetApp.target_types.resolves_to_blocked', side_effect=lambda host, **k: host == 'api.app.example.test'):
+		with mock.patch('targetApp.target_types.blocked_address', side_effect=lambda host, **k: host == 'api.app.example.test'):
 			auth_routes.run_signed_in(scan.id, force=True)
-		self.assertFalse([c for c in self.calls if 'api.app.example.test' in c[0]])
-		self.assertTrue(self.signed_calls())
+		self.assertTrue(self.signed_calls())  # a name is judged by the Sentinel that connects to it: the server looks none up (contract 11)
 
 	def test_this_server_has_no_way_left_to_send_a_stored_sign_in(self):
 		self.assertFalse(hasattr(ra, 'probe_url'))  # this server has no GET of any kind: anonymous or signed in, the request is a Sentinel's
@@ -831,10 +828,6 @@ def nuclei_line(host='https://app.example.test', matched='https://app.example.te
 
 class NucleiTests(Fixture):
 	def setUp(self):
-		for name in ('targetApp.target_types.resolves_to_blocked',):
-			patcher = mock.patch(name, return_value=False)
-			patcher.start()
-			self.addCleanup(patcher.stop)
 		self.addCleanup(mock.patch.stopall)
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		self.runs = []
@@ -1051,12 +1044,8 @@ class NucleiTests(Fixture):
 			self.stream(), force=True)
 		self.assertEqual(out['findings'], 1)
 		run, = self.signed_runs()
+		# a name that now resolves somewhere no scanner may go is refused by the built-in scanner when it connects: the server looks no name up
 		self.assertEqual(run['targets'], ['https://app.example.test', 'https://bad.app.example.test'])
-		self.runs.clear()
-		with mock.patch('targetApp.target_types.resolves_to_blocked', side_effect=lambda host, **k: host == 'bad.app.example.test'):
-			auth_nuclei.run_authenticated(scan, AuthScope.for_domain(self.domain), ['app.example.test', 'bad.app.example.test'], self.stream(), force=True)
-		run, = self.signed_runs()
-		self.assertEqual(run['targets'], ['https://app.example.test'])  # it now resolves to something a scanner must not touch
 
 	def test_the_ledger_skips_a_repeat_and_a_replaced_credential_runs_again(self):
 		cred = self.make()

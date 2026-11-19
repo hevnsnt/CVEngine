@@ -9,7 +9,8 @@ How it works. This server never talks to gvmd and never runs a scan: the Sentine
 the target and the task). A beat entry calls ``tick`` every 15 minutes, and a tick does one small step, so a worker restart loses nothing:
 
 * nothing is running: pick the next opted-in project with hosts that are due (once a week each, ``ledger`` service ``openvas``), vet every host
-  (``scannable_hosts``, exclusions, ``pinned_transport.resolve``: only the vetted numeric address is ever put in a task, never a name), and hand one
+  (``scannable_hosts``, exclusions, ``_address``: only a stored numeric address a scanner may touch is ever put in a task, never a name, and this
+  server looks no name up), and hand one
   batch to a Sentinel that declares ``openvas`` for the project (``dispatch_to_sentinel``). With no such Sentinel the hosts stay due;
 * a task is running: ask the ``SentinelTask``'s status; when it is done import the reported results (``poll_sentinel``), when it failed, expired or was
   lost say so. At most one task runs at a time (a unique constraint on ``OpenvasRun``).
@@ -183,11 +184,16 @@ def refuse_reason(ip):
 
 
 def _address(host, project_id):
-    """The one vetted numeric address of ``host`` (IPv4 first); raises ``ValueError`` when it resolves somewhere prohibited."""
-    from cveFeed import pinned_transport
-    addresses = pinned_transport.resolve(host, 443, project=project_id)
-    ordered = sorted(addresses, key=lambda item: item[0] != 2)  # AF_INET is 2
-    return ordered[0][1][0]
+    """The one numeric address of ``host`` a task names (IPv4 first): its newest stored address that a scanner may touch (what a Sentinel's passes
+    recorded). This server looks no name up; the Sentinel judges the address again before OpenVAS is given it (``check_hosts``). Raises ``ValueError``
+    when there is none."""
+    from targetApp.target_types import is_scannable_ip
+    sub = _latest_row(project_id, host, scoped=True)
+    addresses = [ip.address for ip in sub.ip_addresses.all() if ip.address] if sub is not None else []
+    usable = sorted((a for a in addresses if is_scannable_ip(a, project=project_id)), key=lambda a: ':' in a)
+    if not usable:
+        raise ValueError('no stored address of this host is one a scanner may use')
+    return usable[0]
 
 
 def _latest_row(project_id, host, scoped=False):
@@ -275,8 +281,8 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
     ``forced`` names it; it is on a CDN or a platform other tenants share, or at an address that is not the project's to test (documentation
     ranges, this server, the tailnet), or the same address as a host already chosen; it was scanned within a week or failed within three days.
     ``forced`` lifts only the heat gate, never the ownership refusals. Order: Fire before Smoke, then the most fire reasons, then the most smoke
-    reasons, then the longest-waiting; a forced host with no heat comes last. ``resolve=None`` reads the stored address (no DNS): the explanation
-    shown to people. The real selection passes ``_address``. ``internal`` selects the project's declared internal networks, whose names are their
+    reasons, then the longest-waiting; a forced host with no heat comes last. ``resolve=None`` reads the stored address: the explanation
+    shown to people. The real selection passes ``_address`` (the stored address a scanner may touch; no name is looked up). ``internal`` selects the project's declared internal networks, whose names are their
     own address and which only a Sentinel inside can reach."""
     from cveFeed import exclusions, ledger
     from targetApp.target_types import internal_networks, scannable_hosts, sentinel_only_target
@@ -337,13 +343,13 @@ def assess(project_id, candidates, forced=(), gate=True, resolve=None, blocked=N
         if internal:
             ip = host
         elif not scannable_hosts([host], resolver=blocked, project=project_id):
-            refuse(host, heat, 'a scanner may not be pointed at it (a prohibited address range, or it does not resolve to a public address)')
+            refuse(host, heat, 'a scanner may not be pointed at it (a prohibited address range)')
             continue
         else:
             try:
                 ip = resolve(host, project_id) if resolve else _stored_address(sub)
             except (ValueError, OSError):
-                refuse(host, heat, 'the name does not resolve to an address a scanner may use', retry=True)
+                refuse(host, heat, 'no stored address of the host is one a scanner may use', retry=True)
                 continue
             if not ip:
                 refuse(host, heat, 'no address is recorded for the host yet')
@@ -387,7 +393,7 @@ def _shared_address(ip):
 
 def due(project_id, hosts, resolve=None, blocked=None):
     """``[(host, ip, domain_id)]`` of ``hosts`` that are due, whatever their heat: vetted (the same gate as every other scanner,
-    ``scannable_hosts`` and ``pinned_transport.resolve``, plus ``assess``'s ownership refusals), not excluded or archived, not scanned within a
+    ``scannable_hosts`` and the stored address (``_address``), plus ``assess``'s ownership refusals), not excluded or archived, not scanned within a
     week and not failed within three days, never-scanned first, one host per address. ``next_batch`` adds the heat gate."""
     return assess(project_id, hosts, gate=False, resolve=resolve or _address, blocked=blocked)[0]
 
@@ -434,7 +440,7 @@ QUEUE_REASONS = (
     ('bug_bounty', lambda r: r.startswith('bug bounty:'), 'held back by bug bounty scope'),
     ('manual_only', lambda r: r.startswith('the target is set to manual only'), 'on manual only targets'),
     ('single_host_target', lambda r: r.startswith('its target is set to this host only'), 'under a single host target'),
-    ('no_usable_address', lambda r: r.startswith(('a scanner may not be pointed', 'the name does not resolve', 'no address is recorded'))
+    ('no_usable_address', lambda r: r.startswith(('a scanner may not be pointed', 'the name does not resolve', 'no stored address', 'no address is recorded'))
      or r.endswith("not the project's to test"), 'with no address a scanner may use'),
     ('same_address', lambda r: r.startswith('the same address as'), 'sharing an address with another host'),
     ('not_in_project', lambda r: r == 'not a host of this project', 'not hosts of this project'),

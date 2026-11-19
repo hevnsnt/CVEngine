@@ -29,10 +29,12 @@ from reNgine.ai_providers import UNTRUSTED_NOTICE, clean_text
 
 logger = logging.getLogger(__name__)
 
-TEMPLATES_ROOT = os.environ.get("NUCLEI_TEMPLATES_DIR", "/root/nuclei-templates")
-# Deliberately NOT under TEMPLATES_ROOT: the blanket `nuclei -l` pass loads everything in the default template
-# directory, which would run an AI-written template against every tenant's hosts. These run only via explicit -t.
+# The validated AI-written templates, kept here (and in the database) because this server wrote and approved them. The community templates are not:
+# the server keeps no copy of them. An installed template is named by a reference into the pinned release the Sentinels run, ``INSTALLED_PREFIX`` and its
+# path in the release (``nuclei-templates:http/cves/2021/CVE-2021-44228.yaml``), and what this server knows about it comes from the scanner library's
+# template index (``cvengine_scanner.template_index``).
 GENERATED_DIR = os.environ.get("CVENGINE_GENERATED_TEMPLATES_DIR", "/root/cvengine-generated-templates")
+INSTALLED_PREFIX = "nuclei-templates:"
 MAX_TEMPLATE_BYTES = 20000
 RUN_TIMEOUT = 180
 CHUNK_HOSTS = 100  # hosts per template check
@@ -620,15 +622,6 @@ def approved_text(path):
     return '' if problem else (text or '')
 
 
-def evidence_of_template(path):
-    """``template_evidence`` of the approved template at ``path`` (BEHAVIOR_EVIDENCE when it cannot be read: never a downgrade)."""
-    text = approved_text(path)
-    try:
-        return template_evidence(text) if text else BEHAVIOR_EVIDENCE
-    except Exception:  # noqa: BLE001 - never downgrade on a template this cannot read
-        return BEHAVIOR_EVIDENCE
-
-
 # ----------------------------------------------------------------------------- what one hit showed: the counterfactual
 
 # ``template_evidence`` reads the template alone and is an allowlist, so a version check written in a shape it does not list (a product word
@@ -779,14 +772,6 @@ def outcome_evidence(template_text, outcome, static):
     return hit_evidence(template_text, outcome, static)
 
 
-def evidence_of_hit(path, outcome):
-    """``outcome_evidence`` of one outcome of the approved template at ``path`` (BEHAVIOR_EVIDENCE when it cannot be read)."""
-    text = approved_text(path)
-    if not text:
-        return BEHAVIOR_EVIDENCE
-    return outcome_evidence(text, outcome, template_evidence(text))
-
-
 def is_confirmed(outcome):
     """Whether a template test outcome demonstrates the flaw: it matched, and the template is not a version-class one."""
     return bool(outcome.get("vulnerable")) and outcome.get("template_evidence") != VERSION_EVIDENCE
@@ -853,11 +838,21 @@ def revision_id(cve_id, number):
     return f"{str(cve_id).lower()}-r{int(number)}"
 
 
+def installed_relative(path):
+    """The path in the pinned release of an installed template reference (``INSTALLED_PREFIX`` + path), or ``None`` for anything else."""
+    path = str(path or '')
+    return path[len(INSTALLED_PREFIX):] if path.startswith(INSTALLED_PREFIX) else None
+
+
 def find_existing_template(cve_id, roots=None):
-    """Template coverage: paths of installed templates named for ``cve_id``."""
-    roots = roots or [TEMPLATES_ROOT, GENERATED_DIR]
+    """Template coverage for ``cve_id``: the paths of the validated AI-written templates named for it (under ``GENERATED_DIR``, or ``roots``), then the
+    references (``INSTALLED_PREFIX`` + path) of the templates of the pinned release named for it, from the scanner library's template index. This server
+    holds no copy of the release: a Sentinel reads the file from its own image."""
+    from cvengine_scanner import template_index
+    roots = roots or [GENERATED_DIR]
     # case-insensitive: upstream names files CVE-..., generated ones use the lowercase id
-    return sorted(_template_index(roots).get(cve_id.lower(), []))
+    generated = sorted(_template_index(roots).get(cve_id.lower(), []))
+    return generated + [INSTALLED_PREFIX + path for path, _entry in template_index.for_cve(cve_id)]
 
 
 def validate_anywhere(text, project=None):
@@ -882,35 +877,68 @@ def _host_key(value):
 
 
 def run_template(path, hosts, project=None):
-    """Run one approved template against ``hosts`` on the built-in scanner (a ``nuclei_validate`` task in mode ``test``, filed under ``project``,
-    the one the hosts belong to: never another tenant's); returns a ``{host, vulnerable, output}`` per host, in order. The scanner runs exactly the
-    bytes ``approved_template`` inspected. Nothing runs on this server: a host no scanner took, or a call with no project, is reported as not
-    tested (an error outcome) and stays due.
-
-    One more look at the names first: a name a tenant controls can answer a public address when the host list is vetted and an internal one later,
-    so the names are resolved again here, at launch, and one that now resolves to a blocked address is reported as not tested instead of being
-    sent to a scanner. (The scanner resolves the name itself a moment later: this narrows the window, it does not close it.)"""
-    from targetApp.target_types import IP, bare_host, blocked_names, classify_target
+    """Run one approved template against ``hosts`` on a scanner (a ``nuclei_validate`` task in mode ``test``, filed under ``project``, the one the hosts
+    belong to: never another tenant's); returns a ``{host, vulnerable, output, template_evidence}`` per host, in order. The scanner runs exactly the
+    bytes that were approved: an AI-written template's text (``approved_template``), or an installed one named by its path and sha256 in the pinned
+    release, which the Sentinel reads from its own image. Nothing runs on this server and no host name is looked up here: the Sentinel judges every
+    address a name resolves to and reports a host it refuses as not tested. A host no scanner took, or a call with no project, is reported as not
+    tested (an error outcome) and stays due."""
     hosts = [hosts] if isinstance(hosts, str) else list(hosts)
-    names = {bare_host(h) for h in hosts}
-    blocked = blocked_names([n for n in names if n and classify_target(n) != IP]) if hosts else set()
-    allowed = [h for h in hosts if bare_host(h) not in blocked]
-    ran = iter(_run_on_scanner(path, allowed, project) if allowed else [])
-    return [{"host": h, "vulnerable": False, "output": "", "error": "the host name now resolves to an address that may not be scanned"}
-            if bare_host(h) in blocked else next(ran) for h in hosts]
+    return _run_on_scanner(path, hosts, project) if hosts else []
+
+
+def _not_tested(hosts, why):
+    return [{"host": host, "vulnerable": False, "output": "", "error": why} for host in hosts]
 
 
 def _run_on_scanner(path, hosts, project):
-    """The outcomes of the template at ``path`` over ``hosts``, from the built-in scanner (``sentinel_dispatch.try_template_test``), one per host."""
+    """The outcomes of the template at ``path`` over ``hosts``, from a scanner (``sentinel_dispatch.try_template_test``, or
+    ``try_installed_template_test`` for an installed template), one per host, each with what it shows (``template_evidence``: ``outcome_evidence`` of
+    the text that ran; an installed template's text comes back with the Sentinel's result)."""
     if project is None:
-        return [{"host": host, "vulnerable": False, "output": "", "error": "not tested: a template check needs the project the host belongs to"}
-                for host in hosts]
-    from cveFeed.validation import approved_template
-    text, problem = approved_template(path)
-    if problem:
-        return [{"host": host, "vulnerable": False, "output": "", "error": problem} for host in hosts]
+        return _not_tested(hosts, "not tested: a template check needs the project the host belongs to")
+    from cveFeed.validation import approved_template, installed_approval
     from agentapi import sentinel_dispatch
-    return sentinel_dispatch.try_template_test(text, hosts, project)
+    relative = installed_relative(path)
+    if relative is not None:
+        entry, problem = installed_approval(relative)
+        if problem:
+            return _not_tested(hosts, problem)
+        outcomes, text = sentinel_dispatch.try_installed_template_test(relative, entry["sha256"], hosts, project)
+        if not text:  # a hit cannot be read without the text that ran (a version check is not a confirmation): not tested, it stays due
+            outcomes = [{"host": o.get("host"), "vulnerable": False, "output": "",
+                         "error": "not tested: the scanner did not send back the template it ran, so its hit cannot be read"}
+                        if o.get("vulnerable") and not o.get("error") else o for o in outcomes]
+    else:
+        text, problem = approved_template(path)
+        if problem:
+            return _not_tested(hosts, problem)
+        outcomes = sentinel_dispatch.try_template_test(text, hosts, project)
+    try:
+        static = template_evidence(text) if text else BEHAVIOR_EVIDENCE
+    except Exception:  # noqa: BLE001 - never downgrade on a template this cannot read
+        static = BEHAVIOR_EVIDENCE
+    for outcome in outcomes:
+        outcome["template_evidence"] = outcome_evidence(text, outcome, static) if text else BEHAVIOR_EVIDENCE
+        outcome["template_static"] = static
+    return outcomes
+
+
+def with_evidence(path, outcomes):
+    """``outcomes`` with ``template_evidence`` on each that has none yet (``_run_on_scanner`` sets it from the text that ran): read from the approved text
+    at ``path``, an AI-written template's. An installed template's text is not on this server, so it is behaviour: never a downgrade."""
+    if all('template_evidence' in o for o in outcomes):
+        return outcomes
+    text = approved_text(path)
+    try:
+        static = template_evidence(text) if text else BEHAVIOR_EVIDENCE
+    except Exception:  # noqa: BLE001 - never downgrade on a template this cannot read
+        static = BEHAVIOR_EVIDENCE
+    for outcome in outcomes:
+        if 'template_evidence' not in outcome:
+            outcome['template_evidence'] = outcome_evidence(text, outcome, static) if text else BEHAVIOR_EVIDENCE
+            outcome.setdefault('template_static', static)
+    return outcomes
 
 
 def _test_chunk(path, hosts, project=None):
@@ -919,29 +947,7 @@ def _test_chunk(path, hosts, project=None):
     return run_template(path, hosts, project=project)
 
 
-def templates_dir_problem(generated=None, root=None):
-    """Why the generated-templates directory and nuclei's template root must not be set as they are, or "" when they are apart.
-    AI-written templates are run only by explicit ``-t``; the blanket ``nuclei -l`` pass loads everything under the template root,
-    so a generated directory inside it would run unproven templates against every tenant's hosts, and a root inside the generated
-    directory would put nuclei's own templates in the directory a factory reset empties."""
-    generated = os.path.realpath(generated or GENERATED_DIR)
-    root = os.path.realpath(root or TEMPLATES_ROOT)
-
-    def inside(child, parent):
-        return child == parent or child.startswith(parent.rstrip(os.sep) + os.sep)
-    if inside(generated, root):
-        return (f"CVENGINE_GENERATED_TEMPLATES_DIR ({generated}) is inside the nuclei templates directory ({root}): the blanket nuclei "
-                "pass would run AI-written templates against every host. Set it to a directory outside it.")
-    if inside(root, generated):
-        return (f"NUCLEI_TEMPLATES_DIR ({root}) is inside CVENGINE_GENERATED_TEMPLATES_DIR ({generated}): a factory reset empties "
-                "that directory. Keep the two apart.")
-    return ""
-
-
 def save_template_file(template_id, yaml_text):
-    problem = templates_dir_problem()
-    if problem:
-        raise RuntimeError(problem)
     if not ID_RE.fullmatch(template_id):
         raise ValueError('invalid generated template filename')
     os.makedirs(GENERATED_DIR, exist_ok=True)
@@ -1391,23 +1397,18 @@ def run_cve_tests(cve, hosts, ai=False, project=None):
         return {"source": "candidate", "template": "", "results": [], "job": job.pk,
                 "reason": "an AI draft is being written; it is validated automatically when it lands and is never run on a host until every gate has passed"}
     results = []
-    # what a hit of this template shows: the flaw, or the version string only. The template alone says so for the shapes
-    # ``template_evidence`` lists; for any other, each hit is asked itself (``hit_evidence``)
-    text = approved_text(path)
-    try:
-        static = template_evidence(text) if text else BEHAVIOR_EVIDENCE
-    except Exception:  # noqa: BLE001 - never downgrade on a template this cannot read
-        static = BEHAVIOR_EVIDENCE
+    # what a hit of this template shows: the flaw, or the version string only. The template alone says so for the shapes ``template_evidence`` lists; for
+    # any other, each hit is asked itself (``hit_evidence``). ``_run_on_scanner`` reads it from the text that ran and puts it on each outcome
+    static = BEHAVIOR_EVIDENCE
     from targetApp.target_types import scannable_hosts
-    hosts = scannable_hosts(hosts, project=project)  # whatever called us, nothing that resolves to a blocked address is ever tested
+    hosts = scannable_hosts(hosts, project=project)  # whatever called us: exclusions, archives and scope (a name is judged by the Sentinel that runs it)
     for start in range(0, len(hosts), CHUNK_HOSTS):
         chunk = hosts[start:start + CHUNK_HOSTS]
         label = chunk[0] if len(chunk) == 1 else f'{len(chunk)} hosts'
         with activity.step('run_check', f'Running the {cve.cve_id} check against {label}', project=project,
                            cve_id=cve.cve_id) as handle:
-            outcomes = _test_chunk(path, chunk, project=getattr(project, 'pk', project))
-            for outcome in outcomes:
-                outcome['template_evidence'] = outcome_evidence(text, outcome, static)
+            outcomes = with_evidence(path, _test_chunk(path, chunk, project=getattr(project, 'pk', project)))
+            static = next((o.get('template_static') for o in outcomes if o.get('template_static')), static)
             errors = sum(bool(o.get('error')) for o in outcomes)
             versions = sum(is_version_hit(o) for o in outcomes)
             handle.done_message = (f'{errors} of {len(outcomes)} checks failed for {cve.cve_id}' if errors else

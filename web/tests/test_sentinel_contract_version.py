@@ -82,7 +82,8 @@ class ReportingTests(TestCase):
         agent, _ = self.register(contract_version=1)
         agent.refresh_from_db()
         everything = set(agent.capabilities)
-        self.assertEqual(broker.effective_capabilities(agent) & set(SentinelTask.KINDS), everything & set(SentinelTask.KINDS))
+        # every kind it lists, except the nuclei kinds: before contract 11 a Sentinel cannot build its template set from the template index
+        self.assertEqual(broker.effective_capabilities(agent) & set(SentinelTask.KINDS), (everything & set(SentinelTask.KINDS)) - set(broker.TEMPLATE_INDEX_KINDS))
         newer = {**contract.load(), 'contract_version': 2, 'kind_since': {**contract.load()['kind_since'], 'nmap': 2}}
         with mock.patch.object(contract, 'load', return_value=newer):
             caps = broker.effective_capabilities(agent)

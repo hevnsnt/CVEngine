@@ -152,35 +152,38 @@ class RankedOfferTests(TestCase):
 class TemplateIndexTests(TestCase):
 	"""The installed templates' own vendor, product and CPE metadata map a name to the tags that product's templates use."""
 
-	def make(self, directory, name, tags, vendor='', product='', cpe=''):
-		import os
-		os.makedirs(directory, exist_ok=True)
-		meta = ''.join(f'  {k}: {v}\n' for k, v in (('vendor', vendor), ('product', product)) if v)
-		classification = f'  classification:\n    cpe: {cpe}\n' if cpe else ''
-		with open(os.path.join(directory, name), 'w') as f:
-			f.write(f'id: {name[:-5]}\ninfo:\n  name: x\n  severity: high\n{classification}  metadata:\n{meta}  tags: {tags}\n')
+	def make(self, name, tags, vendor='', product='', cpe=''):
+		"""One entry of a template index (``cvengine_scanner.template_index``), as the Sentinel library's generator records a template: the server keeps no
+		template files and reads only the index."""
+		entry = {'sha256': f'{len(self.index["templates"]):064x}', 'id': name[:-5], 'tags': sorted(tags.split(','))}
+		if vendor:
+			entry['vendor'] = vendor
+		if product:
+			entry['product'] = product
+		if cpe:
+			entry['cpe'] = ':'.join(cpe.split(':')[2:5])
+		self.index['templates'][f'http/{name}'] = entry
 
 	def setUp(self):
-		import tempfile
-		self.dir = tempfile.mkdtemp()
-		self.make(self.dir, 'a.yaml', 'cve,cve2024,panos,paloalto,globalprotect,rce', vendor='paloaltonetworks', product='pan-os')
-		self.make(self.dir, 'b.yaml', 'cve,cve2023,panos,paloalto,kev', vendor='paloaltonetworks', product='pan-os')
-		self.make(self.dir, 'c.yaml', 'cve,cve2021,apache,httpd,rce', cpe='cpe:2.3:a:apache:http_server:2.4.49:*:*:*:*:*:*:*')
-		self.make(self.dir, 'd.yaml', 'tech,detect,springboot', product='spring_boot')
-		nt._installed.pop(self.dir, None)
-		self.addCleanup(nt._installed.pop, self.dir, None)
+		self.index = {'nuclei_templates': 'test', 'rules': 1, 'reasons': [], 'templates': {}, 'sha256': 'e' * 64}
+		self.make('a.yaml', 'cve,cve2024,panos,paloalto,globalprotect,rce', vendor='paloaltonetworks', product='pan-os')
+		self.make('b.yaml', 'cve,cve2023,panos,paloalto,kev', vendor='paloaltonetworks', product='pan-os')
+		self.make('c.yaml', 'cve,cve2021,apache,httpd,rce', cpe='cpe:2.3:a:apache:http_server:2.4.49:*:*:*:*:*:*:*')
+		self.make('d.yaml', 'tech,detect,springboot', product='spring_boot')
+		nt._installed.pop(self.index['sha256'], None)
+		self.addCleanup(nt._installed.pop, self.index['sha256'], None)
 
 	def test_it_reads_tags_vendors_products_and_cpes(self):
-		index = nt.installed_index(self.dir)
+		index = nt.installed_index(self.index)
 		self.assertIn('globalprotect', index.tags)
 		self.assertIn('paloaltonetworks', index.products)
 		self.assertIn('panos', index.products)
 		self.assertIn('apache', index.products)  # from the CPE
 		self.assertIn('httpserver', index.products)
-		self.assertEqual(nt.installed_tags(self.dir), index.tags)
+		self.assertEqual(nt.installed_tags(self.index), index.tags)
 
 	def test_a_name_resolves_to_the_tags_that_products_templates_carry(self):
-		index = nt.installed_index(self.dir)
+		index = nt.installed_index(self.index)
 		got = nt._index_tags(['Palo Alto Networks'], index)
 		self.assertEqual(got, {'panos', 'paloalto'})  # not cve, kev, rce, or a year tag
 		self.assertIn('panos', nt._index_tags(['PAN-OS'], index))
@@ -189,7 +192,7 @@ class TemplateIndexTests(TestCase):
 		self.assertEqual(nt._index_tags(['Web Server'], index), set())
 
 	def test_the_offer_uses_it_and_ranks_it_above_a_partial_match(self):
-		index = nt.installed_index(self.dir)
+		index = nt.installed_index(self.index)
 		allowed = set(index.tags) | {'pan-os-extra'}
 		out = nt.pertinent_tags([('Palo Alto Networks', 'GlobalProtect')], allowed, index=index)
 		self.assertIn('panos', out)
@@ -197,7 +200,7 @@ class TemplateIndexTests(TestCase):
 		self.assertNotIn('cve', out)
 
 	def test_without_templates_nothing_breaks(self):
-		self.assertEqual(nt.installed_index('/no/such/dir').tags, frozenset())
+		self.assertEqual(nt.installed_index({'nuclei_templates': '', 'rules': 0, 'reasons': [], 'templates': {}, 'sha256': 'f' * 64}).tags, frozenset())
 		self.assertEqual(nt._index_tags(['nginx'], None), set())
 
 

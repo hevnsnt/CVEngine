@@ -63,8 +63,7 @@ class FullScanBase(TestCase):
 		self.domain = Domain.objects.create(name='fs.test', project=self.project, insert_date=now)
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		self.scan = ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=now, scan_status=2, results_dir='/tmp')
-		patches = [mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False),
-			mock.patch('cveFeed.tasks.run_hygiene_task.delay'),
+		patches = [mock.patch('cveFeed.tasks.run_hygiene_task.delay'),
 			mock.patch('cveFeed.fullscan.CLAIM_KEY', 'cvengine:fullscan:test'),
 			# These fixtures do not build full core-stage coverage; the deep-scan coverage gate (see
 			# cveFeed.coverage_topup.backlog_exists, tests/test_coverage_gate.py) is exercised on its own there.
@@ -155,7 +154,7 @@ class SelectionTests(FullScanBase):
 	def test_a_host_that_resolves_somewhere_blocked_is_skipped(self):
 		self.ip('192.0.2.1', name='rebind.fs.test')
 		ok = self.ip('192.0.2.2', name='fine.fs.test', scanned=timezone.now())
-		with mock.patch('targetApp.target_types.resolves_to_blocked', side_effect=lambda name: name == 'rebind.fs.test'):
+		with mock.patch('targetApp.target_types.blocked_address', side_effect=lambda name, project=None: name == 'rebind.fs.test'):
 			self.assertEqual(fullscan.pick().pk, ok.pk)
 
 

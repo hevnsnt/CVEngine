@@ -408,14 +408,14 @@ def run_discovery(scan_id, mode=bbot_lib.DEFAULT_MODE, finalize=True):
     web_events = {'URL': 0, 'HTTP_RESPONSE': 0}  # what the scanner's web module reported, counted over the whole run
     hard_failures = []  # (module, reason) for modules whose set-up hard-failed, e.g. a screenshot module without a working browser
     try:
-        # Same policy the nuclei, route-auth and validation stages apply: never start a scanner against a name
-        # that currently resolves to a loopback, link-local, metadata or (unless allowed) internal address.
-        from targetApp.target_types import resolves_to_blocked, sentinel_only_target
+        # Never start a scanner against an address a scanner must not touch. A name is not looked up here: the Sentinel that runs the discovery
+        # judges every address it resolves to (and refuses a loopback, link-local, metadata or private one) when it connects.
+        from targetApp.target_types import blocked_address, sentinel_only_target
         if sentinel_only_target(scan.domain.name, scan.domain.project_id):
             raise TargetRefused(f'{scan.domain.name} is inside an internal range of this project: only a Sentinel inside that network scans it, '
                                 'never this server')
-        if resolves_to_blocked(scan.domain.name, project=scan.domain.project_id):
-            raise TargetRefused(f'{scan.domain.name} resolves to a loopback, link-local or internal address; '
+        if blocked_address(scan.domain.name, project=scan.domain.project_id):
+            raise TargetRefused(f'{scan.domain.name} is a loopback, link-local or internal address; '
                                 'discovery refused (CVENGINE_ALLOW_PRIVATE_TARGETS=1 allows internal ranges)')
         remote = _discover_on_sentinel(scan, mode, ctx, extra_args, stored, shown)
         stored, finished_mode, web_events = remote['stored'], remote['mode'], remote['web_events']

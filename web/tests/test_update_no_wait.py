@@ -227,7 +227,8 @@ class DispatchBudgetTests(SentinelBase):
 class AdoptionTests(SentinelBase):
     def setUp(self):
         super().setUp()
-        _, self.agent = register_sentinel(self.t['dana'], name='adopt-sentinel', capabilities=['nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'testssl'])
+        _, self.agent = register_sentinel(self.t['dana'], name='adopt-sentinel', capabilities=['nmap', 'naabu', 'nuclei_light', 'nuclei_targeted', 'testssl'],
+                                          info={'contract_version': 11})  # new enough for nuclei work (the template index)
         self.agent_row = Agent.objects.get(pk=self.agent['id'])
         self.url = '/api/v1/sentinel/tasks/{}/result'
 

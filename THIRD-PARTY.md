@@ -55,7 +55,7 @@ cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x, rele
 | [cvENGINE CVE seed](https://github.com/hevnsnt/CVEngine/releases/tag/cve-seed) | The pre-built CVE catalog a new install downloads and verifies on first start |
 | [GitHub API](https://docs.github.com/rest) | The in-app update check |
 | [badkeys.info](https://badkeys.info) | Known-weak SSH host keys, downloaded by the Sentinel (see sshamble above) |
-| [nuclei-templates releases](https://github.com/projectdiscovery/nuclei-templates/releases) | The server's template refresh and the reviewer's check for a newer release |
+| [nuclei-templates releases](https://github.com/projectdiscovery/nuclei-templates/releases) | The reviewer's check for a release newer than the one the Sentinels pin |
 | [Greenbone Community feed](https://greenbone.github.io/docs/latest/) | The OpenVAS add-on's vulnerability tests, from `registry.community.greenbone.net` |
 | [HackerOne API](https://api.hackerone.com) | Submitting a report you wrote, with your own API token |
 | Slack, Discord, Telegram and Lark webhooks | Notifications to the webhook or bot you configure |

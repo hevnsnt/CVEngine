@@ -4,8 +4,8 @@
 #
 #   Where: the file system under Docker's data directory (docker info: Docker Root Dir; /var/lib/docker when it cannot be read).
 #   How much is needed (cvengine_disk_need_mb), an ESTIMATE made of what the first 1.4 update measured (docs/UPDATES.md, "Small hosts: disk, memory and stuck scans"):
-#       8900 MB  the new server image (1.6 GB, celery and beat share it), the AI reviewer (0.25 GB), a cold build cache (4.7 GB; the nuclei compile layer
-#                alone is 3.2 GB) and about 2 GB to work in (the database dump, logs, the old image that is only removed after a verified update)
+#       8900 MB  the new server image (1.6 GB, celery and beat share it), the AI reviewer (0.25 GB), a cold build cache (4.7 GB, measured when the image
+#                still compiled nuclei: an over-estimate now) and about 2 GB to work in (the database dump, logs, the old image that is only removed after a verified update)
 #     + 5100 MB  the built-in scanner's image, when the scanner is on and that image is not on this host yet
 #     = 14000 MB for a 1.3 to 1.4 update (a host that has no scanner image), 8900 MB for one that already has it or has the scanner off.
 #   It is a conservative estimate, not a prediction: the sizes of an image that is going to be pulled are not known before it is pulled, so they are the

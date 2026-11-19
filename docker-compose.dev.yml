@@ -52,7 +52,6 @@ services:
     volumes:
       - ./web:/usr/src/app
       - scan_results:/usr/src/scan_results
-      - nuclei_templates:/root/nuclei-templates
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
       - tool_config:/root/.config
     # every variable in .env reaches the container (the explicit entries below win, so the internal
@@ -108,7 +107,6 @@ services:
     volumes:
       - ./web:/usr/src/app
       - scan_results:/usr/src/scan_results
-      - nuclei_templates:/root/nuclei-templates
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
       - tool_config:/root/.config
     networks:
@@ -144,7 +142,6 @@ services:
     volumes:
       - ./web:/usr/src/app
       - scan_results:/usr/src/scan_results
-      - nuclei_templates:/root/nuclei-templates
       - generated_templates:/root/cvengine-generated-templates  # validated AI-written templates survive an update
       - tool_config:/root/.config
     ports:
@@ -161,6 +158,5 @@ networks:
 volumes:
   tool_config:
   postgres18_data:
-  nuclei_templates:
   generated_templates:
   scan_results:

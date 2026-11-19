@@ -136,26 +136,12 @@ class ComposeTests(SimpleTestCase):
 
 
 class TemplateRefreshScheduleTests(TestCase):
-	def test_the_nuclei_template_refresh_runs_every_six_hours_unless_an_admin_changed_it(self):
-		import importlib
-
-		from django_celery_beat.models import CrontabSchedule, PeriodicTask
-		migration = importlib.import_module('cveFeed.migrations.0079_nuclei_templates_every_six_hours')
-		task = PeriodicTask.objects.get(name='cvengine-nuclei-templates')
-		self.assertEqual(task.crontab.hour, '4,10,16,22')  # the migration already ran on the test database
-		daily, _ = CrontabSchedule.objects.get_or_create(minute='41', hour='4', day_of_week='*', day_of_month='*', month_of_year='*')
-		task.crontab = daily
-		task.save()
-		from django.apps import apps
-		migration.every_six_hours(apps, None)
-		task.refresh_from_db()
-		self.assertEqual(task.crontab.hour, '4,10,16,22')
-		custom = CrontabSchedule.objects.create(minute='5', hour='1', day_of_week='*', day_of_month='*', month_of_year='*')
-		task.crontab = custom
-		task.save()
-		migration.every_six_hours(apps, None)
-		task.refresh_from_db()
-		self.assertEqual(task.crontab.hour, '1')
+	def test_the_nuclei_template_refresh_is_no_longer_scheduled(self):
+		"""The server keeps no template set (0172 removes the schedule); the task itself is gone."""
+		from django_celery_beat.models import PeriodicTask
+		from cveFeed import tasks
+		self.assertFalse(PeriodicTask.objects.filter(task='update_nuclei_templates').exists())
+		self.assertFalse(hasattr(tasks, 'update_nuclei_templates'))
 
 
 class FieldKeyDeliveryTests(SimpleTestCase):

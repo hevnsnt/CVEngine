@@ -33,7 +33,7 @@ PATTERNS['subprocess'] = re.compile(r'\bsubprocess\b')
 PATTERNS['heavy_process.run'] = re.compile(r'\bheavy_process\.run')
 PATTERNS['_BIN'] = re.compile(r'_BIN\b')
 
-SCAN_DIRS = ('cveFeed', 'reNgine', 'agentapi')
+SCAN_DIRS = ('cveFeed', 'reNgine', 'agentapi', 'targetApp', 'startScan', 'scanEngine', 'dashboard')
 SCAN_SUFFIXES = ('.py', '.sh')
 EXTRA_FILES = ('entrypoint.sh', 'celery-entrypoint.sh', 'beat-entrypoint.sh', 'Dockerfile')
 SKIP_DIRS = {'__pycache__', 'tests'}
@@ -113,9 +113,13 @@ ALLOWED = {
         'reNgine/definitions.py',
         'reNgine/input_guard.py',
         'reNgine/resources.py',
+        'startScan/migrations/0003_shodan_service_fields.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old migration: field help about the fingerprint pass, runs nothing
+        'startScan/migrations/0007_deshare_ports.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old data migration: names the tools whose rows it moved, runs nothing
+        'startScan/migrations/0016_scrub_unreviewed_nse_scripts.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old data migration: scrubs stored script output, runs nothing
+        'startScan/models.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): stored results: names the tool a row came from, runs nothing
+        'targetApp/target_types.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): target classification: names the tools in comments about what a Sentinel takes, runs nothing
     ],
     'nuclei': [
-        'Dockerfile',
         'agentapi/ai_checks.py',  # 1.4.0 AI-written checks on Sentinels: the rules a nuclei_validate task must keep, runs nothing (the Sentinel runs the tool)
         'agentapi/mcp.py',
         'agentapi/models.py',
@@ -125,8 +129,6 @@ ALLOWED = {
         'agentapi/sentinel_tools.py',  # 1.4 contract 5: the names of the tools whose versions a Sentinel reports, compared with the shipped ones; runs nothing
         'agentapi/services.py',
         'agentapi/system_status.py',
-        'agentapi/template_bundle.py',
-        'celery-entrypoint.sh',
         'cveFeed/apps.py',
         'cveFeed/auth_checks.py',
         'cveFeed/auth_nuclei.py',  # T8 nuclei: ledger service keys (nuclei-auth, nuclei-auth-refused) are stored data, plus activity text; runs nothing, the signed-in pass is the built-in scanner's
@@ -138,7 +140,6 @@ ALLOWED = {
         'cveFeed/counts.py',
         'cveFeed/coverage_topup.py',
         'cveFeed/detection.py',
-        'cveFeed/detection_author.py',
         'cveFeed/detection_commands.py',
         'cveFeed/diagnostics.py',
         'cveFeed/discovery.py',
@@ -155,6 +156,7 @@ ALLOWED = {
         'cveFeed/migrations/0016_nuclei_template_update_schedule.py',
         'cveFeed/migrations/0049_weekly_deep_nuclei.py',
         'cveFeed/migrations/0079_nuclei_templates_every_six_hours.py',
+        'cveFeed/migrations/0175_drop_nuclei_template_refresh.py',  # removes the old template refresh schedule; runs nothing
         'cveFeed/models.py',
         'cveFeed/network_detection.py',  # the network detection pass (contract 10): reads the result lines a Sentinel returned and fills what the port scan left out of a port row, runs nothing
         'cveFeed/notify.py',
@@ -188,12 +190,16 @@ ALLOWED = {
         'cveFeed/validation.py',  # T8 nuclei: help text and the policy docstring naming the template policy; the nuclei_template check kind is a data value; runs nothing
         'cveFeed/views.py',
         'cveFeed/work_planner.py',  # 1.4 work planner: the check-to-tool table of the coverage rules, queues Sentinel tasks, runs nothing
+        'dashboard/models.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): the template policy settings: field help, runs nothing
         'reNgine/ai_nuclei_model.py',  # the model of the nuclei tag choice (an AI call about tag names, the stages nuclei_targeting and nuclei_tag_selection): names the tool, runs nothing
         'reNgine/ai_providers.py',
         'reNgine/definitions.py',
         'reNgine/input_guard.py',
         'reNgine/resources.py',
         'reNgine/tasks.py',
+        'scanEngine/migrations/0007_delete_installedexternaltool.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): drops the old installed-tool table, runs nothing
+        'startScan/models.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): stored results: names the tool a finding came from, runs nothing
+        'targetApp/target_types.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): target classification: names the tools in comments about what a Sentinel takes, runs nothing
     ],
     'naabu': [
         'agentapi/mcp.py',
@@ -215,6 +221,7 @@ ALLOWED = {
         'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
         'cveFeed/work_planner.py',  # 1.4 work planner: the check-to-tool table of the coverage rules, queues Sentinel tasks, runs nothing
         'reNgine/resources.py',
+        'scanEngine/migrations/0007_delete_installedexternaltool.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): drops the old installed-tool table, runs nothing
     ],
     'wpscan': [
         'agentapi/mcp.py',  # capability list in a tool description names the kind, runs nothing
@@ -302,8 +309,15 @@ ALLOWED = {
         'cveFeed/threat.py',  # 1.3.5 heat rules (develop): names the sources whose severity heat is not held back, runs nothing
         'cveFeed/triage.py',  # 1.4 T8: finding kind 'bbot' (a stored data value), runs nothing
         'cveFeed/upgrade_backfills.py',  # 1.4 secrets inventory: names the bbot findings it files and masks (rule ids, the finding's source), runs nothing
+        'dashboard/models.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): the discovery settings: names the discovery tool in field help and choices, runs nothing
         'reNgine/resources.py',  # 1.4 T8: heavy-job kind names 'bbot-deep', 'bbot-standard', 'bbot-passive' now unused: lead decides with the tunables that name them (one-line tables shared with other tools), runs nothing
         'reNgine/tasks.py',  # 1.4 T8: stores a Sentinel's discovery results with source 'bbot' (a stored data value), runs nothing
+        'startScan/migrations/0007_deshare_ports.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old data migration: names the tools whose rows it moved, runs nothing
+        'startScan/migrations/0011_shorten_bbot_names.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old data migration: names the tool whose rows it shortened, runs nothing
+        'startScan/migrations/0025_scanhistory_discovery_mode.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): an old migration: the discovery mode field help, runs nothing
+        'startScan/models.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): stored results: names the tool a row came from, runs nothing
+        'targetApp/models.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): target settings: names the discovery tool in field help, runs nothing
+        'targetApp/target_types.py',  # widened guard (targetApp, startScan, scanEngine, dashboard): target classification: names the tools in comments about what a Sentinel takes, runs nothing
     ],
     'wafw00f': [
         'agentapi/sentinel_tools.py',  # 1.4 contract 5: the names of the tools whose versions a Sentinel reports, compared with the shipped ones; runs nothing
@@ -321,9 +335,7 @@ ALLOWED = {
         'cveFeed/software.py',  # the About page list of the tools of both images (names, versions, licenses), runs nothing
     ],
     'subprocess': [
-        'agentapi/system_status.py',
         'cveFeed/report_pdf.py',
-        'cveFeed/tasks.py',
         'cveFeed/templatefixture.py',  # runs a model-written regex in a time-limited child interpreter; no scan tool (review 2 F5)
         'reNgine/resources.py',
         'reNgine/time_limits.py',
@@ -407,3 +419,62 @@ class NoLocalToolsTests(SimpleTestCase):
     def test_allowlist_has_no_duplicates_and_sorted_paths(self):
         for tool, files in ALLOWED.items():
             self.assertEqual(files, sorted(set(files)), '%s entries must be unique and sorted' % tool)
+
+
+# --- the server resolves no scanned target name -------------------------------------------------------------------------------------------------------
+# All scanning runs on the Sentinels: only the Sentinel that runs the work resolves a target's name, when it connects, and refuses it when any address is one
+# no Sentinel may scan (``cvengine_scanner.scope.check_host``). A lookup in this server's code is a second, divergent judgement of a target and a request
+# the server makes about it, so any new one fails here. The few lookups that remain are of names that are not scan targets, each with its reason.
+LOOKUP = re.compile(r'\bgetaddrinfo\b|\bgethostbyname(?:_ex)?\b|\bdns\.resolver\b|\bdns\.query\b|\bcreate_connection\b|\bdns\.asyncresolver\b')
+LOOKUP_ALLOWED = {
+    'cveFeed/openvas_scan.py': "own_addresses: this server's own DOMAIN_NAME, so OpenVAS is never pointed at the server itself",
+    'cveFeed/settings_api.py': 'the SSRF check of an outbound URL an App Admin enters (SMTP host, AI base URL), not a scan target',
+    'reNgine/ai_providers.py': "the SSRF check of the AI provider's base URL, not a scan target",
+}
+
+
+def lookup_usage():
+    """The files (relative to web/) whose code names a way to resolve a host name."""
+    return {rel for rel in candidate_files() if LOOKUP.search((WEB / rel).read_text(encoding='utf-8', errors='replace'))}
+
+
+class NoTargetLookupTests(SimpleTestCase):
+    def test_no_server_side_lookup_of_a_target_name(self):
+        found = lookup_usage()
+        new = sorted(found - set(LOOKUP_ALLOWED))
+        self.assertFalse(new, 'A host name lookup in server code (the server resolves no target name: the Sentinel that runs the work does). Send the '
+                              'question to a Sentinel (dns_resolve, identity_check) or read the addresses a Sentinel stored; a lookup of a name that is not '
+                              'a scan target goes in LOOKUP_ALLOWED with its reason: ' + ', '.join(new))
+        self.assertFalse(sorted(set(LOOKUP_ALLOWED) - found), 'a LOOKUP_ALLOWED entry no longer matches: delete it')
+
+    def test_the_guard_sees_a_lookup(self):
+        self.assertTrue(LOOKUP.search('socket.getaddrinfo(host, None)'))
+        self.assertTrue(LOOKUP.search('import dns.resolver'))
+        self.assertFalse(LOOKUP.search('scannable_hosts(names)'))
+
+
+# --- the server image ships no scan tool and no template set ------------------------------------------------------------------------------------------
+REPO = WEB.parent
+IMAGE_TOOL = re.compile(r'\b(?:%s)\b|nuclei-templates|go install|GOVERSION|update-templates' % '|'.join(TOOL_WORDS), re.I)
+
+
+class ServerImageTests(SimpleTestCase):
+    def test_the_dockerfile_builds_and_ships_no_scan_tool(self):
+        text = (WEB / 'Dockerfile').read_text(encoding='utf-8')
+        found = sorted({m.group(0).lower() for m in IMAGE_TOOL.finditer(text)})
+        self.assertFalse(found, f'web/Dockerfile names a scan tool or builds one ({found}): every scan tool and template set lives in the Sentinel image')
+
+    def test_no_server_service_mounts_a_template_set(self):
+        for name in ('docker-compose.yml', 'docker-compose.dev.yml'):
+            path = REPO / name
+            if path.is_file():
+                with self.subTest(file=name):
+                    self.assertNotIn('nuclei-templates', path.read_text(encoding='utf-8'), f'{name} mounts a template set into a server container')
+
+    def test_the_entrypoints_run_no_scan_tool(self):
+        for name in ('entrypoint.sh', 'celery-entrypoint.sh', 'beat-entrypoint.sh'):
+            path = WEB / name
+            if path.is_file():
+                with self.subTest(file=name):
+                    commands = [line for line in path.read_text(encoding='utf-8').splitlines() if line.strip() and not line.strip().startswith('#')]
+                    self.assertFalse([c for c in commands if IMAGE_TOOL.search(c)], f'{name} runs a scan tool')

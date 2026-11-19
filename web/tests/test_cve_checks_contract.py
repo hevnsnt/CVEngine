@@ -73,7 +73,6 @@ class RunCveChecksContractTests(CveChecksFixture, TestCase):
         def chunk(path, hosts, project=None):
             return [{'host': h, 'vulnerable': False} for h in hosts]
         with mock.patch('cveFeed.validation.resolve_template', return_value=('/t/CVE-2099-7.yaml', '')), \
-                mock.patch.object(templategen, 'evidence_of_template', return_value='flaw'), \
                 mock.patch.object(templategen, '_test_chunk', side_effect=chunk) as ran, \
                 mock.patch.object(templategen, 'record_outcomes'), \
                 mock.patch('cveFeed.validation.record_template_outcomes'), \
@@ -112,7 +111,6 @@ class ThroughTheFakeSentinelTests(NoRealSleep, RouteFixture, TestCase):
     def test_the_check_reaches_the_sentinel_and_the_ledger_says_done(self):
         LocalFallback('none').apply(self)
         self.no_real_sleep()
-        mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True).start()
         assert_ran_nowhere_locally(self, 'nuclei_validate')
         scan = self.scan()
         sub = Subdomain.objects.get(scan_history=scan)
