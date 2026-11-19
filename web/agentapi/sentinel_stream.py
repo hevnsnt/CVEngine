@@ -20,8 +20,11 @@ Leases. A batch counts as a sign of life: it extends the task's lease like a hea
 for a streamed task is the run's own time limit plus ``REPORT_GRACE`` and the broker's ``RUN_GRACE``), so a six hour run does not expire while it works.
 
 Credentials. The API keys a project stored for the discovery's modules are never in a task: a task of a project that has some names them by reference
-(``secret_ref`` ``bbotkeys:<project id>``), which keeps it to the built-in scanner, and the scanner reads them once through the secure read
-(``sentinel_broker.read_secret``).
+(``secret_ref`` ``bbotkeys:<project id>``), which keeps it to the built-in scanner and the Sentinels the one gate allows (``key_delivery_decision``), and
+the scanner reads them once through the secure read (``sentinel_broker.read_secret``). What a Sentinel other than the built-in scanner is sent is held to
+what its enrolling user administers (``key_levels``: the project's own keys for a project admin, the organization's for an admin of that organization, the
+install's Chaos key for an App Admin) and to the modules the task's mode runs (``modules_for``); the levels held back are audited
+(``sentinel.discovery_keys.withheld``).
 """
 import base64
 import binascii
@@ -52,6 +55,7 @@ LIMITS = {'subdomains': 1000, 'ips': 1000, 'ports': 2000, 'urls': 1000, 'technol
 MAX_PROBLEMS = 50
 MAX_SCREENSHOT_BYTES = 2 * 1024 * 1024
 SCREENSHOT_TYPES = {'image/png': b'\x89PNG\r\n\x1a\n', 'image/jpeg': b'\xff\xd8\xff'}
+SCREENSHOT_EXTENSIONS = {'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg'}  # the file name's extension must be the type's (cveFeed.shots.IMAGE_EXTENSIONS)
 EVENT_TYPES = ('DNS_NAME', 'IP_ADDRESS', 'OPEN_TCP_PORT', 'URL', 'TECHNOLOGY', 'WAF', 'FINDING', 'VULNERABILITY', 'STORAGE_BUCKET',
                'EMAIL_ADDRESS', 'ASN', 'SOCIAL', 'CODE_REPOSITORY', 'WEBSCREENSHOT', 'PROTOCOL')
 MODES = ('passive', 'standard', 'deep')
@@ -146,14 +150,17 @@ class Scope:
 # --- what a Sentinel posts ----------------------------------------------------------------------------------------------------------------
 
 def _screenshot(item, scope):
-    """One screenshot, kept only when its host is in scope, its name is a plain file name and its bytes are the image type it says, at most
-    ``MAX_SCREENSHOT_BYTES``. The bytes stay base64 in the batch; ``cveFeed.discovery.persist_screenshot_blobs`` writes them out."""
+    """One screenshot, kept only when its host is in scope, its name is a plain file name whose extension is the picture type it says (``.png`` for
+    ``image/png``, ``.jpg`` or ``.jpeg`` for ``image/jpeg``) and its bytes are that type, at most ``MAX_SCREENSHOT_BYTES``. The bytes stay base64 in
+    the batch; ``cveFeed.discovery.persist_screenshot_blobs`` writes them out under a name of the server's own, never this one."""
     if not isinstance(item, dict):
         return None
     host = scope.host(item.get('host'))
     filename, kind, data = item.get('filename'), item.get('content_type'), item.get('data')
     if host is None or not isinstance(filename, str) or not _FILENAME.match(filename) or filename.startswith('.') or kind not in SCREENSHOT_TYPES:
         return None
+    if '.' not in filename or SCREENSHOT_EXTENSIONS.get(filename.rpartition('.')[2].lower()) != kind:
+        return None  # x.html, x.svg, a name with no extension: never kept, whatever the bytes start with
     if not isinstance(data, str) or len(data) > (MAX_SCREENSHOT_BYTES + 2) // 3 * 4:
         return None
     try:
@@ -391,21 +398,84 @@ def keys_ref(project_id):
     return f'{KEYS_REF_PREFIX}{int(project_id)}'
 
 
-def keys_payload(task):
-    """The project's discovery module keys as the nested config the scanner reads from a preset (``{modules: {shodan_dns: {api_key: ...}}}``), or ``None`` when the
-    project has none any more. Called only by ``sentinel_broker.read_secret`` once it has won the single use."""
-    from cveFeed.api_credentials import bbot_config_args
-    from dashboard.models import Project
-    project = Project.objects.filter(pk=task.project_id).first()
-    args = bbot_config_args(project) if project else []
+# The discovery modules a key feeds (cveFeed.api_credentials.SERVICES) and the scanner's own flags for each (the discovery scanner 3.1.0 the Sentinel image
+# pins), so a task is sent only the keys of modules its mode runs (``modules_for``). A module missing here is never sent a key (tests.test_bbot_key_levels
+# holds this table to SERVICES).
+KEYED_MODULE_FLAGS = {
+    'shodan_dns': {'safe', 'subdomain-enum', 'passive'}, 'censys_dns': {'safe', 'subdomain-enum', 'passive'},
+    'virustotal': {'safe', 'subdomain-enum', 'passive'}, 'securitytrails': {'safe', 'subdomain-enum', 'passive'},
+    'fullhunt': {'safe', 'subdomain-enum', 'passive'}, 'leakix': {'safe', 'subdomain-enum', 'passive'},
+    'hunterio': {'safe', 'passive', 'email-enum', 'subdomain-enum'}, 'chaos': {'safe', 'subdomain-enum', 'passive'},
+    'github_codesearch': {'safe', 'passive', 'subdomain-enum', 'code-enum'}, 'github_org': {'safe', 'passive', 'subdomain-enum', 'code-enum'},
+    'otx': {'safe', 'subdomain-enum', 'passive'}, 'c99': {'safe', 'subdomain-enum', 'passive'}, 'bevigil': {'safe', 'subdomain-enum', 'passive'},
+    'builtwith': {'safe', 'affiliates', 'subdomain-enum', 'passive'}, 'bufferoverrun': {'safe', 'subdomain-enum', 'passive'},
+}
+# The module flags each preset a mode names turns on (the discovery scanner 3.1.0's presets; kitchen-sink includes the others).
+PRESET_FLAGS = {
+    'subdomain-enum': {'subdomain-enum'}, 'web': {'web'}, 'web-screenshots': {'web-screenshots'},
+    'kitchen-sink': {'subdomain-enum', 'cloud-enum', 'code-enum', 'email-enum', 'spider', 'web', 'paramminer', 'webbrute', 'web-screenshots', 'baddns-heavy'},
+}
+
+
+def modules_for(target):
+    """The keyed modules a discovery task's ``target`` runs: one a preset of its mode turns on, carrying every flag the mode requires, and not excluded.
+    Read from the target the server built (``bbot_target``), falling back to the mode's own options."""
+    target = target if isinstance(target, dict) else {}
+    options = mode_options(target.get('mode')) if not target.get('presets') else target
+    enabled = set().union(*(PRESET_FLAGS.get(p, set()) for p in options.get('presets') or ()))
+    required = set(options.get('require_flags') or ())
+    excluded = set(target.get('exclude_modules') or ())
+    return {m for m, flags in KEYED_MODULE_FLAGS.items() if flags & enabled and required <= flags and m not in excluded}
+
+
+def key_levels(agent, project):
+    """The levels (``cveFeed.api_credentials.LEVELS``) of a project's discovery keys ``agent`` may be sent: what its enrolling user (its token's user)
+    administers. The built-in scanner and a Sentinel of an App Admin: every level, the install's own Chaos key included. Otherwise the organization's keys
+    only when that user is an admin of the project's organization, and the project's own only when the user is an admin of the project (the people who
+    may change those keys). A Sentinel a project member registered is sent none: enrolling a Sentinel never gives anyone a key they could not set."""
+    from agentapi.sentinel_policy import is_builtin
+    from cveFeed import api_credentials as creds
+    from tenancy import roles
+    if is_builtin(agent):
+        return set(creds.LEVELS)
+    user = agent.token.user
+    if user.is_superuser:
+        return set(creds.LEVELS)
+    levels = set()
+    if roles.effective_role(user, project) == roles.ADMIN:
+        levels.add(creds.PROJECT)
+    if project.org_id and roles.can_manage_org(user, project.org_id):
+        levels.add(creds.ORG)
+    return levels
+
+
+def _config(args, modules):
     config = {}
     for flag, pair in zip(args[::2], args[1::2]):
         path, _, value = pair.partition('=')
         keys = path.split('.')
-        if flag != '-c' or len(keys) != 3 or keys[0] != 'modules' or not value:
+        if flag != '-c' or len(keys) != 3 or keys[0] != 'modules' or not value or keys[1] not in modules:
             continue
         config.setdefault('modules', {}).setdefault(keys[1], {})[keys[2]] = value
-    return config or None
+    return config
+
+
+def keys_payload(task, agent):
+    """``(config, withheld)``: the project's discovery module keys ``agent`` may be sent for ``task`` as the nested config the scanner reads from a preset
+    (``{modules: {shodan_dns: {api_key: ...}}}``, or ``None`` when there is none to send), and the levels whose keys were held back from it (``key_levels``),
+    for the audit. Only the keys of modules the task's mode runs (``modules_for``). Called only by ``sentinel_broker.read_secret`` once it has won the single
+    use; no value leaves this function except in ``config``."""
+    from cveFeed import api_credentials as creds
+    from dashboard.models import Project
+    project = Project.objects.filter(pk=task.project_id).first()
+    if project is None:
+        return None, []
+    modules = modules_for(task.target)
+    allowed = key_levels(agent, project)
+    config = _config(creds.bbot_config_args(project, tuple(sorted(allowed))), modules)
+    withheld = [level for level in creds.LEVELS if level not in allowed
+                and _config(creds.bbot_config_args(project, tuple(sorted(allowed | {level}))), modules) != config]
+    return config or None, withheld
 
 
 def keys_ref_project(ref):
