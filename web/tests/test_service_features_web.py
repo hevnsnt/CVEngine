@@ -168,6 +168,14 @@ class RuleTests(SimpleTestCase):
                          ASA_0101, ASA_20333, CITRIX_4966, ESXI_21974, ESXI_5544, SLP_29552):
             self.assertTrue(prefilter.search(advisory[1]), advisory[0])
 
+    def test_what_one_reading_means_on_the_host_page(self):
+        self.assertEqual(service_features.meaning('http3', 'no'), 'unknown')  # not advertised proves nothing
+        self.assertEqual(service_features.meaning('http3', 'yes'), 'exposed')
+        self.assertEqual(service_features.meaning('vpn_fortinet', 'no'), 'ruled_out')
+        self.assertEqual(service_features.meaning('slp', 'yes'), 'exposed')
+        self.assertEqual(service_features.meaning('http_methods', 'put,trace'), '')  # shown, no rule reads it
+        self.assertEqual(service_features.meaning('vpn_ivanti', 'yes'), '')
+
     def test_every_feature_has_its_server_words(self):
         for key in ('http3', 'php_windows', 'webdav', 'http_methods', 'vpn_fortinet', 'vpn_globalprotect', 'vpn_cisco', 'vpn_citrix', 'vpn_ivanti', 'slp'):
             self.assertIn(key, service_features.FEATURES)
