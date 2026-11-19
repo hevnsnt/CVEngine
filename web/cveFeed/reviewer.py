@@ -131,10 +131,14 @@ def ops_due(row, now=None):
 
 
 def reviews_today(now=None):
+    """The finding reviews counted against ``review_daily_max`` today (since UTC midnight): the finding reviewer's own rows, refusals included.
+    The verdicts a host review writes (``FindingReview.host_review`` set, up to ``host_review.MAX_FINDINGS`` per host) are counted by the host
+    review's own cap (``host_review.reviews_today``), not here: they cost no call of the finding reviewer, and counting them let a few host
+    reviews use up the finding reviewer's whole day."""
     from cveFeed.models import FindingReview
     now = now or timezone.now()
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    return FindingReview.objects.filter(created_at__gte=start).count()
+    return FindingReview.objects.filter(created_at__gte=start, host_review__isnull=True).count()
 
 
 REFUSED = 'refused'  # FindingReview.outcome of a review the model did not answer (refused, empty, cut off, unusable): no verdict
@@ -214,7 +218,7 @@ def _reviewed(triages, fingerprints):
 
 
 def due(limit=PACKET_LIMIT, now=None):
-    """Up to ``limit`` ``(triage, review_key)`` pairs to review now: open findings whose current key has no review, CVE matches first.
+    """Up to ``limit`` ``(triage, review_key)`` pairs to review now: open findings whose current key has no review, hottest first (``_due_in``).
     Each project with open findings gets an equal share of the batch (what one has too little of goes to the others), so a large project
     cannot take the whole of the daily cap while another has work."""
     from cveFeed.models import Triage
@@ -235,13 +239,32 @@ def due(limit=PACKET_LIMIT, now=None):
     return picked
 
 
+def heat_rank_expr():
+    """The heat of a Triage row's finding as a number (3 fire, 2 smoke, 1 ice, 0 none), in the database: the CVE match's heat
+    (``threat.match_heat_rank_expr``, read through a subquery on the match), a scanner finding's (``threat.finding_heat_rank_expr``) and a hygiene
+    finding's severity heat, with a heat a person set winning. The same expressions every list and count reads, so the reviewer reads the
+    hottest findings first, as a person would see them."""
+    from django.db.models import Case, IntegerField, OuterRef, Subquery, Value, When
+    from cveFeed import threat
+    from cveFeed.models import CVEMatch
+    match_heat = Subquery(CVEMatch.objects.filter(pk=OuterRef('match_id')).annotate(_heat=threat.match_heat_rank_expr()).values('_heat')[:1],
+                          output_field=IntegerField())
+    return Case(*[When(heat_override=heat, then=Value(threat.HEAT_RANK[heat])) for heat in (threat.FIRE, threat.SMOKE, threat.ICE)],
+                When(match__isnull=False, then=match_heat),
+                When(vulnerability__isnull=False, then=threat.finding_heat_rank_expr(prefix='vulnerability__')),
+                When(hygiene__isnull=False, then=threat.severity_heat_rank_expr('hygiene__severity')),
+                default=Value(0), output_field=IntegerField())
+
+
 def _due_in(project_id, limit, now):
-    """``due`` for one project. The open findings are read in pages of WINDOW in that order until ``limit`` are found or none are left, so a
-    finding is reached however many reviewed ones come before it."""
+    """``due`` for one project, hottest first: the finding's heat (``heat_rank_expr``: fire, a KEV or exploited CVE on the host, before smoke and
+    ice), then its kind (CVE matches first), then the newest. The open findings are read in pages of WINDOW in that order until ``limit`` are found
+    or none are left, so a finding is reached however many reviewed ones come before it."""
     from django.db.models import Case, IntegerField, Value, When
     from cveFeed.models import Triage
     rank = Case(*[When(kind=k, then=Value(v)) for k, v in KIND_ORDER.items()], default=Value(9), output_field=IntegerField())
-    qs = (Triage.objects.filter(open_q(), project_id=project_id).exclude(kind='route_auth').annotate(kind_rank=rank).order_by('kind_rank', '-last_seen', '-id')
+    qs = (Triage.objects.filter(open_q(), project_id=project_id).exclude(kind='route_auth').annotate(heat_rank=heat_rank_expr(), kind_rank=rank)
+          .order_by('-heat_rank', 'kind_rank', '-last_seen', '-id')
           .only('id', 'kind', 'project_id', 'host', 'evidence_key', 'signature'))
     picked = []
     offset = 0
@@ -564,6 +587,10 @@ def apply_verdict(ref, body, now=None):
     key = review_key(triage, fingerprint)
     if parsed['review_key'] != key:
         raise VerdictError('the finding or its host changed since the packet was built', 409)
+    if reviews_today(now) >= settings_row().review_daily_max:
+        # the cap ``record_refusal`` holds too: a packet handed out before the cap was lowered, or a container that kept its batch past midnight,
+        # writes no more reviews than the day allows (``next_packets`` never hands out more than are left)
+        raise VerdictError('the daily limit of reviews is used up', 429)
     return apply_finding_verdict(triage, parsed, key, now=now)
 
 
@@ -826,7 +853,7 @@ def installed_templates_version():
 # Every code ops_checks can return, in the order it computes them. The snapshot sends it to the reviewer container, which builds the model's answer
 # format from it; tests/test_ai_prompts.py holds it equal to the codes written in ops_checks and to the container's fallback copy.
 OPS_CODES = ('sentinels_idle', 'workers_down', 'nuclei_templates', 'sentinel_errors', 'sentinel_waiting', 'sentinels_offline', 'scan_errors', 'system',
-             'generated_templates', 'ai_errors', 'memory', 'queue_starvation', 'sentinel_claims_refused')
+             'generated_templates', 'ai_errors', 'memory', 'queue_starvation', 'sentinel_claims_refused', 'ai_budget', 'triage_backlog')
 
 
 def _check(code, state, title, detail, facts=None, actions=(), severity=None):
@@ -1083,6 +1110,8 @@ def ops_checks(now=None, templates_release=None, _out=None):
     checks.append(_check('memory', **maintainer_checks.memory(signals)))
     checks.append(_check('queue_starvation', **maintainer_checks.queue_starvation(signals, work)))
     checks.append(_check('sentinel_claims_refused', **maintainer_checks.claim_refusals(signals)))
+    checks.append(_check('ai_budget', **maintainer_checks.ai_budget(signals)))  # an AI cap used up stops that work silently otherwise
+    checks.append(_check('triage_backlog', **maintainer_checks.triage_backlog(signals)))  # findings of the current inventory waiting for their AI triage
 
     # a Sentinel that was registered and approved, was heard from this week, and now none is live: nothing runs, whether or not tasks wait
     if not fleet['live_sentinels']:
