@@ -40,7 +40,7 @@ from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone
 
 from django.db import transaction
-from django.db.models import F
+from django.db.models import F, Q
 from django.utils import timezone
 
 from reNgine.state_machines import RUN_DONE, RUN_FAILED, RUN_READY, RUN_RUNNING, RUN_WAITING, STAGE_RUN
@@ -609,6 +609,28 @@ def task_ended(task):
             _try_ready(pk, ended=task.pk)
     except Exception:  # noqa: BLE001 - the drive and the tick wake it anyway
         logger.warning('could not wake the stage run waiting on sentinel task %s', getattr(task, 'pk', None), exc_info=True)
+
+
+def tasks_ended(tasks):
+    """``task_ended`` for many tasks that ended together (a reaper sweep): one look for the waiting runs that wait on any of them, then each such run
+    is asked once (with one of its ended tasks), not once per task. Never raises."""
+    try:
+        from agentapi.models import StageRun
+        ids = [t.pk for t in tasks if t.pk]
+        if not ids:
+            return
+        waits = Q()
+        for pk in ids:
+            waits |= Q(task_ids__contains=[pk])
+        ended = set(ids)
+        driving = getattr(_local, 'driving', None)
+        for pk, task_ids in StageRun.objects.filter(waits, state='waiting').order_by().values_list('pk', 'task_ids')[:10 * len(ids)]:
+            if pk == driving:
+                continue  # the drive that expired it saves the run's waits first, then wakes it itself
+            mine = [t for t in (task_ids or []) if t in ended]
+            _try_ready(pk, ended=mine[-1] if mine else None)
+    except Exception:  # noqa: BLE001 - the drive and the tick wake it anyway
+        logger.warning('could not wake the stage runs waiting on %d ended sentinel tasks', len(tasks), exc_info=True)
 
 
 def wake_scan(scan_id):

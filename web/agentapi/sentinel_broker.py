@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from datetime import timedelta
 
 from django.core.cache import cache
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Avg, CharField, Count, DurationField, Exists, F, Q, Value
 from django.db.models.functions import Cast, Coalesce, Concat, Greatest
 from django.http import JsonResponse
@@ -1765,7 +1765,7 @@ def _end_as_expired(task, reason, now):
     # on its own tasks, and a Sentinel whose tasks all expire must be named
     result = {**(task.result if isinstance(task.result, dict) else {}), EXPIRED_AGENT: task.agent_id} if task.agent_id else task.result
     won = _move_task(SentinelTask._base_manager.filter(pk=task.pk), 'expired', agent=None, lease_expires_at=None, error=reason[:300], finished_at=now,
-                             result=result, **_scrubbed(task))
+                             result=result, **({'last_holder': task.agent_id} if task.agent_id else {}), **_scrubbed(task))
     if won:
         _ended(task, task.agent_id)
     return bool(won)
@@ -1794,26 +1794,67 @@ def _ended(task, agent_id=None):
     stage_runs.task_ended(task)
 
 
+QUEUED_EXPIRED = 'no Sentinel took the task while it waited in the queue'
+
+
 def reap_expired(now=None):
     """Return every SentinelTask whose lease ran out to 'expired' (never retried locally by the broker: the dispatcher that
     created it already fell back to running the tool itself once its own wait timed out, so there is nothing left to
     queue). Also a task that has waited in the queue longer than ``queued_ttl`` for its kind: a task has no lease until it is claimed, and the
     dispatcher that normally expires it is gone when its worker died, so without this an orphan would stay claimable, and counted as waiting
-    work, for ever. Called by every broker entry point, like ``agent_broker.reap_expired``."""
+    work, for ever. Called by every broker entry point, like ``agent_broker.reap_expired`` (a report for a lease that lapsed a moment ago must
+    find it expired), so it is kept cheap: with nothing to reap it is two index reads, and a queued task nobody held is ended with the others of
+    its sweep in one statement; only a task a Sentinel held is ended on its own row (its result keeps who held it, ``EXPIRED_AGENT``)."""
     now = now or timezone.now()
     if _in_update_grace(now):  # an update is running (or has just ended): Sentinels were talking to a server that was down, nothing is judged lost yet
         return 0
-    stale = (Q(status='queued', kind='openvas', created_at__lt=now - queued_ttl('openvas'))
-             | (Q(status='queued', created_at__lt=now - queued_ttl('nmap')) & ~Q(kind='openvas')))
-    expired = SentinelTask._base_manager.filter(Q(status__in=SENTINEL_ACTIVE_STATUSES, lease_expires_at__lt=now) | stale).select_related('project')[:CANDIDATES]
+    # two selects, each served by its own index (the lease index, and the partial index of the queued rows by age): one select with an OR of both read
+    # the whole table whenever there was nothing to reap
+    expired = list(SentinelTask._base_manager.filter(status__in=SENTINEL_ACTIVE_STATUSES, lease_expires_at__lt=now).select_related('project').order_by()[:CANDIDATES])
+    if len(expired) < CANDIDATES:
+        stale = Q(kind='openvas', created_at__lt=now - queued_ttl('openvas')) | (Q(created_at__lt=now - queued_ttl('nmap')) & ~Q(kind='openvas'))
+        newest = now - min(queued_ttl('openvas'), queued_ttl('nmap'))
+        seen = {t.pk for t in expired}
+        expired += [t for t in SentinelTask._base_manager.filter(stale, status='queued', created_at__lt=newest).select_related('project').order_by()[:CANDIDATES - len(expired)]
+                    if t.pk not in seen]
     ended = {}  # org id -> [(task, reason)]
-    for task in list(expired):
-        reason = 'the lease expired without a report' if task.status != 'queued' else 'no Sentinel took the task while it waited in the queue'
+    unheld = []  # queued tasks nobody held, with nothing to scrub: ended together
+    for task in expired:
+        if task.status == 'queued' and not task.agent_id and not _scrubbed(task):
+            unheld.append(task)
+            continue
+        reason = 'the lease expired without a report' if task.status != 'queued' else QUEUED_EXPIRED
         if _end_as_expired(task, reason, now):
             ended.setdefault(task.project.org_id, []).append((task, reason))
+    won = _expire_unheld([t.pk for t in unheld], QUEUED_EXPIRED, now)
+    batch = [t for t in unheld if t.pk in won]
+    for task in batch:
+        ended.setdefault(task.project.org_id, []).append((task, QUEUED_EXPIRED))
+    _ended_many(batch)
     _audit_sweep(ended)
     scrub_stale_values(now)
     return sum(len(v) for v in ended.values())
+
+
+def _expire_unheld(ids, reason, now):
+    """End the queued tasks ``ids`` that are still queued and held by nobody, in one statement: what ``_end_as_expired`` writes for such a task (no
+    agent to clear or remember, no target to scrub). Returns the set of ids this call ended; a task claimed or ended meanwhile is left alone."""
+    if not ids or 'queued' not in SENTINEL_TASK.sources('expired'):  # the move the state machine allows, as ``_move_task`` asks it
+        return set()
+    table = SentinelTask._meta.db_table
+    with connection.cursor() as cursor:
+        cursor.execute(f'UPDATE "{table}" SET "status" = %s, "lease_expires_at" = NULL, "error" = %s, "finished_at" = %s '
+                       f'WHERE "id" = ANY(%s) AND "status" = %s AND "agent_id" IS NULL RETURNING "id"', ['expired', reason[:300], now, list(ids), 'queued'])
+        return {row[0] for row in cursor.fetchall()}
+
+
+def _ended_many(tasks):
+    """``_ended`` for tasks nobody held: one wake-up push for all of them and one look for the stage runs that wait on any of them."""
+    if not tasks:
+        return
+    from agentapi import sentinel_notify, stage_runs
+    sentinel_notify.wake_tasks([t.pk for t in tasks])
+    stage_runs.tasks_ended(tasks)
 
 
 STALE_VALUES_AFTER = timedelta(minutes=10)  # a finished secrets_scan or route_probe result keeps its secret values this long at most
@@ -2178,7 +2219,7 @@ def _claim(agent, kinds, now):
                     expire(task, reason=f'cancelled: {refusal}')
                 continue
             won = SentinelTask.objects.filter(pk=task.pk, status='queued').update(
-                status='claimed', agent=agent, attempts=task.attempts + 1, claimed_at=now, lease_expires_at=now + OFFER_LEASE, error='')
+                status='claimed', agent=agent, last_holder=agent.pk, attempts=task.attempts + 1, claimed_at=now, lease_expires_at=now + OFFER_LEASE, error='')
             if won:
                 task.refresh_from_db()
                 from agentapi import sentinel_notify
@@ -3202,14 +3243,27 @@ def explain_error(text):
 
 
 def _held_before(task, agent):
-    """Whether ``agent`` held ``task`` before it ended. ``expire`` clears the task's agent, so the claim's audit row is the only record of who it was."""
+    """Whether ``agent`` held ``task`` before it ended. ``expire`` clears the task's agent; the claim (and the expiry) keep it in ``last_holder``. A task
+    claimed before that column existed has none, and its claim's audit row is asked instead."""
+    if task.last_holder is not None:
+        return task.last_holder == agent.pk
+    if task.claimed_at is None:
+        return False  # never claimed: nobody held it
     return AuditLog.objects.filter(action='sentinel.task.claim', detail__task_id=task.pk, detail__agent_id=agent.pk).exists()
+
+
+def _late_recorded(task):
+    """Whether a late report of ``task`` was already recorded (``_record_late``): ``late_reported_at``, or for a task claimed before that column existed
+    (no ``last_holder``), its audit row."""
+    if task.late_reported_at is not None:
+        return True
+    return task.last_holder is None and task.claimed_at is not None and AuditLog.objects.filter(action='sentinel.task.late', detail__task_id=task.pk).exists()
 
 
 def _record_late(ctx, agent, task):
     """A Sentinel reported a task whose stage had already stopped waiting: the result is discarded (the stage ran it here or left the targets due),
     but it is said, once per task however often the Sentinel retries: an audit row, and an activity line next to the stage's own."""
-    if AuditLog.objects.filter(action='sentinel.task.late', detail__task_id=task.pk).exists():
+    if _late_recorded(task) or not SentinelTask._base_manager.filter(pk=task.pk, late_reported_at__isnull=True).update(late_reported_at=timezone.now()):
         return
     from agentapi import sentinel_dispatch
     from cveFeed import activity
@@ -3238,7 +3292,7 @@ def report_result(ctx, task_id, body):
             raise ApiError(404, 'task not found')
         from agentapi import sentinel_adopt
         from cveFeed import scan_control
-        if late and not AuditLog.objects.filter(action='sentinel.task.late', detail__task_id=task.pk).exists() and sentinel_adopt.orphaned(task, now):
+        if late and not _late_recorded(task) and sentinel_adopt.orphaned(task, now):
             # an update (or a restart) ended the stage that waited for this task, and this Sentinel did hold it: its result is filed, not discarded
             late_adopted = _adopt_late(ctx, agent, task, body, now)
             if late_adopted is not None:
@@ -3756,7 +3810,8 @@ def cancel_task(ctx, slug, task_id):
     if task is None:
         raise ApiError(404, 'task not found')
     won = SentinelTask.objects.filter(pk=task.pk, status=task.status, status__in=SENTINEL_ACTIVE_STATUSES).update(
-        status='expired', agent=None, lease_expires_at=None, finished_at=timezone.now(), error='cancelled by a person', **_scrubbed(task))
+        status='expired', agent=None, lease_expires_at=None, finished_at=timezone.now(), error='cancelled by a person',
+        **({'last_holder': task.agent_id} if task.agent_id else {}), **_scrubbed(task))
     if not won:
         raise ApiError(409, 'the task already finished')
     audit.record(ctx.user, 'sentinel.task.cancel', _target(task), org=project.org_id, task_id=task.pk, trace_id=task.trace_id,

@@ -39,10 +39,13 @@ def has_adopter(kind):
 
 def covered_by_stage_run(task):
     """Whether an open ``StageRun`` still waits on ``task``: its callback consumes the result itself, so it is never adopted."""
+    from django.db.models import Q
+
     from agentapi.models import StageRun
     rows = StageRun.objects.filter(state__in=StageRun.OPEN_STATES)
     rows = rows.filter(scan_id=task.scan_id) if task.scan_id else rows.filter(project_id=task.project_id)
-    return any(task.pk in {int(t) for t in (row.task_ids or []) if str(t).isdigit()} for row in rows.only('task_ids'))
+    # the containment test in SQL (a run's ids are stored as numbers; one stored as a string still counts)
+    return rows.filter(Q(task_ids__contains=[task.pk]) | Q(task_ids__contains=[str(task.pk)])).exists()
 
 
 def orphaned(task, now=None):
@@ -51,14 +54,14 @@ def orphaned(task, now=None):
     from django.utils import timezone
 
     from cveFeed import scan_control
-    if covered_by_stage_run(task):
-        return False
     # a closed scan alone is not enough: a sweep that is not a StageRun (the weekly deep sweep) blocks on its own task and files its own result
-    started, ended, _grace = scan_control.update_window()
+    started, ended, _grace = scan_control.update_window()  # one row by primary key: asked first, since without an update nothing is an orphan
     if started is None:
         return False
     since = task.claimed_at or task.created_at
-    return since is not None and since <= (ended or (now or timezone.now()))
+    if since is None or since > (ended or (now or timezone.now())):
+        return False
+    return not covered_by_stage_run(task)
 
 
 def adopt(task, result, agent=None):
