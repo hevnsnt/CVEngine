@@ -13,7 +13,7 @@ class Migration(migrations.Migration):
 
     atomic = False
 
-    dependencies = [('cveFeed', '0172_ai_review_coverage')]
+    dependencies = [('cveFeed', '0173_ai_review_coverage')]
 
     operations = [
         AddIndexConcurrently(model_name='triage', index=models.Index(fields=['status', 'updated_at'], name='triage_status_updated_idx')),

@@ -26,7 +26,7 @@ def daily(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    dependencies = [('cveFeed', '0171_retry_record_rereads'), ('django_celery_beat', '0001_initial')]
+    dependencies = [('cveFeed', '0172_search_trigram_indexes'), ('django_celery_beat', '0001_initial')]
     operations = [
         migrations.AddField(model_name='automaticvalidation', name='ai_job_id', field=models.PositiveBigIntegerField(blank=True, null=True)),
         migrations.AddField(model_name='ondemandvalidation', name='ai_job_id', field=models.PositiveBigIntegerField(blank=True, null=True)),
