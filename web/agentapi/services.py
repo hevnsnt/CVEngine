@@ -1965,8 +1965,8 @@ def _shared_for(project, subs):
             .values_list('subdomain_id', 'technology__name', 'technology__version', 'cpe'):
         link_cpes.setdefault(sub_id, []).append((name or '', version or '', cpe))
     return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots, 'shots': shots, 'legacy_shots': legacy_shots,
-            'probes': probe_rows, 'vhosts': vhosts, 'java': java, 'versions': versions, 'unconfirmed': unconfirmed, 'features': features,
-            'link_cpes': link_cpes}
+            'probes': probe_rows, 'vhosts': vhosts, 'java': java, 'versions': versions, 'unconfirmed': unconfirmed, 'link_cpes': link_cpes,
+            'features': features}
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}
