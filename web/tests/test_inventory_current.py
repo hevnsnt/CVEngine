@@ -39,7 +39,7 @@ class CurrentInventoryTests(TestCase):
 	def test_rescanning_one_host_keeps_the_rest_of_the_inventory(self):
 		full = self.scan(names=['www.acme.example', 'api.acme.example', 'mail.acme.example'])
 		_, kwargs = _stages()
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
+		with mock.patch('cveFeed.tasks.run_hygiene_task.delay'):
 			out = discovery.run_host_pipeline(self.domain.id, ['www.acme.example'], retest=True, **kwargs)
 		self.assertEqual(out['status'], discovery.SUCCESS)
 		# every host is still there, once; the rescanned host is read from the rescan, the rest from the full scan
@@ -49,7 +49,7 @@ class CurrentInventoryTests(TestCase):
 	def test_a_late_stage_failure_keeps_the_hosts_it_found_current(self):
 		full = self.scan(names=['www.acme.example'])
 		_, kwargs = _stages()
-		with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'), \
+		with mock.patch('cveFeed.tasks.run_hygiene_task.delay'), \
 				mock.patch('cveFeed.triage.run_for_scan', side_effect=RuntimeError('boom')):
 			out = discovery.run_host_pipeline(self.domain.id, ['new.acme.example'], **kwargs)
 		self.assertEqual(out['failed_stages'], ['triage'])

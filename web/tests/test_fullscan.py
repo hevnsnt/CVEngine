@@ -64,7 +64,7 @@ class FullScanBase(TestCase):
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		self.scan = ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=now, scan_status=2, results_dir='/tmp')
 		patches = [mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False),
-			mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'),
+			mock.patch('cveFeed.tasks.run_hygiene_task.delay'),
 			mock.patch('cveFeed.fullscan.CLAIM_KEY', 'cvengine:fullscan:test'),
 			# These fixtures do not build full core-stage coverage; the deep-scan coverage gate (see
 			# cveFeed.coverage_topup.backlog_exists, tests/test_coverage_gate.py) is exercised on its own there.
@@ -352,8 +352,9 @@ class InvestigationTests(FullScanBase):
 			pipeline=pipeline or self.pipeline(checks))
 
 	def test_a_new_port_is_fingerprinted_checked_retested_and_recorded_as_a_change(self):
-		checks = {'redis': ('Redis', lambda host, port: True)}
-		out = self.sweep([(22, 'ssh'), (6379, 'redis')], checks=checks)
+		from tests.test_db_exposure import db_probe_dispatch
+		with db_probe_dispatch(lambda host, port: True):  # the Sentinel's db_probe finds the new Redis open
+			out = self.sweep([(22, 'ssh'), (6379, 'redis')], checks={'redis': 'Redis'})
 		inv = out['swept'][0]['investigation']
 		self.assertEqual(inv['ports'], [6379])
 		self.assertEqual(self.fp[0][0], ['192.0.2.1'])

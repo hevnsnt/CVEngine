@@ -159,7 +159,7 @@ class ScanTests(FreshWorld):
             scan = discovery.start_discovery(domain)
 
         def finish():
-            with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(EVENTS):
+            with mock.patch('cveFeed.tasks.correlate_cves.delay'), sentinel_discovery(EVENTS):
                 discovery.run_discovery(scan.id)
         stats, ticker = self.written(finish)
         self.assertEqual(stats['hosts'], 4 + 2)

@@ -598,8 +598,6 @@ class StatusSignalsTests(TestCase):
                       mock.patch.dict(os.environ, {'CVENGINE_STATUS_CACHE_SECONDS': '0'})):
             patch.start()
             self.addCleanup(patch.stop)
-        from tests.test_local_egress import _clear
-        _clear()
 
     def status(self, token):
         from tests.test_agentapi import call

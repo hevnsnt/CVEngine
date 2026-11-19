@@ -18,9 +18,10 @@ class QueueTimeLimitTests(SimpleTestCase):
         longest = 12 * 3600 - time_limits.VISIBILITY_MARGIN
         for queue in ('discovery_queue', 'cve_feed_queue', 'validation_priority_queue', 'udp_queue', 'vhost_queue'):
             self.assertEqual(limits_for(queue, {})[1], longest, queue)
-        for queue in ('api_queue', 'send_notif_queue', 'geo_localize_queue'):
+        for queue in ('api_queue', 'send_notif_queue'):
             self.assertEqual(limits_for(queue, {})[1], 30 * 60, queue)
-        self.assertEqual(limits_for('run_command_queue', {})[1], 3600)
+        for gone in ('run_command_queue', 'geo_localize_queue'):  # the reNgine command runner and its geoiplookup caller are gone
+            self.assertIsNone(limits_for(gone, {}), gone)
 
     def test_openvas_and_unknown_queues_have_no_default_limit(self):
         # a local OpenVAS task has its own budget of 24 hours per host

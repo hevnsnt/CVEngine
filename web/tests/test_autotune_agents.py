@@ -307,12 +307,6 @@ class AgentLimitTests(AgentBase):
         with self.assertRaises(ApiError):
             self.write(values(sentinel_bbot_keys=2), name='tunables')
 
-    def test_a_cap_of_zero_on_the_port_25_pacing_is_not_lower_it_turns_the_pacing_off(self):
-        with self.assertRaises(ApiError):
-            self.write({'values': {'egress_port25_per_hour': 0}}, name='tunables')
-        self.write({'values': {'egress_port25_per_hour': 100}}, name='tunables')
-        self.assertEqual(tunables.value('egress_port25_per_hour'), 100)
-
     def test_the_ai_and_reviewer_limits_are_lower_only_and_nothing_paid_or_scan_wide_is_switched_on(self):
         from dashboard.models import AIProviderSettings
         row = AIProviderSettings.objects.first() or AIProviderSettings()

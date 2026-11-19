@@ -23,7 +23,6 @@ from agentapi import sentinel_stream
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
-from agentapi import egress
 from agentapi import generated_templates as gentpl
 from agentapi import tuning
 from agentapi import tech_coverage_api
@@ -199,10 +198,6 @@ ROUTES = [
     ('GET', r'me', 'Who am I: user, projects and roles, token info', lambda r, c, **k: svc.me(c)),
     ('GET', r'system/status', 'Instance status: overall health with problems and notes, scanning pause, update phase, inventory counts per project (targets, hosts, exposed hosts, scans running/queued, open findings), and for an App Admin the database and broker, queue depths, workers, schedules, memory, disk, CVE feed, AI budget and auto-tuning (mode, last run, last decisions, why each setting was not raised)',
      lambda r, c, **k: system_status.system_status(c)),
-    ('GET', r'egress/connections', 'App Admin: the log of this server\'s own outbound connections to the logged ports (25, 465, 587 by default), newest first: '
-     'at, address, port, outcome (sent|paced|skipped), mode (exact|estimated), kind (the tool), project, scan_id. ?port=&project=&since=&until= '
-     '(ISO 8601 or epoch seconds), limit (up to 1000) and cursor (the next of the previous page); format=csv downloads every matching record',
-     lambda r, c, **k: egress.connections_csv(c, r.GET) if r.GET.get('format') == 'csv' else egress.list_connections(c, r.GET)),
     ('GET', r'projects', 'Projects visible to the caller', lambda r, c, **k: svc.list_projects(c)),
     ('GET', r'engines', 'Scan engines (legacy labels: every scan runs the same fixed pipeline)', lambda r, c, **k: svc.list_engines(c)),
     ('GET', r'states', 'Every lifecycle (scans, ...): its states, what each means, and which state may follow which', lambda r, c, **k: svc.describe_states(c)),

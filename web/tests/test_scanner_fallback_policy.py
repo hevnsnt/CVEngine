@@ -16,7 +16,7 @@ KIND = 'openvas'
 
 class NoKindRunsLocallyTests(SimpleTestCase):
     def test_every_contract_kind_is_never_local_except_the_internal_one(self):
-        self.assertEqual(set(SentinelTask.KINDS) - set(dispatch.NEVER_LOCAL), {'discover'})  # discover: internal ranges, Sentinel-only by design
+        self.assertEqual(set(SentinelTask.KINDS) - set(dispatch.NEVER_LOCAL), set())  # discover included: internal ranges are Sentinel-only by design
 
     def test_the_policy_machinery_is_gone(self):
         for name in ('local_fallback_kinds', 'default_fallback_kinds', 'unknown_fallback_kinds', 'fallback_allowed', 'offline_fallback', 'LOCAL_FALLBACK_ENV'):

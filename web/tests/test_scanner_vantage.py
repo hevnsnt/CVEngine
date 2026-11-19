@@ -66,7 +66,7 @@ class NothingMovesSoNothingWarnsTests(VantageBase):
 
     def test_every_kind_a_scanner_could_be_moved_to_is_never_local(self):
         from agentapi.models import SentinelTask
-        self.assertEqual(set(SentinelTask.KINDS) - set(sentinel_dispatch.NEVER_LOCAL), set(scanner_state.INTERNAL_ONLY))
+        self.assertEqual(set(SentinelTask.KINDS) - set(sentinel_dispatch.NEVER_LOCAL), set())  # every kind, discover (INTERNAL_ONLY) included
 
     def test_the_tailscale_profile_is_read_whatever_case_and_spacing(self):
         os.environ['COMPOSE_PROFILES'] = 'builtin-scanner, Tailscale'

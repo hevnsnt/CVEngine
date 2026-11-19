@@ -102,6 +102,7 @@ NEVER_LOCAL = (
     'version_read',  # the version source catalogue's GETs (cveFeed.version_sources): a Sentinel's requests, this server only parses the answers
     'version_digest',  # the same with a digest of a static asset (contract 8, cveFeed.edge_builds): a Sentinel's requests alone
     'version_rows',  # the same with only the named version rows of a status page (contract 9): a Sentinel's requests alone
+    'discover',  # the internal-range discovery (cveFeed.internal_scan): an external Sentinel's by design, never this server's
 )
 def builtin_scanner_enrolled():
     """Whether the built-in scanner is switched on and has enrolled at least once (one indexed query). Until it has, nothing waits for it: a host whose
@@ -480,7 +481,7 @@ RECORDER = contextvars.ContextVar('sentinel_result_recorder', default=None)  # a
 
 class Result(dict):
     """A dispatched task's typed result, as the plain dict every caller reads, plus ``agent_id``: which Sentinel ran it. The built-in scanner scans from
-    this server's own network (it shares celery's network namespace), so a stage treats what it measured as measured here (``ran_here``)."""
+    this server's own host (its own network next to the server's, and the host's network or LAN address with the overlays), so a stage treats what it measured as measured here (``ran_here``)."""
 
     def __init__(self, data, agent_id=None, task_id=None):
         super().__init__(data or {})

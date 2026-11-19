@@ -162,7 +162,7 @@ class ScansListAndStopTests(TestCase):
         def nmap_runner(*a, **k):
             services._abort_scan(scan)  # a person presses Stop while nmap runs
             return ''
-        with mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('reNgine.celery.app.control.revoke'), \
+        with mock.patch('reNgine.celery.app.control.revoke'), \
                 mock.patch('cveFeed.tasks.run_hygiene_task.delay') as hygiene, sentinel_discovery(events):
             out = discovery.run_pipeline(scan.id, port_stage_run=port_double(nmap_runner),
                 light_stream=lambda path, **k: later.append('light') or iter([]), targeted_stream=lambda path, **k: later.append('t') or iter([]),

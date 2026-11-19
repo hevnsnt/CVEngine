@@ -39,7 +39,7 @@ class Gated(TestCase):
             BountyAsset.objects.create(program=self.program, kind=kind, identifier=ident, in_scope=inside)
         for patcher in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False),
                         mock.patch('targetApp.target_types.blocked_names', return_value=set()),
-                        mock.patch('reNgine.tasks.geo_localize.delay'),
+                        
                         mock.patch('cveFeed.scan_control.pause_requested', return_value=False),
                         mock.patch('cveFeed.ledger.sweep_claim', return_value=True),
                         mock.patch('cveFeed.coverage_topup.backlog_exists', return_value=False)):
@@ -212,8 +212,10 @@ def database_exposure_stage(self, w):
     from startScan.models import Port
     port = Port.objects.create(number=6379, service_name='redis', protocol='tcp', state='open')
     w.ip.ports.add(port)
+    from tests.test_db_exposure import db_probe_dispatch
     probe = mock.Mock(return_value=False)
-    db_exposure.run_db_exposure_checks(w.scan.id, checks={'redis': ('Redis', probe)})
+    with db_probe_dispatch(probe):
+        db_exposure.run_db_exposure_checks(w.scan.id)
     return probe.called
 
 

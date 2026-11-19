@@ -900,9 +900,7 @@ def read_page(entries, page_url, fetch, vet, budget, before_each=None, stop=None
             read, why = _read_one(url, fetch, cached)
         except Exception as exc:  # noqa: BLE001 - a script that cannot be read is skipped; its name stays a hint
             logger.info('script read failed: %s', type(exc).__name__)
-            from cveFeed.local_egress import PortHeld
-            # this server's egress governor or skip list held the port: nothing was sent, which says nothing about the host
-            read, why = None, 'held' if isinstance(exc, PortHeld) else 'unreachable'
+            read, why = None, 'unreachable'
         reader.keep(url, (read, why))
         if read is None:
             entry['skipped'] = why

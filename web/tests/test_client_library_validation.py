@@ -542,16 +542,6 @@ class LibraryValidationTests(Base):
 					self.assertIn(words, step['summary'])
 				self.assert_open(m)
 
-	def test_a_port_the_egress_governor_holds_is_not_read_and_nothing_is_concluded(self):
-		from cveFeed import local_egress
-		m = self.match()
-		site = Site(error=local_egress.PortHeld(443, 'paced'))
-		row, _stats, _calls = self.validate(site)
-		self.assertEqual(row.validation_status, 'failed')
-		self.assertIn('not run from this server', self.step(row)['summary'])
-		self.assert_open(m)
-
-
 	def test_a_failed_read_changes_nothing_and_is_retried(self):
 		m = self.match()
 		(before,) = self.rows()

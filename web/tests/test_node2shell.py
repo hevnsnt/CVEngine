@@ -79,6 +79,21 @@ class NodeSitesTests(RouteFixture, TestCase):
 		self.assertEqual(node2shell_scan.node_sites(scan), [])
 
 
+def node2shell_dispatch(answer):
+	"""The Sentinel's ``node2shell`` in place: ``answer(url)`` is the result the Sentinel reports for one site (the detector's result shape)."""
+	import contextlib
+
+	def dispatch_each(project, kind, items, target_of, scan=None, label_of=None, ips_of=None):
+		if kind != 'node2shell':
+			return
+		for index, item in enumerate(list(items)):
+			yield index, answer(target_of(item)['url'])
+	stack = contextlib.ExitStack()
+	stack.enter_context(mock.patch('agentapi.sentinel_dispatch.scanner_or_local', return_value=True))
+	stack.enter_context(mock.patch('agentapi.sentinel_dispatch.dispatch_each', side_effect=dispatch_each))
+	return stack
+
+
 class RunForScanTests(RouteFixture, TestCase):
 	def setUp(self):
 		super().setUp()
@@ -92,12 +107,13 @@ class RunForScanTests(RouteFixture, TestCase):
 		return self.result
 
 	def go(self, **kw):
-		with mock.patch('cveFeed.node2shell_scan.enabled', return_value=True):
-			return node2shell_scan.run_for_scan(self.scan_obj.id, checker=self.checker, **kw)
+		with mock.patch('cveFeed.node2shell_scan.enabled', return_value=True), node2shell_dispatch(self.checker):
+			return node2shell_scan.run_for_scan(self.scan_obj.id, **kw)
 
 	def test_disabled_by_default(self):
 		self.result = VULNERABLE
-		out = node2shell_scan.run_for_scan(self.scan_obj.id, checker=self.checker)
+		with node2shell_dispatch(self.checker):
+			out = node2shell_scan.run_for_scan(self.scan_obj.id)
 		self.assertEqual(out, {'checked': 0, 'skipped': 'disabled'})
 		self.assertEqual(self.calls, [])
 
@@ -143,8 +159,8 @@ class RunForScanTests(RouteFixture, TestCase):
 
 	def test_no_candidates_is_a_no_op(self):
 		other = self.scan(names=('plain.rt.test',), ports=((443, 'https'),))
-		with mock.patch('cveFeed.node2shell_scan.enabled', return_value=True):
-			out = node2shell_scan.run_for_scan(other.id, checker=self.checker)
+		with mock.patch('cveFeed.node2shell_scan.enabled', return_value=True), node2shell_dispatch(self.checker):
+			out = node2shell_scan.run_for_scan(other.id)
 		self.assertEqual(out, {'checked': 0})
 		self.assertEqual(self.calls, [])
 
@@ -159,11 +175,11 @@ class PipelineWiringTests(RouteFixture, TestCase):
 		def checker(url, **kw):
 			calls.append(url)
 			return NOT_VULNERABLE
-		with mock.patch('cveFeed.node2shell_scan.enabled', return_value=True), mock.patch('cveFeed.discovery.stopped', return_value=False):
+		with mock.patch('cveFeed.node2shell_scan.enabled', return_value=True), mock.patch('cveFeed.discovery.stopped', return_value=False), \
+				node2shell_dispatch(checker):
 			discovery._run_stages(scan.id, {'scan_id': scan.id, 'status': discovery.SUCCESS}, hygiene=False,
 								  port_stage_run=port_double(), db_exposure_checks={}, provider=None,
-								  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]),
-								  node2shell_checker=checker)
+								  light_stream=lambda path, **k: iter([]), targeted_stream=lambda path, **k: iter([]))
 		self.assertEqual(calls, ['https://api.rt.test'])
 		from startScan.models import ScanActivity
 		self.assertTrue(ScanActivity.objects.filter(scan_of=scan, name='node2shell').exists())

@@ -78,7 +78,6 @@ ENTRIES = {
 # Routes that are in the tables on purpose without a tool. Each carries the reason; a new route with no entry and no reason fails the test.
 NOT_EXPOSED = {
     ('settings', 'factory_reset'): 'destroys the instance; not something an agent should be able to do on one call. A person does it in the UI.',
-    ('settings', 'egress/connections\\.csv'): 'a CSV download; list_egress_connections returns the same data.',
     ('settings', 'cve_seed/import'): 'uploads a file; it needs a person at the browser.',
     ('settings', 'cve_seed/download/(?P<which>seed|manifest)'): 'a file download.',
     ('settings', 'autotune/decisions'): 'list_tuning_decisions.',
@@ -162,7 +161,7 @@ AGENT_LOWER_ONLY = {'ai': ('plan_daily_total', 'plan_daily_per_project', 'cve_gu
 # ``validate_min_gap_hours`` is the other way round (a shorter gap spends more), so an agent may only raise it. A cap of 0 turns the pacing off: more, not less.
 TUNABLE_ONLY_RAISE = ('validate_min_gap_hours',)
 TUNABLE_SWITCHES = ('planner_enabled', 'sentinel_bbot_keys')
-TUNABLE_ZERO_IS_UNLIMITED = ('egress_port25_per_hour',)
+TUNABLE_ZERO_IS_UNLIMITED = ()
 # Lists that decide what is scanned, with which way narrows them (FB-5): an ``only`` list lets less through the fewer entries it has (and an empty one lets everything
 # through), a ``skip`` list the more entries it has. {entry: {field: 'only' | 'skip'}}
 AGENT_SCOPE_LISTS = {'tailscale_project': {'only_tags': 'only', 'only_os': 'only', 'skip_tags': 'skip'}}

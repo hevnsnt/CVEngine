@@ -25,7 +25,6 @@ from reNgine import schema_guard
 from agentapi import services as svc
 from agentapi import suppliers
 from agentapi import system_status
-from agentapi import egress
 from agentapi import generated_templates as gentpl
 from agentapi import host_review_api as hostreview
 from agentapi import tuning
@@ -569,11 +568,6 @@ TOOLS = [
     ('list_agents', 'Registered agents you may see: your own, and for an administrator those of the users they manage. Shows scope, capabilities, last seen, live, and open, completed and failed counts.',
      _schema(_page_props({'status': {'type': 'string', 'enum': list(broker.Agent.STATUSES)}, 'kind': {'type': 'string'}, 'q': {'type': 'string'}})),
      lambda c, a: broker.list_agents(c, a), False),
-    ('list_egress_connections', 'App Admin only. The log of this server\'s own outbound connections to the logged ports (25, 465 and 587 by default; CVENGINE_EGRESS_LOG_PORTS), newest first, kept 14 days and at most 200,000 records: at, address, port, outcome (sent, paced: held back by the hourly budget and probed later, skipped: on the opt-in skip list), mode (exact: this server opened or refused that very connection; estimated: an external tool such as nmap or naabu had it in its probe plan), kind (the tool), project and scan_id. Page with cursor (the next value of the previous page). For a CSV download use GET /api/v1/egress/connections?format=csv.',
-     _schema({'port': {'type': 'integer'}, 'project': {'type': 'string', 'description': 'project slug'},
-              'since': {'type': 'string', 'description': 'ISO 8601 time or epoch seconds'}, 'until': {'type': 'string', 'description': 'ISO 8601 time or epoch seconds'},
-              'limit': {'type': 'integer', 'description': 'up to 1000, default 100'}, 'cursor': {'type': 'string'}}),
-     lambda c, a: egress.list_connections(c, a), False),
     ('get_tuning_status', 'App Admin only. Auto-tuning of the instance throughput settings (Settings, configMaxxing): mode (off, suggest or auto; auto by default) and effective_mode (off when the CVENGINE_AUTOTUNE=0 kill switch is set), the AI advisor and its daily budget, the numbers it chose, the settings a person pinned by saving a value (with who), the settings it manages with range and step, its last run with why each setting was not raised, and the last ten decisions.',
      _schema(), lambda c, a: tuning.get_status(c), False),
     ('list_tuning_decisions', 'App Admin only. Auto-tuning decisions, newest first: each change or recommendation with old and new value, source (controller, ai, person or agent), reason, whether it was applied, what happened after it (outcome: helped, no_effect, regressed, unknown or reverted, with outcome_detail, the measurements in baseline and verify_at while it is still being checked), the open alerts it answered (alerts), the decision it undid (undoes), and can_apply / can_revert.',

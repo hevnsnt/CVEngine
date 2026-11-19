@@ -90,7 +90,7 @@ class UdpBase(TestCase):
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		self.scan = ScanHistory.objects.create(domain=self.domain, scan_type=self.engine, start_scan_date=now, scan_status=2, results_dir='/tmp')
 		for p in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False),
-		          mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'),
+		          mock.patch('cveFeed.tasks.run_hygiene_task.delay'),
 		          mock.patch('cveFeed.udp_scan.CLAIM_KEY', 'cvengine:udpscan:test'),
 		          # These fixtures do not build full core-stage coverage; the deep-scan coverage gate (see
 		          # cveFeed.coverage_topup.backlog_exists, tests/test_coverage_gate.py) is exercised on its own there.

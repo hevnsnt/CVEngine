@@ -41,7 +41,6 @@ SKIP_DIRS = {'__pycache__', 'tests'}
 # Phase 5 and 8 delete PRs shrink this; the final slice empties it. Paths are relative to web/.
 ALLOWED = {
     'nmap': [
-        'agentapi/egress.py',  # 1.3.4 outbound connection log (develop): names the tools whose probe plans it records, runs nothing
         'agentapi/mcp.py',
         'agentapi/models.py',
         'agentapi/rest.py',
@@ -67,7 +66,6 @@ ALLOWED = {
         'cveFeed/discovery.py',
         'cveFeed/distro.py',
         'cveFeed/distro_releases.py',  # distro release inference: mentions nmap's stored OS CPE in a docstring, runs nothing
-        'cveFeed/heavy_process.py',
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/host_context.py',
         'cveFeed/host_inventory.py',
@@ -76,7 +74,6 @@ ALLOWED = {
         'cveFeed/internal_scan.py',
         'cveFeed/java_runtime.py',  # reads the port rows the fingerprint pass stored (the service nmap's jdwp-version named) and says so; runs nothing
         'cveFeed/ledger.py',
-        'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
         'cveFeed/management/commands/backfill_distro_readings.py',  # re-reads stored banners and nmap OS CPEs for distro readings, runs nothing
         'cveFeed/management/commands/seed_scale_fixture.py',  # scale fixture: names the ledger services 'nmap' as stored data values (synthetic rows for scripts/scale), runs nothing
         'cveFeed/match_policy.py',
@@ -120,7 +117,6 @@ ALLOWED = {
     'nuclei': [
         'Dockerfile',
         'agentapi/ai_checks.py',  # 1.4.0 AI-written checks on Sentinels: the rules a nuclei_validate task must keep, runs nothing (the Sentinel runs the tool)
-        'agentapi/egress.py',  # 1.3.4 outbound connection log (develop): names the tools whose probe plans it records, runs nothing
         'agentapi/mcp.py',
         'agentapi/models.py',
         'agentapi/rest.py',
@@ -147,7 +143,6 @@ ALLOWED = {
         'cveFeed/diagnostics.py',
         'cveFeed/discovery.py',
         'cveFeed/fullscan.py',
-        'cveFeed/heavy_process.py',
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/internal_scan.py',
         'cveFeed/js_libraries.py',  # 1.3.3 JS library evidence (develop): a docstring naming evidence sources, runs nothing
@@ -201,7 +196,6 @@ ALLOWED = {
         'reNgine/tasks.py',
     ],
     'naabu': [
-        'agentapi/egress.py',  # 1.3.4 outbound connection log (develop): names the tools whose probe plans it records, runs nothing
         'agentapi/mcp.py',
         'agentapi/models.py',
         'agentapi/rest.py',
@@ -209,12 +203,9 @@ ALLOWED = {
         'agentapi/sentinel_broker.py',
         'agentapi/sentinel_dispatch.py',
         'agentapi/sentinel_tools.py',  # 1.4 contract 5: the names of the tools whose versions a Sentinel reports, compared with the shipped ones; runs nothing
-        'agentapi/system_status.py',  # 1.3.4 egress status (develop): a docstring naming the tools counted from their probe plan, runs nothing
         'cveFeed/check_coverage.py',
-        'cveFeed/heavy_process.py',
         'cveFeed/host_assessment.py',  # 1.3.2 assessment batches (develop): comments about the dispatched stages, runs nothing
         'cveFeed/ledger.py',
-        'cveFeed/local_egress.py',  # 1.3.4 egress governor (develop): budgets and logs the ports a local tool run will probe, runs nothing itself
         'cveFeed/management/commands/seed_scale_fixture.py',  # scale fixture: names the ledger services 'naabu' as stored data values (synthetic rows for scripts/scale), runs nothing
         'cveFeed/port_stage.py',  # the ledger service and Port source of the discovery pass, and the discovery pass's own activity text: data values, runs nothing
         'cveFeed/report_data.py',
@@ -331,17 +322,11 @@ ALLOWED = {
     ],
     'subprocess': [
         'agentapi/system_status.py',
-        'cveFeed/heavy_process.py',
         'cveFeed/report_pdf.py',
         'cveFeed/tasks.py',
         'cveFeed/templatefixture.py',  # runs a model-written regex in a time-limited child interpreter; no scan tool (review 2 F5)
         'reNgine/resources.py',
-        'reNgine/tasks.py',
         'reNgine/time_limits.py',
-    ],
-    'heavy_process.run': [
-    ],
-    '_BIN': [
     ],
 }
 

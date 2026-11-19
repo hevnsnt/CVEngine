@@ -145,8 +145,7 @@ class DiscoveryLineTests(PolicyBase):
     def run_with(self, error):
         from cveFeed import discovery
         scan = self.make_scan()
-        with mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), mock.patch('reNgine.tasks.geo_localize.delay'), \
-                mock.patch('cveFeed.tasks.correlate_cves.delay'), mock.patch('agentapi.sentinel_stream.dispatch_stream', side_effect=error):
+        with mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), mock.patch('cveFeed.tasks.correlate_cves.delay'), mock.patch('agentapi.sentinel_stream.dispatch_stream', side_effect=error):
             out = discovery.run_discovery(scan.id)
         return out, AgentActivity.objects.filter(kind='discovery', message__contains='Discovery of ').order_by('-id')
 

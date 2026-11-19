@@ -55,10 +55,9 @@ class ComposeEnvTests(unittest.TestCase):
             for svc in APP_SERVICES:
                 self.assertEqual([o for o in load(name)[svc].get('security_opt', []) if 'seccomp' in o], [], f'{name} {svc}')
 
-    def test_the_openvas_feed_containers_come_back_after_a_host_reboot(self):
-        services = load('docker-compose.yml')
-        for name in ('vulnerability-tests', 'notus-data', 'scap-data', 'cert-bund-data', 'dfn-cert-data', 'data-objects', 'report-formats'):
-            self.assertEqual(services[f'openvas-{name}'].get('restart'), 'unless-stopped', name)
+    def test_no_openvas_container_is_defined_here(self):
+        # OpenVAS runs on a Sentinel (kind openvas): the Greenbone containers are the Sentinel's compose file's, not this one's
+        self.assertFalse([name for name in load('docker-compose.yml') if name.startswith('openvas')])
 
     def test_unused_concurrency_variables_are_gone(self):
         for name in FILES + ('.env.example',):

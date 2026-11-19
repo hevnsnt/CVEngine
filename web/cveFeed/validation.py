@@ -793,7 +793,7 @@ def run_db_probe(check):
     from cveFeed import db_exposure
     from dashboard.models import Project
     params = check['params']
-    label, _fn = db_exposure.CHECKS[params['db']]
+    label = db_exposure.CHECKS[params['db']]
     project = Project.objects.get(pk=params['project_id'])
     result = sentinel_dispatch.dispatch_or_none(project, 'db_probe', {'address': params['ip'], 'port': params['port'], 'db': db_exposure.DB_KEYS[label]},
                                                 host=f'{label} on {params["ip"]}:{params["port"]}', ips=[params['ip']])  # ScannerUnavailable: no scanner can take it
@@ -1051,7 +1051,7 @@ def library_outcome(params, reading):
     if not pages:
         return result('failed', 'the host has no web page to read')
     held = [p for p in pages if p.get('outcome') == 'held']
-    if held:  # not run from this server (cveFeed.local_egress): nothing was sent, nothing is concluded, it is tried again later
+    if held:  # the port was held back, so nothing was sent: nothing is concluded, it is tried again later
         return result('failed', f"not run from this server: {held[0].get('error') or 'the port is held'}")
     read = [p for p in pages if p.get('outcome') == 'read']
     if not read:

@@ -359,7 +359,7 @@ class ExecuteBatchTests(Base):
             return real(*args, **{**kw, **kwargs})
         with mock.patch('cveFeed.discovery.run_host_pipeline', side_effect=piped) as pipeline, \
                 mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), \
-                mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'), \
+                mock.patch('cveFeed.tasks.run_hygiene_task.delay'), \
                 mock.patch('cveFeed.hygiene.run_hygiene', return_value={'tls_hosts': 1}) as hygiene:
             outcome = execute_batch([j.pk for j in jobs], celery_id='batch-task')
         return outcome, nmap, pipeline, hygiene
@@ -416,7 +416,7 @@ class ExecuteBatchTests(Base):
         with mock.patch('cveFeed.discovery.run_host_pipeline', side_effect=lambda *a, **k: real(*a, **{**k, **kwargs})), \
                 mock.patch('agentapi.probe_dispatch.resolve_for', side_effect=lookup), \
                 mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), \
-                mock.patch('reNgine.tasks.geo_localize.delay'), mock.patch('cveFeed.tasks.run_hygiene_task.delay'), \
+                mock.patch('cveFeed.tasks.run_hygiene_task.delay'), \
                 mock.patch('cveFeed.hygiene.run_hygiene', return_value={'tls_hosts': 1}):
             outcome = execute_batch([j.pk for j in jobs], celery_id='t')
         rows = {j.host: HostAssessment.objects.get(pk=j.pk) for j in jobs}
@@ -495,8 +495,7 @@ class RunHostPipelineSingleTests(Base):
         [sub] = self.hosts(self.a1, 1)
         job = HostAssessment.objects.create(project=self.project, domain=self.a1, host=sub.name, status='running')
         nmap, kwargs = _stages(resolver=lambda names: {(name, '8.8.8.8') for name in names})
-        with mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), mock.patch('reNgine.tasks.geo_localize.delay'), \
-                mock.patch('cveFeed.hygiene.run_hygiene', return_value={'tls_hosts': 1}) as hygiene:
+        with mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), mock.patch('cveFeed.hygiene.run_hygiene', return_value={'tls_hosts': 1}) as hygiene:
             out = discovery.run_host_pipeline(self.a1.pk, [sub.name], force=True, hygiene=True, assessment_id=job.pk, **kwargs)
         self.assertNotIn('per_host', out)
         self.assertEqual(hygiene.call_args.kwargs['hosts'], [sub.name])

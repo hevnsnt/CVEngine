@@ -787,7 +787,7 @@ def _resume_pipeline(context):
 def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_stage_run=None, db_exposure_checks=None,
                 provider=False, cve_runner=None, hygiene=True, retest=False,
                 force=False, hygiene_host=None, wpscan_runner=None, rdp_reader=None,
-                node2shell_checker=None, by_person=False, screenshot_queuer=None):
+                by_person=False, screenshot_queuer=None):
     """Everything after discovery: nmap, the exposure check, the light nuclei pass, the web route auth check, correlation, the targeted nuclei pass, AI triage of what the scan produced (which queues the read-only
     validation checks, one task per project) and (unless ``hygiene`` is off) the hygiene sweep of the target. Shared by a full discovery and by the new-hosts pipeline;
     the stop flag is honoured between stages."""
@@ -938,7 +938,7 @@ def _run_stages(scan_id, found, light_stream=None, targeted_stream=None, port_st
     if stopped(scan_id):
         return gone
     from cveFeed import node2shell_scan
-    n2s_kwargs = {'checker': node2shell_checker} if node2shell_checker else {}
+    n2s_kwargs = {}
     if retest or force:
         n2s_kwargs['force'] = True
     node2shell_result = None

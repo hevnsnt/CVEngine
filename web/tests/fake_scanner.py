@@ -523,17 +523,15 @@ class LocalGuard:
 
 def assert_ran_nowhere_locally(testcase, kind):
     """From now until the end of ``testcase``, any local run of ``kind`` fails the test with ``LocalRunDetected`` (an ``AssertionError``): the module
-    functions in ``LOCAL_RUNNERS`` that run the tool, the resource gate (``resources.heavy_job``) for the job kinds the tool uses, and
-    ``heavy_process.run`` (testssl.sh, WPScan, wafw00f) for the same. The gates catch a stage that reached the tool through a default argument
+    functions in ``LOCAL_RUNNERS`` that run the tool and the resource gate (``resources.heavy_job``) for the job kinds the tool uses. The gate catches a stage that reached the tool through a default argument
     bound before the patch (``runner=run_testssl``). Returns the ``LocalGuard``; the test also fails at the end when anything was attempted, even if
     the stage swallowed the error."""
-    from cveFeed import heavy_process
     from reNgine import resources
     if kind not in LOCAL_RUNNERS:
         raise ValueError(f'no local path is known for {kind!r}: one of {", ".join(LOCAL_RUNNERS)}')
     guard = LocalGuard(kind)
     heavy = set(HEAVY_KINDS[kind])
-    real_heavy_job, real_run = resources.heavy_job, heavy_process.run
+    real_heavy_job = resources.heavy_job
 
     def refuse(where):
         def raiser(*args, **kwargs):
@@ -547,18 +545,12 @@ def assert_ran_nowhere_locally(testcase, kind):
         with real_heavy_job(job_kind, *args, **kwargs) as job:
             yield job
 
-    def gated_run(job_kind, argv, *args, **kwargs):
-        if job_kind in heavy:
-            guard.hit(f'heavy_process.run({job_kind!r}, {list(argv)[:1]})', argv)
-        return real_run(job_kind, argv, *args, **kwargs)
-
     for target in LOCAL_RUNNERS[kind]:
         patcher = mock.patch(target, side_effect=refuse(target))
         patcher.start()
         testcase.addCleanup(patcher.stop)
-    for target, replacement in (('reNgine.resources.heavy_job', gated_job), ('cveFeed.heavy_process.run', gated_run)):
-        patcher = mock.patch(target, replacement)
-        patcher.start()
-        testcase.addCleanup(patcher.stop)
+    patcher = mock.patch('reNgine.resources.heavy_job', gated_job)
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
     testcase.addCleanup(guard.assert_clean)  # added last: runs first, before the patches come off
     return guard

@@ -294,13 +294,9 @@ class SentinelChoiceTests(InstallTests):
 
 
 class OpenvasOffByDefaultTests(unittest.TestCase):
-    def test_no_openvas_service_starts_without_its_profile(self):
-        text = (ROOT / 'docker-compose.yml').read_text()
+    def test_no_openvas_service_is_defined_on_the_server(self):
         import re
-        blocks = re.findall(r'\n  (openvas-[a-z-]+):\n(.*?)(?=\n  [a-z#]|\Z)', text, re.S)
-        self.assertGreaterEqual(len(blocks), 10)
-        for name, block in blocks:
-            self.assertIn('profiles: ["openvas"]', block, name)
+        self.assertFalse(re.findall(r'\n  (openvas-[a-z-]+):\n', (ROOT / 'docker-compose.yml').read_text()))
 
     def test_no_profile_is_active_in_the_example_and_make_up_names_no_openvas_service(self):
         self.assertNotIn('COMPOSE_PROFILES', active((ROOT / '.env.example').read_text()))

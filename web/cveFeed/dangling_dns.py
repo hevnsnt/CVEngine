@@ -1,7 +1,7 @@
 """Rating the discovery's baddns dangling-DNS findings by what an outsider can actually claim.
 
 baddns rates every dangling record medium, so cvENGINE showed them all as smoke: a claimable zone takeover and a stale CNAME no one else can
-use looked the same. Each finding is checked again here when it is stored (``reNgine.tasks._persist_bbot_findings``) and by the
+use looked the same. Each finding is checked again (on a Sentinel) when it is stored (``reNgine.tasks._persist_bbot_findings``) and by the
 ``rerate_dangling_dns`` command, and gets a severity (critical/high fire, medium smoke, low ice) and a note saying why:
 
 * **Dangling NS** ("Dangling NS Records (NS records without SOA)"): the delegation is evaluated at the client's own zone cut, found by walking
@@ -19,9 +19,11 @@ use looked the same. Each finding is checked again here when it is stored (``reN
   about this host and the finding is dropped. A target at a provider listed as claimable is not controlled, because its "unclaimed" page is
   the same for every unknown host by design.
 
-A check that gets no answer changes nothing: the finding keeps baddns's rating. ``CVENGINE_DANGLING_DNS_CHECKS=0`` turns the checks off.
+The checks themselves (the zone-cut walk, the SOA questions, the registration lookup and the control request) run on a Sentinel (kind
+``dangling_dns_check``, ``assess_all``), which applies these rules and the provider lists this server sends (``providers_doc``); this server sends no
+DNS or HTTP request for them. A check that gets no answer changes nothing: the finding keeps baddns's rating. ``CVENGINE_DANGLING_DNS_CHECKS=0``
+turns the checks off.
 """
-import functools
 import json
 import logging
 import os
@@ -33,49 +35,15 @@ logger = logging.getLogger(__name__)
 DATA_FILE = os.path.join(os.path.dirname(__file__), 'data', 'takeover_providers.json')
 FIRE_SEVERITY, SMOKE_SEVERITY, ICE_SEVERITY = 3, 2, 1  # high, medium, low: cveFeed.threat.SEVERITY_HEAT
 KIND_NS, KIND_NXDOMAIN, KIND_HTTP = 'ns', 'cname_nxdomain', 'cname_http'
-NOTE_MARKER = '\n\ncvENGINE check: '  # what assess() adds to the stored description; parse() reads only what is before it
-MAX_SERVERS = 4  # name servers asked per level before the level counts as unanswered
-LAME_RCODES = ('REFUSED', 'SERVFAIL')
+NOTE_MARKER = '\n\ncvENGINE check: '  # what with_note() adds to the stored description; parse() reads only what is before it
 
 
 def enabled():
     return os.environ.get('CVENGINE_DANGLING_DNS_CHECKS', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 
 
-# ----------------------------------------------------------------------------- the provider list
-
-@functools.lru_cache(maxsize=1)
-def providers():
-    with open(DATA_FILE, encoding='utf-8') as handle:
-        data = json.load(handle)
-    cname = [(p['service'], tuple(s.lower() for s in p['suffixes'])) for p in data['cname']]
-    nameservers = [(p['service'], tuple(re.compile(x, re.I) for x in p['patterns'])) for p in data['nameservers']]
-    return cname, nameservers
-
-
 def _clean(name):
     return (name or '').strip().lower().rstrip('.')
-
-
-def claimable_provider(target):
-    """The listed provider a CNAME target is at (a suffix on a label boundary), or None."""
-    name = _clean(target)
-    for service, suffixes in providers()[0]:
-        if any(name == s or name.endswith('.' + s) for s in suffixes):
-            return service
-    return None
-
-
-def self_service_provider(nameservers):
-    """The self-service DNS provider every one of ``nameservers`` belongs to, or None when any of them is not at a listed provider."""
-    found = []
-    for ns in nameservers:
-        service = next((s for s, patterns in providers()[1] if any(p.match(_clean(ns)) for p in patterns)), None)
-        if service is None:
-            return None
-        if service not in found:
-            found.append(service)
-    return ' and '.join(found) or None
 
 
 # ----------------------------------------------------------------------------- reading baddns's description
@@ -112,115 +80,6 @@ def parse(description):
                   [_clean(t) for t in trigger.split(',') if _clean(t)])
 
 
-# ----------------------------------------------------------------------------- the network (replaced in tests)
-
-@dataclass
-class Reply:
-    """One DNS answer: the rcode as text, the AA flag, and the answer and authority records as ``(owner, type, value)``, all lower case
-    without the trailing dot."""
-    rcode: str
-    aa: bool = False
-    answer: list = field(default_factory=list)
-    authority: list = field(default_factory=list)
-
-    def values(self, owner, rtype, sections=('answer', 'authority')):
-        owner = _clean(owner)
-        return [v for s in sections for o, t, v in getattr(self, s) if o == owner and t == rtype]
-
-
-def reply_from(response):
-    """A ``Reply`` from a dnspython message."""
-    import dns.flags
-    import dns.rcode
-    import dns.rdatatype
-
-    def records(section):
-        return [(_clean(rrset.name.to_text()), dns.rdatatype.to_text(rrset.rdtype),
-                 rd.to_text() if rrset.rdtype == dns.rdatatype.SOA else _clean(rd.to_text().split()[-1]))
-                for rrset in section for rd in rrset]
-    return Reply(dns.rcode.to_text(response.rcode()), bool(response.flags & dns.flags.AA), records(response.answer), records(response.authority))
-
-
-def ask_any(net, servers, qname, rdtype):
-    for server in list(servers)[:MAX_SERVERS]:
-        reply = net.ask(server, qname, rdtype)
-        if reply is not None:
-            return reply
-    return None
-
-
-def _addresses(net, hosts):
-    out = []
-    for host in hosts:
-        out += [a for a in net.addresses(host) if a not in out]
-    return out
-
-
-# ----------------------------------------------------------------------------- the zone cut
-
-@dataclass
-class Cut:
-    kind: str  # 'zone' (a delegation), 'cname' (a name of the client's is a CNAME) or 'unknown'
-    name: str = ''
-    nameservers: list = field(default_factory=list)
-    target: str = ''
-
-
-def find_cut(name, net):
-    """The deepest delegation on the way to ``name``, walking down from its registry: each level's servers are asked (recursion off) for
-    the next name's NS, and a referral or an NS answer for that name is a cut. Stops at a CNAME (``kind='cname'``: whatever lies past it
-    is the CNAME target's zone, not the client's), at a server that refuses (a lame delegation: the cut above is the one to evaluate) and at a
-    name that does not exist."""
-    from targetApp.target_types import apex_domain
-    name = _clean(name)
-    apex = apex_domain(name)
-    if not apex or '.' not in apex:
-        return Cut('unknown')
-    labels = name[:-len(apex)].rstrip('.').split('.') if name != apex else []
-    chain = [apex]
-    for label in reversed([x for x in labels if x]):
-        chain.append(f'{label}.{chain[-1]}')
-    servers = _addresses(net, net.ns(apex.split('.', 1)[1]))
-    cut = None
-    for qname in chain:
-        reply = ask_any(net, servers, qname, 'NS')
-        if reply is not None and reply.rcode in LAME_RCODES and cut is not None:
-            break  # the servers of the cut above refuse: that delegation is the one to evaluate
-        if reply is None or reply.rcode not in ('NOERROR', 'NXDOMAIN'):
-            return Cut('unknown')  # no answer: a shallower cut is not evaluated in place of one that may lie deeper
-        target = reply.values(qname, 'CNAME', ('answer',))
-        if target:
-            return Cut('cname', qname, target=target[0])
-        nameservers = reply.values(qname, 'NS')
-        if nameservers:
-            cut = Cut('zone', qname, sorted(set(nameservers)))
-            servers = _addresses(net, cut.nameservers)
-            if not servers:
-                break
-            continue
-        if reply.rcode == 'NXDOMAIN':
-            return Cut('unknown')  # the name does not exist where baddns saw a delegation: nothing to rate
-    return cut or Cut('unknown')
-
-
-def soa_state(zone, nameservers, net):
-    """'lame' when every delegated name server answered a non-recursive SOA question for ``zone`` with REFUSED or SERVFAIL, 'served' when
-    one answered for it, None otherwise (a server gave no answer, or answered something else)."""
-    replies = []
-    for ns in nameservers:
-        reply = ask_any(net, net.addresses(ns), zone, 'SOA')
-        if reply is None:
-            return None
-        replies.append(reply)
-    if not replies:
-        return None
-    if any(r.rcode == 'NOERROR' and (r.aa or r.values(zone, 'SOA', ('answer',))) for r in replies):
-        return 'served'
-    if all(r.rcode in LAME_RCODES for r in replies):
-        return 'lame'
-    return None
-
-
 # ----------------------------------------------------------------------------- the rating
 
 @dataclass
@@ -229,98 +88,6 @@ class Rating:
     drop: bool = False
     note: str = ''
     zone: str = ''
-
-
-def assess(finding, net):
-    """The rating of one discovery finding (a dict with ``host``, ``description``, ``module``), or None when it is not a baddns finding this rates,
-    the checks are off or ``net`` gave no usable answer. Never raises. ``net`` is the object that answers the questions (``ns``, ``addresses``, ``ask``,
-    ``registered``, ``http_control``): this server has none of its own, the lookups run on a Sentinel (``dangling_dns_check``, ``assess_all``), so only
-    the rules live here."""
-    if not enabled() or (finding.get('module') or 'baddns') != 'baddns':
-        return None
-    parsed = parse(finding.get('description'))
-    host = _clean(finding.get('host'))
-    if parsed is None or not host:
-        return None
-    try:
-        return {KIND_NS: _assess_ns, KIND_NXDOMAIN: _assess_nxdomain, KIND_HTTP: _assess_http}[parsed.kind](host, parsed, net)
-    except Exception:  # noqa: BLE001 - a check that fails leaves baddns's rating, it never loses the finding
-        logger.exception('dangling DNS check of %s failed', host)
-        return None
-
-
-def _assess_ns(host, parsed, net):
-    cut = find_cut(host, net)
-    if cut.kind == 'cname':
-        return Rating(drop=True, zone=cut.name, note=(
-            f'{cut.name} is a CNAME to {cut.target}. The name servers baddns reached serve the zone of the CNAME target (the provider), not '
-            f'a delegation of this domain, so how they answer is the provider\'s DNS behaviour, not a dangling delegation.'))
-    if cut.kind != 'zone':
-        return None
-    state = soa_state(cut.name, cut.nameservers, net)
-    servers = ', '.join(cut.nameservers)
-    if state == 'served':
-        return Rating(severity=ICE_SEVERITY, zone=cut.name, note=(
-            f'The delegation of {cut.name} ({servers}) is served: a delegated name server answers for the zone with its SOA. '
-            f'baddns\'s reading is not reproduced.'))
-    if state != 'lame':
-        return None
-    provider = self_service_provider(cut.nameservers)
-    if provider:
-        return Rating(severity=FIRE_SEVERITY, zone=cut.name, note=(
-            f'{cut.name} is delegated to {provider} ({servers}) and every delegated name server answers a non-recursive SOA query for it '
-            f'with REFUSED or SERVFAIL: no account there hosts the zone. {provider} lets any customer create a zone of any name, so anyone '
-            f'can create {cut.name} there and answer for it (a zone takeover).'))
-    return Rating(severity=SMOKE_SEVERITY, zone=cut.name, note=(
-        f'{cut.name} is delegated to {servers} and every delegated name server refuses it, but that provider is not one where anyone can '
-        f'create a zone of any name: the delegation is broken, a takeover is not shown.'))
-
-
-def _assess_nxdomain(host, parsed, net):
-    from targetApp.target_types import apex_domain
-    target = parsed.triggers[-1] if parsed.triggers else ''
-    if not target or target == 'self':
-        return None
-    provider = claimable_provider(target)
-    if provider:
-        return Rating(note=f'{target} is at {provider}, where a released name can be claimed by another customer.')
-    domain = apex_domain(target)
-    if not domain:
-        return None
-    registered = net.registered(domain)
-    if registered is False:
-        return Rating(note=f'{domain}, the registrable domain of {target}, is not registered: anyone can register it and answer for this name.')
-    if registered is None:
-        return None
-    return Rating(severity=ICE_SEVERITY, note=(
-        f'{target} does not resolve, but it is not at a provider where another customer can claim a name, and {domain} is registered, so '
-        f'no outsider can create it: a stale record to remove, not a takeover.'))
-
-
-def _normalised(answer, name):
-    status, body = answer
-    text = body.decode('utf-8', 'replace') if isinstance(body, (bytes, bytearray)) else str(body or '')
-    return status, ' '.join(text.replace(name, '{host}').split())
-
-
-def same_answer(real, control, host, control_name):
-    """Whether the control request got the same status and body as the real one (each with its own host name blanked out)."""
-    return _normalised(real, host) == _normalised(control, control_name)
-
-
-def _assess_http(host, parsed, net):
-    target = parsed.triggers[-1] if parsed.triggers else ''
-    if target and target != 'self' and claimable_provider(target):
-        return None
-    pair = net.http_control(host)
-    if pair is None:
-        return None
-    real, control, control_name = pair
-    if same_answer(real, control, host, control_name):
-        return Rating(drop=True, note=(
-            f'A control request to the same addresses with a random host name ({control_name}) got the same answer (HTTP {real[0]}, same '
-            f'body): the provider answers every host name this way, claimed or not, so the matched text says nothing about {host}.'))
-    return None
 
 
 def providers_doc():

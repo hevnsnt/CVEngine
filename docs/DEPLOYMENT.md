@@ -304,7 +304,6 @@ Every updater takes a database dump just before it migrates (`scripts/update.sh`
 | `make logs`, `make images` | Follow the logs (last 1000 lines), or show the images. |
 | `make test` | Runs the test suite in the running `celery` container. |
 | `make redis-auth`, `make rotate-field-key` | One-time hardening of an older install ([CONFIGURATION.md](CONFIGURATION.md#templates-and-secrets), [UPGRADE.md](UPGRADE.md#upgrading-to-12)). |
-| `make openvas-up`, `make openvas-down` | Start and stop the old in-stack Greenbone containers (no longer used by the app: a Sentinel runs OpenVAS, see [OPENVAS.md](OPENVAS.md)). |
 | `make export-cve-seed` | Writes this instance's CVE catalog to `web/cve-seed.jsonl.gz` ([PIPELINE.md](PIPELINE.md#seeding-the-catalog)). |
 | `make scanner-update` | The Scanner update: pull the newest published scanner image, start it, keep it only once it has checked in with a contract version the server accepts, else put the previous image back ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md#keeping-it-current-the-scanner-update)). Run it from cron on a host without the updater timer. |
 | `make scanner-build`, `make scanner-logs` | Build the built-in scanner's image from the known-good floor commit `scanner.lock.json` names (the offline fallback when the published image cannot be pulled), or follow its log ([BUILTIN-SCANNER.md](BUILTIN-SCANNER.md)). |
