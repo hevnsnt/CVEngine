@@ -978,6 +978,32 @@ def _without_product_name(entry):
     return {**entry, "versions": out} if changed else entry
 
 
+_LLAMACPP_TAG = re.compile(r"(?<![0-9A-Za-z])b(\d{1,6})(?:-[0-9a-f]{4,40})?(?![0-9A-Za-z.])")
+
+
+def _llamacpp_builds(entry):
+    """``entry`` with each llama.cpp build tag in its version texts read as the build number ("< b5662" -> "< 5662", ``lessThan: b5662`` ->
+    ``5662``), for an entry that names llama.cpp only (``correlation.is_llamacpp``): its releases are builds, and a tag is no version anywhere
+    else. Any other entry, and any other text, is returned as it was."""
+    from cveFeed.correlation import is_llamacpp
+    versions = entry.get("versions")
+    if not isinstance(versions, list) or not is_llamacpp(entry):
+        return entry
+
+    def read(text):
+        if not isinstance(text, str):
+            return text
+        return _LLAMACPP_TAG.sub(lambda m: m.group(1) if int(m.group(1)) > 0 else m.group(0), text)
+    out = []
+    for v in versions:
+        if isinstance(v, dict):
+            v = {**v, **{k: read(v[k]) for k in ("version", "lessThan", "lessThanOrEqual") if k in v}}
+            if isinstance(v.get("changes"), list):
+                v["changes"] = [{**c, "at": read(c.get("at"))} if isinstance(c, dict) else c for c in v["changes"]]
+        out.append(v)
+    return {**entry, "versions": out}
+
+
 def convert_affected(entries, assigner=""):
     """CVE 5 ``affected`` -> the cve.now shape correlation reads: [{vendor, product, package?, ranges, builds?}]. ``assigner`` is the
     record's ``assignerShortName``: an Oracle record's exact versions are read as Oracle means them (``_oracle_line_ranges``)."""
@@ -986,7 +1012,7 @@ def convert_affected(entries, assigner=""):
     for entry in entries or []:
         if not isinstance(entry, dict):
             continue
-        entry = _without_product_name(entry)
+        entry = _llamacpp_builds(_without_product_name(entry))
         item = {k: _clean(entry.get(k), 200) for k in ("vendor", "product") if entry.get(k) and str(entry.get(k)).lower() != "n/a"}
         package = entry.get("packageName")
         if not package:  # a CPE names the product the way nmap does ("log4j" for "Apache Log4j2")
@@ -1124,7 +1150,7 @@ def record_ranges_for(item, entries, assigner=""):
         return None
     same = [e for e in entries or [] if isinstance(e, dict) and wanted & affected_product_tokens(e) and _same_vendor(item, e)
             and listed <= {_listed_text(v.get("version")) for v in e.get("versions") or [] if isinstance(v, dict)}]
-    if len(same) != 1 or not _sound_entry(_without_product_name(same[0])):
+    if len(same) != 1 or not _sound_entry(_llamacpp_builds(_without_product_name(same[0]))):
         return None
     converted = convert_affected(same, assigner)
     if len(converted) != 1 or not _sound_ranges(converted[0].get("ranges")):
@@ -1601,6 +1627,34 @@ def reset_bare_versions():
     """Start the walk of ``backfill_bare_versions`` again from the first stored entry."""
     from cveFeed.models import BackgroundCursor
     BackgroundCursor.objects.filter(lane=BARE_LANE).delete()
+
+
+LLAMACPP_LANE = "llamacpp-builds"  # the BackgroundCursor lane of ``backfill_llamacpp_builds``
+# a bare-versions block of llama.cpp (``correlation.is_llamacpp`` names the vendors): its record's "< b5662" was read as no version before
+# ``_llamacpp_builds``, so the block was stored with no range even after ``backfill_bare_versions`` had read it
+_LLAMACPP_SQL = """jsonb_path_exists(affected, '$[*] ? (@.ranges.size() == 0 && !exists(@.builds) && @.versions.size() > 0
+    && @.product like_regex "llama[._ -]?cpp$" flag "i")')"""
+
+
+def llamacpp_candidates():
+    """The stored entries ``backfill_llamacpp_builds`` reads the CVE List record of, from where the last run stopped."""
+    from cveFeed.models import BackgroundCursor, CVEEntry
+    cursor = BackgroundCursor.objects.filter(lane=LLAMACPP_LANE).values_list("last_pk", flat=True).first() or 0
+    return CVEEntry.objects.extra(where=[_LLAMACPP_SQL]).filter(pk__gt=cursor).order_by("pk")
+
+
+def backfill_llamacpp_builds(limit=200, get=None, workers=4):
+    """One bounded step of reading again the CVE List record of each stored llama.cpp block that has no range and a bare ``versions`` list,
+    now that a llama.cpp build tag ("< b5662") reads as its build number. The same walk and the same soundness rules as
+    ``backfill_bare_versions``: a block whose record lists a commit or anything else that is not a version stays as it was."""
+    return _reread_walk(LLAMACPP_LANE, llamacpp_candidates(), lambda row, doc: overlay_from_record(row.affected, doc)[0] if doc else None,
+                        limit=limit, get=get, workers=workers)
+
+
+def reset_llamacpp_builds():
+    """Start the walk of ``backfill_llamacpp_builds`` again from the first stored entry."""
+    from cveFeed.models import BackgroundCursor
+    BackgroundCursor.objects.filter(lane=LLAMACPP_LANE).delete()
 
 
 OPEN_LANE = "open-ranges"  # the BackgroundCursor lane of ``backfill_open_ranges``

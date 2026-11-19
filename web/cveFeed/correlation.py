@@ -628,6 +628,8 @@ def clean_affected(value):
             item = {**item, "ranges": [r for r in ranges[:MAX_RANGES_PER_ITEM] if isinstance(r, dict)] if isinstance(ranges, list) else []}
             if item["ranges"] and _is_netscaler(item):
                 item["ranges"] = [_netscaler_range(r) for r in item["ranges"]]
+            if item["ranges"] and is_llamacpp(item):  # build tags read as the build number (``llamacpp_range``)
+                item["ranges"] = [llamacpp_range(r) for r in item["ranges"]]
         if _is_esxi(item):  # read by build (``esxi_ranges``), as Broadcom writes its fixes
             ranges = esxi_ranges(item.get("ranges") or [], item.get("versions"))
             if ranges != (item.get("ranges") or []):
@@ -666,7 +668,46 @@ def _netscaler_range(rng):
     return out
 
 
-# VMware ESXi names a fix by the patch release and its build: "ESXi80U3d-24585383" is build 24585383 of 8.0 Update 3 (patch d), the build
+# llama.cpp names its releases by build number: the tag ``b5662`` (its server's /props ``build_info`` says "b5662-a1b2c3d", ``llama-server
+# --version`` "version: 5662 (a1b2c3d)"), and its advisories write their bounds that way (the CVE List's "< b5662", cve.now's
+# ``{"introduced": "b5899", "fixed": "b10261"}``). A strict bound must start with a digit, so "b5662" read as nothing and every such range was
+# unknown. The reading is held to llama.cpp: only an affected entry that names it (``is_llamacpp``: ggml-org's or ggerganov's llama.cpp, as
+# NVD, the CVE List, GitHub and huntr name it) has its build tags read as the build number, so "b5662" is 5662 there and still nothing for any
+# other product. Its other numbering (a 0.x range some records add, a commit) is left as it was: a build number is never inside a 0.x range.
+LLAMACPP_BUILD_RE = re.compile(r"^b(\d{1,6})(?:-[0-9a-f]{4,40})?$")
+_LLAMACPP_PRODUCTS = frozenset({"llamacpp", "ggerganovllamacpp", "ggmlorgllamacpp"})
+_LLAMACPP_VENDORS = frozenset({"", "ggmlorg", "ggml", "ggerganov"})
+
+
+def is_llamacpp(item):
+    """Whether an affected entry is llama.cpp's: product (or package) ``llama.cpp`` (``llama_cpp`` in a CPE, ``ggerganov/llama.cpp`` or
+    ``ggml-org/llama.cpp`` in huntr's and GitHub's records) of ggml-org, ggml, ggerganov or no vendor. llama-cpp-python is another product."""
+    if not isinstance(item, dict) or _real_vendor(item) not in _LLAMACPP_VENDORS:
+        return False
+    return any(_norm(item.get(key), True) in _LLAMACPP_PRODUCTS for key in ("product", "package") if isinstance(item.get(key), str))
+
+
+def llamacpp_build(text):
+    """The build number a llama.cpp build tag states ("b5662" or "b5662-a1b2c3d" -> "5662"), or ''. Build 0 is a build made without git
+    information: it says nothing."""
+    found = LLAMACPP_BUILD_RE.match(str(text or "").strip())
+    return str(int(found.group(1))) if found and int(found.group(1)) > 0 else ""
+
+
+def llamacpp_range(rng):
+    """A llama.cpp range with each bound that is a build tag read as its build number (``fixed: b5662`` -> ``fixed: 5662``); every other
+    bound is kept as it was."""
+    if not isinstance(rng, dict):
+        return rng
+    out = dict(rng)
+    for key in ("introduced", "fixed", "lastAffected"):
+        build = llamacpp_build(rng.get(key))
+        if build:
+            out[key] = build
+    return out
+
+
+# VMware ESXi names a fix by the patch release and its build:"ESXi80U3d-24585383" is build 24585383 of 8.0 Update 3 (patch d), the build
 # its own vmware-version reply states as version 8.0.3, build 24585383. Builds only grow, so within one update a build below the fix is
 # affected. A patch id of the 6.x releases ("ESXi670-202102401-SG") names no build: only its release line is known.
 _ESXI_FIX_RE = re.compile(r"^ESXi(\d)(\d)(?:U(\d{1,2}))?[a-z]{0,3}-(\d{6,9})$", re.IGNORECASE)

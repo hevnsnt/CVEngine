@@ -133,7 +133,21 @@
    "evidence": ["cpe:2.3:a:openwebui:open_webui", "CVE-2025-64496 (open-webui: open-webui)", "CVE-2024-6707 (Open WebUI: Open WebUI)"],
    "note": "GitHub's records name it open-webui, huntr's open-webui/open-webui"},
   {"names": ["Langflow"], "vendors": ["langflow-ai", "langflow"], "products": ["langflow-ai/langflow", "langflow"],
-   "evidence": ["cpe:2.3:a:langflow:langflow", "CVE-2025-3248 (langflow-ai: langflow)"], "note": "huntr's records name the product owner/repo"}
+   "evidence": ["cpe:2.3:a:langflow:langflow", "CVE-2025-3248 (langflow-ai: langflow)"], "note": "huntr's records name the product owner/repo"},
+  {"names": ["Text Generation Inference", "text-generation-inference", "Hugging Face Text Generation Inference"], "vendors": ["huggingface"],
+   "products": ["huggingface/text-generation-inference", "text-generation-inference", "text_generation_inference"],
+   "evidence": ["CVE-2026-0599 (huggingface: huggingface/text-generation-inference)"],
+   "note": "huntr's records name the product owner/repo; cveFeed.ai_servers reads TGI's version from /info"},
+  {"names": ["LocalAI"], "vendors": ["mudler", "go-skynet", "localai"], "products": ["mudler/localai", "localai", "go-skynet/localai"],
+   "evidence": ["CVE-2024-5182 (mudler: mudler/localai)"], "note": "huntr's records name the product owner/repo"},
+  {"names": ["Triton Inference Server", "NVIDIA Triton Inference Server"], "vendors": ["nvidia"],
+   "products": ["triton_inference_server", "NVIDIA Triton Inference Server", "Triton Inference Server"],
+   "evidence": ["cpe:2.3:a:nvidia:triton_inference_server", "CVE-2024-0087 (nvidia: NVIDIA Triton Inference Server)"],
+   "note": "NVIDIA's records name the NGC container release (24.03); cveFeed.ai_servers.triton_release states the server's release that way"},
+  {"names": ["Dify"], "vendors": ["langgenius"], "products": ["langgenius/dify", "dify"],
+   "evidence": ["cpe:2.3:a:langgenius:dify", "CVE-2026-41948 (langgenius: dify)"], "note": "huntr's records name the product owner/repo"},
+  {"names": ["n8n"], "vendors": ["n8n-io", "n8n"], "products": ["n8n-io/n8n", "n8n"],
+   "evidence": ["cpe:2.3:a:n8n:n8n", "CVE-2025-68613 (n8n-io: n8n)"], "note": "huntr's records name the product owner/repo"}
  ],
  "restrict": [
   {"names": ["Express", "Express.js", "expressjs", "Node.js Express framework"], "vendors": ["expressjs", "openjs"], "require_vendor": false,
