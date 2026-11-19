@@ -15,7 +15,7 @@ and acts on what these return; ``cveFeed.autotune_signals`` takes the measuremen
    ``AIM_FALLBACK_SECONDS`` with the optimistic values for what is missing), every setting goes straight up to that target (lower than the
    target only while the level that last caused trouble is remembered, below). The jump only goes up.
 3. **Scale back on evidence, at once**: memory pressure or a memory kill, scanner time-outs and kills, the database above ``DB_PRESSURE`` of its
-   connections, a CPU overload, a worker that stopped answering, Sentinel waits that time out and run locally, runs of a kind that wait with
+   connections, a CPU overload, a worker or the broker that stopped answering, Sentinel tasks that time out or expire unclaimed, runs of a kind that wait with
    nothing of the kind running. A back-off is fast (``backoff``: a quarter to a half, at least two steps), needs no cooldown, and is then
    held for ``BACKOFF_HOLD`` before another one. The level that caused the trouble is remembered for ``BAD_MEMORY_SECONDS``: nothing goes back
    up to it before that.
@@ -60,7 +60,7 @@ RESERVED_CONNECTIONS = 30      # database connections kept for everything but th
 AIM_WARMUP_SECONDS = 600       # no aim-high jump in the first ten minutes after a restart or an update
 AIM_FALLBACK_SECONDS = 1800    # ... and not before memory and Sentinels reported, unless this long has passed (then the optimistic values fill in)
 CAPACITY_FAILURES = 3          # failures of one scanner kind that point at load (timeouts, out of memory, exit -9) in one interval
-SENTINEL_TROUBLE = 2           # Sentinel waits that timed out or ran locally in one interval (or one in each of two) that are trouble
+SENTINEL_TROUBLE = 2           # Sentinel tasks that timed out or expired unclaimed in one interval (or one in each of two) that are trouble
 BACKLOG_SECONDS = 1800         # assessment work older than this is a backlog
 SMALL_INSTANCE = 100           # hosts plus targets under this: a small instance, sized modestly
 LOW_DISK_PERCENT = 10          # under this share of free disk, no target is above the optimistic value
@@ -93,6 +93,7 @@ METRICS = {
     'sentinel_idle_share': ('lower', 0.15, 'share of Sentinel slots idle'),
     'scan_oldest_s': ('lower', 600.0, 'age of the oldest queued scan (seconds)'),
     'trouble': ('lower', 1.0, 'trouble for this setting (1 yes, 0 no)'),
+    'sentinel_done': ('higher', 1.0, 'tasks the Sentinel finished per measurement'),  # a per-Sentinel number (cveFeed.autotune_sentinels.measure)
 }
 NO_ACTION_PHASES = ('cap', 'verify', 'emergency')  # never reverted, never hold the one-at-a-time gate
 
@@ -385,11 +386,22 @@ def _worker_silent(samples):
 
 
 def _sentinel_trouble(samples):
+    """Sentinel work that did not get done in time: tasks that timed out, and tasks that expired unclaimed while the Sentinels were busy (not during a
+    claim outage, ``autotune_signals.claim_outage``). Nothing runs on the server, so this is the Sentinels' capacity, which the planner and stage settings
+    feed."""
     def bad(s):
-        return (_get(s, 'sentinel', 'timeouts', default=0) or 0) + (_get(s, 'sentinel', 'fallbacks', default=0) or 0)
+        return (_get(s, 'sentinel', 'timeouts', default=0) or 0) + (_get(s, 'sentinel', 'expired_unclaimed', default=0) or 0)
     last = bad(samples[-1])
     if last >= SENTINEL_TROUBLE or (last and len(samples) > 1 and bad(samples[-2])):
-        return f'{last} Sentinel wait(s) timed out and ran locally'
+        return f'{last} Sentinel task(s) timed out or expired unclaimed'
+    return None
+
+
+def _broker_trouble(samples):
+    """The Celery broker did not answer in the last two measurements: nothing more is started."""
+    recent = samples[-2:]
+    if len(recent) == 2 and all(_get(s, 'broker', 'ok') is False for s in recent):
+        return 'the Celery broker does not answer'
     return None
 
 
@@ -472,8 +484,9 @@ def _trouble(setting, samples, last, kind):
         return _lane_trouble(kind.split(':', 1)[1], samples)
     checks = {
         'assess_share': (lambda: _starvation_trouble(samples),),
-        'discovery': (lambda: _db_pressure(last), lambda: _worker_silent(samples), lambda: _memory_pressure(last), lambda: _load_pressure(samples)),
-        'depth': (lambda: _db_pressure(last), lambda: _worker_silent(samples), lambda: _memory_pressure(last)),
+        'discovery': (lambda: _db_pressure(last), lambda: _worker_silent(samples), lambda: _memory_pressure(last), lambda: _load_pressure(samples),
+                      lambda: _broker_trouble(samples)),
+        'depth': (lambda: _db_pressure(last), lambda: _worker_silent(samples), lambda: _memory_pressure(last), lambda: _broker_trouble(samples)),
         'batch': (lambda: _sentinel_trouble(samples), lambda: _worker_silent(samples)),
         'stage': (lambda: _sentinel_trouble(samples),),
         'work_gap': (lambda: _memory_pressure(last), lambda: _db_pressure(last), lambda: _load_pressure(samples)),
@@ -502,6 +515,8 @@ def room(sample):
         return 'database connections could not be counted'
     if db >= DB_RAISE:
         return f'database at {round(db * 100)}% of its connections (a probe needs under {round(DB_RAISE * 100)}%)'
+    if _get(sample, 'broker', 'ok') is False:
+        return 'the Celery broker did not answer'
     load = sample.get('load')
     if load is not None and load >= LOAD_RAISE[sample.get('load_kind') or 'loadavg']:
         return f'CPU load {load:.2f}' + (' of the limit' if sample.get('load_kind') == 'cgroup' else ' per core')
@@ -562,8 +577,8 @@ def demand(setting, value, sample):
     live, slots, in_use = sent.get('live') or 0, sent.get('slots') or 0, sent.get('in_use') or 0
     if not live:
         return 'no live Sentinel'
-    if sent.get('timeouts') or sent.get('fallbacks'):
-        return 'Sentinel waits timed out'
+    if sent.get('timeouts') or sent.get('expired_unclaimed'):
+        return 'Sentinel tasks timed out or expired unclaimed'
     free = slots - in_use
     if kind == 'stage':
         if free < 2:

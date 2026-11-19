@@ -146,3 +146,17 @@ test('Settings has the configMaxxing group, collapsed by default, with a pointer
   assert.doesNotMatch(src, /innerHTML/);
   assert.match(src, /try \{\s*storage = window\.localStorage;\s*\} catch/);
 });
+
+test('a Sentinel machine and its tuning read as one line each', () => {
+  const m = {cpus: 4, host_cpus: 4, load_per_cpu: [0.25, 0.3, 0.3], available_share: 0.75, total_mb: 8000, oom_kills_1h: {nuclei_deep: 1}, stale: false};
+  assert.equal(L.machineText(m), '4 CPUs, load 0.25 per CPU, 75% of 7.8 GB memory available, 1 run killed for memory in the last hour');
+  assert.equal(L.machineText({...m, host_cpus: 16, oom_kills_1h: {}}), '4 CPUs (host 16), load 0.25 per CPU, 75% of 7.8 GB memory available');
+  assert.match(L.machineText({...m, stale: true, age_seconds: 900}), /last reported 15 min ago/);
+  assert.equal(L.machineText(null), '');
+  assert.equal(L.sentinelTuningText({max_concurrent: 6, ceiling: 8, kinds: {nuclei_deep: 4}}), "Auto-tuned to 6 of its machine's 8 tasks at once; nuclei deep 4 at once");
+  assert.equal(L.sentinelTuningText({max_concurrent: null, ceiling: 8, kinds: {}}), "Runs its machine's own 8 tasks at once");
+  assert.match(L.sentinelTuningText({pinned: 's_root (Sentinel settings, 5)', ceiling: 8}), /^Tasks at once pinned by s_root/);
+  assert.equal(L.sentinelTuningText({killed: true, max_concurrent: 6, ceiling: 8}), '');
+  assert.equal(L.sentinelStatusLine({name: 'edge', tuning: {ceiling: 8}, machine: null, last_run: {held: 'offline: left as it is'}}),
+    "edge: Runs its machine's own 8 tasks at once · now: offline: left as it is");
+});

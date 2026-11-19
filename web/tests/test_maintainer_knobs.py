@@ -429,11 +429,11 @@ class ClaimOutageTests(SentinelBase):
         SentinelTask.objects.bulk_create([SentinelTask(project=self.proj, kind='nmap', target={}, status='running', agent=agents[i % len(agents)], claimed_at=timezone.now())
                                           for i in range(count)])
 
-    def test_unclaimed_expiries_with_every_slot_idle_are_not_counted_as_waits_that_ran_locally(self):
+    def test_unclaimed_expiries_with_every_slot_idle_are_not_counted_as_sentinel_capacity_trouble(self):
         self.live()
         self.tasks(70, 'expired', WAIT, ago=timedelta(minutes=3))
         sample = signals.sentinels(timezone.now().timestamp())
-        self.assertEqual((sample['claims_outage'], sample['fallbacks'], sample['unclaimed']), (True, 0, 70))
+        self.assertEqual((sample['claims_outage'], sample['expired_unclaimed'], sample['unclaimed']), (True, 0, 70))
         samples = [merge(BASE, {'t': NOW - 600, 'sentinel': sample}), merge(BASE, {'t': NOW, 'sentinel': sample})]
         for setting in (policy.Setting('assess_batch', 'batch', 'b', 4, 32, 4, 'more', 16, 8), policy.Setting('stage_parallel', 'stage', 's', 2, 16, 1, 'more', 6, 4),
                         policy.Setting('sentinel_refresh_gap_hours', 'refresh_gap', 'r', 2, 24, 1, 'gap', 3, 6)):
@@ -445,7 +445,7 @@ class ClaimOutageTests(SentinelBase):
         self.holding(8)
         self.tasks(70, 'expired', WAIT, ago=timedelta(minutes=3))
         sample = signals.sentinels(timezone.now().timestamp())
-        self.assertEqual((sample['claims_outage'], sample['fallbacks']), (False, 70))
+        self.assertEqual((sample['claims_outage'], sample['expired_unclaimed']), (False, 70))
         batch = policy.Setting('assess_batch', 'batch', 'b', 4, 32, 4, 'more', 16, 8)
         self.assertIn('timed out', policy.trouble(batch, [merge(BASE, {'t': NOW, 'sentinel': sample})]))
 
@@ -455,7 +455,7 @@ class ClaimOutageTests(SentinelBase):
         self.tasks(5, 'expired', WAIT, ago=timedelta(minutes=3))
         with mock.patch('agentapi.maintainer_signals.claim_refusals', return_value={'this_hour': 150, 'previous_hour': 20}):
             sample = signals.sentinels(timezone.now().timestamp())
-        self.assertEqual((sample['claims_outage'], sample['fallbacks']), (True, 0))
+        self.assertEqual((sample['claims_outage'], sample['expired_unclaimed']), (True, 0))
 
 
 class KindPauseTests(SentinelBase):

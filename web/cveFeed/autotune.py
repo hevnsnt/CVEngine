@@ -38,6 +38,7 @@ import time
 from collections import namedtuple
 from datetime import datetime, timedelta, timezone as dt_timezone
 
+from cveFeed import autotune_sentinels
 from reNgine import ai_prompts, resources
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,12 @@ ADVISOR_SYSTEM = ai_prompts.compose('autotune_advisor',
     'back off quickly on evidence of trouble, then probe upward slowly. You get measured numbers from the last hours and, for each setting it may '
     'change now, the number in effect, the target sized for this machine, and the lowest and highest number you may choose. Be ambitious: choose '
     'the highest allowed number unless the measurements show trouble (memory kills or little memory free, timeouts, the database near its '
-    'connection limit, a worker not answering, Sentinel waits that ran locally); then choose a lower allowed number. Never name a setting you '
+    'connection limit, a worker or the broker not answering, Sentinel tasks that time out or expire unclaimed); then choose a lower allowed number. '
+    'Nothing scans on this server: every scan runs on a Sentinel. Settings named sentinel:<id>:max_concurrent (how many tasks that one Sentinel runs at '
+    'once) and sentinel:<id>:kind:<kind> (how many of one kind it runs at once) belong to one Sentinel; measurements.sentinels.<id> are that '
+    'Sentinel\'s own machine (CPUs, load per CPU, share of memory available, slots, its machine\'s own ceiling, tasks finished, runs killed for memory, '
+    'timeouts). For those, choose lower when its memory available is under 0.2, its load per CPU is over 1.5 or a run was killed for memory, and never '
+    'above its machine\'s ceiling. Never name a setting you '
     'were not given. Reply with ONLY {"recommendations": [{"setting": "<name>", "value": <whole number>, "reason": "<one short sentence citing the '
     'numbers>"}]}.')
 
@@ -414,6 +420,8 @@ def apply_decision(user, decision_id):
     decision = _decision(decision_id)
     if decision.applied or decision.resolution:
         raise TuningError(409, 'this recommendation was already applied or replaced')
+    if autotune_sentinels.is_key(decision.setting):  # one Sentinel's concurrency or per-kind slots
+        return serialize(autotune_sentinels.apply_decision(user, decision))
     m = by_key().get(decision.setting)
     if m is None:
         raise TuningError(409, 'this setting is no longer auto-tuned')
@@ -452,6 +460,8 @@ def revert(user, decision_id):
         raise TuningError(409, 'only an applied change can be reverted')
     if decision.action == 'release':
         raise TuningError(409, 'handing a setting to auto-tuning cannot be reverted: save a value for it to pin it again')
+    if autotune_sentinels.is_key(decision.setting):
+        return serialize(autotune_sentinels.revert(user, decision))
     latest = _latest_applied(decision.setting)
     if latest is None or latest.pk != decision.pk:
         raise TuningError(409, 'a later change of this setting exists: revert that one first')
@@ -500,6 +510,8 @@ def release(user, key):
 
     from cveFeed.models import AutoTuneSettings
     _need_admin(user)
+    if autotune_sentinels.is_key(key):
+        return serialize(autotune_sentinels.release(user, key))
     m = by_key().get(key)
     if m is None:
         raise TuningError(400, 'this setting is not auto-tuned')
@@ -566,11 +578,12 @@ def set_mode(user, mode=None, advisor=None, policy=None):
         row = AutoTuneSettings.objects.select_for_update().get(pk=settings_row().pk)
         before = {'mode': row.mode, 'advisor': row.advisor}
         policy_before = agent_policy(row)
-        dropped = []
+        dropped, sentinels_dropped = [], 0
         if mode is not None and mode != row.mode:
             if row.mode == 'auto':
                 dropped = sorted(row.values or {})
                 row.values, row.meta = {}, {}
+                sentinels_dropped = autotune_sentinels.drop_all()  # every Sentinel back to its own numbers
             row.mode = mode
         if advisor is not None:
             row.advisor = advisor
@@ -579,6 +592,8 @@ def set_mode(user, mode=None, advisor=None, policy=None):
         row.changed_by, row.changed_at = user, _now()
         row.save()
     publish(row)
+    if sentinels_dropped:
+        dropped.append(f'{sentinels_dropped} Sentinel(s)')
     after = {'mode': row.mode, 'advisor': row.advisor}
     policy_after = agent_policy(row)
     if after != before or policy_after != policy_before:
@@ -600,6 +615,8 @@ def reset(user):
     changed = row.mode != DEFAULT_MODE or not row.advisor or cleared
     AutoTuneSettings.objects.filter(pk=row.pk).update(mode=DEFAULT_MODE, advisor=True, values={}, meta={}, changed_by=user, changed_at=_now(),
                                                       updated_at=_now())
+    if autotune_sentinels.drop_all():
+        cleared.append('sentinels')
     publish()
     if changed:
         _audit(user, 'autotune.reset', 'auto-tuning', before={'mode': row.mode, 'advisor': row.advisor}, cleared=cleared)
@@ -1468,6 +1485,10 @@ def run(now_dt=None):
     in_window = [s for s in samples if s['t'] >= now - window]
     if mode == 'auto':
         summary['verified'] = verify_pending(now_dt, samples)
+        try:
+            summary['verified'] += autotune_sentinels.verify_pending(now_dt, samples)
+        except Exception:  # noqa: BLE001 - a Sentinel's verification that could not run never stops the round
+            logger.warning('auto-tune: the per-Sentinel verification could not run', exc_info=True)
         row = settings_row()  # a revert just wrote the tuned numbers
         try:
             summary['paused_kinds'] = pause_failing_kinds(mode, now_dt)
@@ -1508,6 +1529,12 @@ def run(now_dt=None):
         if plan['ai_range'] and plan['ai_range'][0] != plan['ai_range'][1]:  # the advisor is asked only about a setting the controller lets move
             offered[m.key] = {'setting': m.setting, 'value': value, 'baseline': baseline, 'range': plan['ai_range'], 'target': plan['ceiling'],
                               'controller': plan['reason'] or 'hold'}
+    try:  # every live Sentinel with a fresh machine report: its concurrency and per-kind slots (cveFeed.autotune_sentinels)
+        sentinel_plans, sentinel_offered, summary['sentinels'] = autotune_sentinels.plan(mode, now_dt, samples)
+        offered.update(sentinel_offered)
+    except Exception:  # noqa: BLE001 - the per-Sentinel tuning never stops the round
+        logger.warning('auto-tune: the per-Sentinel plans could not be made', exc_info=True)
+        sentinel_plans, summary['sentinels'] = [], {}
     advice = {}
     state = advisor_state(row)
     reply = take_advice(now) if offered else None
@@ -1519,10 +1546,14 @@ def run(now_dt=None):
         summary['advisor'] = {'answered': True, 'accepted': len(accepted), 'refused': [f'{k}: {why}' for k, why in refused][:20],
                               'error': error or None}
     elif offered and _advisor_due(state, now):
-        error = ask_advisor(offered, signals.summarise(in_window), now)
+        error = ask_advisor(offered, {**signals.summarise(in_window), 'sentinels': autotune_sentinels.advisor_numbers(samples)}, now)
         summary['advisor'] = {'asked': True, 'queued': not error, 'error': error or None}
     compact = signals.summarise(in_window[-6:])
     gate_closed = mode == 'auto' and calm_change_unverified()
+    try:
+        summary['changes'] += autotune_sentinels.act(mode, sentinel_plans, advice, now_dt, summary['sentinels'])
+    except Exception:  # noqa: BLE001
+        logger.warning('auto-tune: the per-Sentinel changes could not be made', exc_info=True)
     for key, (m, value, baseline, plan) in plans.items():
         source, new, reason, pressured, phase = 'controller', plan['new'], plan['reason'], plan['pressure'], plan['phase']
         if not pressured and key in advice:
@@ -1701,7 +1732,10 @@ def record_emergency(now_dt):
 
 def serialize(d):
     marks = d.signals if isinstance(d.signals, dict) else {}
-    return {'id': d.pk, 'at': _iso(d.created_at), 'setting': d.setting, 'label': getattr(by_key().get(d.setting), 'label', None) or (f"{(d.signals or {}).get('kind')} on {(d.signals or {}).get('sentinel')}" if d.action == 'pause' else d.setting),
+    label = getattr(by_key().get(d.setting), 'label', None) or (f"{marks.get('kind')} on {marks.get('sentinel')}" if d.action == 'pause' else None)
+    if label is None and autotune_sentinels.is_key(d.setting) and isinstance(marks.get('label'), str):
+        label = marks['label']  # one Sentinel's number: "Tasks at once on <name>"
+    return {'id': d.pk, 'at': _iso(d.created_at), 'setting': d.setting, 'label': label or d.setting,
             'old_value': d.old_value, 'new_value': d.new_value, 'mode': d.mode, 'source': d.source, 'action': d.action, 'layer': d.layer,
             'applied': d.applied, 'pressure': d.pressure, 'phase': d.phase or None, 'reason': d.reason, 'actor': d.actor.username if d.actor_id else None,
             'resolution': d.resolution or None, 'resolved_at': _iso(d.resolved_at), 'resolved_by': d.resolved_by or None,
@@ -1790,7 +1824,16 @@ def status():
                      'higher_means': 'more work at once' if m.setting.sense == 'more' else 'a longer wait between runs'} for m in managed()],
         'last_run': last or None, 'sized_for': last.get('sized_for'), 'facts': last.get('facts'), 'recent_decisions': recent,
         'run_every_minutes': 10, 'retention_days': RETENTION_DAYS,
+        'sentinels': _sentinel_status(),
     }
+
+
+def _sentinel_status():
+    try:
+        return autotune_sentinels.status()
+    except Exception:  # noqa: BLE001 - the status of the per-Sentinel tuning never fails the whole status
+        logger.warning('auto-tune: the per-Sentinel status could not be read', exc_info=True)
+        return []
 
 
 def annotate(fields):

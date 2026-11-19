@@ -60,7 +60,7 @@ BASE = {
                'running': {'nmap': 2}, 'cost_mb': {'nmap': 400, 'nuclei': 1000}},
     'db': {'used': 20, 'max': 300}, 'load': 0.3, 'load_kind': 'loadavg', 'cores': 8, 'size': {'hosts': 500, 'targets': 50, 'disk_free_percent': 50.0},
     'discovery': {'replying': True, 'ceiling': 8, 'active': 4, 'queued': 0},
-    'sentinel': {'live': 0, 'slots': 0, 'in_use': 0, 'queued': 0, 'oldest_queued_s': None, 'timeouts': 0, 'fallbacks': 0},
+    'sentinel': {'live': 0, 'slots': 0, 'in_use': 0, 'queued': 0, 'oldest_queued_s': None, 'timeouts': 0, 'expired_unclaimed': 0},
     'assess': {'queued': 0, 'running': 0, 'oldest_s': None},
     'conductor': {'depth': 3, 'active': 1, 'state': 'filling'}, 'failures': {},
 }
@@ -316,7 +316,7 @@ class ControllerTests(SimpleTestCase):
             (NMAP8, 6, {'memory': {'waiting': {'nmap': 1.0}, 'running': {'nmap': 0}}}, 4, 'waited for memory'),
             (DISCOVERY32, 24, {'db': {'used': 250, 'max': 300}}, 18, 'database at 83%'),
             (DISCOVERY32, 24, {'discovery': {'replying': False}}, 18, 'does not answer'),
-            (STAGE16, 8, {'sentinel': {'live': 2, 'slots': 8, 'timeouts': 1, 'fallbacks': 1}}, 6, 'ran locally'),
+            (STAGE16, 8, {'sentinel': {'live': 2, 'slots': 8, 'timeouts': 1, 'expired_unclaimed': 1}}, 6, 'expired unclaimed'),
             (WORK_GAP, 1, {'memory': {'free_frac': 0.05}}, 2, 'memory free'),
         ]
         recent_calm_change = [change(60, 4, 5)]  # a change a minute ago does not hold a back-off
