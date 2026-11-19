@@ -66,11 +66,8 @@ ADVISOR_SYSTEM = ai_prompts.compose('autotune_advisor',
     'change now, the number in effect, the target sized for this machine, and the lowest and highest number you may choose. Be ambitious: choose '
     'the highest allowed number unless the measurements show trouble (memory kills or little memory free, timeouts, the database near its '
     'connection limit, a worker or the broker not answering, Sentinel tasks that time out or expire unclaimed); then choose a lower allowed number. '
-    'Nothing scans on this server: every scan runs on a Sentinel. Settings named sentinel:<id>:max_concurrent (how many tasks that one Sentinel runs at '
-    'once) and sentinel:<id>:kind:<kind> (how many of one kind it runs at once) belong to one Sentinel; measurements.sentinels.<id> are that '
-    'Sentinel\'s own machine (CPUs, load per CPU, share of memory available, slots, its machine\'s own ceiling, tasks finished, runs killed for memory, '
-    'timeouts). For those, choose lower when its memory available is under 0.2, its load per CPU is over 1.5 or a run was killed for memory, and never '
-    'above its machine\'s ceiling. Never name a setting you '
+    'Settings sentinel:<id>:max_concurrent and sentinel:<id>:kind:<kind> are one Sentinel\'s tasks at once; measurements.sentinels.<id> is its '
+    'machine: choose lower when memory_available_share < 0.2, load_per_cpu_1m > 1.5 or a run was killed for memory. Never name a setting you '
     'were not given. Reply with ONLY {"recommendations": [{"setting": "<name>", "value": <whole number>, "reason": "<one short sentence citing the '
     'numbers>"}]}.')
 
