@@ -35,8 +35,10 @@ runtime rules of ``cveFeed.version_sources``):
                  IOS XE, IOS XR, NX-OS, FortiOS, Junos OS, PAN-OS, SonicOS, RouterOS). A product a port row, another first-party reading or a
                  technology already states with a version is left out (``recog_readings``): Recog only adds what nmap and the other readers
                  did not read, and never replaces their version. Derived like ``vsrc:nmap``.
-  vsrc:nuclei    a versioned product a ``network/detection/`` template read on a port (``cveFeed.network_detection``) when the port's own row names another
-                 product: nmap's product and version are never overwritten, so a second product the service names is a reading of its own, per port.
+  vsrc:nuclei    what a ``network/detection/`` template read on a port (``cveFeed.network_detection``): a versioned product when the port's own row names
+                 another product (nmap's product and version are never overwritten, so a second product the service names is a reading of its own),
+                 an unversioned one as an identity reading, and the version the pass filled into the port row (``on_port``: the port is matched, so
+                 no second technology; ``port_inventory`` keeps the port's version while this reading is fresh), per port.
 
 The Windows release (``cveFeed.windows_builds``: kind ``hint``, ``release_only``, never a technology, matched by its own rules as "release known,
 patch level unknown"):
@@ -46,8 +48,10 @@ patch level unknown"):
 
 Third-party readings (kind and outcome ``reported``): passive data another service collected at some earlier time, never a technology:
 
-  vsrc:shodan-idb  a versioned CPE bbot's ``shodan_idb`` module (Shodan's InternetDB) gives a discovered host (``cpe:/a:openbsd:openssh:8.9p1``).
-                   InternetDB states no scan date: the reading is dated when cvENGINE received it, and marked ``undated``.
+  vsrc:shodan-idb  every CPE bbot's ``shodan_idb`` module (Shodan's InternetDB) gives a discovered host, labelled "vendor product"
+                   (``shodan_reading``): versioned or not (``cpe:/a:openbsd:openssh:8.9p1``, ``cpe:/a:apache:http_server``), an application or an
+                   operating system (``cpe:/o:canonical:ubuntu_linux``). Only a versioned one is matched. InternetDB states no scan date: the
+                   reading is dated when cvENGINE received it, and marked ``undated``.
   vsrc:runzero     the operating system and its version runZero's inventory states for an address (``os``, ``os_version``), dated by the
                    asset's ``last_seen``.
 
@@ -163,6 +167,51 @@ def cpe_reading(cpe, source, evidence=''):
         return None
     label = found.group(2).replace('_', ' ').strip()
     return product_reading(label, version, source, evidence=evidence or str(cpe), cpe=str(cpe).strip())
+
+
+def identity_reading(label, source, evidence='', url='', cpe=''):
+    """An identity reading: the product a source names with no version (``cveFeed.identity_readings.reading``)."""
+    from cveFeed import identity_readings
+    return identity_readings.reading(label, source, evidence=evidence, url=url, cpe=cpe)
+
+
+_ANY_CPE_RE = re.compile(r'^cpe:(?:/|2\.3:)([aoh]):([^:\s]*):([^:\s]+)(?::([^:\s]*))?', re.IGNORECASE)
+
+
+def is_cpe(text):
+    """Whether ``text`` is a CPE (an application, operating system or hardware one, 2.2 or 2.3 form)."""
+    return bool(_ANY_CPE_RE.match(str(text or '').strip()))
+
+
+def cpe_label(vendor, product):
+    """The name a CPE's vendor and product make: "vendor product" (``apache:http_server`` is "apache http server", never the bare "http server"),
+    the product alone when it already starts with its vendor (``nginx:nginx``, ``linux:linux_kernel``)."""
+    vendor, product = (vendor or '').replace('_', ' ').strip(), (product or '').replace('_', ' ').strip()
+    if not vendor or vendor in ('*', '-') or _component(product).startswith(_component(vendor)):
+        return product
+    return f'{vendor} {product}'
+
+
+def shodan_reading(cpe):
+    """The third-party reading one CPE Shodan's InternetDB handed bbot is, or None for text that is no CPE: an application, operating system or
+    hardware CPE, versioned or not, labelled "vendor product" (``cpe_label``), the CPE kept for correlation's CPE-first matching. Never a
+    technology: what InternetDB says is passive and of unknown age (``store_bbot_reported``)."""
+    text = catalogue.clip(cpe, 200)
+    found = _ANY_CPE_RE.match(text)
+    if not found:
+        return None
+    label = cpe_label(found.group(2), found.group(3))
+    version = found.group(4) or ''
+    version = '' if version in ('*', '-') else version
+    evidence = f'Shodan InternetDB CPE {text}'
+    from cveFeed import js_libraries
+    if version and js_libraries.is_library(found.group(3)):
+        # a JavaScript library's version comes only from its own file (cveFeed.js_libraries), never from another tool's reading
+        return identity_reading(label, SHODAN_PROVIDER, evidence=f'{evidence} (a library\'s version is read from its own file)', cpe=text)
+    if version and _STATED.match(version):
+        # read as the product InternetDB names, a runtime too (cpe:/a:php:php:8.1.2): the CPE is what correlation matches
+        return {**catalogue.reading(_component(label), label, version.lstrip('vV'), evidence=evidence, source=SHODAN_PROVIDER), 'cpe': text}
+    return identity_reading(label, SHODAN_PROVIDER, evidence=evidence, cpe=text)
 
 
 def header_readings(headers, source, url='/'):
@@ -506,9 +555,9 @@ def recog_readings(sub, ports):
 
 
 def reported_cpe(tech):
-    """The third-party reading a technology string bbot reported is, when it is a versioned application CPE (only Shodan's InternetDB hands bbot
-    CPEs), else None: anything else is a technology like any other."""
-    return cpe_reading(tech, SHODAN_PROVIDER, evidence=f'Shodan InternetDB CPE {catalogue.clip(tech, 200)}')
+    """The third-party reading a technology string bbot reported is, when it is a CPE (only Shodan's InternetDB hands bbot CPEs: versioned or
+    not, an application or an operating system, ``shodan_reading``), else None: anything else is a technology like any other."""
+    return shodan_reading(tech)
 
 
 def runzero_readings(block):
@@ -841,6 +890,15 @@ def collect_reported(subdomain, product_index, cve_by_id, rows, scan_history=Non
     return found
 
 
+def os_rows(value):
+    """The version source rows that name an operating system containing ``value`` (``os:``): the Windows release an NTLM challenge states
+    (``vsrc:ntlm``), runZero's operating system (``vsrc:runzero``) and any reading carrying an operating system CPE (a network operating
+    system's identity, Shodan's ``cpe:/o:`` CPEs)."""
+    from cveFeed import version_sources
+    return version_sources.readings_qs().filter(Q(probe__in=(NTLM_PROBE, RUNZERO_PROBE)) | Q(evidence__cpe__istartswith='cpe:/o:')) \
+        .filter(Q(product__icontains=value) | Q(evidence__cpe__icontains=value))
+
+
 def reported_host_ids(base_qs):
     """The ids of the Subdomain rows of ``base_qs`` with a reported reading (``correlation.candidate_subdomains``)."""
     from django.db.models import Exists, OuterRef
@@ -866,9 +924,7 @@ def catch_up(apply=False, batch=200):
     banners and WordPress scan headers were never stored: they are read from the next audit and scan. Idempotent. Returns
     ``{'hosts', 'readings', 'matches'}``."""
     from cveFeed import correlation, version_sources
-    from cveFeed.models import DiscoveryEvent
-    from cvengine_scanner import versions
-    from startScan.models import Subdomain, Technology, Vulnerability
+    from startScan.models import Subdomain, Vulnerability
     base = Subdomain.objects.filter(correlation.latest_scan_q()).filter(target_domain__isnull=False)
     ids = list(base.order_by('id').values_list('id', flat=True))
     out = {'hosts': len(ids), 'readings': 0, 'matches': 0}
@@ -900,27 +956,7 @@ def catch_up(apply=False, batch=200):
             on_runzero = any(isinstance(ip.fingerprint, dict) and ip.fingerprint.get('runzero') for ip in sub.ip_addresses.all())
             if changed or found or on_runzero:
                 moved.add(sub.pk)
-    # the CPEs Shodan's InternetDB handed bbot, as the discovery feed kept them ("<technology> on <host>"), newest first
-    seen = set()
-    for event in DiscoveryEvent.objects.filter(type='TECHNOLOGY', label__istartswith='cpe:').order_by('-id').iterator(chunk_size=500):
-        tech, sep, host = event.label.rpartition(' on ')
-        host = (host or event.host or '').strip().lower().rstrip('.')
-        reading = reported_cpe(tech.strip()) if sep else None
-        if not reading or (event.domain_id, host, reading['label']) in seen:
-            continue
-        seen.add((event.domain_id, host, reading['label']))
-        sub = _current_row(event.domain_id, host)
-        if sub is None:
-            continue
-        if store_reported(sub.target_domain.project_id, sub.target_domain_id, sub.name, SHODAN_PROBE, [reading], SHODAN_PROVIDER, event.created_at,
-                          undated=True):
-            moved.add(sub.pk)
-        out['readings'] += 1
-        stored = Technology.objects.filter(name=versions.normalize_technology(tech.strip())).values_list('id', flat=True)
-        links = Subdomain.technologies.through.objects.filter(subdomain_id=sub.pk, technology_id__in=list(stored))
-        if links.exists():
-            links.delete()  # an earlier discovery stored the CPE as a first-party technology: the reported reading replaces it
-            moved.add(sub.pk)
+    out['readings'] += _shodan_events(moved)
     # the replies the database exposure findings kept
     for vuln in Vulnerability.objects.filter(source='db_exposure').exclude(subdomain__isnull=True).select_related('subdomain').iterator(chunk_size=500):
         replies = [r for r in (vuln.extracted_results or []) if isinstance(r, str)] if isinstance(vuln.extracted_results, list) else []
@@ -934,6 +970,85 @@ def catch_up(apply=False, batch=200):
         out['readings'] += len(readings)
     if moved:
         # every host that gained or lost a reading (or a technology): one that lost its only one is correlated too, so its matches close
+        cve_by_id, index = correlation.cve_pool()
+        ordered = sorted(moved)
+        for start in range(0, len(ordered), batch):
+            subs = list(Subdomain.objects.filter(pk__in=ordered[start:start + batch]).select_related('target_domain', 'scan_history')
+                        .prefetch_related('technologies', 'ip_addresses__ports'))
+            out['matches'] += correlation.correlate_subdomains(subs, index, cve_by_id, min_confidence=0.4)[1]
+    return out
+
+
+def _shodan_events(moved):
+    """Store the CPEs Shodan's InternetDB handed bbot, as the discovery feed kept them ("<technology> on <host>"), newest first, as reported
+    readings of the host's current row (dated when they were received), and take off that row the technology an earlier discovery stored
+    for the CPE under its normalized name ("http server", "http_server:2.4.41"): the reading replaces it. Adds each host that moved to
+    ``moved``; returns how many readings were read."""
+    from cveFeed.models import DiscoveryEvent
+    from cvengine_scanner import versions
+    from startScan.models import Subdomain, Technology
+    seen, count = set(), 0
+    for event in DiscoveryEvent.objects.filter(type='TECHNOLOGY', label__istartswith='cpe:').order_by('-id').iterator(chunk_size=500):
+        tech, sep, host = event.label.rpartition(' on ')
+        host = (host or event.host or '').strip().lower().rstrip('.')
+        reading = reported_cpe(tech.strip()) if sep else None
+        if not reading or (event.domain_id, host, reading['label']) in seen:
+            continue
+        seen.add((event.domain_id, host, reading['label']))
+        sub = _current_row(event.domain_id, host)
+        if sub is None:
+            continue
+        if store_reported(sub.target_domain.project_id, sub.target_domain_id, sub.name, SHODAN_PROBE, [reading], SHODAN_PROVIDER, event.created_at,
+                          undated=True):
+            moved.add(sub.pk)
+        count += 1
+        names = {versions.normalize_technology(tech.strip()), tech.strip()}
+        stored = Technology.objects.filter(name__in=names).values_list('id', flat=True)
+        links = Subdomain.technologies.through.objects.filter(subdomain_id=sub.pk, technology_id__in=list(stored))
+        if links.exists():
+            links.delete()  # an earlier discovery stored the CPE as a first-party technology: the reported reading replaces it
+            moved.add(sub.pk)
+    return count
+
+
+def catch_up_shodan(apply=False, batch=200):
+    """The one-time catch-up of the Shodan InternetDB CPEs an update runs (``manage.py backfill_shodan_cpes --apply``): every CPE is a reported
+    reading labelled "vendor product" (``shodan_reading``: unversioned and operating system CPEs too, which were stored as technologies named
+    "http server" or "cpe:/o:..."). Relabels the stored readings ("openssh" is "openbsd openssh"), re-reads the CPEs the discovery feed kept
+    (``_shodan_events``), turns every technology named as a raw CPE into the reading it is and drops it, then correlates the hosts that moved.
+    Idempotent. Returns ``{'relabelled', 'readings', 'technologies', 'hosts', 'matches'}``."""
+    from cveFeed import correlation
+    from cveFeed.models import ProbeObservation
+    from startScan.models import Subdomain, Technology
+    rows = list(ProbeObservation.objects.filter(probe=SHODAN_PROBE))
+    stale = [(row, shodan_reading((row.evidence or {}).get('cpe') if isinstance(row.evidence, dict) else '')) for row in rows]
+    stale = [(row, r) for row, r in stale if r and r['label'] != row.product]
+    raw = list(Technology.objects.filter(name__istartswith='cpe:'))
+    links = list(Subdomain.technologies.through.objects.filter(technology_id__in=[t.pk for t in raw]).values_list('subdomain_id', 'technology_id'))
+    out = {'relabelled': len(stale), 'readings': 0, 'technologies': len(raw), 'hosts': 0, 'matches': 0}
+    if not apply:
+        return out
+    moved = set()
+    for row, reading in stale:
+        ev = row.evidence if isinstance(row.evidence, dict) else {}
+        sub = _current_row(row.domain_id, row.host)
+        store_reported(row.project_id, row.domain_id, row.host, SHODAN_PROBE, [reading], SHODAN_PROVIDER, ev.get('reported_at') or row.observed_at,
+                       port=row.port, undated=bool(ev.get('undated')))
+        row.delete()
+        if sub is not None:
+            moved.add(sub.pk)
+    out['readings'] += _shodan_events(moved)
+    names = {t.pk: t.name for t in raw}
+    current = set(Subdomain.objects.filter(correlation.latest_scan_q()).filter(pk__in={s for s, _t in links}).values_list('pk', flat=True))
+    for sub in Subdomain.objects.filter(pk__in=current).select_related('target_domain'):
+        readings = [reported_cpe(names[t]) for s, t in links if s == sub.pk]
+        if sub.target_domain_id and store_bbot_reported(sub, [r for r in readings if r]):
+            out['readings'] += len([r for r in readings if r])
+        moved.add(sub.pk)
+    Subdomain.technologies.through.objects.filter(technology_id__in=list(names)).delete()
+    Technology.objects.filter(pk__in=list(names)).delete()
+    out['hosts'] = len(moved)
+    if moved:
         cve_by_id, index = correlation.cve_pool()
         ordered = sorted(moved)
         for start in range(0, len(ordered), batch):

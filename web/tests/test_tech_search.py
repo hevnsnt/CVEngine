@@ -253,6 +253,37 @@ class TechSearchTests(TestCase):
         self.assertEqual(self.names('component:any'), ['reading.ts.example', 'reported.ts.example', 'wpphp.ts.example'])
         self.assertEqual(self.names('vsource:reported'), ['reported.ts.example'])
 
+    def test_component_takes_any_name_tech_takes(self):
+        # a reading's product by its aliases, a vendor in front, a quoted name with spaces; the slug still works
+        for q in ('component:"apache http server"', 'component:"apache httpd"', 'component:apachegeneric', 'component:apache-http-server'):
+            self.assertEqual(self.names(q), ['reading.ts.example', 'reported.ts.example'], q)
+        self.assertEqual(self.names('component:"apache httpd@2.4.57"'), ['reading.ts.example'])
+        self.assertEqual(self.names('component:php'), ['wpphp.ts.example'])  # never phpMyAdmin-like longer names
+
+    def test_os_reads_every_operating_system_source(self):
+        def reading(host, probe, product, version='', cpe='', kind='hint'):
+            Subdomain.objects.create(name=host, target_domain=self.da)
+            evidence = {'version_source': True, 'component': product.lower(), 'confidence': 'exact', **({'cpe': cpe} if cpe else {})}
+            ProbeObservation.objects.create(project=self.pa, domain=self.da, host=host, probe=probe, kind=kind, product=product, version=version,
+                                            outcome='found', evidence=evidence)
+        reading('ntlm.ts.example', 'vsrc:ntlm', 'Windows Server 2019', '10.0.17763')
+        reading('rz.ts.example', 'vsrc:runzero', 'Ubuntu Linux', '22.04', kind='reported')
+        reading('forti.ts.example', 'vsrc:nmap', 'FortiOS', cpe='cpe:/o:fortinet:fortios', kind='version')
+        sub = Subdomain.objects.create(name='guess.ts.example', target_domain=self.da)
+        addr = IpAddress.objects.create(address='198.51.100.200', os_guess='Linux 4.x',
+                                        fingerprint={'os_matches': [{'name': 'Linux 4.x', 'accuracy': 92}, {'name': 'Fortinet FortiOS 6.2 - 7.2', 'accuracy': 90}]})
+        sub.ip_addresses.add(addr)
+        sub = Subdomain.objects.create(name='oscpe.ts.example', target_domain=self.da)
+        addr = IpAddress.objects.create(address='198.51.100.201')
+        sub.ip_addresses.add(addr)
+        addr.ports.add(Port.objects.create(number=22, product='OpenSSH', service_name='ssh', extra={'cpes': ['cpe:/a:openbsd:openssh:8.9p1',
+                                                                                                          'cpe:/o:canonical:ubuntu_linux']}))
+        self.assertEqual(self.names('os:windows'), ['ntlm.ts.example'])
+        self.assertEqual(self.names('os:ubuntu'), ['oscpe.ts.example', 'rz.ts.example'])
+        self.assertEqual(self.names('os:fortios'), ['forti.ts.example', 'guess.ts.example'])
+        self.assertIn('OS guess Fortinet FortiOS 6.2 - 7.2', self.why('os:fortios')['guess.ts.example'])
+        self.assertEqual(self.names('os:openssh'), [])  # an application CPE is not an operating system
+
     # ------------------------------------------------------------------ tenancy and the MCP path
     def test_another_projects_hosts_and_readings_never_count(self):
         for q in ('tech:php', 'tech:wordpress', 'tech:java', 'tech:"apache httpd"', 'tech:php@known', 'tech:java@21'):

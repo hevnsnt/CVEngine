@@ -517,6 +517,8 @@ def technology_names(observations):
             names += [str(n)[:500] for n in library['tech_names'] if ':' in str(n)]  # the effective copy, or each copy of an unresolved set
         elif o['kind'] == 'version' and o['product'] == JAVA_RUNTIME:
             continue  # the JVM a page states is a Java runtime reading of its own (cveFeed.java_runtime), never a technology
+        elif o['kind'] == 'version' and isinstance(o.get('evidence'), dict) and o['evidence'].get('on_port'):
+            continue  # a version the port row itself states (cveFeed.network_detection filled it): the port is matched, not a second technology
         elif o['kind'] == 'version' and o['outcome'] == 'found' and o['version']:
             names.append(f"{o['product']}:{o['version']}")
         elif o['kind'] == 'wordpress' and o['outcome'] == 'found':
@@ -528,15 +530,13 @@ def technology_names(observations):
 
 def apply_to_subdomain(sub, observations):
     """Add the observations' technologies to the host row so correlation reads them like any detected technology. Returns how many were new."""
-    from startScan.ip_rows import get_or_create_first
-    from startScan.models import Technology
+    from cveFeed import tech_rows
     added = 0
     have = {t.name for t in sub.technologies.all()}
     for name in technology_names(observations):
         if name in have:
             continue
-        tech, _ = get_or_create_first(Technology, name=name[:500])
-        sub.technologies.add(tech)
+        sub.technologies.add(tech_rows.technology(name))  # one row per spelling (cveFeed.tech_rows)
         added += 1
     return added
 

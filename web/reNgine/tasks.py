@@ -89,21 +89,22 @@ def persist_bbot_result(result, ctx):
 			subdomain = Subdomain.objects.filter(scan_history_id=ctx['scan_history_id'], name=host).first()
 		if not subdomain:
 			continue
-		raw_tech = tech_name
-		tech_name = versions.normalize_technology(tech_name)  # a CPE or a "v3.3.7" would otherwise store a name no advisory matches
+		if source_versions.is_cpe(tech_name):
+			# a CPE is what Shodan's InternetDB told bbot (passive, of unknown age): versioned or not, an application or an operating system, a
+			# third-party reading of the host labelled "vendor product" with its CPE (cveFeed.source_versions.shodan_reading), matched only while
+			# nothing first-party names the product, never a technology that outlives a fresher scan
+			reported = source_versions.reported_cpe(tech_name)
+			if reported:
+				source_versions.store_bbot_reported(subdomain, [reported])
+			continue
+		tech_name = versions.normalize_technology(tech_name)  # a "v3.3.7" would otherwise store a name no advisory matches
 		tech_name = stored_technology_name(tech_name)  # a Server-header token ("nginx/1.28.3") is the product and its version
 		# a JavaScript library's version is read from its own file (cveFeed.js_libraries), never taken from another tool's guess
 		tech_name = js_libraries.unversioned(tech_name)
 		if not tech_name:
 			continue
-		reported = source_versions.reported_cpe(raw_tech) if tech_name == versions.normalize_technology(raw_tech) else None
-		if reported:
-			# a versioned CPE is what Shodan's InternetDB told bbot (passive, of unknown age): a third-party reading of the host with its CPE,
-			# matched only while nothing first-party names the product (cveFeed.source_versions), never a technology that outlives a fresher scan
-			source_versions.store_bbot_reported(subdomain, [reported])
-			continue
-		tech, _ = get_or_create_first(Technology, name=tech_name[:500])
-		subdomain.technologies.add(tech)
+		from cveFeed import tech_rows
+		subdomain.technologies.add(tech_rows.technology(tech_name))  # one row per spelling: "Caddy" and "caddy" are one (cveFeed.tech_rows)
 	_persist_bbot_findings(result, ctx, subdomains)
 	_persist_bbot_urls(result, ctx, subdomains)
 	_persist_bbot_http(result, ctx, subdomains)

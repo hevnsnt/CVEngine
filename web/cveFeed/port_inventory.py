@@ -5,6 +5,7 @@ The scan tools run on a Sentinel (the built-in scanner or an external one); this
 onto IpAddress / Port. Nothing here launches a tool.
 """
 import logging
+import re
 
 from django.db import DatabaseError
 from django.utils import timezone
@@ -133,7 +134,7 @@ def _persist_ports(ip_obj, host, source, now, tcp_protocols):
     for rec in host.get('ports', []):
         if not rec.get('number'):
             continue
-        rec = split_header_product(rec)
+        rec = mariadb_version(split_header_product(rec))
         protocol = 'udp' if rec.get('protocol') == 'udp' else 'tcp'  # UDP 161 and TCP 161 are two services: two rows
         same_protocol = ('udp',) if protocol == 'udp' else tcp_protocols
         number = int(rec['number'])
@@ -163,8 +164,9 @@ def _persist_ports(ip_obj, host, source, now, tcp_protocols):
             port.version = port.service_extra = port.cpe = port.banner = ''
         elif seen(port) and rec.get('product') and rec.get('method') == 'probed' and not rec.get('version') and not _cpe_version(rec):
             # the same product answered and no longer states a version (server_tokens off, an upgrade): the old version, and the CPE
-            # that carried it, are not what runs there now
-            port.version = port.cpe = ''
+            # that carried it, are not what runs there now, unless a fresh first-party reading of the same product on this port states it
+            # (the network detection pass filled it: nmap's probe does not read it, the template does)
+            port.version, port.cpe = _read_version(ip_obj, port, rec['product']), ''
         for field in ('protocol', 'state', 'product', 'version', 'service_extra', 'cpe'):
             if rec.get(field):
                 setattr(port, field, rec[field])
@@ -260,6 +262,23 @@ def split_header_product(rec):
     if rest and not rec.get('service_extra'):
         out['service_extra'] = rest[:255]
     return out
+_MARIADB_PREFIX = re.compile(r'^5\.5\.5-(?=\d+\.\d)')
+
+
+def mariadb_version(rec):
+    """``rec`` with the "5.5.5-" MariaDB's handshake puts before its version (old MySQL clients refuse a server below 5.5) taken off the
+    version and the CPEs nmap read it into (``cpe:/a:mariadb:mariadb:5.5.5-10.11.19`` is MariaDB 10.11.19), so the stored version is the
+    release a search for ``tech:mariadb@10.11`` and a person read. Only for MariaDB; anything else unchanged. Returns a new dict."""
+    names = f"{rec.get('product') or ''} {rec.get('version') or ''} {rec.get('cpe') or ''} {' '.join(rec.get('cpes') or [])}".lower()
+    if 'mariadb' not in names:
+        return rec
+    out = {**rec, 'version': _MARIADB_PREFIX.sub('', str(rec.get('version') or ''))}
+    fix = lambda cpe: re.sub(r'(?i)^(cpe:/a:mariadb:mariadb:)5\.5\.5-(?=\d)', r'\1', cpe) if isinstance(cpe, str) else cpe  # noqa: E731
+    if rec.get('cpe'):
+        out['cpe'] = fix(rec['cpe'])
+    if rec.get('cpes'):
+        out['cpes'] = [fix(c) for c in rec['cpes']]
+    return out
 
 
 def store_distro(port, info):
@@ -277,6 +296,28 @@ def store_distro(port, info):
         extra.pop('distro', None)
     port.extra = extra
     return before != (port.distro, port.distro_release, port.package_release, port.upstream_version, kept)
+
+
+def _read_version(ip_obj, port, product):
+    """The version a fresh first-party reading of ``product`` states for ``port`` (the network detection pass's reading,
+    ``source_versions.NUCLEI_PROBE``: it filled it into the row, ``cveFeed.network_detection``), or ''. Fresh: seen inside the pass's ledger
+    window; a pass that no longer reads it drops it."""
+    from datetime import timedelta
+
+    from cveFeed import ledger, network_detection, source_versions
+    from cveFeed.models import ProbeObservation
+    from startScan.models import Subdomain
+    fill = (port.extra or {}).get(network_detection.FILL_KEY) if isinstance(port.extra, dict) else None
+    version = (port.version or '').strip()
+    if not version or not isinstance(fill, dict) or fill.get('version') != version:
+        return ''
+    hosts = {n.lower().rstrip('.') for n in Subdomain.objects.filter(ip_addresses=ip_obj).values_list('name', flat=True)[:200]}
+    cutoff = timezone.now() - timedelta(seconds=ledger.ttl(network_detection.SERVICE))
+    for row in ProbeObservation.objects.filter(probe=source_versions.NUCLEI_PROBE, host__in=hosts, port=port.number, kind='version', outcome='found',
+                                               version=version, observed_at__gte=cutoff):
+        if network_detection._same_product(row.product, product):
+            return version
+    return ''
 
 
 def _unprobed(rec):
