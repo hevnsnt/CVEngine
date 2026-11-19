@@ -55,7 +55,7 @@ _WORD = re.compile(r'[^A-Za-z0-9 ._:/;,()+@-]')
 
 
 def _https_port(number, service='', tunnel=''):
-    """A port a TLS web server (nginx, Apache, Tomcat ...) answers HTTPS on: the usual numbers, or a TLS tunnel nmap read as HTTP."""
+    """A port a TLS web server (nginx, Apache, Tomcat ...) answers HTTPS on: the usual numbers, or a TLS tunnel the port scan read as HTTP."""
     service = str(service or '').lower()
     return number in (443, 8443, 9443) or (tunnel == 'ssl' and 'http' in service) or service in ('https', 'https-alt', 'ssl/http', 'ssl/https')
 
@@ -354,8 +354,8 @@ def closure_reason(match, now=None):
 
 
 def is_precondition_closure(match):
-    return (match.ai_verdict == 'not_affected' and (match.ai_reason or '').startswith(CLOSED)
-            and (match.ai_model or '') == AUTOMATIC_MODEL)
+    return (getattr(match, 'ai_verdict', '') == 'not_affected' and (getattr(match, 'ai_reason', '') or '').startswith(CLOSED)
+            and (getattr(match, 'ai_model', '') or '') == AUTOMATIC_MODEL)
 
 
 def evidence_of(items, boost):
