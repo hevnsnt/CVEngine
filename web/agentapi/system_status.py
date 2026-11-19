@@ -563,24 +563,25 @@ def _certificate():
 
 
 def _feeds():
+    """The CVE feeds: when each last ran and succeeded, the coverage watermark, each threat-intelligence source (cveFeed.feed_health). Only
+    small reads: the detection-guidance progress (a pass over the whole catalog, which ran past the probe's 5 s) is what the authoring task
+    last cached, None before its first run."""
+    from django.core.cache import cache
     from django_celery_beat.models import PeriodicTask
 
+    from cveFeed import feed_health
     from cveFeed.models import CVEEntry
     last = PeriodicTask.objects.filter(task='sync_cve_now_feed').values_list('last_run_at', flat=True).first()
     newest = CVEEntry.objects.order_by('-published_at').values_list('published_at', flat=True).first()
+    guidance = cache.get('cvengine:cve-guidance-progress')
     try:
-        from cveFeed import detection_author
-        guidance = detection_author.progress()
-    except Exception:  # noqa: BLE001 - status must not fail on a counting problem
-        guidance = None
-    try:
-        from cveFeed import feed_watermark
-        watermark = feed_watermark.status()  # the feed is complete through this time; `behind` when it has not been read to its head in a day
-    except Exception:  # noqa: BLE001 - status must not fail on a counting problem
-        watermark = None
-    cve_entries = guidance['cves'] if guidance else CVEEntry.objects.count()  # the guidance progress has just counted them (a second pass over the whole catalogue otherwise)
+        health = feed_health.status()
+    except Exception as exc:  # noqa: BLE001 - status must not fail on a counting problem
+        health = {'feeds': None, 'intel': None, 'watermark': None, 'problems': [f'feeds: health not read ({type(exc).__name__})']}
+    cve_entries = guidance['cves'] if guidance else CVEEntry.objects.count()
     return {'cve_entries': cve_entries, 'newest_cve_published': _iso(newest), 'last_feed_dispatch': _iso(last),
-            'cve_feed_watermark': watermark, 'cve_guidance': guidance}
+            'cve_feed_watermark': health['watermark'], 'cve_guidance': guidance, 'health': health['feeds'], 'intel_sources': health['intel'],
+            'problems': health['problems']}
 
 
 def _os_detection():
@@ -962,6 +963,7 @@ def _system(user, problems, notes, run=None):
     if out['disk'].get('free_percent') is not None and out['disk']['free_percent'] < DISK_LOW_PERCENT:
         problems.append(f"disk: only {out['disk']['free_percent']}% free ({out['disk']['free_mb']} MB)")
     out['feeds'] = take('feeds')
+    problems.extend(out['feeds'].pop('problems', None) or [])  # each feed's failures and staleness (cveFeed.feed_health)
     last = out['feeds'].get('last_feed_dispatch')
     if last:
         age = (timezone.now() - datetime.fromisoformat(last)).total_seconds() / 3600

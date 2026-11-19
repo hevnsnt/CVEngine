@@ -43,7 +43,7 @@ MAX_BUFFER = 96 * 1024 * 1024  # the biggest single package record (the kernel's
 MAX_ROWS = 50000
 HTTP_TIMEOUT = 30
 STREAM_TIMEOUT = 180
-TTL = timedelta(hours=24)
+TTL = timedelta(hours=20)  # under the daily schedule: an answer read yesterday is due today, not every other day (it was 24 h, the period itself)
 MAX_REDHAT_CVES = 300  # Red Hat CVE records read per run
 MAX_REDHAT_ADVISORIES = 100  # OSV advisory records read per run to name a module stream's fixed rpm build
 MAX_REDHAT_BYTES = 4 * 1024 * 1024  # one Red Hat CVE record or OSV advisory record (a few KB; the kernel's advisories are the largest)
@@ -74,6 +74,26 @@ class Fetcher:
         with requests.get(url, stream=True, timeout=STREAM_TIMEOUT, headers={"User-Agent": "cvengine-distro-sync"}) as resp:
             resp.raise_for_status()
             yield from resp.iter_content(chunk_size=1024 * 1024)
+
+    def stream_if_changed(self, url, etag="", last_modified=""):
+        """``(chunks, validators)`` for a download sent with the validators of the last one (If-None-Match, If-Modified-Since); ``chunks`` is
+        None when the server answers 304 Not Modified. ``validators`` are the new ``(etag, last_modified)``."""
+        import requests
+        headers = {"User-Agent": "cvengine-distro-sync"}
+        if etag:
+            headers["If-None-Match"] = etag
+        if last_modified:
+            headers["If-Modified-Since"] = last_modified
+        resp = requests.get(url, stream=True, timeout=STREAM_TIMEOUT, headers=headers)
+        if resp.status_code == 304:
+            resp.close()
+            return None, (etag, last_modified)
+        resp.raise_for_status()
+
+        def chunks():
+            with resp:
+                yield from resp.iter_content(chunk_size=1024 * 1024)
+        return chunks(), (resp.headers.get("ETag") or "", resp.headers.get("Last-Modified") or "")
 
     def get_json_capped(self, url, limit):
         """A JSON GET read no further than ``limit`` bytes (ValueError past it); None for a 404."""
@@ -362,24 +382,41 @@ def sync_redhat(fetcher, cves):
 
 # --- the run ---------------------------------------------------------------------------------------------------------
 
+STORE_CHUNK = 1000
+
+
 def _store(rows):
-    """Upsert DistroFix rows; returns how many were new or changed."""
+    """Upsert DistroFix rows in bulk (a Debian pass is up to ``MAX_ROWS``: one query per row took minutes); returns how many were new or
+    changed. A row seen twice in ``rows`` counts once, the last one standing."""
     from cveFeed.models import DistroFix
     changed = 0
     now = timezone.now()
+    keyed = {}
     for row in rows:
-        key = {k: row[k] for k in ("distro", "release", "package", "cve_id")}
-        advisory = (row.get("advisory") or "")[:32]
-        obj, created = DistroFix.objects.get_or_create(**key, defaults={
-            "fixed_version": row["fixed_version"][:128], "status": row["status"], "advisory": advisory, "synced_at": now})
-        if created:
-            changed += 1
-        elif (obj.fixed_version, obj.status, obj.advisory) != (row["fixed_version"][:128], row["status"], advisory):
-            obj.fixed_version, obj.status, obj.advisory, obj.synced_at = row["fixed_version"][:128], row["status"], advisory, now
-            obj.save(update_fields=["fixed_version", "status", "advisory", "synced_at"])
-            changed += 1
-        else:
-            DistroFix.objects.filter(pk=obj.pk).update(synced_at=now)
+        key = tuple(str(row[k]) for k in ("distro", "release", "package", "cve_id"))
+        keyed[key] = (row["fixed_version"][:128], row["status"], (row.get("advisory") or "")[:32])
+    keys = list(keyed)
+    for start in range(0, len(keys), STORE_CHUNK):
+        chunk = keys[start:start + STORE_CHUNK]
+        existing = {(o.distro, o.release, o.package, o.cve_id): o for o in DistroFix.objects.filter(
+            cve_id__in={k[3] for k in chunk}, distro__in={k[0] for k in chunk})}
+        new, updated, touched = [], [], []
+        for key in chunk:
+            fixed, status, advisory = keyed[key]
+            obj = existing.get(key)
+            if obj is None:
+                new.append(DistroFix(distro=key[0], release=key[1], package=key[2], cve_id=key[3], fixed_version=fixed, status=status,
+                                     advisory=advisory, synced_at=now))
+            elif (obj.fixed_version, obj.status, obj.advisory) != (fixed, status, advisory):
+                obj.fixed_version, obj.status, obj.advisory, obj.synced_at = fixed, status, advisory, now
+                updated.append(obj)
+            else:
+                touched.append(obj.pk)
+        DistroFix.objects.bulk_create(new, ignore_conflicts=True)  # a concurrent run that stored the same row first is no error
+        DistroFix.objects.bulk_update(updated, ["fixed_version", "status", "advisory", "synced_at"], batch_size=500)
+        if touched:
+            DistroFix.objects.filter(pk__in=touched).update(synced_at=now)
+        changed += len(new) + len(updated)
     return changed
 
 
@@ -446,8 +483,35 @@ def sync_osv(fetcher, cves, pairs):
     return rows
 
 
+DEBIAN_SOURCE = "distro:debian"  # the IntelSource row that keeps the tracker download's validators (ETag, Last-Modified)
+
+
 def sync_debian(fetcher, cves):
-    return list(debian_fixes(iter_json_object(limited(fetcher.stream(DEBIAN_JSON_URL), MAX_DEBIAN_BYTES)), set(cves)))
+    """The Debian tracker's rows for ``cves``. The tracker is one large file; when every CVE asked about was looked up in an earlier download
+    (it has a Debian row), the download is conditional, and a 304 means nothing changed since: their rows are only marked as read again.
+    A CVE never looked up makes it a full download."""
+    from cveFeed.models import DistroFix, IntelSource
+    wanted = set(cves)
+    looked_up = set(DistroFix.objects.filter(distro="debian", cve_id__in=wanted).values_list("cve_id", flat=True))
+    source, _ = IntelSource.objects.get_or_create(name=DEBIAN_SOURCE)
+    conditional = hasattr(fetcher, "stream_if_changed") and wanted <= looked_up and (source.etag or source.last_modified)
+    if hasattr(fetcher, "stream_if_changed"):
+        chunks, (etag, modified) = fetcher.stream_if_changed(DEBIAN_JSON_URL, *((source.etag, source.last_modified) if conditional else ("", "")))
+    else:
+        chunks, (etag, modified) = fetcher.stream(DEBIAN_JSON_URL), ("", "")
+    now = timezone.now()
+    if chunks is None:
+        DistroFix.objects.filter(distro="debian", cve_id__in=wanted).update(synced_at=now)
+        IntelSource.objects.filter(name=DEBIAN_SOURCE).update(last_checked=now, last_error="")
+        return []
+    rows = list(debian_fixes(iter_json_object(limited(chunks, MAX_DEBIAN_BYTES)), wanted))
+    # a CVE the tracker has nothing on (for the packages we map) is recorded as looked up, so the next pass can ask conditionally
+    found = {r["cve_id"] for r in rows}
+    rows += [{"distro": "debian", "release": "", "package": "", "cve_id": c, "fixed_version": "", "status": "undetermined"}
+             for c in sorted(wanted - found)]
+    IntelSource.objects.filter(name=DEBIAN_SOURCE).update(etag=(etag or "")[:200], last_modified=(modified or "")[:100], last_checked=now,
+                                                          last_changed=now, last_error="")
+    return rows
 
 
 def sync_distro_fixes(fetcher=None):

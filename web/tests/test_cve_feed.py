@@ -102,18 +102,38 @@ class FeedEntryStorageTests(TestCase):
 		self.assertEqual((stored.cvss, stored.stated_severity, stored.summary), (None, '', 'An early warning summary'))
 
 
+def _open_match(cve):
+	from cveFeed.models import CVEMatch
+	from dashboard.models import Org, Project
+	from startScan.models import Subdomain
+	from targetApp.models import Domain
+	project = Project.objects.create(name=cve.cve_id, slug=cve.cve_id.lower(), insert_date=timezone.now(),
+									 org=Org.objects.create(name=cve.cve_id, slug=cve.cve_id.lower() + 'o'))
+	domain = Domain.objects.create(name=f'{cve.pk}.rq.test', project=project, insert_date=timezone.now())
+	return CVEMatch.objects.create(cve_entry=cve, subdomain=Subdomain.objects.create(name=f'www.{cve.pk}.rq.test', target_domain=domain))
+
+
+def _quiet_client():
+	"""A cve.now client with nothing new and no changes: only the refresh of CVEs with open matches reads anything."""
+	from unittest import mock
+	client = mock.Mock()
+	client.iter_entries.return_value = iter([])
+	client.changes.return_value = {'items': [], 'next_cursor': None, 'next_since': None, 'has_more': False, 'etag': '', 'not_modified': True}
+	return client
+
+
 class RefreshQueueTests(TestCase):
-	"""The scheduled sync refreshes the oldest-synced matched CVEs: one that fails must go to the back, not hold the first places for good."""
+	"""The scheduled sync refreshes the oldest-synced CVEs with open matches: one that fails must go to the back, not hold the first places for good."""
 
 	def test_a_failed_refresh_goes_to_the_back_of_the_queue(self):
 		import datetime
 		from unittest import mock
 		from cveFeed import tasks
 		old = timezone.now() - datetime.timedelta(days=3)
-		CVEEntry.objects.create(cve_id='CVE-2026-1', affected=[], published_at=timezone.now())
+		cve = CVEEntry.objects.create(cve_id='CVE-2026-1', affected=[], published_at=timezone.now())
 		CVEEntry.objects.filter(cve_id='CVE-2026-1').update(synced_at=old)
-		client = mock.Mock()
-		client.iter_entries.return_value = iter([])
+		_open_match(cve)
+		client = _quiet_client()
 		client.get_entry.side_effect = RuntimeError('unreadable')
 		with mock.patch('cveFeed.tasks.CVENowClient', return_value=client), mock.patch('cveFeed.tasks.correlate_refreshed_cves.delay'):
 			out = tasks.sync_cve_now_feed()
@@ -124,10 +144,10 @@ class RefreshQueueTests(TestCase):
 		import datetime
 		from unittest import mock
 		from cveFeed import tasks
-		CVEEntry.objects.create(cve_id='CVE-2026-2', affected=[], published_at=timezone.now(), kev=False)
+		cve = CVEEntry.objects.create(cve_id='CVE-2026-2', affected=[], published_at=timezone.now(), kev=False)
 		CVEEntry.objects.filter(cve_id='CVE-2026-2').update(synced_at=timezone.now() - datetime.timedelta(days=3))
-		client = mock.Mock()
-		client.iter_entries.return_value = iter([])
+		_open_match(cve)
+		client = _quiet_client()
 		client.get_entry.return_value = {'id': 'CVE-2026-2', 'title': 't', 'affected': [], 'severity': {'cvss': 7.5},
 										 'exploitation': {'kev': {'dateAdded': '2026-11-10'}, 'epssReached': None, 'exploitDb': None}}
 		with mock.patch('cveFeed.tasks.CVENowClient', return_value=client), mock.patch('cveFeed.tasks.correlate_refreshed_cves.delay'), \
@@ -207,7 +227,7 @@ class ActivityCollapseTests(TestCase):
 		client.iter_entries.return_value = iter([{'id': 'CVE-2099-5'}])
 		client.get_entry.return_value = {'id': 'CVE-2099-5', 'title': 't', 'published_at': timezone.now().isoformat()}
 		with mock.patch('cveFeed.tasks.CVENowClient', return_value=client), mock.patch('cveFeed.tasks.CVEEntry.from_api') as from_api, \
-				mock.patch('cveFeed.tasks.auto_fire_new_cves.delay'):
+				mock.patch('cveFeed.tasks.auto_fire_new_cves.delay'), mock.patch('cveFeed.tasks.correlate_new_cves.delay'):
 			from_api.return_value = (mock.Mock(threat_tier='ice'), True)
 			tasks.sync_cve_now_feed()
 		self.assertTrue(AgentActivity.objects.filter(kind='feed', message__startswith='cve.now: 1 new CVEs').exists())
