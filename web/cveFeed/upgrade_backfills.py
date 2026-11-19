@@ -54,6 +54,7 @@ BACKFILLS = (
     'backfill_shodan_cpes',               # every Shodan InternetDB CPE a reported reading ("vendor product"), CPE technologies removed (re-correlated)
     'backfill_technology_names',          # technology rows folded onto one spelling, MariaDB's "5.5.5-" prefix off port versions (re-correlated)
     'recheck_openvas_generic_checks',     # OpenVAS matches a behaviour check (TRACE enabled) confirmed on a CVE whose record names no vendor or product
+    'backfill_version_scripts',           # vmware-version's ESXi build and the other version script output stored ports keep, runZero hw hints (re-correlated)
     'rerate_findings',                    # 1.3.5: rescore hosts for the new heat rules, clear stale fire marks (last: counts everything above)
 )
 MAX_ATTEMPTS = 3

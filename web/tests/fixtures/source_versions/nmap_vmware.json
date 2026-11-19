@@ -1,0 +1,42 @@
+{
+  "outcome": "done",
+  "os_reliable": true,
+  "hosts": [
+    {
+      "ip": "203.0.113.5",
+      "os_guess": "VMware ESXi 7.0",
+      "scanned": [443, 902],
+      "ports": [
+        {
+          "number": 443,
+          "protocol": "tcp",
+          "state": "open",
+          "service_name": "http",
+          "product": "VMware ESXi SOAP API",
+          "version": "7.0.3",
+          "method": "probed",
+          "tunnel": "ssl",
+          "confidence": "10",
+          "cpes": ["cpe:/o:vmware:ESXi:7.0.3"],
+          "cpe": "cpe:/o:vmware:ESXi:7.0.3",
+          "scripts": {"http-title": "Site doesn't have a title (text/html)."},
+          "version_scripts": {
+            "vmware-version": "  Server version: VMware ESXi 7.0.3\n  Build: 21930508\n  Locale version: INTL 000\n  OS type: vmnix-x86\n  Product Line ID: embeddedEsx"
+          }
+        },
+        {
+          "number": 902,
+          "protocol": "tcp",
+          "state": "open",
+          "service_name": "vmware-auth",
+          "product": "VMware Authentication Daemon",
+          "version": "1.10",
+          "service_extra": "Uses VNC, SOAP",
+          "method": "probed",
+          "confidence": "10",
+          "cpes": []
+        }
+      ]
+    }
+  ]
+}
