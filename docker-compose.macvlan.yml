@@ -1,4 +1,4 @@
-# Give the scanners their own address on your LAN (macvlan), so nmap's operating system probes reach the targets unchanged.
+# Give the built-in scanner its own address on your LAN (macvlan), so nmap's operating system probes reach the targets unchanged.
 #
 #   1. Pick an address on the LAN that nothing else uses (outside the router's DHCP range) and set, in .env:
 #        CVENGINE_SCANNER_IP=192.168.1.250
@@ -11,13 +11,15 @@
 # operating system detection is unreliable and CVEngine stops using it. With a macvlan address the same scan gave the exact direct
 # result. See docs/DEPLOYMENT.md, "Operating system detection and the scan path".
 #
+# Only the built-in scanner moves: it is where every scan runs; the server's containers stay on the compose network and carry no scan traffic.
 # Linux only (Docker's own documentation: macvlan is not supported on Docker Desktop for Mac or Windows). The switch port must accept more
 # than one MAC address, and Wi-Fi access points usually refuse that: use ipvlan (driver: ipvlan, driver_opts: ipvlan_mode: l2) there. The
-# scanner cannot reach the Docker host itself over macvlan (a kernel restriction); it keeps the bridge network for Redis and PostgreSQL.
+# scanner cannot reach the Docker host itself over macvlan (a kernel restriction); it keeps its bridge network (scanner_network) to reach the
+# server at http://web:8000.
 services:
-  celery:
+  scanner:
     networks:
-      rengine_network: {}
+      scanner_network: {}
       lan:
         ipv4_address: ${CVENGINE_SCANNER_IP:?set CVENGINE_SCANNER_IP in .env}
         gw_priority: 1  # the LAN, not the bridge, carries the scans' default route

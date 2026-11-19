@@ -51,14 +51,21 @@ def credential_summary(cred):
     return {name: bool(cred.value.get(name)) for name, _, _ in fields}
 
 
-def resolve_for_project(project):
-    """{service: {field: value}} for one project: its own keys, falling back to its organization's."""
+# Where a key is stored: the project's own, its organization's, or the install's (the one Chaos key of Settings > API vault). Who may be sent a key
+# depends on the level (agentapi.sentinel_stream.key_levels): a Sentinel gets only the levels its enrolling user administers.
+PROJECT, ORG, INSTANCE = 'project', 'org', 'instance'
+LEVELS = (PROJECT, ORG, INSTANCE)
+
+
+def resolve_for_project(project, levels=LEVELS):
+    """{service: {field: value}} for one project: its own keys, falling back to its organization's. ``levels`` leaves out the keys stored at any other
+    level (a project row holding half of a pair then stays half: it is not usable without the organization's other half)."""
     from dashboard.models import ApiCredential
     merged = {}
-    if project.org_id:
+    if project.org_id and ORG in levels:
         for cred in ApiCredential.objects.filter(org_id=project.org_id):
             merged[cred.service] = dict(cred.value)
-    for cred in ApiCredential.objects.filter(project=project):
+    for cred in ApiCredential.objects.filter(project=project) if PROJECT in levels else ():
         # the project's own key wins over its org's, field by field: a project row holding only part of a pair (Censys's ID without
         # its secret) must not blank what the organization set
         merged[cred.service] = {**merged.get(cred.service, {}), **{k: v for k, v in cred.value.items() if v}}
@@ -98,11 +105,12 @@ def key_fingerprint_from_args(service, args):
     return key_limits.fingerprint([a.split('=', 1)[1] for prev, a in zip(args, args[1:]) if prev == '-c' and '=' in a and a.split('=', 1)[0] in paths])
 
 
-def bbot_config_args(project):
-    """``-c path=value`` flags for every configured service, ready to hand to the scanner."""
+def bbot_config_args(project, levels=LEVELS):
+    """``-c path=value`` flags for every configured service, ready to hand to the scanner. ``levels`` (``LEVELS`` by default: the built-in scanner and a
+    local run) limits them to keys stored at those levels."""
     args = []
-    resolved = resolve_for_project(project)
-    if not any(resolved.get('chaos', {}).values()) and _global_chaos_key():
+    resolved = resolve_for_project(project, levels)
+    if INSTANCE in levels and not any(resolved.get('chaos', {}).values()) and _global_chaos_key():
         resolved['chaos'] = {'api_key': _global_chaos_key()}
     from cveFeed import key_limits
     for service, fields in resolved.items():

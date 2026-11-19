@@ -1718,7 +1718,7 @@ def save_matches(rows, covered=None):
         return 0
     existing = {
         (m.cve_entry_id, m.subdomain_id, m.source, m.matched_product): m
-        for m in CVEMatch.objects.filter(subdomain_id__in={k[1] for k in unique}).select_related("cve_entry", "triage").only(
+        for m in CVEMatch.objects.filter(subdomain_id__in={k[1] for k in unique}).order_by().select_related("cve_entry", "triage").only(
             "id", "cve_entry_id", "subdomain_id", "source", "matched_product", "ai_verdict", "ai_reason", "ai_model", "template_result",
             "cve_entry__kev", "cve_entry__exploit_db", "triage__validation_status", *_MATCH_FIELDS)}
     # a NEW KEV match from a technology fingerprint older than a day is held until the version is read again (cveFeed.kev_freshness)
@@ -1852,7 +1852,7 @@ def close_stale(current, covered):
     if not subdomain_ids:
         return set()
     stale_keep, hosts = [], set()
-    for m in CVEMatch.objects.filter(subdomain_id__in=list(subdomain_ids), source__in=_CORRELATED_SOURCES).only(
+    for m in CVEMatch.objects.filter(subdomain_id__in=list(subdomain_ids), source__in=_CORRELATED_SOURCES).order_by().only(
             "id", "cve_entry_id", "subdomain_id", "source", "matched_product", "matched_version", "evidence", "ai_verdict", "ai_reason",
             "template_result", "remediation_status", "version_in_range", "assignee_id", "distro_status"):
         if m.cve_entry_id not in cve_ids or (m.cve_entry_id, m.subdomain_id, m.source, m.matched_product) in current:
@@ -1883,11 +1883,19 @@ def close_stale(current, covered):
         from cveFeed import activity
         from startScan.models import Subdomain
         projects = dict(Subdomain.objects.filter(pk__in=hosts).values_list('id', 'target_domain__project_id'))
+        closed = {}  # project id -> [match id]: one activity line per project, not one per match (a rescan can close hundreds)
         for match in stale_keep:
             if projects.get(match.subdomain_id):
-                activity.log('confirm', 'CVE candidate closed after its product or version disappeared from inventory',
-                             project=projects[match.subdomain_id], match_id=match.pk, decision='closed_not_applicable')
+                closed.setdefault(projects[match.subdomain_id], []).append(match.pk)
+        for project_id, ids in closed.items():
+            message = ('CVE candidate closed after its product or version disappeared from inventory' if len(ids) == 1 else
+                       f'{len(ids)} CVE candidates closed after their product or version disappeared from inventory')
+            activity.log('confirm', message, project=project_id, match_id=ids[0], match_ids=ids[:CLOSED_SAMPLE], count=len(ids),
+                         decision='closed_not_applicable')
     return hosts
+
+
+CLOSED_SAMPLE = 20  # match ids named in a close_stale activity line: enough to find them, never a row the size of the sweep
 
 
 def _vouched_on_another_row(subdomain, name, version):
@@ -2067,6 +2075,7 @@ def correlate_subdomains(subdomains, product_index, cve_by_id, min_confidence=0.
         if product_index:
             version_sources.prefetch_bundled(chunk)  # the hosts' bundled component readings in one query, not one per host
             source_versions.prefetch(chunk)  # their source readings (cveFeed.source_versions) in one query, not one per host
+            version_sources.prefetch_readings(chunk, cve_by_id)  # their runtime, version range and Java runtime rows, one query each, not one per host
         for sub in chunk:
             hosts += 1
             ids.add(sub.id)

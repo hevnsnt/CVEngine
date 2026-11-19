@@ -106,14 +106,15 @@ _SECRET_PATTERNS = (
     # Header names are matched anywhere in a line: the same request shows up as raw HTTP and inside `curl -H '...'`.
     (re.compile(r"(?i)\b((?:proxy-)?authorization[ \t]*:[ \t]*(?:[A-Za-z][\w-]*[ \t]+)?)([^\s'\"]+)"), lambda m: m.group(1) + _mask(m.group(2))),
     (re.compile(r"(?i)\b((?:set-)?cookie\s*:\s*)([^\r\n'\"]+)"), lambda m: m.group(1) + re.sub(r"(=)([^;\s]{4,})", lambda c: c.group(1) + _mask(c.group(2)), m.group(2))),
-    (re.compile(r"(?i)\b(x-[\w-]*(?:token|key|secret|auth)[\w-]*\s*:\s*)([^\s'\"\r\n]+)"), lambda m: m.group(1) + _mask(m.group(2))),
+    # Bounded name parts: an unbounded [\w-]* rescanned the rest of a run like "x-x-x-..." from every "x-" (quadratic on scanned-host text).
+    (re.compile(r"(?i)\b(x-[\w-]{0,60}?(?:token|key|secret|auth)[\w-]{0,60}\s*:\s*)([^\s'\"\r\n]+)"), lambda m: m.group(1) + _mask(m.group(2))),
     (re.compile(r"-----BEGIN [A-Z ]{0,30}PRIVATE KEY-----.{0,8000}?(?:-----END [A-Z ]{0,30}PRIVATE KEY-----|$)", re.S), lambda m: "[private key removed]"),
     (re.compile(r"\b(AKIA|ASIA)[0-9A-Z]{16}\b"), lambda m: m.group(0)[:8] + "[redacted]"),
     (re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"), lambda m: m.group(0)[:10] + "[redacted jwt]"),
     (re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{10,}|AIza[0-9A-Za-z_-]{30,})\b"), lambda m: m.group(0)[:6] + "[redacted]"),
     (re.compile(r"(?i)(\b(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)\b[\"']?\s*[:=]\s*[\"']?)([^\s\"'&,;<>]{4,})"),
      lambda m: m.group(1) + _mask(m.group(2), 2)),
-    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]+:)([^/\s@]{3,})(@)"), lambda m: m.group(1) + "[redacted]" + m.group(3)),
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]{0,30}://[^/\s:@]{1,256}:)([^/\s@]{3,256})(@)"), lambda m: m.group(1) + "[redacted]" + m.group(3)),
 )
 
 

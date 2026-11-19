@@ -94,16 +94,16 @@ class ComposeLayoutTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.recreates(), ['docker compose -f docker-compose.yml up -d --force-recreate redis web celery celery-beat proxy'])
 
-    def test_a_running_built_in_scanner_is_recreated_with_celery_whose_network_it_shares(self):
-        # the scanner uses network_mode service:celery: a celery that is recreated alone leaves it in a dead namespace where `web` no longer resolves
-        # (the Upgrade rehearsal failure after make redis-auth)
+    def test_a_running_built_in_scanner_is_left_alone_when_celery_is_recreated(self):
+        # the scanner has a network of its own (scanner_network; the Tailscale sidecar is in its namespace) and reaches the server by name, so a
+        # recreated celery or web takes nothing from it: these scripts recreate neither the scanner nor the sidecar
         (self.stub / 'scanner_running').touch()
         result = self.run_script('enable-redis-auth.sh')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.recreates(), ['docker compose -f docker-compose.yml up -d --force-recreate redis web celery celery-beat proxy scanner'])
+        self.assertEqual(self.recreates(), ['docker compose -f docker-compose.yml up -d --force-recreate redis web celery celery-beat proxy'])
         result = self.run_script('rotate-field-key.sh')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.recreates()[-1], 'docker compose -f docker-compose.yml up -d --force-recreate web celery celery-beat scanner')
+        self.assertEqual(self.recreates()[-1], 'docker compose -f docker-compose.yml up -d --force-recreate web celery celery-beat')
 
     def test_a_scanner_that_is_not_running_is_not_started_by_these_scripts(self):
         # an install that removed or stopped its scanner (host-fit, an external Sentinel) must not get one back

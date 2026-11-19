@@ -49,6 +49,7 @@ BACKFILLS = (
     'recover_feed_gap',                   # the cve.now window a walk declared covered after the feed renamed its cursor: read again and matched
     'retype_distro_ranges',               # ranges bounded by distribution package builds (0:8.7p1-38.el9_4.4) are no longer read as upstream releases
     'repair_open_ranges',                 # open ranges made from an upper bound the CVE List record writes as text (issue 696), re-correlated
+    'neutralise_screenshots',             # stored discovery screenshots named by a Sentinel (x.html, x.svg): renamed to a picture name or removed
     'rerate_findings',                    # 1.3.5: rescore hosts for the new heat rules, clear stale fire marks (last: counts everything above)
 )
 MAX_ATTEMPTS = 3

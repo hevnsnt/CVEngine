@@ -313,3 +313,15 @@ class RedactionBoundsTests(SimpleTestCase):
         self.assertNotIn('hunter2hunter2', text)
         self.assertNotIn('AKIAABCDEFGHIJKLMNOP', text)
         self.assertGreaterEqual(count, 1)
+
+    def test_header_and_url_shapes_from_a_scanned_host_are_read_in_linear_time(self):
+        """Security review MEDIUM 1, same shape: ``x-[\\w-]*...`` and ``scheme://user:pass@`` rescanned a run like "x-x-x-..." or "a.a.a..." from
+        every start (about a second on a 10 KB response); their repetitions are bounded now."""
+        import time
+        for hostile in ('x-' * 10_000, 'a.' * 10_000, 'a://' + 'b' * 20_000, 'x-' + 'a' * 20_000):
+            started = time.monotonic()
+            br.redact(hostile, 8000)
+            self.assertLess(time.monotonic() - started, 0.5, hostile[:10])
+        text, _ = br.redact('X-Api-Token: abcdef123456\nfetch https://admin:hunter22@example.com/', 8000)
+        self.assertNotIn('abcdef123456', text)
+        self.assertNotIn('hunter22', text)

@@ -24,7 +24,8 @@ INVENTORY_PATH = re.compile(r'^/api/v1/projects/(?P<slug>[-\w]+)/inventory/?$')
 # (with the partial results a streamed task posts while it runs)
 # (and ``secret``, the built-in scanner's single-use read of a stored credential: the route answers 403 to any other Sentinel itself, see sentinel_broker.read_secret).
 # (and ``check``, the hash of the AI-written check the server approves for a task the Sentinel holds, sentinel_broker.approved_check).
-SENTINEL_PATH = re.compile(r'^/api/v1/sentinel(?:/heartbeat|/template-policy(?:/bundle)?|/tasks/next|/tasks/\d+(?:/(?:accept|result|partial|release|secret|check))?)?/?$')
+# (and ``secret-rules/bundle``, the instance's custom secret rules a ``secrets_scan`` task names by sha256, agentapi.secrets_api.rules_bundle_response).
+SENTINEL_PATH = re.compile(r'^/api/v1/sentinel(?:/heartbeat|/template-policy(?:/bundle)?|/secret-rules/bundle|/tasks/next|/tasks/\d+(?:/(?:accept|result|partial|release|secret|check))?)?/?$')
 # The AI reviewer container (docs/AI-REVIEWER.md) and nothing else: its configuration, review packets and verdicts, the operations snapshot
 # and report, and the pipeline's AI jobs and their answers (cveFeed.ai_jobs). The routes themselves also refuse any other token and any session (agentapi.reviewer_api), so the two checks guard each other.
 REVIEWER_PATH = re.compile(r'^/api/v1/reviewer/(?:config|findings/next|findings/t\d{1,12}/(?:verdict|refusal)|ops/snapshot|ops/report|usage|jobs/next|jobs/\d{1,12}/result)/?$')

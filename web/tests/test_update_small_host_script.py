@@ -172,7 +172,6 @@ class BuildMemoryTests(SmallHostCase):
         start_scanner = self.index('compose start scanner', calls)
         self.assertLess(stop, build)
         self.assertLess(build, start_celery)
-        self.assertLess(start_celery, start_scanner)  # the scanner joins celery's network: celery first
         self.assertLess(start_scanner, self.index('--force-recreate', calls))  # back before the migration and the recreate
         for forbidden in ('stop -t 30 web', ' stop web', ' stop db', ' stop redis', ' stop proxy', 'rm -sf'):
             self.assertFalse([c for c in calls if forbidden in c and 'celery' not in c.split(forbidden)[0]], forbidden)

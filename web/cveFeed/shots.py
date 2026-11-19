@@ -126,3 +126,80 @@ def warn_unavailable(scan):
     del _warned[:-1000]
     from cveFeed import activity
     activity.log('scan', 'screenshot comparison skipped: Pillow is not installed', project=scan.domain.project_id, scan_id=scan.id)
+
+
+# --- what a stored picture is, read from its bytes (never from its name) -------------------------------------------------------------------
+
+# The only picture types a screenshot is stored and served as, each with its magic bytes and the one extension a stored file of it carries. A file
+# whose first bytes are neither is never served (cveFeed.views._image_response), whatever its name says: a name came from a scanner or a Sentinel once.
+IMAGE_TYPES = {'image/png': (b'\x89PNG\r\n\x1a\n', 'png'), 'image/jpeg': (b'\xff\xd8\xff', 'jpg')}
+IMAGE_EXTENSIONS = {'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg'}  # what a Sentinel's file name may end in, per type
+
+
+def image_type(data):
+    """``'image/png'`` or ``'image/jpeg'`` when ``data`` (bytes) starts with that type's magic bytes, else ``None``."""
+    for kind, (magic, _ext) in IMAGE_TYPES.items():
+        if data[:len(magic)] == magic:
+            return kind
+    return None
+
+
+def file_image_type(path):
+    """``image_type`` of the file at ``path`` (its first bytes), or ``None`` when it cannot be read or is neither picture type. Never raises."""
+    try:
+        with open(path, 'rb') as handle:
+            return image_type(handle.read(16))
+    except OSError:
+        return None
+
+
+def extension_for(kind):
+    """The extension a stored file of picture type ``kind`` is written with (``png``, ``jpg``), or ``None`` for any other type."""
+    return IMAGE_TYPES.get(kind, (None, None))[1]
+
+
+def neutralise_discovery_paths(apply=False):
+    """The upgrade backfill ``neutralise_screenshots``: every ``Subdomain.screenshot_path`` whose name does not end in a picture extension
+    (``.png``, ``.jpg``, ``.jpeg``). Before this release a Sentinel's discovery screenshot was stored under the file name the Sentinel sent, so a name
+    like ``x.html`` or ``x.svg`` with PNG bytes up front was possible. A file that really is a PNG or JPEG is renamed to a server-made name
+    (``sentinel-<random>.<ext>``) and the row follows it; anything else (not a picture, missing, outside the media folder) is removed and the row's
+    screenshot cleared. Returns counts. A dry run unless ``apply``."""
+    import uuid
+
+    from django.conf import settings
+
+    from startScan.models import Subdomain
+    root = os.path.realpath(settings.MEDIA_ROOT)
+    rows = Subdomain.objects.exclude(screenshot_path__isnull=True).exclude(screenshot_path='').values_list('pk', 'screenshot_path')
+    odd = {}
+    for pk, rel in rows.iterator():
+        ext = os.path.splitext(rel)[1].lower().lstrip('.')
+        if ext not in IMAGE_EXTENSIONS:
+            odd.setdefault(rel, []).append(pk)
+    out = {'paths': len(odd), 'rows': sum(len(v) for v in odd.values()), 'renamed': 0, 'cleared': 0}
+    for rel, pks in odd.items():
+        path = os.path.realpath(os.path.join(root, rel))
+        inside = path.startswith(root + os.sep)
+        kind = file_image_type(path) if inside and os.path.isfile(path) and not os.path.islink(os.path.join(root, rel)) else None
+        if kind is None:
+            out['cleared'] += 1
+            if apply:
+                if inside:  # never a file outside the media folder, whatever the row says
+                    _remove_quietly(path)
+                    _remove_quietly(f'{path}.thumb-{THUMB_WIDTH}.jpg')
+                Subdomain.objects.filter(pk__in=pks).update(screenshot_path=None, screenshot_hash='')
+            continue
+        out['renamed'] += 1
+        if apply:
+            dest = os.path.join(os.path.dirname(path), f'sentinel-{uuid.uuid4().hex}.{extension_for(kind)}')
+            os.replace(path, dest)
+            _remove_quietly(f'{path}.thumb-{THUMB_WIDTH}.jpg')
+            Subdomain.objects.filter(pk__in=pks).update(screenshot_path=os.path.relpath(dest, root))
+    return out
+
+
+def _remove_quietly(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass

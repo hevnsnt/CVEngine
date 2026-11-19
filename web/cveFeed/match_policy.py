@@ -509,8 +509,25 @@ def has_standing(match):
     if (match.remediation_status != 'open' or match.assignee_id or match.ai_verdict == 'affected' or match.source == 'host'
             or _has_other_evidence(match)):
         return True
+    primed = getattr(match, '_worked_on', None)  # ``prime_standing`` read it for many matches at once
+    if primed is not None:
+        return primed
     return (FindingComment.objects.filter(finding_kind='match', finding_id=match.pk).exists()
             or OnDemandValidation.objects.filter(match=match, source='manual').exclude(status='running').exists())
+
+
+def prime_standing(matches):
+    """Read for many matches at once what ``has_standing`` would ask the database for each (a comment, a manual validation request that is not
+    the one running now), and keep the answer on each match object. Two queries, whatever the number of matches."""
+    from cveFeed.models import FindingComment, OnDemandValidation
+    ids = {m.pk for m in matches if m.pk}
+    if not ids:
+        return
+    worked = set(FindingComment.objects.filter(finding_kind='match', finding_id__in=ids).values_list('finding_id', flat=True).distinct())
+    worked |= set(OnDemandValidation.objects.filter(match_id__in=ids, source='manual').exclude(status='running').values_list('match_id', flat=True).distinct())
+    for match in matches:
+        if match.pk:
+            match._worked_on = match.pk in worked
 
 
 def unworked(qs):
