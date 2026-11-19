@@ -10,6 +10,10 @@ To roll back, check out the previous commit and start it. It still uses the unto
 
 ## Upgrading to 1.4
 
+### Each Sentinel is auto-tuned
+
+After the update, auto-tuning (when in Auto, the default) also tunes each Sentinel's tasks at once and the slots of its memory-heavy kinds, from the machine numbers a current Sentinel client reports in its heartbeat. Nothing is stored or migrated: a Sentinel nobody tuned keeps running at its machine's own setting, and the tuner only lowers it on trouble and brings it back. A Sentinel whose tasks at once (or a kind's cap) you set on the Sentinels page stays as you set it. A Sentinel on an older client sends no machine report and is left as it is until it updates. To stop it, choose Off or Suggest under Settings, configMaxxing, Auto-tuning (every Sentinel goes back to its own numbers at once).
+
 ### Questions after an update
 
 The server health check (part of the AI question's first line) may now also propose performance changes to the auto-tuned settings. It adds no AI call and costs nothing extra. It is treated as an AI agent: what it proposes follows the setting for AI agents (Settings, configMaxxing, Auto-tuning, **Suggest** by default, asked after an update), so **on an install that already had the AI reviewer on, the proposals appear as suggestions in the Auto-tuning History that a person applies; nothing is changed by itself** unless a person sets AI agents to Automatic (and auto-tuning is in Auto mode). With AI agents Off the proposals are ignored.

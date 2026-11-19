@@ -4,7 +4,7 @@
 import { api, ask, button, details, el, selectOf, shortDate, toast } from "/staticfiles/cve/ui.js";
 import { API, cardAnchor, registerCard } from "/staticfiles/cve/config-maxxing.js";
 import { historyLine } from "/staticfiles/cve/autotune-history.js";
-import { AGENT_POLICIES, AGENT_POLICY_HELP, AUTOTUNE_INTRO, AUTOTUNE_MODES, AUTOTUNE_OFF_DETAIL, AUTOTUNE_OFF_HELP, decisionText, lastRunText, modeDetail, modeNotice } from "/staticfiles/cve/config-maxxing-logic.js";
+import { AGENT_POLICIES, AGENT_POLICY_HELP, AUTOTUNE_INTRO, AUTOTUNE_MODES, AUTOTUNE_OFF_DETAIL, AUTOTUNE_OFF_HELP, decisionText, lastRunText, modeDetail, modeNotice, sentinelStatusLine } from "/staticfiles/cve/config-maxxing-logic.js";
 
 const PATH = `${API}/autotune`;
 const HISTORY_SHOWN = 5;  // the first screen: the newest five changes
@@ -136,6 +136,14 @@ export async function build(host, ctx = {}) {
   if (data.changed_by) card.append(el("p", "note", `Mode last set by ${data.changed_by} on ${shortDate(data.changed_at)}`, { style: "margin:8px 0 0" }));
   card.append(el("p", "note", lastRunText(data.last_run, shortDate), { style: "margin:8px 0 0" }));
   if (data.sized_for) card.append(el("p", "note", `Sized for this machine: ${data.sized_for}.`, { style: "margin:4px 0 0" }));
+  const sentinels = (Array.isArray(data.sentinels) ? data.sentinels : []).map(sentinelStatusLine).filter(Boolean);
+  if (sentinels.length) {
+    card.append(el("p", "sec", "Sentinels", { style: "margin:12px 0 4px" }),
+      el("p", "note", "Each Sentinel's tasks at once and its per-kind slots follow its own CPU, memory and load: lowered at once when a run is killed for memory, memory runs low or the load is far above its CPUs, raised again one at a time after two healthy hours, never above its machine's own setting. A number set for a Sentinel on the Sentinels page pins it.", { style: "margin:0 0 4px" }));
+    const list = el("ul", "", null, { style: "margin:0;padding-left:18px" });
+    sentinels.forEach((line) => list.append(el("li", "note", line)));
+    card.append(list);
+  }
 
   host.textContent = "";
   host.append(card);

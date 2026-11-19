@@ -16,6 +16,7 @@ import {
   text,
   toast,
 } from "/staticfiles/cve/ui.js";
+import { machineText, sentinelTuningText } from "/staticfiles/cve/config-maxxing-logic.js";
 
 export const SENTINEL_KINDS = [
   "nmap",
@@ -496,6 +497,10 @@ export function versionBlock(d, { onChange, builtin = false }) {
   if (d.credential_filter && d.credential_filter.note) box.append(el("p", "msg err ss-detail", d.credential_filter.note));
   if (d.contract && d.contract.note)
     box.append(el("p", d.contract.state === "unsupported" ? "msg err ss-detail" : "note ss-detail", d.contract.note));
+  const machine = machineText(d.machine);
+  if (machine) box.append(el("p", "note ss-detail", `Machine: ${machine}.`));
+  const tuning = sentinelTuningText(d.tuning);
+  if (tuning) box.append(el("p", "note ss-detail", `${tuning}.`));
   box.append(...waitingLines(d));
   const held = spoolLine(d);
   if (held) box.append(held);
