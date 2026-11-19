@@ -72,10 +72,10 @@ def store_products(project, sub, products, scan=None):
     """What one host's finished fingerprint leaves behind, as a Sentinel reported it: the host is recorded in the service ledger
     (so it is not asked again inside the window) and each product becomes a technology of it. ``products`` is ``[{'firewall', ...}]`` as
     ``_named`` makes it. Returns how many products were named. Never called for a run that failed: that host is asked again next scan."""
-    from cveFeed import ledger, tech_rows
+    from cveFeed import ledger, tech_links, tech_rows
     ledger.record(SERVICE, [sub.name], project.id, scan)
-    for product in products:
-        sub.technologies.add(tech_rows.technology(product['firewall']))  # one row per spelling (cveFeed.tech_rows)
+    # one row per spelling (cveFeed.tech_rows); source waf, and a product the host already has is confirmed (its link's time)
+    tech_links.link_host(sub, [tech_rows.technology(product['firewall']) for product in products], tech_links.WAF)
     return len(products)
 
 

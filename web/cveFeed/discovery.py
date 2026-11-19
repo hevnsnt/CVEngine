@@ -644,8 +644,11 @@ def seed_from_scan(scan, source):
     ips, techs = Subdomain.ip_addresses.through, Subdomain.technologies.through
     ips.objects.bulk_create([ips(subdomain_id=c.pk, ipaddress_id=ip.pk) for c, o in zip(copies, originals)
                              for ip in o.ip_addresses.all()])
-    techs.objects.bulk_create([techs(subdomain_id=c.pk, technology_id=t.pk) for c, o in zip(copies, originals)
-                               for t in o.technologies.all()])
+    # a copied link keeps where it came from (its source, the CPE its reading named, when it was seen: cveFeed.tech_links)
+    meta = {(r.subdomain_id, r.technology_id): r for r in techs.objects.filter(subdomain_id__in=[o.pk for o in originals])}
+    techs.objects.bulk_create([techs(subdomain_id=c.pk, technology_id=t.pk, **({'source': was.source, 'cpe': was.cpe, 'observed_at': was.observed_at}
+                                                                            if (was := meta.get((o.pk, t.pk))) else {}))
+                               for c, o in zip(copies, originals) for t in o.technologies.all()])
     return len(copies)
 
 

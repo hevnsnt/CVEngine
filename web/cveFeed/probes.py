@@ -528,17 +528,16 @@ def technology_names(observations):
     return list(dict.fromkeys(names))
 
 
-def apply_to_subdomain(sub, observations):
-    """Add the observations' technologies to the host row so correlation reads them like any detected technology. Returns how many were new."""
-    from cveFeed import tech_rows
-    added = 0
-    have = {t.name for t in sub.technologies.all()}
-    for name in technology_names(observations):
-        if name in have:
-            continue
-        sub.technologies.add(tech_rows.technology(name))  # one row per spelling (cveFeed.tech_rows)
-        added += 1
-    return added
+def apply_to_subdomain(sub, observations, source=None):
+    """Add the observations' technologies to the host row so correlation reads them like any detected technology, linked under ``source``
+    (``cveFeed.tech_links``: the probes', ``probe``, by default); a technology the host already has is confirmed (its link's time). Returns how
+    many were new."""
+    from cveFeed import tech_links, tech_rows
+    names = technology_names(observations)
+    if not names:
+        return 0
+    # one row per spelling (cveFeed.tech_rows)
+    return tech_links.link_host(sub, [tech_rows.technology(name) for name in names], source or tech_links.PROBE)
 
 
 def apply_known(scan):
@@ -554,12 +553,15 @@ def apply_known(scan):
     # version source read (cveFeed.version_sources, probe vsrc:<entry>) is one too
     from django.db.models import Q
     read = Q(probe__in=list(BY_ID)) | Q(probe__startswith='vsrc:', kind='version')
+    from cveFeed import tech_links
     for row in ProbeObservation.objects.filter(read, project_id=project, outcome='found', observed_at__gte=cutoff):
-        by_host.setdefault(row.host, []).append({'kind': row.kind, 'product': row.product, 'version': row.version, 'variant': row.variant,
-                                                 'outcome': row.outcome, 'evidence': row.evidence or {}})
+        source = tech_links.VERSION_SOURCE if row.probe.startswith('vsrc:') else tech_links.PROBE
+        by_host.setdefault(row.host, {}).setdefault(source, []).append({
+            'kind': row.kind, 'product': row.product, 'version': row.version, 'variant': row.variant, 'outcome': row.outcome, 'evidence': row.evidence or {}})
     added = 0
     for sub in Subdomain.objects.filter(scan_history=scan, name__in=list(by_host)).prefetch_related('technologies'):
-        added += apply_to_subdomain(sub, by_host.get(sub.name.lower(), []))
+        for source, observations in sorted(by_host.get(sub.name.lower(), {}).items()):
+            added += apply_to_subdomain(sub, observations, source)
     return added
 
 

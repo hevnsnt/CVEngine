@@ -82,6 +82,7 @@ from datetime import datetime, timedelta
 from django.db.models import Q
 from django.utils import timezone
 
+from cveFeed import tech_links
 from cveFeed import version_catalogue as catalogue
 
 logger = logging.getLogger(__name__)
@@ -956,24 +957,34 @@ def prefetch(subs):
     for sub in subs:
         sub._source_rows = by_key.get((project_of.get(sub.target_domain_id), _host(sub)), [])
     from startScan.models import SubdomainTechnology
-    cpes = {}
-    for sub_id, name, cpe in SubdomainTechnology.objects.filter(subdomain_id__in=[s.pk for s in subs]).exclude(cpe='') \
-            .values_list('subdomain_id', 'technology__name', 'cpe'):
+    cpes, derived = {}, {}
+    for sub_id, name, cpe, source in SubdomainTechnology.objects.filter(subdomain_id__in=[s.pk for s in subs]).exclude(cpe='') \
+            .values_list('subdomain_id', 'technology__name', 'cpe', 'source'):
         cpes.setdefault(sub_id, {})[name or ''] = cpe
+        if tech_links.is_derived(source):
+            derived.setdefault(sub_id, set()).add(name or '')
     for sub in subs:
-        sub._link_cpes = cpes.get(sub.pk, {})
+        sub._link_cpes, sub._link_derived = cpes.get(sub.pk, {}), derived.get(sub.pk, set())
 
 
 def link_cpes(sub):
     """``{technology name: CPE}`` the host's technology links carry (``SubdomainTechnology.cpe``: the CPE the nuclei template that named the
-    technology states in its metadata, ``nuclei_scan.tech_cpe_from``); read once per correlation of the host (``prefetch``)."""
+    technology states in its metadata, ``nuclei_scan.tech_cpe_from``, or the one the server derived from a name matcher's name,
+    ``tech_links.derived_cpe``); read once per correlation of the host (``prefetch``)."""
     got = getattr(sub, '_link_cpes', None)
     if got is None:
         from startScan.models import SubdomainTechnology
-        got = {name or '': cpe for name, cpe in SubdomainTechnology.objects.filter(subdomain_id=sub.pk).exclude(cpe='')
-               .values_list('technology__name', 'cpe')} if sub.pk else {}
-        sub._link_cpes = got
+        rows = list(SubdomainTechnology.objects.filter(subdomain_id=sub.pk).exclude(cpe='').values_list('technology__name', 'cpe', 'source')) \
+            if sub.pk else []
+        got = {name or '': cpe for name, cpe, _source in rows}
+        sub._link_cpes, sub._link_derived = got, {name or '' for name, _cpe, source in rows if tech_links.is_derived(source)}
     return got
+
+
+def derived_link_cpes(sub):
+    """The names of ``link_cpes`` whose CPE the server derived from the name (``tech_links.DERIVED``), not one a template stated."""
+    link_cpes(sub)
+    return getattr(sub, '_link_derived', set())
 
 
 def technology_cpes(sub):

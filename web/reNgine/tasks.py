@@ -80,6 +80,9 @@ def persist_bbot_result(result, ctx):
 		port.last_seen = timezone.now()
 		port.save()
 		ip.ports.add(port)
+	from cveFeed import tech_links, tech_rows
+	tech_seen = {}  # {(host row id, technology id): ''}: written once for the batch, source bbot (cveFeed.tech_links)
+	tech_hosts = []
 	for host, tech_name in result.technologies:
 		if not tech_name:
 			continue
@@ -102,8 +105,11 @@ def persist_bbot_result(result, ctx):
 		tech_name = js_libraries.unversioned(tech_name)
 		if not tech_name:
 			continue
-		from cveFeed import tech_rows
-		subdomain.technologies.add(tech_rows.technology(tech_name))  # one row per spelling: "Caddy" and "caddy" are one (cveFeed.tech_rows)
+		tech_seen[(subdomain.pk, tech_rows.technology(tech_name).pk)] = ''  # one row per spelling: "Caddy" and "caddy" are one (cveFeed.tech_rows)
+		tech_hosts.append(subdomain)
+	if tech_seen:
+		tech_links.link(tech_seen, tech_links.BBOT)
+		tech_links.forget(*tech_hosts)
 	_persist_bbot_findings(result, ctx, subdomains)
 	_persist_bbot_urls(result, ctx, subdomains)
 	_persist_bbot_http(result, ctx, subdomains)

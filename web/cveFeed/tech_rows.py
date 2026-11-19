@@ -60,7 +60,10 @@ def merge_duplicates(apply=False):
             continue
         linked = set(through.objects.filter(technology_id=keep_pk, subdomain_id__in=moved).values_list('subdomain_id', flat=True))
         # a moved link keeps where it came from (its source, the CPE its template named, when it was seen)
-        meta = {r.subdomain_id: r for r in through.objects.filter(technology_id__in=same).order_by('cpe', 'id')}  # one with a CPE last, so it wins
+        # one with a CPE last, so it wins, and of those one whose CPE a source stated over one the server derived (cveFeed.tech_links)
+        from cveFeed import tech_links
+        meta = {r.subdomain_id: r for r in sorted(through.objects.filter(technology_id__in=same),
+                                                  key=lambda r: (bool(r.cpe), bool(r.cpe) and not tech_links.is_derived(r.source), r.id))}
         through.objects.bulk_create([through(subdomain_id=s, technology_id=keep_pk, source=meta[s].source, cpe=meta[s].cpe, observed_at=meta[s].observed_at)
                                      if s in meta else through(subdomain_id=s, technology_id=keep_pk) for s in set(moved) - linked], ignore_conflicts=True)
         through.objects.filter(technology_id__in=same).delete()

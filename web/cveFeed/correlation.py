@@ -1155,11 +1155,12 @@ def fix_only_branch_verdict(ver, ranges):
     return None, None
 
 
-def named_hits(token, product_index, cve_by_id, cpe=None):
+def named_hits(token, product_index, cve_by_id, cpe=None, cpe_derived=False):
     """Yield ``(cve, [(affected index, item), ...])`` for every CVE with an affected entry that names the discovered product ``token``
     (normalized): its CPE's vendor and product first, then the name itself and its aliases (``PRODUCT_ALIASES``, ``ALIAS_VENDORS``). The one
     place that decides whether a name connects to a CVE record: ``_match_candidates`` judges versions on these entries and
-    ``cveFeed.tech_coverage`` counts them."""
+    ``cveFeed.tech_coverage`` counts them. A CPE the server derived from the name (``cpe_derived``: ``cveFeed.tech_links.derived_cpe``, no
+    source stated it) only adds the entries it names: an entry the name reaches without it still counts, so it never hides one."""
     cpe_parts = parse_cpe(cpe)
     candidate_ids, cpe_product, cpe_vendor = set(), None, ""
     if cpe_parts:
@@ -1179,12 +1180,13 @@ def named_hits(token, product_index, cve_by_id, cpe=None):
         candidate_ids |= _fuzzy_ids(rest, product_index)
     for cid in candidate_ids:
         cve = cve_by_id[cid]
-        hit = [(i, item) for i, item in enumerate(cve.affected or []) if _item_hits(item, token, aliases, cpe_product, cpe_vendor, led)]
+        hit = [(i, item) for i, item in enumerate(cve.affected or []) if _item_hits(item, token, aliases, cpe_product, cpe_vendor, led)
+               or (cpe_derived and cpe_product and _item_hits(item, token, aliases, None, "", led))]
         if hit:
             yield cve, hit
 
 
-def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, details=None, raw=None):
+def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, details=None, raw=None, cpe_derived=False):
     """Yield (cve, matched_product, in_range) for CVEs plausibly affecting a
     discovered product `token` (normalized) at version `ver` (tuple or None).
 
@@ -1201,7 +1203,7 @@ def _match_candidates(name, ver, token, product_index, cve_by_id, cpe=None, deta
     """
     from cveFeed.version_catalogue import line_conflict, product_line
     line = product_line(name)  # a SharePoint or Exchange line the host's name states: an entry for another line is not this product's
-    for cve, hit in named_hits(token, product_index, cve_by_id, cpe):
+    for cve, hit in named_hits(token, product_index, cve_by_id, cpe, cpe_derived=cpe_derived):
         # Every hit names the same product (see name_matches_token): a wrapper or repackaging with its own version numbers
         # ("jquery-rails", "ingress-nginx") is another product and was never a hit, so its ranges are never compared.
         if line:
@@ -1405,7 +1407,7 @@ def tech_distro(host, name, version, raw=""):
 
 def _record_matches(subdomain, name, version, token, source, product_index,
                     cve_by_id, min_confidence, scan_history, rows=None, cpe="", distro=None, fix_lookup=None, evidence=None,
-                    corroborated=(), leads=None, confidence_cap=None):
+                    corroborated=(), leads=None, confidence_cap=None, cpe_derived=False):
     """Work out the CVEMatch rows for one discovered product on a subdomain and append them to ``rows``
     (written in a batch by ``save_matches``). Returns the number of matches found. ``leads``, when given, is a dict that receives
     ``{cve.id: {(domain id, host name)}}`` for the CVEs a product seen without a version could be about."""
@@ -1419,13 +1421,13 @@ def _record_matches(subdomain, name, version, token, source, product_index,
         # A product seen without a version is a lead (match_policy.unversioned_products), never a match: naming a product says nothing
         # about which of its advisories apply.
         if leads is not None:
-            for cve, _product, _in_range in _match_candidates(name, None, token, product_index, cve_by_id, cpe=cpe):
+            for cve, _product, _in_range in _match_candidates(name, None, token, product_index, cve_by_id, cpe=cpe, cpe_derived=cpe_derived):
                 leads.setdefault(cve.id, set()).add((subdomain.target_domain_id, subdomain.name))
         return 0
     found = 0
     details = {}
     for cve, matched_product, in_range in _match_candidates(
-            name, ver, token, product_index, cve_by_id, cpe=cpe, details=details, raw=version):
+            name, ver, token, product_index, cve_by_id, cpe=cpe, details=details, raw=version, cpe_derived=cpe_derived):
         confidence = confidence_for(ver, in_range, cve.kev)
         if confidence_cap is not None and confidence > 0.0:
             confidence = min(confidence, confidence_cap)  # how far the version itself can be trusted (a library's file-name hint)
@@ -1660,7 +1662,7 @@ def invalid_identity_reason(match):
         return ''
     cve = match.cve_entry
     index = build_product_index([cve])
-    if any(_match_candidates(name, None, token, index, {cve.pk: cve}, cpe=cpe)):
+    if any(_match_candidates(name, None, token, index, {cve.pk: cve}, cpe=cpe, cpe_derived=bool((match.evidence or {}).get('cpe_derived')))):
         return ''
     seen = _names([name])
     covers = _names(item.get('product') or item.get('package') for item in affected if isinstance(item, dict))
@@ -2122,6 +2124,8 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
     # the CPE a first-party reading named a technology by (nmap's other CPEs on a port, cveFeed.source_versions): matched CPE first like a port's
     from cveFeed import source_versions
     tech_cpes = source_versions.technology_cpes(subdomain) if technologies else {}
+    # a CPE the server derived from a name matcher's name (cveFeed.tech_links): matched the same way, and said so on the evidence
+    derived_cpes = {n: c for n, c in source_versions.link_cpes(subdomain).items() if n in source_versions.derived_link_cpes(subdomain)} if technologies else {}
     for tech in technologies:
         name, version = split_name_version(tech.name)
         if wrong and (cms.key(name), version) in wrong:
@@ -2144,11 +2148,13 @@ def collect_subdomain_matches(subdomain, product_index, cve_by_id, min_confidenc
             if skip:
                 continue
         tech_cpe = tech_cpes.get(tech.name or "", "")
+        derived = bool(tech_cpe) and derived_cpes.get(tech.name or "") == tech_cpe  # derived from the name: it only adds (named_hits)
         _record_matches(
             subdomain, name, version, token, "tech",
             product_index, cve_by_id, min_confidence, scan_history, rows, evidence={"source": "tech", "source_id": tech.id, **library,
-                                                                                   **({"cpe": tech_cpe[:255]} if tech_cpe else {})},
-            leads=leads, confidence_cap=cap, distro=tech_distro(hint, name, version, tech.name), fix_lookup=fix_lookup, cpe=tech_cpe)
+                                                                                   **({"cpe": tech_cpe[:255]} if tech_cpe else {}),
+                                                                                   **({"cpe_derived": True} if derived else {})},
+            leads=leads, confidence_cap=cap, distro=tech_distro(hint, name, version, tech.name), fix_lookup=fix_lookup, cpe=tech_cpe, cpe_derived=derived)
 
     # nmap -sV service data on the host's open ports (Shodan-style inventory).
     from startScan.models import open_services

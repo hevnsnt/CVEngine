@@ -256,15 +256,13 @@ def _versioned(sub, label):
 def bare_technology(sub, r, now=None):
     """Link the product an identity reading names to ``sub`` as a technology with no version (``Fortinet FortiGate SSL VPN``), its CPE and source
     on the link, unless a technology of the host already names the product (at any version). Returns whether a link was added."""
-    from cveFeed import source_versions, tech_rows
+    from cveFeed import tech_links, tech_rows
     from cveFeed.correlation import _norm, parse_cpe, read_technology
     cpe = parse_cpe(r.get('cpe') or '')
     tokens = {_norm(r['label'])} | ({cpe[1]} if cpe else set())
     if any(_same(_norm(read_technology(t.name or '')[0]), tokens) for t in sub.technologies.all()):
         return False
-    from django.utils import timezone
-    sub.technologies.add(tech_rows.technology(r['label']), through_defaults={
-        'source': source_versions.PANEL_PROBE, 'cpe': (r.get('cpe') or '')[:255], 'observed_at': now or timezone.now()})
+    tech_links.link_host(sub, {tech_rows.technology(r['label']): r.get('cpe') or ''}, tech_links.PANEL, now=now)
     return True
 
 
