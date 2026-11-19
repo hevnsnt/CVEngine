@@ -172,6 +172,11 @@ class CVEEntry(models.Model):
         # exact versions) takes the ranges the CVE List record states for it, when every one of them can be read (intel.record_ranges_for)
         defaults["affected"], exact = overlay_exact_versions(str(entry["id"])[:64], defaults["affected"])
         overlaid = overlaid or exact
+        # an open range cve.now made from an upper bound the record writes as text ("Apache HTTP Server 2.4*", issue 696) is left out, as an
+        # earlier reading found or as the record says now (intel.close_open_ranges); one the record means open is kept
+        from cveFeed.intel import keep_open_checks, overlay_open_ranges
+        defaults["affected"] = keep_open_checks(defaults["affected"], stored[0] if stored else [])
+        defaults["affected"], _opened = overlay_open_ranges(str(entry["id"])[:64], defaults["affected"])
         if overlaid and "CVE List V5" not in defaults["sources"]:
             defaults["sources"] = [*defaults["sources"], "CVE List V5"]
         # a bound the structured record states narrower than public sources show (cveFeed.range_corrections, each with its sources)

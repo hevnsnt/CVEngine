@@ -96,6 +96,7 @@ def backfill(apply=False):
     matches come at the next correlation). With ``apply`` the ranges are written, the CVE is marked for re-correlation and its cached match
     verdicts are dropped (as a feed refresh that changes a range does); without it nothing is written."""
     from django.db import transaction
+    from django.utils import timezone
 
     from cveFeed.models import CVEEntry, MatchVerdict
     out = {'cves': {}, 'hosts': {}}
@@ -109,7 +110,7 @@ def backfill(apply=False):
                 out['hosts'][slug] = out['hosts'].get(slug, 0) + count
         if apply:
             with transaction.atomic():
-                CVEEntry.objects.filter(pk=cve.pk).update(affected=new, needs_recorrelation=True)
+                CVEEntry.objects.filter(pk=cve.pk).update(affected=new, needs_recorrelation=True, synced_at=timezone.now())
                 MatchVerdict.objects.filter(cve_entry_id=cve.pk).delete()
     return out
 

@@ -224,100 +224,291 @@ def _known_in_batches(summaries, size=100):
             yield summary, known
 
 
-@app.task(name="sync_cve_now_feed", bind=False, queue="cve_feed_queue")
-def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max=10):
-    """Pull recent entries from cve.now and upsert the new ones.
+SYNC_LOCK = 'cvengine:cve-now-sync'
+SYNC_LOCK_TTL = 3600
+CHANGES_FIRST = 6 * 3600         # seconds of changes the first delta read (or one that fell past what since reaches) starts from
+CHANGES_MAX_READS = 200          # full entries one sync reads for the changes (cve.now allows 120 entry reads a minute: about 2 minutes)
+CHANGES_MAX_PAGES = 25           # delta pages one sync lists (200 each)
+ENTRY_PAUSE = 0.5                # seconds between entry reads
+NEW_FROM_CHANGES_DAYS = 30       # an unstored entry the changes list is created when published this recently (older ones: the inventory import)
+DEAD_STATUSES = ('withdrawn', 'merged')  # cve.now's tombstones in the delta listing
 
-    Walks the feed newest-first. Each id not already stored is hydrated (full
-    entry: affected ranges + exploitation) and saved. The walk stops once it has
-    created `max_new` records, or after `catch_up_after` consecutive
-    already-known ids (we have reached territory a previous run covered), so a
-    scheduled run stays cheap and incremental.
+
+def _sync_owner():
+    import socket
+    return f'{socket.gethostname()}:{os.getpid()}'
+
+
+@app.task(name="sync_cve_now_feed", bind=False, queue="cve_feed_queue")
+def sync_cve_now_feed(max_new=200, catch_up_after=40, max_scan=5000, refresh_max=10, changes_max=CHANGES_MAX_READS):
+    """Pull new entries from cve.now and apply what changed in the stored ones.
+
+    * New entries: the feed newest-first; each id not stored is read in full and saved. The walk stops after ``max_new`` records or
+      ``catch_up_after`` known ids in a row; the coverage walk (``backfill_cve_now_feed``) reads anything older.
+    * Changes: cve.now's delta listing (``since``, kept in the ``feed:cve_now_changes`` IntelSource row with its ETag) names every entry it
+      wrote since the last read, oldest first. A stored CVE it names is read again and rewritten (``from_api``); a withdrawn or merged one is
+      closed like a rejected one. At most ``changes_max`` entries a run; the position moves only past what was applied.
+    * A few CVEs with open matches not read for a day are read again anyway (``refresh_max``): a safety net while the changes lag.
+    One run at a time (a Redis claim): a run that finds another running returns at once.
     """
-    from cveFeed import activity
+    from reNgine import resources
+    with resources.redis_claim(SYNC_LOCK, _sync_owner(), SYNC_LOCK_TTL) as holder:
+        if holder is not True:
+            return {'status': 'running', 'holder': str(holder)}
+        return _sync_cve_now(max_new, catch_up_after, max_scan, refresh_max, changes_max)
+
+
+def _sync_cve_now(max_new, catch_up_after, max_scan, refresh_max, changes_max):
+    from cveFeed import activity, feed_health
     from cveFeed.threat import FIRE, SMOKE
+    from django.utils import timezone
     client = CVENowClient()
     reading = activity.log('feed', 'Reading the cve.now feed', status='running')
     new_entries = []
     seen = created = skipped = failed = 0
     consecutive_existing = 0
-    for summary, known in _known_in_batches(client.iter_entries(max_entries=max_scan)):
-        cve_id = summary.get("id")
-        if not cve_id:
-            continue
-        seen += 1
-        if cve_id in known:
-            skipped += 1
-            consecutive_existing += 1
-            if consecutive_existing >= catch_up_after:
+    listing_error = None
+    try:
+        for summary, known in _known_in_batches(client.iter_entries(max_entries=max_scan)):
+            cve_id = summary.get("id")
+            if not cve_id:
+                continue
+            seen += 1
+            if cve_id in known:
+                skipped += 1
+                consecutive_existing += 1
+                if consecutive_existing >= catch_up_after:
+                    break
+                continue
+            consecutive_existing = 0
+            try:
+                entry = client.get_entry(cve_id)
+                if isinstance(entry, dict) and summary.get("firstSeenAt"):
+                    entry.setdefault("firstSeenAt", summary["firstSeenAt"])
+                obj, _ = CVEEntry.from_api(entry)
+                new_entries.append(obj)
+                created += 1
+            except Exception as exc:  # one bad entry must not abort the sync
+                failed += 1
+                logger.warning(f"cve.now: failed to sync {cve_id}: {exc}")
+            if created >= max_new:
                 break
-            continue
-        consecutive_existing = 0
-        try:
-            entry = client.get_entry(cve_id)
-            if isinstance(entry, dict) and summary.get("firstSeenAt"):
-                entry.setdefault("firstSeenAt", summary["firstSeenAt"])
-            obj, _ = CVEEntry.from_api(entry)
-            new_entries.append(obj)
-            created += 1
-        except Exception as exc:  # one bad entry must not abort the sync
-            failed += 1
-            logger.warning(f"cve.now: failed to sync {cve_id}: {exc}")
-        if created >= max_new:
-            break
-    # Rotate through the oldest refreshed entries that actually match inventory.
-    # Freshly discovered entries remain governed by max_new above.
-    refreshed = changed = 0
-    from cveFeed.models import MatchVerdict
-    from django.utils import timezone
-    from datetime import timedelta
-    from django.db.models import Q
+    except Exception as exc:  # noqa: BLE001 - a listing that fails ends this read; the row must not stay "running"
+        listing_error = f'{type(exc).__name__}: {exc}'[:200]
+        logger.warning('cve.now: the listing failed: %s', exc)
     now = timezone.now()
-    # a CVE with a match is kept current; so is a recent one the feed published with no affected data yet (the CNA's first record often
-    # names no version, and the enrichment that makes it matchable arrives days later: without this it would never be read again)
-    needs_refresh = Q(matches__isnull=False) | Q(affected=[], published_at__gte=now - timedelta(days=90))
-    due = CVEEntry.objects.filter(needs_refresh, synced_at__lt=now - timedelta(hours=12)) \
-        .distinct().order_by('synced_at', 'id')[:max(0, min(int(refresh_max), 20))]
     signals = []
+    changes = _apply_changes(client, now, changes_max, new_entries, signals)
+    refreshed, refresh_changed, refresh_failed = _refresh_open_matched(client, now, refresh_max, signals)
+    _follow_signal_changes(signals)
+    failed += changes['failed'] + refresh_failed
+    changed = changes['changed'] + refresh_changed
+    created += changes['created']
+    result = {"seen": seen, "created": created, "skipped": skipped, "refreshed": refreshed + changes['read'], "changed": changed,
+              "failed": failed, "changes": changes, "depth_limited": bool(getattr(client, 'depth_limited', False))}
+    if listing_error:
+        result['listing_error'] = listing_error
+    logger.info(f"cve.now sync complete: {result}")
+    feed_health.record('cve_now_sync', not listing_error, listing_error or '')
+    tiers = [e.threat_tier for e in new_entries]
+    pending_recorrelation = CVEEntry.objects.filter(needs_recorrelation=True).exists()
+    if new_entries:
+        auto_fire_new_cves.delay([e.pk for e in new_entries if getattr(e, "pk", None)])
+        correlate_new_cves.delay([e.pk for e in new_entries if getattr(e, "pk", None)])  # every tier, not only the hot ones
+    if pending_recorrelation:
+        correlate_refreshed_cves.delay()
+    _queue_inventory_import()
+    if not created and not failed and not changed and not listing_error and not changes['dead']:
+        logger.debug('cve.now: nothing new since the last read')  # recorded above (feed_health): the activity feed stays quiet
+        activity.discard(reading)
+        return result
+    activity.settle(
+        reading, 'failed' if listing_error or (failed and not created) else 'done',
+        message=(f"cve.now: {created} new CVEs ({tiers.count(FIRE)} fire, {tiers.count(SMOKE)} smoke); "
+                 f"{result['refreshed']} stored CVEs read again ({changed} changed"
+                 + (f", {changes['dead']} withdrawn or merged" if changes['dead'] else '') + ")")
+                + (f"; {failed} could not be saved (see the worker log)" if failed else "")
+                + (f"; the listing failed: {listing_error}" if listing_error else ""),
+        created=created, fire=tiers.count(FIRE), smoke=tiers.count(SMOKE))
+    return result
+
+
+INVENTORY_IMPORT_EVERY = 6 * 3600
+INVENTORY_IMPORT_KEY = 'cvengine:inventory-import-due'
+
+
+def _queue_inventory_import():
+    """Queue the inventory CVE history import at most every ``INVENTORY_IMPORT_EVERY`` seconds (a cache key the first sync of the window
+    sets). Never raises."""
+    from cveFeed import catalog_import
+    if not catalog_import.per_run():
+        return
+    try:
+        from django.core.cache import cache
+        if cache.add(INVENTORY_IMPORT_KEY, '1', INVENTORY_IMPORT_EVERY):
+            import_inventory_cve_history.delay()
+    except Exception:  # noqa: BLE001
+        logger.exception('could not queue the inventory CVE history import')
+
+
+@app.task(name='import_inventory_cve_history', bind=False, queue='cve_feed_queue')
+def import_inventory_cve_history(reads=None):
+    """Read the older CVEs of the products the inventory runs that the catalog lacks (cveFeed.catalog_import), then match them against the
+    inventory, whatever their tier. Bounded per run; a product already read is not asked again for a week."""
+    from cveFeed import activity, catalog_import, feed_health
+    client = CVENowClient()
+    try:
+        out = catalog_import.run(client, reads=reads)
+    except Exception as exc:  # noqa: BLE001
+        feed_health.record('inventory_import', False, f'{type(exc).__name__}: {exc}')
+        logger.exception('inventory CVE history import failed')
+        return {'status': 'failed'}
+    feed_health.record('inventory_import', True, detail=f"{len(out['done'])} of {len(out['products'])} products complete")
+    created = out['created']
+    for start in range(0, len(created), NEW_CORRELATE_CHUNK):
+        correlate_cve_rows(list(CVEEntry.objects.filter(pk__in=created[start:start + NEW_CORRELATE_CHUNK])))
+    if created:
+        auto_fire_new_cves.delay(created)
+        activity.log('feed', f"cve.now: {len(created)} older CVEs of {len(out['products'])} products the inventory runs were read and matched",
+                     status='done')
+    return {**out, 'created': len(created)}
+
+
+def _parse_feed_time(value):
+    from cveFeed.cve_now import _time
+    return _time(value)
+
+
+def _rewrite(client, cve_id, old, signals, first_seen=None):
+    """Read one entry again and store it; mark it for re-correlation when what correlation reads changed. Returns (obj, changed)."""
+    from cveFeed.models import MatchVerdict
+    entry = client.get_entry(cve_id)
+    if isinstance(entry, dict) and first_seen:
+        entry.setdefault('firstSeenAt', first_seen)
+    before = None if old is None else (old.affected, old.cvss, old.kev, old.epss_reached, old.exploit_db, old.original_description,
+                                       old.summary, old.status)
+    obj, _ = CVEEntry.from_api(entry)
+    after = (obj.affected, obj.cvss, obj.kev, obj.epss_reached, obj.exploit_db, obj.original_description, obj.summary, obj.status)
+    changed = before is not None and before != after
+    if changed:
+        CVEEntry.objects.filter(pk=obj.pk).update(needs_recorrelation=True)
+        MatchVerdict.objects.filter(cve_entry_id=obj.pk).delete()
+    signals.append((None if before is None else before[1:5], obj))
+    return obj, changed
+
+
+def _apply_changes(client, now, max_reads, new_entries, signals):
+    """Apply cve.now's delta listing since the stored position (see ``sync_cve_now_feed``). Returns the counts."""
+    from datetime import timedelta
+    from cveFeed import feed_health
+    from cveFeed.correlation import close_rejected
+    from cveFeed.models import IntelSource
+    out = {'listed': 0, 'read': 0, 'changed': 0, 'created': 0, 'dead': 0, 'failed': 0, 'complete': False, 'restarted': False}
+    state, _ = IntelSource.objects.get_or_create(name=feed_health.PREFIX + 'cve_now_changes')
+    since_text = state.last_modified or ''
+    since = _parse_feed_time(since_text)
+    if since is None or since < now - cve_now.SINCE_REACH:
+        # never read, or the position fell past what since reaches (7 days without a key): start a few hours back; the targeted refresh and
+        # the coverage walk cover what lies between
+        out['restarted'] = since is not None
+        since = now - timedelta(seconds=CHANGES_FIRST)
+        since_text, state.etag = '', ''
+    position, etag, cursor, pages, stop, error = since_text or since, state.etag or None, None, 0, False, ''
+    try:
+        while not stop:
+            page = client.changes(since_text or since, cursor=cursor, etag=etag if cursor is None else None)
+            if page['not_modified']:
+                out['complete'] = True
+                break
+            items = page['items']
+            out['listed'] += len(items)
+            stored = {c.cve_id: c for c in CVEEntry.objects.filter(cve_id__in=[str(i.get('id') or '') for i in items])}
+            for item in items:
+                cve_id = str(item.get('id') or '').strip()
+                updated = item.get('updatedAt')
+                old = stored.get(cve_id)
+                if not cve_id:
+                    continue
+                if str(item.get('status') or '').lower() in DEAD_STATUSES:
+                    if old is not None and old.status != item['status']:
+                        CVEEntry.objects.filter(pk=old.pk).update(status=str(item['status'])[:128], needs_recorrelation=False, synced_at=now)
+                        out['dead'] += 1
+                    position = updated or position
+                    continue
+                written = _parse_feed_time(updated)
+                if old is not None and written is not None and old.synced_at and old.synced_at >= written:
+                    position = updated or position  # stored after cve.now wrote it (the newest-first walk just read it): nothing to apply
+                    continue
+                published = _parse_feed_time(item.get('publishedAt'))
+                if old is None and (published is None or published < now - timedelta(days=NEW_FROM_CHANGES_DAYS)):
+                    position = updated or position  # an old entry the catalog never held: the inventory import decides those
+                    continue
+                if out['read'] >= max_reads:
+                    stop = True
+                    break
+                if out['read'] and ENTRY_PAUSE:
+                    client.sleep(ENTRY_PAUSE)
+                out['read'] += 1
+                try:
+                    obj, changed = _rewrite(client, cve_id, old, signals, first_seen=item.get('firstSeenAt'))
+                    if old is None:
+                        new_entries.append(obj)
+                        out['created'] += 1
+                    out['changed'] += bool(changed)
+                except Exception as exc:  # noqa: BLE001 - one entry must not hold the listing back; the targeted refresh retries matched ones
+                    out['failed'] += 1
+                    logger.warning('cve.now: could not apply the change of %s: %s', cve_id, exc)
+                position = updated or position
+            if stop:
+                break
+            if not page['has_more'] or not page['next_cursor']:
+                position, etag = page['next_since'] or position, page.get('etag') or ''
+                out['complete'] = True
+                break
+            pages += 1
+            if pages >= CHANGES_MAX_PAGES:
+                break
+            cursor = page['next_cursor']
+            etag = None
+    except Exception as exc:  # noqa: BLE001 - the position stays at what was applied; the next run continues from it
+        error = f'{type(exc).__name__}: {exc}'[:200]
+        logger.warning('cve.now: the change listing failed: %s', exc)
+    if isinstance(position, str):
+        moved = position
+    else:
+        moved = position.isoformat()
+    if not out['complete']:
+        etag = ''  # an answer cut short is not what the next read will ask for
+    IntelSource.objects.filter(pk=state.pk).update(etag=(etag or '')[:200])
+    feed_health.record('cve_now_changes', not error, error, detail=moved)
+    out['position'] = moved
+    if out['dead'] or out['changed']:
+        close_rejected()  # a withdrawn, merged or rejected CVE stops being a finding now, not at the next scan
+    return out
+
+
+def _refresh_open_matched(client, now, refresh_max, signals):
+    """Read again the CVEs with an open match not read for a day (at most ``refresh_max``): the delta listing names every change, so this
+    only covers a listing that lags or a change it could not apply. Returns (read, changed, failed)."""
+    from datetime import timedelta
+    from django.db.models import Exists, OuterRef
+    from cveFeed.closure import CLOSED
+    from cveFeed.models import CVEMatch
+    open_match = CVEMatch.objects.filter(cve_entry=OuterRef('pk')).exclude(remediation_status__in=CLOSED).exclude(ai_verdict='not_affected')
+    due = CVEEntry.objects.filter(Exists(open_match), synced_at__lt=now - timedelta(hours=24)).order_by('synced_at', 'id')[
+        :max(0, min(int(refresh_max), 20))]
+    read = changed = failed = 0
     for old in list(due):
         try:
-            entry = client.get_entry(old.cve_id)
-            before = (old.affected, old.cvss, old.kev, old.epss_reached, old.exploit_db, old.original_description, old.summary)
-            obj, _ = CVEEntry.from_api(entry)
-            after = (obj.affected, obj.cvss, obj.kev, obj.epss_reached, obj.exploit_db, obj.original_description, obj.summary)
-            refreshed += 1
-            if before != after:
-                changed += 1
-                CVEEntry.objects.filter(pk=obj.pk).update(needs_recorrelation=True)
-                MatchVerdict.objects.filter(cve_entry_id=obj.pk).delete()
-            signals.append((before[1:5], obj))
-        except Exception as exc:
+            _obj, moved = _rewrite(client, old.cve_id, old, signals)
+            read += 1
+            changed += bool(moved)
+        except Exception as exc:  # noqa: BLE001
             failed += 1
             logger.warning('cve.now: failed to refresh %s: %s', old.cve_id, exc)
             # to the back of the queue: an entry that cannot be read or saved must not hold the first places of every later run
             CVEEntry.objects.filter(pk=old.pk).update(synced_at=now)
-    _follow_signal_changes(signals)
-    result = {"seen": seen, "created": created, "skipped": skipped, "refreshed": refreshed, "changed": changed, "failed": failed}
-    logger.info(f"cve.now sync complete: {result}")
-    tiers = [e.threat_tier for e in new_entries]
-    pending_recorrelation = CVEEntry.objects.filter(needs_recorrelation=True).exists()
-    if not created and not failed and not changed:  # a read that found nothing is noise in the AI feed
-        logger.debug('cve.now: nothing new since the last read')
-        activity.discard(reading)
-        if pending_recorrelation:
-            correlate_refreshed_cves.delay()
-        return result
-    activity.settle(
-        reading, 'done' if not failed or created else 'failed',
-        message=(f"cve.now: {created} new CVEs ({tiers.count(FIRE)} fire, {tiers.count(SMOKE)} smoke); "
-                 f"{refreshed} matched advisories refreshed ({changed} changed)")
-                + (f"; {failed} could not be saved (see the worker log)" if failed else ""),
-        created=created, fire=tiers.count(FIRE), smoke=tiers.count(SMOKE))
-    if created:
-        auto_fire_new_cves.delay([e.pk for e in new_entries if getattr(e, "pk", None)])
-    if pending_recorrelation:
-        correlate_refreshed_cves.delay()
-    return result
+    return read, changed, failed
 
 
 COVERAGE_DAYS_DEFAULT = 14
@@ -477,6 +668,7 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
         logger.warning('cve.now backfill could not list the whole window: %s', exc)
         reached = False
         if not wanted:
+            _record_backfill(row, result)
             return result
     except requests.RequestException as exc:
         status = getattr(getattr(exc, 'response', None), 'status_code', None)
@@ -485,12 +677,14 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
         logger.warning('cve.now backfill could not read the listing: %s', exc)
         reached = False
         if not wanted:
+            _record_backfill(row, result)
             return result
     result['wanted'] = len(wanted)
     created_rows, refused = [], []
     # an entry already stored (a forced walk, or ids given) is rewritten: what its signals were, to follow up a change (_follow_signal_changes)
     stored = {c: (cvss, kev, epss, exploit) for c, cvss, kev, epss, exploit in CVEEntry.objects.filter(cve_id__in=wanted[:max_new])
               .values_list('cve_id', 'cvss', 'kev', 'epss_reached', 'exploit_db')}
+    existed = set(stored)
     signals = []
     for entry_id in wanted[:max_new]:
         try:
@@ -561,7 +755,18 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
         activity.log('feed', f"cve.now backfill: {len(created_rows)} older CVEs read ({tiers.count(FIRE)} fire, {tiers.count(SMOKE)} smoke)"
                      + (f"; {result['failed']} could not be read" if result['failed'] else ''), status='done')
         auto_fire_new_cves.delay([e.pk for e in created_rows if getattr(e, 'pk', None)])
+        correlate_new_cves.delay([e.pk for e in created_rows if getattr(e, 'pk', None) and e.cve_id not in existed])
+    _record_backfill(row, result)
     return result
+
+
+def _record_backfill(row, result):
+    """The coverage walk's outcome for the feed status (cveFeed.feed_health); only the scheduled walk (``row``), not a run for given ids."""
+    if row is None:
+        return
+    from cveFeed import feed_health
+    ok = result['status'] == 'ok'
+    feed_health.record('cve_now_backfill', ok, '' if ok else (result.get('window') or result['status']))
 
 
 @app.task(name='sync_bounty_catalogue', bind=False, queue='cve_feed_queue')
@@ -609,12 +814,18 @@ def sync_threat_intel():
     from cveFeed.threat import FIRE, SMOKE
     if not cache.add('cvengine:threat-intel', 1, timeout=2 * 3600):
         return {'skipped': 'another threat-intel run is in progress'}
+    from cveFeed import feed_health
     try:
         result = intel.run()
+    except Exception as exc:
+        feed_health.record('threat_intel', False, f'{type(exc).__name__}: {exc}')
+        raise
     finally:
         cache.delete('cvengine:threat-intel')
     if result.get('status') == 'disabled':
         return result
+    feed_health.record('threat_intel', not result.get('errors'),
+                       '; '.join(f'{n}: {e}' for n, e in (result.get('errors') or {}).items()))
     created, changed = result['imported'], result['signals_changed']
     if changed:
         from cveFeed import scoring
@@ -656,15 +867,49 @@ def correlate_cve_rows(cves):
         triage.track(list(qs[start:start + 500]))
 
 
+RECORRELATE_BATCH = 100      # CVEs matched in one walk of the inventory
+RECORRELATE_SECONDS = 600    # one run drains for this long, then queues the next if any are left
+
+
 @app.task(name='correlate_refreshed_cves', bind=False, queue='cve_feed_queue')
-def correlate_refreshed_cves():
-    """Recheck only materially updated CVEs and reset their dependent AI rows."""
-    pending = list(CVEEntry.objects.filter(needs_recorrelation=True).order_by('synced_at', 'id')[:10])
-    if not pending:
-        return {'correlated': 0}
-    correlate_cve_rows(pending)
-    CVEEntry.objects.filter(pk__in=[c.pk for c in pending]).update(needs_recorrelation=False)
-    return {'correlated': len(pending)}
+def correlate_refreshed_cves(seconds=RECORRELATE_SECONDS, batch=RECORRELATE_BATCH, clock=None):
+    """Recheck the CVEs marked for re-correlation (a refresh, a range repair, a correction changed what correlation reads), a batch per walk
+    of the inventory, until none is left or the time is up; then the next run is queued, so a backlog of thousands (an update step) drains
+    within the hour instead of ten every half hour. A withdrawn, merged or rejected CVE is only unmarked: ``close_rejected`` closes its matches."""
+    from cveFeed.correlation import DEAD_STATUS_RE
+    clock = clock or time.monotonic
+    deadline = clock() + max(1, int(seconds))
+    done = 0
+    while clock() < deadline:
+        pending = list(CVEEntry.objects.filter(needs_recorrelation=True).order_by('synced_at', 'id')[:max(1, int(batch))])
+        if not pending:
+            return {'correlated': done, 'left': 0}
+        live = [c for c in pending if not re.search(DEAD_STATUS_RE, c.status or '', re.I) and not c.local_only]
+        correlate_cve_rows(live)
+        CVEEntry.objects.filter(pk__in=[c.pk for c in pending]).update(needs_recorrelation=False)
+        done += len(pending)
+    left = CVEEntry.objects.filter(needs_recorrelation=True).count()
+    if left:
+        correlate_refreshed_cves.delay()
+    return {'correlated': done, 'left': left}
+
+
+NEW_CORRELATE_MAX = 2000  # new CVEs one run matches against the inventory (a run of the coverage walk creates up to 1,500)
+NEW_CORRELATE_CHUNK = 200
+
+
+@app.task(name='correlate_new_cves', bind=False, queue='cve_feed_queue')
+def correlate_new_cves(cve_pks=None):
+    """Match CVEs the feed just created against the current inventory, whatever their tier: a CVE neither hot nor in a runtime used to wait
+    for the next scan of its hosts. The hot ones are left to ``auto_fire_new_cves``, which correlates them itself. One walk of the inventory
+    per ``NEW_CORRELATE_CHUNK`` CVEs, at most ``NEW_CORRELATE_MAX`` a run."""
+    from cveFeed.correlation import DEAD_STATUS_RE
+    from cveFeed.threat import FIRE, SMOKE
+    rows = [c for c in CVEEntry.objects.filter(pk__in=list(cve_pks or [])[:NEW_CORRELATE_MAX]).exclude(status__iregex=DEAD_STATUS_RE)
+            .exclude(local_only=True).order_by('id') if c.attention_tier not in (FIRE, SMOKE)]
+    for start in range(0, len(rows), NEW_CORRELATE_CHUNK):
+        correlate_cve_rows(rows[start:start + NEW_CORRELATE_CHUNK])
+    return {'correlated': len(rows)}
 
 
 FEED_RECOVERY_RUNS = 12
@@ -824,11 +1069,15 @@ def sync_distro_fixes_task():
     from cveFeed import distro_sync, ledger
     if not ledger.sweep_claim("distro-sync", 3000):
         return {"skipped": "another sync is running"}
+    from cveFeed import feed_health
     try:
         result = distro_sync.sync_distro_fixes()
     except Exception as exc:  # noqa: BLE001 - a failed sync must never surface as a task failure
         logger.exception("distro fix sync failed")
+        feed_health.record('distro_sync', False, f'{type(exc).__name__}: {exc}')
         return {"error": str(exc)[:200]}
+    failed = {n: e for n, e in (result.get("sources") or {}).items() if e != "ok"}
+    feed_health.record('distro_sync', not failed, '; '.join(f'{n}: {e}' for n, e in failed.items()))
     if result.get("changed"):
         correlate_cves.delay()
     logger.info("distro fix sync complete: %s", result)
@@ -2254,6 +2503,11 @@ def author_cve_detections():
     from cveFeed import match_policy
     out['no_evidence_closed'] = match_policy.close_policy_matches()
     out['template_refresh_for'] = len(detection_author.refresh_templates_for_new_hot_cves(update_nuclei_templates.delay))
+    try:  # the system status shows this progress; counting the catalogue there ran past the status probe's budget
+        from django.core.cache import cache
+        cache.set('cvengine:cve-guidance-progress', detection_author.progress(), 6 * 3600)
+    except Exception:  # noqa: BLE001 - the status falls back to a plain count
+        logger.exception('could not cache the detection guidance progress')
     return out
 
 

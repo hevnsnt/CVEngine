@@ -237,7 +237,7 @@ def match_rows(sub, found):
             wanted.setdefault(cve_id, []).append((port, test_id, evidence, seen))
     if not wanted:
         return []
-    known = {c.cve_id: c for c in CVEEntry.objects.filter(cve_id__in=list(wanted)).exclude(status__icontains='reject').exclude(local_only=True)
+    known = {c.cve_id: c for c in CVEEntry.objects.filter(cve_id__in=list(wanted)).exclude(status__iregex=r'reject|withdrawn|merged|superseded').exclude(local_only=True)
              .only('id', 'cve_id')}
     rows = []
     for cve_id, hits in wanted.items():
