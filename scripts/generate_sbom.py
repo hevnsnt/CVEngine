@@ -3,10 +3,10 @@
 
   python3 scripts/generate_sbom.py [--output cvengine.sbom.cdx.json]
 
-It lists what a build is made of, read from the files that pin it: the nuclei binary and its toolchain, the base image and the apt packages (web/Dockerfile), the Python
+It lists what a build is made of, read from the files that pin it: the base image and the apt packages (web/Dockerfile), the Python
 packages (web/requirements.txt) and the service images (docker-compose.yml). Nothing is downloaded and the output is reproducible: the
 same commit gives the same document (the timestamp is the commit's). A component that is not pinned to an exact version (a floating
-image tag, a version range, nuclei's templates) is listed with `cvengine:pinned` = `false` so a reader can see what the bill cannot vouch
+image tag, a version range) is listed with `cvengine:pinned` = `false` so a reader can see what the bill cannot vouch
 for. What the finished image really contains (what the apt packages pull in, and the base image's own packages) is not in this file: scan the built
 image for that, for example `syft cvengine/web:latest -o cyclonedx-json`. The release workflow attaches this file to every release."""
 import json
@@ -48,15 +48,7 @@ def component(name, version, purl, kind='application', hashes=(), pinned=True, n
 
 
 def tools(dockerfile):
-    go = arg(dockerfile, 'GOVERSION')
-    out = [
-        component('go', go, f'pkg:generic/go@{go}', hashes=[arg(dockerfile, 'GO_SHA256_AMD64'), arg(dockerfile, 'GO_SHA256_ARM64')],
-                  note='build toolchain for nuclei, in a build stage that is not part of the image (hashes: amd64, arm64)', url='https://go.dev'),
-        component('nuclei', arg(dockerfile, 'NUCLEI_VERSION'), GOMOD.format('nuclei/v3', arg(dockerfile, 'NUCLEI_VERSION')),
-                  url='https://github.com/projectdiscovery/nuclei'),
-        component('nuclei-templates', None, None, kind='data', pinned=False, note='refreshed at runtime, by design',
-                  url='https://github.com/projectdiscovery/nuclei-templates'),
-    ]
+    out = []  # the server image builds and ships no scan tool and no template set: those are the Sentinel image's (cvENGINE-sentinel's own pins)
     base = re.search(r'(?m)^FROM ([\w.-]+):([\w.-]+)', dockerfile)
     if base:
         out.append(component(base.group(1), base.group(2), f'pkg:docker/{base.group(1)}@{base.group(2)}', kind='container',

@@ -288,8 +288,7 @@ class DiscoveryOnSentinelTests(StreamBase):
             self.assertEqual((kind, target['domain'], kwargs['secret_ref'], kwargs['bbot_keys']), ('bbot_discovery', 'a.example', None, False))
             on_partial(batch)
             return {'result': {**RESULT, 'partials': 1}, 'consumed': 1}
-        with mock.patch.object(stream, 'dispatch_stream', side_effect=fake), \
-                mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False):
+        with mock.patch.object(stream, 'dispatch_stream', side_effect=fake):
             out = discovery.run_discovery(self.scan.pk, 'standard')
         self.assertEqual(out['status'], discovery.SUCCESS, out)
         names = set(Subdomain.objects.filter(scan_history=self.scan).values_list('name', flat=True))
@@ -309,8 +308,7 @@ class DiscoveryOnSentinelTests(StreamBase):
         def unfinished(project, kind, target, scan, on_partial, **kwargs):
             on_partial(self.batch_for())
             return {'result': None, 'consumed': 1, 'error': 'the lease expired without a report'}
-        with mock.patch.object(stream, 'dispatch_stream', side_effect=unfinished), \
-                mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False):
+        with mock.patch.object(stream, 'dispatch_stream', side_effect=unfinished):
             out = discovery.run_discovery(self.scan.pk, 'standard')
         self.assertEqual((out['status'], out['partial']), (discovery.SUCCESS, 'the lease expired without a report'))
         self.assertEqual(ScanActivity.objects.get(scan_of=self.scan, name='bbot_discovery').status, discovery.FAILED)
@@ -323,8 +321,7 @@ class DiscoveryOnSentinelTests(StreamBase):
         none = {'state': 'none', 'reason': 'none', 'message': 'no Sentinel is live', 'slots': 0}
         before = Subdomain.objects.filter(scan_history=self.scan).count()
         for fallback in ('none', 'all', 'bbot_discovery'):  # the kind has no local path, whatever the variable says
-            with self.subTest(fallback=fallback), LocalFallback(fallback), mock.patch.object(broker, 'capacity_state', return_value=none), \
-                    mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False):
+            with self.subTest(fallback=fallback), LocalFallback(fallback), mock.patch.object(broker, 'capacity_state', return_value=none):
                 assert_ran_nowhere_locally(self, 'bbot_discovery')
                 out = discovery.run_discovery(self.scan.pk, 'standard')
             self.assertEqual(out['status'], discovery.FAILED)
@@ -340,8 +337,7 @@ class DiscoveryOnSentinelTests(StreamBase):
             seen.update(target=target, **kwargs)
             return None
         with mock.patch.object(stream, 'dispatch_stream', side_effect=capture), \
-                mock.patch('cveFeed.api_credentials.bbot_config_args', return_value=['-c', 'modules.shodan_dns.api_key=KEY-123']), \
-                mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False):
+                mock.patch('cveFeed.api_credentials.bbot_config_args', return_value=['-c', 'modules.shodan_dns.api_key=KEY-123']):
             discovery.run_discovery(self.scan.pk, 'standard')
         self.assertEqual((seen['secret_ref'], seen['bbot_keys'], seen.get('builtin_only', False), seen['target']['api_keys']), (f'bbotkeys:{self.pa.pk}', True, False, True))
         self.assertNotIn('KEY-123', json.dumps(seen['target']))

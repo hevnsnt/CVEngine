@@ -66,7 +66,6 @@ CANDIDATES = broker.CANDIDATES
 INTERNAL_CAPABILITY = 'network:internal'  # declared by a Sentinel deployed inside a private network; the only kind that may claim work for an address of a declared internal range
 RATES = {'claim': broker.RATES['claim'], 'report': broker.RATES['report'], 'release': broker.RATES['release'],
          'heartbeat': broker.RATES['heartbeat'], 'register': broker.RATES['register'],
-         'policy': (60, 60), 'bundle': (12, 60),  # the template policy is a cheap read, the bundle a download of several MiB
          'secret': (6, 60),  # a stored credential is read once per signed-in task; more than a few a minute is a caller gone wrong, or guessing ids
          'partial': (240, 60),  # a streamed task posts a batch every few seconds while it runs (sentinel_stream.report_partial)
          'bootstrap': (30, 60),  # per client address, and the one call that needs no bearer token (``limit_address``): a throttle on what an unknown caller can make the server hash and query
@@ -99,7 +98,6 @@ UPDATE_HOLD = timedelta(minutes=30)  # a Sentinel that reported draining or upda
 RUN_GRACE = timedelta(minutes=10)  # heartbeats extend a running task's lease up to this long past the longest the dispatcher waits for its kind
 RUNNING_GRACE = timedelta(seconds=120)  # a task accepted more recently than this is not ended for missing from a heartbeat's ``running`` list (the Sentinel may not have started it yet)
 MAX_RUNNING_IDS = 100
-TEMPLATE_POLICY_PATH = '/api/v1/sentinel/template-policy'
 PREFER_DEFER_DEFAULT = 60  # seconds a task is held back from a Sentinel that does not prefer its kind while one that does is live and has room (CVENGINE_SENTINEL_PREFER_DEFER_SECONDS)
 BALANCE_DEFER_DEFAULT = 60  # seconds a task is held back from a Sentinel while a less loaded, eligible one has room for it (CVENGINE_SENTINEL_BALANCE_DEFER_SECONDS)
 BUILTIN_FALLBACK_DEFAULT = 120  # seconds a task waits for an external Sentinel before the built-in scanner may take it (CVENGINE_BUILTIN_FALLBACK_SECONDS)
@@ -227,35 +225,6 @@ def limit_address(address, action='bootstrap'):
     name = f'agentapi:{action}:addr:{address or "unknown"}'
     if not broker._hit(name, limit, window):
         raise ApiError(429, f'too many {action} calls from this address: at most {limit} per {window} seconds', retry_after_seconds=broker._window_left(name, window))
-
-
-def _template_bundle(ctx, action):
-    """The current approved template bundle, for a Sentinel's own token only (a person's full token answers 403: the bundle is the Sentinel's
-    copy of the server's template policy, not an API for people). A set that cannot be offered is a clear 503."""
-    from agentapi import template_bundle
-    if ctx.token is None or ctx.token.scope != SCOPE_SENTINEL:
-        raise ApiError(403, 'the template policy is for a Sentinel token only')
-    agent = _sentinel_agent(ctx, write=False)
-    _limit(agent.token, action)
-    try:
-        return template_bundle.current()
-    except template_bundle.BundleError as error:
-        raise ApiError(503, f'the approved Nuclei template bundle is not available: {error}')
-
-
-def template_policy(ctx):
-    """``GET sentinel/template-policy``: the template policy in force and the bundle of templates it approves."""
-    from agentapi import template_bundle
-    return template_bundle.policy(_template_bundle(ctx, 'policy'), TEMPLATE_POLICY_PATH + '/bundle')
-
-
-def template_bundle_response(ctx, if_none_match=None):
-    """``GET sentinel/template-policy/bundle``: the archive, streamed from disk, or a 304 when ``If-None-Match`` names it."""
-    from agentapi import template_bundle
-    try:
-        return template_bundle.response(_template_bundle(ctx, 'bundle'), if_none_match)
-    except template_bundle.BundleError as error:
-        raise ApiError(503, f'the approved Nuclei template bundle is not available: {error}')
 
 
 def _renew_token(token, now=None):
@@ -539,6 +508,8 @@ def effective_capabilities(agent, withheld=None, policy=None):
         caps -= set(failing_kinds(agent) if withheld is None else withheld)  # a kind it keeps failing is run here for a while instead (failing_kinds)
         reported = (agent.info or {}).get('contract_version')
         caps = {c for c in caps if c not in SentinelTask.KINDS or sentinel_contract.can_run(reported, c)}  # a kind its contract version predates is never sent
+        if not runs_template_index_version(reported):
+            caps -= set(TEMPLATE_INDEX_KINDS)  # before contract 11 it would wait for a template bundle this server no longer packs: never offered
         if caps & set(BUILTIN_KINDS) and not is_builtin(agent):
             from agentapi import ai_checks
             # older than the kind's external_since: never offered outside (route_probe_signed has none and is refused by ``builtin_only_kind``)
@@ -993,6 +964,8 @@ class SentinelEff:
             return 'capability', CREDENTIAL_FILTER  # an older client would run default-login and brute-force templates while credential checks are off
         if network_detection_task(task) and not self.network_detection:
             return 'capability', NETWORK_DETECTION  # an older client would ignore the field and check nothing on the ports (contract 10)
+        if installed_check_task(task) and not runs_template_index(self.agent):
+            return 'capability', TEMPLATE_INDEX  # an older client cannot read an installed template by path (contract 11)
         return None
 
     def _in_hosts(self, task):
@@ -1019,6 +992,32 @@ def effective(agent, now=None):
 
 
 NETWORK_DETECTION = 'too old to run the network detection pass (contract 10)'  # the refusal reason of such a task offered to an older Sentinel
+# The kinds that run nuclei templates from the template index (contract 11, ``cvengine_scanner.flags.TEMPLATE_INDEX_SINCE``): the server keeps no copy of the
+# templates, so a Sentinel builds the approved set from its own baked templates and its library's index. An older one waited for a server bundle that no
+# longer exists, so it is never credited with these kinds (``effective_capabilities``); a ``nuclei_validate`` test that names an installed template by
+# ``template_path`` is refused to it (``SentinelEff.refusal``), and the stage waits (``ScannerUnavailable``) while no live Sentinel is new enough.
+TEMPLATE_INDEX_KINDS = ('nuclei_light', 'nuclei_targeted', 'nuclei_deep')
+TEMPLATE_INDEX = 'too old to run nuclei templates from the template index (contract 11)'
+
+
+def runs_template_index_version(reported):
+    """Whether a Sentinel that declared contract version ``reported`` builds its approved template set from the template index (contract 11 or later)."""
+    from cvengine_scanner import flags as scan_flags
+    return isinstance(reported, int) and not isinstance(reported, bool) and reported >= scan_flags.TEMPLATE_INDEX_SINCE
+
+
+def runs_template_index(agent):
+    return runs_template_index_version((agent.info or {}).get('contract_version') if isinstance(agent.info, dict) else None)
+
+
+def installed_check_task(task):
+    """Whether ``task`` is a ``nuclei_validate`` test of an installed template named by ``template_path`` (contract 11)."""
+    return task.kind == AI_CHECK and isinstance(task.target, dict) and task.target.get('template_path') is not None
+
+
+def installed_check_scanner(project, now=None):
+    """Whether a live Sentinel that may take ``nuclei_validate`` for ``project`` runs installed templates from the template index (contract 11)."""
+    return any(runs_template_index(e.agent) and e.live for e in eligible_sentinels(project, AI_CHECK, now=now, live_only=True))
 
 
 def runs_network_detection(agent):
@@ -1314,6 +1313,9 @@ def _explain(kind, agents, live, internal=False, only=None, load=None, builtin_o
         elif kind not in e.caps and not sentinel_contract.can_run((a.info or {}).get('contract_version'), kind):
             reasons.add('outdated')
             clauses.append(f'{a.name} has it but its client is too old to run {word}')
+        elif kind in TEMPLATE_INDEX_KINDS and kind not in e.caps and not runs_template_index(a):
+            reasons.add('outdated')
+            clauses.append(f'{a.name} has it but is too old to build its nuclei template set from the template index (contract 11): update it; its {word} work waits until then')
         elif credential_work(kind) and kind in e.caps and not e.credential_filter:
             reasons.add('outdated')
             clauses.append(f'{a.name} is too old to leave out checks that send credentials: update it; its {word} work waits until then')
@@ -3114,7 +3116,9 @@ def _clean_nuclei_validate_result(body):
                 item['error'] = _text(row['error'], 300)
             kept.append(item)
         out['outcomes'] = kept
-    if not set(out) - {'template_sha256'}:
+    if isinstance(body.get('template'), str) and 0 < len(body['template']) <= 200_000:
+        out['template'] = body['template']  # contract 11: the installed template a test named by path, as the Sentinel read and ran it (``ai_checks.result_problem`` holds it to the hash)
+    if not set(out) - {'template_sha256', 'template'}:
         raise ApiError(400, 'a nuclei_validate result carries valid (validate) or outcomes (test)')
     return out
 

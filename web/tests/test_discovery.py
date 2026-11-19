@@ -32,18 +32,15 @@ class DiscoveryTests(TestCase):
 		self.project = Project.objects.create(name='P', slug='pd', insert_date=timezone.now(), org=org)
 		self.domain = Domain.objects.create(name='example.test', project=self.project, insert_date=timezone.now())
 		EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
-		patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)  # no real DNS in tests
-		self.resolves_to_blocked = patcher.start()
-		self.addCleanup(patcher.stop)
 
 	def test_domain_resolving_to_a_blocked_address_is_never_handed_to_a_scanner(self):
 		scan = self._scan()
-		self.resolves_to_blocked.return_value = True
 		with mock.patch('cveFeed.tasks.correlate_cves.delay'), \
+				mock.patch('targetApp.target_types.blocked_address', return_value=True), \
 				mock.patch('agentapi.sentinel_stream.dispatch_stream', side_effect=AssertionError('no task may be created')) as dispatch:
 			out = discovery.run_discovery(scan.id)
 		self.assertEqual(out['status'], discovery.FAILED)
-		self.assertIn('resolves to a loopback, link-local or internal address', out['error'])
+		self.assertIn('is a loopback, link-local or internal address', out['error'])
 		dispatch.assert_not_called()
 
 	def _scan(self):
@@ -280,9 +277,6 @@ class DiscoveryApiCredentialWiringTests(TestCase):
 		self.project = Project.objects.create(name='K', slug='pk2', insert_date=timezone.now(), org=self.org)
 		self.domain = Domain.objects.create(name='keyed.test', project=self.project, insert_date=timezone.now())
 		EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
-		patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)  # no real DNS in tests: a resolver answer must not decide whether the run starts
-		patcher.start()
-		self.addCleanup(patcher.stop)
 
 	def _dispatched(self):
 		with mock.patch('cveFeed.tasks.run_bbot_discovery.delay'):
@@ -321,7 +315,7 @@ class TrufflehogBountyTests(TestCase):
 			scan = discovery.start_discovery(self.domain)
 		seen = {}
 		with mock.patch.dict('os.environ', {'CVENGINE_BBOT_TRUFFLEHOG': env}), mock.patch('cveFeed.tasks.correlate_cves.delay'), \
-				mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False), sentinel_discovery(EVENTS, seen=seen):
+				sentinel_discovery(EVENTS, seen=seen):
 			discovery.run_discovery(scan.id)
 		return seen['target']
 
@@ -744,9 +738,6 @@ class NucleiLedgerTests(TestCase):
 		self.p2 = Project.objects.create(name='P2', slug='nl2', insert_date=timezone.now(), org=org)
 		self.engine = EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
 		# no real DNS: a name that is slow to answer counts as blocked, which dropped a host from the chunk test on a loaded runner
-		patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)
-		patcher.start()
-		self.addCleanup(patcher.stop)
 
 	def _scan(self, project, name, host='shared.example.test'):
 		domain = Domain.objects.create(name=name, project=project, insert_date=timezone.now())

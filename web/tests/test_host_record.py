@@ -170,8 +170,7 @@ class CanonicalNameTests(Fixture):
 class PortScanGuardTests(Fixture):
 	def setUp(self):
 		super().setUp()
-		for p in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False),
-				  mock.patch('cveFeed.fullscan.CLAIM_KEY', 'cvengine:fullscan:hostrecord')):
+		for p in (mock.patch('cveFeed.fullscan.CLAIM_KEY', 'cvengine:fullscan:hostrecord'),):
 			p.start()
 
 	def test_the_background_sweep_never_scans_a_shared_platform_address(self):

@@ -138,8 +138,7 @@ class StrictScopeTests(TestCase):
 			scan = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=timezone.now(),
 				scan_status=discovery.QUEUED, results_dir='/tmp')
 			with mock.patch('cveFeed.tasks.correlate_cves.delay'), \
-					mock.patch('agentapi.sentinel_stream.dispatch_stream', side_effect=dispatch), \
-					mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False):  # no real DNS in tests
+					mock.patch('agentapi.sentinel_stream.dispatch_stream', side_effect=dispatch):  # no real DNS in tests
 				discovery.run_discovery(scan.id)
 		self.assertEqual(seen, {'acme.jfrog.com': True, 'acme-example.ai': False})
 

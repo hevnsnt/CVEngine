@@ -73,8 +73,6 @@ class Stored(TestCase):
         self.scan = ScanHistory.objects.create(domain=self.domain, scan_type=engine, start_scan_date=timezone.now(), scan_status=1, tasks=[],
                                                results_dir='x')
         self.ctx = {'scan_history_id': self.scan.id, 'domain_id': self.domain.id, 'subdomain_id': None, 'subscan_id': None}
-        mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False).start()
-        mock.patch('agentapi.sentinel_dispatch._resolves', return_value=True).start()
         self.addCleanup(mock.patch.stopall)
 
     RATINGS = {  # what the Sentinel reports for each host (the rules run there): a claimable delegation, a CNAME into a provider zone, a stale CNAME

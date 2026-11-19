@@ -39,7 +39,6 @@ class Fleet(TestCase):
         for key in KEYS:
             cache.delete(key)
         mock.patch('cveFeed.scan_control.pause_requested', return_value=False).start()
-        mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False).start()
         self.sent = mock.patch('cveFeed.tasks.work_planner_batch.apply_async').start()
         self.census_task = mock.patch('cveFeed.tasks.work_planner_census.apply_async').start()
         self.addCleanup(mock.patch.stopall)

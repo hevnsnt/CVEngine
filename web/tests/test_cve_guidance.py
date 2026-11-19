@@ -394,8 +394,7 @@ class AfterAnUpdateTests(TestCase):
 									cvss_vector='CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H')
 		CVEEntry.objects.create(cve_id='CVE-2099-7699', title='Windows kernel', affected=[{'product': 'Windows'}], published_at=now,
 								original_description='The Windows kernel allows an elevation of privilege.')
-		with mock.patch.object(detection_author, 'RULES_LOOP_BATCH', 4), mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None), \
-				mock.patch('cveFeed.tasks.update_nuclei_templates.delay'):
+		with mock.patch.object(detection_author, 'RULES_LOOP_BATCH', 4), mock.patch('reNgine.ai_settings.get_configured_provider', return_value=None):
 			out = author_cve_detections()
 		self.assertEqual(out['rules_first'], 12)  # three rounds of four, not one small batch per half hour
 		self.assertEqual(CVEDetection.objects.count(), 12)

@@ -390,18 +390,54 @@ def _inside(path, root):
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
+def installed_approval(relative):
+    """``(entry, problem)`` for the installed template at ``relative`` (its path in the pinned release): its entry in the scanner library's template index
+    and why the policy in force refuses it, or ''. This server keeps no copy of the templates: the index records each file's sha256 and the verdicts of the
+    library's rules (``cvengine_scanner.template_index``: the rule ``installed_template_problem`` applies to a text, composed the same way), and the Sentinel
+    runs only a file whose bytes hash to that sha256."""
+    from cvengine_scanner import template_index
+    from cveFeed import nuclei_scan
+    entry = template_index.entry_for(relative)
+    if entry is None:
+        return None, 'template not validated: not a template of the pinned release (the template index does not record it)'
+    read_only, credentials = nuclei_scan.policy_flags()
+    return entry, template_index.policy_problem(entry, read_only, credentials)
+
+
+def template_fingerprint(path):
+    """What identifies the exact template at ``path`` for a coverage key: the sha256 the template index records for an installed one, the sha256 of
+    the file for a generated one, '' when there is none."""
+    from cveFeed import templategen
+    relative = templategen.installed_relative(path)
+    if relative is not None:
+        from cvengine_scanner import template_index
+        return str((template_index.entry_for(relative) or {}).get('sha256') or '')
+    if not path:
+        return ''
+    try:
+        with open(path, 'rb') as source:
+            return hashlib.sha256(source.read(MAX_INSTALLED_TEMPLATE_BYTES + 1)).hexdigest()
+    except OSError:
+        return ''
+
+
 def approved_template(path, cve_id=None):
     """Return approved immutable text and an error, applying policy at every execution.
 
-    Generated files must still match an approved row. Installed files must be read-only
-    and destination-bound. Both are read with a size cap and fail closed outside roots.
+    Generated files must still match an approved row and are read with a size cap, failing closed outside their directory. An installed template
+    (``templategen.INSTALLED_PREFIX``) is judged from the template index (``installed_approval``); its text is not on this server (a Sentinel reads it
+    from its own image), so an approved one returns '' with no problem.
     """
     from cveFeed import templategen
     from cveFeed.models import GeneratedTemplate
+    relative = templategen.installed_relative(path)
+    if relative is not None:
+        _entry, problem = installed_approval(relative)
+        return '', problem
     generated = _inside(path, templategen.GENERATED_DIR)
-    if not generated and not _inside(path, templategen.TEMPLATES_ROOT):
+    if not generated:
         return '', 'template not validated: outside the template directories'
-    limit = templategen.MAX_TEMPLATE_BYTES if generated else MAX_INSTALLED_TEMPLATE_BYTES
+    limit = templategen.MAX_TEMPLATE_BYTES
     try:
         with open(path, 'rb') as handle:
             data = handle.read(limit + 1)
@@ -410,18 +446,15 @@ def approved_template(path, cve_id=None):
         text = data.decode('utf-8')
     except (OSError, UnicodeError):
         return '', 'template not validated: cannot read UTF-8 template'
-    if generated:
-        rows = GeneratedTemplate.objects.filter(path=path, status=GeneratedTemplate.STATUS_VALID,
-                    positive_fixture_verified_at__isnull=False).exclude(positive_fixture_source='')
-        if cve_id:
-            rows = rows.filter(cve_entry__cve_id__iexact=cve_id)
-        row = rows.select_related('cve_entry').first()
-        if row is None or row.yaml != text:
-            return '', 'template not validated: not an unchanged valid generated template with a reviewed positive fixture'
-        ok, why = templategen.static_check(text, expected_cve_id=row.cve_entry.cve_id)
-        problem = '' if ok else f'template not validated: {why}'
-    else:
-        problem = installed_template_problem(text)
+    rows = GeneratedTemplate.objects.filter(path=path, status=GeneratedTemplate.STATUS_VALID,
+                positive_fixture_verified_at__isnull=False).exclude(positive_fixture_source='')
+    if cve_id:
+        rows = rows.filter(cve_entry__cve_id__iexact=cve_id)
+    row = rows.select_related('cve_entry').first()
+    if row is None or row.yaml != text:
+        return '', 'template not validated: not an unchanged valid generated template with a reviewed positive fixture'
+    ok, why = templategen.static_check(text, expected_cve_id=row.cve_entry.cve_id)
+    problem = '' if ok else f'template not validated: {why}'
     return ('', problem) if problem else (text, '')
 
 
@@ -464,17 +497,15 @@ def local_component_only(cve):
 def _check(kind, label, argv, display, target, asset, signature, timeout, **params):
     revision = hashlib.sha256(('validation-policy-2:' + repr(argv)).encode()).hexdigest()[:10]
     if kind == 'nuclei_template':
-        try:
-            with open(params['template'], 'rb') as source:
-                revision = hashlib.sha256(revision.encode() + source.read(MAX_INSTALLED_TEMPLATE_BYTES + 1)).hexdigest()[:10]
-        except OSError:
-            pass
+        fingerprint = template_fingerprint(params['template'])
+        if fingerprint:
+            revision = hashlib.sha256(revision.encode() + fingerprint.encode()).hexdigest()[:10]
     return {'kind': kind, 'label': label, 'argv': argv, 'display': display, 'target': target, 'asset': asset,
             'service': f'validate:{kind}:{signature[:16]}:{revision}', 'timeout': timeout, 'params': params}
 
 
 def _template_check(path, host, cve_id, signature, **params):
-    """The ``nuclei_template`` check of one CVE's template against one host: it runs on the built-in scanner (``templategen.run_template``), so it has no
+    """The ``nuclei_template`` check of one CVE's template against one host: it runs on a scanner (``templategen.run_template``), so it has no
     argv; ``display`` names the template file and the host, for a person reading the step."""
     from cveFeed import templategen
     display = f'template check {os.path.basename(path)} against {host}'
@@ -668,10 +699,10 @@ def _trim(value, limit=EVIDENCE_CAP):
 def run_nuclei_template(check):
     """Run the planned template against the one host, on the built-in scanner (see ``templategen.run_template``)."""
     from cveFeed import templategen
-    outcome = templategen._test_chunk(check['params']['template'], [check['target']], project=check['params'].get('project_id'))[0]
-    if outcome.get('vulnerable') and not outcome.get('error'):
-        # what this hit shows: the template alone says so for the shapes it lists, the hit itself for any other (templategen.hit_evidence)
-        outcome = {**outcome, 'template_evidence': templategen.evidence_of_hit(check['params']['template'], outcome)}
+    # what a hit shows (``template_evidence``: the template alone for the shapes it lists, the hit itself for any other) is read by ``run_template``
+    # from the text that ran
+    outcome = templategen.with_evidence(check['params']['template'],
+                                        templategen._test_chunk(check['params']['template'], [check['target']], project=check['params'].get('project_id')))[0]
     return _result_from_outcome(outcome)
 
 

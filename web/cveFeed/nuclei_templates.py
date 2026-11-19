@@ -11,7 +11,6 @@ eventual ``nuclei -tags ...`` argument or any other sink.
 import hashlib
 import json
 import logging
-import os
 import re
 import time
 
@@ -243,12 +242,8 @@ def select_tags(scan):
 
 # --- AI-targeted pass: what each host is running, and which of the installed templates' tags fit it ---------------
 
-TEMPLATES_DIR = os.environ.get('NUCLEI_TEMPLATES_DIR', '/root/nuclei-templates')
-_TAG_LINE = re.compile(r'^\s{0,4}tags:\s*(.+?)\s*$', re.MULTILINE)
 _SAFE_TAG = re.compile(r'^[a-z0-9][a-z0-9_-]{0,40}$')
-_installed = {}  # templates dir -> TemplateIndex, read once per process
-_META_LINE = re.compile(r'^\s{2,8}(vendor|product):\s*["\']?([A-Za-z0-9_.+ -]{1,60})', re.MULTILINE)
-_CPE_LINE = re.compile(r'^\s{2,8}cpe:\s*["\']?cpe:2\.3:[aho]:([^:\s"\']+):([^:\s"\']+)', re.MULTILINE)
+_installed = {}  # template index sha256 -> TemplateIndex, built once per process
 SEVERITY_CHOICES = ('info', 'low', 'medium', 'high', 'critical')
 MAX_SIGNATURES = 25  # distinct host profiles one AI call is asked about
 MAX_CVES_PER_HOST = 10
@@ -277,85 +272,70 @@ class TemplateIndex:
 				counter[tag] = counter.get(tag, 0) + 1
 
 
-def installed_index(root=None):
-	"""The ``TemplateIndex`` of the installed nuclei templates (read once from the templates directory, then cached)."""
-	root = root or TEMPLATES_DIR
-	if root not in _installed:
-		index, tags = TemplateIndex(), set()
-		try:
-			for base, _dirs, files in os.walk(root):
-				for name in files:
-					if not name.endswith(('.yaml', '.yml')):
-						continue
-					try:
-						with open(os.path.join(base, name), errors='ignore') as f:
-							head = f.read(4096)
-					except OSError:
-						continue
-					mine = set()
-					for line in _TAG_LINE.findall(head):
-						mine.update(t.strip().lower() for t in line.split(',') if _SAFE_TAG.match(t.strip().lower()))
-					tags |= mine
-					vendors, products = set(), set()
-					for kind, value in _META_LINE.findall(head):
-						(vendors if kind == 'vendor' else products).add(_norm(value))
-					for vendor, product in _CPE_LINE.findall(head):
-						vendors.add(_norm(vendor))
-						products.add(_norm(product))
-					keys = {k for k in vendors | products if len(k) >= 3} | {v + p for v in vendors for p in products if len(v + p) >= 4}
-					if mine and keys:
-						index.add(mine, keys)
-		except OSError:
-			logger.warning('could not read nuclei templates from %s', root, exc_info=True)
-		index.tags = frozenset(tags)
-		_installed[root] = index
-	return _installed[root]
+def _keys(entry):
+	"""The normalised vendor, product and vendor+product keys of one template index entry: its ``info.metadata`` and the product of its CPE."""
+	vendors, products = set(), set()
+	for key, bucket in (('vendor', vendors), ('product', products)):
+		if entry.get(key):
+			bucket.add(_norm(entry[key]))
+	cpe = str(entry.get('cpe') or '').split(':')
+	if len(cpe) == 3:
+		vendors.add(_norm(cpe[1]))
+		products.add(_norm(cpe[2]))
+	return {k for k in vendors | products if len(k) >= 3} | {v + p for v in vendors for p in products if len(v + p) >= 4}
 
 
-def installed_tags(root=None):
-	"""Every tag the installed nuclei templates use. This is the closed set the AI picks from, so it can only ever choose tags that
+def installed_index(index=None):
+	"""The ``TemplateIndex`` of the templates the Sentinels run, built once from the scanner library's template index (``cvengine_scanner.template_index``:
+	the tags, metadata vendor and product and CPE of every template of the pinned release). This server keeps no copy of the templates."""
+	from cvengine_scanner import template_index
+	index = index or template_index.load()
+	key = index.get('sha256') or id(index)
+	if key not in _installed:
+		built, tags = TemplateIndex(), set()
+		for entry in index['templates'].values():
+			mine = {t for t in (entry.get('tags') or ()) if _SAFE_TAG.match(t)}
+			tags |= mine
+			keys = _keys(entry)
+			if mine and keys:
+				built.add(mine, keys)
+		built.tags = frozenset(tags)
+		_installed[key] = built
+	return _installed[key]
+
+
+def installed_tags(index=None):
+	"""Every tag the templates the Sentinels run use. This is the closed set the AI picks from, so it can only ever choose tags that
 	select real templates."""
-	return installed_index(root).tags
+	return installed_index(index).tags
 
 
-PANEL_DIRS = ('http/exposed-panels',)  # nuclei's panel templates (tag ``panel``): cveFeed.panel_versions reads the product they name
-_ID_LINE = re.compile(r'^id:\s*["\']?([A-Za-z0-9_.-]{1,120})', re.MULTILINE)
-_CPE_PART_LINE = re.compile(r'^\s{2,8}cpe:\s*["\']?cpe:2\.3:([aho]):([^:\s"\']+):([^:\s"\']+)', re.MULTILINE)
-_panels = {}  # templates dir -> {template id: product metadata}, read once per process
+PANEL_DIRS = ('http/exposed-panels/',)  # nuclei's panel templates (tag ``panel``): cveFeed.panel_versions reads the product they name
+_panels = {}  # template index sha256 -> {template id: product metadata}, read once per process
 
 
-def panel_products(root=None):
-	"""``{template id: {'vendor', 'product', 'part'}}`` of the installed panel templates (``PANEL_DIRS``), read once from the templates directory:
-	the ``vendor`` and ``product`` of a template's ``info.metadata``, else those of its ``classification.cpe``, and the CPE's part (``a``, ``o``,
-	``h``; '' when it states none). A result line from a Sentinel, and a finding stored before, carry no metadata: this is where it is read.
+def panel_products(index=None):
+	"""``{template id: {'vendor', 'product', 'part'}}`` of the panel templates (``PANEL_DIRS``) of the release the Sentinels run, from the scanner library's
+	template index: the ``vendor`` and ``product`` of a template's ``info.metadata``, else those of its ``classification.cpe``, and the CPE's part (``a``,
+	``o``, ``h``; '' when it states none). A result line from a Sentinel, and a finding stored before, carry no metadata: this is where it is read.
 	Templates with neither are left out."""
-	root = root or TEMPLATES_DIR
-	if root not in _panels:
+	from cvengine_scanner import template_index
+	index = index or template_index.load()
+	key = index.get('sha256') or id(index)
+	if key not in _panels:
 		found = {}
-		for sub in PANEL_DIRS:
-			for base, _dirs, files in os.walk(os.path.join(root, sub)):
-				for name in files:
-					if not name.endswith(('.yaml', '.yml')):
-						continue
-					try:
-						with open(os.path.join(base, name), errors='ignore') as f:
-							head = f.read(4096)
-					except OSError:
-						continue
-					ident = _ID_LINE.search(head)
-					if not ident:
-						continue
-					meta = {}
-					for kind, value in _META_LINE.findall(head):
-						meta.setdefault(kind, value.strip().lower())
-					cpe = _CPE_PART_LINE.search(head)
-					part = cpe.group(1) if cpe else ''
-					if cpe and not (meta.get('vendor') and meta.get('product')):
-						meta = {'vendor': cpe.group(2).lower(), 'product': cpe.group(3).lower()}
-					if meta.get('product'):
-						found[ident.group(1)] = {'vendor': meta.get('vendor', ''), 'product': meta['product'], 'part': part}
-		_panels[root] = found
-	return _panels[root]
+		for path, entry in sorted(index['templates'].items()):
+			if not path.startswith(PANEL_DIRS) or not entry.get('id'):
+				continue
+			cpe = str(entry.get('cpe') or '').split(':')
+			part = cpe[0] if len(cpe) == 3 else ''
+			meta = {'vendor': entry.get('vendor') or '', 'product': entry.get('product') or ''}
+			if len(cpe) == 3 and not (meta['vendor'] and meta['product']):
+				meta = {'vendor': cpe[1], 'product': cpe[2]}
+			if meta['product']:
+				found[entry['id']] = {'vendor': meta['vendor'], 'product': meta['product'], 'part': part}
+		_panels[key] = found
+	return _panels[key]
 
 
 def allowed_tags():

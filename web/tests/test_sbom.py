@@ -31,22 +31,11 @@ class SbomTests(SimpleTestCase):
 		self.assertEqual(len(refs), len(set(refs)))
 		self.assertEqual(self.doc['dependencies'][0]['dependsOn'], refs)
 
-	def test_every_scanner_tool_is_listed_with_its_pinned_version(self):
-		dockerfile = sbom.read('web/Dockerfile')
-		for name, argname in (('nuclei', 'NUCLEI_VERSION'), ('go', 'GOVERSION')):
-			self.assertEqual(self.by_name[name]['version'], sbom.arg(dockerfile, argname), name)
-			self.assertEqual(self.by_name[name]['properties'][0], {'name': 'cvengine:pinned', 'value': 'true'}, name)
-		self.assertEqual(self.by_name['nuclei']['purl'], f"pkg:golang/github.com/projectdiscovery/nuclei/v3@v{self.by_name['nuclei']['version']}")
-
-	def test_downloads_carry_their_checksums(self):
-		hashes = [h['content'] for h in self.by_name['go']['hashes']]
-		self.assertTrue(hashes and all(re.fullmatch(r'[0-9a-f]{64}', h) for h in hashes))
-		self.assertEqual(len(hashes), 2)  # amd64 and arm64
-		for gone in ('nmap', 'naabu', 'bbot', 'tzdata', 'wpscan', 'testssl.sh'):  # the scan tools run on the Sentinels, not in this image
+	def test_no_scan_tool_or_template_set_is_in_this_image(self):
+		for gone in ('nuclei', 'go', 'nuclei-templates', 'nmap', 'naabu', 'bbot', 'tzdata', 'wpscan', 'testssl.sh'):  # every scan tool runs on the Sentinels
 			self.assertNotIn(gone, self.by_name)
 
 	def test_what_is_not_pinned_is_marked_as_such(self):
-		self.assertEqual(self.by_name['nuclei-templates']['properties'][0]['value'], 'false')
 		self.assertEqual(self.by_name['ubuntu']['properties'][0]['value'], 'false')
 		self.assertEqual(self.by_name['Pillow']['properties'][0]['value'], 'false')  # a version range in requirements.txt
 		self.assertNotIn('version', self.by_name['Pillow'])

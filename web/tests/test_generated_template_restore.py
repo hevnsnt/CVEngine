@@ -23,7 +23,7 @@ class RestoreGeneratedTemplatesTests(TestCase):
 		patch = mock.patch.object(templategen, 'GENERATED_DIR', str(self.generated))
 		patch.start()
 		self.addCleanup(patch.stop)
-		other = mock.patch.object(templategen, 'TEMPLATES_ROOT', str(Path(scratch.name) / 'installed'))
+		other = mock.patch('cvengine_scanner.template_index.load', return_value={'nuclei_templates': '', 'rules': 0, 'reasons': [], 'templates': {}, 'sha256': ''})
 		other.start()
 		self.addCleanup(other.stop)
 		templategen.invalidate_template_index()

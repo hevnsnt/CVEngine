@@ -125,8 +125,7 @@ class Base(TestCase):
 		self.cve = CVEEntry.objects.create(cve_id='CVE-2020-11023', title='Potential XSS vulnerability in jQuery', kev=True, cvss=6.9,
 										   published_at=timezone.now(), affected=JQUERY_11023)
 		self.sent = mock.Mock(return_value=False)
-		for patched in (mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False),
-						mock.patch('targetApp.target_types.is_scannable_ip', return_value=True),
+		for patched in (mock.patch('targetApp.target_types.is_scannable_ip', return_value=True),
 						mock.patch('cveFeed.activity.log', return_value=None),
 						mock.patch('cveFeed.notify._send', self.sent),
 						mock.patch.dict(os.environ, {'CVENGINE_VALIDATE_MAX_PER_RUN': '500', 'CVENGINE_VALIDATE_MAX_PER_PROJECT_DAY': '500',

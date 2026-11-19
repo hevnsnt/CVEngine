@@ -301,7 +301,7 @@ class RefusedTargetIsARefusalTests(Base):
     def run_one(self):
         from cveFeed import discovery
         scan = self.make()
-        with mock.patch('targetApp.target_types.resolves_to_blocked', return_value=True), \
+        with mock.patch('targetApp.target_types.blocked_address', return_value=True), \
                 mock.patch('targetApp.target_types.sentinel_only_target', return_value=False):
             discovery.run_discovery(scan.pk)
         scan.refresh_from_db()

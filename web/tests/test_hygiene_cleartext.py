@@ -350,8 +350,7 @@ class InternalAndGateTests(Base):
                                  path='/login', auth_state='login', http_status=200)
         with mock.patch('socket.socket', side_effect=AssertionError('socket opened')), \
                 mock.patch('socket.getaddrinfo', side_effect=AssertionError('DNS lookup')), \
-                mock.patch('http.client.HTTPConnection.connect', side_effect=AssertionError('HTTP connection')), \
-                mock.patch('cveFeed.pinned_transport.resolve', side_effect=AssertionError('vetted lookup')):
+                mock.patch('http.client.HTTPConnection.connect', side_effect=AssertionError('HTTP connection')):
             found = cleartext.findings_for(self.domain)
         self.assertEqual(sorted(f.check for f in found),
                          ['cleartext_ftp', 'cleartext_http_login', 'cleartext_telnet', 'cleartext_telnet'])

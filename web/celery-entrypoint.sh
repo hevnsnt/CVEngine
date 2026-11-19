@@ -45,19 +45,7 @@ fi
 # account in this container has any business with scan output, PDF reports or log archives. Applied at every start.
 chgrp 101 /usr/src/scan_results && chmod 0750 /usr/src/scan_results || echo "Could not restrict /usr/src/scan_results to root and the proxy"
 
-# the one tool the server runs itself (it refreshes and reads the template set); every scan runs on a Sentinel
-nuclei -version
-
-# geeknik/the-nuclei-templates produces false positives (#1521), drop copies left by older installs
-if [ -d "/root/nuclei-templates/geeknik_nuclei_templates" ];
-then
-  echo "Removing Geeknik Nuclei templates"
-  rm -rf /root/nuclei-templates/geeknik_nuclei_templates
-fi
-
-# a third-party template that used to be fetched from a branch on every start is no longer downloaded: unreviewed, unpinned
-# content must not enter the template set. A copy left by an older install is removed.
-rm -f ~/nuclei-templates/ssrf_nagli.yaml
+# the server runs no scan tool and keeps no template set: every scan, template run and template check runs on a Sentinel
 
 # TEMPORARY FIX, httpcore is causing issues with celery, removing it as temp fix
 #python3 -m pip uninstall -y httpcore

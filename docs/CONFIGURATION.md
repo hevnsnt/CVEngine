@@ -356,8 +356,7 @@ Production runs Gunicorn; the development compose file keeps Django's auto-reloa
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `NUCLEI_TEMPLATES_DIR` | `/root/nuclei-templates` | nuclei's installed templates. |
-| `CVENGINE_GENERATED_TEMPLATES_DIR` | `/root/cvengine-generated-templates` | Where validated AI-written templates live. It must sit outside `NUCLEI_TEMPLATES_DIR`, and the app says so at startup if it does not. In the shipped compose files it is the `generated_templates` volume, so validated templates survive an update, and a worker rewrites any validated template whose file is missing from the copy kept in the database when it starts. |
+| `CVENGINE_GENERATED_TEMPLATES_DIR` | `/root/cvengine-generated-templates` | Where validated AI-written templates live. (The server keeps no copy of the community templates: `NUCLEI_TEMPLATES_DIR` is no longer read.) In the shipped compose files it is the `generated_templates` volume, so validated templates survive an update, and a worker rewrites any validated template whose file is missing from the copy kept in the database when it starts. |
 | `CVENGINE_CVE_SEED` | `1` | Load the published CVE catalog on first start (`off` to skip). `CVENGINE_CVE_SEED_URL` points it at another https location. See [PIPELINE.md](PIPELINE.md#seeding-the-catalog). |
 | `CVENGINE_DETECTION_AI_PER_DAY` | `25` | How many CVEs the AI is asked to write guidance for in 24 hours (rules-written guidance is not limited by this). It is only the fallback: **Settings, AI model** has its own "CVE guidance written by the model per day" setting (default 25, 0 to 100000, 0 turns it off) and that one is used whenever the AI model settings exist. A run takes its share of the day's budget (a 48th, at least 1 and at most 100). |
 | `CVENGINE_DETECTION_RULES_BATCH` | `500` | Rules-written guidance records per run. The task runs about every 30 minutes. |
@@ -441,6 +440,7 @@ Remove these from `.env`; they change nothing and nothing warns about them.
 | `CVENGINE_SCREENSHOT_MAX_RSS_MB` | The browser runs on a Sentinel, whose own variable is `CVENGINE_SENTINEL_SHOT_MAX_RSS_MB` (1500 MB, set in that Sentinel's environment). The page budget (`CVENGINE_SCREENSHOT_MAX_PER_SCAN`, `_MAX_BYTES`) stays on the server. |
 | `CVENGINE_OPENVAS_COST_MB` | The server holds no GMP login and no OpenVAS memory budget; the floors of the scripts above remain for a Sentinel's host. |
 | `CVENGINE_INVENTORY_NAME_ONLY` | Host inventory reports match by name alone by default; `CVENGINE_INVENTORY_STRICT=1` is the switch that remains. |
+| `NUCLEI_TEMPLATES_DIR`, `NUCLEI_CONFIG_DIR` | The server keeps no copy of the nuclei templates and runs no nuclei: it reads the template index of the Sentinel library it installs. A Sentinel's own templates are baked into its image. |
 
 ## Settings in the app
 

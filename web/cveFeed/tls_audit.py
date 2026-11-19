@@ -8,8 +8,8 @@ injection, ROBOT, POODLE, FREAK, DROWN, Logjam, SWEET32, Ticketbleed, RC4, CRIME
 the sweep waits and the targets stay due.
 
 This is a slow, polite background sweep, never part of a scan: one target at a time, the longest-waiting first, at most
-``CVENGINE_TESTSSL_MAX_TARGETS`` per run, one sweep at a time, and it stops when scans are paused. Each target is tested at the address
-``cveFeed.pinned_transport`` vetted, so a name that was pointed at a prohibited address after it was stored is never contacted.
+``CVENGINE_TESTSSL_MAX_TARGETS`` per run, one sweep at a time, and it stops when scans are paused. Each target is tested at its newest stored
+address that a scanner may touch (``_address``); this server looks no name up, and the Sentinel judges that address again before it connects.
 
 What it records:
 
@@ -363,11 +363,16 @@ def _latest_row(project_id, host):
 
 
 def _address(host, port, project_id):
-    """The one vetted address the audit is pinned to (IPv4 first): a name that resolves somewhere prohibited raises."""
-    from cveFeed import pinned_transport
-    addresses = pinned_transport.resolve(host, port, project=project_id)
-    ordered = sorted(addresses, key=lambda item: item[0] != 2)  # AF_INET is 2
-    return ordered[0][1][0]
+    """The one address the audit is pinned to (IPv4 first): the host's newest stored address that a scanner may touch (what a Sentinel's passes
+    recorded for it). This server looks no name up; the Sentinel judges the address again before testssl.sh connects to it (``scope.check_ip``).
+    Raises ``ValueError`` when the host has no such address yet."""
+    from targetApp.target_types import is_scannable_ip
+    sub = _latest_row(project_id, host)
+    addresses = [ip.address for ip in sub.ip_addresses.all() if ip.address] if sub is not None else []
+    usable = sorted((a for a in addresses if is_scannable_ip(a, project=project_id)), key=lambda a: ':' in a)
+    if not usable:
+        raise ValueError('no stored address of this host is one a scanner may use (it is looked up by a Sentinel at the next discovery)')
+    return usable[0]
 
 
 def sweep(project_id, resolve=None):

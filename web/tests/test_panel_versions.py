@@ -58,18 +58,44 @@ def cve(cve_id, vendor, product, introduced, fixed):
                                               'ranges': [{'type': 'ECOSYSTEM', 'introduced': introduced, 'fixed': fixed}]}])
 
 
+def fixture_index():
+    """The template index (``cvengine_scanner.template_index``) of the fixture panel templates, as the Sentinel library's generator records them: the
+    server keeps no template files and reads only such an index."""
+    import hashlib
+    import re
+
+    import yaml
+    templates = {}
+    for path in sorted(Path(TEMPLATES).rglob('*.yaml')):
+        raw = path.read_bytes()
+        doc = yaml.safe_load(raw)
+        info = doc.get('info') or {}
+        meta, classification = info.get('metadata') or {}, info.get('classification') or {}
+        entry = {'sha256': hashlib.sha256(raw).hexdigest(), 'id': doc['id']}
+        for key in ('vendor', 'product'):
+            if meta.get(key):
+                entry[key] = str(meta[key]).strip().lower()
+        cpe = re.match(r'^cpe:2\.3:([aho]):([^:\s]+):([^:\s]+)', str(classification.get('cpe') or '').strip().lower())
+        if cpe:
+            entry['cpe'] = ':'.join(cpe.groups())
+        templates[path.relative_to(TEMPLATES).as_posix()] = entry
+    return {'nuclei_templates': 'fixture', 'rules': 1, 'reasons': [], 'templates': templates, 'sha256': hashlib.sha256(repr(sorted(templates)).encode()).hexdigest()}
+
+
 class Templates:
     def setUp(self):
         super().setUp()
-        patcher = mock.patch.object(nuclei_templates, 'TEMPLATES_DIR', TEMPLATES)
+        from cvengine_scanner import template_index
+        self.index = fixture_index()
+        patcher = mock.patch.object(template_index, 'load', return_value=self.index)
         patcher.start()
         self.addCleanup(patcher.stop)
-        nuclei_templates._panels.pop(TEMPLATES, None)
+        nuclei_templates._panels.pop(self.index['sha256'], None)
 
 
 class ReadingTests(Templates, SimpleTestCase):
     def test_the_installed_templates_metadata_is_read_by_id(self):
-        got = nuclei_templates.panel_products(TEMPLATES)
+        got = nuclei_templates.panel_products(self.index)
         self.assertEqual(got['grafana-detect'], {'vendor': 'grafana', 'product': 'grafana', 'part': 'a'})
         self.assertEqual(got['jenkins-login'], {'vendor': 'jenkins', 'product': 'jenkins', 'part': 'a'})
         self.assertEqual(got['citrix-adc-gateway-panel'], {'vendor': 'citrix', 'product': 'gateway', 'part': 'a'})

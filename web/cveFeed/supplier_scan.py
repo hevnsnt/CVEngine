@@ -18,7 +18,7 @@ port than 443 and 80):
 
 Safety, the same as the other slow sweeps (cloud storage, virtual hosts, UDP): every name is resolved once and every address must be public
 (loopback, private, link-local and cloud metadata addresses refuse the whole name, whatever ``CVENGINE_ALLOW_PRIVATE_TARGETS`` says), and
-every connection goes to those vetted numeric addresses (``pinned_transport``); the sweep stops while scanning is paused; a global request
+every connection goes to those vetted numeric addresses (on the Sentinel, which resolves and judges them); the sweep stops while scanning is paused; a global request
 pace is shared with the other slow web sweeps; each supplier is checked at most once a week (``ledger`` kind ``supplier``) and a supplier that
 answered nothing is asked again tomorrow (``supplier-failed``); one sweep runs at a time; a project whose bug bounty engagement has not
 confirmed automated testing is skipped; an organization's excluded names are never contacted; an edge that challenges a request is

@@ -69,15 +69,15 @@ class ScannableHostsTests(unittest.TestCase):
 
 
 class ScannerTargetFilterTests(TestCase):
-	"""Every path that aims a scanner at a stored host list goes through the filter."""
+	"""Every path that aims a scanner at a stored host list goes through the filter. (A name is not looked up on the server any more: the Sentinel that
+	connects judges what it resolves to. The filter's refusal of a name is shown here with an exclusion, which it applies the same way.)"""
 
 	def setUp(self):
+		from cveFeed.models import HostExclusion
 		org = Org.objects.create(name='A', slug='a')
 		self.project = Project.objects.create(name='P', slug='pa', insert_date=timezone.now(), org=org)
 		self.domain = Domain.objects.create(name='sec.test', project=self.project, insert_date=timezone.now())
-		patcher = mock.patch('targetApp.target_types.resolves_to_blocked', blocked_by_name)
-		patcher.start()
-		self.addCleanup(patcher.stop)
+		HostExclusion.objects.create(org=org, host='bad.sec.test')
 
 	def _cve(self):
 		return CVEEntry.objects.create(cve_id='CVE-2099-50', kev=True, cvss=9.8, published_at=timezone.now(),
@@ -107,7 +107,7 @@ class ScannerTargetFilterTests(TestCase):
 		with mock.patch('cveFeed.validation.resolve_template', return_value=('/t/x.yaml', '')), \
 				mock.patch.object(templategen, '_test_chunk', side_effect=lambda path, chunk, project=None: seen.append(chunk) or
 					[{'host': h, 'vulnerable': False, 'output': ''} for h in chunk]):
-			out = templategen.run_cve_tests(self._cve(), ['good.sec.test', 'bad.sec.test', '169.254.169.254', 'ok.sec.test:8443'])
+			out = templategen.run_cve_tests(self._cve(), ['good.sec.test', 'bad.sec.test', '169.254.169.254', 'ok.sec.test:8443'], project=self.project.pk)
 		self.assertEqual(seen, [['good.sec.test', 'ok.sec.test:8443']])
 		self.assertEqual([r['host'] for r in out['results']], ['good.sec.test', 'ok.sec.test:8443'])
 

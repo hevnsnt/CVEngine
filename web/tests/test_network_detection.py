@@ -133,7 +133,6 @@ class Base(DispatchBase):
             return (x for x in ())
         with tempfile.NamedTemporaryFile('w', suffix='.txt') as handle, mock.patch('agentapi.sentinel_dispatch.any_scanner_for', return_value=True), \
                 mock.patch('agentapi.sentinel_broker.network_detection_scanner', return_value=capable), \
-                mock.patch('agentapi.sentinel_dispatch.resolvable_targets', side_effect=lambda chunk, **kw: list(chunk)), \
                 mock.patch('agentapi.sentinel_dispatch.dispatch_many', side_effect=capture), \
                 mock.patch('cveFeed.validation.all_templates_allowed', return_value=False):
             handle.write('\n'.join(targets) + '\n')
@@ -186,7 +185,6 @@ class TargetTests(Base):
             captured.extend(prepare(chunk)[0] for chunk in chunks)
             return (x for x in ())
         with tempfile.NamedTemporaryFile('w', suffix='.txt') as handle, mock.patch('agentapi.sentinel_dispatch.any_scanner_for', return_value=True), \
-                mock.patch('agentapi.sentinel_dispatch.resolvable_targets', side_effect=lambda chunk, **kw: list(chunk)), \
                 mock.patch('agentapi.sentinel_dispatch.dispatch_many', side_effect=capture), \
                 mock.patch('cveFeed.validation.all_templates_allowed', return_value=False):
             handle.write(f'{HOST}\n{HOST}:22\n')
@@ -222,17 +220,18 @@ class BrokerTests(Base):
                                                    'template_policy': {'rev': 'r', 'read_only': True, 'bundle_sha256': None}, **target})
 
     def test_an_older_sentinel_is_never_handed_the_pass_and_a_current_one_is(self):
-        old, new = self.sentinel('old', 9), self.sentinel('new', 10)
+        old, new = self.sentinel('old', 9), self.sentinel('new', scan_flags.TEMPLATE_INDEX_SINCE)
         task = self.queue(network_detection=True)
         self.assertIsNone(self.claim(old))
-        self.assertEqual(sentinel_broker.effective(old).refusal(task), ('capability', sentinel_broker.NETWORK_DETECTION))
+        self.assertEqual(sentinel_broker.effective(old).refusal(task), ('capability', 'nuclei_light'))  # before contract 11: no nuclei work at all
         self.assertIsNone(sentinel_broker.effective(new).refusal(task))
         self.assertEqual(self.claim(new)['id'], task.pk)
 
-    def test_an_older_sentinel_still_takes_the_ordinary_light_pass(self):
-        old = self.sentinel('old', 9)
+    def test_a_sentinel_before_the_template_index_takes_no_light_pass_either(self):
+        old = self.sentinel('old', 10)  # runs the detection pass, but would wait for a template bundle the server no longer packs
         task = self.queue()
-        self.assertEqual(self.claim(old)['id'], task.pk)
+        self.assertIsNone(self.claim(old))
+        self.assertEqual(sentinel_broker.effective(old).refusal(task), ('capability', 'nuclei_light'))
 
     def test_a_sentinel_that_never_said_its_contract_is_older(self):
         self.assertFalse(sentinel_broker.runs_network_detection(self.sentinel('silent', None)))
@@ -243,7 +242,7 @@ class BrokerTests(Base):
         self.assertFalse(sentinel_broker.network_detection_scanner(self.project))
         self.sentinel('old', 9)
         self.assertFalse(sentinel_broker.network_detection_scanner(self.project))
-        self.sentinel('new', 10)
+        self.sentinel('new', scan_flags.TEMPLATE_INDEX_SINCE)
         self.assertTrue(sentinel_broker.network_detection_scanner(self.project))
 
 

@@ -136,10 +136,8 @@ def in_scope(ip, *, strict=False):
     from cveFeed.bounty_gate import Gate
     gate = Gate()  # the project's bug bounty confirmation, and the program's scope for each name on the address
     names = [(name, project) for name, project in rows if name.lower().rstrip('.') not in banned[project] and gate.allows(project, name)]
-    def blocked(name, project):  # an address is judged as that address (its project may authorise a tailnet device); a name only by DNS
-        if target_types.classify_target(name) == target_types.IP:
-            return not target_types.is_scannable_ip(name, project=project)
-        return target_types.resolves_to_blocked(name)
+    def blocked(name, project):  # an address is judged as that address (its project may authorise a tailnet device); a name by the Sentinel that sweeps it
+        return target_types.blocked_address(name, project=project)
     return any(not blocked(name, project) for name, project in names)
 
 

@@ -12,8 +12,10 @@ own Sentinels whose contract version is at least ``external_since`` (``sentinel_
   benign loopback page, no host); ``test`` runs an approved check against hosts. For a Sentinel that is not the built-in scanner (review D3) each
   is bound to an approval record of its exact text (so its exact sha256), looked up again every time, so a revoked one is never sent: ``validate``
   needs a ``GeneratedTemplate`` draft row holding exactly that text, a task filed under a project that owns a target matched to the draft's CVE (the
-  tenant) and no targets; ``test`` needs a valid generated row with a reviewed positive fixture or an installed template file holding exactly
-  that text (``validation.approved_template``), and every target a host of the task's own project. Arbitrary read-only text is never approved.
+  tenant) and no targets; ``test`` needs a valid generated row with a reviewed positive fixture holding exactly that text, and every target a host
+  of the task's own project. Arbitrary read-only text is never approved. An installed template of the pinned release is not sent as text (contract
+  11, ``installed_target``): the task names its path and the sha256 the scanner library's template index records, the server approves it from the
+  index's verdicts (``installed_problem``), and the Sentinel reads exactly that file from its own image and sends its text back with the result.
   On the built-in scanner (the server's own container) the gate is as before: the static gate for a draft, ``validation.approved_template``'s
   file rules for a test (the all-templates setting counts there only).
 - **Read-only, the task's own target and port, and the allowlist**, for anything a Sentinel other than the built-in scanner may run
@@ -86,6 +88,31 @@ def target(mode, text, targets=None):
     return out
 
 
+def installed_target(relative, sha256, targets):
+    """The ``nuclei_validate`` test target of an installed template (contract 11): its path in the pinned release and the sha256 the template index records,
+    never its text (this server has none)."""
+    return {'mode': 'test', 'template_path': relative, 'template_sha256': sha256, 'targets': list(targets or [])}
+
+
+def installed_problem(relative, sha256, builtin=True, project=None, targets=None):
+    """Why the server does not approve the installed template at ``relative`` with ``sha256`` for a test, or "": the template index records it with exactly
+    that hash and its verdicts pass the policy in force (``validation.installed_approval``). For a Sentinel that is not the built-in scanner it must also
+    be read-only (``NOT_READ_ONLY``) and the targets hosts of the task's project; the Sentinel itself applies the rest of the content rules to the file it
+    reads (``cvengine_scanner.checks.check_problem``)."""
+    from cvengine_scanner import template_index
+    from cveFeed import validation
+    entry, problem = validation.installed_approval(relative) if isinstance(relative, str) else (None, 'template not validated: no template path')
+    if problem:
+        return problem
+    if not same_hash(entry.get('sha256'), sha256):
+        return 'template not validated: the template index records another hash for this template'
+    if builtin:
+        return ''
+    if template_index.reason(entry, 'ro') or template_index.reason(entry, 'cred'):
+        return NOT_READ_ONLY
+    return hosts_problem(project, targets)
+
+
 def _approved_generated(text):
     """Whether ``text`` is exactly an unchanged valid generated template with a reviewed positive fixture that passes the static gate again."""
     from cveFeed import templategen
@@ -99,7 +126,7 @@ def approval_problem(mode, text, builtin=True, project=None, targets=None):
     """Why the server does not approve ``text`` for a check in ``mode``, or "".
 
     On the built-in scanner (``builtin``), as before: ``validate``, the static gate of a draft; ``test``, an approved generated template, else a
-    read-only installed one, else any installed one when Settings allows every template (the text comes from ``validation.approved_template``).
+    read-only text, else any text when Settings allows every template (an installed template is sent by path instead: ``installed_problem``).
     For a Sentinel that is not the built-in scanner: the content rules (``content_problem``) and then the approval record of exactly this text,
     bound to the task's tenant and targets (``binding_problem``)."""
     from cveFeed import templategen, validation
@@ -149,29 +176,6 @@ def draft_projects(text):
                       .values_list('subdomain__target_domain__project_id', flat=True)))
 
 
-def _approved_installed(text):
-    """Whether ``text`` is exactly an installed template file the server approves now (``validation.approved_template``), found by the CVE its id or
-    classification names."""
-    from cveFeed import templategen, validation
-    from cveFeed.safeyaml import load_template
-    try:
-        doc = load_template(text)
-    except Exception:  # noqa: BLE001 - any template that does not load is not an installed one
-        return False
-    if not isinstance(doc, dict):
-        return False
-    info = doc.get('info') if isinstance(doc.get('info'), dict) else {}
-    classification = info.get('classification') if isinstance(info.get('classification'), dict) else {}
-    named = [doc.get('id'), *(classification.get('cve-id') if isinstance(classification.get('cve-id'), list) else [classification.get('cve-id')])]
-    cves = {m.upper() for value in named if isinstance(value, str) for m in re.findall(r'(?i)CVE-\d{4}-\d{4,7}', value)}
-    for cve_id in sorted(cves):
-        for path in templategen.find_existing_template(cve_id):
-            approved, problem = validation.approved_template(path, cve_id)
-            if not problem and approved == text:
-                return True
-    return False
-
-
 def hosts_problem(project, targets):
     """Why ``targets`` are not all hosts of ``project`` (its targets and subdomains), or "": a test runs only on its own tenant's hosts."""
     from startScan.models import Subdomain
@@ -201,7 +205,7 @@ def binding_problem(mode, text, project, targets):
         if project_id is None or project_id not in draft_projects(text):
             return 'template not validated: the draft is not for a target of the project this check is filed under'
         return ''
-    if not (_approved_generated(text) or _approved_installed(text)):
+    if not _approved_generated(text):
         return 'template not validated: no approval holds exactly this text (sha256), or it was withdrawn'
     return hosts_problem(project, targets)
 
@@ -231,6 +235,13 @@ def task_problem(task, builtin):
     names no stored sign-in. A task built by ``sentinel_dispatch`` passes; one changed after it was made, or whose approval was withdrawn, does not."""
     body = task.target if isinstance(task.target, dict) else {}
     mode, text, sha = body.get('mode'), body.get('template'), body.get('template_sha256')
+    if text is None and body.get('template_path') is not None:  # contract 11: an installed template, named by path and hash
+        if mode != 'test' or not isinstance(sha, str) or not SHA256.fullmatch(sha):
+            return 'the check does not name a test of an installed template with its hash'
+        problem = installed_problem(body.get('template_path'), sha, builtin=builtin, project=task.project_id, targets=body.get('targets'))
+        if not problem and not builtin:
+            problem = 'the check names a stored sign-in' if task.secret_ref else ''
+        return problem
     if not isinstance(text, str) or not isinstance(sha, str) or not SHA256.fullmatch(sha) or not same_hash(digest(text), sha):
         return 'the check does not match its template hash'
     problem = approval_problem(mode, text, builtin=builtin, project=task.project_id, targets=body.get('targets'))
@@ -248,4 +259,7 @@ def result_problem(task, result, builtin):
         return ''
     if not same_hash(echoed, sent):
         return 'the result does not name the check it was sent (template_sha256)'
+    ran = result.get('template')
+    if ran is not None and not (isinstance(ran, str) and same_hash(digest(ran), sent)):
+        return 'the text the result names is not the template it was sent (template_sha256)'
     return ''

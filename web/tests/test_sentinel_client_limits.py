@@ -35,7 +35,7 @@ class MachineLimitTests(SentinelBase):
     def sentinel(self, caps=('nmap', 'nuclei_light', 'network:internal')):
         out = register_sentinel(self.t['dana'], name='limited', capabilities=list(caps))[1]
         agent = Agent.objects.get(pk=out['id'])
-        Agent.objects.filter(pk=agent.pk).update(network='internal', status='active', last_seen=timezone.now())
+        Agent.objects.filter(pk=agent.pk).update(network='internal', status='active', last_seen=timezone.now(), info={'contract_version': 11})  # nuclei work needs 11
         agent.refresh_from_db()
         return agent
 

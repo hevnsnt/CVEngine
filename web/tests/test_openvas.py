@@ -210,27 +210,16 @@ class GatingTests(Fixture, TestCase):
     def test_a_name_that_resolves_somewhere_prohibited_is_dropped_by_the_scannable_gate(self):
         self.assertEqual({h for h, _ip, _d in self.due(blocked=lambda h: h == 'api.rt.test')}, {'www.rt.test'})
 
-    def test_the_real_vetting_refuses_a_name_pointed_at_a_prohibited_address(self):
-        """No injected resolver: pinned_transport.resolve runs against what DNS says now."""
-        with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('169.254.169.254', 443))]):
-            self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
-        with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('127.0.0.1', 443))]):
-            self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
-        with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('93.184.216.5', 443))]):
+    def test_the_real_selection_names_the_stored_address_and_looks_no_name_up(self):
+        """No injected resolver: the address put in a task is the host's newest stored address a scanner may touch (what a Sentinel recorded), never a
+        DNS answer read here (the server resolves no target name)."""
+        from startScan.models import IpAddress
+        with mock.patch('socket.getaddrinfo', side_effect=AssertionError('the server looked a target name up')):
             self.assertEqual([(h, ip) for h, ip, _d in ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False)], [('www.rt.test', '93.184.216.5')])
-
-    def test_a_name_that_does_not_resolve_at_all_is_dropped_by_the_real_vetting(self):
-        """No injected resolver: a name with no DNS answer (NXDOMAIN) must be skipped exactly like one that resolves somewhere
-        prohibited, never handed to gvmd as a bare name or an empty address."""
-        import socket
-        with mock.patch('socket.getaddrinfo', side_effect=socket.gaierror(-2, 'Name or service not known')):
-            self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
-
-    def test_a_name_with_no_address_family_cvengine_understands_is_dropped(self):
-        """A getaddrinfo answer with no usable family, or an empty answer set, never produces a target: pinned_transport.resolve
-        raises for both, and due() skips the host rather than letting an empty or missing address reach gvmd."""
-        with mock.patch('socket.getaddrinfo', return_value=[]):
-            self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
+            IpAddress.objects.filter(address='93.184.216.5').update(address='169.254.169.254')
+            self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])  # a stored address no scanner may touch
+            IpAddress.objects.filter(address='169.254.169.254').delete()
+            self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])  # no stored address yet
 
     def test_documentation_ranges_and_this_instances_own_address_are_refused(self):
         for ip in ('192.0.2.1', '198.51.100.9', '203.0.113.200', '2001:db8::5'):
@@ -260,8 +249,9 @@ class GatingTests(Fixture, TestCase):
         for ip in ('93.184.216.5', '93.184.214.7', '2606:4700::5'):
             self.assertFalse(bool(ov.refuse_reason(ip)), ip)
         self.assertEqual(self.due(resolve=lambda h, p: '100.64.0.9'), [])
-        with mock.patch('socket.getaddrinfo', return_value=[(2, 1, 6, '', ('100.64.0.9', 443))]):
-            self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
+        from startScan.models import IpAddress
+        IpAddress.objects.filter(address='93.184.216.5').update(address='100.64.0.9')  # the stored address is a tailnet one: never handed over
+        self.assertEqual(ov.due(self.project.id, ['www.rt.test'], blocked=lambda h: False), [])
 
     def test_a_name_the_project_does_not_have_is_never_scanned(self):
         self.assertEqual(self.due(['stranger.example.test']), [])
@@ -893,12 +883,6 @@ class SettingsApiTests(Fixture, TestCase):
         status, data = send(self.c, 'PUT', f'openvas/projects/{self.pid}', {'hosts': ['www.rt.test', 'api.rt.test']})
         self.assertEqual(status, 400)
         self.assertIn('api.rt.test', data['error'])
-
-    def test_a_host_that_resolves_to_a_prohibited_range_cannot_be_opted_in(self):
-        with mock.patch('targetApp.target_types.blocked_names', return_value={'www.rt.test'}):
-            status, data = send(self.c, 'PUT', f'openvas/projects/{self.pid}', {'hosts': ['www.rt.test']})
-        self.assertEqual(status, 400)
-        self.assertIn('may not be pointed at', data['error'])
 
     def test_malformed_hosts_and_too_many_are_refused(self):
         for hosts in (['bad host'], ['a;b'], 'x' * 300, [f'h{i}.rt.test' for i in range(201)], 5):

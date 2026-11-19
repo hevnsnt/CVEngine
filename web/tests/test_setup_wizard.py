@@ -34,9 +34,6 @@ class WizardBase(TestCase):
         self.admin = User.objects.create_superuser('wiz', password='x')
         self.c = client_for(self.admin)
         EngineType.objects.create(engine_name='e', yaml_configuration='x', default_engine=True)
-        patcher = mock.patch('targetApp.target_types.resolves_to_blocked', return_value=False)  # no real DNS in tests
-        self.resolves = patcher.start()
-        self.addCleanup(patcher.stop)
         self.live = True  # a scanner is live unless a test says otherwise (the first discovery is held until one is: setup_flow.start_discovery)
         live = mock.patch.object(setup_flow, 'live_sentinels', side_effect=lambda now=None: {'live': int(self.live), 'builtin': int(self.live), 'external': 0})
         live.start()
@@ -273,13 +270,6 @@ class SeedTests(WizardBase):
         self.assertFalse(Domain.objects.exists())
         self.assertFalse(Org.objects.exclude(slug='default').exists())
         self.assertFalse(SetupWizard.objects.exists() and SetupWizard.objects.get().data.get('steps'))
-
-    def test_a_domain_that_resolves_to_an_internal_address_is_refused(self):
-        self.resolves.return_value = True
-        response = self.seed()
-        self.assertEqual(response.status_code, 400)
-        self.assertIn('internal address', response.json()['error'])
-        self.assertFalse(Domain.objects.exists())
 
     def test_url_and_wildcard_forms_are_cleaned_to_the_domain(self):
         self.assertEqual(setup_flow.clean_domain('https://WWW.Seed.test/path'), 'www.seed.test')

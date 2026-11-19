@@ -206,10 +206,7 @@ def clean_domain(value):
         text = text[2:]
     if target_types.classify_target(text) != target_types.DOMAIN:
         raise WizardError(400, f'"{text[:80]}" is not a domain name. Enter one domain such as example.com (an address or range can be added later in Targets).')
-    if target_types.resolves_to_blocked(text):
-        raise WizardError(400, f'{text} points at a loopback, link-local or internal address, which cannot be scanned from here '
-                               '(an operator can allow internal ranges with CVENGINE_ALLOW_PRIVATE_TARGETS=1).')
-    return text
+    return text  # a name is not looked up here: the Sentinel that scans it refuses one that points at an address no Sentinel may scan
 
 
 def _clean_name(value, what):
