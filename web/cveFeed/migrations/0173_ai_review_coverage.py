@@ -26,7 +26,9 @@ def daily(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    dependencies = [('cveFeed', '0172_search_trigram_indexes'), ('django_celery_beat', '0001_initial')]
+    # the schedule row this creates needs CrontabSchedule.timezone (NOT NULL in the table): depend on the migration that adds it, or a plan
+    # that rolls cveFeed back and forward again can run this one against a historical model without the column (a NULL insert)
+    dependencies = [('cveFeed', '0172_search_trigram_indexes'), ('django_celery_beat', '0006_auto_20180322_0932')]
     operations = [
         migrations.AddField(model_name='automaticvalidation', name='ai_job_id', field=models.PositiveBigIntegerField(blank=True, null=True)),
         migrations.AddField(model_name='ondemandvalidation', name='ai_job_id', field=models.PositiveBigIntegerField(blank=True, null=True)),
