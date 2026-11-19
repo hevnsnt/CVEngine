@@ -169,9 +169,12 @@ def discovered_pages(sub):
 
 
 def host_products(sub, ports):
+    """``[(name, version)]`` of what the host runs: its technologies, its open ports' products and the products an identity reading names with
+    no version (``cveFeed.identities``: a FortiGate's OS guess or factory certificate leads to the FortiOS build read)."""
+    from cveFeed import identities
     out = [_split(t.name) for t in sub.technologies.all() if t.name]
     out += [((p.product or '').strip(), (p.version or '').strip()) for p in ports if (p.product or '').strip()]
-    return out
+    return out + identities.products(sub)
 
 
 def _ports(sub):

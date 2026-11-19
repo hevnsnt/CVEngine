@@ -147,7 +147,7 @@ class NmapCleaning(SimpleTestCase):
         evil = 'A' * 5000 + '\x00\x07'
         port = self.stored(self.host(banner='x\n' + evil, service_extra=evil, hostname=evil, ostype=evil, devicetype=evil,
                                      scripts={'banner': 'ok\x00' + evil, 'Bad Id': 'x', 'x' * 80: 'y'}, tunnel='tls', method='guess', confidence='99'))['hosts'][0]['ports'][0]
-        self.assertEqual(len(port['banner']), 1024)
+        self.assertEqual(len(port['banner']), sb.MAX_BANNER)  # 4096: room for nmap's escaped service fingerprint
         self.assertNotIn('\x00', port['banner'])
         self.assertIn('\n', port['banner'])
         self.assertEqual((len(port['service_extra']), len(port['hostname']), len(port['ostype']), len(port['devicetype'])), (200, 255, 40, 64))
