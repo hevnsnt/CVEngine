@@ -72,12 +72,10 @@ def store_products(project, sub, products, scan=None):
     """What one host's finished fingerprint leaves behind, as a Sentinel reported it: the host is recorded in the service ledger
     (so it is not asked again inside the window) and each product becomes a technology of it. ``products`` is ``[{'firewall', ...}]`` as
     ``_named`` makes it. Returns how many products were named. Never called for a run that failed: that host is asked again next scan."""
-    from cveFeed import ledger
-    from startScan.models import Technology
+    from cveFeed import ledger, tech_rows
     ledger.record(SERVICE, [sub.name], project.id, scan)
     for product in products:
-        tech = Technology.objects.filter(name=product['firewall']).order_by('id').first() or Technology.objects.create(name=product['firewall'])
-        sub.technologies.add(tech)
+        sub.technologies.add(tech_rows.technology(product['firewall']))  # one row per spelling (cveFeed.tech_rows)
     return len(products)
 
 
@@ -108,6 +106,9 @@ def run_for_scan(scan_id, force=False):
     if not sites:
         return {'checked': 0}
     covered = set() if force else ledger.fresh(SERVICE, [s.name for s, _ in sites], project.id)
+    if covered:  # not asked again inside the window: the products its last run named stay on this scan's rows (cveFeed.tech_carry)
+        from cveFeed import tech_carry
+        tech_carry.carry(scan, project.id, {name: name for name in covered}, SERVICE)
     todo = [(s, u) for s, u in sites if s.name not in covered][:max_hosts()]
     if not todo:
         return {'checked': len(sites), 'tested': 0, 'reused': len(covered)}

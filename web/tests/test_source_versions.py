@@ -50,9 +50,14 @@ class ReaderTests(SimpleTestCase):
 
     def test_a_cpe_is_a_reading_with_its_cpe_and_an_os_cpe_or_a_bare_one_is_none(self):
         got = source_versions.reported_cpe('cpe:/a:openbsd:openssh:8.9p1')
-        self.assertEqual((got['label'], got['version'], got['cpe']), ('openssh', '8.9p1', 'cpe:/a:openbsd:openssh:8.9p1'))
-        self.assertIsNone(source_versions.reported_cpe('cpe:/o:canonical:ubuntu_linux'))
-        self.assertIsNone(source_versions.reported_cpe('cpe:/a:igor_sysoev:nginx'))
+        self.assertEqual((got['label'], got['version'], got['cpe']), ('openbsd openssh', '8.9p1', 'cpe:/a:openbsd:openssh:8.9p1'))
+        # every CPE InternetDB hands bbot is a reading, labelled "vendor product": an operating system and an unversioned one too (no version)
+        got = [(r['label'], r['version'], r['cpe']) for r in map(source_versions.reported_cpe, (
+            'cpe:/o:canonical:ubuntu_linux', 'cpe:/a:igor_sysoev:nginx', 'cpe:/a:apache:http_server', 'cpe:/a:nginx:nginx:1.18.0',
+            'cpe:/a:jquery:jquery:3.5.1'))]
+        self.assertEqual(got, [('canonical ubuntu linux', '', 'cpe:/o:canonical:ubuntu_linux'), ('igor sysoev nginx', '', 'cpe:/a:igor_sysoev:nginx'),
+                               ('apache http server', '', 'cpe:/a:apache:http_server'), ('nginx', '1.18.0', 'cpe:/a:nginx:nginx:1.18.0'),
+                               ('jquery', '', 'cpe:/a:jquery:jquery:3.5.1')])  # a library's version is read from its own file only
         self.assertIsNone(source_versions.reported_cpe('nginx:1.18.0'))
 
     def test_testssl_banners(self):
@@ -190,13 +195,16 @@ class ShodanTests(ReportedFixture, TestCase):
     def test_a_versioned_cpe_is_a_reported_reading_not_a_technology_and_is_matched_cpe_first(self):
         row = cve('CVE-2026-300010', *OPENSSH)
         sub = self.discover()
-        reading = ProbeObservation.objects.get(probe=source_versions.SHODAN_PROBE)
+        reading = ProbeObservation.objects.get(probe=source_versions.SHODAN_PROBE, product='openbsd openssh')
         self.assertEqual((reading.kind, reading.outcome, reading.product, reading.version, reading.project_id),
-                         ('reported', 'reported', 'openssh', '8.9p1', self.project.id))
+                         ('reported', 'reported', 'openbsd openssh', '8.9p1', self.project.id))
         self.assertEqual((reading.evidence['cpe'], reading.evidence['provider'], reading.evidence['undated']),
                          ('cpe:/a:openbsd:openssh:8.9p1', 'shodan_idb', True))
         self.assertNotIn('openssh:8.9p1', names(sub))  # never a first-party technology
-        self.assertIn('jQuery', names(sub))  # a library's CPE keeps the library rule: the name, no version
+        # the operating system CPE and the library's are readings too (never a technology named "cpe:/o:..."), the library's without a version
+        others = dict(ProbeObservation.objects.filter(probe=source_versions.SHODAN_PROBE).exclude(pk=reading.pk).values_list('product', 'version'))
+        self.assertEqual(others, {'canonical ubuntu linux': '', 'jquery': ''})
+        self.assertEqual(names(sub), set())
         match, = self.correlate(row)
         self.assertEqual((match.source, match.matched_version, match.version_in_range), ('tech', '8.9p1', True))
         self.assertLessEqual(match.confidence, source_versions.REPORTED_CONFIDENCE)
@@ -313,7 +321,7 @@ class BackfillTests(ReportedFixture, TestCase):
         self.assertGreaterEqual(out['readings'], 3)
         self.assertEqual(rows(source_versions.NMAP_PROBE)[('version', 'Redis', 6379)].version, '7.2.4')
         self.assertEqual(rows(source_versions.DB_PROBE)[('version', 'Memcached', 11211)].version, '1.6.21')
-        self.assertEqual(rows(source_versions.SHODAN_PROBE)[('reported', 'openssh', 0)].version, '8.9p1')
+        self.assertEqual(rows(source_versions.SHODAN_PROBE)[('reported', 'openbsd openssh', 0)].version, '8.9p1')
         self.assertNotIn('openssh:8.9p1', names(sub))  # the CPE technology gave way to the reported reading
         match, = [m for m in CVEMatch.objects.filter(cve_entry=row)]
         self.assertTrue(match.evidence.get('reported'))
