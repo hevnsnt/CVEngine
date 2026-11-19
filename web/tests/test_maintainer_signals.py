@@ -145,10 +145,10 @@ class ContainerSignalTests(SimpleTestCase):
     def test_the_worker_resource_tick_publishes_the_worker_container(self):
         from reNgine import resources
         store = resources.RedisStore(mock.MagicMock(), 'cvengine:heavy:test')
-        with mock.patch.object(store, 'waiting', return_value=[]), mock.patch.object(store, 'live', return_value=[]), mock.patch.object(store, 'events', return_value=[]), \
-                mock.patch.object(store, 'publish_state'), mock.patch.object(cs, 'publish') as publish:
+        with mock.patch.object(store, 'publish_state') as state, mock.patch.object(cs, 'publish') as publish:
             resources.report_state(store, state_fn=lambda: {'total_mb': 1, 'limit_mb': None, 'used_mb': 1, 'available_mb': 1}, now_fn=lambda: NOW)
         self.assertEqual(publish.call_args[0], ('worker',))
+        self.assertEqual(set(state.call_args[0][0]), {'host', 'memory', 't'})  # memory only: no runs, waits or kills of the removed gate
 
 
 class QueueAgeTests(SimpleTestCase):

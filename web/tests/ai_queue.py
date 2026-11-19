@@ -58,7 +58,8 @@ def answer(job, fake):
     except AIProviderError as exc:
         category = exc.category if exc.category in ai_jobs.CATEGORIES else 'provider_error'
         return {**base, 'error': category, 'calls': [{'status': 'failed', 'category': category}],
-                **({'http_status': exc.http_status} if exc.http_status else {})}
+                **({'http_status': exc.http_status} if exc.http_status else {}),
+                **({'stop_reason': exc.stop_reason} if getattr(exc, 'stop_reason', None) else {})}
     return {**base, 'text': text, 'calls': [{'status': 'succeeded', 'input_tokens': 10, 'output_tokens': 5}]}
 
 

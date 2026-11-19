@@ -54,17 +54,17 @@ globalThis.document = {
 globalThis.setTimeout = (f) => 0;
 globalThis.localStorage = {getItem: () => null, setItem() {}};
 
-const field = (over) => ({key: 'heavy.nmap', label: 'Port and service scan (nmap)', help: 'The standard scan.', group: 'heavy', default: 2, min: 1, max: 8, value: 2,
-  source: 'default', env_name: 'HEAVY_MAX_NMAP', env_value: null, saved: null, set_by: null, set_at: null, applies: 'live', ...over});
+const field = (over) => ({key: 'assess_batch', label: 'Hosts per assessment batch', help: 'How many hosts one run carries.', group: 'discovery', default: 8, min: 1, max: 64,
+  value: 8, source: 'default', env_name: 'CVENGINE_ASSESS_BATCH', env_value: null, saved: null, set_by: null, set_at: null, applies: 'live', ...over});
+// the server's snapshot (cveFeed.scan_concurrency.snapshot): no per-tool scanner rows and no memory plan, since no scanner runs on the server
 const snapshot = (over = {}) => ({
   fields: [
+    field({key: 'discovery_concurrency', label: 'Hosts assessed at once', default: 8, value: 12, source: 'environment', env_name: 'DISCOVERY_CONCURRENCY', env_value: 12, applies: 'pool', running: 8, running_workers: {}, running_age_seconds: 10, max: 32}),
     field(),
-    field({key: 'heavy.nuclei', label: 'Vulnerability templates (nuclei)', default: 1, value: 3, source: 'admin', saved: 3, set_by: 'alice <b>x</b>', set_at: '2026-10-31T10:00:00Z', max: 8}),
-    field({key: 'discovery_concurrency', label: 'Hosts assessed at once', group: 'discovery', default: 8, value: 12, source: 'environment', env_name: 'DISCOVERY_CONCURRENCY', env_value: 12, applies: 'pool', running: 8, running_workers: {}, running_age_seconds: 10, max: 32}),
     field({key: 'work_depth', label: 'Discovery scans kept running', group: 'depth', default: 3, value: 3, min: 0, max: 32, env_name: 'CVENGINE_WORK_DEPTH'}),
+    field({key: 'lane.classic', label: 'Classic lane tasks at once', group: 'lanes', default: 10, value: 7, source: 'admin', saved: 7, set_by: 'alice <b>x</b>', set_at: '2026-10-31T10:00:00Z', max: 32, env_name: 'CLASSIC_CONCURRENCY'}),
   ],
-  groups: [{id: 'heavy', title: 'Scanners at once'}, {id: 'discovery', title: 'Discovery and assessment'}, {id: 'depth', title: 'The work conductor'}],
-  memory: {budget_mb: 3072, limit_mb: 4096, costs_mb: {nmap: 400, nuclei: 1000}, warnings: []},
+  groups: [{id: 'discovery', title: 'Discovery and assessment'}, {id: 'depth', title: 'The work conductor'}, {id: 'lanes', title: 'Worker lanes'}],
   discovery: {state: 'pending', message: 'The saved value is 12, but the worker last said it runs 8.'},
   ...over,
 });
@@ -88,9 +88,8 @@ test('the card registers itself once and the section draws title, warning, the c
   assert.match(text, /^configMaxxing/);
   assert.match(text, /Changing these can make scans slower, use more memory or send more traffic to your targets/);
   assert.match(text, /Scan concurrency/);
-  assert.match(text, /second machine \(a Sentinel\) is the best way to scale/);
-  assert.match(text, /Memory budget of the scanning container: 3\.0 GB \(container limit 4\.0 GB\)\./);
-  behindDetails(host, /The container limit is set by the server's administrator with CELERY_MEM_LIMIT/);
+  assert.match(text, /Every scan runs on a Sentinel, so another Sentinel \(a second machine\) is the best way to scale/);
+  assert.doesNotMatch(text, /Memory budget|scanning container|CELERY_MEM_LIMIT|memory gate/);
   assert.match(text, /Reset all configMaxxing settings to defaults/);
   assert.doesNotMatch(text, /Tinkerer/i);
   assert.deepEqual(calls.map((c) => `${c.method} ${c.url}`), ['GET /cve/api/settings/scan_concurrency']);
@@ -101,13 +100,13 @@ test('each row shows its default, range, environment value, who set it and a Res
   await maxxing.buildSection(host);
   const inputs = find(host, (n) => n.tag === 'input');
   assert.deepEqual(inputs.map((i) => [i.dataset.key, i.value, i.attrs.min, i.attrs.max]),
-    [['heavy.nmap', '2', '1', '8'], ['heavy.nuclei', '3', '1', '8'], ['discovery_concurrency', '12', '1', '32'], ['work_depth', '3', '0', '32']]);
+    [['discovery_concurrency', '12', '1', '32'], ['assess_batch', '8', '1', '64'], ['work_depth', '3', '0', '32'], ['lane.classic', '7', '1', '32']]);
   const resets = find(host, (n) => n.tag === 'button' && n.textContent === 'Reset to default');
-  assert.deepEqual(resets.map((b) => b.disabled), [true, false, true, true]);
+  assert.deepEqual(resets.map((b) => b.disabled), [true, true, true, false]);
   const text = host.textContent;
-  assert.match(text, /Built-in default · allowed 1 to 8 · Default 2 · Applies within a few seconds/);
-  behindDetails(host, /HEAVY_MAX_NMAP is not set/);
-  assert.match(text, /Saved here · allowed 1 to 8 · Default 1 · Set by alice <b>x<\/b> on /);  // shown as text, never as markup
+  assert.match(text, /Built-in default · allowed 1 to 64 · Default 8 · Applies within a few seconds/);
+  behindDetails(host, /CVENGINE_ASSESS_BATCH is not set/);
+  assert.match(text, /Saved here · allowed 1 to 32 · Default 10 · Set by alice <b>x<\/b> on /);  // shown as text, never as markup
   assert.match(text, /Set on the server/);
   assert.match(text, /Worker ceiling now: 8/);
   assert.match(text, /Being applied The saved value is 12, but the worker last said it runs 8\./);
@@ -119,33 +118,32 @@ test('Save sends only what changed, a bad number blocks it, and Reset to default
   await maxxing.buildSection(host);
   const save = find(host, (n) => n.tag === 'button' && n.textContent === 'Save')[0];
   assert.equal(save.disabled, true);  // nothing changed yet
-  const nmap = find(host, (n) => n.dataset.key === 'heavy.nmap')[0];
-  nmap.value = '99';
-  nmap.oninput();
+  const batch = find(host, (n) => n.dataset.key === 'assess_batch')[0];
+  batch.value = '99';
+  batch.oninput();
   assert.equal(save.disabled, true);
-  assert.match(host.textContent, /Port and service scan \(nmap\) must be from 1 to 8/);
-  nmap.value = '4';
-  nmap.oninput();
+  assert.match(host.textContent, /Hosts per assessment batch must be from 1 to 64/);
+  batch.value = '16';
+  batch.oninput();
   assert.equal(save.disabled, false);
   calls.length = 0;
   await save.onclick();
-  assert.deepEqual(calls[0], {url: '/cve/api/settings/scan_concurrency', method: 'PUT', body: {values: {'heavy.nmap': 4}}});
+  assert.deepEqual(calls[0], {url: '/cve/api/settings/scan_concurrency', method: 'PUT', body: {values: {assess_batch: 16}}});
   calls.length = 0;
   const reset = find(host, (n) => n.tag === 'button' && n.textContent === 'Reset to default' && !n.disabled)[0];
   await reset.onclick();
-  assert.deepEqual(calls[0], {url: '/cve/api/settings/scan_concurrency', method: 'PUT', body: {values: {'heavy.nuclei': null}}});
+  assert.deepEqual(calls[0], {url: '/cve/api/settings/scan_concurrency', method: 'PUT', body: {values: {'lane.classic': null}}});
 });
 
-test('the memory warning appears while a big number is typed, from the server costs and budget', async () => {
-  reply = snapshot({memory: {budget_mb: 3100, limit_mb: 4096, costs_mb: {nmap: 400, nuclei: 1000}, warnings: []}});
+test('no memory budget or memory warning is drawn, even for a big number or a reply from an older server', async () => {
+  reply = snapshot({memory: {budget_mb: 3100, limit_mb: 4096, costs_mb: {nmap: 400, nuclei: 1000}, warnings: ['an old warning']}});
   const host = new Node('div');
   await maxxing.buildSection(host);
-  assert.doesNotMatch(host.textContent, /could be wanted/);
-  const nmap = find(host, (n) => n.dataset.key === 'heavy.nmap')[0];
-  nmap.value = '8';
-  nmap.oninput();
-  assert.match(host.textContent, /Port and service scan \(nmap\) at 8 could want 3200 MB by itself, more than the 3100 MB budget/);
-  assert.match(host.textContent, /CELERY_MEM_LIMIT/);
+  const batch = find(host, (n) => n.dataset.key === 'assess_batch')[0];
+  batch.value = '64';
+  batch.oninput();
+  assert.doesNotMatch(host.textContent, /could want|Memory budget|an old warning|CELERY_MEM_LIMIT/);
+  assert.equal(find(host, (n) => n.attrs.role === 'status').length, 0);  // the live warning region went with the memory plan
   reply = snapshot();
 });
 
@@ -166,13 +164,13 @@ test('the error bar under Save is hidden while it is empty and shown only with a
   const bar = find(host, (n) => n.tag === 'p' && n.className === 'msg err')[0];
   assert.ok(bar, 'no error bar found');
   assert.equal(bar.hidden, true, 'an empty error bar is visible');
-  const nmap = find(host, (n) => n.dataset.key === 'heavy.nmap')[0];
-  nmap.value = '99';
-  nmap.oninput();
+  const batch = find(host, (n) => n.dataset.key === 'assess_batch')[0];
+  batch.value = '99';
+  batch.oninput();
   assert.equal(bar.hidden, false);
-  assert.match(bar.textContent, /must be from 1 to 8/);
-  nmap.value = '2';
-  nmap.oninput();
+  assert.match(bar.textContent, /must be from 1 to 64/);
+  batch.value = '8';
+  batch.oninput();
   assert.equal(bar.hidden, true);
   assert.equal(bar.textContent, '');
 });

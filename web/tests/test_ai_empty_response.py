@@ -1,6 +1,7 @@
 """'anthropic response contained no text' in the nuclei AI targeting path: every response shape through a fake Messages API, the one retry with
 a larger reply limit and its cap, never retrying a refusal, one log line per failure, the standard templates when the AI gives nothing, the
-negative cache and backoff, the day's cap, and the plain reason on the usage page and in the activity."""
+negative cache and backoff, the day's cap, and the plain reason on the usage page and in the activity. The targeting question is an AI job
+(the reviewer container answers it, played by tests/ai_queue.py): a failure is what the container posts back."""
 import json
 import os
 from unittest import mock
@@ -11,6 +12,7 @@ from cveFeed import nuclei_templates as nt
 from cveFeed.models import AIUsage
 from cveFeed.ai_usage import snapshot
 from reNgine import ai_providers as ai
+from tests import ai_queue
 from tests.anthropic_fake import SHAPES, FakeAnthropic
 
 INSTALLED = {'nginx', 'php', 'exposure', 'cve'}
@@ -108,106 +110,117 @@ class RetryTests(Isolated):
                 self.assertLess(thinking['budget_tokens'], body['max_tokens'])
 
 
+def model(reply=ANSWER, error=None):
+    """The model the reviewer container asks: answers ``reply``, or raises ``error`` (``(category, stop_reason)``)."""
+    fake = mock.Mock(model='claude-haiku-5-5')
+    fake.name = 'anthropic'
+    if error:
+        fake.complete.side_effect = ai.AIProviderError('no text', category=error[0], stop_reason=error[1])
+    else:
+        fake.complete.return_value = reply
+    return fake
+
+
+def ask(signatures, fake, notes=None):
+    """Queue the targeting question and let the container answer it with ``fake``; returns the job (None when nothing was queued)."""
+    ai_queue.ensure_configured(fake)
+    job = nt.ai_plan(signatures, INSTALLED, notes=notes)
+    with mock.patch.object(nt, 'allowed_tags', return_value=set(INSTALLED)):
+        ai_queue.serve(fake)
+    return job
+
+
 class PlanFallbackTests(Isolated):
     SIG = [('nginx 1.18.0',)]
 
-    def plan(self, fake, notes=None):
-        return nt.ai_plan(self.SIG, provider(fake.url), INSTALLED, notes=notes)
+    def test_a_good_answer_is_kept_for_the_profile(self):
+        ask(self.SIG, model())
+        self.assertEqual(nt.remembered(self.SIG[0]), ({'nginx'}, ('high',)))
 
-    def test_a_good_answer_still_plans(self):
-        with FakeAnthropic([SHAPES['thinking_then_text'](ANSWER)]) as fake:
-            self.assertEqual(self.plan(fake)[0], ({'nginx'}, ('high',)))
-
-    def test_a_failure_is_one_line_with_the_stop_reason_and_token_counts_and_no_traceback(self):
-        notes = []
-        with FakeAnthropic([SHAPES['thinking_only_end_turn']()]) as fake, self.assertLogs('cveFeed.nuclei_templates', 'WARNING') as logs:
-            self.assertEqual(self.plan(fake, notes), {})
+    def test_a_failure_is_one_line_with_the_stop_reason_and_no_traceback_and_the_next_pass_says_why(self):
+        with self.assertLogs('cveFeed.nuclei_templates', 'WARNING') as logs:
+            ask(self.SIG, model(error=('empty_response', 'end_turn')))
         self.assertEqual(len(logs.records), 1)
         record = logs.records[0]
         self.assertIsNone(record.exc_info)
         line = record.getMessage()
-        for part in ('empty_response', 'end_turn', 'input tokens 321', 'output tokens 2048'):
+        for part in ('empty_response', 'end_turn'):
             self.assertIn(part, line)
         self.assertNotIn('\n', line)
-        self.assertEqual(notes, ['The model answered with no text (stop reason: end_turn)'])
+        notes = []
+        self.assertIsNone(nt.ai_plan(self.SIG, INSTALLED, notes=notes))
+        self.assertTrue(notes[0].startswith('The model answered with no text (stop reason: end_turn); not asked again for'), notes)
 
     def test_a_cut_off_says_so_in_the_words_the_operator_reads(self):
+        with self.assertLogs('cveFeed.nuclei_templates', 'WARNING'):
+            ask(self.SIG, model(error=('output_truncated', 'max_tokens')))
         notes = []
-        with FakeAnthropic([SHAPES['thinking_only_max_tokens']()]) as fake, self.assertLogs('cveFeed.nuclei_templates', 'WARNING'):
-            self.plan(fake, notes)
-        self.assertEqual(notes, ['The model answered with no text (it stopped at the token limit)'])
-        self.assertEqual(len(fake.requests), 2)  # the one retry
-
-    def test_a_refusal_is_asked_once(self):
-        with FakeAnthropic([SHAPES['refusal']()]) as fake, self.assertLogs('cveFeed.nuclei_templates', 'WARNING'):
-            self.assertEqual(self.plan(fake), {})
-        self.assertEqual(len(fake.requests), 1)
+        nt.ai_plan(self.SIG, INSTALLED, notes=notes)
+        self.assertTrue(notes[0].startswith('The model answered with no text (it stopped at the token limit)'), notes)
 
     def test_the_standard_templates_stand_when_the_ai_gives_nothing(self):
         profile = {'technologies': ['nginx'], 'services': [], 'exposure': [], 'cves': [], 'light': False}
-        with FakeAnthropic([SHAPES['empty_content']()]) as fake, self.assertLogs('cveFeed.nuclei_templates', 'WARNING'), \
-                mock.patch.object(nt, 'allowed_tags', return_value=set(INSTALLED)), mock.patch.object(nt, 'profile_names', return_value=['nginx']):
+        fake = model(error=('empty_response', 'end_turn'))
+        ai_queue.ensure_configured(fake)
+        with self.assertLogs('cveFeed.nuclei_templates', 'WARNING'), mock.patch.object(nt, 'allowed_tags', return_value=set(INSTALLED)), \
+                mock.patch.object(nt, 'profile_names', return_value=['nginx']), mock.patch.object(nt, 'installed_index', return_value=None):
+            groups, skipped = nt.plan_targeting({'h.test': profile}, True)
+            ai_queue.serve(fake)
             notes = []
-            groups, skipped = nt.plan_targeting({'h.test': profile}, provider(fake.url), notes=notes)
+            again = nt.plan_targeting({'h.test': profile}, True, notes=notes)
         self.assertEqual((groups, skipped), ([{'tags': ['nginx'], 'severities': (), 'hosts': ['h.test']}], []))
+        self.assertEqual(again, (groups, skipped))
         self.assertEqual(len(notes), 1)
+        self.assertIn('not asked again', notes[0])
 
 
 class BackoffTests(Isolated):
     SIG = [('nginx 1.18.0',)]
 
     def test_the_same_request_is_not_asked_again_inside_its_window_and_the_window_grows(self):
+        from cveFeed.models import AIJob
         now = [1000.0]
-        with mock.patch.object(nt, '_clock', lambda: now[0]), FakeAnthropic([SHAPES['thinking_only_end_turn']()]) as fake, \
-                self.assertLogs('cveFeed.nuclei_templates', 'WARNING') as logs:
-            p = provider(fake.url)
-            ask = lambda notes=None: nt.ai_plan(self.SIG, p, INSTALLED, notes=notes)  # noqa: E731
-            ask()
-            self.assertEqual(len(fake.requests), 1)
+        fake = model(error=('empty_response', 'end_turn'))
+        with mock.patch.object(nt, '_clock', lambda: now[0]), self.assertLogs('cveFeed.nuclei_templates', 'WARNING') as logs:
+            ask(self.SIG, fake)
+            self.assertEqual(fake.complete.call_count, 1)
             for _ in range(5):  # a scan pass that comes round again, a retried task
                 notes = []
-                ask(notes)
+                self.assertIsNone(ask(self.SIG, fake, notes))
                 now[0] += 10
-            self.assertEqual(len(fake.requests), 1)
+            self.assertEqual(fake.complete.call_count, 1)
             self.assertIn('not asked again', notes[0])
             now[0] += nt.FAILURE_WINDOW  # the window is over
-            ask()
-            self.assertEqual(len(fake.requests), 2)
+            ask(self.SIG, fake)
+            self.assertEqual(fake.complete.call_count, 2)
             now[0] += nt.FAILURE_WINDOW + 1  # the second window is twice as long
-            ask()
-            self.assertEqual(len(fake.requests), 2)
+            ask(self.SIG, fake)
+            self.assertEqual(fake.complete.call_count, 2)
             now[0] += nt.FAILURE_WINDOW
-            ask()
-            self.assertEqual(len(fake.requests), 3)
+            ask(self.SIG, fake)
+            self.assertEqual(fake.complete.call_count, 3)
         self.assertEqual(len(logs.records), 3)  # one line per request that was really made
+        self.assertEqual(AIJob.objects.filter(kind='nuclei_targeting').count(), 3)
 
     def test_another_question_is_not_held_back_by_a_failed_one(self):
-        with FakeAnthropic([SHAPES['thinking_only_end_turn'](), SHAPES['text_only'](ANSWER)]) as fake, self.assertLogs('cveFeed.nuclei_templates', 'WARNING'):
-            p = provider(fake.url)
-            nt.ai_plan([('apache',)], p, INSTALLED)
-            self.assertEqual(nt.ai_plan(self.SIG, p, INSTALLED)[0][0], {'nginx'})
+        with self.assertLogs('cveFeed.nuclei_templates', 'WARNING'):
+            ask([('apache',)], model(error=('empty_response', 'end_turn')))
+        ask(self.SIG, model())
+        self.assertEqual(nt.remembered(self.SIG[0])[0], {'nginx'})
 
-    def test_a_success_is_not_remembered(self):
-        with FakeAnthropic([SHAPES['text_only'](ANSWER)]) as fake:
-            p = provider(fake.url)
-            nt.ai_plan(self.SIG, p, INSTALLED)
-            nt.ai_plan(self.SIG, p, INSTALLED)
-        self.assertEqual(len(fake.requests), 2)
+    def test_a_success_is_not_remembered_as_a_failure(self):
+        fake = model()
+        ask(self.SIG, fake)
+        self.assertIsNotNone(ask(self.SIG, fake))  # asked directly again: queued (a pass reads the kept answer instead)
+        self.assertEqual(fake.complete.call_count, 2)
 
     def test_the_shared_cache_holds_it_for_another_worker(self):
-        with FakeAnthropic([SHAPES['thinking_only_end_turn']()]) as fake, self.assertLogs('cveFeed.nuclei_templates', 'WARNING'):
-            p = provider(fake.url)
-            nt.ai_plan(self.SIG, p, INSTALLED)
-            nt._failed.clear()  # a second process has no copy of its own
-            nt.ai_plan(self.SIG, p, INSTALLED)
-        self.assertEqual(len(fake.requests), 1)
-
-    def test_the_tag_selection_path_has_the_same_guard(self):
-        with FakeAnthropic([SHAPES['thinking_only_end_turn']()]) as fake, self.assertLogs('cveFeed.nuclei_templates', 'WARNING'):
-            p = provider(fake.url)
-            self.assertEqual(nt.ai_tags_for(['Weird Thing'], p), set())
-            self.assertEqual(nt.ai_tags_for(['Weird Thing'], p), set())
-        self.assertEqual(len(fake.requests), 1)
+        fake = model(error=('empty_response', 'end_turn'))
+        with self.assertLogs('cveFeed.nuclei_templates', 'WARNING'):
+            ask(self.SIG, fake)
+        nt._failed.clear()  # a second process has no copy of its own
+        self.assertIsNone(ask(self.SIG, fake))
+        self.assertEqual(fake.complete.call_count, 1)
 
 
 class DayCapTests(Isolated):
@@ -215,23 +228,35 @@ class DayCapTests(Isolated):
         for _ in range(3):
             AIUsage.objects.create(provider='anthropic', model='m', stage='nuclei_targeting', status='failed')
         notes = []
-        with mock.patch.dict(os.environ, {'CVENGINE_NUCLEI_AI_MAX_PER_DAY': '3'}), FakeAnthropic([SHAPES['text_only'](ANSWER)]) as fake:
-            self.assertEqual(nt.ai_plan([('nginx',)], provider(fake.url), INSTALLED, notes=notes), {})
-        self.assertEqual(fake.requests, [])
+        fake = model()
+        with mock.patch.dict(os.environ, {'CVENGINE_NUCLEI_AI_MAX_PER_DAY': '3'}):
+            self.assertIsNone(ask([('nginx',)], fake, notes))
+        fake.complete.assert_not_called()
         self.assertIn('CVENGINE_NUCLEI_AI_MAX_PER_DAY', notes[0])
 
+    def test_a_queued_question_counts_against_the_cap_and_waits_when_the_day_is_spent(self):
+        from cveFeed import ai_jobs
+        ai_queue.configure()
+        with mock.patch.dict(os.environ, {'CVENGINE_NUCLEI_AI_MAX_PER_DAY': '2'}):
+            AIUsage.objects.create(provider='anthropic', model='m', stage='nuclei_targeting', status='succeeded')
+            self.assertIsNotNone(nt.ai_plan([('nginx',)], INSTALLED))
+            notes = []
+            self.assertIsNone(nt.ai_plan([('apache',)], INSTALLED, notes=notes))  # one made, one waiting: the day is full
+            self.assertIn('CVENGINE_NUCLEI_AI_MAX_PER_DAY', notes[0])
+            AIUsage.objects.create(provider='anthropic', model='m', stage='nuclei_targeting', status='succeeded')
+            self.assertEqual(ai_jobs.next_jobs(5), [])  # the queued one is not handed out over the cap (it waits for tomorrow)
+
     def test_the_retry_counts_against_the_cap(self):
-        for _ in range(2):
-            AIUsage.objects.create(provider='anthropic', model='m', stage='nuclei_targeting', status='failed')
-        with mock.patch.dict(os.environ, {'CVENGINE_NUCLEI_AI_MAX_PER_DAY': '4'}), FakeAnthropic([SHAPES['thinking_only_max_tokens']()]) as fake, \
-                self.assertLogs('cveFeed.nuclei_templates', 'WARNING'):
-            nt.ai_plan([('nginx',)], provider(fake.url), INSTALLED)
-            self.assertEqual(len(fake.requests), 2)  # 3rd call, then the retry is the 4th
-            nt._failed.clear()
-            from django.core.cache import cache
-            cache.clear()
-            nt.ai_plan([('nginx',)], provider(fake.url), INSTALLED)
-        self.assertEqual(len(fake.requests), 2)  # 4 used: no more
+        from cveFeed import ai_jobs
+        from cveFeed.models import AIJob
+        from django.utils import timezone
+        from datetime import timedelta
+        job = AIJob.objects.create(kind='nuclei_targeting', stage='nuclei_targeting', status='leased', lease='L',
+                                   lease_until=timezone.now() + timedelta(hours=1), context={'signatures': [['nginx']], 'digest': 'd'})
+        calls = [{'status': 'failed', 'category': 'output_truncated', 'stop_reason': 'max_tokens', 'retried': True},
+                 {'status': 'succeeded', 'stop_reason': 'end_turn'}]
+        ai_jobs.submit(job.pk, {'lease': 'L', 'text': ANSWER, 'calls': calls, 'provider': 'anthropic', 'model': 'm'})
+        self.assertEqual(nt.ai_calls_today(), 2)  # the container's two requests are two calls of the day
 
     def test_the_counter_is_a_tunable_with_a_usage_line(self):
         from cveFeed import tunables

@@ -246,7 +246,7 @@ class TuningTokenTests(AgentBase):
 
 
 class WidenOutsideTheBridgeTests(Base):
-    """FB-5, the doors of the settings bridge: a switch or a number sent as text, a filter list emptied, Tailscale routing and the heavy scanner limits."""
+    """FB-5, the doors of the settings bridge: a switch or a number sent as text, a filter list emptied and Tailscale routing."""
 
     def link(self):
         from cveFeed.models import TailscaleLink
@@ -275,16 +275,18 @@ class WidenOutsideTheBridgeTests(Base):
         for name, values in (('updates', {'enabled': 'yes'}), ('updates', {'enabled': 'false'})):
             self.refused(name, values)
 
-    def test_the_heavy_scanner_limits_an_agent_can_lower_but_not_raise(self):
+    def test_a_scan_concurrency_number_auto_tuning_does_not_manage_an_agent_can_lower_but_not_raise(self):
         from cveFeed import scan_concurrency as sc
-        unmanaged = [f.key for f in sc.FIELDS if not f.auto_tunable]
-        self.assertTrue(unmanaged)
-        for key in unmanaged:
+        self.assertTrue(all(f.auto_tunable for f in sc.FIELDS))  # as shipped every number is auto-tuned (the per-tool scanner limits are gone)
+        # a worker lane configured at or below its floor is not auto-tuned (scan_concurrency.lane_range): the page's handler takes it
+        fields = [f._replace(auto_tunable=False) if f.key == 'lane.classic' else f for f in sc.FIELDS]
+        with mock.patch.object(sc, 'FIELDS', fields), mock.patch.dict(sc.BY_KEY, {f.key: f for f in fields}), mock.patch.object(sc, 'request_apply'):
+            key = 'lane.classic'
             now = sc.resolve(key)['value']
             self.refused('scan_concurrency', {'values': {key: min(sc.BY_KEY[key].high, now + 1)}})
-            if now > sc.BY_KEY[key].low:
-                bridge.change_setting(self.ctx, 'scan_concurrency', {'values': {key: now - 1}})
-                self.assertEqual(sc.resolve(key)['value'], now - 1)
+            bridge.change_setting(self.ctx, 'scan_concurrency', {'values': {key: now - 1}})
+            sc.invalidate()
+            self.assertEqual(sc.resolve(key)['value'], now - 1)
 
 
 class WidenThroughSentinelAndTargetToolsTests(TestCase):
