@@ -110,7 +110,30 @@
    "vendors": ["microsoft"], "products": ["exchange_server", "Microsoft Exchange Server", "Exchange Server"],
    "evidence": ["cpe:2.3:a:microsoft:exchange_server", "CVE-2018-8581 (Microsoft: Microsoft Exchange Server)", "CVE-2018-0941 (Microsoft Corporation: Exchange Server)",
                 "CVE-2021-34473 (Microsoft: Microsoft Exchange Server 2019 Cumulative Update 8)"],
-   "note": "Outlook on the web is Exchange Server's own web client, served by the Exchange server, and its flaws are Exchange Server's"}
+   "note": "Outlook on the web is Exchange Server's own web client, served by the Exchange server, and its flaws are Exchange Server's"},
+  {"names": ["Ollama"], "vendors": ["ollama"], "products": ["ollama/ollama", "ollama"],
+   "evidence": ["cpe:2.3:a:ollama:ollama", "CVE-2025-1975 (ollama: ollama/ollama)", "CVE-2024-12886 (ollama: ollama/ollama)"],
+   "note": "huntr's records name the product owner/repo; cveFeed.ai_servers reads Ollama's version from /api/version"},
+  {"names": ["vLLM"], "vendors": ["vllm-project", "vllm"], "products": ["vllm-project/vllm", "vllm"],
+   "evidence": ["cpe:2.3:a:vllm:vllm", "CVE-2025-47277 (vllm-project: vllm)"],
+   "note": "GitHub's records name it vllm, huntr's vllm-project/vllm"},
+  {"names": ["LiteLLM"], "vendors": ["berriai", "litellm"], "products": ["berriai/litellm", "litellm"],
+   "evidence": ["cpe:2.3:a:litellm:litellm", "CVE-2025-0628 (berriai: berriai/litellm)"], "note": "huntr's records name the product owner/repo"},
+  {"names": ["ComfyUI"], "vendors": ["comfyanonymous"], "products": ["comfyanonymous/comfyui", "comfyui"],
+   "evidence": ["CVE-2024-10099 (comfyanonymous: comfyanonymous/comfyui)"], "note": "huntr's records name the product owner/repo"},
+  {"names": ["Gradio"], "vendors": ["gradio-app", "gradio_project"], "products": ["gradio-app/gradio", "gradio"],
+   "evidence": ["cpe:2.3:a:gradio_project:gradio", "CVE-2024-1561 (gradio-app: gradio-app/gradio)"], "note": "huntr's records name the product owner/repo"},
+  {"names": ["AnythingLLM", "Anything LLM"], "vendors": ["mintplex-labs", "mintplexlabs"], "products": ["mintplex-labs/anything-llm", "anything-llm", "anythingllm"],
+   "evidence": ["cpe:2.3:a:mintplexlabs:anythingllm", "CVE-2024-3104 (mintplex-labs: mintplex-labs/anything-llm)"],
+   "note": "huntr's records name the product owner/repo"},
+  {"names": ["Ray", "Ray dashboard"], "vendors": ["ray-project", "anyscale", "ray_project"], "products": ["ray-project/ray", "ray"],
+   "evidence": ["cpe:2.3:a:anyscale:ray", "CVE-2023-6019 (ray-project: ray-project/ray)"],
+   "note": "Anyscale's Ray; huntr's records name the product owner/repo. 'Ray' alone is a common word: restrict holds it to these vendors"},
+  {"names": ["Open WebUI"], "vendors": ["open-webui", "openwebui"], "products": ["open-webui/open-webui", "open-webui", "open_webui"],
+   "evidence": ["cpe:2.3:a:openwebui:open_webui", "CVE-2025-64496 (open-webui: open-webui)", "CVE-2024-6707 (Open WebUI: Open WebUI)"],
+   "note": "GitHub's records name it open-webui, huntr's open-webui/open-webui"},
+  {"names": ["Langflow"], "vendors": ["langflow-ai", "langflow"], "products": ["langflow-ai/langflow", "langflow"],
+   "evidence": ["cpe:2.3:a:langflow:langflow", "CVE-2025-3248 (langflow-ai: langflow)"], "note": "huntr's records name the product owner/repo"}
  ],
  "restrict": [
   {"names": ["Express", "Express.js", "expressjs", "Node.js Express framework"], "vendors": ["expressjs", "openjs"], "require_vendor": false,
@@ -119,7 +142,10 @@
   {"names": [".NET", ".NET Framework", ".NET Core", ".NET Framework CLR", "Microsoft .NET", "Microsoft .NET Framework", ".net_framework"],
    "vendors": ["microsoft"], "require_vendor": true,
    "evidence": ["cpe:2.3:a:microsoft:.net_framework", "CVE-2017-8759 (Microsoft Corporation: Microsoft .NET Framework)",
-                "CVE-2023-45288 (Go standard library: net/http) and CVE-2026-97045 (golang.org/x/net) are Go's net packages, which share the word 'net'"]}
+                "CVE-2023-45288 (Go standard library: net/http) and CVE-2026-97045 (golang.org/x/net) are Go's net packages, which share the word 'net'"]},
+  {"names": ["Ray", "Ray dashboard"], "vendors": ["ray-project", "anyscale", "ray_project"], "require_vendor": true,
+   "evidence": ["cpe:2.3:a:anyscale:ray", "CVE-2023-6019 (ray-project: ray-project/ray)"],
+   "note": "Anyscale's distributed computing framework (the dashboard on port 8265); 'Ray' is also other vendors' product names"}
  ],
  "renames": [
   {"names": ["AspNet Version Disclosure"], "to": "ASP.NET",
