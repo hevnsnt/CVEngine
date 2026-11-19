@@ -47,6 +47,7 @@ BACKFILLS = (
     'backfill_identities',                # service fingerprints decoded; network OS, appliance certificate, Recog and SSH identities read (re-correlated)
     'backfill_windows_builds',            # the Windows release stored NTLM and SMB script output states, and its KEV/critical candidates (re-correlated)
     'backfill_panel_versions',            # the version a stored panel template finding extracted, read as a version reading of its host (re-correlated)
+    'backfill_template_identities',       # technology template CPEs onto host technology links, panel hits without a version as identities (re-correlated)
     'recover_feed_gap',                   # the cve.now window a walk declared covered after the feed renamed its cursor: read again and matched
     'retype_distro_ranges',               # ranges bounded by distribution package builds (0:8.7p1-38.el9_4.4) are no longer read as upstream releases
     'repair_open_ranges',                 # open ranges made from an upper bound the CVE List record writes as text (issue 696), re-correlated

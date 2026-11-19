@@ -59,7 +59,10 @@ def merge_duplicates(apply=False):
         if not apply:
             continue
         linked = set(through.objects.filter(technology_id=keep_pk, subdomain_id__in=moved).values_list('subdomain_id', flat=True))
-        through.objects.bulk_create([through(subdomain_id=s, technology_id=keep_pk) for s in set(moved) - linked], ignore_conflicts=True)
+        # a moved link keeps where it came from (its source, the CPE its template named, when it was seen)
+        meta = {r.subdomain_id: r for r in through.objects.filter(technology_id__in=same).order_by('cpe', 'id')}  # one with a CPE last, so it wins
+        through.objects.bulk_create([through(subdomain_id=s, technology_id=keep_pk, source=meta[s].source, cpe=meta[s].cpe, observed_at=meta[s].observed_at)
+                                     if s in meta else through(subdomain_id=s, technology_id=keep_pk) for s in set(moved) - linked], ignore_conflicts=True)
         through.objects.filter(technology_id__in=same).delete()
         pages = EndPoint.techs.through  # an endpoint's technologies point at the same rows
         on_pages = set(pages.objects.filter(technology_id__in=same).values_list('endpoint_id', flat=True))
