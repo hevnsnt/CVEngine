@@ -11,8 +11,8 @@ import re
 # unrelated scanner's concurrency.
 STAGE_KINDS = {'nmap_scan': 'nmap', 'nuclei_light_scan': 'nuclei',
                'nuclei_targeted_scan': 'nuclei', 'route_auth_scan': 'route-probe'}
-# What a failed stage's stored message says about its cause (the texts the scanners raise: see resources.MemoryBusy, the nmap and Nuclei
-# wrappers, route_auth). Only a failure that points at load can justify a lower admission cap; one that points at configuration (a missing
+# What a failed stage's stored message says about its cause (the texts the scanners and Sentinels report: the nmap and Nuclei results,
+# route_auth). Only a failure that points at load can justify a lower admission cap; one that points at configuration (a missing
 # template library, a policy refusal, an invalid argument, a missing key) will fail again at any concurrency, and a message that says
 # neither is not acted on.
 CAPACITY_PATTERN = (r'waited too long for memory|timed out|timeout|exceeded its total time budget|out of memory|cannot allocate memory|'

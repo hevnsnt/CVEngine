@@ -37,7 +37,7 @@ ENTRIES = {
     'updates_cancel': ('settings', 'updates/cancel', 'Cancel an update that has not started. Action.', None),
     'updates_dismiss': ('settings', 'updates/dismiss', 'Dismiss the update notice. Action.', None),
     'scanner_plan': ('settings', 'scanner_plan', 'Where scanning runs: Sentinels of your own only, or also the built-in scanner. Change applies on the next update step.', None),
-    'keys': ('settings', 'keys', 'The service keys saved (CVE sources, OpenAI, Anthropic, and so on): which are saved, never their values.', None),
+    'keys': ('settings', 'keys', 'The instance-wide service key saved (the Chaos discovery fallback): whether it is saved, never its value.', None),
     'notifications': ('settings', 'notifications', 'Where notifications go (webhook and chat targets) and which events.', None),
     'email': ('settings', 'email', 'Outgoing mail (SMTP): host, port, sender, whether a password is saved (never shown).', None),
     'email_test': ('settings', 'email/test', 'Send one test mail to the address given. Action.', None),
@@ -460,7 +460,7 @@ def _tunable_rules(values):
 
 
 def _scan_concurrency_rules(values):
-    """FB-5: a scan concurrency number that auto-tuning does not manage (the heavy scanner limits) goes straight to the page's handler, which takes any number in
+    """FB-5: a scan concurrency number that auto-tuning does not manage (a worker lane configured at or below its floor) goes straight to the page's handler, which takes any number in
     range: an agent may only lower it (a reset to the default counts as the default)."""
     from cveFeed import scan_concurrency as sc
     for key, new in values.items():

@@ -1866,8 +1866,7 @@ def run_validation(project_id, triage_ids, scan_id=None, runners=None, template_
                                     if s.get('result') != 'failed' or (s.get('kind'), s.get('target')) in planned]
             put_library_step(row, library)
             for check in checks:
-                # a stopped scan or a global pause ends the run before its next check (a check already running under heavy_job is
-                # stopped by its watchdog)
+                # a stopped scan or a global pause ends the run before its next check
                 if (scan_id is not None and resources.abort_requested(scan_id)) or resources.global_pause_requested(fail_closed=True):
                     stats['stopped'] = True
                     break

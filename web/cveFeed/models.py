@@ -2130,10 +2130,10 @@ class OpenvasSettings(models.Model):
 
 
 class ScanConcurrency(models.Model):
-    """Single-row scan concurrency chosen on Settings, configMaxxing (see cveFeed.scan_concurrency): ``values`` maps a setting key (``heavy.nmap``,
-    ``discovery_concurrency``, ``work_depth``) to the whole number an App Admin chose, and ``meta`` to who chose it and when. A key that is
+    """Single-row scan concurrency chosen on Settings, configMaxxing (see cveFeed.scan_concurrency): ``values`` maps a setting key (``discovery_concurrency``,
+    ``work_depth``, ``lane.classic`` ...) to the whole number an App Admin chose, and ``meta`` to who chose it and when. A key that is
     absent was never set (or was reset), so the environment variable, then the built-in default, applies. The row is the durable truth; the
-    workers read a copy published to Redis (a few seconds old at most) so that admission never waits on the database."""
+    workers read a copy published to Redis (a few seconds old at most) so that they never wait on the database."""
 
     values = models.JSONField(default=dict, blank=True)
     meta = models.JSONField(default=dict, blank=True)  # {key: {"by": username, "at": iso time}}

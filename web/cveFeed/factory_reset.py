@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 CONFIRM_PHRASE = 'FACTORY RESET'
 WIPE_APPS = ('startScan', 'targetApp', 'cveFeed', 'dashboard')
 # The acting administrator's own rows survive (the other users' cascade away with them).
-KEEP_MODELS = {'dashboard.userprofile', 'dashboard.userpreferences'}
+KEEP_MODELS = {'dashboard.userprofile'}
 WIPE_SCAN_MODELS = ('scanEngine.notification', 'scanEngine.proxy', 'scanEngine.vulnerabilityreportsetting')
 RUNNING_STATUSES = (-1, 1)  # initiated, running
 

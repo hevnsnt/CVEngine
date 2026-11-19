@@ -1,9 +1,6 @@
 from dashboard.models import *
 from django.contrib import admin
 
-admin.site.register(SearchHistory)
-
-
 class ProjectMembershipInline(admin.TabularInline):
     model = ProjectMembership
     extra = 0
@@ -30,12 +27,7 @@ class OrgAdmin(admin.ModelAdmin):
 class UserProfileAdmin(admin.ModelAdmin):
     list_display = ('user', 'bugbounty_enabled', 'mfa_enabled')
     exclude = ('mfa_secret', 'recovery_codes')
-admin.site.register(OpenAiAPIKey)
-admin.site.register(NetlasAPIKey)
 admin.site.register(ChaosAPIKey)
-admin.site.register(HackerOneAPIKey)
-admin.site.register(InAppNotification)
-admin.site.register(UserPreferences)
 
 @admin.register(AbuseBan)
 class AbuseBanAdmin(admin.ModelAdmin):

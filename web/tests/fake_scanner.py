@@ -415,90 +415,50 @@ class LocalRunDetected(AssertionError):
     """A scan tool was about to run on this server in a test that says it must not."""
 
 
-# what each task kind's local path goes through: the module functions that run the tool, and the resource-gate job kinds (``heavy_job``) they use
+# what each task kind's local path goes through: the module functions that run the tool on this server. Every one is empty: no kind runs here
+# (sentinel_dispatch.NEVER_LOCAL), and the per-tool memory gate (``resources.heavy_job``) that the guard also closed is gone with the last local
+# scanner. A stage that took an injected runner (``LocalGuard.runner``) is still caught, and a path added here is patched shut.
 LOCAL_RUNNERS = {
-    'nmap': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'nmap': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
     'naabu': (),  # likewise
     'nuclei_light': (),  # likewise
     'nuclei_targeted': (),  # likewise
     'nuclei_deep': (),  # likewise
     'nmap_udp': (),  # likewise
     'testssl': (),  # likewise
-    'wpscan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'wpscan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
     'wpscan_thorough': (),  # likewise
-    'bbot_discovery': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'http_probe': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'dns_resolve': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'bbot_discovery': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
+    'http_probe': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
+    'dns_resolve': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
     'alive_check': (),  # likewise
-    'route_probe': (),  # no local path (NEVER_LOCAL): the gate below is the guard
-    'route_probe_signed': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'page_read': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'route_probe': (),  # no local path (NEVER_LOCAL)
+    'route_probe_signed': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
+    'page_read': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
     'openvas': (),  # likewise: no GMP session is opened here (cveFeed.openvas_scan.tick hands the batch to a Sentinel)
-    'web_screenshot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'bucket_check': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'vhost_probe': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'web_screenshot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
+    'bucket_check': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
+    'vhost_probe': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
     'subdir_probe': (),  # likewise
     'supplier_check': (),  # likewise
-    'hygiene_check': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'hygiene_check': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
     'dangling_dns_check': (),  # likewise
-    'secrets_scan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'secrets_scan': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
     'waf': (),  # likewise
     'nmap_full': (),  # likewise
     'nmap_verify': (),  # likewise
     'node2shell': (),  # likewise
     'identity_check': (),  # likewise
-    'ssh_probe': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'java_runtime': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'version_read': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'ssh_probe': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
+    'java_runtime': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
+    'version_read': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
     'version_digest': (),  # the same (contract 8)
     'version_rows': (),  # the same (contract 9)
-    'rdp_shot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
+    'rdp_shot': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
     'db_probe': (),  # likewise
     'path_probe': (),  # likewise
     'nuclei_validate': (),  # likewise
 }
-HEAVY_KINDS = {
-    'nmap': ('nmap', 'nmap-full-bg'),
-    'naabu': ('naabu',),
-    'nuclei_light': ('nuclei', 'nuclei-light'),
-    'nuclei_targeted': ('nuclei', 'nuclei-light'),
-    'nuclei_deep': ('nuclei', 'nuclei-light'),
-    'nmap_udp': ('nmap-udp-bg',),
-    'testssl': ('testssl',),
-    'wpscan': ('wpscan',),
-    'wpscan_thorough': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
-    'bbot_discovery': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL)
-    'http_probe': (),  # no local path exists at all (sentinel_dispatch.NEVER_LOCAL): the gate below is the guard
-    'dns_resolve': (),
-    'alive_check': (),
-    'route_probe': (),  # no local path (NEVER_LOCAL): the gate below is the guard
-    'route_probe_signed': (),
-    'page_read': (),
-    'openvas': (),
-    'web_screenshot': (),
-    'bucket_check': (),
-    'vhost_probe': (),
-    'subdir_probe': (),
-    'supplier_check': (),
-    'hygiene_check': (),
-    'dangling_dns_check': (),
-    'secrets_scan': ('secrets',),  # docs/SECRETS-PLAN.md 6.2: a server path, if one were ever added, would be heavy_job('secrets')
-    'waf': ('route-probe',),
-    'nmap_full': ('nmap-full-bg',),
-    'nmap_verify': ('nmap',),
-    'node2shell': ('route-probe',),
-    'rdp_shot': (),
-    'db_probe': ('route-probe',),
-    'path_probe': (),
-    'identity_check': (),
-    'ssh_probe': (),
-    'java_runtime': (),
-    'version_read': (),
-    'version_digest': (),
-    'version_rows': (),
-    'nuclei_validate': ('template-test',),
-}
-
 
 class LocalGuard:
     """What ``assert_ran_nowhere_locally`` returns: ``calls`` (every local run attempted, as ``(where, args)``) and ``runner``, a callable that records
@@ -523,34 +483,20 @@ class LocalGuard:
 
 def assert_ran_nowhere_locally(testcase, kind):
     """From now until the end of ``testcase``, any local run of ``kind`` fails the test with ``LocalRunDetected`` (an ``AssertionError``): the module
-    functions in ``LOCAL_RUNNERS`` that run the tool and the resource gate (``resources.heavy_job``) for the job kinds the tool uses. The gate catches a stage that reached the tool through a default argument
-    bound before the patch (``runner=run_testssl``). Returns the ``LocalGuard``; the test also fails at the end when anything was attempted, even if
-    the stage swallowed the error."""
-    from reNgine import resources
+    functions in ``LOCAL_RUNNERS`` that run the tool, and the guard's ``runner`` for a stage that takes an injected one. Returns the ``LocalGuard``;
+    the test also fails at the end when anything was attempted, even if the stage swallowed the error."""
     if kind not in LOCAL_RUNNERS:
         raise ValueError(f'no local path is known for {kind!r}: one of {", ".join(LOCAL_RUNNERS)}')
     guard = LocalGuard(kind)
-    heavy = set(HEAVY_KINDS[kind])
-    real_heavy_job = resources.heavy_job
 
     def refuse(where):
         def raiser(*args, **kwargs):
             guard.hit(where, args)
         return raiser
 
-    @contextlib.contextmanager
-    def gated_job(job_kind, *args, **kwargs):
-        if job_kind in heavy:
-            guard.hit(f'resources.heavy_job({job_kind!r})', args)
-        with real_heavy_job(job_kind, *args, **kwargs) as job:
-            yield job
-
     for target in LOCAL_RUNNERS[kind]:
         patcher = mock.patch(target, side_effect=refuse(target))
         patcher.start()
         testcase.addCleanup(patcher.stop)
-    patcher = mock.patch('reNgine.resources.heavy_job', gated_job)
-    patcher.start()
-    testcase.addCleanup(patcher.stop)
     testcase.addCleanup(guard.assert_clean)  # added last: runs first, before the patches come off
     return guard

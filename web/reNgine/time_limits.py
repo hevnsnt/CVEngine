@@ -4,10 +4,10 @@ A task that hangs (a socket with no timeout, a subprocess that never exits, a lo
 nothing but a restart would end it. Each queue gets a hard limit set far above its slowest legitimate run, so only a hung task meets it.
 A task that declares its own ``time_limit`` keeps it.
 
-The scan queues are not given a short limit: a task that needs memory waits inside ``resources.heavy_job`` for its turn (up to
-``HEAVY_WAIT_SECONDS``, a day) before it runs, so a limit of a few hours would kill queued work that is only waiting. They get the longest
-limit that is safe, the broker's redelivery window: a task that outlives it is delivered to a second worker anyway. The light queues
-(API, notifications, geolocation) never wait for memory and get half an hour.
+The scan queues are not given a short limit: a stage that waits on a Sentinel holds its task for as long as the Sentinel runs the
+work (an OpenVAS scan or a deep discovery can take hours), so a limit of a few hours would kill work that is only waiting. They get the
+longest limit that is safe, the broker's redelivery window: a task that outlives it is delivered to a second worker anyway. The light
+queues (API, notifications) get half an hour.
 
 The workers run the gevent pool (celery-entrypoint.sh). There the hard limit ends a task that is waiting (a sleep, a socket, a subprocess
 wait) and marks it failed (``TimeLimitExceeded``), freeing its slot; it cannot interrupt a task that is computing without ever yielding, and
