@@ -12,7 +12,7 @@ class Migration(migrations.Migration):
     stored template findings that name the template."""
 
     dependencies = [
-        ('startScan', '0026_vulnerability_severity_id_idx'),
+        ('startScan', '0027_drop_unused_legacy_models'),
     ]
 
     operations = [

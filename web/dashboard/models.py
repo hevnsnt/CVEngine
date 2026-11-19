@@ -5,14 +5,6 @@ from reNgine.definitions import *
 from django.contrib.auth.models import User
 
 
-class SearchHistory(models.Model):
-	user = models.ForeignKey(User, null=True, blank=True, on_delete=models.CASCADE, related_name='search_history')
-	query = models.CharField(max_length=1000)
-
-	def __str__(self):
-		return self.query
-
-
 class Org(models.Model):
 	"""Top of the tenancy hierarchy: Organization -> Project.
 
@@ -50,23 +42,6 @@ class Project(models.Model):
 		if is_reserved_project(self.slug):
 			raise ValueError(f'"{ALL_PROJECTS}" is reserved for the all-projects view and cannot be a project slug')
 		super().save(*args, **kwargs)
-
-
-class OpenAiAPIKey(models.Model):
-	id = models.AutoField(primary_key=True)
-	key = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH)
-
-	def __str__(self):
-		return 'OpenAI API key (the value is never shown)'
-	
-
-class OllamaSettings(models.Model):
-	id = models.AutoField(primary_key=True)
-	selected_model = models.CharField(max_length=500)
-	use_ollama = models.BooleanField(default=True)
-
-	def __str__(self):
-		return self.selected_model
 
 
 class AIProviderSettings(models.Model):
@@ -111,14 +86,6 @@ class AIProviderSettings(models.Model):
 		return f'{self.provider}:{self.model or "default"}'
 
 
-class NetlasAPIKey(models.Model):
-	id = models.AutoField(primary_key=True)
-	key = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH)
-
-	def __str__(self):
-		return 'Netlas API key (the value is never shown)'
-	
-
 class ChaosAPIKey(models.Model):
 	id = models.AutoField(primary_key=True)
 	key = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH)
@@ -126,49 +93,6 @@ class ChaosAPIKey(models.Model):
 	def __str__(self):
 		return 'Chaos API key (the value is never shown)'
 	
-
-class HackerOneAPIKey(models.Model):
-	id = models.AutoField(primary_key=True)
-	username = models.CharField(max_length=500)
-	key = EncryptedCharField(max_length=ENCRYPTED_COLUMN_LENGTH)
-
-	def __str__(self):
-		return self.username
-
-
-class InAppNotification(models.Model):
-	project = models.ForeignKey(Project, on_delete=models.CASCADE, null=True, blank=True)
-	notification_type = models.CharField(max_length=10, choices=NOTIFICATION_TYPES, default='system')
-	status = models.CharField(max_length=10, choices=NOTIFICATION_STATUS_TYPES, default='info')
-	title = models.CharField(max_length=255)
-	description = models.TextField()
-	icon = models.CharField(max_length=50) # mdi icon class name
-	is_read = models.BooleanField(default=False)
-	created_at = models.DateTimeField(auto_now_add=True)
-	redirect_link = models.URLField(max_length=255, blank=True, null=True)
-	open_in_new_tab = models.BooleanField(default=False)
-
-	class Meta:
-		ordering = ['-created_at']
-
-	def __str__(self):
-		if self.notification_type == 'system':
-			return f"System wide notif: {self.title}"
-		else:
-			return f"Project wide notif: {self.project.name}: {self.title}"
-		
-	@property
-	def is_system_wide(self):
-		# property to determine if the notification is system wide or project specific
-		return self.notification_type == 'system'
-
-
-class UserPreferences(models.Model):
-	user = models.OneToOneField(User, on_delete=models.CASCADE)
-	bug_bounty_mode = models.BooleanField(default=True)
-	
-	def __str__(self):
-		return f"{self.user.username}'s preferences"
 
 ROLE_ADMIN, ROLE_USER, ROLE_AUDIT, ROLE_PENTESTER = 'admin', 'user', 'audit', 'pentester'
 ROLE_CHOICES = [
