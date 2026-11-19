@@ -376,6 +376,8 @@ def report_partial(ctx, task_id, body):
         broker.expire(task, f'cancelled: {refusal}')
         raise ApiError(409, f'the task was cancelled ({refusal}): stop the run')
     batch, _ = address_guard.filter_batch(task, batch)  # a batch about an excluded address is not stored (the address list is read again for every batch)
+    from agentapi import dns_crosscheck
+    batch = dns_crosscheck.screen_batch(task, batch)  # a resolution one Sentinel alone gives that would change a host is held, not stored (agentapi.dns_crosscheck)
     lease = min(now + broker.RUN_LEASE, (task.accepted_at or now) + broker.max_runtime(task))
     try:
         with transaction.atomic():
