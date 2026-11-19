@@ -16,7 +16,14 @@ like (``product_name``) when that names the same product, else the metadata prod
 word: Citrix's ``gateway`` is "Citrix Gateway"). A template with neither names its product only by its ``info.name``.
 
 The version. Only a value that looks like one (``version_of``): it starts with a digit and is dotted, at most ``MAX_VERSION`` characters, no build
-hash, no date. Several: the highest (``nuclei_scan._version_order``, as the technology pass). No value, no reading: a version is never invented.
+hash, no date. Several: the highest (``nuclei_scan._version_order``, as the technology pass). A version is never invented.
+
+No version. A panel hit that extracts none (FortiGate's SSL VPN page, GlobalProtect, Ivanti Connect Secure) still names the product: it is an identity
+reading (``identity``: ``cveFeed.identity_readings``, outcome ``hidden``, with the CPE the template names of any part, so ``os:fortios`` finds FortiOS's
+own panel) and a technology with no version (``bare_technology``: "Fortinet FortiGate SSL VPN", unless a technology of the host already names the
+product). ``tech:fortigate@unknown``, ``vsource:panel`` and ``component:`` find it, the version source and edge build reads take it as a lead
+(``version_sources.host_products``), and correlation as a lead, never a match (``identities.collect_leads``). It never replaces a version reading of the
+same product the panel source stored.
 
 Never a downgrade. A reading is stored only when no other source states a version of the same product on the host (a technology, an open port's
 product or CPE, another first-party reading), or every one that does is a less precise form of the panel's (``10.2`` for ``10.2.3``). The same
@@ -29,6 +36,7 @@ from urllib.parse import urlsplit
 logger = logging.getLogger(__name__)
 
 PANEL_TAG = 'panel'
+FINDING_SOURCE = 'nuclei'  # Vulnerability.source of a template finding (reNgine.definitions.NUCLEI)
 MAX_VERSION = 30
 INFO = 'info'
 # what a panel template's name says about the page, not the product: "Grafana Login Panel - Detect", "Jenkins Login Detected", "Zabbix Admin"
@@ -91,40 +99,23 @@ def highest_version(values):
 
 def _metadata(line, index=None):
     """``(vendor, product, part)`` the template names: from the line's ``info.metadata`` and ``classification.cpe``, else the installed template of
-    that id (``nuclei_templates.panel_products``)."""
-    info = line.get('info') or {}
-    meta = info.get('metadata') if isinstance(info.get('metadata'), dict) else {}
-    classification = info.get('classification') if isinstance(info.get('classification'), dict) else {}
-    cpes = classification.get('cpe')
-    cpe = next((c for c in (cpes if isinstance(cpes, list) else [cpes]) if isinstance(c, str) and c.lower().startswith('cpe:2.3:')), '')
-    parts = cpe.lower().split(':') if cpe else []
-    part = parts[2] if len(parts) > 4 else ''
-    vendor, product = str(meta.get('vendor') or '').strip().lower(), str(meta.get('product') or '').strip().lower()
-    if not product and len(parts) > 4:
-        vendor, product = parts[3], parts[4]
-    if not product:
-        if index is None:
-            from cveFeed import nuclei_templates
-            index = nuclei_templates.panel_products()
-        known = index.get(str(line.get('template-id') or ''))
-        if known:
-            vendor, product, part = known['vendor'], known['product'], known['part']
-    clean = re.compile(r'^[a-z0-9][a-z0-9_.+-]{0,59}$')
-    return (vendor if clean.match(vendor or '') else ''), (product if clean.match(product or '') else ''), part
+    that id (``nuclei_templates.panel_products``, ``nuclei_templates.line_metadata``)."""
+    from cveFeed import nuclei_templates
+    return nuclei_templates.line_metadata(line, index)
 
 
 def _words(value):
     return ' '.join(w if any(c.isupper() for c in w) else w.capitalize() for w in re.split(r'[\s_]+', value) if w)
 
 
-def product_of(line, index=None):
-    """``(name, CPE prefix)`` of the product a panel hit names (see the module), or ``('', '')``. The CPE prefix (``cpe:2.3:a:grafana:grafana``)
-    is given only for an application CPE."""
+def _product(line, index=None):
+    """``(label, vendor, product, part)`` of the product a panel hit names (see the module); ``vendor``, ``product`` and ``part`` are '' when the
+    template names none."""
     from cveFeed import correlation
     name = product_name((line.get('info') or {}).get('name') or '')
     vendor, product, part = _metadata(line, index)
     if not product:
-        return name, ''
+        return name, '', '', ''
     words = product.replace('_', ' ')
     if name and correlation.name_matches_token(correlation._norm(name), correlation._norm(words)):
         label = name
@@ -133,8 +124,15 @@ def product_of(line, index=None):
         alone = re.findall(r'[a-z0-9]+', words)
         if vendor and (not correlation._word_run_ok(tuple(alone)) or (len(alone) == 1 and alone[0] in correlation.DESCRIPTOR_WORDS)):
             label = f'{_words(vendor)} {label}'
-    cpe = f'cpe:2.3:a:{vendor}:{product}' if vendor and part in ('', 'a') else ''
-    return label[:80], cpe
+    return label[:80], vendor, product, part
+
+
+def product_of(line, index=None):
+    """``(name, CPE prefix)`` of the product a panel hit names (see the module), or ``('', '')``. The CPE prefix (``cpe:2.3:a:grafana:grafana``)
+    is given only for an application CPE."""
+    label, vendor, product, part = _product(line, index)
+    cpe = f'cpe:2.3:a:{vendor}:{product}' if vendor and product and part in ('', 'a') else ''
+    return label, cpe
 
 
 def _port(url):
@@ -143,6 +141,28 @@ def _port(url):
         return parts.port or (443 if parts.scheme == 'https' else 80)
     except ValueError:
         return 0
+
+
+def identity(line, index=None):
+    """The identity reading a panel hit that states no version gives (``identity_readings.reading``'s shape, with ``port`` and ``template``), or
+    None: not an info-level panel hit, a version-shaped value extracted (``reading`` reads it), or no product named. It carries the CPE the template
+    names, of any part (``cpe:2.3:o:fortinet:fortios`` for FortiOS's own panel: ``os:fortios`` finds it), and is never a version: correlation reads
+    it as a lead, never a match (``identities.collect_leads``)."""
+    if not is_panel_hit(line) or highest_version(line.get('extracted-results') or []):
+        return None
+    label, vendor, product, part = _product(line, index)
+    if not label:
+        return None
+    from cveFeed import identity_readings, nuclei_templates, source_versions
+    url = str(line.get('matched-at') or line.get('host') or '')
+    template = str(line.get('template-id') or '')[:120]
+    got = identity_readings.reading(label, source_versions.PANEL_SOURCE, evidence=f'{template}: the panel names the product, no version',
+                                    url=url, cpe=nuclei_templates.cpe_prefix(vendor, product, part))
+    if not got:
+        return None
+    got['template'] = template
+    got['port'] = _port(url)
+    return got
 
 
 def reading(line, index=None):
@@ -225,21 +245,54 @@ def superseded(sub, r):
 
 # ----------------------------------------------------------------------------- storing
 
+def _versioned(sub, label):
+    """Whether a version reading of ``label`` is already stored for ``sub`` under ``vsrc:panel`` (on any port)."""
+    from cveFeed import source_versions
+    from cveFeed.models import ProbeObservation
+    return ProbeObservation.objects.filter(project_id=sub.target_domain.project_id, host=sub.name.lower().rstrip('.'), probe=source_versions.PANEL_PROBE,
+                                           kind='version', product=label, outcome='found').exclude(version='').exists()
+
+
+def bare_technology(sub, r, now=None):
+    """Link the product an identity reading names to ``sub`` as a technology with no version (``Fortinet FortiGate SSL VPN``), its CPE and source
+    on the link, unless a technology of the host already names the product (at any version). Returns whether a link was added."""
+    from cveFeed import source_versions, tech_rows
+    from cveFeed.correlation import _norm, parse_cpe, read_technology
+    cpe = parse_cpe(r.get('cpe') or '')
+    tokens = {_norm(r['label'])} | ({cpe[1]} if cpe else set())
+    if any(_same(_norm(read_technology(t.name or '')[0]), tokens) for t in sub.technologies.all()):
+        return False
+    from django.utils import timezone
+    sub.technologies.add(tech_rows.technology(r['label']), through_defaults={
+        'source': source_versions.PANEL_PROBE, 'cpe': (r.get('cpe') or '')[:255], 'observed_at': now or timezone.now()})
+    return True
+
+
 def store(sub, readings):
-    """Store ``readings`` (``reading``'s) of one host under ``vsrc:panel``, each on its port, except a reading another source supersedes
-    (``superseded``). Returns ``(stored, whether something new or changed was stored)``."""
+    """Store ``readings`` (``reading``'s and ``identity``'s) of one host under ``vsrc:panel``, each on its port, except a version reading another source
+    supersedes (``superseded``) and an identity reading of a product the panel source already holds a version of (a version reading of the same
+    product, from this pass or one before, stands: an identity never replaces it). The product an identity reading names is also linked as a
+    technology with no version (``bare_technology``). Returns ``(stored, whether something new or changed was stored)``."""
     from cveFeed import source_versions, version_sources
     if sub is None or sub.target_domain_id is None:
         return 0, False
     stored, changed = 0, False
-    by_port = {}
+    by_port, named = {}, []
     for r in readings:
-        if r and not superseded(sub, r):
+        if r and r.get('version') and not superseded(sub, r):
             by_port.setdefault(r['port'], {})[r['label']] = r
+    versioned = {label for kept in by_port.values() for label in kept}
+    for r in readings:
+        if r and not r.get('version') and r['label'] not in versioned and not _versioned(sub, r['label']):
+            by_port.setdefault(r['port'], {}).setdefault(r['label'], r)
+            named.append(r)
     for port, kept in by_port.items():
         count, moved = version_sources.store_readings(sub, source_versions.PANEL_PROBE, list(kept.values()), port=port)
         stored += count
         changed = changed or moved
+    for r in {r['label']: r for r in named}.values():
+        if bare_technology(sub, r):
+            changed = True
     return stored, changed
 
 
@@ -259,7 +312,7 @@ class Collector:
             if self.index is None:
                 from cveFeed import nuclei_templates
                 self.index = nuclei_templates.panel_products()
-            got = reading(line, self.index)
+            got = reading(line, self.index) or identity(line, self.index)
         except Exception:  # noqa: BLE001 - one odd result line never stops the pass
             logger.exception('panel version of a nuclei result could not be read')
             return
@@ -267,14 +320,17 @@ class Collector:
             self.pending.setdefault(sub.pk, (sub, []))[1].append(got)
 
     def flush(self):
+        from django.db import transaction
+
         from cveFeed import probes
         pending, self.pending = self.pending, {}
         for sub, readings in pending.values():
             try:
-                count, changed = store(sub, readings)
+                with transaction.atomic():  # a savepoint: inside a caller's transaction (an adopted result) one host's failure leaves the rest usable
+                    count, changed = store(sub, readings)
+                    if changed:
+                        probes.recorrelate(sub)
                 self.stored += count
-                if changed:
-                    probes.recorrelate(sub)
             except Exception:  # noqa: BLE001
                 logger.exception('panel versions of host %s could not be stored', sub.pk)
 
@@ -293,9 +349,8 @@ def catch_up(apply=False, batch=200):
     with extracted values are read again as panel readings (newest first, one per host, template and port), stored on the host's current row,
     and the hosts that gained or changed one are correlated. Idempotent. Returns ``{'findings', 'readings', 'hosts', 'matches'}``."""
     from cveFeed import correlation, nuclei_templates, source_versions
-    from reNgine.definitions import NUCLEI
     from startScan.models import Subdomain, Vulnerability
-    qs = (Vulnerability.objects.filter(source=NUCLEI, severity=0, tags__name=PANEL_TAG, subdomain__isnull=False, extracted_results__len__gt=0)
+    qs = (Vulnerability.objects.filter(source=FINDING_SOURCE, severity=0, tags__name=PANEL_TAG, subdomain__isnull=False, extracted_results__len__gt=0)
           .select_related('subdomain').distinct().order_by('-id'))
     index = nuclei_templates.panel_products()
     out = {'findings': 0, 'readings': 0, 'hosts': 0, 'matches': 0}

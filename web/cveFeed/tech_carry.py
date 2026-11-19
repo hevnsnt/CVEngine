@@ -40,19 +40,23 @@ def carry(scan, project_id, assets, service):
         host = norm.get(asset)
         if host in mine and scan_id and scan_id > last.get(host, 0):
             last[host] = scan_id
-    source = {}
+    source, rows_of = {}, {}  # host -> technologies of the row carried from; host -> that row's id
     if last:
         for other in Subdomain.objects.filter(target_domain__project_id=project_id, scan_history_id__in=set(last.values()), name__in=list(last)) \
                 .prefetch_related('technologies').order_by('-id'):
             if last.get(other.name) == other.scan_history_id and other.name not in source:
                 source[other.name] = list(other.technologies.all())
+                rows_of[other.name] = other.pk
     rest = [h for h in mine if h not in source]
     if rest:  # no scan recorded for the run (deleted since): the host's newest other row, as before
         for other in Subdomain.objects.filter(target_domain__project_id=project_id, name__in=rest).exclude(scan_history=scan) \
                 .prefetch_related('technologies').order_by('-id').iterator(chunk_size=500):
             if other.name not in source and other.technologies.all():
                 source[other.name] = list(other.technologies.all())
+                rows_of[other.name] = other.pk
     through = Subdomain.technologies.through
+    # where each carried technology came from (source, the CPE its template named, when it was seen) goes with it
+    meta = {(r.subdomain_id, r.technology_id): r for r in through.objects.filter(subdomain_id__in=list(rows_of.values()))} if rows_of else {}
     links, out = [], {}
     for host, techs in source.items():
         row = mine[host]
@@ -61,7 +65,9 @@ def carry(scan, project_id, assets, service):
         for tech in techs:
             if tech.pk in have or _key(tech.name) in named:
                 continue
-            links.append(through(subdomain_id=row.pk, technology_id=tech.pk))
+            was = meta.get((rows_of.get(host), tech.pk))
+            links.append(through(subdomain_id=row.pk, technology_id=tech.pk, source=was.source if was else '', cpe=was.cpe if was else '',
+                                 observed_at=was.observed_at if was else None))
             out.setdefault(host, []).append(tech.name)
     if links:
         through.objects.bulk_create(links, ignore_conflicts=True)

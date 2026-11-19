@@ -311,31 +311,74 @@ def installed_tags(index=None):
 
 
 PANEL_DIRS = ('http/exposed-panels/',)  # nuclei's panel templates (tag ``panel``): cveFeed.panel_versions reads the product they name
-_panels = {}  # template index sha256 -> {template id: product metadata}, read once per process
+TECH_DIRS = ('http/technologies/',)  # the technology templates the light pass runs: cveFeed.nuclei_scan reads the CPE they name for a technology
+_products = {}  # (template index sha256, directories) -> {template id: product metadata}, read once per process
+
+
+def template_products(dirs, index=None):
+    """``{template id: {'vendor', 'product', 'part'}}`` of the templates under ``dirs`` of the release the Sentinels run, from the scanner library's
+    template index: the ``vendor`` and ``product`` of a template's ``info.metadata``, else those of its ``classification.cpe``, and the CPE's part
+    (``a``, ``o``, ``h``; '' when it states none). A result line from a Sentinel, and a finding stored before, carry no metadata: this is where it is
+    read. Templates with neither are left out."""
+    from cvengine_scanner import template_index
+    index = index or template_index.load()
+    key = (index.get('sha256') or id(index), tuple(dirs))
+    if key not in _products:
+        found = {}
+        for path, entry in sorted(index['templates'].items()):
+            if not path.startswith(tuple(dirs)) or not entry.get('id'):
+                continue
+            cpe = str(entry.get('cpe') or '').split(':')
+            part = cpe[0] if len(cpe) == 3 else ''
+            meta = {'vendor': entry.get('vendor') or '', 'product': entry.get('product') or ''}
+            if len(cpe) == 3 and not (meta['vendor'] and meta['product']):
+                meta = {'vendor': cpe[1], 'product': cpe[2]}
+            if meta['product']:
+                found[entry['id']] = {'vendor': meta['vendor'], 'product': meta['product'], 'part': part}
+        _products[key] = found
+    return _products[key]
 
 
 def panel_products(index=None):
-	"""``{template id: {'vendor', 'product', 'part'}}`` of the panel templates (``PANEL_DIRS``) of the release the Sentinels run, from the scanner library's
-	template index: the ``vendor`` and ``product`` of a template's ``info.metadata``, else those of its ``classification.cpe``, and the CPE's part (``a``,
-	``o``, ``h``; '' when it states none). A result line from a Sentinel, and a finding stored before, carry no metadata: this is where it is read.
-	Templates with neither are left out."""
-	from cvengine_scanner import template_index
-	index = index or template_index.load()
-	key = index.get('sha256') or id(index)
-	if key not in _panels:
-		found = {}
-		for path, entry in sorted(index['templates'].items()):
-			if not path.startswith(PANEL_DIRS) or not entry.get('id'):
-				continue
-			cpe = str(entry.get('cpe') or '').split(':')
-			part = cpe[0] if len(cpe) == 3 else ''
-			meta = {'vendor': entry.get('vendor') or '', 'product': entry.get('product') or ''}
-			if len(cpe) == 3 and not (meta['vendor'] and meta['product']):
-				meta = {'vendor': cpe[1], 'product': cpe[2]}
-			if meta['product']:
-				found[entry['id']] = {'vendor': meta['vendor'], 'product': meta['product'], 'part': part}
-		_panels[key] = found
-	return _panels[key]
+    """``template_products`` of the panel templates (``PANEL_DIRS``): cveFeed.panel_versions reads the product a panel hit names here."""
+    return template_products(PANEL_DIRS, index)
+
+
+def technology_products(index=None):
+    """``template_products`` of the technology templates (``TECH_DIRS``): 513 of the 1,163 of v10.5.2 name a vendor and product, 196 a CPE."""
+    return template_products(TECH_DIRS, index)
+
+
+_CLEAN = re.compile(r'^[a-z0-9][a-z0-9_.+-]{0,59}$')
+
+
+def line_metadata(line, index=None):
+    """``(vendor, product, part)`` the template of a result line names: from the line's own ``info.metadata`` and ``classification.cpe``, else the
+    installed template of that id in ``index`` (``template_products``' map; the panel templates' when none is given). '' for what it does not
+    name, or names in a shape no CPE has."""
+    info = line.get('info') or {}
+    meta = info.get('metadata') if isinstance(info.get('metadata'), dict) else {}
+    classification = info.get('classification') if isinstance(info.get('classification'), dict) else {}
+    cpes = classification.get('cpe')
+    cpe = next((c for c in (cpes if isinstance(cpes, list) else [cpes]) if isinstance(c, str) and c.lower().startswith('cpe:2.3:')), '')
+    parts = cpe.lower().split(':') if cpe else []
+    part = parts[2] if len(parts) > 4 else ''
+    vendor, product = str(meta.get('vendor') or '').strip().lower(), str(meta.get('product') or '').strip().lower()
+    if not product and len(parts) > 4:
+        vendor, product = parts[3], parts[4]
+    if not product:
+        known = (panel_products() if index is None else index).get(str(line.get('template-id') or ''))
+        if known:
+            vendor, product, part = known['vendor'], known['product'], known['part']
+    return (vendor if _CLEAN.match(vendor or '') else ''), (product if _CLEAN.match(product or '') else ''), part
+
+
+def cpe_prefix(vendor, product, part=''):
+    """The CPE 2.3 prefix a template's metadata names (``cpe:2.3:a:apache:tomcat``; ``o`` and ``h`` for a system or hardware), or '' without both a
+    vendor and a product."""
+    if not (vendor and product):
+        return ''
+    return f'cpe:2.3:{part if part in ("a", "o", "h") else "a"}:{vendor}:{product}'
 
 
 def allowed_tags():

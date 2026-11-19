@@ -1951,8 +1951,13 @@ def _shared_for(project, subs):
     java = java_runtime.runtimes_for(_pids_of(project, subs), {s.name.lower() for s in subs})  # what the host was read to run on (one query)
     from cveFeed import version_sources
     versions = version_sources.readings_for(_pids_of(project, subs), {s.name.lower() for s in subs})  # what its version sources state (one query)
+    from startScan.models import SubdomainTechnology
+    link_cpes = {}  # the CPE a technology template named for a host's technology (cveFeed.nuclei_scan.tech_cpe_from), one query
+    for sub_id, name, version, cpe in SubdomainTechnology.objects.filter(subdomain_id__in=[s.pk for s in subs]).exclude(cpe='') \
+            .values_list('subdomain_id', 'technology__name', 'technology__version', 'cpe'):
+        link_cpes.setdefault(sub_id, []).append((name or '', version or '', cpe))
     return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots, 'shots': shots, 'legacy_shots': legacy_shots,
-            'probes': probe_rows, 'vhosts': vhosts, 'java': java, 'versions': versions}
+            'probes': probe_rows, 'vhosts': vhosts, 'java': java, 'versions': versions, 'link_cpes': link_cpes}
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}
@@ -2450,6 +2455,14 @@ def _tech_technology_q(cond):
     return _tech_hosts(Subdomain.technologies.through, 'technology_id', Technology.objects.filter(cond).values('id'))
 
 
+def _tech_link_q(cond):
+    """The hosts with a technology link that satisfies ``cond`` (a Q over ``SubdomainTechnology``: the CPE a technology template named for it)."""
+    from django.db.models import Q
+
+    from startScan.models import SubdomainTechnology
+    return Q(id__in=SubdomainTechnology.objects.filter(cond).values('subdomain_id'))
+
+
 def _tech_port_q(cond):
     """The hosts with an open port that satisfies ``cond`` (a Q over Port: every condition on the same port row)."""
     from startScan.models import OPEN_PORT_STATES, IpAddress, Port, Subdomain
@@ -2503,7 +2516,9 @@ def _tech_known_q(spec, named):
         # a Windows release an NTLM challenge states (cveFeed.windows_builds: ``release_only``) knows the release, never its update revision: the
         # version is not known (@unknown finds the host, @known does not); a release asked for (@10.0.20348) is stated by it
         readings = readings.exclude(evidence__has_key='release_only')
-    return _any(_tech_technology_q(named_tech & Q(version__iregex=release)) if named_tech else None, _tech_port_q(port) if port else None,
+    link = _iregex('cpe', spec.cpe_re())  # a technology a template named by its CPE, at the version its name states
+    return _any(_tech_technology_q(named_tech & Q(version__iregex=release)) if named_tech else None,
+                _tech_link_q(link & Q(technology__version__iregex=release)) if link else None, _tech_port_q(port) if port else None,
                 _iregex('webserver', spec.header_re(True)), named(RouteAuth.objects.filter(retired_at__isnull=True).filter(route)) if route else None,
                 named(readings), java)
 
@@ -2539,7 +2554,9 @@ def _tech_q(spec, project):
         port, tech, web, reading = port | Q(product__iregex=pattern), tech | Q(name__iregex=pattern), web | Q(webserver__iregex=pattern), \
             reading | Q(product__iregex=pattern)
         route = _any(route, *(Q(**{f'evidence__{key}__iregex': pattern}) for key in ('server', 'powered_by', 'fingerprint_names')))
-    runs = _any(web, _tech_technology_q(tech), _tech_port_q(port), named(RouteAuth.objects.filter(retired_at__isnull=True).filter(route)),
+    link = _iregex('cpe', spec.cpe_re())  # the CPE the technology template that named it states (cveFeed.nuclei_scan.tech_cpe_from)
+    runs = _any(web, _tech_technology_q(tech), _tech_link_q(link) if link else None, _tech_port_q(port),
+                named(RouteAuth.objects.filter(retired_at__isnull=True).filter(route)),
                 named(HostArchive.objects.filter(tech_text__icontains=v)), named(version_sources.readings_qs().filter(reading)))
     if platform is not None and platform.runtime == 'java_runtime':
         runs |= named(JavaRuntime.objects.all())
@@ -2770,6 +2787,9 @@ def _tech_reasons(sub, spec, routes=None, archive=None, shared=None):
             add(f'technology {name}', (spec.matches('stating', name) or spec.matches('cpe', name)) and spec.version_ok(t.version))
         if spec.matches('platform', name):
             runs_on.append(' '.join(x for x in split_name_version(name) if x))
+    for name, version, cpe in ((shared or {}).get('link_cpes') or {}).get(sub.pk, []):
+        if spec.matches('cpe', cpe) and f'technology {name}' not in shown:  # named by its template's CPE, not by its own name
+            add(f'technology {name} ({cpe})', spec.version_ok(version))
     if sub.webserver and (v in sub.webserver.lower() or spec.matches('header', sub.webserver)):
         add(f'web server {sub.webserver}', spec.matches('header_v', sub.webserver))
     if sub.webserver and spec.matches('platform', sub.webserver):
