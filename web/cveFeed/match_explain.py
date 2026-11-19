@@ -927,20 +927,20 @@ def precondition_words(match):
     closed_reason = str(match.ai_reason or '') if service_features.is_precondition_closure(match) else ''
     out = []
     for key, need in needs.items():
-        spec = service_features.FEATURES[key]
+        spec = service_features.server(key)
         seen = stored.get(key) if isinstance(stored.get(key), dict) else {}
         state = seen.get('state') if seen.get('state') in service_features.STATES else 'unknown'
         reading = _plain(seen.get('detail'), 120)
         from reNgine.ai_providers import clean_text
         said = clean_text(str(need.get('quote') or ''), 300) or ''  # the advisory's sentence: feed prose, shown as text
-        if closed_reason and spec.words.get('absent', '') in closed_reason:
-            state, closed = 'absent', True
+        if closed_reason and service_features._words(key, 'ruled_out') in closed_reason:
+            state, closed = 'ruled_out', True
             text = closed_reason.split(': ', 1)[-1] if closed_reason.startswith(service_features.CLOSED) else closed_reason
             text = 'Ruled out: ' + text[0].lower() + text[1:] if text else 'Ruled out.'
         else:
             closed = False
             text = (f'The advisory says the flaw needs {spec.label}, and the host offers it ({reading}): a precondition holds, which is not proof '
-                    'of the flaw.' if state == 'offered' else
+                    'of the flaw.' if state == 'exposed' else
                     f'The advisory says the flaw needs {spec.label}; whether the host offers it is not known (no fresh reading, a port not read, or '
                     'a CDN or proxy answers for the host).' if state == 'unknown' else
                     f'The advisory says the flaw needs {spec.label}, and the host does not offer it ({reading}).')

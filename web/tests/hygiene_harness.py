@@ -49,7 +49,10 @@ def responder(probe=None, emailer=None, mx=None):
             findings, has_mx = emailer(item['name'])
             mail.append({'name': item['name'], 'has_mx': bool(has_mx), 'findings': [
                 {'check': f.check, 'severity': f.severity, 'title': f.title, 'detail': f.detail, 'host': f.host, 'evidence': f.evidence or {}} for f in findings]})
-        return {'outcome': 'done', 'certs': certs, 'mail': mail, 'touched': [t['host'] for t in target['tls']], 'refused': []}
+        # the HTTP/2 readings the handshakes took (a probe info with ``alpn``), as the library's batch reports them
+        features = scanner_hygiene.service_features(certs)
+        return {'outcome': 'done', 'certs': certs, 'mail': mail, 'touched': [t['host'] for t in target['tls']], 'refused': [],
+                **({'service_features': features} if features else {})}
     return answer
 
 

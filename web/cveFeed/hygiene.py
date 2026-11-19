@@ -551,7 +551,8 @@ def _remote_review(domain, targets, hosts):
         logger.info('hygiene check of %s waits for a scanner: %s', domain.name, exc)
         return None, True
     rows = {(_norm(c['host']), c['port']): c for c in result.get('certs') or []}
-    review = {'infos': {}, 'unknown_tls': set(), 'no_tls': set(), 'mail': {}, 'mail_hosts': [], 'unknown_mail': set()}
+    review = {'infos': {}, 'unknown_tls': set(), 'no_tls': set(), 'mail': {}, 'mail_hosts': [], 'unknown_mail': set(),
+              'service_features': result.get('service_features') or []}
     for host, port in targets:
         row = rows.get((_norm(host), port))
         if row is None or row.get('error'):
@@ -577,19 +578,18 @@ def _remote_review(domain, targets, hosts):
 
 
 def _service_features(domain, review):
-    """Store what the certificate handshakes said about HTTP/2 (each certificate's ALPN) and apply it to the host's CVE matches whose CVE needs
-    it (``cveFeed.service_features``). Never fatal: the hygiene review stands without it."""
+    """Store what the certificate handshakes read about the services' features (``service_features``: HTTP/2 from ALPN), through the one ingest
+    every kind uses (``cveFeed.service_features.ingest``), which re-evaluates the CVE matches of the hosts whose readings changed. Only the
+    endpoints this check asked about count; an endpoint that answered (a certificate, or nothing speaking TLS) and has no reading now loses its
+    old one (unknown, never "no"). Never fatal: the hygiene review stands without it."""
     from cveFeed import service_features
+    answered = set(review['infos']) | set(review.get('no_tls') or ())
     try:
-        changed = service_features.store_alpn(domain, {key: {'alpn': info.get('alpn')} for key, info in review['infos'].items()},
-                                              nothing_there=review.get('no_tls') or ())
-        hosts = {host.lower() for host, _port in review['infos']} | {host.lower() for host, _port in review.get('no_tls') or ()}
-        if hosts:
-            service_features.reevaluate(domain.project_id, hosts)
-        return changed
+        return service_features.ingest(domain.project_id, review.get('service_features') or [], 'hygiene_check', allowed=answered,
+                                       covered={(host, port, 'http2') for host, port in answered})
     except Exception:  # noqa: BLE001
         logger.exception('could not store the service features read by the hygiene check of %s', domain.name)
-        return set()
+        return None
 
 
 def run_hygiene(domain_id, now=None, hosts=None):

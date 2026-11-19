@@ -1,13 +1,12 @@
 """Service features (cveFeed.service_features): the HTTP/2 reading a Sentinel takes in the hygiene check's handshake (ALPN), the CVEs whose
 advisory needs HTTP/2, and what the reading does to their matches: rule out, raise within the ceiling, or nothing when it is unknown."""
 import datetime
-from unittest import mock
 
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from agentapi import probe_results
+from agentapi import sentinel_broker
 from cveFeed import correlation, detection, match_explain, service_features, triage
 from cveFeed.detection_classes import feature_preconditions
 from cveFeed.models import CVEDetection, CVEEntry, CVEMatch, ServiceFeature, Triage
@@ -76,22 +75,19 @@ class PreconditionRuleTests(SimpleTestCase):
         self.assertNotIn('requires_features', detection.merge_strategies({**clean, 'requires_features': {}}, extra))  # nor adds one
 
 
-class IngestTests(SimpleTestCase):
-    def cert(self, **over):
-        return {'host': 'www.example.test', 'port': 443, 'found': True,
-                'cert': {'subject': 's', 'issuer': 'i', 'sans': [], 'not_before': None, 'not_after': '2027-01-01T00:00:00+00:00',
-                         'signature_algorithm': 'sha256', 'key_description': 'RSA 2048', 'protocol': 'TLSv1.3', 'cipher': 'X', 'chain_error': '',
-                         'legacy_tls': False, **over}}
+class ResultTests(SimpleTestCase):
+    def item(self, **over):
+        return {'host': 'www.example.test', 'port': 443, 'transport': 'tcp', 'feature': 'http2', 'value': 'yes', 'detail': 'ALPN h2', **over}
 
-    def alpn(self, **over):
-        return probe_results.clean_hygiene_check({'certs': [self.cert(**over)], 'mail': []})['certs'][0]['cert']['alpn']
-
-    def test_only_the_four_values_pass_anything_else_is_unknown(self):
-        for value in ('h2', 'http/1.1', 'none', 'unknown'):
-            self.assertEqual(self.alpn(alpn=value), value)
-        for value in ('H2', 'h3', 'spdy/3', 'h2' * 100, 7, True, None, ['h2'], {'v': 'h2'}):
-            self.assertEqual(self.alpn(alpn=value), 'unknown', value)
-        self.assertEqual(self.alpn(), 'unknown')  # a Sentinel before the field
+    def test_any_kind_may_carry_service_features_cleaned_by_the_shared_vocabulary(self):
+        body = {'outcome': 'done', 'certs': [], 'mail': [], 'touched': [],
+                'service_features': [self.item(), self.item(port=8443, value='maybe'), self.item(feature='http9'), 'junk']}
+        got = sentinel_broker.clean_result('hygiene_check', body)
+        self.assertEqual(got['service_features'], [self.item()])
+        body['service_features'] = [self.item()] * 129  # over the cap: nothing
+        self.assertNotIn('service_features', sentinel_broker.clean_result('hygiene_check', body))
+        del body['service_features']
+        self.assertNotIn('service_features', sentinel_broker.clean_result('hygiene_check', body))  # an older Sentinel
 
 
 class FeatureCase(TestCase):
@@ -117,46 +113,53 @@ class FeatureCase(TestCase):
 
     def reading(self, port, value, detail, age=0):
         ServiceFeature.objects.update_or_create(domain=self.domain, host=self.sub.name, port=port, feature='http2', defaults={
-            'value': value, 'detail': detail, 'source': 'tls_alpn', 'observed_at': timezone.now() - datetime.timedelta(days=age)})
+            'value': value, 'detail': detail, 'source': 'hygiene_check', 'observed_at': timezone.now() - datetime.timedelta(days=age)})
 
     def fresh(self, match):
         return CVEMatch.objects.select_related('cve_entry', 'subdomain__target_domain').get(pk=match.pk)
 
 
 class StoreTests(FeatureCase):
+    def probe(self, alpn):
+        def read(host, port):
+            if host != 'www.example.test':
+                return None
+            return {'host': host, 'port': port, 'subject': host, 'sans': [host], 'not_after': timezone.now() + datetime.timedelta(days=90),
+                    'signature_algorithm': 'sha256', 'key_description': 'RSA 2048', 'protocol': 'TLSv1.3', 'chain_error': '',
+                    'legacy_tls': False, **({'alpn': alpn} if alpn else {})}
+        return read
+
     def test_the_hygiene_check_stores_the_reading_per_host_and_port_and_unknown_removes_it(self):
-        def probe(alpn):
-            def read(host, port):
-                if host != 'www.example.test':
-                    return None
-                return {'host': host, 'port': port, 'subject': host, 'sans': [host], 'not_after': timezone.now() + datetime.timedelta(days=90),
-                        'signature_algorithm': 'sha256', 'key_description': 'RSA 2048', 'protocol': 'TLSv1.3', 'chain_error': '',
-                        'legacy_tls': False, **({'alpn': alpn} if alpn else {})}
-            return read
-        hygiene_harness.run_hygiene(self.domain.id, probe=probe('http/1.1'))
+        hygiene_harness.run_hygiene(self.domain.id, probe=self.probe('http/1.1'))
         row = ServiceFeature.objects.get(host='www.example.test', port=443, feature='http2')
-        self.assertEqual((row.value, row.detail, row.source, row.transport), ('no', 'ALPN http/1.1', 'tls_alpn', 'tls'))
-        hygiene_harness.run_hygiene(self.domain.id, probe=probe('h2'))
+        self.assertEqual((row.value, row.detail, row.source, row.transport), ('no', 'ALPN http/1.1', 'hygiene_check', 'tcp'))
+        hygiene_harness.run_hygiene(self.domain.id, probe=self.probe('h2'))
         self.assertEqual(ServiceFeature.objects.get(host='www.example.test', port=443).value, 'yes')
-        hygiene_harness.run_hygiene(self.domain.id, probe=probe('none'))
+        hygiene_harness.run_hygiene(self.domain.id, probe=self.probe('none'))
         self.assertEqual(ServiceFeature.objects.get(host='www.example.test', port=443).detail, 'no ALPN protocol chosen')
-        hygiene_harness.run_hygiene(self.domain.id, probe=probe(None))  # an older Sentinel: unknown, not "no"
+        hygiene_harness.run_hygiene(self.domain.id, probe=self.probe(None))  # an older Sentinel: unknown, not "no"
         self.assertFalse(ServiceFeature.objects.filter(host='www.example.test').exists())
-        hygiene_harness.run_hygiene(self.domain.id, probe=probe('h2'))
+        hygiene_harness.run_hygiene(self.domain.id, probe=self.probe('h2'))
         hygiene_harness.run_hygiene(self.domain.id, probe=lambda host, port: None)  # nothing speaks TLS there any more
         self.assertFalse(ServiceFeature.objects.filter(host='www.example.test').exists())
 
-    def test_store_takes_only_the_vocabulary(self):
-        for args in (('http3', 'yes', 'tls_alpn'), ('http2', 'maybe', 'tls_alpn'), ('http2', 'yes', 'banner')):
-            with self.assertRaises(ValueError):
-                service_features.store(self.domain, 'www.example.test', 443, *args)
+    def test_ingest_keeps_to_the_vocabulary_the_task_and_the_project(self):
+        item = {'host': 'www.example.test', 'port': 443, 'transport': 'tcp', 'feature': 'http2', 'value': 'yes', 'detail': 'ALPN h2'}
+        got = service_features.ingest(self.project.pk, [item, {**item, 'port': 8443}, {**item, 'host': 'elsewhere.test'}, {**item, 'value': 'h2'}],
+                                      'hygiene_check', allowed={('www.example.test', 443), ('elsewhere.test', 443)})
+        self.assertEqual((got['stored'], got['changed_hosts']), (1, ['www.example.test']))  # 8443 was not asked; elsewhere.test is not the project's
+        self.assertEqual(list(ServiceFeature.objects.values_list('host', 'port', 'value')), [('www.example.test', 443, 'yes')])
+        other = Project.objects.create(name='O', slug='sfx', insert_date=timezone.now(), org=Org.objects.create(name='O', slug='sfxo'))
+        self.assertEqual(service_features.ingest(other.pk, [item], 'hygiene_check')['stored'], 0)  # another project's host
         with self.assertRaises(ValueError):
-            service_features.store(self.domain, 'www.example.test', 70000, 'http2', 'yes', 'tls_alpn')
+            service_features.ingest(self.project.pk, [item], 'Not A Source')
+        got = service_features.ingest(self.project.pk, [], 'hygiene_check', covered={('www.example.test', 443, 'http2')})
+        self.assertEqual(got['removed'], 1)
 
 
 class AssessTests(FeatureCase):
     def state(self, cve=None):
-        sub = Subdomain.objects.select_related('target_domain').get(pk=self.sub.pk)
+        sub = Subdomain.objects.select_related('target_domain').get(pk=self.sub.pk)  # a fresh object: its readings are read again
         items = service_features.preconditions_for(sub, cve or self.cve)
         return items[0]['state'] if items else None
 
@@ -167,9 +170,9 @@ class AssessTests(FeatureCase):
     def test_absent_offered_and_unknown(self):
         self.assertEqual(self.state(), 'unknown')  # no reading
         self.reading(443, 'no', 'ALPN http/1.1')
-        self.assertEqual(self.state(), 'absent')
+        self.assertEqual(self.state(), 'ruled_out')
         self.reading(443, 'yes', 'ALPN h2')
-        self.assertEqual(self.state(), 'offered')
+        self.assertEqual(self.state(), 'exposed')
 
     def test_a_stale_reading_is_unknown(self):
         self.reading(443, 'no', 'ALPN http/1.1', age=service_features.FRESH.days + 1)
@@ -180,7 +183,7 @@ class AssessTests(FeatureCase):
         self.reading(443, 'no', 'ALPN http/1.1')
         self.assertEqual(self.state(), 'unknown')
         self.reading(4443, 'no', 'ALPN http/1.1')
-        self.assertEqual(self.state(), 'absent')
+        self.assertEqual(self.state(), 'ruled_out')
 
     def test_only_a_mail_port_read_is_not_enough_to_rule_out(self):
         self.reading(993, 'no', 'no ALPN protocol chosen')
@@ -200,7 +203,7 @@ class AssessTests(FeatureCase):
         self.assertIsNone(self.state())
         CVEDetection.objects.create(cve_entry=self.other, source='manual', strategy={'summary': 's', 'requires_features': {'http2': True}})
         service_features.reset_index()
-        self.assertEqual(self.state(self.other), 'absent')
+        self.assertEqual(self.state(self.other), 'ruled_out')
 
     def test_a_models_record_cannot_add_the_precondition(self):
         CVEDetection.objects.create(cve_entry=self.other, source='ai', strategy={'summary': 's', 'requires_features': {'http2': True}})
@@ -230,7 +233,7 @@ class MatchTests(FeatureCase):
         match = self.fresh(match)
         self.assertEqual((match.ai_verdict, match.ai_reason), ('', ''))
         self.assertEqual(match.confidence, 0.9)
-        self.assertEqual(match.evidence['preconditions']['http2']['state'], 'offered')
+        self.assertEqual(match.evidence['preconditions']['http2']['state'], 'exposed')
         self.assertEqual(Triage.objects.get(match=match).status, 'pending')
 
     def test_offered_raises_the_confidence_once_and_names_the_evidence_but_never_lifts_the_ceiling(self):
@@ -240,17 +243,17 @@ class MatchTests(FeatureCase):
         self.assertEqual(service_features.reevaluate(self.project.pk, {self.sub.name})['raised'], 0)  # not twice
         match = self.fresh(match)
         self.assertEqual(match.confidence, 0.9)
-        self.assertEqual(match.evidence['preconditions']['http2'], {'state': 'offered', 'detail': 'on 443: ALPN h2', 'boost': 0.05})
+        self.assertEqual(match.evidence['preconditions']['http2'], {'state': 'exposed', 'detail': 'on 443: ALPN h2', 'boost': 0.05})
         explained = match_explain.explain(match)
         self.assertIn('the host offers it (on 443: ALPN h2): a precondition holds, which is not proof', explained['why'])
         self.assertEqual(explained['confidence'], 'not_confirmed')
-        self.assertEqual(explained['preconditions'][0]['state'], 'offered')
+        self.assertEqual(explained['preconditions'][0]['state'], 'exposed')
         d = triage.describe_cve_match(match)
         self.assertTrue(d['facts']['version_only'])
         self.assertEqual(triage.ceiling('cve_match', d['facts'])[0], 'needs_validation')  # HTTP/2 on is a precondition, not proof
-        self.assertEqual(d['payload']['preconditions'][0]['host_reading'], 'offered')
+        self.assertEqual(d['payload']['preconditions'][0]['host_reading'], 'exposed')
         self.assertIn('configurations that use HTTP/2', d['payload']['preconditions'][0]['advisory_says'])
-        self.assertEqual(d['signature_fields']['preconditions'], {'HTTP/2': 'offered'})
+        self.assertEqual(d['signature_fields']['preconditions'], {'HTTP/2': 'exposed'})
         # the reading goes stale: the boost goes with it
         ServiceFeature.objects.update(observed_at=timezone.now() - datetime.timedelta(days=service_features.FRESH.days + 1))
         self.assertEqual(service_features.reevaluate(self.project.pk, {self.sub.name})['lowered'], 1)
@@ -300,7 +303,7 @@ class MatchTests(FeatureCase):
                                     evidence={'source': 'tech'})
         by_cve = {r['cve_entry_id']: r for r in rows}
         self.assertEqual(by_cve[self.cve.pk]['confidence'], 0.9)
-        self.assertEqual(by_cve[self.cve.pk]['evidence']['preconditions']['http2']['state'], 'offered')
+        self.assertEqual(by_cve[self.cve.pk]['evidence']['preconditions']['http2']['state'], 'exposed')
         self.assertEqual(by_cve[self.other.pk]['confidence'], 0.85)
         self.assertNotIn('preconditions', by_cve[self.other.pk]['evidence'])
 
@@ -323,10 +326,10 @@ class ShownTests(FeatureCase):
         status, data = call(self.tok, 'GET', '/api/v1/projects/sf/hosts')
         self.assertEqual(status, 200)
         row = next(h for h in data['results'] if h['host'] == self.sub.name)
-        self.assertEqual([(f['port'], f['feature'], f['offered'], f['fresh']) for f in row['service_features']], [(443, 'http2', True, True)])
+        self.assertEqual([(f['port'], f['feature'], f['value'], f['detail'], f['fresh']) for f in row['service_features']],
+                         [(443, 'http2', 'yes', 'ALPN h2', True)])
 
     def test_purging_the_host_removes_its_readings(self):
         from agentapi import host_manage
-        with mock.patch.object(host_manage, '_purge', wraps=host_manage._purge):
-            host_manage._purge(self.project, self.sub.name)
+        host_manage._purge(self.project, self.sub.name)
         self.assertFalse(ServiceFeature.objects.filter(host=self.sub.name).exists())

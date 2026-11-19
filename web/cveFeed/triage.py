@@ -567,15 +567,15 @@ def precondition_brief(m, evidence, names=()):
     stored = evidence.get('preconditions') if isinstance(evidence.get('preconditions'), dict) else {}
     out = []
     for key, need in needs.items():
-        spec = service_features.FEATURES[key]
+        spec = service_features.server(key)
         seen = stored.get(key) if isinstance(stored.get(key), dict) else {}
         state = seen.get('state') if seen.get('state') in service_features.STATES else 'unknown'
         out.append({'feature': spec.label, 'advisory_says': _prose(need.get('quote'), 300, names), 'host_reading': state,
                     'reading': _s(seen.get('detail'), 120, names),
                     'absent_rules_out': bool(need.get('rule_out')),
-                    'note': (f'{spec.label} being on is a precondition of the flaw, not proof of it.' if state == 'offered' else
+                    'note': (f'{spec.label} being on is a precondition of the flaw, not proof of it.' if state == 'exposed' else
                              f'No fresh, direct reading says whether the host offers {spec.label} (behind a CDN or proxy the edge answers).'
-                             if state == 'unknown' else f'The host does not offer {spec.label} on any port read.')})
+                             if state == 'unknown' else f'The readings of every port where {spec.label} would be served rule it out.')})
     return out
 
 

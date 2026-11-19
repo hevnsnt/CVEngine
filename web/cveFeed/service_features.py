@@ -2,53 +2,56 @@
 
 Some flaws are only reachable when the service has a feature turned on: the nginx HTTP/2 module flaws (CVE-2026-123007, CVE-2026-123633) need
 HTTP/2, Terrapin needs an SSH algorithm, an SMBv3 compression flaw needs compression. A version match cannot tell; a reading of the feature can.
-This module holds the three parts, written once for every feature:
+Everything here is written once for every feature:
 
-- ``FEATURES``: the closed vocabulary. Each feature names its values, which value means "offered", the readings that set it (``sources``), which
-  of a host's ports must be read before its absence can be concluded (``relevant``), and whether an edge (a CDN, WAF or reverse proxy that answers
-  for the host) answers it instead of the origin (``edge_sensitive``). The readings are stored as ``ServiceFeature`` rows, one per host, port and
-  feature; no row is unknown.
-- ``requirements(cve)``: the features a CVE needs. The advisory's own words decide (``detection_classes.FEATURE_PRECONDITIONS``, a table with one
-  wording rule per feature), unless a person's detection record (source ``manual``) says otherwise (``requires_features``: ``{feature: true |
-  false}``, which corrects the rule either way). The rules write the same field on the records they build, for people and agents to read; a
-  model's answer never sets it.
-- ``assess`` and ``closure_reason``: for a match of such a CVE, the state of the feature on its host: ``offered`` (a fresh reading shows it:
-  the match's confidence rises by ``BOOST``, never to proof, see below), ``absent`` (every relevant port was read recently and none offers it:
-  the match is closed as not applicable with the reason, through the same path as every other deterministic rule-out,
-  ``correlation.close_invalid_correlation``) or ``unknown`` (no fresh reading, a relevant port not read, or an edge answers for the host: no
-  change). A feature being on is a precondition, not proof: it never lifts a version-only match above the triage ceiling (``triage.ceiling``)
-  and it never raises the classification, only the 0..1 confidence, and at most to ``BOOST_CAP``.
+- The vocabulary is the Sentinel library's (``cvengine_scanner.features``: ``FEATURES`` and the validator ``clean_features``), one copy for both
+  sides. ``SERVER`` adds what only the server needs per feature: its label and words, which of a host's ports must be read before its absence
+  can be concluded (``relevant``) and whether an edge (a CDN, WAF or reverse proxy answering for the host) answers the reading instead of the
+  origin (``edge_sensitive``). A feature without an entry there gets ``DEFAULT``.
+- Readings arrive as the optional ``service_features`` list any result kind may carry (cleaned for every kind by
+  ``agentapi.sentinel_broker.clean_result``) and are stored by ``ingest``, the one function every kind's ingest calls, as ``ServiceFeature`` rows
+  (one per host, port and feature; no row is unknown). ``ingest`` re-evaluates the matches of the hosts whose readings changed.
+- The rule table is ``detection_classes.FEATURE_RULES``: a CVE predicate (the advisory's wording) and, for the feature it needs, the reading values
+  that expose the host and those that rule it out. ``requirements(cve)`` gives a CVE's needs; a person's detection record (source ``manual``) can
+  correct the rule either way (``requires_features``: ``{feature: true | false}``). The rules write the same field on the records they build;
+  a model's answer never sets it.
+- One evaluation path (``assess``, ``closure_reason``, ``adjust``) gives three states. ``exposed``: a fresh reading on some port has an exposing
+  value; the match's confidence rises by ``BOOST``, at most to ``BOOST_CAP``, never its classification: a feature being on is a precondition, not
+  proof, and a version-only match stays under the triage ceiling (``triage.ceiling``). ``ruled_out``: every relevant port of the host was read
+  recently, each reading clears it, and the advisory names no way to the feature that is not read; the match is closed as not applicable with
+  the reason, through the path every deterministic rule-out uses (``correlation.invalid_identity_reason`` and ``close_invalid_correlation``).
+  ``unknown``: anything else (no fresh reading, a relevant port not read, an inconclusive value, an edge): no change.
 
-Edges. Behind a CDN or a reverse proxy the TLS handshake (and so ALPN) is the edge's, not the origin nginx's: CloudFront offers h2 whatever
-the origin does. For an ``edge_sensitive`` feature a host that ``host_context.edge_for`` reports as fronted (its CNAME, a CDN flag on the host
-or an address, a WAF fingerprint, edge response headers, a probe that saw an edge page) reads as unknown, neither ruled out nor raised. That is
-deliberately wider than the DNS-verified edge that may clear a match (``triage.closure_basis``): a header alone is the host's own say-so, but
-here it can only keep a match open. A reading is the origin's own when the host is reached directly: a name or an address no edge indicator
-names (a host that is an address and not a CDN address is the origin address itself).
+Edges. Behind a CDN or a reverse proxy the TLS handshake (and so ALPN) is the edge's, not the origin nginx's: CloudFront offers h2 whatever the
+origin does. For an ``edge_sensitive`` feature a host that ``host_context.edge_for`` reports as fronted (its CNAME, a CDN flag on the host or an
+address, a WAF fingerprint, edge response headers, a probe that saw an edge page) reads as unknown, neither ruled out nor raised. That is wider
+than the DNS-verified edge that may clear a match (``triage.closure_basis``): a header alone is the host's own say-so, but here it can only keep a
+match open. A reading counts as the origin's own when the host is reached directly: a name or an address no edge indicator names (a host that is
+an address and not a CDN address is the origin address itself).
 
-Re-evaluation. Correlation reads the state for each new or moved match (``adjust``). A new reading reaches the existing matches through
-``reevaluate``, run by the hygiene check right after it stores the readings: a match the reading rules out is closed, one an earlier reading
-closed is reopened (unjudged, at its version's confidence, its triage row pending again) when the reading no longer rules it out, and the
-confidence of the rest follows the state.
-
-Adding a feature (HTTP/3 next: an ``Alt-Svc: h3`` response header, nginx's QUIC module): an entry in ``FEATURES`` (values, sources, relevant
-ports), a wording rule in ``detection_classes.FEATURE_PRECONDITIONS``, and a writer that stores its readings with ``store`` from the result
-that carries them. Correlation, triage, the closure and the explanation need no change.
+Adding a feature (HTTP/3 next, for the same nginx family: an ``Alt-Svc: h3`` response header, nginx's QUIC module): a vocabulary entry in
+``cvengine_scanner.features`` (say ``http3: yes | no``), the Sentinel kind that reads it adds items to its result's ``service_features``, the kind's
+server ingest passes them to ``ingest``, a ``SERVER`` entry here (label, words, the HTTPS ports, edge-sensitive) and a rule in
+``detection_classes.FEATURE_RULES`` (the advisory's words for "when HTTP/3 / QUIC is enabled"). Correlation, triage, the closure, the explanation
+and the host page need no change.
 """
 import logging
 import re
 from dataclasses import dataclass, field
 from datetime import timedelta
 
+from cvengine_scanner.features import FEATURES, clean_features
+
 logger = logging.getLogger(__name__)
 
 FRESH = timedelta(days=14)  # a reading older than this is unknown: the hygiene check reads every target daily
-BOOST = 0.05  # the confidence a fresh reading that the feature is offered adds to a match: a precondition, never proof
+BOOST = 0.05  # the confidence a fresh exposing reading adds to a match: a precondition, never proof
 BOOST_CAP = 0.9  # never at or above what hard evidence gives (a distribution tracker listing the build: 0.95)
-CLOSED = 'Closed automatically: precondition not met'  # the lead of the closure reason (correlation.AUTO_CLOSED)
+CLOSED = 'Closed automatically: precondition not met'  # the lead of the closure reason (correlation.PRECONDITION_CLOSED)
 AUTOMATIC_MODEL = 'deterministic-correlation'  # what correlation.close_invalid_correlation writes
-STATES = ('offered', 'absent', 'unknown')
-_WORD = re.compile(r'[^A-Za-z0-9 ._:/;()-]')
+STATES = ('exposed', 'ruled_out', 'unknown')
+_SOURCE = re.compile(r'[a-z0-9_]{1,24}')
+_WORD = re.compile(r'[^A-Za-z0-9 ._:/;,()+@-]')
 
 
 def _https_port(number, service='', tunnel=''):
@@ -58,72 +61,100 @@ def _https_port(number, service='', tunnel=''):
 
 
 @dataclass(frozen=True)
-class Feature:
-    key: str
+class Server:
     label: str
-    values: tuple  # what a reading may say (a stored value outside it is ignored)
-    offered: str  # the value that means the feature is on
-    sources: tuple  # the readings that set it
-    relevant: object  # (port number, service name, tunnel) -> whether the port must be read before the feature's absence holds
-    edge_sensitive: bool = True  # an edge in front of the host answers this reading instead of the origin
-    transport: str = 'tls'
-    words: dict = field(default_factory=dict)
+    relevant: object = None  # (port number, service name, tunnel) -> whether the port must be read before the feature can be ruled out; None: any read port
+    edge_sensitive: bool = False  # an edge in front of the host answers this reading instead of the origin
+    words: dict = field(default_factory=dict)  # 'exposed' / 'ruled_out': how the host is described ("offers HTTP/2")
 
 
-FEATURES = {
-    'http2': Feature('http2', 'HTTP/2', ('yes', 'no'), 'yes', ('tls_alpn',), _https_port, edge_sensitive=True, transport='tls',
-                     words={'reading': 'ALPN', 'absent': 'does not offer HTTP/2', 'offered': 'offers HTTP/2',
-                            'unread': 'cleartext HTTP/2 (h2c) is not read'}),
+SERVER = {
+    'http2': Server('HTTP/2', _https_port, edge_sensitive=True, words={'exposed': 'offers HTTP/2', 'ruled_out': 'does not offer HTTP/2'}),
 }
 
-# what a hygiene_check certificate's ``alpn`` (agentapi.probe_results.ALPN_VALUES) means for the http2 feature; "unknown" or a missing field is no row
-ALPN_HTTP2 = {'h2': ('yes', 'ALPN h2'), 'http/1.1': ('no', 'ALPN http/1.1'), 'none': ('no', 'no ALPN protocol chosen')}
+
+def server(feature):
+    return SERVER.get(feature) or Server(feature)
 
 
-def _clean(text, limit=120):
+def _words(feature, state):
+    spec = server(feature)
+    return spec.words.get(state) or (f'has {spec.label} on' if state == 'exposed' else f'does not have {spec.label} on')
+
+
+def _clean(text, limit=200):
     return _WORD.sub('', str(text or ''))[:limit]
 
 
 # --- storing readings ------------------------------------------------------------------------------------------------------------------------
 
-def store(domain, host, port, feature, value, source, detail='', now=None):
-    """Upsert one reading (``value`` None removes it: the reading said nothing, which is unknown). Returns whether the stored value changed.
-    Only the vocabulary is stored: an unknown feature, a value outside the feature's or a source it does not take raises ValueError."""
+def _domains(project_id, hosts):
+    """``{host: Domain}`` for the names the project holds (a discovered host, or a target named like it). A reading of a name the project does not
+    hold is not stored."""
+    from startScan.models import Subdomain
+    from targetApp.models import Domain
+    out = {}
+    for name, domain in Subdomain.objects.filter(target_domain__project_id=project_id, name__in=list(hosts)).select_related('target_domain') \
+            .order_by('-id').values_list('name', 'target_domain'):
+        out.setdefault(name.lower(), domain)
+    for domain in Domain.objects.filter(project_id=project_id, name__in=list(hosts)):
+        out.setdefault(domain.name.lower(), domain.pk)
+    return out
+
+
+def ingest(project_id, items, source, allowed=None, covered=None, now=None, reevaluate_matches=True):
+    """Store a result's ``service_features`` readings for the project: the one ingest every result kind calls.
+
+    ``items`` is the result's list (validated again here with ``clean_features``: anything malformed or outside the vocabulary is dropped).
+    ``source`` names the reading (the task kind, ``[a-z0-9_]{1,24}``). ``allowed``, when given, is the set of ``(host, port)`` the task asked
+    about: a reading of anything else is dropped. ``covered``, when given, is the set of ``(host, port, feature)`` the task read: a stored reading
+    of such an endpoint from the same source that this result did not repeat is removed (the reading is unknown now, never "no"). A host the
+    project does not hold is skipped. The hosts whose readings changed have their CVE matches re-evaluated (``reevaluate``). Returns
+    ``{'stored', 'removed', 'changed_hosts'}``."""
     from django.utils import timezone
 
     from cveFeed.models import ServiceFeature
-    spec = FEATURES.get(feature)
-    if spec is None or source not in spec.sources or (value is not None and value not in spec.values):
-        raise ValueError(f'not a {feature} reading: {value!r} from {source!r}')
-    if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
-        raise ValueError('port out of range')
-    host = str(host or '').strip().lower().rstrip('.')[:500]
-    rows = ServiceFeature.objects.filter(domain=domain, host=host, port=port, feature=feature)
-    if value is None:
-        return rows.filter(source=source).delete()[0] > 0
-    before = rows.values_list('value', flat=True).first()
-    rows.update_or_create(domain=domain, host=host, port=port, feature=feature,
-                          defaults={'value': value, 'detail': _clean(detail), 'source': source, 'transport': spec.transport,
-                                    'observed_at': now or timezone.now()})
-    return before != value
-
-
-def store_alpn(domain, infos, nothing_there=(), now=None):
-    """Store the http2 readings of one hygiene check: ``infos`` maps ``(host, port)`` to the cleaned certificate info (its ``alpn``), and
-    ``nothing_there`` lists the endpoints that answered with no TLS service (their reading goes). Returns the hosts whose state changed."""
-    changed = set()
-    for (host, port), info in infos.items():
-        value, detail = ALPN_HTTP2.get((info or {}).get('alpn'), (None, ''))
-        if store(domain, host, port, 'http2', value, 'tls_alpn', detail, now=now):
-            changed.add(str(host).lower())
-    for host, port in nothing_there:
-        if store(domain, host, port, 'http2', None, 'tls_alpn', now=now):
-            changed.add(str(host).lower())
-    return changed
+    if not _SOURCE.fullmatch(str(source or '')):
+        raise ValueError('a reading names its source')
+    now = now or timezone.now()
+    readings = clean_features(items)
+    if allowed is not None:
+        allowed = {(str(h).lower().rstrip('.'), p) for h, p in allowed}
+        readings = [r for r in readings if (r['host'], r['port']) in allowed]
+    covered = {(str(h).lower().rstrip('.'), p, f) for h, p, f in covered or ()}
+    hosts = {r['host'] for r in readings} | {h for h, _p, _f in covered}
+    domains = _domains(project_id, hosts) if hosts else {}
+    changed, stored, removed = set(), 0, 0
+    seen = set()
+    for r in readings:
+        domain = domains.get(r['host'])
+        if domain is None:
+            continue
+        seen.add((r['host'], r['port'], r['feature']))
+        before = ServiceFeature.objects.filter(domain_id=domain, host=r['host'], port=r['port'], feature=r['feature']).values_list('value', flat=True).first()
+        ServiceFeature.objects.update_or_create(domain_id=domain, host=r['host'], port=r['port'], feature=r['feature'], defaults={
+            'value': r['value'], 'detail': r['detail'], 'transport': r['transport'], 'source': source, 'observed_at': now})
+        stored += 1
+        if before != r['value']:
+            changed.add(r['host'])
+    for host, port, feature in covered - seen:
+        domain = domains.get(host)
+        if domain is None:
+            continue
+        gone = ServiceFeature.objects.filter(domain_id=domain, host=host, port=port, feature=feature, source=source).delete()[0]
+        if gone:
+            removed += gone
+            changed.add(host)
+    if changed and reevaluate_matches:
+        try:
+            reevaluate(project_id, changed, now=now)
+        except Exception:
+            logger.exception('could not re-evaluate the CVE matches of %d host(s) after new service feature readings', len(changed))
+    return {'stored': stored, 'removed': removed, 'changed_hosts': sorted(changed)}
 
 
 def readings_for(project_ids, hosts):
-    """``{(project id, host): [{port, feature, label, value, detail, source, observed_at, fresh}]}`` for the host page (one query)."""
+    """``{(project id, host): [{port, transport, feature, label, value, detail, source, observed_at, fresh}]}`` for the host page (one query)."""
     from django.utils import timezone
 
     from cveFeed.models import ServiceFeature
@@ -131,29 +162,29 @@ def readings_for(project_ids, hosts):
     if not hosts:
         return out
     for row in ServiceFeature.objects.filter(domain__project_id__in=list(project_ids), host__in=list(hosts)).order_by('host', 'port', 'feature') \
-            .values('domain__project_id', 'host', 'port', 'feature', 'value', 'detail', 'source', 'observed_at'):
-        spec = FEATURES.get(row['feature'])
-        if spec is None:
+            .values('domain__project_id', 'host', 'port', 'transport', 'feature', 'value', 'detail', 'source', 'observed_at'):
+        if row['feature'] not in FEATURES:
             continue
         out.setdefault((row['domain__project_id'], row['host']), []).append({
-            'port': row['port'], 'feature': row['feature'], 'label': spec.label, 'value': row['value'], 'offered': row['value'] == spec.offered,
-            'detail': row['detail'], 'source': row['source'], 'observed_at': row['observed_at'].isoformat(),
-            'fresh': row['observed_at'] >= now - FRESH})
+            'port': row['port'], 'transport': row['transport'], 'feature': row['feature'], 'label': server(row['feature']).label, 'value': row['value'],
+            'detail': row['detail'], 'source': row['source'], 'observed_at': row['observed_at'].isoformat(), 'fresh': row['observed_at'] >= now - FRESH})
     return out
 
 
 # --- which CVEs need a feature ---------------------------------------------------------------------------------------------------------
 
 def _from_words(title, description, stated):
-    from cveFeed.detection_classes import feature_preconditions
+    from cveFeed.detection_classes import feature_preconditions, feature_rule
     found = feature_preconditions(title or '', description or '')
     if isinstance(stated, dict):
         for key, needed in stated.items():
             if key not in FEATURES or not isinstance(needed, bool):
                 continue
-            if needed:
-                found.setdefault(key, {'quote': '', 'rule_out': True})
-            else:
+            rule = feature_rule(key)
+            if needed and key not in found and rule is not None:
+                found[key] = {'rule': rule['id'], 'quote': '', 'rule_out': True, 'exposed': tuple(rule['exposed']),
+                              'clears': tuple(rule['rule_out']) if rule['rule_out'] is not None else None}
+            elif not needed:
                 found.pop(key, None)
     return {k: v for k, v in found.items() if k in FEATURES}
 
@@ -163,10 +194,8 @@ def _stated(strategy):
 
 
 def requirements(cve):
-    """``{feature: {'quote', 'rule_out'}}``: the service features the CVE's flaw needs. The detection strategy's ``requires_features`` decides
-    for a feature it names (True keeps it, with the advisory's sentence when the rule found one; False drops it); the advisory's words decide the
-    rest (``detection_classes.feature_preconditions``). Read from ``index()``, so a CVE that needs nothing costs no query (triage asks this of
-    every match)."""
+    """``{feature: {'rule', 'quote', 'rule_out', 'exposed', 'clears'}}``: the service features the CVE's flaw needs (see the module docstring).
+    Read from ``index()``, so a CVE that needs nothing costs no query (triage asks this of every match)."""
     if getattr(cve, 'pk', None) is None:  # not stored: its own words
         return _from_words(getattr(cve, 'title', ''), getattr(cve, 'original_description', '') or getattr(cve, 'summary', ''), None)
     return index().get(cve.pk, {})
@@ -181,9 +210,10 @@ def reset_index():
 
 
 def index():
-    """``{CVEEntry id: requirements}`` for every CVE that needs a feature: one query for the CVEs whose words name a feature
-    (``detection_classes.FEATURE_PREFILTER``, then the rule itself) and one for the detection records that state ``requires_features``. Cached per
-    process, and read again when the CVE table or a detection record changed (looked at once every ``INDEX_CHECK`` seconds)."""
+    """``{CVEEntry id: requirements}`` for every CVE that needs a feature: one query for the CVEs whose words name one
+    (``detection_classes.FEATURE_PREFILTER``, then the rules themselves) and one for the people's detection records that state
+    ``requires_features``. Cached per process, and read again when the CVE table or a detection record changed (looked at once every
+    ``INDEX_CHECK`` seconds)."""
     import time
 
     from django.db.models import Count, Max, Q
@@ -227,7 +257,7 @@ def _edge(sub, project_id):
     from cveFeed import host_context
     try:
         return host_context.edge_for(sub, project_id)
-    except Exception:  # noqa: BLE001 - an edge that cannot be read is an edge that cannot be ruled out: unknown
+    except Exception:
         logger.warning('could not read the edge of host %s', sub.pk, exc_info=True)
         return {'fronted': True, 'providers': [], 'basis': ['the edge could not be read']}
 
@@ -236,58 +266,75 @@ def _ports_text(rows):
     return '; '.join(f'on {r.port}: {r.detail or r.value}' for r in sorted(rows, key=lambda r: r.port)[:6])
 
 
-def assess(sub, feature, project_id=None, now=None):
-    """``{'feature', 'label', 'state', 'detail', 'why', 'ports'}``: what the readings say about ``feature`` on the host ``sub`` (a Subdomain).
-    See the module docstring for the three states. Memoised on the Subdomain object for the life of the object."""
-    memo = sub.__dict__.setdefault('_feature_assessments', {})
-    if feature in memo:
-        return memo[feature]
-    from django.utils import timezone
+def _exposes(value, need):
+    return any(token in need['exposed'] for token in str(value).split(','))
 
-    from cveFeed.models import ServiceFeature
-    spec = FEATURES[feature]
+
+def _clears(value, need):
+    if _exposes(value, need):
+        return False
+    clears = need.get('clears')
+    return clears is None or all(token in clears for token in str(value).split(','))
+
+
+def _rows(sub, feature, project_id):
+    """The host's stored readings of ``feature``, read once per Subdomain object."""
+    memo = sub.__dict__.setdefault('_feature_rows', {})
+    if feature not in memo:
+        from cveFeed.models import ServiceFeature
+        memo[feature] = list(ServiceFeature.objects.filter(domain__project_id=project_id, host=sub.name.lower(), feature=feature))
+    return memo[feature]
+
+
+def assess(sub, feature, need, project_id=None, now=None):
+    """``{'feature', 'label', 'state', 'detail', 'why', 'ports'}``: what the host's readings say about ``feature`` under one requirement ``need``
+    (what exposes it and what clears it). See the module docstring for the three states."""
+    from django.utils import timezone
+    spec = server(feature)
     now = now or timezone.now()
     project_id = project_id or (sub.target_domain.project_id if sub.target_domain_id else None)
-    rows = [r for r in ServiceFeature.objects.filter(domain__project_id=project_id, host=sub.name.lower(), feature=feature, source__in=spec.sources)
-            if r.value in spec.values]
+    allowed = FEATURES[feature]['values']
+    rows = [r for r in _rows(sub, feature, project_id) if all(t in allowed for t in str(r.value).split(','))]
     fresh = [r for r in rows if r.observed_at >= now - FRESH]
-    out = {'feature': feature, 'label': spec.label, 'state': 'unknown', 'detail': _ports_text(fresh),
-           'ports': {r.port: r.value for r in fresh}, 'why': ''}
+    out = {'feature': feature, 'label': spec.label, 'state': 'unknown', 'detail': _ports_text(fresh), 'ports': {r.port: r.value for r in fresh}, 'why': ''}
     if spec.edge_sensitive and fresh:
-        edge = _edge(sub, project_id)
+        edge = sub.__dict__.get('_feature_edge')
+        if edge is None:
+            edge = sub.__dict__['_feature_edge'] = _edge(sub, project_id)
         if edge.get('fronted'):
             named = ', '.join(edge.get('providers') or []) or 'an edge'
-            out['why'] = (f'the host is fronted by {named}: its {spec.words.get("reading", "reading")} answer is the edge\'s, not the origin\'s, so it '
-                          f'neither rules the match out nor supports it')
-            memo[feature] = out
+            out['why'] = (f'the host is fronted by {named}: the reading is the edge\'s, not the origin\'s, so it neither rules the match out nor '
+                          'supports it')
             return out
-    offered = [r for r in fresh if r.value == spec.offered]
-    if offered:
-        out.update(state='offered', detail=_ports_text(offered),
-                   why=f'the host {spec.words.get("offered", "offers " + spec.label)} ({_ports_text(offered)})')
-    elif not fresh:
-        out['why'] = f'no recent reading of {spec.label} on this host' + (' (the last one is older than %d days)' % FRESH.days if rows else '')
+    exposing = [r for r in fresh if _exposes(r.value, need)]
+    if exposing:
+        out.update(state='exposed', detail=_ports_text(exposing), why=f'the host {_words(feature, "exposed")} ({_ports_text(exposing)})')
+        return out
+    if not fresh:
+        out['why'] = f'no recent reading of {spec.label} on this host' + (f' (the last one is older than {FRESH.days} days)' if rows else '')
+        return out
+    known = _ports_of(sub)
+    relevant = spec.relevant or (lambda number, service='', tunnel='': True)
+    read = {r.port for r in fresh if relevant(r.port, *known.get(r.port, ('', '')))}
+    missing = sorted(number for number, (service, tunnel) in known.items() if spec.relevant and relevant(number, service, tunnel) and number not in read)
+    if not read:
+        out['why'] = f'no port of this host where {spec.label} would be served was read'
+    elif missing:
+        out['why'] = f'port{"s" if len(missing) > 1 else ""} {", ".join(map(str, missing[:6]))} of this host {"were" if len(missing) > 1 else "was"} not read'
+    elif not all(_clears(r.value, need) for r in fresh if r.port in read):
+        out['why'] = f'a reading of {spec.label} on this host neither exposes it nor clears it'
     else:
-        read = {r.port for r in fresh if spec.relevant(r.port)}
-        known = {number for number, (service, tunnel) in _ports_of(sub).items() if spec.relevant(number, service, tunnel)}
-        missing = sorted(known - read)
-        if not read:
-            out['why'] = f'no port of this host where {spec.label} would be served was read'
-        elif missing:
-            out['why'] = f'port{"s" if len(missing) > 1 else ""} {", ".join(map(str, missing[:6]))} of this host {"were" if len(missing) > 1 else "was"} not read'
-        else:
-            out.update(state='absent', why=f'the host {spec.words.get("absent", "does not offer " + spec.label)} ({_ports_text(fresh)})')
-    memo[feature] = out
+        out.update(state='ruled_out', why=f'the host {_words(feature, "ruled_out")} ({_ports_text(fresh)})')
     return out
 
 
 def preconditions_for(sub, cve, now=None):
-    """``[{feature, label, state, detail, why, ports, quote, rule_out}]``: one entry per feature ``cve`` needs, as the readings of the host ``sub``
-    say; [] when it needs none or there is no host."""
+    """``[{feature, label, state, detail, why, ports, rule, quote, rule_out, exposed, clears}]``: one entry per feature ``cve`` needs, as the
+    readings of the host ``sub`` say; [] when it needs none or there is no host."""
     reqs = requirements(cve)
     if not reqs or sub is None:
         return []
-    return [{**assess(sub, key, now=now), **need} for key, need in reqs.items()]
+    return [{**assess(sub, key, need, now=now), **need} for key, need in reqs.items()]
 
 
 def preconditions(match, now=None):
@@ -296,13 +343,12 @@ def preconditions(match, now=None):
 
 
 def closure_reason(match, now=None):
-    """The reason to close a match whose CVE needs a feature its host does not offer (fresh, direct readings of every relevant port), or ''."""
+    """The reason to close a match whose CVE needs a feature the host's fresh, direct readings rule out, or ''."""
     for item in preconditions(match, now=now):
-        if item['state'] != 'absent' or not item['rule_out']:
+        if item['state'] != 'ruled_out' or not item['rule_out']:
             continue
-        spec = FEATURES[item['feature']]
         said = f' The advisory says: "{_clean(item["quote"], 300)}"' if item['quote'] else ' Its detection record says the flaw needs it.'
-        return (f'{CLOSED}: the host {spec.words.get("absent", "does not offer " + spec.label)} ({item["detail"]}), which this CVE needs.{said} '
+        return (f'{CLOSED}: the host {_words(item["feature"], "ruled_out")} ({item["detail"]}), which this CVE needs.{said} '
                 'This closes this candidate match only; a later reading that shows the feature reopens it.')
     return ''
 
@@ -314,18 +360,18 @@ def is_precondition_closure(match):
 
 def evidence_of(items, boost):
     """The ``evidence['preconditions']`` a match stores: per feature its state, the reading in words and the confidence it added."""
-    return {item['feature']: {'state': item['state'], 'detail': _clean(item['detail']), 'boost': boost if item['state'] == 'offered' else 0.0}
+    return {item['feature']: {'state': item['state'], 'detail': _clean(item['detail']), 'boost': boost if item['state'] == 'exposed' else 0.0}
             for item in items}
 
 
 def adjust(confidence, items, eligible=True):
-    """``(confidence, evidence)`` of a match after its preconditions: ``BOOST`` for a feature a fresh, direct reading shows offered (once, however
-    many features), capped at ``BOOST_CAP`` and never below where it was; ``eligible`` False (a version outside the range, a distribution that lists
+    """``(confidence, evidence)`` of a match after its preconditions: ``BOOST`` for a feature a fresh, direct reading shows on (once, however many
+    features), capped at ``BOOST_CAP`` and never below where it was; ``eligible`` False (a version outside the range, a distribution that lists
     the build as fixed) adds nothing."""
     if not items:
         return confidence, {}
     boost = 0.0
-    if eligible and any(i['state'] == 'offered' for i in items) and confidence < BOOST_CAP:
+    if eligible and any(i['state'] == 'exposed' for i in items) and confidence < BOOST_CAP:
         boost = round(min(BOOST_CAP, confidence + BOOST) - confidence, 2)
     return round(confidence + boost, 2), evidence_of(items, boost)
 
@@ -361,7 +407,7 @@ def _base_confidence(match):
 def reevaluate(project_id, hosts, now=None):
     """Apply the current readings to the current matches of ``hosts`` (names) in the project whose CVE needs a feature: close the ones a reading
     rules out, reopen the ones a precondition closure holds that no reading rules out any more, and move the confidence of the rest with the
-    state. Returns ``{'closed', 'reopened', 'raised', 'lowered'}``. Never fatal to the caller."""
+    state. Returns ``{'closed', 'reopened', 'raised', 'lowered'}``."""
     from django.db import transaction
     from django.utils import timezone
 
@@ -375,19 +421,17 @@ def reevaluate(project_id, hosts, now=None):
     now = now or timezone.now()
     matches = list(CVEMatch.objects.filter(subdomain__target_domain__project_id=project_id, subdomain__name__in=names, cve_entry_id__in=needing)
                    .filter(correlation.latest_scan_q('subdomain__'))
-                   .select_related('cve_entry__detection', 'subdomain__target_domain').order_by('pk'))
-    subs = {}
-    touched = []
+                   .select_related('cve_entry', 'subdomain__target_domain').order_by('pk'))
+    subs, touched = {}, []
     for match in matches:
-        if not requirements(match.cve_entry):
-            continue
-        match.subdomain = subs.setdefault(match.subdomain_id, match.subdomain)  # one Subdomain object per host: its assessment is read once
+        match.subdomain = subs.setdefault(match.subdomain_id, match.subdomain)  # one Subdomain object per host: its readings are read once
         items = preconditions(match, now=now)
+        if not items:
+            continue
         if is_precondition_closure(match):
             if closure_reason(match, now=now):
                 continue
-            base = _base_confidence(match)
-            confidence, evidence = adjust(base, items, _eligible(match))
+            confidence, evidence = adjust(_base_confidence(match), items, _eligible(match))
             evidence = {**(match.evidence if isinstance(match.evidence, dict) else {}), 'preconditions': evidence}
             with transaction.atomic():
                 CVEMatch.objects.filter(pk=match.pk, ai_verdict='not_affected').update(
@@ -404,8 +448,7 @@ def reevaluate(project_id, hosts, now=None):
             if correlation.close_invalid_correlation(match, reason):
                 counts['closed'] += 1
             continue
-        old = stored_boost(match.evidence)
-        confidence, evidence = adjust(round(match.confidence - old, 2), items, _eligible(match))
+        confidence, evidence = adjust(round(match.confidence - stored_boost(match.evidence), 2), items, _eligible(match))
         merged = {**(match.evidence if isinstance(match.evidence, dict) else {}), 'preconditions': evidence}
         if confidence != match.confidence or merged != match.evidence:
             CVEMatch.objects.filter(pk=match.pk).update(confidence=confidence, evidence=merged, updated_at=now)
@@ -419,6 +462,6 @@ def reevaluate(project_id, hosts, now=None):
     if counts['closed'] or counts['reopened']:
         from cveFeed import activity
         activity.log('confirm', f'Service feature readings: {counts["closed"]} CVE match(es) closed (a precondition is not met), '
-                                f'{counts["reopened"]} reopened (it no longer rules them out)', project=project_id,
+                                f'{counts["reopened"]} reopened (a reading no longer rules them out)', project=project_id,
                      decision='service_feature_preconditions', **counts)
     return counts
