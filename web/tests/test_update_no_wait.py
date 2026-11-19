@@ -418,6 +418,28 @@ class AdoptionTests(SentinelBase):
         self.assertEqual(task.status, 'failed')
         self.assertFalse(self.ip().ports.exists())
 
+    def test_a_sentinel_that_releases_a_task_cannot_make_its_late_result_adoptable_by_the_reason_it_gives(self):
+        """Security review LOW 2: the release reason was stored as the task's error as sent, so a Sentinel could give one of the server's own
+        late-servable reasons and have the result it sent afterwards adopted. Its words now always follow ``released by the Sentinel: ``."""
+        for reason in sentinels.LATE_SERVABLE_ERRORS + ('cancelled by a person',):
+            with self.subTest(reason):
+                task = self.held(status='claimed')
+                status, out = call(self.t['dana'], 'POST', f'/api/v1/sentinel/tasks/{task.pk}/release', {'reason': reason})
+                self.assertEqual(status, 200, out)
+                task.refresh_from_db()
+                self.assertEqual((task.status, task.error), ('expired', f'released by the Sentinel: {reason}'))
+                self.assertFalse(sentinels.late_servable(task))
+                self.assertEqual(sentinels.task_outcome(task), 'released by the Sentinel')
+                self.interrupted()
+                status, out = self.report(task)
+                self.assertEqual(status, 200, out)
+                self.assertNotEqual(out.get('adopted'), True)
+                task.refresh_from_db()
+                self.assertEqual(task.status, 'expired')
+        self.assertFalse(self.ip().ports.exists())
+        self.assertEqual(sentinels.release_reason(''), 'released by the Sentinel')
+        self.assertEqual(sentinels.release_reason('  '), 'released by the Sentinel')
+
 
 class DrainQueryTests(TestCase):
     """The two counts scripts/apply-update.sh asks the web service for, run here against the test database."""
