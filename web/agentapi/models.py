@@ -144,6 +144,10 @@ class SentinelTask(models.Model):
     # A streamed kind (``sentinel_contract.STREAMED``: bbot_discovery) posts numbered batches while it runs (``SentinelPartial``): the seq of the last
     # batch the server took. A batch at or below it is a retry of one already stored; the next must be exactly one more.
     partial_seq = models.PositiveIntegerField(default=0, db_default=0)
+    # Who held it last (an Agent id, kept when ``agent`` is cleared by an expiry or a cancel; set by the claim) and when a late report of it was
+    # recorded (``sentinel_broker._record_late``, once per task). Both used to be answered by a JSON lookup in the audit log inside the task's row lock.
+    last_holder = models.IntegerField(null=True, blank=True)
+    late_reported_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -151,6 +155,9 @@ class SentinelTask(models.Model):
     class Meta:
         ordering = ['-priority', 'created_at', 'id']
         indexes = [models.Index(fields=['status', 'lease_expires_at'], name='sentineltask_lease_idx'),
+                   # the reaper's queue-age select (``sentinel_broker.reap_expired``: queued tasks older than ``queued_ttl``), which runs every few seconds;
+                   # it holds only the queued rows, a small part of a table that keeps 30 days of work
+                   models.Index(fields=['created_at'], name='sentineltask_queued_age_idx', condition=models.Q(status='queued')),
                    models.Index(fields=['project', 'status'], name='sentineltask_project_idx'),
                    models.Index(fields=['scan', 'kind'], name='sentineltask_scan_kind_idx'),
                    # the Sentinels page's polls (live_overview, activity_metrics): the last five finished tasks of each Sentinel, the day's counts, the hour's
