@@ -531,19 +531,6 @@ class ScanActivity(models.Model):
 		return str(self.title)
 
 
-class Command(models.Model):
-	id = models.AutoField(primary_key=True)
-	scan_history = models.ForeignKey(ScanHistory, on_delete=models.CASCADE, blank=True, null=True)
-	activity = models.ForeignKey(ScanActivity, on_delete=models.CASCADE, blank=True, null=True)
-	command = models.TextField(blank=True, null=True)
-	return_code = models.IntegerField(blank=True, null=True)
-	output = models.TextField(blank=True, null=True)
-	time = models.DateTimeField()
-
-	def __str__(self):
-		return str(self.command)
-
-
 class Waf(models.Model):
 	id = models.AutoField(primary_key=True)
 	name = models.CharField(max_length=500)

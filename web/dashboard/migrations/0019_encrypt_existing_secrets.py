@@ -9,7 +9,10 @@ TARGETS = [('AIProviderSettings', ['api_key']), ('ApiCredential', ['value']), ('
 def encrypt_existing(apps, schema_editor):
     """Encrypt the secrets already stored, in place. Reads stay backward compatible meanwhile (a plaintext value is returned as is)."""
     for model_name, fields in TARGETS:
-        model = apps.get_model('dashboard', model_name)
+        try:
+            model = apps.get_model('dashboard', model_name)
+        except LookupError:  # dropped by 0037 (a migration run always has the historical model; only a call with today's registry lacks it)
+            continue
         for row in model.objects.all().iterator():
             row.save(update_fields=fields)
 
