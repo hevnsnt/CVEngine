@@ -57,6 +57,7 @@ BACKFILLS = (
     'recheck_openvas_generic_checks',     # OpenVAS matches a behaviour check (TRACE enabled) confirmed on a CVE whose record names no vendor or product
     'backfill_version_scripts',           # vmware-version's ESXi build and the other version script output stored ports keep, runZero hw hints (re-correlated)
     'revalidate_ai_drafts',               # AI-written checks closed only because no scanner could check them go back to validation; reasons named
+    'backfill_llamacpp_builds',           # llama.cpp blocks kept with no range: their record's "< b5662" read as build 5662 (re-correlated)
     'rerate_findings',                    # 1.3.5: rescore hosts for the new heat rules, clear stale fire marks (last: counts everything above)
 )
 MAX_ATTEMPTS = 3

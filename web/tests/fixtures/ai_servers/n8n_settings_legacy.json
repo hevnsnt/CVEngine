@@ -1,0 +1,19 @@
+{
+  "data": {
+    "endpointWebhook": "webhook",
+    "endpointWebhookTest": "webhook-test",
+    "timezone": "America/New_York",
+    "executionTimeout": -1,
+    "versionCli": "0.236.3",
+    "instanceId": "4d1c0b5e0e8e3ed7f3a1f0c6a6b5a4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7",
+    "isNpmAvailable": false,
+    "databaseType": "sqlite",
+    "nodeJsVersion": "18.17.0",
+    "userManagement": {
+      "enabled": false,
+      "showSetupOnFirstLoad": false,
+      "smtpSetup": false,
+      "authenticationMethod": "email"
+    }
+  }
+}

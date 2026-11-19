@@ -1,0 +1,37 @@
+{
+  "data": {
+    "settingsMode": "public",
+    "defaultLocale": "en",
+    "userManagement": {
+      "authenticationMethod": "email",
+      "showSetupOnFirstLoad": true,
+      "smtpSetup": false,
+      "passwordMinLength": 8
+    },
+    "sso": {
+      "saml": {
+        "loginEnabled": false
+      },
+      "ldap": {
+        "loginEnabled": false,
+        "loginLabel": ""
+      },
+      "oidc": {
+        "loginEnabled": false,
+        "loginUrl": ""
+      }
+    },
+    "authCookie": {
+      "secure": true
+    },
+    "previewMode": false,
+    "enterprise": {
+      "saml": false,
+      "ldap": false,
+      "oidc": false
+    },
+    "communityNodesEnabled": true,
+    "activeModules": [],
+    "expressionEngine": "legacy"
+  }
+}

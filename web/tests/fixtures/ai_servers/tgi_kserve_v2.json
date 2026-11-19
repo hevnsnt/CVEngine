@@ -1,0 +1,9 @@
+{
+  "name": "text-generation-inference",
+  "version": "3.3.6",
+  "extensions": [
+    "health",
+    "models",
+    "metrics"
+  ]
+}

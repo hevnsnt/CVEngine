@@ -1,0 +1,17 @@
+{
+  "version": "v3.7.0 (6f0a43c4ac8d0b0e1a3e1ba1f7a4a1b2c3d4e5f6)",
+  "endpoints": {
+    "models": "/v1/models",
+    "models_capabilities": "/v1/models/capabilities",
+    "chat_completions": "/v1/chat/completions",
+    "completions": "/v1/completions",
+    "embeddings": "/v1/embeddings"
+  },
+  "endpoint_groups": {
+    "monitoring": {
+      "metrics": "/metrics",
+      "version": "/version",
+      "system": "/system"
+    }
+  }
+}

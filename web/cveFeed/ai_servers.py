@@ -1,27 +1,39 @@
 """AI model servers and agent dashboards, read from outside: the version source entries for Ollama, llama.cpp's ``llama-server``, vLLM, LM Studio,
-KoboldCpp, Gradio, Langflow, ComfyUI, LiteLLM, the Ray dashboard, Open WebUI, Flowise, AnythingLLM, the OpenClaw gateway and Hermes Agent's
-dashboard (``version_catalogue.SOURCES`` adds them).
+KoboldCpp, Gradio, Langflow, ComfyUI, LiteLLM, the Ray dashboard, Open WebUI, Flowise, AnythingLLM, the OpenClaw gateway, Hermes Agent's
+dashboard, Hugging Face's Text Generation Inference (TGI), LocalAI, NVIDIA's Triton Inference Server, Dify and n8n
+(``version_catalogue.SOURCES`` adds them).
 
 Why. These servers are often started on a laptop or a GPU box with their default bind changed to ``0.0.0.0`` and no authentication: whoever reaches
 one can run prompts on its hardware, pull, push or delete its models (Ollama), run code through a workflow or a job (ComfyUI, Ray, Langflow,
-Flowise) or drive an agent that runs tools on the host (OpenClaw, Hermes Agent, AnythingLLM). Several have known exploited flaws (Ollama's
-CVE-2024-37032 "Probllama", Langflow's CVE-2025-3248 on CISA's KEV list, Ray's CVE-2023-48022 "ShadowRay", OpenClaw's CVE-2026-25253).
+Flowise, Dify, n8n) or drive an agent that runs tools on the host (OpenClaw, Hermes Agent, AnythingLLM). Several have known exploited flaws
+(Ollama's CVE-2024-37032 "Probllama", Langflow's CVE-2025-3248 and n8n's CVE-2025-68613 on CISA's KEV list, Ray's CVE-2023-48022 "ShadowRay",
+OpenClaw's CVE-2026-25253).
 
 What is asked. Each entry is the product's own status or metadata endpoint, a GET of a fixed path, asked only on the product's default port when
 the port scan left its service generic (or named the web framework the product runs on: ``APP_SERVERS``), or of a host already identified as the
-product (a technology, a port product, a template check's detection). Never a prompt, a chat, a completion, an embedding, a model pull or delete, a tool
-call, a WebSocket (the OpenClaw gateway's is never opened) or a login; never a token or a password. The Sentinel's ``version_read`` returns only
-the named JSON fields (``models.0.name``: the first model's name), an excerpt from a literal, or the ``*_info`` metric samples.
+product (a technology, a port product, a template check's detection). Never a prompt, a chat, a completion, an embedding, an inference, a model
+pull or delete, a tool call, a workflow run, a webhook, a setup step (Dify's and n8n's setup state is read, never posted), a WebSocket (the
+OpenClaw gateway's is never opened) or a login; never a token or a password. The Sentinel's ``version_read`` returns only the named JSON fields
+(``models.0.name``: the first model's name) and headers, an excerpt from a literal, or the ``*_info`` metric samples.
 
 How an answer is believed. Every reader takes only the exact shape its product answers with: Ollama's ``Ollama is running`` or its tags list,
 ``owned_by: llamacpp`` or llama.cpp's ``Server`` header and ``/props``, ``owned_by: vllm`` or a ``vllm:`` metric, ``"package": "Langflow"``, a
-Control UI title. A thin answer (vLLM's one-field ``/version``, Flowise's) is believed only next to such a signal, so a catch-all that answers
-every path with the same JSON or page gives nothing (the role the control path plays for the other entries).
+Control UI title, TGI's ``router: text-generation-router``, LocalAI's endpoint map, Triton's ``name: triton``, Dify's ``X-Version`` and ``X-Env``
+next to its setup step, n8n's settings or its page's Sentry meta tag. A thin answer (vLLM's one-field ``/version``, Flowise's, LocalAI's) is
+believed only next to such a signal, so a catch-all that answers every path with the same JSON or page gives nothing (the role the control path
+plays for the other entries).
 
-Exposures. An entry's exposure is rated by what the answer shows is open (``Exposure.rate``): an agent that runs tools with no sign-in or a
-Ray cluster that takes jobs from anyone is critical; Ollama (pull, push, delete) and a workflow runner (ComfyUI, Langflow, Flowise), and a
-reachable agent dashboard that asks for a sign-in, are high; an inference API that only answers prompts (llama.cpp, vLLM, LM Studio, KoboldCpp)
-is medium. An answer that shows the server asks for a key (a 401, ``protected``, ``auth_required``) files nothing and closes an earlier finding.
+Versions. A version becomes a technology (``Ollama:0.1.33``) that correlation matches. Two are stated in the scheme their advisories use: a
+llama.cpp build tag (``b5662``) as its build number (``5662``, ``correlation.llamacpp_range`` reads the advisories' tags the same way), and a
+Triton server release (``2.44.0``) as its NGC container release (``24.03``, ``triton_release``).
+
+Exposures. An entry's exposure is rated by what the answer shows is open (``Exposure.rate``): an agent that runs tools with no sign-in, a Ray
+cluster that takes jobs from anyone, and a Dify or an n8n with no administrator yet (or n8n's user management off) are critical; Ollama (pull,
+push, delete), a workflow runner (ComfyUI, Langflow, Flowise), a reachable agent dashboard that asks for a sign-in, LocalAI with no API key (it
+installs models and backends), a Triton that lists its control APIs and a Dify behind its init password are high; an inference API that only
+answers prompts (llama.cpp, vLLM, LM Studio, KoboldCpp, a Triton without its control APIs, TGI before 2.3.0) is medium, and a TGI whose key
+cannot be read without a prompt (2.3.0 and later) is low. An answer that shows the server asks for a key or a sign-in (a 401, ``protected``,
+``auth_required``, a set-up Dify or n8n) files nothing and closes an earlier finding.
 
 Untrusted text. Model names, ids and titles come from the host: only names made of ``_NAME`` characters (no space, no markup) are kept, at most
 ``MAX_NAMES`` and ``MAX_NAME`` characters each; the rest are counted, never shown.
@@ -33,6 +45,8 @@ MAX_NAME = 60
 _NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$')  # a model name or id: library/llama3:8b, meta-llama/Llama-3.1-8B-Instruct
 # the web frameworks these servers run on, as the port scan names a port's product: the entry's own port still warrants it (a generic service would)
 APP_SERVERS = r'uvicorn|hypercorn|starlette|fastapi|aiohttp|express|node\.?js|werkzeug|simplehttp|basehttp|python'
+# (the servers that are not Python or Node.js name their own: TGI is Rust's axum, LocalAI Go's echo or fiber, Triton C++'s libevhtp; a Go server
+# with no product of its own already reads as generic)
 OLLAMA_NAMES = tuple(f'models.{i}.name' for i in range(MAX_NAMES))
 OPENAI_IDS = tuple(f'data.{i}.id' for i in range(8))
 
@@ -131,27 +145,31 @@ def rate_ollama(answers):
     return 3 if identified and (raw or count is not None) else None
 
 
-_LLAMA_BUILD = re.compile(r'^b(\d{1,6})(?:-[0-9a-f]{4,40})?$')
-
-
 def llamacpp_parts(answers):
     props, models = (list(answers) + [None, None])[:2]
     doc, listing = _doc(props), _doc(models)
     shaped = doc is not None and isinstance(doc.get('total_slots'), int) and isinstance(doc.get('default_generation_settings'), dict)
     owned = _str(listing, 'data.0.owned_by') == 'llamacpp'  # tools/server: every model of /v1/models is owned_by "llamacpp"
     header = _header([props, models], 'server') == 'llama.cpp'  # tools/server sets "Server: llama.cpp" on every answer, a 401 included
-    build = _LLAMA_BUILD.match(_str(doc, 'build_info'))
-    # the build tag (b5662) is what llama.cpp's advisories name ("< b5662"), but the feed's ranges do not read it as a version yet: the build is
-    # evidence, and the reading states no version (the product is a lead, never a version match on a number it does not mean)
-    return {'identified': shaped or owned or header, 'open': shaped or owned, 'version': '',
-            'build': build.group(0) if build else '', 'ids': names(listing, OPENAI_IDS), 'count': _array(listing, 'data') if owned else None}
+    tag = _str(doc, 'build_info')
+    # common/build-info.cpp: build_info is "b" + LLAMA_BUILD_NUMBER + "-" + the commit. llama.cpp's advisories name the build tag ("< b5662"),
+    # which correlation reads as the build number for llama.cpp's own entries (``correlation.llamacpp_range``): the reading states that number
+    build = _build_number(tag) if shaped else ''
+    return {'identified': shaped or owned or header, 'open': shaped or owned, 'version': build, 'build': tag if build else '',
+            'ids': names(listing, OPENAI_IDS), 'count': _array(listing, 'data') if owned else None}
+
+
+def _build_number(tag):
+    """The build number of a llama.cpp build tag (``b5662-a1b2c3d`` -> ``5662``), or '' (``correlation.llamacpp_build``)."""
+    from cveFeed.correlation import llamacpp_build
+    return llamacpp_build(tag)
 
 
 def read_llamacpp(answers):
     got = llamacpp_parts(answers)
     if not got['identified']:
         return []
-    evidence = f'llama.cpp server, build {got["build"]}' if got['build'] else 'llama.cpp server (Server: llama.cpp)'
+    evidence = f'llama.cpp server, build {got["build"][:48]}' if got['build'] else 'llama.cpp server (Server: llama.cpp)'
     if got['open']:
         evidence += ' answered /props or /v1/models without a key' + (f'; {listed(got["count"], got["ids"])}' if got['count'] is not None else '')
     return [_reading('llama.cpp', 'llama.cpp', got['version'], evidence, '/props', 'llama-cpp')]
@@ -417,6 +435,215 @@ def rate_hermes(answers):
     return 3 if doc['auth_required'] else 4
 
 
+# ----------------------------------------------------------------------------- more inference servers and workflow apps (TGI, LocalAI, Triton,
+# Dify, n8n)
+
+_SEMVER = re.compile(r'^v?(\d{1,4}\.\d{1,4}\.\d{1,4})(?![\d.])')
+
+
+def _lead_version(raw):
+    """The release a version text starts with (LocalAI's ``v2.26.0 (a1b2c3d)``: 2.26.0), or ''."""
+    found = _SEMVER.match(raw or '')
+    return found.group(1) if found else ''
+
+
+def tgi_parts(answers):
+    doc = _doc(answers[0] if answers else None)
+    # router/src/lib.rs Info: router is the literal "text-generation-router" (Text Embeddings Inference's /info has no router field)
+    identified = (_str(doc, 'router') == 'text-generation-router' and bool(_str(doc, 'model_id'))
+                  and isinstance((doc or {}).get('max_concurrent_requests'), int))
+    return identified, _str(doc, 'version'), names(doc, ('model_id',))
+
+
+def read_tgi(answers):
+    identified, raw, model = tgi_parts(answers)
+    if not identified:
+        return []
+    evidence = f'/info: Text Generation Inference {raw or "(version not stated)"}' + (f', model {model[0]}' if model else ', model name not shown')
+    return [_reading('text-generation-inference', 'Text Generation Inference', _version(raw), evidence, '/info', 'text-generation-inference')]
+
+
+_TGI_API_KEY = (2, 3, 0)  # router/src/server.rs: --api-key (it guards the generation routes, never /info) exists from v2.3.0 on
+
+
+def rate_tgi(answers):
+    """TGI keeps /info, /health, /metrics and /v1/models public even with --api-key, so /info cannot tell whether its generation routes ask for
+    a key. Before 2.3.0 there is no key at all: anyone runs prompts on its GPUs, medium. From 2.3.0 on it is reachable and the key cannot be read
+    without sending a prompt: low."""
+    from cveFeed.correlation import _vcmp, parse_version
+    identified, raw, _model = tgi_parts(answers)
+    if not identified:
+        return None
+    version = parse_version(_version(raw), strict=True)
+    return 2 if version is not None and _vcmp(version, _TGI_API_KEY) < 0 else 1
+
+
+def localai_parts(answers):
+    known, ver, root = (list(answers) + [None, None, None])[:3]
+    doc, ver_doc = _doc(known), _doc(ver)
+    # core/http/routes/localai.go: the public /.well-known/localai.json lists LocalAI's own endpoint map next to its version
+    listed = bool(_str(doc, 'version')) and _str(doc, 'endpoints.models') == '/v1/models' and _str(doc, 'endpoints.chat_completions') == '/v1/chat/completions'
+    titled = _text(root).startswith('<title>LocalAI')  # the web UI's <title>LocalAI</title>
+    stated = _str(ver_doc, 'version')  # /version: {"version": "v2.26.0 (commit)"}, behind the API key when one is set
+    identified = listed or (titled and bool(_lead_version(stated)))
+    raw = stated or _str(doc, 'version')
+    return {'identified': identified, 'open': identified and bool(_lead_version(stated)), 'raw': raw, 'version': _lead_version(raw)}
+
+
+def read_localai(answers):
+    got = localai_parts(answers)
+    if not got['identified']:
+        return []
+    evidence = f'LocalAI {got["raw"][:60] or "(version not stated)"}' + ('; /version answered without an API key' if got['open'] else '')
+    return [_reading('localai', 'LocalAI', got['version'], evidence, '/version' if got['open'] else '/.well-known/localai.json', 'localai')]
+
+
+def rate_localai(answers):
+    """LocalAI's API key guards every route but its health checks, its web UI and the discovery document, /version included: /version answering
+    means no key. Anyone can then run models and install models and backends from its galleries. High."""
+    return 3 if localai_parts(answers)['open'] else None
+
+
+# Triton states its own release (2.44.0); NVIDIA's advisories name the NGC container release (24.03). The release branches' TRITON_VERSION files
+# (github.com/triton-inference-server/server, r21.02 to r26.11) map one to the other: from 21.02 (2.7.0) one minor release a month to 25.06
+# (2.59.0), 25.07 is 2.59.1, and from 25.08 (2.60.0) one minor a month again. A release outside what those files show reads as no version.
+_TRITON_FIRST, _TRITON_LAST = 7, 75
+_TRITON_EXTENSIONS = tuple(f'extensions.{i}' for i in range(9))
+_TRITON_CONTROL = ('model_repository', 'system_shared_memory', 'cuda_shared_memory', 'logging', 'trace')
+
+
+def triton_release(version):
+    """The NGC container release of a Triton server release (``2.44.0`` -> ``24.03``), or '' for one the release branches do not show."""
+    found = re.match(r'^2\.(\d{1,3})\.(\d{1,2})$', version or '')
+    if not found:
+        return ''
+    minor, patch = int(found.group(1)), int(found.group(2))
+    if (minor, patch) == (59, 1):
+        return '25.07'
+    if patch or not _TRITON_FIRST <= minor <= _TRITON_LAST:
+        return ''
+    months = (21 * 12 + 1) + (minor - 7) if minor <= 59 else (25 * 12 + 7) + (minor - 60)
+    return f'{months // 12}.{months % 12 + 1:02d}'
+
+
+def triton_parts(answers):
+    doc = _doc(answers[0] if answers else None)
+    raw = _str(doc, 'version')
+    # core: GET /v2 is the KServe server metadata, {"name": "triton", "version": ..., "extensions": [...]}; TGI's own /v2 says
+    # "text-generation-inference"
+    identified = _str(doc, 'name') == 'triton' and bool(re.match(r'^2\.\d{1,3}\.\d{1,2}$', raw)) and _array(doc, 'extensions') is not None
+    extensions = [_str(doc, key) for key in _TRITON_EXTENSIONS if _str(doc, key)]
+    return identified, raw, extensions
+
+
+def read_triton(answers):
+    identified, raw, extensions = triton_parts(answers)
+    if not identified:
+        return []
+    release = triton_release(raw)
+    control = [e for e in extensions if e in _TRITON_CONTROL]
+    evidence = (f'/v2: Triton {raw}' + (f' (container release {release})' if release else ' (container release not known)')
+                + (f'; extensions {", ".join(control)}' if control else ''))
+    return [_reading('triton-inference-server', 'Triton Inference Server', release, evidence, '/v2', 'triton')]
+
+
+def rate_triton(answers):
+    """Triton has no authentication of its own (``--http-restricted-api`` can ask for a header per API group; then /v2 asks for it too): an
+    answer means its inference API answers anyone, medium. With its model repository, shared-memory, logging or trace extensions listed, the
+    control APIs NVIDIA's unauthenticated code-execution flaws go through answer too: high."""
+    identified, _raw, extensions = triton_parts(answers)
+    if not identified:
+        return None
+    return 3 if any(e in _TRITON_CONTROL for e in extensions) else 2
+
+
+def dify_parts(answers):
+    setup, init = (list(answers) + [None, None])[:2]
+    doc, init_doc = _doc(setup), _doc(init)
+    raw = _header([setup, init], 'x-version')
+    # api/extensions/ext_app_metrics.py: every API answer carries X-Version and X-Env; controllers/console/setup.py: the public GET /setup
+    # says {"step": "not_started" | "finished"}
+    identified = _str(doc, 'step') in ('not_started', 'finished') and bool(_version(raw)) and bool(_header([setup, init], 'x-env'))
+    return {'identified': identified, 'raw': raw, 'step': _str(doc, 'step'), 'init': _str(init_doc, 'status')}
+
+
+def read_dify(answers):
+    got = dify_parts(answers)
+    if not got['identified']:
+        return []
+    said = ('no administrator yet and no init password: the first visitor creates it' if got['step'] == 'not_started' and got['init'] == 'finished'
+            else 'no administrator yet, behind the init password' if got['step'] == 'not_started' else 'set up, sign-in required')
+    return [_reading('dify', 'Dify', _version(got['raw']), f'/console/api/setup: Dify {got["raw"]}, {said}', '/console/api/setup', 'dify')]
+
+
+def rate_dify(answers):
+    """No administrator yet (controllers/console/setup.py: POST /setup creates it): with no INIT_PASSWORD (GET /init says finished) whoever comes
+    first becomes the administrator of every workspace, model key and workflow, critical; behind an init password it can be guessed from
+    anywhere, high. Set up: a sign-in page, nothing to report."""
+    got = dify_parts(answers)
+    if not got['identified'] or got['step'] != 'not_started':
+        return None
+    return 4 if got['init'] == 'finished' else 3
+
+
+_N8N_METHODS = ('email', 'ldap', 'saml', 'oidc', 'token-exchange')  # @n8n/api-types frontend-settings.ts AuthenticationMethod
+_N8N_CONTENT = re.compile(r'content="([A-Za-z0-9+/=]{8,900})"')
+_N8N_RELEASE = re.compile(r'^n8n@(\d{1,4}\.\d{1,4}\.\d{1,4})$')
+
+
+def n8n_page_release(text):
+    """The release the editor page states: packages/cli/src/commands/start.ts puts ``<meta name="n8n:config:sentry" content="...">`` in it, the
+    base64 of a JSON object whose ``release`` is ``n8n@1.123.4``. Only that field is read; anything else in it (a DSN, a server name) is not."""
+    import base64
+    import binascii
+    import json
+    if not text.startswith('<meta name="n8n:config:sentry"'):
+        return ''
+    found = _N8N_CONTENT.search(text[:1024])
+    if not found:
+        return ''
+    try:
+        doc = json.loads(base64.b64decode(found.group(1), validate=True).decode('utf-8'))
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return ''
+    release = doc.get('release') if isinstance(doc, dict) else None
+    matched = _N8N_RELEASE.match(release) if isinstance(release, str) else None
+    return matched.group(1) if matched else ''
+
+
+def n8n_parts(answers):
+    settings, page = (list(answers) + [None, None])[:2]
+    doc = _doc(settings) or {}
+    setup, method, enabled = (doc.get('data.userManagement.showSetupOnFirstLoad'), _str(doc, 'data.userManagement.authenticationMethod'),
+                              doc.get('data.userManagement.enabled'))
+    cli = _version(_str(doc, 'data.versionCli'))
+    # server.ts: /rest/settings answers anyone; signed out, current releases give only the public settings (settingsMode "public", no version),
+    # older ones every setting, versionCli included. 0.x releases name userManagement.enabled, newer ones its authenticationMethod
+    shaped = isinstance(setup, bool) and (method in _N8N_METHODS or isinstance(enabled, bool))
+    release = n8n_page_release(_text(page))
+    return {'identified': shaped or bool(release), 'version': cli or release, 'setup': setup if shaped else None,
+            'enabled': enabled if shaped else None, 'from': '/rest/settings' if cli else '/' if release else '/rest/settings'}
+
+
+def read_n8n(answers):
+    got = n8n_parts(answers)
+    if not got['identified']:
+        return []
+    said = ('user management off: no sign-in' if got['enabled'] is False else 'no owner account yet: the first visitor creates it' if got['setup']
+            else 'owner set up, sign-in required' if got['setup'] is False else 'sign-in state not read')
+    return [_reading('n8n', 'n8n', got['version'], f'n8n {got["version"] or "(version not stated)"}, {said}', got['from'], 'n8n')]
+
+
+def rate_n8n(answers):
+    """No owner account yet (/rest/settings showSetupOnFirstLoad: the owner setup answers whoever comes first), or a 0.x release with user
+    management off: anyone gets the editor, its credentials and its Code node, which runs commands on the host. Critical. An owner set up:
+    a sign-in page, nothing to report (its version is still matched)."""
+    got = n8n_parts(answers)
+    if not got['identified']:
+        return None
+    return 4 if got['setup'] is True or got['enabled'] is False else None
+
+
 # ----------------------------------------------------------------------------- the entries
 
 _REMEDIATION = ('Bind it to 127.0.0.1 (or a private interface), or put it behind a reverse proxy or VPN that authenticates every request, and '
@@ -447,7 +674,8 @@ def sources():
                read_llamacpp, leads=r'llama[._ -]?cpp|llama-server', ports=(8080,), servers=APP_SERVERS,
                verified='https://github.com/ggml-org/llama.cpp/tree/master/tools/server (Server: llama.cpp; /props build_info; /v1/models owned_by '
                         'llamacpp; with --api-key only /health and the web page are public)',
-               note='the build tag (b5662) is kept as evidence: the feed\'s ranges do not read it as a version yet; the model\'s path is never asked',
+               note='the build tag (b5662) is stated as the build number (5662), the version llama.cpp\'s advisories are compared by '
+                    '(correlation.llamacpp_range); the model\'s path is never asked',
                exposure=exposure('llamacpp-api-exposed', 'llama.cpp server answers without an API key', 2,
                                  'A llama.cpp server (llama-server) answers its API from the network without an API key.',
                                  'Anyone who reaches it can run prompts and completions on its hardware and read its model and settings.',
@@ -582,5 +810,72 @@ def sources():
                                  'gateways; with no sign-in anyone can, and with a password sign-in it can be guessed from anywhere.',
                                  'Keep `hermes dashboard` on 127.0.0.1 (the default) and reach it over SSH or a VPN, or use the Nous Portal or OIDC '
                                  'sign-in behind a proxy.', rate=rate_hermes)),
+        Source('text-generation-inference', 'Hugging Face Text Generation Inference', 'product',
+               (Request('/info', fields=('router', 'model_id', 'version', 'max_concurrent_requests')),),
+               read_tgi, leads=r'text[ -]generation[ -]inference|huggingface[ -]tei|\btgi\b', ports=(8080,), servers=r'axum|hyper',
+               verified='https://github.com/huggingface/text-generation-inference/blob/main/router/src/lib.rs (Info: router '
+                        '"text-generation-router", model_id, version); router/src/server.rs (/info public; --api-key, from v2.3.0, guards only the '
+                        'generation routes)',
+               note='the model id is shown only when it is a plain name; whether a key guards generation cannot be read without a prompt',
+               exposure=exposure('tgi-api-exposed', 'Text Generation Inference server reachable from the network', 2,
+                                 'A Hugging Face Text Generation Inference (TGI) server answers from the network.',
+                                 'Unless it was started with --api-key (2.3.0 and later), anyone who reaches it can run prompts on its GPUs; '
+                                 'releases before 2.3.0 have no key at all.',
+                                 'Start TGI with --api-key, keep it on a private network or behind an authenticating proxy, and block its port.',
+                                 rate=rate_tgi)),
+        Source('localai', 'LocalAI', 'product',
+               (Request('/.well-known/localai.json', fields=('version', 'endpoints.models', 'endpoints.chat_completions')),
+                Request('/version', fields=('version',)), Request('/', read='text', find='<title>')),
+               read_localai, leads=r'\blocalai\b|local-ai', ports=(8080,), servers=r'echo|fiber',
+               verified='https://github.com/mudler/LocalAI/blob/master/core/http/routes/localai.go (/version, /.well-known/localai.json); '
+                        'core/http/auth/public_routes.go (public: the discovery document, health checks, the web UI; /version is not)',
+               exposure=exposure('localai-api-exposed', 'LocalAI answers without an API key', 3,
+                                 'A LocalAI server answers its API from the network without an API key.',
+                                 'Anyone who reaches it can run models on its hardware and install models and backends from its galleries, '
+                                 'which load code and files onto the host.',
+                                 'Set API keys (LOCALAI_API_KEY) or turn on its user authentication, keep it on a private network, and block its '
+                                 'port.', rate=rate_localai)),
+        Source('triton', 'NVIDIA Triton Inference Server', 'product',
+               (Request('/v2', fields=('name', 'version', 'extensions') + _TRITON_EXTENSIONS),),
+               read_triton, leads=r'triton[ -]?inference|tritonserver|nvidia[ -]triton', ports=(8000,), servers=r'evhtp',
+               verified='https://github.com/triton-inference-server/server (GET /v2 server metadata: name "triton", version, extensions; '
+                        'TRITON_VERSION of each rYY.MM branch maps the release to the container release NVIDIA\'s advisories name)',
+               note='the server release (2.44.0) is stated as its container release (24.03), the version NVIDIA\'s advisories use',
+               exposure=exposure('triton-inference-server-exposed', 'NVIDIA Triton Inference Server reachable without authentication', 3,
+                                 'An NVIDIA Triton Inference Server answers its HTTP API from the network. Triton has no authentication of its own.',
+                                 'Anyone who reaches it can run inference on its models and, where its model repository, shared-memory or '
+                                 'logging APIs are on, use the control routes NVIDIA\'s unauthenticated code-execution flaws go through '
+                                 '(CVE-2024-0087, CVE-2025-23319).',
+                                 'Keep Triton on a private network or behind an authenticating proxy, restrict its control APIs '
+                                 '(--http-restricted-api), and upgrade.', rate=rate_triton)),
+        Source('dify', 'Dify', 'product',
+               (Request('/console/api/setup', fields=('step',), headers=('x-version', 'x-env', 'server')),
+                Request('/console/api/init', fields=('status',), headers=('x-version', 'x-env'))),
+               read_dify, leads=r'\bdify\b|langgenius', ports=(5001,), servers=APP_SERVERS + r'|gunicorn',
+               verified='https://github.com/langgenius/dify/blob/main/api/controllers/console/setup.py (public GET /setup: step); '
+                        'init_validate.py (GET /init: status); api/extensions/ext_app_metrics.py (X-Version and X-Env on every answer)',
+               note='only the setup step and the init status are asked, never POST /setup or /init',
+               exposure=exposure('dify-setup-open', 'Dify has no administrator yet', 4,
+                                 'A Dify instance answers from the network and has not been set up: it has no administrator account.',
+                                 'Whoever completes the setup first becomes the administrator of every workspace, its model provider keys, '
+                                 'datasets and workflows; with INIT_PASSWORD set only that password stands in the way.',
+                                 'Complete the setup now, set INIT_PASSWORD before exposing a new instance, and keep Dify behind a VPN or an '
+                                 'authenticating proxy.', rate=rate_dify)),
+        Source('n8n', 'n8n', 'product',
+               (Request('/rest/settings', fields=('data.versionCli', 'data.settingsMode', 'data.userManagement.showSetupOnFirstLoad',
+                                                  'data.userManagement.authenticationMethod', 'data.userManagement.enabled')),
+                Request('/', read='text', find='<meta name="n8n:config:sentry"')),
+               read_n8n, leads=r'\bn8n\b', ports=(5678,), servers=APP_SERVERS,
+               verified='https://github.com/n8n-io/n8n/blob/master/packages/cli/src/server.ts (/rest/settings answers signed-out callers with '
+                        'getPublicSettings); services/frontend.service.ts (showSetupOnFirstLoad: no owner yet); commands/start.ts '
+                        '(n8n:config:sentry meta tag, release n8n@<version>)',
+               note='current releases state their version only in the editor page\'s Sentry meta tag; older ones in versionCli',
+               exposure=exposure('n8n-open-access', 'n8n editor open to anyone', 4,
+                                 'An n8n instance answers from the network with no owner account yet, or with user management off.',
+                                 'Anyone who reaches it can create the owner account (or needs none) and then read every stored credential and '
+                                 'run workflows, whose Code and Execute Command nodes run commands on the host.',
+                                 'Create the owner account now, keep n8n behind a VPN or an authenticating proxy, and upgrade (several 2025 and '
+                                 '2026 flaws, CVE-2025-68613 on CISA\'s KEV list, need no account or only a low-privileged one).',
+                                 rate=rate_n8n)),
     )
 
