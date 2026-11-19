@@ -1,3 +1,4 @@
+import datetime
 import gzip
 import hashlib
 import json
@@ -110,7 +111,10 @@ class SeedWatermarkTests(TestCase):
 		self.assertEqual(self._through(), '2026-10-01T00:00:00+00:00')
 
 	def test_an_export_says_what_it_covers(self):
+		from cveFeed import feed_watermark
+		from cveFeed.models import FeedWatermark
 		make_catalog()
+		FeedWatermark.objects.create(source=feed_watermark.SOURCE, covered_through=timezone.now() + datetime.timedelta(days=1))
 		with tempfile.TemporaryDirectory() as directory:
 			path = os.path.join(directory, 'seed.jsonl.gz')
 			manifest = seed.export_seed(path)

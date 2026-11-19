@@ -234,6 +234,45 @@ class CVENowClient:
                 "has_more": bool(data.get("has_more")), "etag": (getattr(resp, "headers", None) or {}).get("ETag"),
                 "not_modified": False}
 
+    def search_cves(self, query=None, tech=None, published=None, cursor=None, limit=100):
+        """One page of cve.now's search for CVEs (``/api/v1/search`` with ``type=cve``): ``query`` is the ``q`` text (a quoted product name),
+        ``tech`` a technology slug, ``published`` a list of date bounds (``[">=2023-01-01", "<2024-01-01"]``). Returns ``(ids, total,
+        next_cursor)``. Without a key a search reaches its newest 400 results (a deeper page raises ``DepthLimit``) and 30 searches a
+        minute."""
+        params = {"type": "cve", "limit": limit}
+        if query:
+            params["q"] = query
+        if tech:
+            params["tech"] = tech
+        if published:
+            params["published"] = list(published)
+        if cursor:
+            params["cursor"] = cursor
+        try:
+            data = self._get("/search", params=params)
+        except requests.HTTPError as exc:
+            resp = getattr(exc, "response", None)
+            if getattr(resp, "status_code", None) == 401 and (_error_code(resp) == DEPTH_LIMIT or cursor):
+                raise DepthLimit(str(exc), response=resp) from exc
+            raise
+        data = data if isinstance(data, dict) else {}
+        ids = []
+        for item in page_rows(data):
+            entry_id = str(item.get("id") or "").strip().upper()
+            if (item.get("type") in (None, "cve")) and re.match(r"^CVE-\d{4}-\d{4,19}$", entry_id) and entry_id not in ids:
+                ids.append(entry_id)
+        total = data.get("total")
+        return ids, (total if isinstance(total, int) else None), next_cursor(data)
+
+    def tech_slugs(self):
+        """``{slug: [title, aliases...]}`` of the technologies cve.now tracks (``/api/v1/tech``)."""
+        out = {}
+        for item in page_rows(self._get("/tech", params={"limit": 200})):
+            slug = str(item.get("id") or "").strip().lower()
+            if TECH_RE.match(slug):
+                out[slug] = [str(item.get("title") or "")] + [str(a) for a in item.get("aliases") or [] if isinstance(a, str)]
+        return out
+
     def archive_day_ids(self, day):
         """The CVE ids cve.now lists as published on one UTC day (``/archive/<YYYY-MM-DD>.md``, a page per day up to yesterday, with no
         depth limit), in the page's order. A day the archive does not have (today, a future day) raises the HTTP error."""
