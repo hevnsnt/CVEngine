@@ -420,7 +420,7 @@ def sweep(project_id, resolve=None):
                 result = evaluate(items, where)
                 if not result.tested:
                     raise TlsAuditError(_why(items))
-            except (resources.ScanAborted, resources.MemoryBusy, resources.MemoryKill) as exc:  # stopped, or no scanner: not the target's failure
+            except (resources.ScanAborted, resources.MemoryBusy) as exc:  # stopped, or no scanner: not the target's failure
                 if isinstance(exc, resources.ScannerUnavailable):  # a scanner that is offline is not memory pressure
                     activity.settle(running, 'done', message=f'TLS audit of {where} is waiting: no scanner could take this work ({exc.kind}); the target stays due until one can')
                     return {**summary, 'skipped': f'no scanner could take this work ({exc.kind}): the targets stay due until one can'}

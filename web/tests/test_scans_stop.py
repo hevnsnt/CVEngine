@@ -1,5 +1,3 @@
-import subprocess
-import time
 from unittest import mock
 
 from django.contrib.auth.models import User
@@ -173,37 +171,6 @@ class ScansListAndStopTests(TestCase):
         scan.refresh_from_db()
         self.assertEqual(scan.scan_status, 3)  # not overwritten with finished
         self.assertFalse(ScanActivity.objects.filter(scan_of=scan, name='nuclei_light_scan').exists())
-
-    def test_stopping_kills_the_scanner_process_and_releases_the_memory_reservation(self):
-        store = resources.MemoryStore()
-        proc = None
-        with mock.patch.object(resources, 'HEARTBEAT_SECONDS', 0.05):
-            with self.assertRaises(resources.ScanAborted):
-                with resources.scan_context(987001):
-                    with resources.heavy_job('nmap', label='x', store=store, state_fn=lambda: {
-                            'available_mb': 4000, 'limit_mb': 4000, 'total_mb': 4000, 'used_mb': 0}) as job:
-                        proc = subprocess.Popen(['sleep', '60'], start_new_session=True)
-                        job.attach(proc)
-                        resources.request_abort(987001)
-                        for _ in range(100):
-                            if proc.poll() is not None:
-                                break
-                            time.sleep(0.05)
-                        job.raise_if_killed()
-        self.assertIsNotNone(proc.poll())  # the process is gone
-        self.assertEqual(store.live(time.time()), [])  # and so is its reservation: the next queued job can start
-        resources.clear_abort(987001)
-
-    def test_a_job_waiting_for_memory_gives_up_when_its_scan_is_stopped(self):
-        store = resources.MemoryStore()
-        store.reserve('hog', 3000, 'hog', 3500, time.time())
-        with resources.scan_context(987002):
-            resources.request_abort(987002)
-            with self.assertRaises(resources.ScanAborted):
-                with resources.heavy_job('nuclei', label='x', store=store, state_fn=lambda: {
-                        'available_mb': 100, 'limit_mb': 4000, 'total_mb': 4000, 'used_mb': 3900}, sleep=lambda s: None):
-                    self.fail('must not start')
-        resources.clear_abort(987002)
 
     def test_the_task_records_its_id_so_a_running_scan_can_be_revoked(self):
         from cveFeed.tasks import run_bbot_discovery

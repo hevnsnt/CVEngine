@@ -1,9 +1,8 @@
 """Scan concurrency: how much scanning one instance does at once, chosen on Settings, configMaxxing.
 
-Three groups of numbers, each with a built-in default and an environment variable that existed before this page:
+Each number has a built-in default and an environment variable that existed before this page. Scanner runs are not here: every scan
+runs on a Sentinel, whose own slots set how much it runs at once (the per-tool ``heavy.<kind>`` limits went with the last local scanner):
 
-* ``heavy.<kind>``          how many scanner runs of one kind (nmap, nuclei, bbot ...) may run at once in the celery container
-                            (``HEAVY_MAX_<KIND>``; the memory gate in ``reNgine.resources`` still holds work back when memory is short)
 * ``discovery_concurrency`` how many discovery tasks and host assessments run at once (``DISCOVERY_CONCURRENCY``; the discovery worker's
                             autoscale ceiling)
 * ``assess_batch``          how many hosts one assessment run carries (``CVENGINE_ASSESS_BATCH``)
@@ -71,46 +70,7 @@ WORK_DEPTH_DEFAULT = 3
 Field = namedtuple('Field', 'key label help group env default low high env_floor auto_tunable auto_min auto_max auto_step auto_optimistic',
                    defaults=(None, None, None, 1, None))
 
-# One line per local scanner kind: what it is, in words that mean something to a person who has never read the code.
-HEAVY_HELP = {
-    'bbot-deep': ('Deep discovery (bbot)', 'The kitchen-sink discovery run: dozens of modules and a spider. The most memory hungry kind.'),
-    'bbot-standard': ('Standard discovery (bbot)', 'Subdomain enumeration plus the quick web checks, safe modules only.'),
-    'bbot-passive': ('Passive discovery (bbot)', 'Looks names up in public sources and never touches the target.'),
-    'nuclei': ('Vulnerability templates (nuclei)', 'The main template scan. It loads thousands of templates.'),
-    'nuclei-light': ('Vulnerability templates, light (nuclei)', 'The smaller template pass over fewer hosts at a time.'),
-    'nmap': ('Port and service scan (nmap)', 'The standard top-1000 port scan with version detection.'),
-    'nmap-full-bg': ('Full port sweep (nmap, background)', 'The slow all-65535-ports sweep of one address. It waits behind everything else on purpose.'),
-    'nmap-udp-bg': ('UDP sweep (nmap, background)', 'The slow UDP sweep of one address.'),
-    'naabu': ('Fast port discovery (naabu)', 'SYN port discovery over every TCP port.'),
-    'template-test': ('Generated template tests', 'One AI-generated template against one host.'),
-    'route-probe': ('Route probes', 'Safe GET requests to find routes and logins. Light on memory.'),
-    'wpscan': ('WordPress scan', 'The scan of one WordPress site.'),
-    'testssl': ('TLS audit', 'One audit of one TLS port.'),
-}
-# Ceilings an App Admin may choose. Eight for the CPU bound kinds; lower for the sweeps that hit one address with a very wide probe or that
-# load the most memory; sixteen for the one kind that is only a few polite requests.
-HEAVY_HIGH = {'bbot-deep': 4, 'nmap-full-bg': 4, 'nmap-udp-bg': 4, 'naabu': 4, 'route-probe': 16}
-HEAVY_HIGH_DEFAULT = 8
-# (auto_min, auto_max, auto_optimistic): the range the auto-tuner may move a scanner kind's limit within (HEAVY_TUNE_MIN/MAX_<KIND> narrow or widen
-# it), and its target before memory and CPU are reported. Inside the range the target is sized for the machine (cveFeed.autotune_policy.size_for:
-# the memory budget at the kind's real peak, and the CPU cores). A kind that is not here is never auto-tuned: the background sweeps wait behind everything on purpose, naabu sends raw
-# SYN packets at a fixed rate (two at once is twice the packets on the network), and a generated template test runs AI-written checks against a host.
-HEAVY_AUTO = {'bbot-deep': (1, 2, 1), 'bbot-standard': (1, 4, 2), 'bbot-passive': (1, 6, 3), 'nuclei': (1, 4, 2), 'nuclei-light': (1, 4, 2),
-              'nmap': (1, 8, 3), 'route-probe': (1, 16, 4), 'wpscan': (1, 6, 3), 'testssl': (1, 6, 3), 'screenshot': (1, 4, 2)}
-
-
-def _heavy_fields():
-    out = []
-    for kind, default in resources.MAX_CONCURRENT.items():
-        label, help_text = HEAVY_HELP.get(kind, (kind, ''))
-        auto = HEAVY_AUTO.get(kind)
-        out.append(Field(f'heavy.{kind}', label, help_text, 'heavy', 'HEAVY_MAX_' + kind.upper().replace('-', '_'), default, 1,
-                         max(HEAVY_HIGH.get(kind, HEAVY_HIGH_DEFAULT), default), 1, auto is not None, *(auto or (None, None, None))[:2], 1,
-                         (auto or (None, None, None))[2]))
-    return out
-
-
-FIELDS = _heavy_fields() + [
+FIELDS = [
     Field('discovery_concurrency', 'Hosts assessed at once',
           'How many discovery tasks and host assessments run at the same time. A task that waits on a Sentinel holds one of these while it waits. It is the ceiling of the discovery worker\'s autoscaler, which adds a slot a second while work is waiting, up to this number.',
           'discovery', 'DISCOVERY_CONCURRENCY', DISCOVERY_DEFAULT, 1, 32, 1, True, 4, 32, 2, 16),
@@ -140,7 +100,7 @@ BY_KEY = {f.key: f for f in FIELDS}
 assert all(f.auto_tunable in (True, False) for f in FIELDS), 'every scan concurrency field states auto_tunable'
 assert all(not f.auto_tunable or f.low <= f.auto_min <= f.auto_optimistic <= f.auto_max <= f.high for f in FIELDS), \
     'an auto-tuning range (or its optimistic value) is outside the allowed range'
-GROUP_TITLES = {'heavy': 'Scanners at once', 'discovery': 'Discovery and assessment', 'depth': 'The work conductor', 'lanes': 'Worker lanes'}
+GROUP_TITLES = {'discovery': 'Discovery and assessment', 'depth': 'The work conductor', 'lanes': 'Worker lanes'}
 
 
 # --- resolving a value ------------------------------------------------------------------------------------------------
@@ -314,18 +274,8 @@ def reset_all(user):
 
 
 def after_saved(changed, stored):
-    """Make a save take effect without a restart: publish it, drop the AI tuner's remembered step for a scanner whose limit the admin
-    just set (the saved number is what they asked for, and the tuner moves from it, inside the bounds it sets), and ask the discovery
-    worker to resize."""
+    """Make a save take effect without a restart: publish it and ask the discovery worker (and the lanes) to resize."""
     publish(stored)
-    kinds = [k.split('.', 1)[1] for k in changed if k.startswith('heavy.')]
-    if kinds:
-        try:
-            client = _redis()
-            if client is not None:
-                client.delete(*[f'cvengine:adaptive:max:{kind}' for kind in kinds])
-        except Exception:
-            logger.warning('scan concurrency: could not clear the AI tuner step for %s', ', '.join(kinds))
     if 'discovery_concurrency' in changed or any(k in LANE_KEYS for k in changed):
         request_apply()
 
@@ -517,53 +467,6 @@ def running_discovery(now_fn=time.time):
     return {'value': agreed, 'workers': record['workers'], 'age_seconds': int(now_fn() - record.get('t', 0))}
 
 
-# --- memory --------------------------------------------------------------------------------------------------------------
-
-OVERCOMMIT = 2  # the worst case may be this many times the budget before the page warns: the kinds rarely all peak together
-
-
-def memory_plan(caps, costs_mb, budget_mb, defaults=None):
-    """What the chosen scanner limits could ask of the container's memory budget. ``caps`` {kind: limit}, ``costs_mb`` {kind: MB reserved per
-    run}. The total is the worst case (every kind at its limit at once), which the memory gate never lets happen: a run starts only when its
-    estimate fits, so a high total means some runs wait for memory, not that the container runs out. Two warnings, both only for what the
-    admin raised above the defaults (so the defaults themselves are never flagged): one kind alone could want more than the whole budget, or
-    the worst case is more than ``OVERCOMMIT`` times the budget (the kinds rarely peak together, so a plain excess is not a warning).
-    Returns {'total_mb', 'default_total_mb', 'budget_mb', 'warnings': [str]}."""
-    defaults = defaults or {kind: resources.MAX_CONCURRENT.get(kind, 2) for kind in caps}
-    total = sum(costs_mb.get(kind, 500) * cap for kind, cap in caps.items())
-    default_total = sum(costs_mb.get(kind, 500) * defaults.get(kind, cap) for kind, cap in caps.items())
-    warnings = []
-    if budget_mb:
-        for kind, cap in caps.items():
-            one = costs_mb.get(kind, 500) * cap
-            if cap > defaults.get(kind, cap) and one > budget_mb:
-                warnings.append(f'{HEAVY_HELP.get(kind, (kind,))[0]} at {cap} could want {one} MB by itself, more than the {budget_mb} MB budget of the scanning container: '
-                                'the extra runs will only wait for memory.')
-        if total > budget_mb * OVERCOMMIT and total > default_total:
-            warnings.append(f'With every scanner at its limit at the same time, up to {total} MB could be wanted, more than {OVERCOMMIT} times the {budget_mb} MB budget of the scanning container. '
-                            'The memory gate will hold runs back, so raising these further will not scan faster until the container has more memory (CELERY_MEM_LIMIT) or you scan on a second machine.')
-    return {'total_mb': total, 'default_total_mb': default_total, 'budget_mb': budget_mb, 'warnings': warnings}
-
-
-def memory_context():
-    """{'budget_mb', 'limit_mb', 'costs_mb'} of the scanning container, as the celery worker published it to Redis; budget and limit are
-    None when no worker has reported."""
-    costs = {kind: resources.cost_mb(kind) for kind in resources.BASE_COSTS_MB}
-    out = {'budget_mb': None, 'limit_mb': None, 'costs_mb': costs}
-    try:
-        shared = resources.cluster_snapshot()
-        # without Redis the snapshot can only describe this (web) container, whose memory says nothing about the scanners
-        containers = (shared.get('containers') or []) if shared.get('store') == 'redis' else []
-    except Exception:
-        containers = []
-    budgets = [c['budget_mb'] for c in containers if c.get('budget_mb')]
-    limits = [(c.get('memory') or {}).get('limit_mb') or (c.get('memory') or {}).get('total_mb') for c in containers]
-    if budgets:
-        out['budget_mb'] = min(budgets)  # several scanning containers: the tightest one is the one that holds work back first
-        out['limit_mb'] = min(x for x in limits if x) if any(limits) else None
-    return out
-
-
 # --- what the page shows -------------------------------------------------------------------------------------------------
 
 def snapshot():
@@ -585,12 +488,7 @@ def snapshot():
         else:
             item['applies'] = 'live'
         fields.append(item)
-    caps = {f.key.split('.', 1)[1]: effective(f.key, stored, tuned) for f in FIELDS if f.group == 'heavy'}
-    context = memory_context()
-    plan = memory_plan(caps, context['costs_mb'], context['budget_mb'])
     return {'fields': fields, 'groups': [{'id': g, 'title': t} for g, t in GROUP_TITLES.items()],
-            'memory': {'budget_mb': context['budget_mb'], 'limit_mb': context['limit_mb'], 'costs_mb': context['costs_mb'],
-                       'total_mb': plan['total_mb'], 'default_total_mb': plan['default_total_mb'], 'warnings': plan['warnings']},
             'discovery': discovery_status(effective('discovery_concurrency', stored, tuned), running),
             'cache_seconds': CACHE_SECONDS, 'autotune': _annotate(fields)}
 

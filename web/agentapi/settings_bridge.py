@@ -460,7 +460,7 @@ def _tunable_rules(values):
 
 
 def _scan_concurrency_rules(values):
-    """FB-5: a scan concurrency number that auto-tuning does not manage (the heavy scanner limits) goes straight to the page's handler, which takes any number in
+    """FB-5: a scan concurrency number that auto-tuning does not manage (a worker lane configured at or below its floor) goes straight to the page's handler, which takes any number in
     range: an agent may only lower it (a reset to the default counts as the default)."""
     from cveFeed import scan_concurrency as sc
     for key, new in values.items():

@@ -31,9 +31,9 @@ test('auto-tuning help and notices do not send a person to a file on the server'
   bare(logic.AUTOTUNE_INTRO);
   bare(logic.modeNotice({killed: true}));
   assert.match(logic.modeDetail({killed: true}), /CVENGINE_AUTOTUNE=0/);
-  const line = logic.autoTuneLine({value: 1, autotune: {managed: true, pinned: true, pinned_by: null, pinned_env: 'HEAVY_MAX_NMAP=1'}}, 'auto');
+  const line = logic.autoTuneLine({value: 1, autotune: {managed: true, pinned: true, pinned_by: null, pinned_env: 'CVENGINE_WORK_DEPTH=5'}}, 'auto');
   bare(line.text);
-  assert.match(line.detail, /HEAVY_MAX_NMAP=1/);
+  assert.match(line.detail, /CVENGINE_WORK_DEPTH=5/);
 });
 
 test('a cap warning names the server, not the environment', () => {

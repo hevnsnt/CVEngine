@@ -937,34 +937,16 @@ const sections = {
         const kids = [
           el("p", "", `${mb(mem.used_mb)} used of ${mb(mem.limit_mb || mem.total_mb)}${mem.limit_mb ? " (container limit)" : ""}; ${mb(mem.available_mb)} free`, { style: "margin:0;font-weight:500" }),
           bar,
-          el("p", "note", `Heavy jobs (bbot, nmap, nuclei) start only while their estimated memory fits the budget of ${mb(c.budget_mb)} and ${mb(c.headroom_mb)} stays free. If free memory drops under ${mb(c.critical_mb)}, the biggest job is stopped and retried lighter, so the worker is never lost.`),
-          list(
-            `Running (${c.running.length})`,
-            c.running.map((j) => `${j.label}: reserved ${mb(j.reserved_mb)}, using ${mb(j.rss_mb)}, ${secs(j.seconds)}`),
-            "Nothing heavy is running.",
-          ),
-          list(
-            `Waiting for memory (${c.waiting.length})`,
-            c.waiting.map((j) => `${j.label}: needs ${mb(j.needs_mb)}, waiting ${secs(j.seconds)}`),
-            "Nothing is waiting.",
-          ),
-          list(
-            `Stopped for memory in the last 24 hours (${c.memory_kills.length})`,
-            c.memory_kills.map((k) => `${new Date(k.t * 1000).toLocaleTimeString()}  ${k.kind} on ${k.label}: used ${mb(k.rss_mb)}, ${mb(k.available_mb)} free`),
-            "None. The queue is keeping up.",
-          ),
         ];
         if (c.age_seconds > 120) kids.push(el("p", "msg err", `This worker last reported ${secs(c.age_seconds)} ago.`));
         host.append(card(`Container ${c.host}`, ...kids), el("div", "", null, { style: "height:16px" }));
       });
       host.append(
         card(
-          "Tuning",
-          el("p", "note", "Memory reserved per job (an estimate at first, raised to what real runs needed): " +
-            Object.entries(snap.costs_mb || {}).map(([k, v]) => `${k} ${mb(v)}`).join(", ") + "."),
+          "Scanning",
+          el("p", "note", "No scanner runs on this server: every scan runs on a Sentinel, which sets how much it runs at once from its own machine. This page shows the server's own workers."),
           details(
             "For the server's administrator: container ceilings come from CELERY_MEM_LIMIT, WEB_MEM_LIMIT and BEAT_MEM_LIMIT (docker-compose, default 4g, 1g, 512m).",
-            "Override the per-job estimate with HEAVY_COST_SCALE, HEAVY_MEMORY_BUDGET_MB or HEAVY_COST_<KIND>_MB in the celery environment.",
           ),
         ),
       );
