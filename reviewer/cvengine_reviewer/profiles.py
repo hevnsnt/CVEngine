@@ -233,6 +233,7 @@ STAGE_ANSWER_CAPS = {
     'finding_review': 4000, 'host_review': 6000, 'host_review_repair': 6000, 'autotune_advisor': 2000, 'cve_detection': 8192,
     'template_generation': 6144,  # a whole detection template (YAML with requests, matchers and extractors)
     'template_validation': 4096,  # the fixture (two short responses) or the critique of an AI-written template: a small JSON object
+    'nuclei_targeting': 3000,  # up to 25 host numbers, each with its tags and severities (an AI job)
 }
 # The reasoning of a model (a thinking block, or a local model's reasoning) is paid from the reply limit on Anthropic and on the self-hosted
 # servers. Without room of its own it can take the whole limit before the first word of the answer (stop reason max_tokens, no text), so
