@@ -421,6 +421,72 @@ FEATURE_PREFILTER = (r'http/?2|ngx_http_v2|h2c|\mh2\M'
                      r'|smbv1|smb ?1|server message block|compression|unauthenticated attacker connects')
 
 
+# --- web service features (featweb): HTTP/3, PHP on Windows, WebDAV, the VPN portals and SLP --------------------------------------------------
+# Each rule quotes the advisory's own condition ("configured to use the HTTP/3 QUIC module", "PHP-CGI on Windows", "the WebDAV service in IIS",
+# "SSL-VPN", "GlobalProtect portal or gateway", "configured with either WebVPN or AnyConnect", "configured as a Gateway ... or AAA virtual server",
+# "access to port 427"). ``rule_out`` () never clears a match: the reading cannot prove the feature off (Alt-Svc absent is only "not
+# advertised"; a module's WebDAV may sit below /, which one OPTIONS / does not read). Ivanti Connect Secure has no rule: its advisories name no
+# portal setting, the portal is the product, and the reading is shown only.
+_NEVER = re.compile(r'(?!)')
+_H3 = r'(?:HTTP/3|QUIC)'
+_WEBDAV_CLIENT = r'WebDAV (?:client|redirector|Mini-Redirector)|remote WebDAV (?:location|share|server)|\bWebDAV share'
+FEATURE_RULES += (
+    {'id': 'http3_quic_module', 'feature': 'http3', 'exposed': ('yes',), 'rule_out': (),
+     'needs': re.compile(
+         r'\bngx_http_v3_module\b|\bHTTP/3 (?:QUIC )?module\b|\bQUIC module\b'
+         r'|\b(?:configured|configurations?) (?:to use|with|that use) (?:the )?' + _H3 + r'\b'
+         r'|\b(?:when|if|where|only when|only if) (?:the )?' + _H3 + r'(?: support| protocol| module)? (?:is|are|has been|was) '
+         r'(?:enabled|configured|turned on|in use|used|active)\b'
+         r'|\bwith ' + _H3 + r' (?:support )?(?:enabled|turned on|configured)\b|\blisten\b[^.]{0,60}\bquic\b', re.IGNORECASE),
+     'not_needed': re.compile(r'\bregardless of (?:the )?(?:HTTP )?protocol|\b(?:does not|doesn\'t|do not) (?:require|need) ' + _H3 + r'\b'
+                              r'|\bHTTP/[12](?:\.[01x])?\s*(?:,|and|or|/)\s*(?:HTTP/)?3\b', re.IGNORECASE),
+     'unread': _NEVER},
+    {'id': 'php_cgi_windows', 'feature': 'php_windows', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bPHP[- ]CGI\b[^.]{0,80}\bon Windows\b|\bon Windows\b[^.]{0,80}\bPHP[- ]CGI\b|\bWindows[- ]based PHP\b'
+                         r'|\bBest[- ]Fit\b[^.]{0,200}\bPHP\b|\bPHP\b.{0,300}?\bWindows (?:code ?pages?|"?Best[- ]Fit)', re.IGNORECASE),
+     'not_needed': _NEVER, 'unread': _NEVER},
+    {'id': 'webdav_iis', 'feature': 'webdav', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bWebDAV (?:service|extension|component)\b[^.]{0,80}\b(?:Internet Information Services|IIS)\b'
+                         r'|\b(?:Internet Information Services|IIS)\b[^.]{0,40}\bWebDAV (?:service|extension|component)\b', re.IGNORECASE),
+     'not_needed': re.compile(_WEBDAV_CLIENT, re.IGNORECASE), 'unread': _NEVER},
+    {'id': 'webdav_module', 'feature': 'webdav', 'exposed': ('yes',), 'rule_out': (),
+     'needs': re.compile(r'\bmod_dav(?:_fs|_lock|_svn)?\b|\bWebDAV (?:module|support)\b[^.]{0,40}\b(?:enabled|configured|turned on|loaded)\b'
+                         r'|\bwhen (?:the )?WebDAV (?:module |support |service )?(?:is |was )?(?:enabled|configured|turned on)\b'
+                         r'|\bwith WebDAV (?:enabled|turned on|configured)\b', re.IGNORECASE),
+     'not_needed': re.compile(_WEBDAV_CLIENT + r'|\bmod_\w+ and (?:\(\d\) )?mod_dav\b|\bmod_dav (?:and|or) (?:\(\d\) )?mod_\w+', re.IGNORECASE),
+     'unread': _NEVER},
+    {'id': 'fortios_sslvpn', 'feature': 'vpn_fortinet', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bForti(?:OS|Proxy|Gate)\b.{0,400}?\bSSL[- ]?VPN\b|\bSSL[- ]?VPN\b.{0,200}?\bForti(?:OS|Proxy|Gate)\b', re.IGNORECASE),
+     'not_needed': re.compile(r'\b(?:administrative|admin|management) (?:web )?(?:interface|GUI)\b|\bfgfmd\b', re.IGNORECASE), 'unread': _NEVER},
+    {'id': 'panos_globalprotect', 'feature': 'vpn_globalprotect', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bGlobalProtect (?:portal|gateway|feature|interface)s?\b', re.IGNORECASE),
+     'not_needed': re.compile(r'\bGlobalProtect (?:app|agent|client)\b|\bCaptive Portal\b|\bClientless VPN\b|\bweb interfaces?\b', re.IGNORECASE),
+     'unread': _NEVER},
+    {'id': 'cisco_webvpn', 'feature': 'vpn_cisco', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bconfigured with (?:either )?WebVPN or AnyConnect\b|\bWebVPN or AnyConnect (?:features?|configurations?)\b'
+                         r'|\bAnyConnect and WebVPN configurations?\b|\bwebvpn (?:feature )?is enabled\b|\bwebvpn-configured interface\b'
+                         r'|\bWebVPN login page\b|\bVPN web server\b|\bSSL VPN functionality\b', re.IGNORECASE),
+     'not_needed': re.compile(r'\bAnyConnect Secure Mobility Client\b|\bSecure Client for\b|\bAnyConnect (?:client|for (?:Windows|Mac|Linux))\b'
+                              r'|\bmanagement and VPN web servers?\b|\bmanagement web server\b|\bHTTPS management\b|\bASDM\b', re.IGNORECASE),
+     'unread': _NEVER},
+    {'id': 'netscaler_gateway_aaa', 'feature': 'vpn_citrix', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bconfigured as (?:a |an )?(?:Gateway|AAA virtual server)\b|\bGateway \(VPN virtual server, ICA Proxy, CVPN, RDP Proxy\)'
+                         r'|\bAAA virtual server\b', re.IGNORECASE),
+     'not_needed': re.compile(r'\bLB virtual servers?\b|\bCR virtual server\b|\bload balancing virtual server|\bmanagement interface\b'
+                              r'|\bNSIP\b|\bCLIP\b|\bSNIP\b', re.IGNORECASE),
+     'unread': _NEVER},
+    {'id': 'openslp_port_427', 'feature': 'slp', 'exposed': ('yes',), 'rule_out': ('no',),
+     'needs': re.compile(r'\bport 427\b|\bOpenSLP (?:as used in|service)\b|\bService Location Protocol\b', re.IGNORECASE),
+     'not_needed': _NEVER,
+     # the reading is TCP 427's: an advisory that names UDP (the CVE-2023-29552 amplification) keeps its precondition, but a refused TCP port
+     # does not rule it out
+     'unread': re.compile(r'\bUDP\b', re.IGNORECASE)},
+)
+FEATURE_PREFILTER += (r'|ngx_http_v3|http/3|quic|php[- ]cgi|windows-based php|best[- ]fit|webdav|mod_dav|ssl[- ]?vpn|globalprotect|webvpn|windows code ?pages?'
+                      r'|anyconnect|vpn web server|aaa virtual server|configured as (a |an )?gateway|openslp|port 427|service location protocol')
+# --- end of the web service features
+
+
 def _sentences(text):
     return [s.strip() for s in re.split(r'(?<=[.!?])\s+(?=[A-Z"\'(])|\n+', text) if s.strip()]
 
