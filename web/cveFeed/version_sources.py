@@ -913,6 +913,32 @@ def prefetch_bundled(subs):
         sub._bundled_rows = by_key.get((project_of.get(sub.target_domain_id), sub.name.lower().rstrip('.')), [])
 
 
+def prefetch_readings(subs):
+    """Give each of ``subs`` the other per-host rows correlation reads, one query per table for the whole chunk instead of three per host: its
+    runtime readings (``_runtime_rows``, ``host_runtimes``), its version range readings (``_range_rows``, ``edge_builds.range_readings``) and its
+    Java runtimes (``_java_runtimes``, ``java_runtime.host_runtimes``). Also its target, so ``sub.target_domain`` is not one query per host."""
+    from django.db.models import prefetch_related_objects
+
+    from cveFeed import edge_builds
+    from cveFeed.models import JavaRuntime, ProbeObservation
+    subs = [s for s in subs if getattr(s, 'target_domain_id', None)]
+    if not subs:
+        return
+    prefetch_related_objects(subs, 'target_domain')
+    hosts = {s.name.lower().rstrip('.') for s in subs}
+    projects = {s.target_domain.project_id for s in subs}
+    runtimes, ranges, java = {}, {}, {}
+    for row in ProbeObservation.objects.filter(project_id__in=projects, host__in=hosts, kind=RUNTIME_KIND):
+        runtimes.setdefault((row.project_id, row.host), []).append(row)
+    for row in ProbeObservation.objects.filter(project_id__in=projects, host__in=hosts, probe__startswith=PROBE_PREFIX, outcome=edge_builds.RANGE_OUTCOME):
+        ranges.setdefault((row.project_id, row.host), []).append(row)
+    for row in JavaRuntime.objects.filter(project_id__in=projects, host__in=hosts):
+        java.setdefault((row.project_id, row.host), []).append(row)
+    for sub in subs:
+        key = (sub.target_domain.project_id, sub.name.lower().rstrip('.'))
+        sub._runtime_rows, sub._range_rows, sub._java_runtimes = runtimes.get(key, []), ranges.get(key, []), java.get(key, [])
+
+
 def collect_bundled(subdomain, product_index, cve_by_id, rows, scan_history=None, min_confidence=0.0):
     """Append the candidates of the components a vendor bundles on ``subdomain`` (``host_bundled``) to ``rows``: the product named like any
     technology (``correlation._match_candidates``), but its version is an inference, so a version inside an affected range is never
