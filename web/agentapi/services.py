@@ -10,7 +10,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Optional
 
 from django.contrib.postgres.expressions import ArraySubquery
@@ -178,6 +178,24 @@ def paginate(queryset, params, serialize):
             'results': [serialize(o) for o in queryset[start:start + size]] if size else []}
 
 
+def page_slice(queryset, start, stop):
+    """``queryset[start:stop]`` as model rows, in its order, ordered and cut on the ids alone: the ids of the slice are read first (the ordering
+    columns and the filters, none of the wide related rows), then only those rows are loaded with everything ``queryset`` selects and prefetches.
+    Slicing the full queryset made Postgres join every related row of every match (120,000 scanner findings, 7 KB each) before sorting them for
+    the first 50."""
+    ids = list(queryset.values_list('pk', flat=True)[start:stop])
+    rows = {row.pk: row for row in queryset.filter(pk__in=ids)} if ids else {}
+    return [rows[i] for i in ids if i in rows]
+
+
+def paginate_narrow(queryset, params, serialize):
+    """``paginate`` with the page cut on ids first (``page_slice``): the same count, page and rows."""
+    page, size = page_args(params, zero_ok=True)
+    total = queryset.count()
+    start = (page - 1) * size
+    return {'count': total, 'page': page, 'page_size': size, 'results': [serialize(o) for o in page_slice(queryset, start, start + size)] if size else []}
+
+
 def paginate_by_ids(queryset, params, load):
     """The same page ``paginate`` gives, with the heavy query run once. ``queryset`` is the ordered set of rows; its ids are read in one query, the
     count is their number and the page is a slice of them, and only that slice is loaded (``load(ids)``, rows in the order given). ``paginate``
@@ -319,7 +337,7 @@ def _count_target_hosts(rows):
     ids = [r['id'] for r in rows]
     if not ids:
         return
-    reps = counts.host_reps(domain_ids=ids)
+    reps = counts.reps_of(counts.rep_ids(domain_ids=ids))  # the collapse once: both counts read its ids (it ran twice, once per count)
     hosts = dict(reps.order_by().values('target_domain_id').annotate(n=Count('pk')).values_list('target_domain_id', 'n'))
     projects = set(Domain.objects.filter(pk__in=ids).values_list('project_id', flat=True))
     exposed = dict(counts.exposed_among(reps, project_ids=projects).order_by().values('target_domain_id').annotate(n=Count('pk'))
@@ -580,6 +598,9 @@ SCAN_STATUS_FILTER = {'queued': -1, '-1': -1, 'failed': 0, '0': 0, 'running': 1,
                       'aborted': 3, '3': 3}
 
 
+SCAN_ACTIVITY_SLACK = timedelta(hours=1)  # a scan's activity is read from this long before its start (a queued scan's start moves to when it ran)
+
+
 def _scan(s, detail=False, queued=None, stalled_before=None):
     """``queued`` is a callable returning the queued scan ids, so a page of scans looks the queue up at most once. ``stalled_before`` is the
     moment a running scan counts as stalled when it started earlier (``now - running_window()``): a list computes it once for the whole page,
@@ -599,16 +620,22 @@ def _scan(s, detail=False, queued=None, stalled_before=None):
         out['hosts'], out['findings'] = s.n_hosts, s.n_vulns
         out['top_severity'] = SEVERITY_NAMES.get(s.top_sev) if s.n_vulns else None
     if detail:
+        from django.db.models import Count, Q
+
         from startScan.models import Subdomain, Vulnerability
         out['subdomains'] = Subdomain.objects.filter(scan_history=s).count()
-        out['vulnerabilities'] = Vulnerability.objects.filter(scan_history=s).count()
+        # the total and the five severities in one pass over the scan's findings (it was six counts)
+        found = Vulnerability.objects.filter(scan_history=s).order_by().aggregate(total=Count('id'), **{f'sev{k}': Count('id', filter=Q(severity=k)) for k in (4, 3, 2, 1, 0)})
+        out['vulnerabilities'] = found['total']
         from startScan.models import EndPoint
         out['endpoints'] = EndPoint.objects.filter(scan_history=s).count()
-        out['severity_counts'] = {SEVERITY_NAMES[k]: Vulnerability.objects.filter(scan_history=s, severity=k).count()
-                                  for k in (4, 3, 2, 1, 0)}
+        out['severity_counts'] = {SEVERITY_NAMES[k]: found[f'sev{k}'] for k in (4, 3, 2, 1, 0)}
         from cveFeed.models import AgentActivity  # the hosts this scan did not touch because of the organization's do-not-scan list, and why
+        # the lines are written while the scan runs: only the activity since it started is read (the created_at index), not the whole 30-day feed by JSON key
+        since = s.start_scan_date - SCAN_ACTIVITY_SLACK if s.start_scan_date else None
+        lines = AgentActivity.objects.filter(detail__scan_id=s.id, detail__address_excluded=True)
         out['not_scanned'] = [{'message': a.message, 'hosts': (a.detail or {}).get('hosts', [])} for a in
-                              AgentActivity.objects.filter(detail__scan_id=s.id, detail__address_excluded=True).order_by('id')[:20]]
+                              (lines.filter(created_at__gte=since) if since else lines).order_by('id')[:20]]
     return out
 
 
@@ -2033,33 +2060,72 @@ def _one_per_host(qs, per_project=False):
     """Collapse a Subdomain queryset to one row per host. First one row per hostname: the one with the most open ports, then the most
     IPs, then the newest scan (a scan-less row last). Then names that resolve to exactly the same addresses (``example.com`` and
     ``www.example.com``) become one host: the project's own target name first, else the shortest name (see
-    ``cveFeed.counts.with_host_key``; a name behind a CDN, or without an address, stays alone). Two Postgres DISTINCT ON passes over
-    the filtered ids, then a plain ``id__in`` so ordering and paging stay ordinary. Richness comes from subqueries on a fresh
-    queryset, so search joins cannot inflate the counts. ``per_project`` (the all-projects view) keeps one row per (project,
-    hostname): the same name in two projects is two hosts."""
-    from django.db.models import Case, Count, F, IntegerField, OuterRef, Subquery, Value, Window, When
-    from django.db.models.functions import Coalesce, Collate, Length, RowNumber
-    from cveFeed.counts import with_host_key
-    from startScan.models import OPEN_PORT_STATES, Port, Subdomain
-    ports = Port.objects.filter(state__in=OPEN_PORT_STATES, ports__ip_addresses=OuterRef('pk')).order_by() \
-        .values('ports__ip_addresses').annotate(c=Count('id', distinct=True)).values('c')
-    ips = Subdomain.ip_addresses.through.objects.filter(subdomain_id=OuterRef('pk')).order_by() \
-        .values('subdomain_id').annotate(c=Count('id')).values('c')
-    keys = ('target_domain__project_id', 'name') if per_project else ('name',)
-    by_name = Subdomain.objects.filter(id__in=qs.order_by().values('id')).order_by(
-        *keys, Coalesce(Subquery(ports), Value(0)).desc(), Coalesce(Subquery(ips), Value(0)).desc(),
-        F('scan_history_id').desc(nulls_last=True), '-id').distinct(*keys).values('id')
-    own_target = Case(When(name=F('target_domain__name'), then=Value(0)), default=Value(1), output_field=IntegerField())
-    # names that tie on length are ordered by their bytes (COLLATE "C"), not by the database's locale: the same order on every database, and the one
-    # ``cveFeed.inventory_counts`` takes in Python, so the host that stands for a group does not depend on how the database sorts text
-    # a window rather than DISTINCT ON: the key is an annotation, which DISTINCT ON cannot keep once the query is cut to ids
-    rep = with_host_key(Subdomain.objects.filter(id__in=by_name)).annotate(_rank=Window(
-        RowNumber(), partition_by=[F('host_key')],
-        order_by=[own_target.asc(), Length('name').asc(), Collate('name', 'C').asc(), Coalesce(Subquery(ports), Value(0)).desc(), F('id').desc()])
-    ).filter(_rank=1).values('id')
-    # the ids are gathered into an array once and looked up in it (``id = ANY(ARRAY(...))``). ``id IN (subquery)`` let Postgres guess one row for the
-    # window query and rescan its 8,000 rows for each of 10,000 hosts: 4.8 s at that size, 0.1 s with the array
-    return Subdomain.objects.filter(id__in_array=ArraySubquery(rep))
+    ``cveFeed.counts.with_host_key``; a name behind a CDN, or without an address, stays alone). Richness comes from the address links
+    and open ports of the candidates, so search joins cannot inflate the counts. ``per_project`` (the all-projects view) keeps one row
+    per (project, hostname): the same name in two projects is two hosts.
+
+    One statement (``_collapse_sql``): the candidates' open-port counts, address counts, address sets and CDN flags are each read ONCE, as
+    grouped reads over the candidates' links joined to them, then the two passes (DISTINCT ON the name, a window over the host key) run over
+    those columns. The correlated form evaluated the open-port count twice and the address set twice for every candidate (1.9 s for the
+    Hosts page at 20,000 hosts). The ids are gathered into an array and looked up in it (``id = ANY(ARRAY(...))``), so ordering and paging
+    stay ordinary and Postgres never rescans the collapse per row."""
+    from django.contrib.postgres.fields import ArrayField
+    from django.core.exceptions import EmptyResultSet
+    from django.db.models import IntegerField
+    from django.db.models.expressions import RawSQL
+    from startScan.models import Subdomain
+    try:
+        sql, params = _collapse_sql(qs, per_project)
+    except EmptyResultSet:
+        return Subdomain.objects.none()
+    return Subdomain.objects.filter(id__in_array=RawSQL(f'ARRAY({sql})', params, output_field=ArrayField(IntegerField())))
+
+
+def _id_array(ids):
+    """``ids`` as one array parameter for ``id__in_array``: a list of ids already read (``id = ANY(%s::integer[])``), not one placeholder per id."""
+    from django.contrib.postgres.fields import ArrayField
+    from django.db.models import IntegerField
+    from django.db.models.expressions import RawSQL
+    return RawSQL('%s::integer[]', (list(ids),), output_field=ArrayField(IntegerField()))
+
+
+def _collapse_sql(qs, per_project=False):
+    """``(sql, params)`` of the ids ``_one_per_host`` keeps (see there). The same rules as the window and DISTINCT ON passes it replaces, column for
+    column: ``cveFeed.counts.with_host_key`` for the key (the project, then ``:n:`` and the name for a row behind a CDN or with no address, else
+    ``:i:`` and its sorted address ids), names that tie on length ordered by their bytes (``COLLATE "C"``)."""
+    from startScan.models import OPEN_PORT_STATES, IpAddress, Port, Subdomain
+    from targetApp.models import Domain
+    candidates, params = qs.order_by().values('id').query.sql_with_params()
+    sub, domain = Subdomain._meta.db_table, Domain._meta.db_table
+    links, ports_link = Subdomain.ip_addresses.through._meta.db_table, IpAddress.ports.through._meta.db_table
+    ip, port = IpAddress._meta.db_table, Port._meta.db_table
+    states = ', '.join(['%s'] * len(OPEN_PORT_STATES))
+    keys = 'f.project_id, f.name' if per_project else 'f.name'
+    sql = f'''
+        WITH cand AS MATERIALIZED ({candidates}),
+        addr AS MATERIALIZED (
+            SELECT l.subdomain_id, COUNT(*) AS n, BOOL_OR(a.is_cdn) AS cdn, STRING_AGG(l.ipaddress_id::text, ',' ORDER BY l.ipaddress_id) AS ipset
+            FROM "{links}" l INNER JOIN "{ip}" a ON a.id = l.ipaddress_id
+            WHERE l.subdomain_id IN (SELECT id FROM cand) GROUP BY l.subdomain_id),
+        open_ports AS MATERIALIZED (
+            SELECT l.subdomain_id, COUNT(DISTINCT x.port_id) AS n
+            FROM "{links}" l INNER JOIN "{ports_link}" x ON x.ipaddress_id = l.ipaddress_id INNER JOIN "{port}" p ON p.id = x.port_id
+            WHERE l.subdomain_id IN (SELECT id FROM cand) AND p.state IN ({states}) GROUP BY l.subdomain_id),
+        facts AS MATERIALIZED (
+            SELECT s.id, s.name, s.scan_history_id, d.project_id, d.name AS domain_name, COALESCE(o.n, 0) AS open_ports, COALESCE(a.n, 0) AS ips,
+                   COALESCE(d.project_id::varchar, '') || CASE WHEN a.cdn OR a.ipset IS NULL THEN ':n:' || COALESCE(s.name, '') ELSE ':i:' || a.ipset END AS host_key
+            FROM "{sub}" s LEFT OUTER JOIN "{domain}" d ON d.id = s.target_domain_id
+            LEFT OUTER JOIN addr a ON a.subdomain_id = s.id LEFT OUTER JOIN open_ports o ON o.subdomain_id = s.id
+            WHERE s.id IN (SELECT id FROM cand)),
+        by_name AS (
+            SELECT DISTINCT ON ({keys}) f.* FROM facts f
+            ORDER BY {keys}, f.open_ports DESC, f.ips DESC, f.scan_history_id DESC NULLS LAST, f.id DESC)
+        SELECT r.id FROM (
+            SELECT b.id, ROW_NUMBER() OVER (PARTITION BY b.host_key ORDER BY CASE WHEN b.name = b.domain_name THEN 0 ELSE 1 END ASC, LENGTH(b.name) ASC,
+                                            b.name COLLATE "C" ASC, b.open_ports DESC, b.id DESC) AS rank
+            FROM by_name b) r
+        WHERE r.rank = 1'''
+    return sql, (*params, *OPEN_PORT_STATES)
 
 
 def _hosts_page(project, qs, params, extra=None, coverage=True, load=None, page_extra=None):
@@ -3139,11 +3205,14 @@ def search_hosts(ctx, slug, params):
         raise ApiError(400, 'facet_size must be an integer')
     terms = parse_search(params.get('q'))
     qs = _internal_filter(search_host_rows(project, terms), params)
+    counts_only = page_args(params, zero_ok=True)[1] == 0
+    if not (counts_only and not heat):
+        # the collapse once: the facets' walk, the exposed filter and the page all read its ids (it ran once for the facets and again for the page)
+        qs = Subdomain.objects.filter(id__in_array=_id_array(qs.values_list('pk', flat=True)))
     if str(params.get('exposed') or '').lower() in ('1', 'true', 'yes'):  # the hosts the dashboard's Exposed tile counts (cveFeed.counts.exposed_among)
         from cveFeed.counts import exposed_among
         qs = qs.filter(pk__in=exposed_among(qs, project_ids=None if _is_all(project) else [project.id]).values('pk'))
     # facets=none and page_size=0 are the cheap modes: no walk over the match for heat counts (a poll, a palette, an export page need none)
-    counts_only = page_args(params, zero_ok=True)[1] == 0
     no_facets = counts_only or str(params.get('facets') or '').strip().lower() == 'none'
     if no_facets:
         facet_names = []
@@ -3235,7 +3304,7 @@ def list_vulnerabilities(ctx, slug, params):
     if params.get('classification'):
         qs = qs.filter(triage__classification=params['classification'])
     qs = _internal_filter(qs, params, 'subdomain__')
-    return paginate(qs, params, _tagged(_vuln, lambda v: v.target_domain.project) if everywhere else _vuln)
+    return paginate_narrow(qs, params, _tagged(_vuln, lambda v: v.target_domain.project) if everywhere else _vuln)
 
 
 def _cert(c):
@@ -3956,7 +4025,7 @@ def list_matches(ctx, slug, params):
         qs = qs.filter(cve_entry__kev=True)
     # what each row's explanation reads about its host's distribution (match_explain.host_hint): a few queries for the page, none per row
     qs = qs.prefetch_related('subdomain__technologies', 'subdomain__ip_addresses__ports')
-    return paginate(qs, params, _tagged(_match, lambda m: m.subdomain.target_domain.project) if _is_all(project) else _match)
+    return paginate_narrow(qs, params, _tagged(_match, lambda m: m.subdomain.target_domain.project) if _is_all(project) else _match)
 
 
 # --- the unified Findings list: CVE matches, scanner findings and hygiene findings as one population ------------------
@@ -4205,12 +4274,18 @@ def list_findings(ctx, slug, params):
     start, stop = (page - 1) * size, min(page * size, MAX_FINDINGS)
     merged = []
     for key, qs in sources.items():  # the top ``stop`` of each source holds the top ``stop`` of the merged order
-        merged += [(key, obj) for obj in (qs[:stop] if stop > start else [])]
+        # the order is cut on the ordering columns alone, and only the page's rows are loaded whole (``page_slice``): the wide related rows of the top
+        # ``stop`` of every source were joined and sorted before
+        merged += [(key, *row) for row in (qs.values_list('pk', 'heat_rank', 'sev', 'when')[:stop] if stop > start else [])]
     epoch = datetime(1970, 1, 1, tzinfo=dt_timezone.utc)  # not now().replace(year=1970): that raises on 29 February
-    merged.sort(key=lambda pair: (pair[1].heat_rank, pair[1].sev, pair[1].when or epoch, pair[1].id), reverse=True)
+    merged.sort(key=lambda row: (row[2], row[3], row[4] or epoch, row[1]), reverse=True)
+    wanted = merged[start:stop]
+    loaded = {key: {obj.pk: obj for obj in sources[key].filter(pk__in=[row[1] for row in wanted if row[0] == key])} for key in {row[0] for row in wanted}}
     everywhere = _is_all(project)
     results = []
-    for key, obj in merged[start:stop]:
+    for key, obj in ((row[0], loaded[row[0]].get(row[1])) for row in wanted):
+        if obj is None:
+            continue
         row = _finding_row(key, obj)
         if everywhere:
             owner = _finding_project(key, obj)
