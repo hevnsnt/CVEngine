@@ -1664,6 +1664,8 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'names': _host_names(sub),
             # the other names that point at this host's addresses: one host, several domain names
             'aliases': sorted({o.name for o in others if o.name.lower() != sub.name.lower()}, key=str.lower),
+            # what a Sentinel said the name resolves to that a second source has not confirmed yet (agentapi.dns_crosscheck): shown, never stored on the host
+            'unconfirmed_addresses': ((shared or {}).get('unconfirmed') or {}).get(host_key) or [],
             'ips': [{'address': addr, 'os': e['ip'].os_guess,
                      'reverse': e['ip'].reverse_pointer or '', 'country': countries.get(e['ip'].geo_iso_id, ''),
                      'names_on_ip': on_ip.get(addr, 0), 'is_cdn': bool(e['ip'].is_cdn),
@@ -1951,8 +1953,10 @@ def _shared_for(project, subs):
     java = java_runtime.runtimes_for(_pids_of(project, subs), {s.name.lower() for s in subs})  # what the host was read to run on (one query)
     from cveFeed import version_sources
     versions = version_sources.readings_for(_pids_of(project, subs), {s.name.lower() for s in subs})  # what its version sources state (one query)
+    from agentapi import dns_crosscheck
+    unconfirmed = dns_crosscheck.held_for(_pids_of(project, subs), {s.name for s in subs})  # DNS answers one source gave that are not on the host yet (one query)
     return {'names_on_ip': names, 'countries': countries, 'archive': archive, 'rdp_shots': rdp_shots, 'shots': shots, 'legacy_shots': legacy_shots,
-            'probes': probe_rows, 'vhosts': vhosts, 'java': java, 'versions': versions}
+            'probes': probe_rows, 'vhosts': vhosts, 'java': java, 'versions': versions, 'unconfirmed': unconfirmed}
 
 
 NO_PROFILE = {'owner': '', 'purpose': '', 'criticality': 'unknown'}

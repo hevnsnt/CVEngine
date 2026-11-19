@@ -1091,6 +1091,9 @@ const hostOverview = (h) => {
   if (reverse.length) rows.push({ label: "Reverse DNS", value: reverse.join(", ") });
   const shared = h.ips.filter((ip) => ip.names_on_ip > 1).map((ip) => `${ip.address} (${ip.names_on_ip} names)`);
   if (shared.length) rows.push({ label: "Shared with", value: shared.join(", ") });
+  // DNS answers one Sentinel gave that no second source confirmed yet: shown here, never stored on the host (agentapi.dns_crosscheck)
+  const unconfirmed = (h.unconfirmed_addresses || []).map((u) => `${u.address} (unconfirmed${u.single_source ? ", single source" : ""}: ${u.why || u.reason}; seen in ${u.runs} run${u.runs === 1 ? "" : "s"})`);
+  if (unconfirmed.length) rows.push({ label: "Unconfirmed addresses", value: unconfirmed.join("; ") });
   if (!rows.length) return el("div");
   const box = el("div", "why host-overview");
   box.append(el("h3", "sec", "Overview"), kvBox(rows));
@@ -3878,6 +3881,7 @@ const pages = {
       const chip = projChip(h);
       if (chip) head.append(chip);
       if ((h.aliases || []).length) head.append(el("span", "note", `Also answers to ${h.aliases.join(", ")}`, { title: "Names that resolve to the same addresses are one host" }));
+      if ((h.unconfirmed_addresses || []).length) head.append(el("span", "note", `Unconfirmed DNS answer: ${h.unconfirmed_addresses.map((u) => u.address).join(", ")}`, { title: "A single Sentinel gave this address; the host keeps its addresses until a second source confirms it" }));
       if (h.zombie) head.append(badge("Zombie: DNS gone, still answering", "smoke"));
       if (h.secrets) {
         const s = el("a", "badge medium", `Secrets: ${h.secrets}`, { href: `/cve/${encodeURIComponent(projectOf(h))}/secrets/`, title: "Exposed secrets this host serves (masked values only)" });

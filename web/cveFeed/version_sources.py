@@ -471,7 +471,8 @@ def _observation(r, port):
     outcome = 'found' if r['version'] else 'hidden'
     evidence = {'confidence': r['confidence'], 'line_only': r['line_only'], 'component': r['component'], 'source': r['source'],
                 'said': r['evidence'], 'version_source': True, **({'cpe': r['cpe']} if r.get('cpe') else {}),
-                **({'bundled': r['bundled']} if isinstance(r.get('bundled'), dict) else {}), **({'on_port': True} if r.get('on_port') else {})}
+                **({'bundled': r['bundled']} if isinstance(r.get('bundled'), dict) else {}), **({'on_port': True} if r.get('on_port') else {}),
+                **({'build': r['build']} if r.get('build') else {})}  # a build the version carries (vmware-version's ESXi build)
     if r.get('release_only') and isinstance(r.get('windows'), dict):
         # the Windows release an NTLM challenge states (cveFeed.windows_builds): the release, never its update revision
         evidence.update(release_only=True, windows=r['windows'])

@@ -71,10 +71,15 @@ def _allowed(sub):
     return probes.allowed_names(sub)
 
 
-def try_dns_resolve(domain, names, scan=None):
+def try_dns_resolve(domain, names, scan=None, held=None):
     """``(pairs, errors)`` (``{(name, ip)}`` and ``{name: reason}``) from a Sentinel's lookups. The kind has no local path
     (``sentinel_dispatch.NEVER_LOCAL``): ``ScannerUnavailable`` when no Sentinel can take it. A name the scope policy left out is never sent and
-    is an error, as is a name the Sentinel refused or a task nobody finished: looked up again later, never a name without an address."""
+    is an error, as is a name the Sentinel refused or a task nobody finished: looked up again later, never a name without an address.
+
+    The answers are judged first (``agentapi.dns_crosscheck``): ``pairs`` holds what the inventory may take, and for a host whose answer is held (a new
+    address of a host that has addresses, or a move into or out of the do-not-scan list, said by one source only) the addresses it already has. ``held``,
+    when given, is filled with ``{name: {ip: reason}}``; a second Sentinel is asked to confirm them."""
+    from agentapi import dns_crosscheck
     from cveFeed import probe_scope
     project = domain.project
     names = [n for n in dict.fromkeys((n or '').strip().lower().rstrip('.') for n in names) if n]
@@ -94,7 +99,18 @@ def try_dns_resolve(domain, names, scan=None):
             errors.update({name: 'no answer from the scanner' for name in chunk})
             continue
         resolved = result.get('resolved') or {}
-        pairs |= {(name, ip) for name, ips in resolved.items() for ip in ips}
+        verdict = dns_crosscheck.judge(project.pk, resolved)
+        pairs |= verdict.accepted | verdict.carried
+        if verdict.held:
+            if held is not None:
+                for name, addresses in verdict.held.items():
+                    held.setdefault(name, {}).update(addresses)
+            agent_id = getattr(result, 'agent_id', None)
+            dns_crosscheck.note_held(project, verdict.held, scan=scan, sentinel=sentinel_dispatch._sentinel_name(agent_id) if agent_id else '')
+            try:
+                dns_crosscheck.request_confirmation(project, domain, list(verdict.held), agent_id, scan=scan)
+            except Exception:  # noqa: BLE001 - a confirmation that could not be asked for leaves the answer held, nothing else changes
+                logger.exception('could not ask for a confirming lookup in project %s', project.pk)
         failed = result.get('errors') or {}
         for name in chunk:
             if name not in resolved and name in failed:

@@ -76,6 +76,71 @@ class ReaderTests(SimpleTestCase):
         self.assertEqual(source_versions.runzero_readings({**block, 'os_version': ''}), [])
 
 
+    # nmap's own vmware-version output (scripts/vmware-version.nse: "Server version", "Build", "Locale version", "OS type", "Product Line ID"),
+    # once as the normal output prints it and once as the -oX output attribute a Sentinel sends
+    VMWARE_NORMAL = ('| vmware-version:\n|   Server version: VMware ESXi 7.0.3\n|   Build: 21930508\n|   Locale version: INTL 000\n'
+                     '|   OS type: vmnix-x86\n|_  Product Line ID: embeddedEsx')
+    VMWARE_XML = '  Server version: VMware ESXi 7.0.3\n  Build: 21930508\n  Locale version: INTL 000\n  OS type: vmnix-x86\n  Product Line ID: embeddedEsx'
+
+    def test_vmware_version_states_esxi_with_its_build(self):
+        for text in (self.VMWARE_NORMAL, self.VMWARE_XML):
+            got, = source_versions.vmware_readings(text)
+            self.assertEqual((got['label'], got['version'], got['build'], got['cpe'], got['source']),
+                             ('VMware ESXi', '7.0.3-21930508', '21930508', 'cpe:/o:vmware:esxi:7.0.3', 'nse:vmware-version'))
+            self.assertIn('Product Line ID: embeddedEsx', got['evidence'])
+        # vCenter's advisories name update letters, not builds: the release is its version, the build only evidence
+        got, = source_versions.vmware_readings('  Server version: VMware vCenter Server 7.0.3\n  Build: 20150588\n  Locale version: INTL 000\n'
+                                               '  OS type: linux-x64\n  Product Line ID: vpx')
+        self.assertEqual((got['label'], got['version'], got['cpe'], 'build' in got), ('VMware vCenter Server', '7.0.3', 'cpe:/a:vmware:vcenter_server:7.0.3', False))
+        self.assertIn('Build: 20150588', got['evidence'])
+        # the classic ESX the script's own documentation shows
+        got, = source_versions.vmware_readings('| vmware-version:\n|   Server version: VMware ESX 4.1.0\n|   Build: 348481\n'
+                                               '|   Locale version: INTL 000\n|   OS type: vmnix-x86\n|_  Product Line ID: esx')
+        self.assertEqual((got['label'], got['version']), ('VMware ESX', '4.1.0-348481'))
+        for junk in ('', 'Server version: Totally ESXi 7.0.3', '  Server version: VMware ESXi\n  Build: 1', '  Server version: VMware ESXi 7.0.3 <script>'):
+            self.assertEqual(source_versions.vmware_readings(junk), [])
+        got, = source_versions.vmware_readings('  Server version: VMware ESXi 8.0.2\n  Build: not-a-build')
+        self.assertEqual((got['version'], 'build' in got), ('8.0.2', False))  # no build stated: the release alone
+
+    def test_the_other_version_scripts_with_a_fixed_form(self):
+        scripts = {  # the outputs nmap's scripts document (amqp-info.nse, docker-version.nse, wdb-version.nse), as -oX writes them
+            'amqp-info': ('  capabilities: \n    publisher_confirms: YES\n    exchange_exchange_bindings: YES\n    basic.nack: YES\n'
+                          '    consumer_cancel_notify: YES\n  copyright: Copyright (C) 2007-2011 VMware, Inc.\n'
+                          '  information: Licensed under the MPL.  See http://www.rabbitmq.com/\n  platform: Erlang/OTP\n  product: RabbitMQ\n'
+                          '  version: 2.4.0\n  mechanisms: PLAIN AMQPLAIN\n  locales: en_US'),
+            'docker-version': ('  Version: 1.11.2\n  BuildTime: 2016-06-01T21:47:50.269346868+00:00\n  Arch: amd64\n  KernelVersion: 3.13.0-91-generic\n'
+                               '  Os: linux\n  ApiVersion: 1.23\n  GitCommit: b9f10c9\n  GoVersion: go1.5.4'),
+            'wdb-version': ('  VULNERABLE: Wind River Systems VxWorks debug service enabled. See http://www.kb.cert.org/vuls/id/362332\n'
+                            '  Agent version: 2.0\n  VxWorks version: VxWorks5.4.2\n  Board Support Package: PCD ARM940T REV 1\n  Boot line: host:vxWorks.z'),
+            'rpcinfo': '  program version    port/proto  service\n  100000  2,3,4        111/tcp   rpcbind',  # a table, no product version
+            'hnap-info': '  Type: GatewayWithWiFi\n  Device: Ingraham\n  Vendor: Linksys\n  Firmware: 1.0.00 build 11',
+        }
+        got = [(r['label'], r['version'], r['source'], r.get('cpe', '')) for r in source_versions.version_script_readings(scripts)]
+        self.assertEqual(got, [('RabbitMQ', '2.4.0', 'nse:amqp-info', ''), ('Docker', '1.11.2', 'nse:docker-version', ''),
+                               ('VxWorks', '5.4.2', 'nse:wdb-version', 'cpe:/o:windriver:vxworks:5.4.2')])
+        self.assertEqual(source_versions.version_script_readings({'amqp-info': '  capabilities: \n    version: 9.9.9\n    product: Evil'}), [])
+        self.assertEqual(source_versions.version_script_readings('not a dict'), [])
+
+    def test_runzero_services_are_readings_per_port(self):
+        services = [runzero.parse_service(r) for r in fixture('runzero_services_page.json')['services']]
+        services = [s for s in services if s and s['address'] == '203.0.113.5']
+        block = runzero_sync._block(runzero.parse_asset(fixture('runzero_asset.json')), [], services)
+        got = [(port, r['label'], r['version'], r.get('cpe', ''), when[:10]) for port, r, when in source_versions.runzero_service_readings(block)]
+        self.assertEqual(got, [(22, 'OpenSSH', '8.2p1', 'cpe:/a:openbsd:openssh:8.2p1', '2025-11-17'),
+                               (80, 'Apache HTTPD', '2.4.41', 'cpe:/a:apache:http_server:2.4.41', '2025-11-16'),
+                               (80, 'PHP', '7.4.3', 'cpe:/a:php:php:7.4.3', '2025-11-16'),
+                               (8080, 'Jetty', '9.4.41', 'cpe:/a:eclipse:jetty:9.4.41', '2025-11-17')])
+        self.assertEqual(source_versions.runzero_service_readings({'services': [{'port': 'x'}, {'port': 22, 'attributes': 'x'}, 'junk']}), [])
+
+    def test_runzero_hardware_firmware_is_a_hint(self):
+        block = runzero_sync._block(runzero.parse_asset({**fixture('runzero_asset.json'), 'hw': 'Ubiquiti UniFi AP 6.5.28'}), [])
+        _os, hw = source_versions.runzero_readings(block)
+        self.assertEqual((hw['label'], hw['version'], hw['confidence'], hw['hint'], hw['part']), ('Ubiquiti UniFi AP', '6.5.28', 'weak', True, 'hw'))
+        for model in ('Cisco ISR4321', 'Dell PowerEdge 2500', 'Apple Mac Mini (Late 2018)'):  # a model number is no firmware version
+            block = runzero_sync._block(runzero.parse_asset({**fixture('runzero_asset.json'), 'hw': model}), [])
+            self.assertEqual([r['part'] for r in source_versions.runzero_readings(block)], ['os'])
+
+
 class NmapTests(VersionFixture, TestCase):
     def stored(self):
         scan = self.host_scan(web=False)
@@ -350,3 +415,120 @@ class WebserverTests(VersionFixture, TestCase):
         got = {(r.kind, r.product): r.version for r in ProbeObservation.objects.filter(probe=source_versions.WEBSERVER_PROBE)}
         self.assertEqual(got, {('version', 'OpenSSL'): '1.1.1k', ('version', 'mod_wsgi'): '4.6.4'})  # Apache is the port's; Python is vsrc:passive's
         self.assertIn('OpenSSL:1.1.1k', names(sub))
+
+
+# CVE-2025-22224 as cve.now carries it: VMware writes each fix as the patch release and its build
+ESXI_22224 = [{'vendor': 'VMware', 'product': 'ESXi', 'ranges': [{'introduced': '8.0', 'fixed': 'ESXi80U3d-24585383'},
+                                                                 {'introduced': '8.0', 'fixed': 'ESXi80U2d-24585300'},
+                                                                 {'introduced': '7.0', 'fixed': 'ESXi70U3s-24585291'}]}]
+ESXI_OLD = [{'vendor': 'VMware', 'product': 'ESXi', 'ranges': [{'introduced': '7.0', 'fixed': 'ESXi70U3c-19193900'}]}]  # fixed before 21930508
+
+
+class VersionScriptTests(VersionFixture, TestCase):
+    def stored(self):
+        scan = self.host_scan(web=False)
+        port_inventory.persist_inventory(fixture('nmap_vmware.json')['hosts'], os_reliable=True)
+        sub = Subdomain.objects.select_related('target_domain').prefetch_related('technologies', 'ip_addresses__ports').get(scan_history=scan)
+        version_sources.refresh_host(sub)
+        return scan, sub
+
+    def correlate(self, scan):
+        cve_by_id, index = correlation.cve_pool()
+        correlation.correlate_subdomains(list(correlation.candidate_subdomains(index).filter(scan_history=scan)), index, cve_by_id, min_confidence=0.4)
+
+    def test_the_esxi_build_is_a_reading_and_a_technology_though_the_port_states_the_release(self):
+        _scan, sub = self.stored()
+        self.assertTrue(Port.objects.get(number=443).extra['version_scripts']['vmware-version'].startswith('  Server version: VMware ESXi 7.0.3'))
+        row = rows(source_versions.NMAP_PROBE)[('version', 'VMware ESXi', 443)]
+        self.assertEqual((row.version, row.evidence['build'], row.evidence['cpe'], row.evidence['source']),
+                         ('7.0.3-21930508', '21930508', 'cpe:/o:vmware:esxi:7.0.3', 'nse:vmware-version'))
+        self.assertIn('VMware ESXi:7.0.3-21930508', names(sub))
+
+    def test_correlation_decides_by_the_build(self):
+        hit = CVEEntry.objects.create(cve_id='CVE-2025-22224', title='VMX TOCTOU', kev=True, cvss=9.3, published_at=timezone.now(), affected=ESXI_22224)
+        old = CVEEntry.objects.create(cve_id='CVE-2026-300040', title='fixed earlier', cvss=9.8, published_at=timezone.now(), affected=ESXI_OLD)
+        scan, _sub = self.stored()
+        self.correlate(scan)
+        match = CVEMatch.objects.get(cve_entry=hit, source='tech')
+        self.assertEqual((match.matched_product, match.matched_version, match.version_in_range), ('ESXi', '7.0.3-21930508', True))
+        self.assertEqual(match.evidence['range'], {'introduced': '7.0.3', 'fixed': '7.0.3-24585291'})
+        # build 21930508 is past the earlier fix (19193900): no match from the build, and the port's bare "7.0.3" is no proof either way
+        self.assertFalse(CVEMatch.objects.filter(cve_entry=old, version_in_range=True).exclude(ai_verdict='not_affected').exists())
+
+    def test_search_finds_the_reading(self):
+        self.stored()
+        self.assertEqual({r.product for r in version_sources.search_rows('component', 'vmware esxi')}, {'VMware ESXi'})
+        self.assertIn('VMware ESXi', {r.product for r in version_sources.search_rows('vsource', 'nmap')})
+        self.assertEqual({r.product for r in source_versions.os_rows('esxi')}, {'VMware ESXi'})  # its operating system CPE: os:esxi
+
+    def test_the_backfill_reads_stored_version_scripts_and_correlates(self):
+        hit = CVEEntry.objects.create(cve_id='CVE-2025-22224', title='VMX TOCTOU', kev=True, cvss=9.3, published_at=timezone.now(), affected=ESXI_22224)
+        scan, sub = self.stored()
+        ProbeObservation.objects.filter(probe=source_versions.NMAP_PROBE).delete()  # stored before this reader existed
+        sub.technologies.clear()
+        scan.scan_status = 2
+        scan.save(update_fields=['scan_status'])
+        self.assertEqual(source_versions.catch_up_version_scripts(apply=False), {'hosts': 1, 'readings': 0, 'matches': 0})
+        out = source_versions.catch_up_version_scripts(apply=True)
+        self.assertEqual(out['readings'], 1)
+        self.assertEqual(rows(source_versions.NMAP_PROBE)[('version', 'VMware ESXi', 443)].version, '7.0.3-21930508')
+        self.assertTrue(CVEMatch.objects.filter(cve_entry=hit, version_in_range=True).exists())
+        source_versions.catch_up_version_scripts(apply=True)  # idempotent
+        self.assertEqual(ProbeObservation.objects.filter(probe=source_versions.NMAP_PROBE, product='VMware ESXi').count(), 1)
+        self.assertIn('backfill_version_scripts', upgrade_backfills.BACKFILLS)
+        self.assertLess(upgrade_backfills.BACKFILLS.index('backfill_version_scripts'), upgrade_backfills.BACKFILLS.index('rerate_findings'))
+
+
+class RunZeroServiceTests(ReportedFixture, TestCase):
+    def synced(self, hw='Cisco ISR4321', services=None):
+        sub = self.host_scan(web=False).subdomain_set.select_related('target_domain').get()
+        ip = IpAddress.objects.get(address=self.ADDRESS)
+        ip.org = self.project.org
+        ip.save(update_fields=['org'])
+        asset = runzero.parse_asset({**fixture('runzero_asset.json'), 'hw': hw, 'last_seen': int(timezone.now().timestamp())})
+        if services is None:
+            services = [runzero.parse_service({**r, 'service_updated_at': int(timezone.now().timestamp())})
+                        for r in fixture('runzero_services_page.json')['services']]
+        runzero_sync._enrich(self.project, {self.ADDRESS: asset}, [], services=[s for s in services if s])
+        return sub
+
+    def test_services_are_reported_readings_on_their_port_and_matched_while_fresh(self):
+        row = cve('CVE-2026-300050', 'eclipse', 'jetty', '9.4.0', '9.4.52')
+        self.synced()
+        got = {(r.kind, r.product, r.port): (r.version, r.evidence.get('cpe'), r.evidence['provider']) for r in
+               ProbeObservation.objects.filter(probe=source_versions.RUNZERO_PROBE)}
+        self.assertEqual(got[('reported', 'OpenSSH', 22)], ('8.2p1', 'cpe:/a:openbsd:openssh:8.2p1', 'runzero'))
+        self.assertEqual(got[('reported', 'Jetty', 8080)], ('9.4.41', 'cpe:/a:eclipse:jetty:9.4.41', 'runzero'))
+        self.assertEqual(got[('reported', 'Cisco IOS', 0)][0], '15.2(4)M7')  # the asset's operating system, as before
+        self.assertFalse(Port.objects.filter(number__in=(22, 80, 8080)).exists())  # runZero's services make no port row
+        match, = self.correlate(row)
+        self.assertEqual((match.source, match.matched_version, match.evidence['reported_by']), ('tech', '9.4.41', 'runzero'))
+        self.assertLessEqual(match.confidence, source_versions.REPORTED_CONFIDENCE)
+        # our own scan of 8080 sees it closed: the third-party reading of that port is no longer matched
+        IpAddress.objects.get(address=self.ADDRESS).ports.add(Port.objects.create(number=8080, service_name='http', state='closed', source='nmap'))
+        self.assertEqual(self.correlate(row), [])
+
+    def test_a_service_runzero_no_longer_lists_is_dropped(self):
+        sub = self.synced()
+        asset = runzero.parse_asset({**fixture('runzero_asset.json'), 'last_seen': int(timezone.now().timestamp())})
+        runzero_sync._enrich(self.project, {self.ADDRESS: asset}, [], services=[])
+        self.assertEqual({r.product for r in ProbeObservation.objects.filter(probe=source_versions.RUNZERO_PROBE)}, {'Cisco IOS'})
+        self.assertTrue(sub.pk)
+
+    def test_the_firmware_hint_is_shown_and_searched_never_matched(self):
+        row = cve('CVE-2026-300051', 'ubiquiti', 'unifi ap', '6.0.0', '6.6.0')
+        self.synced(hw='Ubiquiti UniFi AP 6.5.28', services=[])
+        hint = ProbeObservation.objects.get(probe=source_versions.RUNZERO_PROBE, product='Ubiquiti UniFi AP')
+        self.assertEqual((hint.version, hint.port, hint.evidence['hint'], hint.evidence['part']), ('6.5.28', 0, True, 'hw'))
+        self.assertEqual(self.correlate(row), [])
+        listed = {i['product']: i for i in version_sources.readings_for([self.project.id], ['app.rt.test'])[(self.project.id, 'app.rt.test')]}
+        self.assertEqual((listed['Ubiquiti UniFi AP']['matched'], listed['Ubiquiti UniFi AP']['hint']), (False, True))
+        self.assertEqual({r.product for r in version_sources.search_rows('component', 'ubiquiti unifi ap')}, {'Ubiquiti UniFi AP'})
+
+    def test_os_search_finds_the_operating_system_never_a_service_or_the_hardware(self):
+        self.synced(hw='Ubiquiti UniFi AP 6.5.28')
+        self.assertEqual({r.product for r in source_versions.os_rows('cisco')}, {'Cisco IOS'})
+        self.assertEqual(list(source_versions.os_rows('openssh')), [])
+        self.assertEqual(list(source_versions.os_rows('unifi')), [])
+        self.assertEqual({r.product for r in version_sources.search_rows('vsource', 'runzero')},
+                         {'Cisco IOS', 'Ubiquiti UniFi AP', 'OpenSSH', 'Apache HTTPD', 'PHP', 'Jetty'})
