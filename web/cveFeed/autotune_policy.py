@@ -12,9 +12,9 @@ and acts on what these return; ``cveFeed.autotune_signals`` takes the measuremen
 2. **Aim high**: once a restart or update is ``AIM_WARMUP_SECONDS`` old and memory and the Sentinels have reported (``facts_ready``; or after
    ``AIM_FALLBACK_SECONDS`` with the optimistic values for what is missing), every setting goes straight up to that target (lower than the
    target only while the level that last caused trouble is remembered, below). The jump only goes up.
-3. **Scale back on evidence, at once**: memory pressure or a memory kill, scanner time-outs and kills, the database above ``DB_PRESSURE`` of its
-   connections, a CPU overload, a worker that stopped answering, Sentinel waits that time out and run locally, runs of a kind that wait with
-   nothing of the kind running. A back-off is fast (``backoff``: a quarter to a half, at least two steps), needs no cooldown, and is then
+3. **Scale back on evidence, at once**: memory pressure, the database above ``DB_PRESSURE`` of its connections, a CPU overload, a worker or the
+   broker that stopped answering, Sentinel tasks that time out or expire unclaimed. (Each Sentinel's own slots are tuned by
+   ``cveFeed.autotune_sentinels`` from its own machine.) A back-off is fast (``backoff``: a quarter to a half, at least two steps), needs no cooldown, and is then
    held for ``BACKOFF_HOLD`` before another one. The level that caused the trouble is remembered for ``BAD_MEMORY_SECONDS``: nothing goes back
    up to it before that.
 4. **Probe up slowly**: one step, only after ``PROBE_HEALTHY_SECONDS`` without any trouble for that setting, with work waiting and room to spare
@@ -55,8 +55,7 @@ LOAD_PRESSURE = {'cgroup': 0.95, 'loadavg': 2.0}   # above this in two measureme
 RESERVED_CONNECTIONS = 30      # database connections kept for everything but the discovery pool (web, the other workers, beat)
 AIM_WARMUP_SECONDS = 600       # no aim-high jump in the first ten minutes after a restart or an update
 AIM_FALLBACK_SECONDS = 1800    # ... and not before memory and Sentinels reported, unless this long has passed (then the optimistic values fill in)
-CAPACITY_FAILURES = 3          # failures of one scanner kind that point at load (timeouts, out of memory, exit -9) in one interval
-SENTINEL_TROUBLE = 2           # Sentinel waits that timed out or ran locally in one interval (or one in each of two) that are trouble
+SENTINEL_TROUBLE = 2           # Sentinel tasks that timed out or expired unclaimed in one interval (or one in each of two) that are trouble
 BACKLOG_SECONDS = 1800         # assessment work older than this is a backlog
 SMALL_INSTANCE = 100           # hosts plus targets under this: a small instance, sized modestly
 LOW_DISK_PERCENT = 10          # under this share of free disk, no target is above the optimistic value
@@ -88,6 +87,7 @@ METRICS = {
     'sentinel_idle_share': ('lower', 0.15, 'share of Sentinel slots idle'),
     'scan_oldest_s': ('lower', 600.0, 'age of the oldest queued scan (seconds)'),
     'trouble': ('lower', 1.0, 'trouble for this setting (1 yes, 0 no)'),
+    'sentinel_done': ('higher', 1.0, 'tasks the Sentinel finished per measurement'),  # a per-Sentinel number (cveFeed.autotune_sentinels.measure)
 }
 NO_ACTION_PHASES = ('cap', 'verify', 'emergency')  # never reverted, never hold the one-at-a-time gate
 
@@ -311,8 +311,6 @@ def sized_for_text(facts):
 
 def _memory_pressure(last):
     mem = last.get('memory') or {}
-    if mem.get('kills'):
-        return f'{mem["kills"]} memory kill{"" if mem["kills"] == 1 else "s"}'
     if mem.get('free_frac') is not None and mem['free_frac'] < MEMORY_FREE_PRESSURE:
         return f'only {round(mem["free_frac"] * 100)}% memory free'
     return None
@@ -338,11 +336,22 @@ def _worker_silent(samples):
 
 
 def _sentinel_trouble(samples):
+    """Sentinel work that did not get done in time: tasks that timed out, and tasks that expired unclaimed while the Sentinels were busy (not during a
+    claim outage, ``autotune_signals.claim_outage``). Nothing runs on the server, so this is the Sentinels' capacity, which the planner and stage settings
+    feed."""
     def bad(s):
-        return (_get(s, 'sentinel', 'timeouts', default=0) or 0) + (_get(s, 'sentinel', 'fallbacks', default=0) or 0)
+        return (_get(s, 'sentinel', 'timeouts', default=0) or 0) + (_get(s, 'sentinel', 'expired_unclaimed', default=0) or 0)
     last = bad(samples[-1])
     if last >= SENTINEL_TROUBLE or (last and len(samples) > 1 and bad(samples[-2])):
-        return f'{last} Sentinel wait(s) timed out and ran locally'
+        return f'{last} Sentinel task(s) timed out or expired unclaimed'
+    return None
+
+
+def _broker_trouble(samples):
+    """The Celery broker did not answer in the last two measurements: nothing more is started."""
+    recent = samples[-2:]
+    if len(recent) == 2 and all(_get(s, 'broker', 'ok') is False for s in recent):
+        return 'the Celery broker does not answer'
     return None
 
 
@@ -405,8 +414,9 @@ def _trouble(setting, samples, last, kind):
         return _lane_trouble(kind.split(':', 1)[1], samples)
     checks = {
         'assess_share': (lambda: _starvation_trouble(samples),),
-        'discovery': (lambda: _db_pressure(last), lambda: _worker_silent(samples), lambda: _memory_pressure(last), lambda: _load_pressure(samples)),
-        'depth': (lambda: _db_pressure(last), lambda: _worker_silent(samples), lambda: _memory_pressure(last)),
+        'discovery': (lambda: _db_pressure(last), lambda: _worker_silent(samples), lambda: _memory_pressure(last), lambda: _load_pressure(samples),
+                      lambda: _broker_trouble(samples)),
+        'depth': (lambda: _db_pressure(last), lambda: _worker_silent(samples), lambda: _memory_pressure(last), lambda: _broker_trouble(samples)),
         'batch': (lambda: _sentinel_trouble(samples), lambda: _worker_silent(samples)),
         'stage': (lambda: _sentinel_trouble(samples),),
         'work_gap': (lambda: _memory_pressure(last), lambda: _db_pressure(last), lambda: _load_pressure(samples)),
@@ -428,13 +438,13 @@ def room(sample):
         return 'no memory report from the scanning container'
     if mem['free_frac'] < MEMORY_FREE_RAISE:
         return f'{round(mem["free_frac"] * 100)}% memory free (a probe needs {round(MEMORY_FREE_RAISE * 100)}%)'
-    if mem.get('kills'):
-        return f'{mem["kills"]} memory kill{"" if mem["kills"] == 1 else "s"}'
     db = _frac(_get(sample, 'db', 'used'), _get(sample, 'db', 'max'))
     if db is None:
         return 'database connections could not be counted'
     if db >= DB_RAISE:
         return f'database at {round(db * 100)}% of its connections (a probe needs under {round(DB_RAISE * 100)}%)'
+    if _get(sample, 'broker', 'ok') is False:
+        return 'the Celery broker did not answer'
     load = sample.get('load')
     if load is not None and load >= LOAD_RAISE[sample.get('load_kind') or 'loadavg']:
         return f'CPU load {load:.2f}' + (' of the limit' if sample.get('load_kind') == 'cgroup' else ' per core')
@@ -486,8 +496,8 @@ def demand(setting, value, sample):
     live, slots, in_use = sent.get('live') or 0, sent.get('slots') or 0, sent.get('in_use') or 0
     if not live:
         return 'no live Sentinel'
-    if sent.get('timeouts') or sent.get('fallbacks'):
-        return 'Sentinel waits timed out'
+    if sent.get('timeouts') or sent.get('expired_unclaimed'):
+        return 'Sentinel tasks timed out or expired unclaimed'
     free = slots - in_use
     if kind == 'stage':
         if free < 2:
@@ -521,17 +531,17 @@ def _beyond(setting, number, ceiling):
 
 
 def decide(setting, value, baseline, samples, history, *, now, boot_at, target, target_reason='', cooldown, probe_cooldown,
-           hold_until=None, hard_cap=None, target_known=True, ready=True, pause=''):
+           hold_until=None, target_known=True, ready=True, pause=''):
     """What the controller does with one setting now.
 
     ``value``: the number in effect; ``baseline``: the number without the tuner (environment or default); ``samples``: the measurements since
     the last restart, oldest first; ``history``: this setting's applied changes of the last two days, ``[{'at', 'direction', 'pressure',
-    'phase', 'old', 'new'}]``; ``target``: what ``size_for`` says this machine carries; ``hard_cap``: a ceiling the caller imposes on top (None: none); ``target_known``: False when the target is only the optimistic stand-in for facts that did
+    'phase', 'old', 'new'}]``; ``target``: what ``size_for`` says this machine carries; ``target_known``: False when the target is only the optimistic stand-in for facts that did
     not report (it then never lowers anything); ``ready``: memory and Sentinels have reported (``facts_ready``); ``hold_until``: a revert asked
     for no raise before this time; ``pause``: the reason when the watchdog paused the starting of work for memory (``trouble``). All times in seconds.
 
-    A value above the ceiling (the known target, a remembered bad level, the memory cap) is brought down to it at once, with no cooldown (phase
-    ``cap``): the Sentinels left, the database filled up, a kind's real peak grew. The aim-high jump waits ``AIM_WARMUP_SECONDS`` after the
+    A value above the ceiling (the known target, a remembered bad level) is brought down to it at once, with no cooldown (phase
+    ``cap``): the Sentinels left, the database filled up. The aim-high jump waits ``AIM_WARMUP_SECONDS`` after the
     restart and for ``ready`` (or ``AIM_FALLBACK_SECONDS``), and only ever goes up.
 
     After an emergency back-off the number before it comes back in one step once the database has room again (``_recovery``, phase ``recover``),
@@ -568,11 +578,6 @@ def decide(setting, value, baseline, samples, history, *, now, boot_at, target, 
             return out
         out.update(direction='less', new=new, pressure=True, phase='back_off', why_not_raised=why,
                    reason=f'{why}: backed off {value} to {new}')
-        return out
-    if hard_cap is not None and setting.sense == 'more' and value > hard_cap and max(setting.low, hard_cap) < value:
-        new = max(setting.low, hard_cap)
-        out.update(direction='less', new=new, phase='cap', why_not_raised='the memory budget',
-                   reason=f'{value} runs do not fit the memory budget at their real peak: lowered to {new}')
         return out
     cap = ceiling if target_known else bad_below
     if cap is not None and _beyond(setting, value, cap):
@@ -780,12 +785,12 @@ def _metric_value(metric, setting, samples):
 
 
 def _kills(samples):
-    """Memory kills the measurements saw (the scanning containers' own), and the kernel's oom kills plus Celery lane restarts of the last day at their
-    highest (``sample['maint']``, ``cveFeed.autotune_signals.maintainer``); each None when nothing measured it."""
-    counts = [_get(s, 'memory', 'kills') for s in samples if (s.get('memory') or {}).get('reported')]
+    """``(None, oom)``: no server measurement counts kills of its own any more (nothing scans here; a Sentinel's kills are its own measurement,
+    ``cveFeed.autotune_sentinels.measure``), and the kernel's oom kills plus Celery lane restarts of the last day at their highest (``sample['maint']``,
+    ``cveFeed.autotune_signals.maintainer``), None when nothing measured them."""
     rolling = [(_get(s, 'maint', 'oom_kills_24h'), _get(s, 'maint', 'lane_restarts_24h')) for s in samples]
     known = [(a or 0) + (b or 0) for a, b in rolling if a is not None or b is not None]
-    return (sum(c or 0 for c in counts) if counts else None), (max(known) if known else None)
+    return None, (max(known) if known else None)
 
 
 def measure(setting, samples, direction='more'):
@@ -879,7 +884,7 @@ _FENCE = re.compile(r'^\s*```(?:json)?\s*|\s*```\s*$', re.I)
 
 def validate_advice(reply, offered, clean=None):
     """Keep what the controller's envelope allows from the AI advisor's reply. ``offered``: {key: {'setting': Setting, 'value': number in effect,
-    'range': (lowest, highest) the controller allows now}} (from one step down up to the controller's own target, the memory cap included).
+    'range': (lowest, highest) the controller allows now}} (from one step down up to the controller's own target).
     Returns ({key: {'value', 'direction', 'reason'}}, [(key or '?', why it was refused)], error or ''). A reply that is not the JSON asked for is refused whole (``error``); each recommendation
     is then judged on its own, so one bad entry does not throw away the good ones. A reason is model text: it is cleaned (no control characters,
     one line, 200 characters) and only ever shown as text."""
