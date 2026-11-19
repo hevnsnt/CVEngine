@@ -9,8 +9,12 @@ runtime rules of ``cveFeed.version_sources``):
                  printed (``extra.cpes``; the first one is ``Port.cpe`` and is matched with the port), the CPE of a port nmap named no
                  product for, the modules nmap's ``extrainfo`` lists (``(CentOS) OpenSSL/1.0.2k-fips PHP/5.4.16``), the Server and generator
                  lines of ``http-server-header``, ``http-headers`` and ``http-generator``, and the versions the database scripts read (``mysql-info``,
-                 ``redis-info``, ``memcached-info``, ``mongodb-info``, ``ms-sql-info``) and ``ntp-info``. A reading the port row already states
-                 (same product, same version) is not stored twice. Derived from the stored ports: refreshed with the other stored-data
+                 ``redis-info``, ``memcached-info``, ``mongodb-info``, ``ms-sql-info``) and ``ntp-info``, and what the scripts of nmap's version
+                 category print on their own (``extra.version_scripts``, ``version_script_readings``): ``vmware-version``'s ESXi or vCenter
+                 release with its build (an ESXi version carries the build, ``7.0.3-21930508``: VMware's advisories are build based,
+                 ``correlation.esxi_ranges``), ``amqp-info``'s product and version, ``docker-version``'s Docker release and ``wdb-version``'s
+                 VxWorks release. A reading the port row already states (same product, same version) is not stored twice; a build the port
+                 row does not state is never dropped as a twin. Derived from the stored ports: refreshed with the other stored-data
                  readings (``version_sources.refresh_host``), and dropped when the port no longer says it.
   vsrc:webserver the Server header the web check stored for the host (``Subdomain.webserver``: bbot's HTTP pass, the web route check), its
                  web server and modules, less what a port of the host states at the same version; derived like ``vsrc:nmap``.
@@ -53,7 +57,9 @@ Third-party readings (kind and outcome ``reported``): passive data another servi
                    operating system (``cpe:/o:canonical:ubuntu_linux``). Only a versioned one is matched. InternetDB states no scan date: the
                    reading is dated when cvENGINE received it, and marked ``undated``.
   vsrc:runzero     the operating system and its version runZero's inventory states for an address (``os``, ``os_version``), dated by the
-                   asset's ``last_seen``.
+                   asset's ``last_seen``; each service runZero read a product version on (its services export: Recog's ``service.*`` and
+                   ``service.component.*`` attributes, with the CPE), per port, dated by the service's ``updated_at``; and the firmware a
+                   hardware description ends with (``hw``: "Ubiquiti UniFi AP 6.5.28"), a hint: shown and searched, never matched.
 
 The freshness rule (``in_use``). A reported reading is matched (``collect_reported``: correlation source ``tech``, the CPE first, confidence at
 most ``REPORTED_CONFIDENCE``, never proof of a version) only while all of these hold, and is otherwise shown and searched but matched to nothing,
@@ -63,7 +69,8 @@ so the next correlation closes a match it made:
   2. nothing first-party names the same product on the host: a technology, a port's product or CPE (a closed port counts: our scan saw the
      product and saw it go), or a first-party reading. A first-party reading always wins, whatever its version and however old the
      third-party one is, and a product our scan saw with no version is not given the third-party version either;
-  3. when it names a port, our own scan of that port does not show it closed or answering with another product.
+  3. when it names a port, our own scan of that port does not show it closed or answering with another product;
+  4. it is no hint (a device's firmware, ``evidence.hint``): those are shown and searched only.
 
 Tenancy: a reading belongs to the project of the host it was stored for (the discovery's target, the project whose runZero sync wrote the
 address's block); correlation reads only the rows of the host's own project.
@@ -276,6 +283,104 @@ def script_readings(scripts):
     return [r for r in out if r]
 
 
+_GUTTER = re.compile(r'^\s*\|[ _]?')  # normal output's two-character gutter: "| " on a line, "|_" on the last
+_FIELD_KEY = re.compile(r'[A-Za-z][A-Za-z0-9 _.-]{0,40}')
+_VMWARE_SERVER = re.compile(r'^(VMware (?:ESXi?|vCenter Server|Server|GSX Server))\s+(\d{1,2}\.\d{1,2}(?:\.\d{1,3})?)$', re.IGNORECASE)
+_VMWARE_BUILD = re.compile(r'^\d{4,9}$')
+_VXWORKS = re.compile(r'^(?:VxWorks\s*)?(\d{1,2}\.\d{1,2}(?:\.\d{1,3})?)$', re.IGNORECASE)
+_PRODUCT_NAME = re.compile(r'^[A-Za-z][A-Za-z0-9 ._+-]{1,40}$')
+
+
+def script_fields(text, script=''):
+    """``{lower-case key: value}`` of the top-level ``Key: value`` lines one NSE script printed: its ``-oX`` ``output`` text (what a Sentinel sends)
+    or the normal output's ``|`` gutter, the ``script:`` header line left out, the first value of a key kept. An indented line under a key with no
+    value (``capabilities:``, a table) is that table's, never a top-level field. At most 60 lines are read."""
+    out, indent = {}, None
+    for raw in str(text or '')[:4000].replace('\r', '').split('\n')[:60]:
+        line = _GUTTER.sub('', raw, count=1) if raw.lstrip().startswith('|') else raw
+        body = line.strip()
+        if not body or (script and body.lower() == f'{script}:'):
+            continue
+        depth = len(line) - len(line.lstrip(' '))
+        indent = depth if indent is None else min(indent, depth)
+        if depth > indent:
+            continue  # a nested table's line
+        key, sep, value = body.partition(':')
+        if sep and _FIELD_KEY.fullmatch(key.strip()):
+            out.setdefault(key.strip().lower(), value.strip())
+    return out
+
+
+def vmware_readings(text):
+    """The reading ``vmware-version`` states (the SOAP API's ``Server version`` and ``Build``): VMware ESXi (or ESX) with the build in its version
+    (``7.0.3-21930508``, as VMware's advisories name the fix by its build), any other VMware server (vCenter) with the release and the build kept
+    as evidence. ``[]`` for anything else."""
+    fields = script_fields(text, 'vmware-version')
+    found = _VMWARE_SERVER.match(fields.get('server version', ''))
+    if not found:
+        return []
+    name, release = found.group(1), found.group(2)
+    build = fields.get('build', '') if _VMWARE_BUILD.match(fields.get('build', '')) else ''
+    esx = bool(re.fullmatch(r'VMware ESXi?', name, re.IGNORECASE))
+    said = f'vmware-version: Server version: {name} {release}' + (f'; Build: {build}' if build else '')
+    line = catalogue.clip(fields.get('product line id', ''), 30)
+    if line:
+        said += f'; Product Line ID: {line}'
+    slug = re.sub(r'[^a-z0-9]+', '_', name.split(' ', 1)[1].lower()).strip('_')
+    cpe = f'cpe:/o:vmware:{slug}:{release}' if esx else f'cpe:/a:vmware:{slug}:{release}'
+    got = product_reading(name, f'{release}-{build}' if esx and build else release, 'nse:vmware-version', evidence=said, cpe=cpe)
+    if got and esx and build:
+        got['build'] = build  # what the port row (nmap's "VMware ESXi SOAP API 7.0.3") does not state: never dropped as its twin
+    return [got] if got else []
+
+
+def _amqp_readings(text):
+    fields = script_fields(text, 'amqp-info')
+    product, version = fields.get('product', ''), fields.get('version', '')
+    if not _PRODUCT_NAME.match(product):
+        return []
+    return [product_reading(product, version, 'nse:amqp-info', evidence=f'amqp-info product: {product}; version: {version}')]
+
+
+def _docker_readings(text):
+    version = script_fields(text, 'docker-version').get('version', '')
+    return [product_reading('Docker', version, 'nse:docker-version', evidence=f'docker-version Version: {version}')]
+
+
+def _wdb_readings(text):
+    stated = script_fields(text, 'wdb-version').get('vxworks version', '')
+    found = _VXWORKS.match(stated)
+    if not found:
+        return []
+    return [product_reading('VxWorks', found.group(1), 'nse:wdb-version', evidence=f'wdb-version VxWorks version: {stated}',
+                            cpe=f'cpe:/o:windriver:vxworks:{found.group(1)}')]
+
+
+# the scripts of nmap's version category whose output states a product and its version in a fixed form (-sV runs them unasked; nmap's scripts
+# directory has the output each prints). The others (rpcinfo's program table, hnap-info's device page, xmpp-info's capabilities ...) state
+# no product version of their own, or only what nmap already put in the port row.
+VERSION_SCRIPT_READERS = (
+    ('vmware-version', vmware_readings),
+    ('amqp-info', _amqp_readings),
+    ('docker-version', _docker_readings),
+    ('wdb-version', _wdb_readings),
+)
+
+
+VERSION_SCRIPT_SOURCES = frozenset(f'nse:{script}' for script, _reader in VERSION_SCRIPT_READERS)
+
+
+def version_script_readings(scripts):
+    """The readings the version category scripts of one port state (``Port.extra['version_scripts']``, ``VERSION_SCRIPT_READERS``)."""
+    scripts = scripts if isinstance(scripts, dict) else {}
+    out = []
+    for script, reader in VERSION_SCRIPT_READERS:
+        text = scripts.get(script)
+        if isinstance(text, str) and text.strip():
+            out += [r for r in reader(text[:4000]) if r]
+    return out
+
+
 def port_readings(port):
     """What one stored port states beyond the product and version the port row itself is matched by: the other application CPEs, the CPE of
     a port with no product, the modules of ``extrainfo`` and the NSE script versions. The port's own reading is left out."""
@@ -290,6 +395,7 @@ def port_readings(port):
         cpes.insert(0, port.cpe)  # nmap named no product, only the CPE: correlation skips the port, so the CPE is the reading
     out += _modules(port.service_extra, 'nmap-extrainfo')
     out += script_readings(extra.get('scripts'))
+    out += version_script_readings(extra.get('version_scripts'))
     from cveFeed import servicefp
     replies = servicefp.decode(port.banner or '')
     if replies:  # an unidentified service's fingerprint: the Server, X-Powered-By and version headers of the HTTP reply it got
@@ -303,8 +409,9 @@ def port_readings(port):
         elif _same_version(got['version'], twin['version']):
             twin['cpe'] = got['cpe']  # the banner's spelling (1.0.2k-fips) with the CPE's product: one reading
     token, version = _norm(port.product or ''), (port.version or '').strip()
-    return [r for r in _unique(out) if not (version and _same_version(r['version'], version) and _names_port(r['label'], token))
-            ][:MAX_READINGS_PER_PORT]
+    # a build the port row does not state (vmware-version's ESXi build) is what the reading adds: never dropped as the port's twin
+    return [r for r in _unique(out) if not (version and _same_version(r['version'], version) and _names_port(r['label'], token)
+                                            and not (r.get('build') and r['build'] not in version))][:MAX_READINGS_PER_PORT]
 
 
 def _names_port(label, port_token):
@@ -560,16 +667,67 @@ def reported_cpe(tech):
     return shodan_reading(tech)
 
 
+_HW_FIRMWARE = re.compile(r'^(.{2,80}?)\s+v?(\d{1,4}\.\d{1,6}(?:[._-][0-9A-Za-z]{1,12}){0,4})$')
+
+
 def runzero_readings(block):
-    """The operating system reading of an address's runZero block (``os``, ``os_version``), dated by the asset's ``last_seen``, or ``[]``."""
+    """The address-wide readings of a runZero block: its operating system (``os``, ``os_version``) and the firmware its hardware description
+    ends with (``hw``: "Ubiquiti UniFi AP 6.5.28"; a hint, never matched: a model number is no version, so only a dotted last word reads),
+    both dated by the asset's ``last_seen``. ``[]`` when it states neither."""
     if not isinstance(block, dict):
         return []
+    out = []
     os_name, os_version = catalogue.clip(block.get('os'), 100), catalogue.clip(block.get('os_version'), 100)
-    if not os_name or not _STATED.match(os_version):
-        return []
-    label = re.sub(rf'\s*{re.escape(os_version)}\s*$', '', os_name).strip() or os_name
-    got = product_reading(label, os_version, RUNZERO_PROVIDER, evidence=f'runZero os: {os_name}; os_version: {os_version}')
-    return [got] if got else []
+    if os_name and _STATED.match(os_version):
+        label = re.sub(rf'\s*{re.escape(os_version)}\s*$', '', os_name).strip() or os_name
+        got = product_reading(label, os_version, RUNZERO_PROVIDER, evidence=f'runZero os: {os_name}; os_version: {os_version}')
+        if got:
+            out.append({**got, 'part': 'os'})
+    hw = catalogue.clip(block.get('hw'), 100)
+    found = _HW_FIRMWARE.match(hw)
+    if found and _STATED.match(found.group(2)):
+        got = product_reading(found.group(1).strip(), found.group(2), RUNZERO_PROVIDER, evidence=f'runZero hw: {hw}')
+        if got and got['kind'] == 'product':
+            out.append({**got, 'confidence': 'weak', 'part': 'hw', 'hint': True})
+    return out
+
+
+MAX_RUNZERO_SERVICES = 64
+
+
+def runzero_service_readings(block):
+    """``[(port, reading, dated)]`` of the services a runZero block keeps (``runzero_sync._services_of``): each product runZero's fingerprint names
+    with a version on a port (Recog's ``service.*`` and ``service.component.*`` attributes, read by ``recog.results`` as Recog's own readings are,
+    with the CPE runZero gives), dated by the service's ``updated``. A protocol's version (``stated_version``) is no reading."""
+    from cveFeed import recog
+    from cveFeed.correlation import stated_version
+    out = []
+    services = block.get('services') if isinstance(block, dict) and isinstance(block.get('services'), list) else []
+    for service in services[:MAX_RUNZERO_SERVICES]:
+        port = service.get('port') if isinstance(service, dict) else None
+        attributes = service.get('attributes') if isinstance(service, dict) else None
+        if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536 or not isinstance(attributes, dict):
+            continue
+        params = {str(k): catalogue.clip(v, 200) for k, v in list(attributes.items())[:20] if isinstance(v, str)}
+        transport = catalogue.clip(service.get('transport'), 10)
+        for result in recog.results(params):
+            if result['part'] not in ('service', 'service.component'):
+                continue  # the operating system is the asset's (``runzero_readings``)
+            version = re.split(r'[\s@]', result['version'].strip(), maxsplit=1)[0] if result['version'].strip() else ''
+            if not version or any(not stated_version(name, version) for name in (result['label'], f"{result['vendor']} {result['product']}")):
+                continue
+            said = f"runZero service {port}/{transport}: {result['vendor']} {result['product']} {result['version']}".replace('  ', ' ')
+            cpe = result['cpe'] if is_cpe(result['cpe']) and '{' not in result['cpe'] else ''
+            got = product_reading(result['label'], version, RUNZERO_PROVIDER, evidence=said, cpe=cpe)
+            if got:
+                out.append((port, {**got, 'part': result['part']}, catalogue.clip(service.get('updated'), 40)))
+    seen, unique = set(), []
+    for port, r, when in out:
+        key = (port, r['component'], r['kind'], r['version'])
+        if key not in seen:
+            seen.add(key)
+            unique.append((port, r, when))
+    return unique
 
 
 def _unique(readings):
@@ -627,17 +785,21 @@ def store_port(sub, probe, port, readings, now=None):
 
 def _reported_observation(r, provider, reported_at, port=0, undated=False):
     from cveFeed import probes
+    if '_reported_at' in r:  # a reading dated on its own (a runZero service: its own updated_at)
+        reported_at, undated = r['_reported_at'], not r['_reported_at']
     when = reported_at.isoformat() if isinstance(reported_at, datetime) else str(reported_at or '')
     evidence = {'confidence': r['confidence'], 'line_only': r['line_only'], 'component': r['component'], 'source': provider, 'said': r['evidence'],
                 'version_source': True, 'reported': True, 'provider': provider, 'reported_at': when[:40],
-                **({'undated': True} if undated else {}), **({'cpe': r['cpe']} if r.get('cpe') else {})}
-    return probes._observation(REPORTED, r['label'], r['version'], '', REPORTED, REPORTED_CONFIDENCE, f'{provider}'[:48], port=port,
+                **({'undated': True} if undated else {}), **({'cpe': r['cpe']} if r.get('cpe') else {}),
+                **({'part': r['part']} if r.get('part') else {}), **({'hint': True} if r.get('hint') else {})}
+    return probes._observation(REPORTED, r['label'], r['version'], '', REPORTED, REPORTED_CONFIDENCE, f'{provider}'[:48], port=r.get('_port', port),
                                url=r.get('url') or '', evidence=evidence)
 
 
 def store_reported(project_id, domain_id, host, probe, readings, provider, reported_at, port=0, undated=False, replace=False, now=None):
     """Store third-party ``readings`` of a host of ``project_id`` (kind and outcome ``reported``: never a technology, never read as a first-party
-    fact). ``replace`` drops the probe's rows of the host the readings no longer name. Returns whether anything moved."""
+    fact). ``replace`` drops the probe's rows of the host the readings no longer name. A reading may carry its own ``_port`` and ``_reported_at``
+    (a runZero service). Returns whether anything moved."""
     from cveFeed import probes
     from cveFeed.models import ProbeObservation
     host = (host or '').lower().rstrip('.')
@@ -683,22 +845,33 @@ def _runzero_block(ip, project_id, configured=None):
     return block if project_id in configured else None
 
 
-def refresh_runzero(sub, configured=None, now=None):
-    """Store the operating system readings runZero's blocks state for the addresses of ``sub`` (its own project's blocks only) and drop the ones
-    no block states any more. Returns whether anything moved."""
-    if sub.target_domain_id is None:
-        return False
+def runzero_host_readings(sub, configured=None):
+    """Every runZero reading of ``sub``'s addresses (its own project's blocks only): the address-wide ones (``runzero_readings``, port 0) and the
+    services (``runzero_service_readings``, on their port), each carrying its ``_port`` and ``_reported_at``."""
     project_id = sub.target_domain.project_id
-    readings, when = [], None
+    out, seen = [], set()
     for ip in sub.ip_addresses.all():
         block = _runzero_block(ip, project_id, configured)
-        if block:
-            got = runzero_readings(block)
-            readings += got
-            if got:
-                when = block.get('last_seen') or block.get('updated') or when
-    return store_reported(project_id, sub.target_domain_id, sub.name, RUNZERO_PROBE, _unique(readings), RUNZERO_PROVIDER, when or '',
-                          undated=not when, replace=True, now=now)
+        if not block:
+            continue
+        dated = block.get('last_seen') or block.get('updated') or ''
+        found = [(0, r, dated) for r in runzero_readings(block)] + [(p, r, when or dated) for p, r, when in runzero_service_readings(block)]
+        for port, r, when in found:
+            key = (port, r['component'], r['kind'], r['version'])
+            if key not in seen:
+                seen.add(key)
+                out.append({**r, '_port': port, '_reported_at': when})
+    return out
+
+
+def refresh_runzero(sub, configured=None, now=None):
+    """Store the readings runZero's blocks state for the addresses of ``sub`` (``runzero_host_readings``) and drop the ones no block states any
+    more. Returns whether anything moved."""
+    if sub.target_domain_id is None:
+        return False
+    readings = runzero_host_readings(sub, configured)
+    return store_reported(sub.target_domain.project_id, sub.target_domain_id, sub.name, RUNZERO_PROBE, readings, RUNZERO_PROVIDER, '',
+                          replace=True, now=now)
 
 
 def refresh_host(sub, ports, now=None):
@@ -885,7 +1058,8 @@ def verdict(row, seen, now=None):
 
 def in_use(sub, now=None):
     """The reported readings of ``sub`` the freshness rule lets correlation match (``verdict``)."""
-    rows = [r for r in _rows(sub) if r.kind == REPORTED and r.outcome == REPORTED and r.version]
+    rows = [r for r in _rows(sub) if r.kind == REPORTED and r.outcome == REPORTED and r.version
+            and not (isinstance(r.evidence, dict) and r.evidence.get('hint'))]  # a hint (a device's firmware) is shown and searched only
     if not rows:
         return []
     seen = first_party(sub)
@@ -916,10 +1090,12 @@ def collect_reported(subdomain, product_index, cve_by_id, rows, scan_history=Non
 
 def os_rows(value):
     """The version source rows that name an operating system containing ``value`` (``os:``): the Windows release an NTLM challenge states
-    (``vsrc:ntlm``), runZero's operating system (``vsrc:runzero``) and any reading carrying an operating system CPE (a network operating
-    system's identity, Shodan's ``cpe:/o:`` CPEs)."""
+    (``vsrc:ntlm``), runZero's operating system (``vsrc:runzero``, the address-wide reading that is no hardware hint: its services are
+    applications) and any reading carrying an operating system CPE (a network operating system's identity, Shodan's ``cpe:/o:`` CPEs, VMware
+    ESXi as vmware-version states it)."""
     from cveFeed import version_sources
-    return version_sources.readings_qs().filter(Q(probe__in=(NTLM_PROBE, RUNZERO_PROBE)) | Q(evidence__cpe__istartswith='cpe:/o:')
+    runzero_os = Q(probe=RUNZERO_PROBE, port=0) & (Q(evidence__part='os') | ~Q(evidence__has_key='part'))
+    return version_sources.readings_qs().filter(Q(probe=NTLM_PROBE) | runzero_os | Q(evidence__cpe__istartswith='cpe:/o:')
                                                 | Q(evidence__cpe__istartswith='cpe:2.3:o:')) \
         .filter(Q(product__icontains=value) | Q(evidence__cpe__icontains=value))
 
@@ -1116,6 +1292,52 @@ def catch_up_recog(apply=False, batch=200):
     return out
 
 
+def catch_up_version_scripts(apply=False, batch=200):
+    """The one-time catch-up an update runs (``manage.py backfill_version_scripts --apply``): read the version category script output every current
+    host's ports already store (``extra.version_scripts``: vmware-version's ESXi build, amqp-info, docker-version, wdb-version) into ``vsrc:nmap``
+    readings, and the firmware hint a stored runZero block's ``hw`` states (its services come with the next sync), then correlate the hosts that
+    moved and every host whose port or technology names VMware ESXi (its CVE ranges are read by build now: ``correlation.esxi_ranges``).
+    Idempotent. Returns ``{'hosts', 'readings', 'matches'}``."""
+    from cveFeed import correlation, version_sources
+    from startScan.models import Subdomain
+    base = Subdomain.objects.filter(correlation.latest_scan_q()).filter(target_domain__isnull=False)
+    stored = base.filter(Q(ip_addresses__ports__extra__has_key='version_scripts') | Q(ip_addresses__fingerprint__has_key='runzero'))
+    esxi = base.filter(Q(ip_addresses__ports__product__icontains='esx') | Q(technologies__name__icontains='esxi'))
+    ids = sorted(set(stored.values_list('id', flat=True)))
+    moved = set(esxi.values_list('id', flat=True))
+    out = {'hosts': len(set(ids) | moved), 'readings': 0, 'matches': 0}
+    if not apply:
+        return out
+    configured = None
+    for start in range(0, len(ids), batch):
+        subs = list(Subdomain.objects.filter(id__in=ids[start:start + batch]).select_related('target_domain', 'scan_history')
+                    .prefetch_related('technologies', 'ip_addresses__ports'))
+        if configured is None:
+            from cveFeed import runzero_sync
+            configured = runzero_sync.configured_project_ids()
+        for sub in subs:
+            try:
+                ports = version_sources._ports(sub)
+                found = nmap_readings(sub, ports)
+                changed = version_sources._store_derived(sub, NMAP_PROBE, found, timezone.now())
+                changed = refresh_runzero(sub, configured=configured) or changed
+                changed = refresh_recog(sub, ports)[1] or changed  # Recog gives way to the nmap readings just stored
+            except Exception:  # noqa: BLE001 - one host's stored data never stops the catch-up
+                logger.exception('version script catch-up of host %s failed', sub.pk)
+                continue
+            out['readings'] += sum(1 for _n, r in found if str(r.get('source') or '') in VERSION_SCRIPT_SOURCES)
+            if changed:
+                moved.add(sub.pk)
+    if moved:
+        cve_by_id, index = correlation.cve_pool()
+        ordered = sorted(moved)
+        for start in range(0, len(ordered), batch):
+            subs = list(Subdomain.objects.filter(pk__in=ordered[start:start + batch]).select_related('target_domain', 'scan_history')
+                        .prefetch_related('technologies', 'ip_addresses__ports'))
+            out['matches'] += correlation.correlate_subdomains(subs, index, cve_by_id, min_confidence=0.4)[1]
+    return out
+
+
 def payload_fields(row):
     """The host payload's fields of a reported reading (``version_sources.as_dict``): who reported it and as of when; ``stale`` and ``matched``
     follow its age (``REPORTED_MAX_AGE_DAYS``). A reading a first-party one supersedes is not told apart here: ``in_use`` decides at correlation."""
@@ -1123,7 +1345,7 @@ def payload_fields(row):
     when = _reported_at(row)
     aged = when is None or when < timezone.now() - timedelta(days=REPORTED_MAX_AGE_DAYS)
     return {'reported': {'by': ev.get('provider') or '', 'at': ev.get('reported_at') or '', 'undated': bool(ev.get('undated'))},
-            'stale': aged, 'matched': not aged}
+            'stale': aged, 'matched': not aged and not ev.get('hint'), **({'hint': True} if ev.get('hint') else {})}
 
 
 def refresh_runzero_project(project):

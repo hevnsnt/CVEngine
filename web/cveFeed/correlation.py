@@ -163,8 +163,9 @@ _TRAIN_BUILD_RE = re.compile(r"^-(\d{1,3})\.(\d{1,4})(?![\d.A-Za-z])")
 # PAN-OS names a hotfix of a release: 10.2.9-h1 is the first hotfix of 10.2.9, so 10.2.9 < 10.2.9-h1 < 10.2.9-h3 < 10.2.10.
 _HOTFIX_RE = re.compile(r"^-h(\d{1,3})(?![0-9A-Za-z])")
 # ImageMagick's "7.1.2-35": a numeric revision after a dash, a release of its own (7.1.2-35 is not 7.1.2-4). Never a distribution build
-# ("2.4.57-11.el9", "1.18.0-6ubuntu14": the lookahead refuses a dot or a letter after the number)
-_DASH_REVISION_RE = re.compile(r"^-(\d{1,5})(?![\d.A-Za-z_+~])")
+# ("2.4.57-11.el9", "1.18.0-6ubuntu14": the lookahead refuses a dot or a letter after the number). VMware ESXi's build reads the same way:
+# "7.0.3-21930508" is build 21930508 of 7.0 Update 3 (``esxi_ranges``), so it orders against another 7.0.3 build by the build number.
+_DASH_REVISION_RE = re.compile(r"^-(\d{1,9})(?![\d.A-Za-z_+~])")
 _DATE_RE = re.compile(r"^(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2}))?(?![\d.])")
 _PRE_RANK = {"dev": -6, "snapshot": -6, "alpha": -5, "a": -5, "beta": -4, "b": -4, "m": -3, "pre": -2, "cr": -1, "rc": -1}
 
@@ -310,6 +311,13 @@ def version_in_range(ver, rng):
     introduced, fixed, last = (parsed for _raw, parsed in bounds)
     if introduced is None and fixed is None and last is None:
         return None  # no usable bound: the range says nothing about this version
+    if rng.get("line_only"):
+        # an ESXi release line whose fix is named by a patch id with no build (``esxi_ranges``): a version of another line is outside it, one
+        # of this line is unknown (the patch id cannot be compared with a build)
+        inside = (introduced is None or _vcmp(ver, introduced) >= 0) and (fixed is None or _vcmp(ver, fixed) < 0)
+        return None if inside else False
+    if rng.get("build_bound") and fixed is not None and getattr(ver, "revision", None) is None and _vcmp(ver, fixed) == 0:
+        return None  # the update the fix belongs to, read without its build (nmap's "7.0.3"): which build it runs is not known
     if introduced is not None and _vcmp(ver, introduced) < 0:
         return False
     if fixed is not None and _vcmp(ver, fixed) >= 0:
@@ -619,6 +627,10 @@ def clean_affected(value):
             item = {**item, "ranges": [r for r in ranges[:MAX_RANGES_PER_ITEM] if isinstance(r, dict)] if isinstance(ranges, list) else []}
             if item["ranges"] and _is_netscaler(item):
                 item["ranges"] = [_netscaler_range(r) for r in item["ranges"]]
+        if _is_esxi(item):  # read by build (``esxi_ranges``), as Broadcom writes its fixes
+            ranges = esxi_ranges(item.get("ranges") or [], item.get("versions"))
+            if ranges != (item.get("ranges") or []):
+                item = {**item, "ranges": ranges}
         if "builds" in item:  # the exact builds the advisory lists (cveFeed.intel.convert_affected), each a ``build_key``
             builds = item["builds"]
             builds = [b for b in (build_key(b) for b in builds[:MAX_BUILDS_PER_ITEM] if isinstance(b, str)) if b] if isinstance(builds, list) else []
@@ -651,6 +663,58 @@ def _netscaler_range(rng):
         if _NETSCALER_BUILD_RE.match(bound):
             out[key] = f"{train.group(1)}-{bound}"
     return out
+
+
+# VMware ESXi names a fix by the patch release and its build: "ESXi80U3d-24585383" is build 24585383 of 8.0 Update 3 (patch d), the build
+# its own vmware-version reply states as version 8.0.3, build 24585383. Builds only grow, so within one update a build below the fix is
+# affected. A patch id of the 6.x releases ("ESXi670-202102401-SG") names no build: only its release line is known.
+_ESXI_FIX_RE = re.compile(r"^ESXi(\d)(\d)(?:U(\d{1,2}))?[a-z]{0,3}-(\d{6,9})$", re.IGNORECASE)
+_ESXI_PATCH_RE = re.compile(r"^ESXi(\d)(\d)0-\d{9}-[A-Z]{1,4}$", re.IGNORECASE)
+_ESXI_BEFORE_RE = re.compile(r"^\s*(\d{1,2}\.\d{1,2})(?:\.x)?\s+before\s+(ESXi\S{6,40})\s*$", re.IGNORECASE)
+
+
+def _is_esxi(item):
+    product = _norm(item.get("product"))
+    return product in ("esxi", "vmwareesxi", "esx", "vmwareesx") and _real_vendor(item) in ("", "vmware")
+
+
+def esxi_ranges(ranges, versions=None):
+    """An ESXi record's ranges read by build (``_ESXI_FIX_RE``). Each fix becomes the range of its own update, from that update's first build
+    up to the fix's build (``8.0.3`` to ``8.0.3-24585383``, ``build_bound``: an 8.0.3 read without its build is unknown there), and the updates
+    of the line below it that no listed fix covers are affected whole (``8.0`` to ``8.0.2`` when only Update 2 and 3 have fixes, the CVE List
+    writing every fix of a line from the line's start). A patch id with no build keeps only its line (``line_only``: unknown inside it). A
+    record cve.now passed on as bare ``versions`` ("7.0 before ESXi70U1c-17325551") is read the same way when every line of it is one of these
+    forms. Any other range is kept as it was."""
+    ranges = [r for r in ranges if isinstance(r, dict)]
+    if not ranges and isinstance(versions, list):
+        listed = [_ESXI_BEFORE_RE.match(v) if isinstance(v, str) else None for v in versions[:20]]
+        if not listed or not all(listed):
+            return ranges
+        ranges = [{"introduced": m.group(1), "fixed": m.group(2)} for m in listed]
+    lines, rest = {}, []
+    for rng in ranges:
+        fixed = str(rng.get("fixed") or "").strip()
+        build, patch = _ESXI_FIX_RE.match(fixed), _ESXI_PATCH_RE.match(fixed)
+        if build:
+            line = f"{build.group(1)}.{build.group(2)}"
+            lines.setdefault((line, rng.get("type")), {}).setdefault(int(build.group(3) or 0), set()).add(int(build.group(4)))
+        elif patch:
+            line = (int(patch.group(1)), int(patch.group(2)))
+            rest.append({**({"type": rng["type"]} if rng.get("type") else {}), "introduced": f"{line[0]}.{line[1]}",
+                         "fixed": f"{line[0]}.{line[1] + 1}", "line_only": True})
+        else:
+            rest.append(rng)
+    out = []
+    for (line, kind), updates in sorted(lines.items()):
+        typed = {"type": kind} if kind else {}
+        covered = -1
+        for update in sorted(updates):
+            if update > covered + 1:  # the updates below this fix that no other listed fix covers: every build of them is affected
+                out.append({**typed, "introduced": line if covered < 0 else f"{line}.{covered + 1}", "fixed": f"{line}.{update}"})
+            # the highest build listed for the update: two fixes of one update (a later respin) are read as the later one
+            out.append({**typed, "introduced": f"{line}.{update}", "fixed": f"{line}.{update}-{max(updates[update])}", "build_bound": True})
+            covered = update
+    return out + rest
 
 
 def build_product_index(cves):
