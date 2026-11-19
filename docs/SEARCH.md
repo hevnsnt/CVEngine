@@ -6,6 +6,7 @@ Search your whole attack surface the way you search the Internet on [Shodan](htt
 port:3389 -host:vpn                 Remote Desktop exposed, not on the VPN
 tech:"apache tomcat" sev:high       Tomcat hosts with a high finding
 ip:203.0.113.0/24 product:nginx     nginx anywhere in a network range
+tech:ollama vuln:ollama             Ollama servers whose API answers anyone
 ```
 
 ## Where to search
@@ -48,7 +49,7 @@ Host search (everything above) answers "which of my hosts...". To look up a CVE 
 | `proto:` | Hosts with an open port over `tcp` or `udp`. A UDP port counts only when it answered, never when it stayed silent (`open\|filtered`). | `proto:udp` |
 | `product:` | Software nmap saw on a port | `product:openssh` |
 | `service:` | Service name on a port | `service:ssh` |
-| `tech:` | Which hosts run a product ([below](#what-a-host-runs)). Every source counts: technologies, open ports (product, version, CPE, banner, script output, HTTP header and title), the stored `Server` header, live routes' `Server` and `X-Powered-By` headers, fingerprints and cookie names, version source readings (first- and third-party, products and runtimes), Java runtime readings, and what runs on a platform (`tech:php` finds WordPress). A name matches as text and as the same product under any of its names (`apache httpd`, `apache http server` and `apachegeneric` are one). After `@`: `unknown` (or `none`) for no version known, `known`, or a release prefix (`@7.1` finds 7.1.4, never 7.10) | `tech:php`, `tech:"apache http server"`, `tech:java@unknown`, `tech:wordpress@7.1` |
+| `tech:` | Which hosts run a product ([below](#what-a-host-runs)). Every source counts: technologies, open ports (product, version, CPE, banner, script output, HTTP header and title), the stored `Server` header, live routes' `Server` and `X-Powered-By` headers, fingerprints and cookie names, version source readings (first- and third-party, products and runtimes), Java runtime readings, and what runs on a platform (`tech:php` finds WordPress). A name matches as text and as the same product under any of its names (`apache httpd`, `apache http server` and `apachegeneric` are one). After `@`: `unknown` (or `none`) for no version known, `known`, or a release prefix (`@7.1` finds 7.1.4, never 7.10) | `tech:php`, `tech:"apache http server"`, `tech:java@unknown`, `tech:wordpress@7.1`; an AI model server or agent dashboard ([PIPELINE.md](PIPELINE.md#ai-model-servers-and-agent-dashboards)): `tech:ollama`, `tech:vllm`, `tech:llama.cpp`, `tech:openclaw`, `tech:"hermes agent"` |
 | `banner:` | Service banners and NSE script output on an open port | `banner:"Anonymous FTP login allowed"` |
 | `os:` | Operating system: the port scan's guess and its runners-up, an operating system CPE a port carries, the Windows release an NTLM challenge states, runZero's operating system (never a service or the hardware runZero names), a network operating system's or Shodan's OS CPE reading, and VMware ESXi as `vmware-version` states it | `os:windows`, `os:fortios`, `os:ubuntu` |
 | `ip:` | An address, a prefix, or a CIDR range | `ip:198.51.100.0/24` |
