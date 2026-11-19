@@ -82,7 +82,8 @@ class _SyncBase(TestCase):
 			return tasks.sync_cve_now_feed(**kw)
 
 	def stored(self, cid, synced=None, **fields):
-		obj = CVEEntry.objects.create(cve_id=cid, affected=[], published_at=timezone.now() - D(days=2), status='published', **fields)
+		fields.setdefault('affected', [{'product': 'nginx'}])  # with affected data: the refresh of thin recent CVEs leaves it alone
+		obj = CVEEntry.objects.create(cve_id=cid, published_at=timezone.now() - D(days=2), status='published', **fields)
 		CVEEntry.objects.filter(pk=obj.pk).update(synced_at=synced or timezone.now() - D(days=2))
 		return CVEEntry.objects.get(pk=obj.pk)
 
@@ -164,7 +165,7 @@ class ChangesTests(_SyncBase):
 
 
 class RefreshAndLockTests(_SyncBase):
-	def test_only_cves_with_open_matches_are_refreshed(self):
+	def test_only_cves_with_open_matches_or_no_affected_data_are_refreshed(self):
 		host = _host()
 		live, closed, quiet = self.stored('CVE-2026-20'), self.stored('CVE-2026-21'), self.stored('CVE-2026-22')
 		CVEMatch.objects.create(cve_entry=live, subdomain=host, source='tech')

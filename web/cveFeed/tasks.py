@@ -488,14 +488,17 @@ def _apply_changes(client, now, max_reads, new_entries, signals):
 
 
 def _refresh_open_matched(client, now, refresh_max, signals):
-    """Read again the CVEs with an open match not read for a day (at most ``refresh_max``): the delta listing names every change, so this
-    only covers a listing that lags or a change it could not apply. Returns (read, changed, failed)."""
+    """Read again the CVEs with an open match, and the recent ones that arrived with no affected-product data, not read for a day (at most
+    ``refresh_max``): the delta listing names every change, so this only covers a listing that lags or a change it could not apply.
+    Returns (read, changed, failed)."""
     from datetime import timedelta
-    from django.db.models import Exists, OuterRef
+    from django.db.models import Exists, OuterRef, Q
     from cveFeed.closure import CLOSED
     from cveFeed.models import CVEMatch
     open_match = CVEMatch.objects.filter(cve_entry=OuterRef('pk')).exclude(remediation_status__in=CLOSED).exclude(ai_verdict='not_affected')
-    due = CVEEntry.objects.filter(Exists(open_match), synced_at__lt=now - timedelta(hours=24)).order_by('synced_at', 'id')[
+    # and a recent CVE that arrived with no affected-product data, read again until it gains some
+    thin = Q(affected=[], published_at__gte=now - timedelta(days=90))
+    due = CVEEntry.objects.filter(Q(Exists(open_match)) | thin, synced_at__lt=now - timedelta(hours=24)).order_by('synced_at', 'id')[
         :max(0, min(int(refresh_max), 20))]
     read = changed = failed = 0
     for old in list(due):
