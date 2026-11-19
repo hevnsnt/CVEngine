@@ -68,8 +68,56 @@ class Server:
     words: dict = field(default_factory=dict)  # 'exposed' / 'ruled_out': how the host is described ("offers HTTP/2")
 
 
+def _ssh_port(number, service='', tunnel=''):
+    """An SSH port: 22, or one the fingerprint pass named ssh."""
+    return number == 22 or 'ssh' in str(service or '').lower()
+
+
+def _smtp_port(number, service='', tunnel=''):
+    """A cleartext SMTP port, the ones the Sentinel sends EHLO to (``cvengine_scanner.probes.service_probes.is_smtp_port``): never one wrapped
+    in TLS (465)."""
+    service = str(service or '').lower()
+    if tunnel == 'ssl' or service in ('smtps', 'ssl/smtp'):
+        return False
+    return service in ('smtp', 'submission') or (number in (25, 587, 2525) and service in ('', 'smtp', 'unknown', 'tcpwrapped'))
+
+
+def _smb_port(number, service='', tunnel=''):
+    return number == 445
+
+
+def _rdp_port(number, service='', tunnel=''):
+    return number == 3389 or str(service or '').lower() == 'ms-wbt-server'
+
+
 SERVER = {
     'http2': Server('HTTP/2', _https_port, edge_sensitive=True, words={'exposed': 'offers HTTP/2', 'ruled_out': 'does not offer HTTP/2'}),
+    # SSH, SMTP, SMB and RDP readings are made of the address the service answers on (the fingerprint pass, the ssh_probe kind), never through
+    # an edge: none is edge-sensitive
+    'ssh_terrapin': Server('SSH Terrapin preconditions', _ssh_port,
+                           words={'exposed': 'offers ChaCha20-Poly1305 or CBC with Encrypt-then-MAC without strict key exchange',
+                                  'ruled_out': 'offers strict key exchange or neither ChaCha20-Poly1305 nor CBC with Encrypt-then-MAC'}),
+    'ssh_cbc': Server('SSH CBC ciphers', _ssh_port, words={'exposed': 'offers an SSH cipher in CBC mode', 'ruled_out': 'offers no SSH cipher in CBC mode'}),
+    'ssh_aes_gcm': Server('SSH AES-GCM ciphers', _ssh_port,
+                          words={'exposed': 'offers an AES-GCM SSH cipher', 'ruled_out': 'offers no AES-GCM SSH cipher'}),
+    'ssh_auth_methods': Server('SSH authentication methods', _ssh_port),
+    'smtp_chunking': Server('SMTP CHUNKING (BDAT)', _smtp_port,
+                            words={'exposed': 'lists CHUNKING (BDAT) in its EHLO reply', 'ruled_out': 'does not list CHUNKING (BDAT) in its EHLO reply'}),
+    'smtp_starttls': Server('SMTP STARTTLS', _smtp_port,
+                            words={'exposed': 'lists STARTTLS in its EHLO reply', 'ruled_out': 'does not list STARTTLS in its EHLO reply'}),
+    'smtp_smtputf8': Server('SMTP SMTPUTF8', _smtp_port),
+    'smtp_8bitmime': Server('SMTP 8BITMIME', _smtp_port),
+    'smtp_pipelining': Server('SMTP PIPELINING', _smtp_port),
+    'smtp_auth': Server('SMTP AUTH mechanisms', _smtp_port,
+                        words={'exposed': 'lists the AUTH mechanism the flaw is in', 'ruled_out': 'does not list the AUTH mechanism the flaw is in'}),
+    'smb_dialect': Server('SMB dialect', _smb_port, words={'exposed': 'negotiates SMB 3.1.1', 'ruled_out': 'does not negotiate SMB 3.1.1'}),
+    'smb_compression': Server('SMB 3.1.1 compression', _smb_port,
+                              words={'exposed': 'negotiates SMB 3.1.1 with compression', 'ruled_out': 'does not negotiate SMB 3.1.1 compression'}),
+    'smb_signing': Server('SMB signing', _smb_port),
+    'smbv1': Server('SMBv1', _smb_port, words={'exposed': 'accepts SMBv1', 'ruled_out': 'refuses SMBv1'}),
+    'rdp_nla': Server('RDP Network Level Authentication', _rdp_port,
+                      words={'exposed': 'does not require Network Level Authentication for RDP',
+                             'ruled_out': 'requires Network Level Authentication for RDP, so an unauthenticated attacker does not reach the flaw'}),
 }
 
 

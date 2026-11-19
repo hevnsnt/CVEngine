@@ -430,7 +430,11 @@ def try_ssh_probe(project, keys, scan=None, priority=1):
         return {}
     if result.get('refused'):
         logger.info('ssh_probe task for %s: the scanner refused %s endpoint(s) outside the scope policy', project.pk, len(result['refused']))
-    return {(row['address'], row['port']): row for row in result.get('hosts') or []}
+    features = {}
+    for item in result.get('service_features') or []:  # the KEXINIT and method readings (cveFeed.address_features), each kept with its endpoint's row
+        features.setdefault((item['host'], item['port']), []).append(item)
+    return {(row['address'], row['port']): {**row, 'service_features': features.get((str(row['address']).lower(), row['port']), [])}
+            for row in result.get('hosts') or []}
 
 
 

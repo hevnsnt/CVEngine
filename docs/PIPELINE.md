@@ -625,6 +625,40 @@ Some flaws are reachable only when a service has a feature on: the nginx HTTP/2 
 - **When it applies.** Correlation applies the reading to every new or moved match. A new reading applies at once: `ingest` re-evaluates the current matches of the hosts whose readings changed (`service_features.reevaluate`), closing the ones it rules out, reopening (unjudged, its triage row pending again) one an earlier reading closed when no reading rules it out now, and moving the confidence of the rest. The AI triage is shown each needed feature with the advisory's sentence and the host's state (`preconditions` in the prompt), and the state is in the match's signature, so a changed reading asks again. The match page's explanation (`match_explain.explain`) carries `preconditions` too.
 - **Adding a feature.** A vocabulary entry in `cvengine_scanner.features`, the reading in the Sentinel kind that takes it (items in its result's `service_features`), a call to `service_features.ingest` from that kind's server ingest, a `service_features.SERVER` entry (label, the ports that must be read before the feature is ruled out, whether an edge answers it) and a rule in `FEATURE_RULES` (plus its words in `FEATURE_PREFILTER`). HTTP/3 is the nearest: the `Alt-Svc: h3` header a web probe already reads, and the advisory's "when HTTP/3 / QUIC is enabled".
 
+### Service features: SSH, SMTP, SMB and RDP
+
+Why. Some flaws are reachable only when the service has a feature on: Terrapin needs an SSH cipher mode, SMBGhost needs SMB 3.1.1 compression, EternalBlue needs SMBv1, the Exim BDAT flaws need CHUNKING, BlueKeep needs a server that lets an unauthenticated client reach the RDP channels. A version match cannot tell; a reading of the feature can (the same mechanism as HTTP/2, `cveFeed.service_features`).
+
+What runs, on the Sentinel only:
+
+| Feature | Read by | What is sent |
+| --- | --- | --- |
+| `ssh_terrapin`, `ssh_cbc`, `ssh_aes_gcm` | the fingerprint pass (`nmap`: the `ssh2-enum-algos` tables) and the SSH inspection (`ssh_probe`: the sshamble record) | nothing new: the server's KEXINIT, sent before any login |
+| `ssh_auth_methods` | `ssh_probe` | nothing new; never a credential |
+| `rdp_nla` | the fingerprint pass (`rdp-enum-encryption`) | nothing new: one X.224 Connection Request per security protocol, which nmap already sends |
+| `smtp_chunking`, `smtp_starttls`, `smtp_smtputf8`, `smtp_8bitmime`, `smtp_pipelining`, `smtp_auth` | the fingerprint pass, on each cleartext SMTP port it found open | one `EHLO`, then `QUIT`: never MAIL FROM, AUTH or STARTTLS |
+| `smb_dialect`, `smb_compression`, `smb_signing`, `smbv1` | the fingerprint pass, on port 445 when open | one SMB2 NEGOTIATE (2.0.2 to 3.1.1, with the compression context) and one SMB1 NEGOTIATE (NT LM 0.12 only): no session setup |
+
+The follow-up probes reach only the addresses the fingerprint task named, through the Sentinel's vetted connection path and its own floor, at most 64 endpoints and 120 seconds a task. The fingerprint task itself passed the bug bounty gate and the exclusions before it was sent.
+
+What is stored. The readings name the address; `cveFeed.address_features` stores them for every host name of the project's current inventory at that address (`ServiceFeature` rows, source `nmap` or `ssh_probe`). A service read again without one of its readings loses the old one (unknown, never "no"). An `smtp_auth` list read before STARTTLS carries `tls_unread`: it can show a mechanism but never rule one out.
+
+What they decide. The rules (`detection_classes.FEATURE_RULES`) read the advisory's own words:
+
+| Rule | Advisories | Exposed | Ruled out |
+| --- | --- | --- | --- |
+| `ssh_terrapin` | CVE-2023-48795 ("Terrapin") | `exposed` | `strict_kex`, `no_affected_mode` |
+| `ssh_cbc_mode` | CVE-2008-5161 (SSH, CBC mode) | `yes` | `no` |
+| `ssh_aes_gcm` | CVE-2013-4548 ("when an AES-GCM cipher is used") | `yes` | `no` |
+| `smtp_bdat` | CVE-2017-16943, CVE-2017-16944 (BDAT) | `yes` | `no` |
+| `smtp_auth_ntlm` | CVE-2023-42114, CVE-2023-42116, CVE-2020-12783 (NTLM, SPA) | `ntlm` | a list without `ntlm` and without `tls_unread` |
+| `smtp_starttls_injection` | CVE-2011-0411, CVE-2021-33515 | `yes` | `no` |
+| `smbv1_server` | CVE-2017-0143 to CVE-2017-0148, CVE-2017-11780, CVE-2020-1301 | `yes` | `no` |
+| `smb_compression` | CVE-2020-0796, CVE-2020-1206 | `yes` | `no` |
+| `rdp_unauthenticated` | CVE-2019-0708, CVE-2019-1181, CVE-2019-1182, CVE-2019-1222, CVE-2019-1226 | `not_required` | `required` |
+
+A match is closed ("Closed automatically: precondition not met") only when every relevant port of the host was read in the last 14 days and each reading rules it out; a later reading that exposes it reopens it. An exposing reading raises the confidence and never lifts a version-only match above the triage ceiling. The SMTP rules hold only for an advisory about a mail server, and the SMB compression rule reads SMBGhost's and SMBleed's exact wording or SMB compression named outright. Exim's CVE-2023-42115 needs the EXTERNAL authenticator by Exim's own advisory, but its CVE text does not say so: a person can record that on its detection strategy.
+
 ### Validating a match
 
 Each detection record also says how to decide a match, so nobody has to rediscover it per CVE:
