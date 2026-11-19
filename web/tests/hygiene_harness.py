@@ -29,6 +29,8 @@ def _cert_row(host, port, info):
     cert = {k: info.get(k) or '' for k in ('subject', 'issuer', 'signature_algorithm', 'key_description', 'protocol', 'cipher', 'chain_error')}
     cert.update(sans=list(info.get('sans') or []), not_before=_iso(info.get('not_before')), not_after=_iso(info.get('not_after')),
                 legacy_tls=bool(info.get('legacy_tls')))
+    if 'alpn' in info:  # what the handshake's ALPN offer read (a Sentinel before the field sends none)
+        cert['alpn'] = info['alpn']
     return {'host': host, 'port': port, 'found': True, 'cert': cert}
 
 

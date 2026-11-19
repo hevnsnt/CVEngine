@@ -355,6 +355,25 @@ def _components(value, problems):
     return out
 
 
+def _requires_features(value, problems):
+    """``requires_features``: ``{feature: true | false}`` over the service feature vocabulary (``cveFeed.service_features.FEATURES``): whether the
+    flaw needs the feature on (HTTP/2 for the nginx HTTP/2 module flaws). True or False overrides the rule that reads the advisory's words; a
+    feature left out is decided by that rule. Anything else is dropped."""
+    from cveFeed.service_features import FEATURES
+    if value in (None, {}):
+        return {}
+    if not isinstance(value, dict):
+        problems.append('requires_features is not an object')
+        return {}
+    out = {}
+    for key, needed in list(value.items())[:len(FEATURES) + 4]:
+        if key in FEATURES and isinstance(needed, bool):
+            out[key] = needed
+        else:
+            problems.append(f'requires_features: {str(key)[:24]!r} dropped (a feature of {", ".join(FEATURES)} with true or false)')
+    return out
+
+
 def _text(value, limit):
     from reNgine.ai_providers import clean_text
     return clean_text(value, limit) if isinstance(value, str) else None
@@ -402,7 +421,7 @@ def validate_strategy(obj):
         if isinstance(obj.get(key), list):
             obj[key] = [{k: v for k, v in c.items() if k not in ('how', 'commands')} if isinstance(c, dict) else c for c in obj[key]]
     allowed = {'summary', 'remote_checks', 'local_checks', 'prerequisites', 'false_positive_notes', 'remediation', 'safety',
-               *GUIDANCE_TEXT, *GUIDANCE_LISTS, 'scope', 'components'}
+               *GUIDANCE_TEXT, *GUIDANCE_LISTS, 'scope', 'components', 'requires_features'}
     for key in set(obj) - allowed:
         problems.append(f'unknown key {str(key)[:40]!r} dropped')
     if obj.get('safety', 'read_only') != 'read_only':
@@ -431,6 +450,9 @@ def validate_strategy(obj):
     components = _components(obj.get('components'), problems)
     if components:
         out['components'] = components
+    features = _requires_features(obj.get('requires_features'), problems)
+    if features:
+        out['requires_features'] = features
     written = out['identify'] or out['scope'] or any(out[key] for key in GUIDANCE_LISTS)
     if not out['remote_checks'] and not out['local_checks'] and not written:
         return None, problems + ['no usable check or guidance']
@@ -606,9 +628,13 @@ def rules_strategy(cve, template_ids=()):
         return None
     components = [{k: v for k, v in c.items() if k in ('name', 'class', 'library', 'coordinates', 'platforms')} for c in comps
                   if c['class'] != 'client_library' or c['library'] in libraries][:MAX_COMPONENTS]
-    precondition = classes.exploit_precondition(getattr(cve, 'original_description', '') or getattr(cve, 'summary', '') or '')
+    description = getattr(cve, 'original_description', '') or getattr(cve, 'summary', '') or ''
+    features = classes.feature_preconditions(cve.title or '', description)
+    # the advisory's own sentence that a service feature must be on (HTTP/2) is the precondition a person reads first
+    precondition = next((f['quote'] for f in features.values() if f['quote']), '') or classes.exploit_precondition(description)
     strategy, _ = validate_strategy({'summary': (cve.title or cve.cve_id)[:400], 'remote_checks': remote, 'local_checks': local,
                                      'components': components, 'exploit_precondition': precondition,
+                                     'requires_features': {key: True for key in features},
                                      **rules_guidance(remote, local, bool(template_ids), components)})
     return strategy
 
@@ -902,6 +928,11 @@ def merge_strategies(base, extra):
         merged[key] = extra.get(key) or base.get(key) or ''
     for key in ('prerequisites', *GUIDANCE_LISTS):
         merged[key] = extra.get(key) or base.get(key) or []
+    # the service features the flaw needs are the rules' reading of the advisory only: a model's answer never adds one (a stated precondition
+    # lets a reading close a match) nor drops one. A person sets them on a manual record (agentapi.services.update_cve_detection).
+    merged.pop('requires_features', None)
+    if base.get('requires_features'):
+        merged['requires_features'] = base['requires_features']
     return merged
 
 

@@ -22,6 +22,7 @@ from cveFeed import distro as distro_lib
 from cveFeed import js_libraries
 from cveFeed import match_policy
 from cveFeed import runzero
+from cveFeed import service_features
 
 logger = logging.getLogger(__name__)
 
@@ -1417,6 +1418,10 @@ def _record_matches(subdomain, name, version, token, source, product_index,
         reported = bool(corroborated) and getattr(cve, "cve_id", "") in corroborated and status != distro_lib.PATCHED
         if reported:  # runZero's own scan reports it too (cveFeed.runzero_sync): more evidence, never a verdict and never a new match
             confidence = runzero.boosted(confidence)
+        preconditions = {}
+        if service_features.index().get(cve.id):  # the CVE needs a service feature (HTTP/2): a reading that the host offers it raises the confidence
+            confidence, preconditions = service_features.adjust(
+                confidence, service_features.preconditions_for(subdomain, cve), eligible=in_range is not False and status != distro_lib.PATCHED)
         rows.append({
             "cve_entry_id": cve.id, "subdomain_id": subdomain.id, "source": source,
             "matched_product": matched_product[:255], "matched_version": version[:100],
@@ -1425,6 +1430,7 @@ def _record_matches(subdomain, name, version, token, source, product_index,
             "distro_status": status, "distro_fixed_version": fixed[:64],
             "evidence": {**(evidence or {}), "raw_version": version[:100], **details.get(cve.id, {}), **({"unbounded": True} if unbounded else {}),
                          **({"runzero": True} if reported else {}),
+                         **({"preconditions": preconditions} if preconditions else {}),
                          **({"distro": {k: v for k, v in distro.items() if v}} if distro and distro.get("distro") else {}),
                          **({"distro_fix": fix} if fix else {})},
         })
@@ -1462,8 +1468,10 @@ SCRIPT_READ = 'Closed automatically: fresh script read'
 # CVEMatch.source of an OpenVAS NVT result (cveFeed.openvas_scan.SOURCE): reported by a test of the product, not correlated from its name
 OPENVAS_SOURCE = 'openvas'
 # the first wording of the same closure ("invalid product correlation") is still on rows closed before it was reworded: it is read the same
+# a service feature the CVE needs is not offered by the host (cveFeed.service_features: HTTP/2 for the nginx HTTP/2 module flaws)
+PRECONDITION_CLOSED = 'Closed automatically: precondition not met'
 AUTO_CLOSED = (DIFFERENT_PRODUCT, 'Closed automatically: invalid product correlation', 'Closed automatically: local-only',
-               match_policy.NO_EVIDENCE, SCRIPT_READ)
+               match_policy.NO_EVIDENCE, SCRIPT_READ, PRECONDITION_CLOSED)
 
 
 def closure_summary(reason):
@@ -1579,6 +1587,10 @@ def invalid_identity_reason(match):
     if getattr(match.cve_entry, 'local_only', False):  # not a product question: nothing outside the host can decide this CVE
         from cveFeed.locality import reason_text
         return reason_text()
+    from cveFeed import service_features
+    reason = service_features.closure_reason(match)  # the CVE needs a service feature (HTTP/2) that fresh, direct readings say the host lacks
+    if reason:
+        return reason
     reason = library_provenance_reason(match)
     if reason:
         return reason

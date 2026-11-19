@@ -308,3 +308,63 @@ def language_ecosystem_of(package):
     if re.match(r'^[a-z0-9_.-]+/[a-z0-9_.-]+\Z', low):
         return 'composer'
     return ''
+
+
+# --- the service features an advisory says the flaw needs (by rules, from its own words) --------------------------------------------------
+# One entry per feature of ``cveFeed.service_features.FEATURES``: the advisory's wording that makes the feature a precondition of the flaw
+# (``needs``), the wording that says the flaw does not need it (``not_needed``: the flaw is reached over HTTP/1.1 too), and the wording that
+# names a way to the feature no Sentinel reads (``unread``: cleartext HTTP/2, h2c, is never probed), which keeps the precondition but never lets
+# its absence rule a match out. A feature named only as the flaw's protocol ("a crafted HTTP/2 request", "the HTTP/2 implementation") is NOT a
+# precondition here: such an advisory says nothing of whether the feature has to be turned on, and a stated precondition is all this rule reads.
+_HTTP2 = r'HTTP/?2(?:\.0)?'
+FEATURE_PRECONDITIONS = {
+    'http2': {
+        'needs': re.compile(
+            r'\bngx_http_v2_module\b|\bmod_http2\b|\b' + _HTTP2 + r' (?:protocol )?module\b'
+            r'|\b(?:configurations?|configured|deployments?|instances?|servers?|sites?|virtual hosts?)\s+(?:that\s+|which\s+|to\s+)?'
+            r'(?:use|uses|using|enable|enables|serve|serves|support|supports|have)\s+' + _HTTP2 + r'\b'
+            r'|\bwhen (?:they |it )?(?:use|uses|using|serves?|serving) ' + _HTTP2 + r'\b'
+            r'|\b(?:when|if|where|with|while|only (?:when|if))\s+(?:the\s+)?' + _HTTP2 + r'(?:\s+(?:support|protocol|module))?\s+'
+            r'(?:is|was|are|has been|have been)\s+(?:enabled|configured|turned on|in use|used|active|negotiated)\b'
+            r'|\bwith ' + _HTTP2 + r' (?:support )?(?:enabled|turned on|configured)\b'
+            r'|\bhttp2 (?:option|parameter|directive)\b|[\'"]http2[\'"] (?:option|parameter|directive)|\blisten\b[^.]{0,60}\bhttp2\b|\bhttp2 on\b'
+            r'|\bProtocols\b[^.]{0,40}\bh2\b',
+            re.IGNORECASE),
+        'not_needed': re.compile(
+            r'\bHTTP/1(?:\.[01x])?\s*(?:,|and|or|/)\s*(?:HTTP/)?2\b|\b' + _HTTP2 + r'\s*(?:,|and|or|/)\s*HTTP/(?:1|3)\b'
+            r'|\bregardless of (?:the )?(?:HTTP )?protocol|\b(?:does not|doesn\'t|do not) (?:require|need) ' + _HTTP2 + r'\b'
+            r'|\bnot (?:limited|specific|restricted) to ' + _HTTP2 + r'\b',
+            re.IGNORECASE),
+        'unread': re.compile(r'\bh2c\b|\bcleartext ' + _HTTP2 + r'|' + _HTTP2 + r' over (?:cleartext|plain ?text|TCP)\b|\bprior knowledge\b',
+                             re.IGNORECASE),
+    },
+}
+
+
+# what a database prefilter for ``feature_preconditions`` looks for (PostgreSQL ``~*``): every wording above names one of these
+FEATURE_PREFILTER = r'http/?2|ngx_http_v2|h2c|\mh2\M'
+
+
+def _sentences(text):
+    return [s.strip() for s in re.split(r'(?<=[.!?])\s+(?=[A-Z"\'(])|\n+', text) if s.strip()]
+
+
+def feature_preconditions(title='', description=''):
+    """``{feature: {'quote': sentence, 'rule_out': bool}}``: the service features (``FEATURE_PRECONDITIONS``) the advisory says the flaw needs,
+    each with the sentence that says so (the description's first, else the title; at most 300 characters) and whether a reading that the
+    feature is absent may rule a match out (False when the advisory also names a way to it that no reading covers, such as h2c). Empty when
+    none is stated, or when the advisory says the flaw does not need it. Plain text from a third-party feed: quoted, never run."""
+    from reNgine.ai_providers import clean_text
+    title = clean_text(str(title or ''), 400) or ''
+    text = clean_text(str(description or ''), 4000) or ''
+    whole = f'{title}\n{text}'
+    out = {}
+    for feature, rule in FEATURE_PRECONDITIONS.items():
+        if rule['not_needed'].search(whole):
+            continue
+        quote = next((s for s in _sentences(text) if rule['needs'].search(s)), '') or (title if rule['needs'].search(title) else '')
+        if not quote:
+            continue
+        out[feature] = {'quote': quote if len(quote) <= 300 else quote[:297].rsplit(' ', 1)[0] + '...',
+                        'rule_out': not rule['unread'].search(whole)}
+    return out

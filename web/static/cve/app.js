@@ -1047,6 +1047,13 @@ const surfaceCard = (h, openServices) => {
   });
   return box;
 };
+// What a Sentinel read about the features of the service on one port (cveFeed.service_features): "HTTP/2 offered (ALPN h2, read 2026-11-19)".
+// A stale reading says so: correlation no longer uses it.
+const featureLine = (features, port) =>
+  (features || [])
+    .filter((f) => f.port === port)
+    .map((f) => `${f.label} ${f.offered ? "offered" : "not offered"} (${[f.detail, `read ${String(f.observed_at || "").slice(0, 10)}`].filter(Boolean).join(", ")}${f.fresh ? "" : ", stale"})`)
+    .join("; ");
 // "14 of 22 applicable checks done" (cveFeed.check_coverage): only the checks that apply to this host are counted; the ones still due are named.
 const coverageLine = (c) => {
   if (!c) return "";
@@ -4166,6 +4173,8 @@ const pages = {
           if (p.db) { const facts = dbFactsCard(p.db); if (facts) card.append(facts); }
           if (p.http) card.append(jsonRows(p.http));
           if (p.tls) card.append(jsonRows(p.tls));
+          const features = featureLine(h.service_features, p.number);
+          if (features) card.append(el("div", "note", features));
           if (p.rdp_screenshot) card.append(rdpShotCard(p.rdp_screenshot));
           S.services.append(card);
         });
@@ -4861,6 +4870,8 @@ pages.hygiene = function hygiene(mount) {
           render: (c) =>
             c.legacy_tls ? badge("1.0/1.1 on", "medium") : c.protocol || "-",
         },
+        // whether the service offers HTTP/2 (the ALPN protocol it chose; cveFeed.service_features)
+        { label: "HTTP/2", render: (c) => (c.http2 ? (c.http2.offered ? "offered" : "not offered") : "-") },
       ]), (c) => (c.days_left == null ? "" : c.days_left < 0 ? "critical" : c.days_left <= 7 ? "high" : c.days_left <= 30 ? "medium" : "")),
     }).start();
   };

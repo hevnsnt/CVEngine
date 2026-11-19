@@ -866,6 +866,13 @@ def explain(match, hint=''):
     label = _label(match, key)
     version = _version(match)
     basis, confidence, why = _assessment(match, family, key, package)
+    preconditions = precondition_words(match)
+    if preconditions:
+        closed = [p for p in preconditions if p['closed']]
+        if closed:
+            basis, confidence, why = 'precondition_absent', RULED_OUT, closed[0]['text']
+        else:
+            why = ' '.join([why] + [p['text'] for p in preconditions])
     fix = _red_hat_fix(match) if family in ('rhel', '') else {k: v for k, v in _red_hat_fix(match).items() if k == 'fixed_build'}
     host = confirm_guide._host(getattr(match.subdomain, 'name', ''))
     if package and cve_id:
@@ -897,9 +904,47 @@ def explain(match, hint=''):
     }
     if fix.get('advisory') or fix.get('fixed_build'):
         out['advisory'] = fix
+    if preconditions:
+        out['preconditions'] = [{k: p[k] for k in ('feature', 'label', 'state', 'reading', 'advisory_says')} for p in preconditions]
     judged = distro_judgement(match)
     if judged:
         out['distro'] = judged  # how the distribution's own data judged it: "Judged by Ubuntu 22.04 (jammy)'s own fixed build ..."
+    return out
+
+
+def precondition_words(match):
+    """``[{feature, label, state, reading, advisory_says, text, closed}]``: each service feature the match's CVE needs (HTTP/2 for the nginx
+    HTTP/2 module flaws, ``cveFeed.service_features``) with what the host's readings said, as the match's evidence stores it, in words. ``closed``:
+    the precondition closure holds the match. [] when the CVE needs none."""
+    from cveFeed import service_features
+    cve = getattr(match, 'cve_entry', None)
+    if cve is None:
+        return []
+    needs = service_features.requirements(cve)
+    if not needs:
+        return []
+    stored = _ev(match).get('preconditions') if isinstance(_ev(match).get('preconditions'), dict) else {}
+    closed_reason = str(match.ai_reason or '') if service_features.is_precondition_closure(match) else ''
+    out = []
+    for key, need in needs.items():
+        spec = service_features.FEATURES[key]
+        seen = stored.get(key) if isinstance(stored.get(key), dict) else {}
+        state = seen.get('state') if seen.get('state') in service_features.STATES else 'unknown'
+        reading = _plain(seen.get('detail'), 120)
+        from reNgine.ai_providers import clean_text
+        said = clean_text(str(need.get('quote') or ''), 300) or ''  # the advisory's sentence: feed prose, shown as text
+        if closed_reason and spec.words.get('absent', '') in closed_reason:
+            state, closed = 'absent', True
+            text = closed_reason.split(': ', 1)[-1] if closed_reason.startswith(service_features.CLOSED) else closed_reason
+            text = 'Ruled out: ' + text[0].lower() + text[1:] if text else 'Ruled out.'
+        else:
+            closed = False
+            text = (f'The advisory says the flaw needs {spec.label}, and the host offers it ({reading}): a precondition holds, which is not proof '
+                    'of the flaw.' if state == 'offered' else
+                    f'The advisory says the flaw needs {spec.label}; whether the host offers it is not known (no fresh reading, a port not read, or '
+                    'a CDN or proxy answers for the host).' if state == 'unknown' else
+                    f'The advisory says the flaw needs {spec.label}, and the host does not offer it ({reading}).')
+        out.append({'feature': key, 'label': spec.label, 'state': state, 'reading': reading, 'advisory_says': said, 'text': text, 'closed': closed})
     return out
 
 

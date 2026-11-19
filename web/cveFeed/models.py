@@ -647,6 +647,29 @@ class TlsCertificate(models.Model):
         return f"{self.host}:{self.port}"
 
 
+class ServiceFeature(models.Model):
+    """What a Sentinel read about one feature of the service on a host and port (``cveFeed.service_features``): whether it offers HTTP/2, and
+    later SSH algorithms, RDP NLA, SMTP extensions ... A closed vocabulary of features (``service_features.FEATURES``) and of values per
+    feature. A feature no reading covers has no row: unknown. Read by correlation and triage for the CVEs whose advisory needs the feature."""
+
+    domain = models.ForeignKey("targetApp.Domain", on_delete=models.CASCADE, related_name="+")
+    host = models.CharField(max_length=500)  # lowercase, as TlsCertificate.host
+    port = models.IntegerField()
+    transport = models.CharField(max_length=8, default="tls")  # how it was read: tls (a TLS handshake) | tcp | udp
+    feature = models.CharField(max_length=24)  # service_features.FEATURES key, e.g. http2
+    value = models.CharField(max_length=24)  # one of that feature's values, e.g. yes | no
+    detail = models.CharField(max_length=120, blank=True, default="")  # the reading in words, e.g. "ALPN http/1.1"
+    source = models.CharField(max_length=24)  # the reading that set it, e.g. tls_alpn (the hygiene_check certificate handshake)
+    observed_at = models.DateTimeField()
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["domain", "host", "port", "feature"], name="servicefeature_unique")]
+        indexes = [models.Index(fields=["host", "feature"], name="servicefeature_host_idx")]
+
+    def __str__(self):
+        return f"{self.host}:{self.port} {self.feature}={self.value}"
+
+
 class HygieneFinding(models.Model):
     """A configuration-hygiene finding for a domain or host: TLS, certificates, SPF, DKIM, DMARC, CAA, cleartext services."""
 

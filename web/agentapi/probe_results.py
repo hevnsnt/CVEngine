@@ -213,6 +213,9 @@ def _timestamp(value):
     return (stamp if stamp.tzinfo else stamp.replace(tzinfo=datetime.timezone.utc)).isoformat()
 
 
+ALPN_VALUES = ('h2', 'http/1.1', 'none', 'unknown')  # a hygiene_check certificate's ``alpn`` (cvengine_scanner.probes.hygiene.ALPN_VALUES)
+
+
 def _certificate(raw):
     """A certificate clipped to the columns it is stored in (``hygiene.clip_certificate`` limits), or None when it has no readable expiry."""
     if not isinstance(raw, dict):
@@ -228,6 +231,9 @@ def _certificate(raw):
            'chain_error': _text(raw.get('chain_error'), 300), 'legacy_tls': raw.get('legacy_tls') is True}
     if legacy:
         out['legacy_handshake'] = {'protocol': _text(legacy.get('protocol'), 20), 'cipher': _text(legacy.get('cipher'), 100)}
+    # the ALPN protocol the server chose in the same handshake (whether it offers HTTP/2): only the four values a Sentinel sends, else unknown;
+    # a Sentinel before the field sends none, which is unknown too (cveFeed.service_features.store_alpn)
+    out['alpn'] = raw['alpn'] if isinstance(raw.get('alpn'), str) and raw['alpn'] in ALPN_VALUES else 'unknown'
     return out
 
 
