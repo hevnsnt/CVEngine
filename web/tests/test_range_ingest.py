@@ -488,8 +488,9 @@ class CiscoExactBuildTests(SimpleTestCase):
         class Sub:
             id, scan_history_id, target_domain_id, name = 5, 7, 3, 'fw.example.test'
         rows = []
-        correlation._record_matches(Sub, ASA_NAME, '9.16.4.18', correlation._norm(ASA_NAME),
-                                    'tech', correlation.build_product_index([cve]), {1: cve}, 0.0, None, rows)
+        with mock.patch('cveFeed.service_features.index', return_value={}):  # no database here: no CVE in this test needs a service feature
+            correlation._record_matches(Sub, ASA_NAME, '9.16.4.18', correlation._norm(ASA_NAME),
+                                        'tech', correlation.build_product_index([cve]), {1: cve}, 0.0, None, rows)
         self.assertEqual([(r['version_in_range'], r['evidence']['range']) for r in rows], [(True, {'build': '9.16.4.18'})])
         self.assertTrue(match_policy.hard_version_evidence(True, rows[0]['evidence']))
         self.assertEqual(triage.range_text(rows[0]['evidence']['range']), 'the listed build 9.16.4.18')
