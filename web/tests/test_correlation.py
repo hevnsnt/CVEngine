@@ -692,3 +692,51 @@ class TestUnlistedBranch(unittest.TestCase):
         self.assertTrue(branch_unlisted((8, 1, 30), PHP_RANGES))
         self.assertFalse(branch_unlisted((8, 2, 0), PHP_RANGES))
         self.assertFalse(branch_unlisted(None, PHP_RANGES))
+
+
+class TestEsxiBuildRanges(unittest.TestCase):
+    """VMware ESXi's advisories name each fix by its patch release and build ("ESXi70U3s-24585291"); a host's vmware-version reply states the
+    release and the build (7.0.3, build 21930508, read as "7.0.3-21930508"). The ranges are cve.now's own, as stored."""
+
+    CVE_2025_22224 = {"vendor": "VMware", "product": "ESXi", "ranges": [
+        {"introduced": "8.0", "fixed": "ESXi80U3d-24585383"}, {"introduced": "8.0", "fixed": "ESXi80U2d-24585300"},
+        {"introduced": "7.0", "fixed": "ESXi70U3s-24585291"}]}
+    # CVE-2021-21974 (ESXiArgs): cve.now passed the record on as bare versions; the 6.x lines name a patch id, no build
+    CVE_2021_21974 = {"vendor": "n/a", "product": "VMware ESXi", "ranges": [], "versions": [
+        "7.0 before ESXi70U1c-17325551", "6.7 before ESXi670-202102401-SG", "6.5 before ESXi650-202102101-SG"]}
+
+    def verdict(self, item, version):
+        from cveFeed.correlation import clean_affected, item_verdict
+        cleaned, = clean_affected([item])
+        return item_verdict(parse_version(version), cleaned, version)[0]
+
+    def test_each_fix_covers_its_own_update_by_build(self):
+        from cveFeed.correlation import clean_affected
+        cleaned, = clean_affected([self.CVE_2025_22224])
+        self.assertEqual(cleaned["ranges"], [
+            {"introduced": "7.0", "fixed": "7.0.3"}, {"introduced": "7.0.3", "fixed": "7.0.3-24585291", "build_bound": True},
+            {"introduced": "8.0", "fixed": "8.0.2"}, {"introduced": "8.0.2", "fixed": "8.0.2-24585300", "build_bound": True},
+            {"introduced": "8.0.3", "fixed": "8.0.3-24585383", "build_bound": True}])
+        cases = {"7.0.3-21930508": True, "7.0.3-24585291": False, "7.0.2-17867351": True, "8.0.1-22088125": True,
+                 "8.0.2-24000000": True, "8.0.2-24585300": False,  # Update 2 patched by its own fix, though below Update 3's
+                 "8.0.3-24280767": True, "8.0.3-24585383": False, "6.7.0-17700523": False,
+                 "7.0.3": None}  # the update without its build (nmap's port row): unknown, never "not affected"
+        for version, expected in cases.items():
+            self.assertIs(self.verdict(self.CVE_2025_22224, version), expected, version)
+
+    def test_a_patch_id_keeps_only_its_line(self):
+        for version, expected in {"7.0.1-16850804": True, "7.0.1-17325551": False, "7.0.3-21930508": False, "6.7.0-17700523": None,
+                                  "6.5.0-4564106": None, "8.0.3-24585383": False}.items():
+            self.assertIs(self.verdict(self.CVE_2021_21974, version), expected, version)
+
+    def test_other_products_and_unreadable_lists_are_left_alone(self):
+        from cveFeed.correlation import clean_affected
+        workstation = {"vendor": "VMware", "product": "Workstation", "ranges": [{"introduced": "17.x", "fixed": "17.6.3"}]}
+        self.assertEqual(clean_affected([workstation]), [workstation])
+        mixed = {"vendor": "n/a", "product": "VMware ESXi", "ranges": [], "versions": ["7.0 before ESXi70U1c-17325551", "6.7 (all)"]}
+        self.assertEqual(clean_affected([mixed])[0]["ranges"], [])  # one line it cannot read: the block stays as it was
+
+    def test_a_long_build_after_a_dash_is_a_revision(self):
+        self.assertEqual(parse_version("7.0.3-21930508").revision, 21930508)
+        self.assertTrue(version_in_range(parse_version("7.0.3-21930508"), {"introduced": "7.0.3", "fixed": "7.0.3-24585291"}))
+        self.assertEqual(parse_version("2.4.57-11.el9"), (2, 4, 57))  # a distribution build is still no revision
