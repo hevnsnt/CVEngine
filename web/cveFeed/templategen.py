@@ -1040,7 +1040,9 @@ def _generation_lease(cve):
     asked = AIJob.objects.filter(kind='template_generation', created_at__gte=now - datetime.timedelta(days=1), status__in=AIJob.OPEN).count()
     # a person's or agent's revision (``supersedes`` set) asked the AI to write nothing: it is not part of the generation budget
     written = GeneratedTemplate.objects.filter(created_at__gte=now - datetime.timedelta(days=1), supersedes__isnull=True).count()
-    if written + asked >= generation_limit('TEMPLATE_GEN_MAX_PER_DAY'):
+    # a draft sent back once to fix what the safety gate refused (``job_answer``) was a second paid request
+    repairs = AIJob.objects.filter(kind='template_generation', created_at__gte=now - datetime.timedelta(days=1), attempt__gt=1).count()
+    if written + asked + repairs >= generation_limit('TEMPLATE_GEN_MAX_PER_DAY'):
         raise TemplateBudgetExceeded('the daily AI template budget is spent')
     if AIJob.objects.filter(kind='template_generation', dedupe=f'template:{cve.pk}', status__in=AIJob.OPEN).exists():
         raise TemplateBudgetExceeded(f'an AI check for {cve.cve_id} is already being written')
@@ -1080,22 +1082,82 @@ def _job_model(job):
     return f'{job.provider}:{job.model}' if job.provider else (job.model or 'unknown')
 
 
+# A tool's own warning printed before anything else (nuclei, on newer Go releases: "WARNING: sonic/ast only supports (go1.17~1.26 ...) ... will
+# fallback to encoding/json"): never the reason a template was refused. ``plain_reason`` drops it, as ``sentinel_broker.explain_error`` does.
+_WARNING_LINE = re.compile(r"^\s*(?:\[wrn\]|\[warn(?:ing)?\]|warn(?:ing)?\b)", re.I)
+_WARNING_TAIL = re.compile(r":\s*(?:\[wrn\]|warning\b).*$", re.I | re.S)
+
+
+def plain_reason(output, fallback="", limit=400, first_line=False):
+    """The words of a check's output that say why, on one line: the tool's own warning lines (``_WARNING_LINE``) are left out, and a one-line
+    message that holds the warning after a colon is cut there. ``first_line``: only the first line left. ``fallback`` when nothing is left."""
+    lines = [line.strip() for line in str(output or "").splitlines() if line.strip()]
+    kept = [line for line in lines if not _WARNING_LINE.match(line)][:1 if first_line else None]
+    text = _WARNING_TAIL.sub("", " ".join(kept)).strip()
+    return " ".join((text or fallback).split())[:limit]
+
+
+def holds_warning(text):
+    """Whether ``text`` is, or holds after a colon, a tool's own warning (what ``plain_reason`` leaves out)."""
+    return bool(_WARNING_LINE.match(str(text or "")) or _WARNING_TAIL.search(str(text or "")))
+
+
+def _repair_room():
+    """Whether today's template budget has room for one more request: a draft rejected by the deterministic gate is sent back to the AI once
+    (``job_answer``), and that second request counts against ``TEMPLATE_GEN_MAX_PER_DAY`` (``_generation_lease`` counts it). The job being
+    answered is still open, so it is counted among the asked ones."""
+    from cveFeed.models import AIJob, GeneratedTemplate
+    now = timezone.now()
+    day = now - datetime.timedelta(days=1)
+    asked = AIJob.objects.filter(kind='template_generation', created_at__gte=day, status__in=AIJob.OPEN).count()
+    repairs = AIJob.objects.filter(kind='template_generation', created_at__gte=day, attempt__gt=1).count()
+    written = GeneratedTemplate.objects.filter(created_at__gte=day, supersedes__isnull=True).count()
+    return written + asked + repairs < generation_limit('TEMPLATE_GEN_MAX_PER_DAY')
+
+
+def gate_problem(text, cve_id):
+    """Why a draft fails the deterministic gate, or '': the static check, then the allowlist a Sentinel applies to every check it runs
+    (``cveFeed.check_allowlist``, the same rules). Both are pure, so the same text always fails them the same way."""
+    ok, reason = static_check(text, expected_cve_id=cve_id)
+    if not ok:
+        return f"static check: {reason}"
+    return check_allowlist.allowlist_problem(text)
+
+
+def repair_parts(parts, reply, reason):
+    """The original question again with why the draft was refused and the draft itself (both fenced: the reason can quote the draft, which was
+    written from the CVE feed's text), for the one repair request."""
+    return [*parts,
+            {"text": "\nYour previous template was REJECTED by the safety gate, for the reason in the REJECTION block. Write the template again, "
+                     "fixing that, and keep every rule above. Output ONLY one YAML document, no prose."},
+            {"fence": "REJECTION", "data": {"reason": str(reason)[:600], "rejected_template": str(reply)[:MAX_TEMPLATE_BYTES]}}]
+
+
 def job_answer(job, text):
     """The model's template arrived: gated as before (static check, then the syntax check and the benign fixture on a scanner:
-    nothing unvalidated ever exists under GENERATED_DIR) and saved as a draft or as invalid."""
+    nothing unvalidated ever exists under GENERATED_DIR) and saved as a draft or as invalid. A draft the deterministic gate refuses is sent
+    back to the AI once with the reason (``repair_parts``), when the day's budget has room for that request; the second answer is the one
+    that counts. A draft no scanner could check now waits in the ``syntax`` stage for ``cveFeed.templatevalidate`` to check it again: the
+    paid answer is not thrown away and the CVE is not blocked for a week by a check that never ran."""
     from cveFeed.models import CVEEntry, GeneratedTemplate
-    from cveFeed import activity
+    from cveFeed import activity, ai_jobs
     from reNgine.resources import ScannerUnavailable
     cve = CVEEntry.objects.filter(pk=job.context.get('cve')).first()
     if cve is None:
         return None
     project = job.context.get('project')
     text = extract_yaml(text)
+    problem = gate_problem(text, cve.cve_id)
+    if problem and job.attempt == 1 and _repair_room():
+        activity.log('write_check', f'The AI-written check for {cve.cve_id} failed the safety gate ({plain_reason(problem, limit=200)}); '
+                     'it was sent back to the AI once to fix it', project=project, cve_id=cve.cve_id)
+        return ai_jobs.Retry('template_generation', repair_parts(job.packet.get('parts') or [], text, problem))
     ok, reason = static_check(text, expected_cve_id=cve.cve_id)
     tmpl = GeneratedTemplate(cve_entry=cve, yaml=text, ai_model=_job_model(job)[:128],
                              template_id=(load_template(text) or {}).get("id", "") if ok else "")
     if not ok:
         tmpl.status, tmpl.validation_output = GeneratedTemplate.STATUS_INVALID, f"static check: {reason}"
+        tmpl.validation_reason, tmpl.validated_at = plain_reason(tmpl.validation_output, "static check failed"), timezone.now()
         tmpl.save()
         activity.log('write_check', f'The AI-written check for {cve.cve_id} failed the static check', project=project, cve_id=cve.cve_id)
         return None
@@ -1108,27 +1170,35 @@ def job_answer(job, text):
                        project=project, cve_id=cve.cve_id) as handle:
         try:
             valid, output = validate_anywhere(text, project)
-        except ScannerUnavailable as exc:  # the scanner went away between the check above and now: never a draft without its check
-            valid, output = False, f'not validated: no scanner could take this work ({exc.kind}); the CVE is tried again later'
+        except ScannerUnavailable as exc:  # the scanner went away between the check above and now: the draft waits for its check
+            from cveFeed import templatevalidate
+            why = f'no Sentinel can run template checks ({exc.kind}) right now'
+            tmpl.validation_next_at = timezone.now() + templatevalidate.WAIT_SYSTEM
+            tmpl.validation_reason = f'waiting: {why}'
+            tmpl.validation_output = f'not validated yet: {why}; the syntax check runs again when a Sentinel can take it'
+            tmpl.save(update_fields=['validation_next_at', 'validation_reason', 'validation_output'])
+            handle.done_message = f'Check for {cve.cve_id} waits for a Sentinel to validate it'
+            return None
         handle.done_message = f'Check for {cve.cve_id} {"passed" if valid else "failed"} validation'
     tmpl.status = GeneratedTemplate.STATUS_DRAFT if valid else GeneratedTemplate.STATUS_INVALID
     tmpl.validation_stage, tmpl.validation_next_at = '', None
     tmpl.validation_output = (output + '\nPending automatic validation: a positive fixture test and a second-pass review run before it may run on a host.'
                               if valid else output)
     if not valid:
-        tmpl.validation_reason = (output or 'the scanner did not accept the template')[:400]
+        tmpl.validation_reason = plain_reason(output, 'the scanner did not accept the template')
         tmpl.validated_at = timezone.now()
     tmpl.save()
     return None
 
 
 def job_failure(job, category, detail):
-    """A failed provider call is still a billable attempt: the ledger row is left, so the CVE is not asked again at once."""
+    """A failed provider call is still a billable attempt: the ledger row is left, so the CVE is not asked again at once. Its reason says so."""
     from cveFeed.models import CVEEntry, GeneratedTemplate
     cve = CVEEntry.objects.filter(pk=job.context.get('cve')).first()
     if cve is not None:
+        why = f'the AI provider call failed ({category}); no template was written'
         GeneratedTemplate.objects.create(cve_entry=cve, yaml='', status=GeneratedTemplate.STATUS_INVALID, ai_model=_job_model(job)[:128],
-                                         validation_output=f'the AI provider call failed ({category}); no template was written')
+                                         validation_output=why, validation_reason=why, validated_at=timezone.now())
 
 
 def _severity_of(cvss, fallback):

@@ -153,8 +153,10 @@ class PromptTests(ContextFixture, TestCase):
     def test_the_planning_prompt_carries_host_metadata_and_the_edge_rule(self):
         provider = self.provider('{"check_kinds":[],"generate_template":false,"reason":"The version is hidden behind the edge."}')
         host = host_context.clipped(host_context.host_context(self.fresh()))
-        decision, _ = validation_plan.plan(self.project.id, mock.Mock(signature='s1'), self.cve, {'source': 'port'},
-                                           [{'kind': 'fact_probe', 'label': 'x'}], ('', 'no template'), provider=provider, host=host)
+        args = (self.project.id, mock.Mock(signature='s1'), self.cve, {'source': 'port'}, [{'kind': 'fact_probe', 'label': 'x'}], ('', 'no template'))
+        pending, _ = ai_queue.asking(validation_plan.plan, provider, *args, host=host)  # queued, then answered by the reviewer container
+        self.assertEqual(pending['source'], 'pending')
+        decision, _ = validation_plan.plan(*args, host=host, waiting={'job': pending['job']})
         system, user = provider.complete.call_args.args
         self.assertIn('host_metadata', user)
         self.assertIn('fact_probe', user)

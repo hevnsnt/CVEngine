@@ -350,6 +350,7 @@ class ProviderFailureLedgerTests(TestCase):
 		row = GeneratedTemplate.objects.get(cve_entry=cve)
 		self.assertEqual(row.status, GeneratedTemplate.STATUS_INVALID)
 		self.assertIn('provider_network', row.validation_output)
+		self.assertIn('provider_network', row.validation_reason)  # the reason a person reads says why too (it was empty)
 		with self.assertRaisesRegex(templategen.TemplateBudgetExceeded, 'already attempted'):  # the next run does not ask again
 			templategen.generate_template(cve)
 		self.assertEqual(provider.complete.call_count, 1)
@@ -450,14 +451,73 @@ class ValidateBeforeSaveTests(TestCase):
 				templategen.generate_template(self.cve)
 		self.assertFalse(AIJob.objects.exists())
 
-	def test_a_scanner_that_went_away_leaves_an_invalid_draft_never_a_valid_one(self):
+	def test_a_scanner_that_went_away_leaves_a_draft_waiting_for_its_check_never_a_valid_one(self):
+		"""The answer was paid for: it is not thrown away (nor the CVE blocked for a week) because no Sentinel could check it at that moment.
+		It waits in the syntax stage, and the automatic validator checks it again when a Sentinel can."""
 		from reNgine.resources import ScannerUnavailable
+		from cveFeed import templatevalidate
 		from tests import ai_queue
 		with mock.patch('agentapi.sentinel_dispatch.try_nuclei_validate', side_effect=ScannerUnavailable('nuclei_validate', 'gone')):
 			ai_queue.asking(templategen.generate_template, self.provider(GOOD), self.cve)
 		tmpl = GeneratedTemplate.objects.get(cve_entry=self.cve)
+		self.assertEqual((tmpl.status, tmpl.validation_stage, tmpl.path), ('draft', 'syntax', ''))
+		self.assertIn('waiting: no Sentinel can run template checks', tmpl.validation_reason)
+		self.assertIn('not validated yet', tmpl.validation_output)
+		self.assertIsNone(tmpl.validated_at)
+		with mock.patch('agentapi.sentinel_dispatch.try_nuclei_validate', return_value=(True, 'ok', True, 'no benign match')), \
+				mock.patch.object(templatevalidate, '_ask', return_value='asked') as ask:
+			self.assertEqual(templatevalidate.step(tmpl), 'asked')  # the same check again, then on to the fixture
+		ask.assert_called_once()
+		self.assertEqual(GeneratedTemplate.objects.get(pk=tmpl.pk).validation_stage, 'fixture')
+
+	def test_a_draft_the_static_gate_refuses_is_sent_back_once_with_the_reason(self):
+		from tests import ai_queue
+		from cveFeed.models import AIJob
+		redirecting = GOOD.replace('    matchers:', '    redirects: true\n    matchers:')
+		self.assertFalse(static_check(redirecting, 'CVE-2024-1234')[0])
+		provider = self.provider(None)
+		provider.complete.side_effect = [redirecting, GOOD]
+		with mock.patch('agentapi.sentinel_dispatch.try_nuclei_validate', return_value=(True, 'syntax ok', True, 'no benign match')):
+			job = ai_queue.asking(templategen.generate_template, provider, self.cve)
+		self.assertEqual(provider.complete.call_count, 2)
+		user = provider.complete.call_args.args[1]
+		self.assertIn('REJECTED by the safety gate', user)
+		self.assertIn('redirects', user)  # the reason, fenced with the refused draft
+		self.assertIn('<<<REJECTION', user)
+		self.assertEqual(AIJob.objects.get(pk=job.pk).attempt, 2)
+		tmpl = GeneratedTemplate.objects.get(cve_entry=self.cve)  # one row: the attempt of this CVE
+		self.assertEqual(tmpl.status, 'draft')
+
+	def test_a_second_refusal_is_final_and_named(self):
+		from tests import ai_queue
+		redirecting = GOOD.replace('    matchers:', '    redirects: true\n    matchers:')
+		provider = self.provider(redirecting)
+		ai_queue.asking(templategen.generate_template, provider, self.cve)
+		self.assertEqual(provider.complete.call_count, 2)  # one repair, never a third request
+		tmpl = GeneratedTemplate.objects.get(cve_entry=self.cve)
 		self.assertEqual(tmpl.status, 'invalid')
-		self.assertIn('not validated', tmpl.validation_output)
+		self.assertTrue(tmpl.validation_reason.startswith('static check:'))
+		self.assertIsNotNone(tmpl.validated_at)
+
+	def test_no_repair_when_the_days_budget_has_no_room_for_it(self):
+		from tests import ai_queue
+		redirecting = GOOD.replace('    matchers:', '    redirects: true\n    matchers:')
+		provider = self.provider(redirecting)
+		with mock.patch.dict(os.environ, {'CVENGINE_TEMPLATE_GEN_MAX_PER_DAY': '1'}):
+			ai_queue.asking(templategen.generate_template, provider, self.cve)
+		self.assertEqual(provider.complete.call_count, 1)
+		self.assertEqual(GeneratedTemplate.objects.get(cve_entry=self.cve).status, 'invalid')
+
+	def test_the_tools_own_warning_is_never_the_reason(self):
+		sonic = ('WARNING: sonic/ast only supports (go1.17~1.26 and amd64 CPU) or (go1.20~1.26 and arm64 CPU), but your environment is not '
+				 'suitable and will fallback to encoding/json')
+		with mock.patch('agentapi.sentinel_dispatch.try_nuclei_validate', return_value=(False, sonic + '\n[ERR] template could not be parsed', None, '')):
+			from tests import ai_queue
+			ai_queue.asking(templategen.generate_template, self.provider(GOOD), self.cve)
+		tmpl = GeneratedTemplate.objects.get(cve_entry=self.cve)
+		self.assertEqual((tmpl.status, tmpl.validation_reason), ('invalid', '[ERR] template could not be parsed'))
+		self.assertEqual(templategen.plain_reason('nuclei exited with status 1: WARNING: sonic/ast only supports x'), 'nuclei exited with status 1')
+		self.assertEqual(templategen.plain_reason(sonic, 'the scanner did not accept the template'), 'the scanner did not accept the template')
 
 	def test_an_invalid_template_never_reaches_the_scan_path(self):
 		tmpl, seen = self._generate(False)

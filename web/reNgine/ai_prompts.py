@@ -74,9 +74,9 @@ TASKS = {
 # Every usage stage a model call may be recorded under (AIUsage.stage), with the job it names. The usage page, the refusal counts and
 # the tests read this; a call that sets no stage is recorded as ``unspecified``, which is a bug (tests/test_ai_prompts.py).
 STAGES = {
-    'nuclei_tag_selection': 'Detection template tags for technology names the static table does not cover',
-    'nuclei_targeting': 'Detection template tags and severities per host signature',
-    'validation_plan': 'Which read-only checks settle whether a CVE applies to a host',
+    'nuclei_tag_selection': 'Detection template tags for technology names the static table does not cover (retired: older rows only)',
+    'nuclei_targeting': 'Detection template tags and severities per host signature (AI job)',
+    'validation_plan': 'Which read-only checks settle whether a CVE applies to a host (AI job)',
     'finding_triage': 'Triage of one finding (AI job)',
     'finding_triage_repair': 'The same triage asked once more after a rejected reply (AI job)',
     'finding_review': 'The AI reviewer container\'s review of one finding',
@@ -98,7 +98,7 @@ CONNECTION_TEST_USER = 'ping'
 
 
 # Stages sent with a TASK LINE ONLY, no shared preamble (so not in TASKS, built by compose()), with the reason. The text is in
-# cveFeed/nuclei_templates.py (TARGETING_TASK, TAG_SELECTION_TASK). Measured on the real provider (11/8, probe ~/re-tools/ai-prompts/probe.py,
+# cveFeed/nuclei_templates.py (TARGETING_TASK; the tag selection job is retired, its entry is kept for the record). Measured on the real provider (11/8, probe ~/re-tools/ai-prompts/probe.py,
 # 5 repeats per job and model): with the shared preamble Sonnet refused both of these jobs; the owner's task sentence alone answered
 # nuclei_targeting 5/5 (old text 3/5) and nuclei_tag_selection 5/5. The preamble raises refusals on these two, so they do not get it.
 UNFRAMED = {
