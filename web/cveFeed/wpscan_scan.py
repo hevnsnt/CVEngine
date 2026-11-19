@@ -420,10 +420,8 @@ def vulnerability_data(report, token):
 def persist_report(scan, sub, url, report):
     """Save one site's report; returns ``(new findings, technologies added)``. The open rows of this host that the versions it read are past
     the fix of are closed as fixed (cveFeed.finding_lifecycle.close_fixed_wpscan_rows)."""
-    from cveFeed import finding_lifecycle
+    from cveFeed import finding_lifecycle, tech_rows
     from reNgine.tasks import save_vulnerability
-    from startScan.ip_rows import get_or_create_first
-    from startScan.models import Technology
     new, seen = 0, {}
     for name, severity, description, cves, refs, component in _vuln_rows(report, url):
         vuln, created = save_vulnerability(
@@ -439,7 +437,7 @@ def persist_report(scan, sub, url, report):
         logger.exception('could not close the fixed WordPress scan findings of %s', getattr(sub, 'name', ''))
     added = 0
     for tech_name in _technologies(report):
-        tech, _ = get_or_create_first(Technology, name=tech_name)
+        tech = tech_rows.technology(tech_name)  # one row per spelling (cveFeed.tech_rows)
         if not sub.technologies.filter(pk=tech.pk).exists():
             sub.technologies.add(tech)
             added += 1
@@ -770,6 +768,10 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
     fresh = set() if force else (ledger.fresh(SERVICE, wanted, project) | ledger.fresh(PARTIAL_SERVICE, wanted, project)
                                 | ledger.fresh(REDIRECT_SERVICE, wanted, project) | ledger.fresh(NOT_SCANNABLE_SERVICE, wanted, project))
     summary['reused'] = len([h for h in wanted if h in fresh])
+    if fresh:  # not scanned again inside the window: the core, plugin and theme versions its last run read stay on this scan's rows
+        from cveFeed import tech_carry
+        for service in (SERVICE, PARTIAL_SERVICE):
+            tech_carry.carry(scan, project, {h: h for h in wanted if h in fresh}, service)
     history = ledger.last_run(SERVICE, wanted, project)
     epoch = timezone.now() - timedelta(days=36500)
     # due first (the fresh ones are not due), positive probes first, then the never-scanned and longest-waiting: a cap cuts only what waits

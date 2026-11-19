@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "updated": "2026-11-18",
+ "updated": "2026-11-19",
  "description": "How a technology name cvENGINE detects reaches the vendor:product a CVE record uses (read by cveFeed.correlation; measured by cveFeed.tech_coverage, manage.py technology_coverage). Every entry names its evidence: the NVD CPE and/or the CVE whose record spells the product that way. 'aliases': a detected name (normalized like correlation normalizes it: case and punctuation dropped) also names these products, and only when the record's vendor is one of 'vendors' (a record with no vendor, or 'n/a', is not contradicted by an exact product). A target is matched exactly, and also by correlation's name rules when the record names one of the vendors ('Microsoft Exchange Server' reaches 'Microsoft Exchange Server 2019 Cumulative Update 12'). 'restrict': a name that may only reach these vendors' records ('require_vendor': a record must name one): a bare name another vendor also uses for a different product. 'ambiguous_products': a product two vendors both use: a record that names no vendor never confirms a name for it. 'vendor_renames': spellings of one vendor across renames and acquisitions, read when a CPE's vendor is compared with a record's and when the coverage report counts vendors. Never add an entry that merges two vendors' different products. 'renames': a detector's name for a reading that names another product ('to'), read as that product (correlation.tech_name). 'protocol_versions': names whose stated version is a protocol's or an API's, never the product's: the version is dropped (correlation.stated_version).",
  "aliases": [
   {"names": ["Apache httpd", "Apache HTTP Server", "httpd", "Apache", "apache2", "apachegeneric"],
@@ -16,9 +16,20 @@
   {"names": ["Microsoft-HTTPAPI", "Microsoft HTTPAPI", "Microsoft HTTPAPI httpd", "ms-httpapi"], "vendors": ["microsoft"], "products": ["HTTP.sys"],
    "evidence": ["CVE-2015-1635 (MS15-034, remote code execution in HTTP.sys)", "CVE-2022-21907 (Microsoft: Windows 10 Version 1809, Windows Server 2019, ...: the HTTP Protocol Stack)"],
    "note": "the Server header of a service on Windows' kernel HTTP stack (HTTP.sys, the HTTP Server API), nmap's name for it and nuclei's tech-detect match. Its flaws are filed under Windows releases, and '2.0' is the API's version, not a Windows build (protocol_versions): no Windows record is reached from this name, and it is kept as an unversioned product"},
-  {"names": ["Microsoft IIS httpd", "Microsoft IIS", "IIS"],
+  {"names": ["Microsoft IIS httpd", "Microsoft IIS", "IIS", "ms-iis", "Microsoft-IIS"],
    "vendors": ["microsoft"], "products": ["internet_information_services", "iis"],
-   "evidence": ["cpe:2.3:a:microsoft:internet_information_services", "CVE-2017-0055 (Microsoft Corporation: IIS Server)"]},
+   "evidence": ["cpe:2.3:a:microsoft:internet_information_services", "CVE-2017-0055 (Microsoft Corporation: IIS Server)"],
+   "note": "nuclei's tech-detect template names its IIS match 'ms-iis'; the Server header spells it 'Microsoft-IIS'"},
+  {"names": ["istio-envoy", "istio envoy", "istio-proxy"], "vendors": ["envoyproxy"], "products": ["envoy"],
+   "evidence": ["cpe:2.3:a:envoyproxy:envoy", "CVE-2023-27487 (envoyproxy: envoy)"],
+   "note": "Istio's sidecar and gateway proxy is Envoy built by Istio, and answers with 'Server: istio-envoy': Envoy's advisories are its own (Istio's control plane, istiod, is another product and is not named here)"},
+  {"names": ["Varnish", "Varnish Cache", "varnish http accelerator", "Varnish httpd"], "vendors": ["varnish_cache_project", "varnish-cache", "varnish-software"],
+   "products": ["varnish_cache", "varnish", "Varnish Cache"],
+   "evidence": ["cpe:2.3:a:varnish_cache_project:varnish_cache", "cpe:/a:varnish-cache:varnish (nmap's CPE)", "CVE-2022-45060 (Varnish Cache 5.x and 6.x before 6.0.11, 7.x before 7.1.2)"],
+   "note": "the open-source Varnish HTTP cache, as nmap, its Via header and nuclei name it"},
+  {"names": ["Varnish Cache Plus", "Varnish Enterprise"], "vendors": ["varnish-software"], "products": ["varnish_cache_plus", "Varnish Cache Plus", "Varnish Enterprise"],
+   "evidence": ["cpe:2.3:a:varnish-software:varnish_cache_plus", "CVE-2022-45060 (Varnish Enterprise (Cache Plus) 6.0.x before 6.0.10r3)"],
+   "note": "Varnish Software's commercial build of Varnish Cache (6.0.10r3); its records name it on their own or next to Varnish Cache, and the name rules read 'Plus' as an edition of Varnish Cache, as they read NGINX Plus"},
   {"names": ["Exim smtpd"], "vendors": ["exim"], "products": ["exim"],
    "evidence": ["cpe:2.3:a:exim:exim", "CVE-2019-10149 (exim: exim)"]},
   {"names": ["PHP-FPM"], "vendors": ["php"], "products": ["php"],
@@ -113,7 +124,10 @@
  "renames": [
   {"names": ["AspNet Version Disclosure"], "to": "ASP.NET",
    "evidence": ["nuclei's 'AspNet Version Disclosure' technology template reads the X-AspNet-Version header (1.1.4322, 2.0.50727, 4.0.30319)"],
-   "note": "a detector's name for a reading that names another product: read as that product, so its CLR line is read as the .NET Framework's (cvengine_scanner.versions.legacy_aspnet), never as a Windows release or an ASP.NET Core one"}
+   "note": "a detector's name for a reading that names another product: read as that product, so its CLR line is read as the .NET Framework's (cvengine_scanner.versions.legacy_aspnet), never as a Windows release or an ASP.NET Core one"},
+  {"names": ["Nginx End-of-Life", "nginx eol"], "to": "nginx",
+   "evidence": ["nuclei's 'Nginx End-of-Life' detection template reads the nginx release in the Server header and reports it when that line is past its support (seen on 4 hosts, each with the version)"],
+   "note": "a detector's name for an nginx reading: read as nginx, at the version it extracted"}
  ],
  "protocol_versions": [
   {"names": ["Microsoft-HTTPAPI", "Microsoft HTTPAPI", "Microsoft HTTPAPI httpd", "ms-httpapi"],

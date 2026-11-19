@@ -565,6 +565,11 @@ def tech_name_from(line):
         name = matcher
     else:
         name = re.sub(r'\s+(version|detect|detected|detection|server|fingerprint)$', '', (info.get('name') or '').strip(), flags=re.I)
+        for _ in range(3):  # "Microsoft IIS version detect": the template words left before the last one ("Server" only ever as the last)
+            stripped = re.sub(r'[\s:–-]+(version|detect|detected|detection|fingerprint)$', '', name, flags=re.I).strip()
+            if stripped == name or not stripped:
+                break
+            name = stripped
         name = re.sub(r'[\s:–-]+$', '', name)  # "AWS Service - Detection" leaves a dangling dash
     from cveFeed.correlation import stored_technology_name
     name = (name or '').strip()[:100]
@@ -572,8 +577,15 @@ def tech_name_from(line):
         from cveFeed import js_libraries
         return js_libraries.unversioned(stored_technology_name(name))
     # every version the template extracted, read the same way each run: nuclei hands several back in no fixed order, and taking the first
-    # made the stored version flip between runs. The highest is kept (the conservative reading: it matches the fewest advisories)
-    found = {str(v).strip().lstrip('vV')[:30] for v in line.get('extracted-results') or [] if re.match(r'[vV]?\d', str(v or '').strip())}
+    # made the stored version flip between runs. The highest is kept (the conservative reading: it matches the fewest advisories). A value that
+    # is not a bare version ("nginx/1.18.0", "OpenSSL/1.0.2k", "Cleo VLTrader/5.8.0.21", a whole Server header a kval extractor returned) is read
+    # for the version that follows the product's own name in it (network_detection.versions_of), never another product's version
+    values = [str(v or '').strip() for v in line.get('extracted-results') or []]
+    found = {v.lstrip('vV')[:30] for v in values if re.match(r'[vV]?\d', v)}
+    named = [v for v in values if v and not re.match(r'[vV]?\d', v)]
+    if name and named:
+        from cveFeed import network_detection
+        found |= {v[:30] for v in network_detection.versions_of({'template-id': template, 'info': {'name': name}, 'extracted-results': named}, name)}
     version = max(found, key=_version_order) if found else ''
     if name and version:
         from cveFeed import js_libraries
@@ -588,21 +600,11 @@ def _version_order(text):
 
 
 def reuse_technologies(scan, project, hosts):
-    """Copy the technologies another scan of this project recorded for ``hosts`` onto this scan's rows for them. Returns how
-    many hosts got any."""
-    from startScan.models import Subdomain
-    mine = {s.name: s for s in Subdomain.objects.filter(scan_history=scan, name__in=hosts).prefetch_related('technologies')
-            if not s.technologies.all()}
-    if not mine:
-        return 0
-    source = {}
-    for other in Subdomain.objects.filter(target_domain__project_id=project, name__in=list(mine)).exclude(scan_history=scan) \
-            .prefetch_related('technologies').order_by('-id').iterator(chunk_size=500):
-        if other.name not in source and other.technologies.all():
-            source[other.name] = [t.id for t in other.technologies.all()]
-    through = Subdomain.technologies.through
-    through.objects.bulk_create([through(subdomain_id=mine[name].pk, technology_id=tid) for name, ids in source.items() for tid in ids])
-    return len(source)
+    """Carry the technologies the light pass's last run found on ``hosts`` (``{ledger target: host}``, or host names) onto this scan's rows for
+    them: what the rows lack, even when another source already gave them some (``tech_carry.carry``). Returns how many hosts got any."""
+    from cveFeed import tech_carry
+    assets = hosts if isinstance(hosts, dict) else {h: h for h in hosts}
+    return len(tech_carry.carry(scan, project, assets, LIGHT_SERVICE))
 
 
 def run_light_nuclei(scan_id, stream, force=False):
@@ -611,8 +613,9 @@ def run_light_nuclei(scan_id, stream, force=False):
     and the AI see them. Hosts this project's light pass covered inside the TTL are not scanned again: they take the
     technologies recorded then. Returns ``{'targets', 'technologies', 'hosts', 'techs': {host: [names]}}``."""
     from cveFeed import activity, ledger
+    from cveFeed import tech_rows as rows_of
     from reNgine.resources import ScannerUnavailable
-    from startScan.models import ScanHistory, Subdomain, Technology
+    from startScan.models import ScanHistory, Subdomain
     scan = ScanHistory.objects.select_related('domain').get(pk=scan_id)
     domain, project = scan.domain, scan.domain.project_id
     targets = build_targets(*scan_targets(scan))
@@ -624,7 +627,7 @@ def run_light_nuclei(scan_id, stream, force=False):
     covered = set() if force else ledger.fresh(service, targets, project)
     held = set() if force else backed_off(service, [t for t in targets if t not in covered], project)  # only partly checked within the day: asked again after it
     todo = [t for t in targets if t not in covered and t not in held]
-    reused = reuse_technologies(scan, project, {host_of({'host': t}) for t in covered}) if covered else 0
+    reused = reuse_technologies(scan, project, {t: host_of({'host': t}) for t in covered}) if covered else 0
     by_name = {s.name: s for s in Subdomain.objects.filter(scan_history=scan)}
     by_ip = {}
     for sub in by_name.values():
@@ -664,8 +667,7 @@ def run_light_nuclei(scan_id, stream, force=False):
                         if not (name and sub):
                             continue
                         if name not in tech_rows:
-                            tech_rows[name] = Technology.objects.filter(name=name).order_by('id').first() \
-                                or Technology.objects.create(name=name)
+                            tech_rows[name] = rows_of.technology(name)  # one row per spelling (cveFeed.tech_rows)
                         pending.add((sub.pk, tech_rows[name].pk))
                         found.setdefault(sub.name, set()).add(name)
                 finally:

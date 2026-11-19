@@ -2480,6 +2480,18 @@ def _tech_q(spec, project):
     return runs & ~_tech_known_q(spec, named) if spec.state == tech_search.UNKNOWN else runs
 
 
+def _os_q(value, project):
+    """The hosts whose operating system ``value`` names: the port scan's OS guess and its runners-up (``fingerprint.os_matches``), an
+    operating system CPE a port carries, and the operating system readings the version sources store (``cveFeed.source_versions.os_rows``:
+    the Windows release an NTLM challenge states, runZero's operating system, a network operating system's identity, Shodan's OS CPEs)."""
+    from django.db.models import Q
+
+    from cveFeed import source_versions
+    q = Q(ip_addresses__os_guess__icontains=value) | Q(ip_addresses__fingerprint__os_matches__icontains=value)
+    q |= _tech_port_q(Q(cpe__istartswith='cpe:/o:', cpe__icontains=value) | Q(extra__cpes__iregex=f'cpe:/o:[^"]*{re.escape(value)}'))
+    return q | _hosts_named_in(source_versions.os_rows(value), project)
+
+
 def _banner_q(value):
     """A Q matching hosts with ``value`` in a service banner, an NSE script's output (ssh-hostkey, ssl-cert, ftp-anon,
     rdp-ntlm-info, smb-os-discovery ...) or the extra info nmap printed, on an open port."""
@@ -2523,7 +2535,7 @@ def _term_filter(field, value, project=None):
     if field == 'service':
         return Q(**{ports + 'service_name__icontains': value}) & open_port
     if field == 'os':
-        return Q(ip_addresses__os_guess__icontains=value)
+        return _os_q(value, project)
     if field == 'country':
         return Q(ip_addresses__geo_iso__iso__iexact=value) | Q(ip_addresses__geo_iso__name__icontains=value)
     if field == 'cve':
@@ -2795,6 +2807,11 @@ def _why_matched(sub, terms, routes=None, archive=None, shared=None):
         for ip in sub.ip_addresses.all():
             if field in (None, 'os') and has(ip.os_guess):
                 reasons.append(f'OS {ip.os_guess}')
+            elif field == 'os':
+                matches = (ip.fingerprint or {}).get('os_matches') if isinstance(ip.fingerprint, dict) else None
+                named = [m.get('name') for m in matches if isinstance(m, dict) and has(m.get('name'))] if isinstance(matches, list) else []
+                if named:
+                    reasons.append(f'OS guess {named[0]}')
             if field == 'country' and ip.geo_iso and (has(ip.geo_iso.iso) or has(ip.geo_iso.name)):
                 reasons.append(f'country {ip.geo_iso.name or ip.geo_iso.iso}')
             for p in open_services(ip):
@@ -2831,6 +2848,8 @@ def _why_matched(sub, terms, routes=None, archive=None, shared=None):
             reasons.append('zombie: DNS gone, still answering')
         if field in ('component', 'runtime', 'vsource'):
             reasons.append(f'{ {"component": "component", "runtime": "runtime", "vsource": "version source"}[field]} {v}')
+        if field == 'os' and not any(r.startswith('OS') for r in reasons):
+            reasons.append(f'operating system {v}')  # a port's OS CPE or an operating system reading (cveFeed.source_versions.os_rows)
     return list(dict.fromkeys(reasons))[:8]
 
 

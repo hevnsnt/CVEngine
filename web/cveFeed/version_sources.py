@@ -468,7 +468,7 @@ def _observation(r, port):
     outcome = 'found' if r['version'] else 'hidden'
     evidence = {'confidence': r['confidence'], 'line_only': r['line_only'], 'component': r['component'], 'source': r['source'],
                 'said': r['evidence'], 'version_source': True, **({'cpe': r['cpe']} if r.get('cpe') else {}),
-                **({'bundled': r['bundled']} if isinstance(r.get('bundled'), dict) else {})}
+                **({'bundled': r['bundled']} if isinstance(r.get('bundled'), dict) else {}), **({'on_port': True} if r.get('on_port') else {})}
     if r.get('release_only') and isinstance(r.get('windows'), dict):
         # the Windows release an NTLM challenge states (cveFeed.windows_builds): the release, never its update revision
         evidence.update(release_only=True, windows=r['windows'])
@@ -1044,7 +1044,8 @@ def readings_for(project_ids, hosts):
 def search_rows(field, value):
     """The reading rows a search term names, or None for a value it cannot read.
 
-    ``component:<name>`` (a product or runtime read from a version source: ``component:grafana``, ``component:docker``; ``component:any``),
+    ``component:<name>`` (a product or runtime read from a version source: ``component:grafana``, ``component:docker``, any name ``tech:`` takes
+    through ``cveFeed.tech_search``: ``component:"apache httpd"``; ``component:any``),
     ``runtime:<name>`` (a language runtime: ``runtime:python``, ``runtime:go``, ``runtime:dotnet``; ``runtime:any``), each optionally with a
     version prefix after ``@`` (``runtime:python@3.8`` finds 3.8.10, never 3.80); ``vsource:<entry>`` (where it was read: ``vsource:prometheus-metrics``,
     ``vsource:header``, ``vsource:snmp`` for an SNMP agent's sysDescr, ``vsource:bundled`` for a component inferred from a vendor's bundle,
@@ -1079,7 +1080,18 @@ def search_rows(field, value):
         name = aliases.get(name, name)
         if name != 'any' and name not in catalogue.RUNTIMES:
             return None
-    if name != 'any':
+    if name != 'any' and field == 'component':
+        # a product by any name tech: takes (cveFeed.tech_search: its aliases, a vendor in front, an edition or a detector's word behind,
+        # a quoted name with spaces), its component slug, or the product as stored
+        from cveFeed import tech_search
+        name = name.strip().strip('"').strip()
+        if not re.fullmatch(r'[a-z0-9][a-z0-9 ._/+-]{0,60}', name):
+            return None
+        spec = tech_search.parse(name)
+        named = Q(evidence__component=name) | Q(evidence__component=re.sub(r'[^a-z0-9]+', '-', name).strip('-')) | Q(product__iexact=name)
+        pattern = spec.name_re() if spec is not None else ''
+        rows = rows.filter(named | Q(product__iregex=pattern) if pattern else named)
+    elif name != 'any':
         if not re.fullmatch(r'[a-z0-9][a-z0-9._-]{0,40}', name):
             return None
         rows = rows.filter(Q(evidence__component=name) | Q(product__iexact=name))

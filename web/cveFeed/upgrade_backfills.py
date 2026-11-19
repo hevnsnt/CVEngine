@@ -46,6 +46,8 @@ BACKFILLS = (
     'backfill_recog_readings',            # the products, versions and CPEs Rapid7 Recog reads in the banners hosts already store (re-correlated)
     'backfill_windows_builds',            # the Windows release stored NTLM and SMB script output states, and its KEV/critical candidates (re-correlated)
     'backfill_panel_versions',            # the version a stored panel template finding extracted, read as a version reading of its host (re-correlated)
+    'backfill_shodan_cpes',               # every Shodan InternetDB CPE a reported reading ("vendor product"), CPE technologies removed (re-correlated)
+    'backfill_technology_names',          # technology rows folded onto one spelling, MariaDB's "5.5.5-" prefix off port versions (re-correlated)
     'rerate_findings',                    # 1.3.5: rescore hosts for the new heat rules, clear stale fire marks (last: counts everything above)
 )
 MAX_ATTEMPTS = 3
