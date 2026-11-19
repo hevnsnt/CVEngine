@@ -10,7 +10,10 @@ Every probe is wrapped: one that fails leaves its numbers out (None), and a rule
 * the CPU: the share of the container's CPU limit (cgroup v2 ``cpu.max`` or v1 CFS quota) it used since the last measurement, from the
   cgroup's own accounting (the load average per core of that limit where the cgroup cannot be read);
 * the discovery worker: whether it answers (the 30 second tick's record), its ceiling, the tasks it runs now and the messages waiting;
-* Sentinels: live ones, their slots and the slots in use, queued work and its age, and the waits that timed out and ran locally instead;
+* Sentinels: live ones, their slots and the slots in use, queued work and its age, the tasks that timed out or expired unclaimed, and one row per
+  Sentinel (``machines``: its machine's CPU, load and memory as it reports them, and what it did: ``cveFeed.autotune_sentinels.collect``), which
+  the per-Sentinel tuning reads;
+* the Celery broker: whether it answers, how long a ping takes, and the messages waiting in the queues the control tasks and the planner use;
 * assessments: queued and running, and the age of the oldest queued one;
 * the work conductor: whether its last round was held back by its depth while targets were due, or had nothing to do;
 * scanner failures that point at load (a timeout, out of memory, a kill) by scanner kind;
@@ -215,12 +218,38 @@ def sentinels(now, interval=INTERVAL_SECONDS):
     expired = SentinelTask.objects.filter(status='expired', finished_at__gte=since)
     unclaimed = expired.filter(error__icontains='in time').count()
     outage = claim_outage(now, unclaimed, slots, in_use)
-    return {'live': len(live), 'slots': slots, 'in_use': in_use, 'queued': queued.count(),
-            'oldest_queued_s': int((at - oldest).total_seconds()) if oldest else None,
-            'timeouts': expired.filter(error__icontains='timed out').count(),
-            # AM-5: tasks that expired unclaimed while the slots were free, or while the server's limiter refused the Sentinels' claims, say the claims did not
-            # reach the server, not that the Sentinels are too small: they are not counted as waits that ran locally (the policy backs off on those)
-            'fallbacks': 0 if outage else unclaimed, 'unclaimed': unclaimed, 'claims_outage': outage}
+    waiting = queued.count()
+    out = {'live': len(live), 'slots': slots, 'in_use': in_use, 'queued': waiting,
+           'oldest_queued_s': int((at - oldest).total_seconds()) if oldest else None,
+           'timeouts': expired.filter(error__icontains='timed out').count(),
+           # AM-5: tasks that expired unclaimed while the slots were free, or while the server's limiter refused the Sentinels' claims, say the claims did not
+           # reach the server, not that the Sentinels are too small: they are not counted as Sentinel capacity trouble (the policy backs off on those)
+           'expired_unclaimed': 0 if outage else unclaimed, 'unclaimed': unclaimed, 'claims_outage': outage}
+    from cveFeed import autotune_sentinels
+    out['machines'] = _probe('sentinel machines', lambda: autotune_sentinels.collect(at, interval, queued=waiting), {})
+    return out
+
+
+BROKER_QUEUES = ('cve_feed_queue', 'planner_queue', 'api_queue', 'celery')  # besides the discovery queue (``discovery``): the control tasks, the planner, the API's own tasks
+
+
+def broker():
+    """``{'ok', 'latency_ms', 'queued': {queue: messages waiting}}`` of the Celery broker; ``ok`` False when it does not answer a ping."""
+    from agentapi.system_status import PRIORITY_SUFFIXES, _broker_client
+    started = time.monotonic()
+    try:
+        client = _broker_client()
+        client.ping()
+    except Exception:  # noqa: BLE001 - not answering is the measurement
+        return {'ok': False, 'latency_ms': None, 'queued': {}}
+    latency = int((time.monotonic() - started) * 1000)
+    pipe = client.pipeline(transaction=False)
+    for name in BROKER_QUEUES:
+        for suffix in PRIORITY_SUFFIXES:
+            pipe.llen(name + suffix)
+    lengths = pipe.execute()
+    step = len(PRIORITY_SUFFIXES)
+    return {'ok': True, 'latency_ms': latency, 'queued': {name: sum(lengths[i * step:(i + 1) * step]) for i, name in enumerate(BROKER_QUEUES)}}
 
 
 def claim_outage(now, unclaimed, slots, in_use):
@@ -347,6 +376,7 @@ def collect(now=None, boot=''):
         'maint': _probe('maintainer signals', lambda: maintainer(now), {}),
         'starve': _probe('queued scans', lambda: starve(now), {}),
         'lanes': _probe('lane memory', lambda: lane_memory(now), {}),
+        'broker': _probe('broker', broker, {}),
     }
     measured = _probe('load', lambda: load(now))
     if measured:
@@ -385,7 +415,11 @@ def summarise(samples):
                       'not_answering': sum(1 for s in samples if (s.get('discovery') or {}).get('replying') is False)},
         'sentinel': {'live': (last.get('sentinel') or {}).get('live'), 'slots': (last.get('sentinel') or {}).get('slots'),
                      'slots_in_use': span('sentinel', 'in_use', digits=1), 'queued': span('sentinel', 'queued', digits=1),
-                     'timeouts': sum(nums('sentinel', 'timeouts')), 'ran_locally': sum(nums('sentinel', 'fallbacks'))},
+                     'timeouts': sum(nums('sentinel', 'timeouts')), 'expired_unclaimed': sum(nums('sentinel', 'expired_unclaimed')),
+                     'oldest_queued_minutes': (max(nums('sentinel', 'oldest_queued_s')) // 60) if nums('sentinel', 'oldest_queued_s') else None},
+        'broker': {'not_answering': sum(1 for s in samples if (s.get('broker') or {}).get('ok') is False),
+                   'latency_ms': span('broker', 'latency_ms', digits=0),
+                   'queued': {q: span('broker', 'queued', q, digits=0) for q in BROKER_QUEUES}},
         'assessments': {'queued': span('assess', 'queued', digits=1), 'oldest_queued_minutes': (max(nums('assess', 'oldest_s')) // 60) if nums('assess', 'oldest_s') else None},
         'conductor': {state: sum(1 for s in samples if (s.get('conductor') or {}).get('state') == state)
                       for state in ('saturated', 'full', 'filling', 'idle', 'off', 'paused')},

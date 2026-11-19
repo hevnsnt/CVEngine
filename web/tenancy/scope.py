@@ -96,6 +96,8 @@ UNSCOPED = {
     'dashboard.ApiToken': 'owned by a user, not a project; the inventory token only names the project it reports to; authenticated before any scope exists',
     'dashboard.AuditLog': 'organization level trail, read through its own organization filter',
     'startScan.IpAddress': 'per organization, shared by the organization\'s projects',
+    'startScan.SubdomainTechnology': 'the table of the host-technology many-to-many link (as unscoped as it was when Django made it): read through a '
+                                     'host already in scope, or as a subquery of host ids under the scoped host query',
     'cveFeed.HostExclusion': 'per organization',
     'cveFeed.ExcludedAddress': 'per organization',
     'cveFeed.OpenvasOrg': 'per organization',

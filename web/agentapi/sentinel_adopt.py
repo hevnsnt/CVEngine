@@ -12,7 +12,8 @@ What each kind lands through is the persistence the stage itself uses (never a s
 * ``naabu``: ``cveFeed.port_stage.persist_open_ports`` (a tarpit is left out, as the stage does), then the ledger says discovery is done;
 * ``nuclei_*``: every finding through ``reNgine.tasks.save_vulnerability`` (one row per finding, so a repeat changes nothing). The stage's catch-all
   screening needs control reads from a Sentinel and cannot be made now, so the findings carry the ``unscreened-same-body`` tag the stage uses for the same
-  case. The ledger is left alone: the hosts are due again at their normal time, which also takes the technology fingerprint the light pass writes;
+  case. An info-level panel hit is also read as the stage reads it (``cveFeed.panel_versions.Collector``): a version reading when it extracted a
+  version, else an identity reading and a technology with no version, and the hosts that changed are correlated again. The ledger is left alone: the hosts are due again at their normal time, which also takes the technology fingerprint the light pass writes;
 * ``bbot_discovery``: the batches the Sentinel posted before it ended go through the discovery stage's own ``_flush``, and the ledger says discovery
   is done when the run was complete.
 
@@ -136,6 +137,8 @@ def _nuclei(task, result, agent):
         by_name.setdefault(sub.name, sub)
         for ip in sub.ip_addresses.all():
             by_ip.setdefault(ip.address, sub)
+    from cveFeed.panel_versions import Collector
+    panels = Collector()  # a panel hit names its product, and its version when it extracted one, as the template pass reads it (cveFeed.panel_versions)
     filed = 0
     for finding in result.get('findings', []):
         line = sentinel_dispatch._finding_to_nuclei_line(finding)
@@ -147,8 +150,13 @@ def _nuclei(task, result, agent):
         host = host_of(line)
         sub = by_name.get(host) or by_ip.get(host)
         save_vulnerability(target_domain=domain, scan_history=scan, subdomain=sub, http_url=line.get('matched-at') or line.get('host') or host, **data)
+        panels.offer(line, sub)
         filed += 1
-    return {'findings': filed}
+    panels.flush()  # stored per host, and a host whose readings changed correlated again
+    out = {'findings': filed}
+    if panels.stored:
+        out['panel_readings'] = panels.stored
+    return out
 
 
 @adopter('bbot_discovery')

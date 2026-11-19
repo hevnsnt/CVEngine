@@ -356,11 +356,15 @@ def set_managed(agent, raw, actor, now=None):
 
 
 def reply(agent):
-    """What a Sentinel is told about its settings: the effective values and their fingerprint. The built-in scanner is also told ``vantage``
+    """What a Sentinel is told about its settings: the effective values and their fingerprint. ``max_concurrent`` is the number auto-tuning chose for it
+    when one applies (``sentinel_machine.tuned_slots``); the Sentinel keeps reporting its own local number, which stays the ceiling. The built-in scanner is also told ``vantage``
     (``builtin_vantage``): this server's egress proxy and the private networks its own scans may reach, so it scans from where the server did. Derived
     at every reply and stored nowhere, sent to the built-in scanner alone (its token and its enrollment make it that, never what it reports)."""
     values = effective(agent)
-    from agentapi import sentinel_broker
+    from agentapi import sentinel_broker, sentinel_machine
+    tuned = sentinel_machine.tuned_slots(agent) if agent.kind == 'scanner' else None
+    if tuned:  # auto-tuning's concurrency for this Sentinel: never above its machine's own setting, never over an administrator's
+        values['max_concurrent'] = tuned
     if agent.kind == 'scanner' and sentinel_broker.is_builtin(agent):
         vantage = builtin_vantage()
         if vantage:
@@ -418,7 +422,7 @@ FEATURES = ('secret_read', 'vantage', 'bbot_keys', 'credential_filter')
 
 
 def clean_info(raw):
-    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (cvengine_scanner/contract/sentinel_contract.json), its updater's ``update`` state, whether its own GVM stack can scan (``openvas``), for the built-in scanner image ``builtin`` and its ``features``, and ``waiting`` (kinds held back for memory, tasks still stopping: ``clean_waiting``), and optionally ``spool`` (results held on disk for cvENGINE: ``clean_spool``). Anything else is dropped."""
+    """What a Sentinel reports about itself, validated: its client ``version``, the ``contract_version`` it speaks (cvengine_scanner/contract/sentinel_contract.json), its updater's ``update`` state, whether its own GVM stack can scan (``openvas``), for the built-in scanner image ``builtin`` and its ``features``, and ``waiting`` (kinds held back for memory, tasks still stopping: ``clean_waiting``), and optionally ``spool`` (results held on disk for cvENGINE: ``clean_spool``) and ``machine`` (its CPU, load, memory and out-of-memory kills: ``sentinel_machine.clean_machine``). Anything else is dropped."""
     if not isinstance(raw, dict):
         raise ApiError(400, 'info must be an object')
     out = {}
@@ -486,6 +490,10 @@ def clean_info(raw):
     watchdog = clean_watchdog(raw.get('watchdog'))
     if watchdog is not None:
         out['watchdog'] = watchdog
+    from agentapi import sentinel_machine
+    machine = sentinel_machine.clean_machine(raw.get('machine'))  # optional, never refused: dropped when it is not the shape (sentinel_machine)
+    if machine is not None:
+        out['machine'] = machine
     return out
 
 
@@ -670,6 +678,11 @@ def record_info(agent, raw, now=None):
         merged.pop('spool', None)  # a full report that says nothing about a spool says it holds none now
     if 'contract_version' in info and 'tool_versions' not in info:
         merged.pop('tool_versions', None)  # a full report without tool versions (a client that cannot read them now): the old ones are not kept as if current
+    if 'machine' in info:
+        from django.utils import timezone
+        merged['machine'] = {**info['machine'], 'at': (now or timezone.now()).isoformat()}  # the server's own time: how old the numbers are is never the Sentinel's say
+    elif 'contract_version' in info:
+        merged.pop('machine', None)  # a full report without the machine: the old numbers are not kept as if current
     # when the Sentinel last changed the version it runs (or first reported one): "last updated" on the Sentinels page. Only the server writes it.
     if 'version' in info and (agent.info or {}).get('version') != info['version']:
         from django.utils import timezone

@@ -129,11 +129,10 @@ class MeasureTests(SimpleTestCase):
         self.assertEqual((empty['value'], empty['trouble'], empty['n']), (None, None, 0))
 
     def test_kills_and_restarts_are_counted_and_unknown_when_nothing_measured_them(self):
-        got = policy.measure(DISCOVERY32, history(3, maint={'oom_kills_24h': 2, 'lane_restarts_24h': 1}, memory={'kills': 1}))
-        self.assertEqual((got['kills'], got['oom']), (3, 3))
+        got = policy.measure(DISCOVERY32, history(3, maint={'oom_kills_24h': 2, 'lane_restarts_24h': 1}))
+        self.assertEqual((got['kills'], got['oom']), (None, 3))  # nothing on the server counts kills of its own: only the kernel's and the lane restarts
         got = policy.measure(DISCOVERY32, history(3))
-        self.assertEqual((got['kills'], got['oom']), (0, None))
-        self.assertEqual(policy.measure(DISCOVERY32, history(3, memory={'reported': False}))['kills'], None)
+        self.assertEqual((got['kills'], got['oom']), (None, None))
 
     def test_trouble_is_what_the_trouble_rule_says(self):
         self.assertEqual(policy.measure(DISCOVERY32, history(3, memory={'free_frac': 0.05}), direction='less')['trouble'], 1)
