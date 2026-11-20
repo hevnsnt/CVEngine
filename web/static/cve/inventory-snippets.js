@@ -10,8 +10,9 @@ const plain = (value, what) => {
 };
 
 // The token is never in a command: a command is saved in shell history and shown in the process list. The Linux and macOS command
-// reads it from the keyboard into a file only its owner can read (paste it, Enter, Ctrl-D); the Windows one reads it as a secure
-// string into the environment of this session. Both are asked for before anything is downloaded.
+// asks for it with a prompt (the paste is not echoed) and writes it to a file only its owner can read; the Windows one reads it as a
+// secure string into the environment of this session. Both ask before anything is downloaded. (The Linux command used to be a bare
+// `cat > file`, which waited for Ctrl-D with no prompt: a person who pasted the command saw a terminal that seemed to hang.)
 export function snippets({ origin, project, privateCa = true }) {
   const server = plain(origin, "the server address");
   const slug = plain(project, "the project");
@@ -19,7 +20,9 @@ export function snippets({ origin, project, privateCa = true }) {
   const curlCa = privateCa ? " --cacert ca.crt" : "";
   const scriptCa = privateCa ? " --ca-file ca.crt" : "";
   const target = `--server ${server} --project ${slug} --token-file cvengine-inventory.token${scriptCa}`;
-  const readToken = "(umask 077; cat > cvengine-inventory.token)";
+  const readToken =
+    "(umask 077; printf 'Paste the cvENGINE inventory token and press Enter: ' >&2; stty -echo 2>/dev/null; IFS= read -r t; " +
+    "stty echo 2>/dev/null; echo >&2; printf '%s\\n' \"$t\" > cvengine-inventory.token)";
   return {
     linux: `${readToken} && curl -fsS${curlCa} ${script("cvengine-inventory.sh")} -o cvengine-inventory.sh && sh cvengine-inventory.sh ${target}`,
     python: `${readToken} && curl -fsS${curlCa} ${script("cvengine-inventory.py")} -o cvengine-inventory.py && python3 cvengine-inventory.py ${target}`,

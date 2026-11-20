@@ -52,6 +52,15 @@ def say(message):
     print(message, file=sys.stderr)
 
 
+def step(message):
+    """Progress for a person watching: only when stderr is a terminal, so a scheduled run (cron, a systemd timer) stays quiet."""
+    try:
+        if sys.stderr.isatty():
+            say('cvengine-inventory: ' + message)
+    except (AttributeError, ValueError):
+        pass
+
+
 # --- running commands ---------------------------------------------------------------------------------------------------
 
 def run(argv, timeout=60):
@@ -586,6 +595,8 @@ def main(argv=None):
             if args.insecure:
                 say("cvengine-inventory: *** --insecure: the server's certificate is NOT being checked. Anyone on the network path can read "
                     'the token and this report. ***')
+        step("collecting this host's inventory (dry run: nothing will be sent)" if args.dry_run else
+             "collecting this host's inventory for project %s on %s (reading the installed packages can take a minute)" % (args.project, args.server))
         report = build_report(args.macs)
         body = json.dumps(report, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
         say('cvengine-inventory: collected %d package entries (%d bytes) on %s' % (len(report['packages']), len(body), report['host'].get('hostname', '?')))
@@ -593,6 +604,7 @@ def main(argv=None):
             print(body.decode('utf-8'))
             say('cvengine-inventory: dry run: nothing was sent. It would POST to %s/api/v1/projects/%s/inventory' % (args.server or '<--server>', args.project or '<--project>'))
             return 0
+        step('sending the report to %s/api/v1/projects/%s/inventory ...' % (args.server.rstrip('/'), args.project))
         return send(args, body)
     except Failure as exc:
         say('cvengine-inventory: %s' % exc)
