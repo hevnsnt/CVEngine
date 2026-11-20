@@ -796,6 +796,33 @@ def generic_check(seen, cves):
     return len(vendors) > 1
 
 
+# What a Greenbone policy check is named: it reports a protocol, a cipher or key exchange setting, or an end-of-life release, and lists the
+# CVEs of that weakness as references ("SSL/TLS: Deprecated TLSv1.0 and TLSv1.1 Protocol Detection" lists BEAST and FREAK, "SSL/TLS: Report
+# Weak Cipher Suites", "OpenSSH End of Life (EOL) Detection")
+_REFERENCE_NAME = re.compile(
+    r'\bProtocols?\b[^()]*\bDetection\b|\bEnd[- ]of[- ]Life\b|\(EOL\)|\bEOL\b[^()]*\bDetection\b'
+    r'|\b(?:Deprecated|Weak|Insecure|Report)\b[^()]*\b(?:Protocols?|Ciphers?|Cipher Suites?|Algorithms?|MACs?|Key Exchange|Host Keys?|Encryption)\b',
+    re.I)
+PROTOCOL_VENDORS = ('ietf',)  # a CPE of a protocol (cpe:/a:ietf:transport_layer_security:1.0), not of a product a CVE could be about
+
+
+def reference_check(nvt, seen):
+    """Whether an NVT is a policy check that lists its CVEs as references rather than testing them (issue 414): its name says it reports a
+    protocol, a cipher or key exchange setting or an end-of-life release, or the CPE it detected is a protocol's (IETF), not a product's.
+    "SSL/TLS: Deprecated TLSv1.0 and TLSv1.1 Protocol Detection" (QoD 98) lists CVE-2011-3389 (BEAST) and CVE-2015-0204 (FREAK): its QoD is
+    the quality of "TLS 1.0 is offered", not of either CVE (FREAK needs RSA export ciphers, BEAST CBC ciphers the result does not name), and
+    its "version" 1.0 is the protocol's. Like a behaviour check (``generic_check``) it does not confirm those CVEs; the scanner finding itself
+    stands, and the AI triage judges each match with the check's result in front of it."""
+    return protocol_cpe(seen) or bool(_REFERENCE_NAME.search(str(nvt or '')[:300]))
+
+
+def protocol_cpe(seen):
+    """Whether the CPE an NVT detected is a protocol's (IETF): its version (TLS "1.0") is the protocol's, never a product release."""
+    cpe = str((seen or {}).get('cpe') or '')
+    parts = cpe.replace('cpe:2.3:', 'cpe:/', 1).split(':') if cpe else []
+    return len(parts) > 2 and parts[2].lower() in PROTOCOL_VENDORS
+
+
 def severity_level(score):
     """The Vulnerability severity (0 info .. 4 critical) of a CVSS base score."""
     return 4 if score >= 9.0 else 3 if score >= 7.0 else 2 if score >= 4.0 else 1 if score > 0 else 0
@@ -899,7 +926,8 @@ def apply_observations(sub):
         # and the product is not a guess (correlation.invalid_identity_reason never compares an OpenVAS match's name: the NVT tested it).
         product = f'OpenVAS NVT {ev["oid"]} on {ev["port"]}'[:255]
         seen = identified(ev)
-        generic = hard and generic_check(seen, [known[c] for c in ev['cves'] if c in known])
+        reference = hard and reference_check(ev.get('name'), seen)
+        generic = hard and (reference or generic_check(seen, [known[c] for c in ev['cves'] if c in known]))
         linked = hard and not generic  # what this NVT's QoD may confirm: the CVEs of the product it tested, never a vendor list it only shares a behaviour with
         for cve_id in ev['cves']:
             cve = known.get(cve_id)
@@ -907,12 +935,13 @@ def apply_observations(sub):
                 continue
             matches.add((cve.id, product))
             rows.append({'cve_entry_id': cve.id, 'subdomain_id': sub.id, 'source': SOURCE, 'matched_product': product,
-                         'matched_version': seen['installed_version'][:100],
+                         'matched_version': '' if protocol_cpe(seen) else seen['installed_version'][:100],
                          'version_in_range': True if linked else None, 'confidence': 0.95 if linked else min(0.5, ev['qod'] / 100),
                          'scan_history_id': sub.scan_history_id, 'distro_status': 'no_data', 'distro_fixed_version': '',
                          'evidence': {'source': 'openvas', 'oid': ev['oid'], 'nvt': ev['name'], 'port': ev['port'], 'qod': ev['qod'], 'qod_type': ev['qod_type'],
                                       'severity': ev['severity'], 'result': ev['result'][:RESULT_EVIDENCE], 'tested_at': obs.observed_at.isoformat(),
-                                      **({'generic_check': True} if generic else {}), **{k: v for k, v in seen.items() if v}}})
+                                      **({'generic_check': True} if generic else {}), **({'reference_check': True} if reference else {}),
+                                      **{k: v for k, v in seen.items() if v}}})
     correlation.save_matches(rows)
     now = timezone.now()
     for row in rows:

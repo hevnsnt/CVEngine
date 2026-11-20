@@ -46,9 +46,10 @@ def candidates(project):
         evidence = m.evidence if isinstance(m.evidence, dict) else {}
         if evidence.get('generic_check'):
             continue
-        seen = {'product': evidence.get('product') or '', 'installed_version': evidence.get('installed_version') or ''}
+        seen = {'product': evidence.get('product') or '', 'installed_version': evidence.get('installed_version') or '',
+                'cpe': evidence.get('cpe') or ''}
         cves = list((siblings.get((m.subdomain_id, m.matched_product)) or {m.cve_entry_id: m.cve_entry}).values())
-        if openvas_scan.generic_check(seen, cves):
+        if openvas_scan.reference_check(evidence.get('nvt'), seen) or openvas_scan.generic_check(seen, cves):
             out.append(m)
     return out
 
@@ -61,16 +62,20 @@ def unconfirmed_confidence(match):
 
 def unconfirm(matches, now=None):
     """Store ``matches`` (from ``candidates``) as a fresh import would, then track them and rescore their hosts. Returns how many."""
-    from cveFeed import scoring, triage
+    from cveFeed import openvas_scan, scoring, triage
     from cveFeed.models import CVEMatch
     now = now or timezone.now()
     done = []
     with transaction.atomic():
         for m in matches:
             evidence = {**(m.evidence if isinstance(m.evidence, dict) else {}), 'generic_check': True}
+            protocol = openvas_scan.protocol_cpe(evidence)
+            if openvas_scan.reference_check(evidence.get('nvt'), evidence):
+                evidence['reference_check'] = True
+            fields = {'matched_version': ''} if protocol else {}  # TLS "1.0" is the protocol's version, not a product release
             if CVEMatch.objects.filter(pk=m.pk, template_result='vulnerable').update(
                     template_result='', template_tested_at=now, version_in_range=None, confidence=unconfirmed_confidence(m), evidence=evidence,
-                    updated_at=now):
+                    updated_at=now, **fields):
                 done.append(m.pk)
     if done:
         fresh = triage.with_cves(CVEMatch.objects.filter(pk__in=done).select_related('subdomain__target_domain'))
@@ -80,7 +85,8 @@ def unconfirm(matches, now=None):
 
 
 class Command(BaseCommand):
-    help = 'Un-confirm OpenVAS CVE matches a generic NVT confirmed on a CVE whose record names no vendor or product; a dry run unless --apply.'
+    help = ('Un-confirm OpenVAS CVE matches a generic NVT (a behaviour check whose CVE record names no vendor or product, or a protocol, cipher '
+            'or end-of-life policy check) confirmed; a dry run unless --apply.')
 
     def add_arguments(self, parser):
         add_arguments(parser)
@@ -100,8 +106,8 @@ class Command(BaseCommand):
             total += count
             self.stdout.write(line(project, {'unconfirmed' if apply else 'would unconfirm': count}))
             if apply and count:
-                activity.log('confirm', f'{count} OpenVAS CVE match(es) are no longer confirmed by their NVT: it checks a behaviour, and the CVE '
-                                        'record names no vendor or product it could have tested; the AI triage judges them again',
+                activity.log('confirm', f'{count} OpenVAS CVE match(es) are no longer confirmed by their NVT: it checks a behaviour or a protocol, '
+                                        'cipher or end-of-life setting, not the CVE itself; the AI triage judges them again',
                              project=project.pk, decision='recheck_openvas_generic_checks', unconfirmed=count)
         verb = 'unconfirmed' if apply else 'would unconfirm (dry run, nothing written)'
         self.stdout.write(self.style.SUCCESS(f'{verb} {total} OpenVAS match(es) a generic check had confirmed'))
