@@ -305,8 +305,33 @@ class RenamedCursorTests(FeedSim):
 		self.assertEqual(since[0]['since'], '2026-11-17T23:00:00.000Z')  # today, from a little before midnight
 		days = sorted(url.rsplit('/', 1)[1] for url, _p in feed.requests if '/archive/' in url)
 		self.assertEqual(days, ['2026-11-13.md', '2026-11-14.md', '2026-11-15.md', '2026-11-16.md', '2026-11-17.md'])
-		with mock.patch.object(cve_now, 'SINCE_MAX_PAGES', 1), self.assertRaises(cve_now.WindowIncomplete):
+		feed.requests.clear()
+		with mock.patch.object(cve_now, 'SINCE_MAX_PAGES', 1), self.assertRaises(cve_now.WindowIncomplete) as ctx:
 			client.published_between(floor, below, now, pause=0)
+		# a burst of changes today does not cost the days below it: the archive days are still read, and handed back whole below 23:00
+		self.assertEqual(ctx.exception.complete_below, datetime.datetime(2026, 11, 17, 23, 0, tzinfo=datetime.timezone.utc))
+		older = {e['id'] for e in feed.entries if floor <= e['_pub'] < ctx.exception.complete_below}
+		self.assertFalse(older - {i for i, _seen in ctx.exception.partial})
+		self.assertEqual(len([url for url, _p in feed.requests if '/archive/' in url]), 5)
+
+	def test_a_burst_of_changes_today_moves_the_watermark_up_to_today_not_past_it(self):
+		now = datetime.datetime(2026, 11, 18, 15, 0, tzinfo=datetime.timezone.utc)
+		midnight = datetime.datetime(2026, 11, 18, tzinfo=datetime.timezone.utc)
+		feed = FakeFeed(now, 8, per_day=600)  # the newest 400 are all from today: the walk reads today from the delta listing
+		with mock.patch('django.utils.timezone.now', return_value=now):
+			self.seed_from(feed, 6)
+			with mock.patch('cveFeed.tasks.CVENowClient', make_client(feed)), mock.patch.object(cve_now, 'SINCE_MAX_PAGES', 1):
+				for _run in range(20):  # each run reads its share of the six days behind the seed
+					out = self.backfill()
+					self.assertEqual(out['status'], 'ok')  # never a failed walk on the status page
+					if 'covered_through' in out:
+						break
+		self.assertIn('has more than 1 pages', out['deferred'])
+		# the watermark moves up to where the window was listed whole (23:00 yesterday), not past today: the next walk reads today again
+		self.assertEqual(feed_watermark.current().covered_through, midnight - D(hours=1))
+		stored = set(CVEEntry.objects.values_list('cve_id', flat=True))
+		older = [e['id'] for e in feed.entries if now - D(days=6) <= e['_pub'] < midnight - D(hours=1) and e['id'] not in stored]
+		self.assertEqual(older, [])  # the archive days below today were read all the same
 
 	def test_a_window_whose_archive_is_missing_is_not_declared_covered(self):
 		feed = FakeFeed(timezone.now(), 8)

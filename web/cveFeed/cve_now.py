@@ -45,7 +45,15 @@ class DepthLimit(requests.HTTPError):
 
 
 class WindowIncomplete(Exception):
-    """A date window could not be read in full (a day's archive is missing, or the delta listing ran past its page budget)."""
+    """A date window could not be read in full (a day's archive is missing, or the delta listing ran past its page budget).
+
+    ``partial`` is what was listed anyway and ``complete_below`` the time below which that listing is whole, when only today's delta
+    listing ran out (a burst of changes on cve.now): the archive days below it were still read. Both are None otherwise."""
+
+    def __init__(self, message, partial=None, complete_below=None):
+        super().__init__(message)
+        self.partial = partial
+        self.complete_below = complete_below
 
 
 def _error_code(resp):
@@ -290,7 +298,10 @@ class CVENowClient:
         because the newest-first listing stops at the newest 400 for a caller without a key: each whole UTC day before today from its
         archive page, and today (and any part of the window the archive does not have yet) from the delta listing (``since``), which
         reaches back 7 days with no depth limit. An entry first seen late is listed under its publication day, so a window read again
-        later finds it. Raises ``WindowIncomplete`` when part of the window could not be listed; an HTTP error is raised as it is."""
+        later finds it. Raises ``WindowIncomplete`` when part of the window could not be listed; an HTTP error is raised as it is. Today's
+        delta listing names every change, not only new entries, so a day cve.now rewrites many entries can run past its page budget: the
+        archive days are read all the same, and the exception carries them (``partial``, whole below ``complete_below``); today's new
+        entries reach the catalog through the sync's own delta read, and tomorrow's archive page lists them."""
         out, seen = [], set()
 
         def add(entry_id, first_seen=None):
@@ -301,7 +312,7 @@ class CVENowClient:
             below = now
         today = now.astimezone(datetime.timezone.utc).date()
         midnight = datetime.datetime.combine(today, datetime.time(), tzinfo=datetime.timezone.utc)
-        requests_made = 0
+        requests_made, short = 0, None
         if below >= midnight - datetime.timedelta(hours=1):
             # today: the delta listing, from a little before midnight (or the floor), never further back than it reaches
             since_from = max(floor, midnight - datetime.timedelta(hours=1), now - SINCE_REACH)
@@ -321,7 +332,8 @@ class CVENowClient:
                 if not page["has_more"] or not page["next_cursor"]:
                     break
                 if pages >= SINCE_MAX_PAGES:
-                    raise WindowIncomplete(f"the delta listing since {since_from.isoformat()} has more than {pages} pages")
+                    short = since_from  # the rest of today waits for the sync's delta read and tomorrow's archive page; the days below still count
+                    break
                 cursor = page["next_cursor"]
             last_day = today - datetime.timedelta(days=1)
         else:
@@ -341,6 +353,9 @@ class CVENowClient:
             for entry_id in ids:
                 add(entry_id)
             day -= datetime.timedelta(days=1)
+        if short is not None:
+            raise WindowIncomplete(f"the delta listing since {short.isoformat()} has more than {SINCE_MAX_PAGES} pages", partial=out,
+                                   complete_below=short)
         return out
 
     def tech_entry_ids(self, tech):
