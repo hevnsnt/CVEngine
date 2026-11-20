@@ -599,12 +599,38 @@ def openvas_brief(m, evidence, names=()):
            'detected_product': _s(evidence.get('product'), 120, names),  # its CPE is the payload's own ``cpe``
            'installed_version': _s(evidence.get('installed_version'), 100, names), 'fixed_version': _s(evidence.get('fixed_version'), 100, names),
            'result': _s(redact_text(evidence.get('result') or ''), OPENVAS_RESULT_LIMIT, names)}
-    if evidence.get('generic_check'):
+    if evidence.get('reference_check'):
+        # cveFeed.openvas_scan.reference_check: a policy check (a protocol, cipher or end-of-life detection) lists this CVE as a reference
+        out['tested'] = ('a protocol, cipher or end-of-life setting, not this CVE: the check lists the CVE as a reference, so its quality of '
+                         'detection is about the setting it reports, and whether this CVE\'s own conditions hold on the host is the question')
+    elif evidence.get('generic_check'):
         # cveFeed.openvas_scan.generic_check: the NVT saw a behaviour (TRACE enabled...) that several vendors' advisories share; its QoD is about
         # the behaviour, so whether this CVE's product runs on the host is the question, not settled by the check
         out['tested'] = ('a behaviour several vendors\' advisories share, not this CVE\'s product: the check identified no product or version, '
                          'so its quality of detection does not say this CVE applies')
+    fix_note = _scanner_fix_note(evidence.get('installed_version'), evidence.get('fixed_version'))
+    if fix_note:
+        out['scanner_fix'] = fix_note
     return {k: v for k, v in out.items() if v not in (None, '')}
+
+
+def _scanner_fix_note(installed, fixed):
+    """A note when the OpenVAS check found the installed version below the fixed version it names (issue 414: Netatalk 3.1.12 against a fix
+    in 3.1.15, while the CVE record lists only 3.1.13, the release a researcher tested). A record's range can be narrower than the vendor's
+    fix, so the model is told which source says what instead of letting the narrower one win silently."""
+    from cveFeed.intel import _cmp
+    installed, fixed = str(installed or '').strip()[:100], str(fixed or '').strip()[:100]
+    if not installed or not fixed:
+        return ''
+    try:
+        below = _cmp(installed, fixed) == -1
+    except Exception:  # noqa: BLE001 - an odd version text is no note, never a failed triage
+        return ''
+    if not below:
+        return ''
+    return (f'the check found the installed version {installed} below the fixed version it names ({fixed}). If the CVE record\'s affected '
+            'range is narrower (it may list only the release a researcher tested), say which source you follow and why; a backported '
+            'distribution package can still be fixed')
 
 
 LIBRARY_SOURCES = {'body': 'stated by the script file itself (its banner or its own code)',
