@@ -47,6 +47,7 @@ BATCH_BYTES = 6_000_000          # bytes of jobs handed out in one answer
 BATCH_MAX = 20
 WINDOW = 200                     # queued jobs looked at per hand-out (some may wait for tomorrow's budget)
 WAITING_AFTER = timedelta(minutes=15)  # a queued job older than this means the queue is not being served
+CALLED_RECENTLY = timedelta(minutes=5)  # the container asks every 15 seconds while it has nothing (a minute's resolution on last_seen): a call this recent means it is serving
 MEDIA_TYPES = ('image/png', 'image/jpeg', 'image/webp', 'image/gif')
 MODEL_NAME = re.compile(r'^[A-Za-z0-9._:/@+\-]{0,200}$')
 # What a failure may be called: the categories of the container's request layer (cvengine_reviewer.llm), which are the server's own from
@@ -485,8 +486,30 @@ def waiting(now=None):
         if not status.get('token'):
             ok, why = False, 'the server has not handed the reviewer container its token yet'
         elif oldest and now - oldest > WAITING_AFTER:
-            ok, why = False, f"the reviewer container has not taken work for {minutes} minutes (last call: {status.get('last_seen') or 'never'})"
+            seen = _parsed(status.get('last_seen'))
+            if seen is not None and now - seen <= CALLED_RECENTLY:
+                # the container is asking and is handed nothing: the jobs are held back by their own stage (``job_admit``: a daily limit spent, a
+                # review from an earlier day), not left unserved. Said so, and not counted as the container being down.
+                why = (f'{count} AI job(s) queued, the oldest for {minutes} minutes: the reviewer container is taking work (last call: '
+                       f"{status.get('last_seen')}), and these are held back by their stage (a daily AI limit reached, or work not due yet)")
+            else:
+                ok, why = False, f"the reviewer container has not taken work for {minutes} minutes (last call: {status.get('last_seen') or 'never'})"
     return {'queued': count, 'oldest_minutes': minutes, 'serving': ok, 'why': why, 'waiting_for_reviewer': bool(count and not ok)}
+
+
+def _parsed(value):
+    """An ISO timestamp as an aware datetime, or None."""
+    if not value:
+        return None
+    try:
+        from django.utils.dateparse import parse_datetime
+        stamp = parse_datetime(str(value))
+    except (TypeError, ValueError):
+        return None
+    if stamp is not None and timezone.is_naive(stamp):
+        from datetime import timezone as utc_zone
+        stamp = stamp.replace(tzinfo=utc_zone.utc)
+    return stamp
 
 
 def waiting_message(state=None):
