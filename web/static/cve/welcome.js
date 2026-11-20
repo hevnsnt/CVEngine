@@ -129,7 +129,7 @@ async function pollStrip() {
 function sentinelPanel() {
   const panel = el('div', 'panel');
   panel.append(el('h3', '', 'Connect another machine'),
-    el('p', 'note', 'This makes a one-time install command to run on that machine, which needs Docker. It is a secret that works once and expires in 30 minutes: it is shown here only.', { style: 'margin:0 0 10px' }));
+    el('p', 'note', 'This makes a one-time install command to run on that machine, which needs Docker. It is a secret that works once and expires in 24 hours: it is shown here only.', { style: 'margin:0 0 10px' }));
   const out = el('div'); const status = el('div', 'note', '', { 'aria-live': 'polite', style: 'margin-top:10px' });
   const msg = el('div', 'msg err', '', { role: 'alert', style: 'display:none' });
   const make = el('button', 'btn sm', 'Create the install command', { type: 'button' });
