@@ -120,6 +120,22 @@ class EnrollmentTests(SentinelBase):
         self.assertEqual(status1, 201)
         self.assertEqual(status2, 403)
 
+    def test_enrollment_secret_outlasts_a_long_first_install(self):
+        """A first install builds the image and pulls the OpenVAS feeds before the Sentinel bootstraps: hours, not minutes. The secret lasts a day,
+        is still redeemable after two hours, and is refused once the day is over."""
+        from agentapi.models import SentinelEnrollment
+        before = timezone.now()
+        _, out = call(self.t['dana'], 'POST', '/api/v1/projects/sen-a/sentinels/enroll')
+        enrollment = SentinelEnrollment.objects.latest('pk')
+        self.assertGreaterEqual(enrollment.expires_at, before + timedelta(hours=24) - timedelta(seconds=5))
+        with mock.patch('django.utils.timezone.now', return_value=before + timedelta(hours=2)):
+            status, _ = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': out['enrollment_token'], 'name': 'slow-build'})
+        self.assertEqual(status, 201)
+        _, late = call(self.t['dana'], 'POST', '/api/v1/projects/sen-a/sentinels/enroll')
+        SentinelEnrollment.objects.filter(pk=SentinelEnrollment.objects.latest('pk').pk).update(expires_at=timezone.now() - timedelta(seconds=1))
+        status, _ = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': late['enrollment_token'], 'name': 'too-late'})
+        self.assertEqual(status, 403)
+
     def test_unknown_or_bad_secret_is_refused(self):
         status, _ = call(None, 'POST', '/api/v1/sentinels/bootstrap', {'enrollment_token': 'senr_not-a-real-one', 'name': 'x'})
         self.assertEqual(status, 403)
