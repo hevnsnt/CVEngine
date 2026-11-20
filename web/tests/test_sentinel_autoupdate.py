@@ -427,6 +427,26 @@ class PinnedTargetTests(Base):
         SentinelDefaults.objects.update_or_create(pk=1, defaults={'keep_newest': False, 'self_update': 'automatic'})
         self.assertNotIn('target', self.beat({'info': {'version': self.pin()[:12]}})['update'])
 
+    def test_a_build_not_yet_compared_is_never_told_the_older_pin(self):
+        # vmi2645654, Nov 20: it ran 663ed8d, the check knew the newest build but had not compared 663ed8d with it yet, and every heartbeat named the pin
+        # 0e8a792, older than what it ran: its updater refused "no downgrade" and the page said Update failed. Nothing is named until the check knows.
+        agent = self.sentinel()
+        not_compared = {'status': 'unknown', 'latest_full': HEAD, 'latest_contract': {'version': sentinel_contract.version(), 'min_supported': 1}}
+        with mock.patch.object(sv, 'state', return_value=not_compared):
+            self.assertNotIn('target', ss.update_reply(agent))
+            self.assertEqual(au.fallback_target(agent), (None, None))
+            self.assertEqual(au.fallback_target(agent, keep=False), (self.pin(), 'pinned'))  # newest-version keeping off: the pin, as before
+
+    def test_update_now_pressed_before_the_check_knew_names_the_newest_once_it_does(self):
+        from agentapi import sentinel_contract
+        agent = self.sentinel()
+        self.assertEqual(call(self.tokens['root'], 'PATCH', f'/api/v1/agents/{agent.pk}', {'update': 'now'})[0], 200)  # no verdict yet: the request names no commit
+        self.refresh()  # the check now knows it is behind HEAD
+        agent.refresh_from_db()
+        agent.info = {**(agent.info or {}), 'contract_version': sentinel_contract.version()}
+        out = ss.update_reply(agent)
+        self.assertEqual((out['requested'], out['target'], out['reason']), (True, HEAD, 'newest'))
+
     def test_manual_and_off_get_a_target_only_when_asked(self):
         agent = self.sentinel()
         SentinelDefaults.objects.update_or_create(pk=1, defaults={'keep_newest': False, 'self_update': 'manual'})

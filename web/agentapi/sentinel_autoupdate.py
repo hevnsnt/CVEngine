@@ -121,6 +121,24 @@ def pinned_target(agent):
     return pin
 
 
+def fallback_target(agent, keep=None):
+    """``(commit, reason)`` for a Sentinel told to update with no request of its own naming a commit. With the instance keeping Sentinels on the newest
+    version and the newest build known: that build when the cached check says this Sentinel is behind it (and the server can run its contract), else nothing
+    (the check has not compared this build yet, or it is current or ahead): the pin is never named then, because it is usually older than what such a Sentinel
+    runs, and its updater refuses a downgrade (vmi2645654, Nov 20: running 663ed8d, told the pin 0e8a792 for the two hours its new build waited to be compared,
+    "Update failed"). Otherwise (newest-version keeping off, or GitHub not read) the pin (``pinned_target``), else ``(None, None)``."""
+    from agentapi import sentinel_settings
+    keep = sentinel_settings.keep_newest() if keep is None else keep
+    verdict = sentinel_version.state(agent)
+    newest = verdict.get('latest_full')
+    if keep and newest and not _is_builtin(agent):
+        if verdict.get('status') == 'behind' and newest_contract_state(verdict.get('latest_contract')) == 'ok':
+            return newest, 'newest'
+        return None, None
+    pinned = pinned_target(agent)
+    return (pinned, 'pinned') if pinned else (None, None)
+
+
 def decide(agent, now=None, verdict=None, keep=None, instance_update=None, check_busy=True):
     """``{action, code, text, target}``: ``action`` is ``request`` (ask now), ``wait`` (a request is out, or one is due later) or ``none``. Reads state and the
     cached verdict only (the one query is whether a heavy task runs, made last, and a page that lists every Sentinel leaves it out with ``check_busy=False``)."""
