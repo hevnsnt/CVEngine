@@ -22,12 +22,13 @@ Nothing here changes a host. The scripts only read.
 Linux and macOS:
 
 ```sh
-(umask 077; cat > cvengine-inventory.token) \
+(umask 077; printf 'Paste the cvENGINE inventory token and press Enter: ' >&2; stty -echo 2>/dev/null; IFS= read -r t; \
+  stty echo 2>/dev/null; echo >&2; printf '%s\n' "$t" > cvengine-inventory.token) \
   && curl -fsS --cacert ca.crt https://cvengine.example.test/staticfiles/cve/inventory/cvengine-inventory.sh -o cvengine-inventory.sh \
   && sh cvengine-inventory.sh --server https://cvengine.example.test --project my-project --token-file cvengine-inventory.token --ca-file ca.crt
 ```
 
-(Paste the token, press Enter, then Ctrl-D. The file is readable only by you; move it to `/etc/cvengine-inventory.token` for scheduled runs.)
+(It asks for the token: paste it and press Enter; what you paste is not shown. The file is readable only by you; move it to `/etc/cvengine-inventory.token` for scheduled runs. Run in a terminal, the script then says what it is doing: reading the packages, the rest of the host, sending, and the server's answer. A scheduled run prints only the result.)
 
 Windows (PowerShell 5.1 or 7):
 
