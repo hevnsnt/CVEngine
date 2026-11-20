@@ -3875,8 +3875,8 @@ def _coverage(agent, orgs, org_of):
 def task_label(task):
     """What a task is on, for a card or a history row: the host it names, else the hosts in its target (an OpenVAS task names addresses and the
     hosts they were chosen for), else its addresses. Never empty text where there is something to show."""
-    if task.host:
-        return task.host[:200]
+    if task.host:  # a task on several names stores them comma-joined with no spaces: spaced here, so the label wraps on a card instead of running on
+        return ', '.join(part.strip() for part in task.host.split(',') if part.strip())[:200]
     hosts = (task.target or {}).get('hosts')
     if isinstance(hosts, dict) and hosts:
         names = sorted({str(v) for v in hosts.values() if v})

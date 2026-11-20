@@ -80,13 +80,24 @@
     });
   }
   var tasks = document.getElementById('tasks'), noTasks = document.getElementById('no-tasks');
+  // A task on several names stores them comma-joined with no spaces (dns_resolve, http_probe, secrets_scan...): one name is shown as is, a few are
+  // spaced so the line can wrap, more than three are "a, b, c and 4 more" (the whole list is the row's tooltip).
+  function hostsText(host) {
+    var names = (host || '').split(',').map(function (n) { return n.trim(); }).filter(Boolean);
+    if (names.length <= 3) return names.join(', ');
+    return names.slice(0, 3).join(', ') + ' and ' + (names.length - 3) + ' more';
+  }
   function renderTasks(items) {
     tasks.textContent = '';
     noTasks.style.display = items.length ? 'none' : '';
     items.forEach(function (t) {
       var li = el('li');
-      li.appendChild(el('span', 'cve-id', t.kind));
-      li.appendChild(el('div', 'meta', [t.status, t.host, t.agent ? 'by ' + t.agent.name : '', when(t.created)].filter(Boolean).join(' · ')));
+      // the kind is a short token: it never wraps, so a long host list beside it cannot squeeze it to one letter per line
+      var kind = el('span', 'cve-id', t.kind); kind.style.whiteSpace = 'nowrap'; kind.style.overflowWrap = 'normal';
+      li.appendChild(kind);
+      var meta = el('div', 'meta', [t.status, hostsText(t.host), t.agent ? 'by ' + t.agent.name : '', when(t.created)].filter(Boolean).join(' · '));
+      if (t.host && t.host.indexOf(',') >= 0) meta.title = t.host.split(',').join(', ');
+      li.appendChild(meta);
       tasks.appendChild(li);
     });
   }

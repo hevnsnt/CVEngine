@@ -641,3 +641,11 @@ class NetworkAuthorityTests(SentinelBase):
         migration.grandfather_internal(apps, None)
         agent.refresh_from_db()
         self.assertEqual(agent.network, 'internal')
+
+
+class TaskLabelTests(SimpleTestCase):
+    def test_a_comma_joined_host_list_is_spaced_so_the_label_wraps(self):
+        # dns_resolve, http_probe and secrets_scan store their names comma-joined with no spaces: on the Sentinels pages that ran on as one unbreakable word
+        task = SentinelTask(kind='dns_resolve', host='a.example.org,b.example.org,c.example.org')
+        self.assertEqual(sentinels.task_label(task), 'a.example.org, b.example.org, c.example.org')
+        self.assertEqual(sentinels.task_label(SentinelTask(kind='nmap', host='one.example.org')), 'one.example.org')
