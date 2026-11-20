@@ -227,9 +227,12 @@ def _known_in_batches(summaries, size=100):
 SYNC_LOCK = 'cvengine:cve-now-sync'
 SYNC_LOCK_TTL = 3600
 CHANGES_FIRST = 6 * 3600         # seconds of changes the first delta read (or one that fell past what since reaches) starts from
-CHANGES_MAX_READS = 200          # full entries one sync reads for the changes (cve.now allows 120 entry reads a minute: about 2 minutes)
-CHANGES_MAX_PAGES = 25           # delta pages one sync lists (200 each)
+# full entries one sync reads for the changes: at ENTRY_PAUSE about 12 minutes of a 30-minute interval, under cve.now's 120 entry reads a
+# minute. 200 (9,600 a day) fell 15 hours behind on a day cve.now rewrote more than 20,000 entries; 900 is 43,200 a day.
+CHANGES_MAX_READS = 900
+CHANGES_MAX_PAGES = 100          # delta pages one sync lists (200 each): enough listing to find CHANGES_MAX_READS changes to apply
 ENTRY_PAUSE = 0.5                # seconds between entry reads
+PAGE_PAUSE = 0.3                 # seconds between delta pages
 NEW_FROM_CHANGES_DAYS = 30       # an unstored entry the changes list is created when published this recently (older ones: the inventory import)
 DEAD_STATUSES = ('withdrawn', 'merged')  # cve.now's tombstones in the delta listing
 
@@ -470,6 +473,7 @@ def _apply_changes(client, now, max_reads, new_entries, signals):
                 break
             cursor = page['next_cursor']
             etag = None
+            client.sleep(PAGE_PAUSE)  # the listing is read gently, as the coverage walk reads it
     except Exception as exc:  # noqa: BLE001 - the position stays at what was applied; the next run continues from it
         error = f'{type(exc).__name__}: {exc}'[:200]
         logger.warning('cve.now: the change listing failed: %s', exc)
@@ -542,8 +546,18 @@ def _parse_time(value):
 def _walk_windows(client, cutoff, below, now, force, want, first_seen, result):
     """The part of a backfill window the newest-first listing could not reach (it stops at the newest 400 for a caller without a key):
     the entries published from ``cutoff`` to ``below``, by date windows (``CVENowClient.published_between``). Each one not stored is
-    wanted. Returns True: the window was listed in full (``published_between`` raises when it was not)."""
-    listed = client.published_between(cutoff, below, now, pause=0.3)
+    wanted. Returns None when the window was listed in full (``published_between`` raises when it was not), or the time below which it
+    was, when only today's delta listing ran past its page budget: the walk then covers up to that time, and the rest of today is read
+    by the sync's delta and, the day after, from the day's archive page (``result['deferred']`` says so)."""
+    try:
+        listed, whole_below = client.published_between(cutoff, below, now, pause=0.3), None
+    except cve_now.WindowIncomplete as exc:
+        if exc.partial is None:
+            raise
+        listed, whole_below = exc.partial, exc.complete_below
+        result['deferred'] = str(exc)[:200]
+        logger.info('cve.now backfill: %s; the window is whole below %s, today follows from the delta sync and tomorrow\'s archive',
+                    exc, whole_below.isoformat())
     result['window_listed'] = len(listed)
     for start in range(0, len(listed), 500):
         chunk = listed[start:start + 500]
@@ -553,7 +567,7 @@ def _walk_windows(client, cutoff, below, now, force, want, first_seen, result):
                 want(entry_id)
                 if seen_at:
                     first_seen.setdefault(entry_id, seen_at)
-    return True
+    return whole_below
 
 
 @app.task(name='backfill_cve_now_feed', bind=False, queue='cve_feed_queue')
@@ -663,7 +677,10 @@ def backfill_cve_now_feed(days=None, max_new=400, max_scan=6000, ids=None, techs
                     # the listing ended above the floor: its last page, or the newest 400 a caller without a key may list (a 401
                     # depth_limit). Neither says the floor was reached; the rest of the window is read by date windows
                     result['depth_limited'] = bool(getattr(client, 'depth_limited', False))
-                    reached = _walk_windows(client, cutoff, oldest or head, now, force, want, first_seen, result)
+                    whole_below = _walk_windows(client, cutoff, oldest or head, now, force, want, first_seen, result)
+                    reached = True
+                    if whole_below is not None:
+                        head = min(head or now, whole_below)  # the watermark moves only as far as the window was listed whole
             result['listed'] = walked
     except cve_now.WindowIncomplete as exc:
         result['status'] = 'incomplete'
