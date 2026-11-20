@@ -81,7 +81,7 @@ AI_CHECK = 'nuclei_validate'  # agentapi.ai_checks.KIND
 SIGNED_IN = 'signed-in'  # the refusal reason of a task that needs a stored credential, offered to a Sentinel that is not the built-in scanner
 SENTINEL_TOKEN_TTL = timedelta(days=90)  # a Sentinel's token expires this long after its last renewal; a heartbeat renews it, so only a Sentinel gone this long needs a new enrollment
 SENTINEL_TOKEN_RENEW_BELOW = timedelta(days=60)  # ...and a heartbeat renews it only once less than this is left, so renewal is one write a month, not one a minute
-ENROLLMENT_TTL = timedelta(minutes=30)  # long enough to copy the token into a Sentinel's setup, short enough to limit exposure if it leaks
+ENROLLMENT_TTL = timedelta(hours=24)  # a first install builds the Sentinel image and pulls the OpenVAS feeds before it bootstraps, which takes well over an hour; single use limits exposure if it leaks
 ENROLLMENT_PREFIX = 'senr_'
 MAX_ADDRESSES = 64  # a dispatched nmap/naabu task names at most this many addresses (one task per stage per Sentinel, this phase)
 MAX_PORTS_PER_HOST = 500
@@ -635,7 +635,7 @@ def _one_liner(blob, flags):
     unprivileged ``cvengine`` user, clones the client into /opt/cvengine-sentinel as that user, writes .env with the blob, names the Sentinel after
     the machine and starts it, so nothing about the Sentinel runs as root (it asks for sudo itself when the person is not root). The script is a
     file, not a pipe into a shell, because the blob has to arrive on standard input: that keeps it out of the process list (it is still in the
-    pasted text, so in shell history, which is why it is single-use and expires in 30 minutes)."""
+    pasted text, so in shell history, which is why it is single-use and expires in 24 hours)."""
     return (f'f=$(mktemp) && curl -fsSL {SENTINEL_INSTALL_URL} -o "$f" && '
             f'bash "$f" {flags} --yes --name "$(hostname -s)" --blob - <<\'EOF\'\n{blob}\nEOF\nrm -f "$f"')
 
