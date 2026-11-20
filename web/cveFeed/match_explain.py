@@ -573,6 +573,10 @@ def _assessment(match, family, key, package):
     if match.source == 'openvas':
         qod = _qod(ev)
         quality = f' (quality of detection {qod}%)' if qod is not None else ''
+        if ev.get('reference_check'):
+            return ('generic_check', NOT_CONFIRMED, f'The OpenVAS check reports a protocol, cipher or end-of-life setting{quality} and lists '
+                                                    f'{cve_id} only as a reference. It does not show that {cve_id} applies to this host. '
+                                                    'Not confirmed.')
         if ev.get('generic_check'):
             return ('generic_check', NOT_CONFIRMED, f'The OpenVAS check saw a behaviour{quality}, not the product: it identified no product or '
                                                     f'version, and the advisories it lists belong to several vendors. It does not show that {cve_id} '
@@ -616,6 +620,9 @@ def _found(match, family, key, label, version):
     if match.source == 'openvas':
         port = _PORT.match(str(ev.get('port') or ''))
         where = f' on port {port.group(1)}/{port.group(2)}' if port else ''
+        if ev.get('reference_check'):
+            return (f'OpenVAS reported {cve_id}{where}. The check that found it reports a protocol, cipher or end-of-life setting; {cve_id} is '
+                    'one of the advisories it lists as a reference.')
         if ev.get('generic_check'):
             return (f'OpenVAS reported {cve_id}{where}. The check that found it looks for a behaviour several vendors share; {cve_id} is one of '
                     'the advisories it lists.')
