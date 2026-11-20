@@ -343,7 +343,7 @@ def visible_hold(agent, viewer, decide=None):
 def _warnings(agent):
     scope = agent.scope or {}
     out = []
-    if not scope.get('orgs') and not scope.get('projects'):
+    if not scope.get('orgs') and not scope.get('projects') and not scope.get('instance'):  # an instance-wide scope covers every project
         out.append('the scope names no organization or project, so no work will be assigned; add orgs or projects (hosts narrow it further)')
     if agent.status == 'pending':
         out.append('this agent is waiting for an administrator to approve it: no work is assigned until then')

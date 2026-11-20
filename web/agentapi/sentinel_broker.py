@@ -1711,6 +1711,9 @@ def kind_report(agent, now=None, eff=None):
         elif not sentinel_contract.can_run(reported_contract, kind):
             row['source'] = 'contract'
             state, note = 'outdated', 'its client is too old to run this kind; update it'
+        elif kind in TEMPLATE_INDEX_KINDS and not runs_template_index(agent):  # the same gate ``effective_capabilities`` applies: say it, not "on"
+            row['source'] = 'contract'
+            state, note = 'outdated', f'{TEMPLATE_INDEX}: update it; its {kind} work waits until then'
         elif credential_work(kind) and not eff.credential_filter:
             row['source'] = 'contract'
             state, note = 'outdated', CREDENTIAL_NOTE
@@ -3588,6 +3591,20 @@ def task_brief(task):
             'result': task.result or None, **result_notes(task.result)}
 
 
+LISTED_RESULT_MAX = 8192  # bytes of one task's result a list shows inline; a screenshot or a raw report is far larger (one web_screenshot result was 2.4 MB)
+
+
+def task_row(task):
+    """``task_brief`` for a list (a Sentinel's recent tasks, a project's task page): a result larger than ``LISTED_RESULT_MAX`` is left out and
+    said to be, so twenty rows stay a page and not megabytes; the task's own read (``get_sentinel_task``) still returns it whole."""
+    row = task_brief(task)
+    if row['result'] is not None:
+        size = len(json.dumps(row['result'], default=str))
+        if size > LISTED_RESULT_MAX:
+            row['result'] = {'omitted': True, 'bytes': size, 'why': f'larger than {LISTED_RESULT_MAX} bytes; read the task itself for it'}
+    return row
+
+
 def task_payload(task):
     """What a Sentinel receives for a task it holds: the server-built target, and nothing it did not ask for (no project
     credentials, no other project's data, no raw database access). ``trace_id`` is the id the server's audit rows and activity lines for this task
@@ -3611,7 +3628,7 @@ def list_tasks(ctx, slug, params):
         qs = qs.filter(agent_id=svc._int_param(params['agent_id'], 'agent_id'))
     if params.get('scan_id'):
         qs = qs.filter(scan_id=svc._int_param(params['scan_id'], 'scan_id'))
-    return svc.paginate(qs.select_related('project__org', 'agent').order_by('-id'), params, task_brief)
+    return svc.paginate(qs.select_related('project__org', 'agent').order_by('-id'), params, task_row)
 
 
 def list_project_sentinels(ctx, slug):
@@ -3904,7 +3921,7 @@ def recent_tasks(agent, viewer=None):
     """The last 20 tasks of ``agent``, those of projects ``viewer`` may read when one is given."""
     rows = SentinelTask.objects.filter(agent=agent)
     rows = (_for_viewer(rows, viewer) if viewer is not None else rows).select_related('project__org', 'agent').order_by('-id')[:20]
-    return [task_brief(t) for t in rows]
+    return [task_row(t) for t in rows]
 
 
 def cancel_task(ctx, slug, task_id):

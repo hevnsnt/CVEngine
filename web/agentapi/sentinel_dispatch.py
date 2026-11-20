@@ -1058,6 +1058,9 @@ def try_testssl(project, host, ip, port, starttls=None, scan=None, timeout=None)
 
 # --- nmap -sU: raw XML through the Sentinel, parsed by the exact function a local run's own XML already goes through --
 
+REFUSED_TARGET = 'not a usable target'  # how a Sentinel's scope check (cvengine_scanner.scope) words a target it will never scan
+
+
 def try_nmap_udp(project, ip_address, scan=None, timeout=None):
     """The parsed ``-sU`` host record for ``ip_address`` from a Sentinel's raw XML report. Raises ``ScannerUnavailable`` when no Sentinel can take
     the work, or when its report is unusable for the address (``ScannerReportedNothing``, counted per day by the caller); a host that did not answer is a clean down record, an address nmap could not reach is ``UdpScanError``. Unlike every other dispatched kind here, the result is raw
@@ -1067,7 +1070,15 @@ def try_nmap_udp(project, ip_address, scan=None, timeout=None):
     from reNgine.resources import ScannerUnavailable
     if not any_scanner_for(project, 'nmap_udp'):
         _no_scanner('nmap_udp', project)
-    result = dispatch_or_none(project, 'nmap_udp', {'address': ip_address}, ips=[ip_address], scan=scan, timeout=timeout)
+    try:
+        result = dispatch_or_none(project, 'nmap_udp', {'address': ip_address}, ips=[ip_address], scan=scan, timeout=timeout)
+    except ScannerUnavailable as exc:
+        if REFUSED_TARGET in str(getattr(exc, 'why', '') or exc):
+            # the Sentinel's own scope refused the address (documentation, reserved or another range a Sentinel never scans): no scanner will
+            # ever take it, so it is a failure of the address (parked for the day by the caller), not a missing scanner to wait for at every firing
+            from cveFeed.udp_scan import UdpScanError
+            raise UdpScanError(f'the Sentinel refuses to scan {ip_address}: it is in a range a Sentinel never scans') from exc
+        raise
     if result is None:
         raise ScannerUnavailable('nmap_udp', 'no scanner finished the work')
     from cveFeed.udp_scan import host_from_report
