@@ -65,14 +65,14 @@ class EvaluateTests(SimpleTestCase):
         self.assertEqual({f['check'] for f in result.findings}, {'tlsa_beast', 'tlsa_lucky13'})
         self.assertEqual(result.vulnerable, {})
         beast = next(f for f in result.findings if f['check'] == 'tlsa_beast')
-        self.assertEqual((beast['severity'], beast['title']), (1, 'rt.test:443: BEAST may apply'))
+        self.assertEqual((beast['severity'], beast['title']), (1, 'BEAST (CVE-2011-3389): precondition present on rt.test:443, not confirmed exploitable'))
 
     def test_a_proven_vulnerability_is_evidence_with_its_cves(self):
         result = tls_audit.evaluate(report(HEARTBLEED), 'rt.test:443')
         self.assertEqual(result.vulnerable['heartbleed']['cves'], ['CVE-2014-0160'])
         self.assertNotIn('heartbleed', result.cleared)
         finding = next(f for f in result.findings if f['check'] == 'tlsa_heartbleed')
-        self.assertEqual((finding['severity'], finding['title']), (4, 'rt.test:443: Heartbleed is exploitable'))
+        self.assertEqual((finding['severity'], finding['title']), (4, 'Heartbleed (CVE-2014-0160) confirmed on rt.test:443'))
 
     def test_a_list_of_cves_is_split_and_sorted(self):
         robot = item('ROBOT', 'CRITICAL', 'VULNERABLE', 'CVE-2017-17382 CVE-2016-6883 cve-2017-13098')

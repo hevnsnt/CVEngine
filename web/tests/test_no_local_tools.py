@@ -98,6 +98,7 @@ ALLOWED = {
         'cveFeed/source_versions.py',  # reads the versions stored results already state (the port scan's CPEs and scripts, the TLS audit's banners, the WordPress scan's headers, a discovery's CPEs) and names them as reading sources, runs nothing
         'cveFeed/tailscale_sync.py',
         'cveFeed/tasks.py',
+        'cveFeed/tls_catalogue.py',  # TLS audit catalogue: the read-only nmap and testssl.sh commands a person runs to confirm a finding, as text; runs nothing
         'cveFeed/triage.py',  # 1.3.3 triage (develop): docstring naming evidence sources, runs nothing
         'cveFeed/tunables.py',  # 1.3.2 tunables registry (develop): setting names and help text, runs nothing
         'cveFeed/udp_scan.py',
@@ -248,10 +249,12 @@ ALLOWED = {
         'agentapi/sentinel_broker.py',
         'agentapi/sentinel_dispatch.py',
         'agentapi/sentinel_tools.py',  # 1.4 contract 5: the names of the tools whose versions a Sentinel reports, compared with the shipped ones; runs nothing
+        'agentapi/services.py',  # a TLS audit finding's page: the tool's raw result is labelled "testssl.sh output" (an excerpt key and a label), runs nothing
         'cveFeed/check_coverage.py',
         'cveFeed/confirm_guide.py',  # 1.3.3 confirmation guide (develop): tells a person how to check a finding by hand, runs nothing
         'cveFeed/internal_scan.py',
         'cveFeed/ledger.py',
+        'cveFeed/management/commands/rewrite_tls_findings.py',  # the update step that rewrites stored TLS audit findings from their evidence: names the tool in its help, runs nothing
         'cveFeed/match_explain.py',  # explains a match to a person: reads the stored finding source 'testssl' and writes a sentence, runs nothing
         'cveFeed/migrations/0094_testssl_schedule.py',
         'cveFeed/report_data.py',
@@ -259,6 +262,9 @@ ALLOWED = {
         'cveFeed/software.py',  # the About page list of the tools of both images (names, versions, licenses), runs nothing
         'cveFeed/source_versions.py',  # reads the versions stored results already state (the port scan's CPEs and scripts, the TLS audit's banners, the WordPress scan's headers, a discovery's CPEs) and names them as reading sources, runs nothing
         'cveFeed/tls_audit.py',  # 1.4 TLS audit on a Sentinel: the kind name, the ledger key and the finding source are stored data values, runs nothing
+        'cveFeed/tls_catalogue.py',  # TLS audit catalogue: what each test means and the read-only commands a person runs to confirm it, as text; runs nothing
+        'cveFeed/triage.py',  # reads the stored confidence of a TLS audit finding (confirmed or unconfirmed) as a triage fact, runs nothing
+        'cveFeed/upgrade_backfills.py',  # names the update step that rewrites stored TLS audit findings, runs nothing
         'cveFeed/work_planner.py',  # 1.4 work planner: the check-to-tool table of the coverage rules, queues Sentinel tasks, runs nothing
     ],
     'bbot': [
