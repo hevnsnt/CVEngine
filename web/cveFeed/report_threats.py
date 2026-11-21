@@ -165,10 +165,11 @@ def impact(ids, cves, sightings=None):
     return out
 
 
-def host_labels(ids, keys):
+def host_labels(ids, keys, raw=False):
     """``{host key: {'host', 'project'}}`` for the host keys that belong to the scope's projects ``ids``: the name of the machine (the shortest name when several names
     share its addresses) and its project's name. A key of another project is never labelled, whatever it says. One query for the keys that name a set of addresses
-    and one for the project names; a key that names a host by its own name (see ``counts.with_host_key``) needs neither for the name."""
+    and one for the project names; a key that names a host by its own name (see ``counts.with_host_key``) needs neither for the name. ``raw`` adds ``name``: the
+    name as stored, not clipped for display, for a link that must name the host exactly (the Overview's, ``cveFeed.overview.host_links``)."""
     from dashboard.models import Project
     from startScan.models import Subdomain
     allowed = {int(i) for i in ids}
@@ -188,7 +189,7 @@ def host_labels(ids, keys):
             found[key].add(name)
         names.update({k: min(v, key=lambda n: (len(n), n)) for k, v in found.items()})
     projects = dict(Project._base_manager.filter(id__in=set(wanted.values())).values_list('id', 'name'))
-    return {k: {'host': clean(names[k], 120), 'project': clean(projects.get(wanted[k], ''), 80)} for k in wanted if k in names}
+    return {k: {'host': clean(names[k], 120), 'project': clean(projects.get(wanted[k], ''), 80), **({'name': names[k]} if raw else {})} for k in wanted if k in names}
 
 
 def _entry_hosts(ids, entries):

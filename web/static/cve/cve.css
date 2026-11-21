@@ -919,6 +919,8 @@ pre.mono{margin:0 0 var(--s-2);padding:var(--s-2) var(--s-3);background:var(--in
 .list-head .chip-x span{font-size:var(--fs-4);line-height:1;color:var(--muted)}
 .list-head .filters-pop{position:absolute;left:0;right:0;top:100%;z-index:7;display:flex;flex-direction:column;gap:var(--s-3);margin:0 var(--s-3);padding:var(--s-3);max-height:calc(100dvh - var(--bar) - 170px);overflow-y:auto;background:var(--surface);border:1px solid var(--line-2);border-radius:var(--r);box-shadow:var(--pop)}
 .list-head .filters-pop[hidden]{display:none}
+.list-head .names-pick[hidden]{display:none} /* the Overview's host list: only while the page is narrowed to it */
+.list-head .names-pick button{max-width:100%;overflow-wrap:anywhere;text-align:left}
 .split>.split-list>.host-rows{max-height:none;overflow:visible;flex:none}
 .split>.split-list>.host-rows .host-row{scroll-margin-top:calc(var(--head-h,130px) + var(--s-2))}
 .split>.split-list>.more-row{margin:0;padding:2px 0 var(--s-2)}
@@ -3086,6 +3088,12 @@ a.hr-name{text-underline-offset:2px}
 .ov-impact-big{font-size:var(--fs-5);font-weight:var(--fw-semi);line-height:1.1}
 .ov-impact-big.hot{font-size:var(--fs-8);letter-spacing:-.02em;color:var(--fire-ink)}
 .ov-impact-text{font-size:var(--fs-2);color:var(--ink-2);overflow-wrap:anywhere}
+/* a count and a project's share of it are links to exactly those hosts: the same type as the text, underlined when pointed at or focused */
+a.ov-impact-big,a.ov-impact-link{color:inherit;text-decoration:none;align-self:flex-start}
+a.ov-impact-big.hot{color:var(--fire-ink)}
+a.ov-impact-big:focus-visible,a.ov-impact-link:focus-visible{text-decoration:underline}
+@media (hover:hover){a.ov-impact-big:hover,a.ov-impact-link:hover{text-decoration:underline}}
+@media (pointer:coarse){a.ov-impact-big{display:flex;align-items:center;min-height:var(--hit);min-width:var(--hit)}}
 .ov-actions-row{display:flex;flex-wrap:wrap;gap:var(--s-2)}
 .ov-folded-wrap{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);overflow:hidden}
 .ov-folded>summary,.ov-det>summary{list-style:none;cursor:pointer}

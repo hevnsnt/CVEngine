@@ -1,8 +1,11 @@
 """The Overview's summary (cveFeed.overview): the sentences are templates filled from counts, the tiles read the daily snapshots, the threats of the week are
 grouped by product, Fix first folds hosts that share a fix, and the summary is shared per set of project ids and never across them."""
 import json
+import re
 from datetime import date, datetime, timedelta, timezone as dt_timezone
+from typing import ClassVar
 from unittest import mock
+from urllib.parse import parse_qs, urlsplit
 
 from django.contrib.auth.models import User
 from django.core.cache import cache
@@ -236,6 +239,98 @@ class ThreatGroupTests(SimpleTestCase):
         self.assertLessEqual(len(g['summary']), 600)  # the page draws it with textContent; here it is only bounded
 
 
+SAFE_HREF = re.compile(r'^/cve/[-\w]+/hosts/\?[-\w=%.&~]*$')  # what static/cve/overview-logic.js (hostsLinkHref) accepts
+
+
+def link_params(href):
+    """``(path, {param: value})`` of a Hosts page link."""
+    parts = urlsplit(href)
+    return parts.path, {k: v[0] for k, v in parse_qs(parts.query).items()}
+
+
+class ThreatLinkTests(SimpleTestCase):
+    """Each count of a card links to the Hosts page listing exactly the hosts it counts, by name; never a host of a project outside the summary."""
+    names: ClassVar[dict] = {1: 'Marino', 2: 'Trifident'}
+    slugs: ClassVar[dict] = {1: 'marino', 2: 'trifident'}
+    hosts: ClassVar[dict] = {'1:i:1': 'one.m.test', '1:i:2': 'two.m.test', '1:n:a.m.test': 'a.m.test', '2:n:b.t.test': 'b.t.test', '2:i:9': 'c.t.test'}
+
+    def groups(self, entries, many=True, slugs=None, hosts=None):
+        hosts = self.hosts if hosts is None else hosts
+
+        def labels_of(keys):  # report_threats.host_labels(..., raw=True) without the database
+            return {k: {'host': hosts[k][:120], 'project': self.names.get(int(k.split(':')[0]), ''), 'name': hosts[k]} for k in keys if k in hosts}
+        slugs = self.slugs if slugs is None else slugs
+        return overview.threat_groups(entries, self.names, many, links=lambda live: overview.host_links(live, [1, 2], slugs, labels_of=labels_of))[0]
+
+    def test_one_projects_counts_link_to_its_own_hosts_by_name(self):
+        (g,) = self.groups([entry('CVE-2026-1', matched={'1:i:1', '1:i:2'}, unknown={'1:n:a.m.test'}), entry('CVE-2026-2', matched={'1:i:2'})], many=False)
+        path, q = link_params(g['links']['matched']['href'])
+        self.assertEqual((path, q), ('/cve/marino/hosts/', {'names': 'one.m.test,two.m.test', 'label': 'PHP: two critical flaws, version match'}))
+        self.assertEqual((g['links']['matched']['n'], g['links']['matched']['exact']), (g['matched'], True))
+        self.assertEqual(link_params(g['links']['product_only']['href'])[1], {'names': 'a.m.test', 'label': 'PHP: two critical flaws, version unknown'})
+        self.assertIsNone(g['by_project'])
+
+    def test_hosts_of_several_projects_are_listed_by_project_and_name_and_each_project_links_to_its_share(self):
+        (g,) = self.groups([entry('CVE-2026-1', matched={'1:i:1', '2:i:9'}, unknown={'1:n:a.m.test', '2:n:b.t.test'})])
+        path, q = link_params(g['links']['matched']['href'])
+        self.assertEqual((path, q['names']), ('/cve/_all/hosts/', 'marino/one.m.test,trifident/c.t.test'))
+        rows = {r['project']: r for r in g['by_project']['product_only']}
+        self.assertEqual((rows['Marino']['slug'], rows['Trifident']['slug']), ('marino', 'trifident'))
+        self.assertEqual(link_params(rows['Marino']['href']), ('/cve/marino/hosts/', {'names': 'a.m.test', 'label': 'PHP: a flaw, version unknown, Marino'}))
+        self.assertEqual(link_params(rows['Trifident']['href'])[1]['names'], 'b.t.test')
+        self.assertEqual(set(rows['Marino']), {'project', 'n', 'slug', 'href'})  # the project id stays inside
+
+    def test_hosts_all_in_one_project_open_that_projects_page_even_in_the_all_projects_view(self):
+        (g,) = self.groups([entry('CVE-2026-1', matched={'1:i:1', '1:i:2'})])
+        self.assertEqual(link_params(g['links']['matched']['href'])[0], '/cve/marino/hosts/')
+        self.assertIsNone(g['links']['product_only'])
+
+    def test_a_host_of_a_project_outside_the_summary_is_never_named(self):
+        hosts = {**self.hosts, '3:n:evil.other.test': 'evil.other.test'}
+        (g,) = self.groups([entry('CVE-2026-1', matched={'1:i:1', '3:n:evil.other.test'})], hosts=hosts)
+        self.assertIsNone(g['links']['matched'])  # no link at all rather than a list with a host of another tenant in it
+        marino = next(r for r in g['by_project']['matched'] if r['project'] == 'Marino')
+        self.assertEqual(link_params(marino['href'])[1]['names'], 'one.m.test')
+        self.assertNotIn('evil', json.dumps(g))
+
+    def test_too_many_hosts_fall_back_to_the_search_and_the_chip_says_so(self):
+        with mock.patch.object(overview, 'LINK_NAMES', 2):
+            (g,) = self.groups([entry('CVE-2026-1', matched={'1:i:1', '1:i:2', '2:i:9'}, unknown={'1:n:a.m.test'}), entry('CVE-2026-2', matched={'1:i:1'})])
+        link = g['links']['matched']
+        path, q = link_params(link['href'])
+        self.assertEqual((path, q['q'], link['exact'], link['n']), ('/cve/_all/hosts/', 'cve:CVE-2026-1,CVE-2026-2', False, 3))
+        self.assertNotIn('names', q)
+        self.assertIn('too many to list one by one', q['label'])
+        self.assertTrue(g['links']['product_only']['exact'])
+        self.assertEqual({r['project']: link_params(r['href'])[1].get('names') for r in g['by_project']['matched']}, {'Marino': 'one.m.test,two.m.test', 'Trifident': 'c.t.test'})
+        with mock.patch.object(overview, 'LINK_NAMES', 0):
+            (g,) = self.groups([entry('CVE-2026-1', unknown={'1:n:a.m.test'})], many=False)
+        self.assertEqual(link_params(g['links']['product_only']['href'])[1]['q'], 'tech:"PHP"')
+
+    def test_a_link_too_long_for_one_request_line_or_a_name_a_list_cannot_carry_falls_back(self):
+        hosts = {**self.hosts, '1:i:1': 'x' * 2000 + '.m.test', '1:i:2': 'y' * 2000 + '.m.test'}
+        (g,) = self.groups([entry('CVE-2026-1', matched={'1:i:1', '1:i:2'})], many=False, hosts=hosts)
+        self.assertFalse(g['links']['matched']['exact'])
+        self.assertLessEqual(len(g['links']['matched']['href']), overview.LINK_CHARS)
+        (g,) = self.groups([entry('CVE-2026-1', matched={'1:i:1'})], many=False, hosts={**self.hosts, '1:i:1': 'a,b.m.test'})
+        self.assertFalse(g['links']['matched']['exact'])
+
+    def test_every_link_is_a_plain_path_whatever_the_names_say(self):
+        names = {1: 'Mar<i>no & "Co" ünïcode', 2: 'T'}
+        with mock.patch.object(self, 'names', names):
+            (g,) = self.groups([entry('CVE-2026-1', product='P"H<P>', matched={'1:i:1', '2:i:9'}, unknown={'1:n:a.m.test'})])
+        hrefs = [g['links'][b]['href'] for b in ('matched', 'product_only')] + [r['href'] for rows in g['by_project'].values() for r in rows]
+        self.assertTrue(hrefs and all(SAFE_HREF.match(h) for h in hrefs), hrefs)
+        self.assertEqual(link_params(g['by_project']['product_only'][0]['href'])[1]['label'], 'PH<P>: a flaw, version unknown, Mar<i>no & "Co" ünïcode')
+
+    def test_without_links_asked_for_nothing_changes(self):
+        """The email report groups the digest the same way and asks for no links: no ``links``, and nothing internal left behind."""
+        (g,) = overview.threat_groups([entry('CVE-2026-1', matched={'1:i:1', '2:i:9'})], self.names, True)[0]
+        self.assertIsNone(g['links'])
+        self.assertNotIn('_keys', g)
+        self.assertEqual(g['by_project']['matched'], [{'project': 'Marino', 'n': 1}, {'project': 'Trifident', 'n': 1}])
+
+
 class TileTests(TestCase):
     """The tiles read the daily snapshots, summed over the projects of the scope."""
 
@@ -401,6 +496,30 @@ class SummaryTests(Fixture):
         self.assertEqual(data['threats']['groups'], [])
         self.assertEqual([l['value'] for l in data['what_changed']['lines'] if l['key'] == 'sensitive'], ['1'])
         self.assertNotIn('sa.test', json.dumps(data['fix_first']))
+
+    def test_the_counts_link_to_exactly_the_hosts_they_count(self):
+        from agentapi import services as svc
+        (g,) = self.build()['threats']['groups']
+        path, q = link_params(g['links']['matched']['href'])
+        self.assertEqual((path, q['names']), ('/cve/sa/hosts/', 'one.sa.test,two.sa.test'))
+        page = svc.search_hosts(svc.Ctx(user=self.user), 'sa', {'names': q['names']})
+        self.assertEqual((page['count'], sorted(h['host'] for h in page['results'])), (g['matched'], ['one.sa.test', 'two.sa.test']))  # the page says the card's number
+
+    def test_across_projects_the_link_names_project_and_host_and_the_page_never_shows_more_than_the_viewer_reads(self):
+        from agentapi import services as svc
+        other = self.host('x.sb.test', domain=self.db, http=200)
+        self.match(other, self.php)
+        (g,) = self.build([self.pa.pk, self.pb.pk])['threats']['groups']
+        path, q = link_params(g['links']['matched']['href'])
+        self.assertEqual((g['matched'], path, q['names']), (3, '/cve/_all/hosts/', 'sa/one.sa.test,sa/two.sa.test,sb/x.sb.test'))
+        rows = {r['slug']: link_params(r['href']) for r in g['by_project']['matched']}
+        self.assertEqual(rows, {'sa': ('/cve/sa/hosts/', {'names': 'one.sa.test,two.sa.test', 'label': 'PHP: two critical flaws, version match, A'}),
+                                'sb': ('/cve/sb/hosts/', {'names': 'x.sb.test', 'label': 'PHP: two critical flaws, version match, B'})})
+        boss = User.objects.create_user('ov-boss', password='x', is_superuser=True)
+        self.assertEqual(svc.search_hosts(svc.Ctx(user=boss), '_all', {'names': q['names']})['count'], 3)
+        mine = svc.search_hosts(svc.Ctx(user=self.user), '_all', {'names': q['names']})  # the same link opened by a member of A only
+        self.assertEqual(sorted(h['host'] for h in mine['results']), ['one.sa.test', 'two.sa.test'])
+        self.assertNotIn('x.sb.test', json.dumps(self.build([self.pa.pk])))  # A's own summary never names B's host
 
     def test_the_number_of_queries_does_not_grow_with_the_hosts(self):
         from django.db import connection
