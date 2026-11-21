@@ -8,10 +8,12 @@ by startScan.report_resources.ClosedFetcher with an empty map, so a ``file:``, `
 nothing is read or fetched.
 
 Memory. WeasyPrint lays out the whole document before it writes a page and keeps every page's boxes until it is done: about 1.3 MB a page, so the
-default report (500 hosts, 1000 findings, 670 pages) peaked near 1 GB, 3000 hosts near 2.9 GB, and a 1 GB container killed the renderer (-9). The template
-marks its two long lists, the hosts table and the findings, with comment markers (``<!--cv:begin-->``, ``<!--cv:row-->`` before every row, ``<!--cv:end-->``,
+old findings report (500 hosts, 1000 findings, 670 pages) peaked near 1 GB, 3000 hosts near 2.9 GB, and a 1 GB container killed the renderer (-9). The
+findings report is now bounded to a few dozen pages by its caps (cveFeed.report_data) and is always one document (its table of contents and the page
+column of its summary of findings need the whole document to count pages). The discovered hosts report can still list thousands of hosts, so the
+template marks its host table with comment markers (``<!--cv:begin-->``, ``<!--cv:row-->`` before every row, ``<!--cv:end-->``,
 ``<!--cv:finish-->``). A report bigger than ``CHUNK_BYTES`` of HTML is cut at row markers into chunks, each laid out as a document of its own with the same
-head and style (a cut table is reopened with its header row, as it is on every new page anyway), written to a temporary PDF and freed; the PDFs are
+head, style and running header and footer (a cut table is reopened with its header row, as it is on every new page anyway), written to a temporary PDF and freed; the PDFs are
 joined page by page. Every page is then stamped with its real ``Page N of Y`` (the one thing a chunk cannot know) by a second, nearly empty document that uses
 the same ``@page`` rule, so the footer is in the same place in the same type. Cuts between the report's sections cost nothing (each section starts a page
 anyway); a cut inside a list means the page before it ends where the chunk ended, so a report of N chunks has at most N-1 pages that end a little early.
@@ -82,8 +84,8 @@ def split(html, chunk_bytes=CHUNK_BYTES):
     if len(html) <= chunk_bytes or not lists or '<body>' not in html:
         return [html]
     head = html[:html.index('<body>') + len('<body>')]
-    foot = re.search(r'<div class="foot">.*?</div>', html, re.S)
-    start = head + (foot.group(0) if foot else '')  # what every document after the first begins with
+    running = re.findall(r'<div class="(?:head|foot)">.*?</div>', html[len(head):], re.DOTALL)[:2]  # the running header and footer
+    start = head + ''.join(running)  # what every document after the first begins with
     chunks, pos = [], 0
 
     def emit(text):
@@ -130,7 +132,7 @@ def render_one(html, out_path, footer=True):
 def stamp_html(total):
     """``total`` nearly empty pages in the report's own page setup, each with only ``Page N of total`` in the same margin box and type (page 1 is the cover: none)."""
     return ('<!doctype html><meta charset="utf-8"><style>'
-            '@page { size: A4; margin: 22mm 17mm 21mm 17mm; '
+            '@page { size: A4; margin: 24mm 18mm 20mm 18mm; '
             f'@bottom-right {{ content: "Page " counter(page) " of {int(total)}"; font: 8pt sans-serif; color: #6b7280; }} }}'
             '@page cover { margin: 0; @bottom-right { content: none; } }'
             'body { margin: 0; } i { display: block; height: 1px; break-after: page; } i.cover { page: cover; }'

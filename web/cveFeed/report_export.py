@@ -238,8 +238,9 @@ def build_file(scope, kind, fmt, include_closed, out_path, now, host=''):
         return {'rows': written['rows'], 'omitted': {'rows': written['omitted']}}
     data = report_data.collect(target, host=host or None, include_closed=include_closed, now=now, kind=kind, org=scope.org, whole=scope.whole)
     report_pdf.render_pdf(report_pdf.build_html(data), out_path)
-    return {'hosts': len(data['hosts']), 'findings': len(data['findings']), 'findings_total': data['summary']['findings'],
-            'hygiene': data['caps']['hygiene_shown'], 'omitted': {k: data['caps'][k] for k in ('hosts_omitted', 'findings_omitted', 'hygiene_omitted')}}
+    return {'hosts': len(data['hosts']), 'findings': data['summary']['findings'], 'findings_total': data['summary']['findings'],
+            'hygiene': data['summary']['hygiene'], 'issues': data['summary']['issues'], 'detailed': len(data['detailed']),
+            'omitted': {k: data['caps'][k] for k in ('hosts_omitted', 'writeups_omitted', 'minor_omitted')}}
 
 
 def execute(job_id, celery_id=None):

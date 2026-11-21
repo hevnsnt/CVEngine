@@ -299,7 +299,10 @@ A report of a project, a host or an organization, as a PDF or a CSV file ([Repor
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CVENGINE_REPORT_MAX_HOSTS`, `_MAX_FINDINGS`, `_MAX_HYGIENE` | `500`, `1000`, `500` | Most hosts in the table, detailed findings (CVE matches and scanner findings, hottest first) and hygiene findings one report prints. The counts in the summary always cover everything, and the report says what was left out. Held under ceilings of 5,000 each. |
+| `CVENGINE_REPORT_MAX_WRITEUPS`, `_MAX_ISSUE_HOSTS` | `50`, `25` | Most critical, high and medium issues a findings PDF writes up in detail (ceiling 500), and most affected hosts listed under one issue (ceiling 500; the rest are counted in an "and N more" line). Issues past the first cap stay in the summary of findings, marked "not detailed". |
+| `CVENGINE_REPORT_MAX_MINOR`, `_MAX_INVENTORY`, `_MAX_CLOSED` | `200`, `200`, `300` | Rows of a findings PDF's appendices: low and informational issues, the asset inventory and, with closed findings included, the closed findings (ceilings of 5,000 each). |
+| `CVENGINE_REPORT_MAX_HOSTS` | `500` | Most hosts a hosts PDF (and the host detail of a one-host report) lists, highest score first (ceiling 5,000). |
+| `CVENGINE_REPORT_MAX_ROWS` | `20000` | Findings of each kind (CVE matches, scanner findings, hygiene findings) a findings PDF reads to group into issues, hottest first (ceiling 100,000). The counts in the summary always cover everything, and every PDF says what its caps left out. `CVENGINE_REPORT_MAX_FINDINGS` and `CVENGINE_REPORT_MAX_HYGIENE` are no longer read. |
 | `CVENGINE_REPORT_PER_HOUR`, `CVENGINE_REPORT_ACTIVE_TOTAL` | `20`, `8` | Reports one person may start in an hour, and reports building or waiting at once on the whole server (a report over either limit is refused until one finishes). |
 | `CVENGINE_REPORT_TTL_HOURS` | `24` | Hours a finished report can be downloaded before it is deleted (1 to 168). Expired files are also removed by the weekly maintenance. |
 | `CVENGINE_REPORT_ACTIVE_PER_USER`, `_PER_HOUR`, `_ACTIVE_TOTAL` | `3`, `20`, `8` | Reports one user may have queued or running, one user may ask for in an hour, and queued or running across the installation. Over a limit the API answers `429`. |

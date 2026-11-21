@@ -16,7 +16,7 @@ The defaults below were measured on a 3000-target stack (3000 hosts, 18,000 find
 | `CVENGINE_DB_CONN_MAX_AGE` | `60` (web only) | `60` | A request that opened a connection spent 3.8 ms of a 5 to 60 ms answer on it, and the database forked a backend each time. `0` brings the old behaviour back. |
 | `WEB_MEM_LIMIT`, `CELERY_MEM_LIMIT`, `BEAT_MEM_LIMIT` | `1g`, `4g`, `512m` | `1g`, `2g`, `256m` | Container ceilings. Report PDFs, discovery and feed workers share the celery ceiling; lower `DISCOVERY_CONCURRENCY` (default 8) to 4 on a 2 GB host. |
 | `CVENGINE_AGENT_TASK_RETENTION_DAYS` | `30` | `7` to `14` | A Sentinel task row is about a kilobyte: a week of scanning 3000 targets was 300,000 rows (300 MB with indexes). Also on Settings, configMaxxing, **Data retention**. |
-| `CVENGINE_REPORT_MAX_HOSTS`, `CVENGINE_REPORT_MAX_FINDINGS` | `500`, `1000` | defaults | Bound the PDF. They are no longer a memory guard (the renderer works in chunks) but keep a report readable and its render time near 25 s. |
+| `CVENGINE_REPORT_MAX_HOSTS`, `CVENGINE_REPORT_MAX_WRITEUPS` | `500`, `50` | defaults | Bound the PDF: the hosts report's table, and the issues written up in full in a findings report (findings are grouped into issues across hosts). They keep a report readable and quick to build. |
 
 Changing a `POSTGRES_*` value recreates the `db` container once on the next update or `docker compose up -d` (a few seconds of downtime, no data change).
 
