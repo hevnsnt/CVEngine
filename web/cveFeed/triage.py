@@ -122,7 +122,13 @@ def hard_evidence(kind, facts):
         elif facts.get('admin_path') and 200 <= (facts.get('http_status') or 0) < 300:
             raise_to('likely', 'an admin or API route answers anonymously')
     elif kind == 'hygiene':
-        raise_to('confirmed', 'a deterministic check failed')
+        tls = facts.get('testssl')
+        if tls == 'unconfirmed':
+            pass  # a heuristic result (testssl.sh's "likely" or "potentially VULNERABLE"): not proof, so no floor and the model's answer stands
+        elif tls == 'confirmed':
+            raise_to('confirmed', 'testssl.sh confirmed it on the server: the test answered plainly, not by inference')
+        else:
+            raise_to('confirmed', 'a deterministic check failed')
     return floor, found
 
 
@@ -771,6 +777,8 @@ def describe_hygiene(f):
     evidence = {_s(k, 40): _s(v if not isinstance(v, (list, dict)) else json.dumps(v, default=str), 200, names)
                 for k, v in list((f.evidence or {}).items())[:20]}
     parsed = hygiene_facts(f.host, domain_name, f.evidence, names)
+    from cveFeed import tls_audit
+    tls = tls_audit.confidence_of(f.check_name, f.evidence, f.severity)  # testssl.sh: confirmed, or unconfirmed (a heuristic is not proof)
     if parsed.get('spf'):
         # the strict cleaning keeps no "?" or "~": the record is shown as parsed, every SPF qualifier where the record has it
         evidence = {k: (parsed['spf']['record'] if k == 'record' else v) for k, v in evidence.items()}
@@ -778,8 +786,13 @@ def describe_hygiene(f):
                'detail': _prose(f.detail, 600, names), 'evidence': evidence}
     if parsed:
         payload['facts'] = parsed
-    return {'kind': 'hygiene', 'facts': {'parsed': parsed} if parsed else {}, 'payload': payload,
-            'signature_fields': {'check': f.check_name, 'severity': f.severity, 'evidence': stable(evidence, tokens=False)},
+    facts = {'parsed': parsed} if parsed else {}
+    fields = {'check': f.check_name, 'severity': f.severity, 'evidence': stable(evidence, tokens=False)}
+    if tls:
+        facts['testssl'] = tls
+        fields['testssl'] = tls  # a finding judged before this was known (its floor was "a deterministic check failed") is asked again
+    return {'kind': 'hygiene', 'facts': facts, 'payload': payload,
+            'signature_fields': fields,
             'severity': f.severity,
             'priority': (5, -f.severity)}
 

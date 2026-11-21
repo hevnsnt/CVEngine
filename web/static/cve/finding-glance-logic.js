@@ -69,3 +69,43 @@ export function proofOf(validation) {
   };
 }
 
+
+// Two notes say the same thing when, ignoring case, punctuation and filler, the shorter is mostly contained in the longer: the AI reviewer's note
+// restates the triage's reasoning in other words, and the same sentence is stored in two fields. Tested in tests/test_glance_notes.mjs.
+const words = (t) =>
+  String(t == null ? "" : t)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2);
+
+export function sameNote(a, b) {
+  const x = words(a);
+  const y = words(b);
+  if (!x.length || !y.length) return false;
+  const [short, long] = x.length <= y.length ? [x, y] : [y, x];
+  const pool = new Set(long);
+  const shared = short.filter((w) => pool.has(w)).length;
+  return shared / short.length >= 0.8 && short.length / long.length >= 0.5;
+}
+
+// ``notes``: [{key, label, text}] in the order they should read. Returns {shown, repeats}: the notes to draw (a note that repeats an earlier one is
+// dropped, and the clearer of the two, the longer, is kept in the earlier one's place) and the repeats, each with the label of what it repeats, for
+// a collapsed "also recorded as" line. Nothing is lost: a repeat is kept in full under a fold.
+export function dedupeNotes(notes) {
+  const shown = [];
+  const repeats = [];
+  for (const note of notes) {
+    if (!note || !String(note.text || "").trim()) continue;
+    const at = shown.findIndex((s) => sameNote(s.text, note.text));
+    if (at < 0) {
+      shown.push(note);
+    } else if (String(note.text).length > String(shown[at].text).length) {
+      repeats.push({ ...shown[at], repeatOf: note.label });
+      shown[at] = note;
+    } else {
+      repeats.push({ ...note, repeatOf: shown[at].label });
+    }
+  }
+  return { shown, repeats };
+}

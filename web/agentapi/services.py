@@ -5260,8 +5260,37 @@ def _cap_text(value):
     return None if value is None else str(value)[:EXCERPT_CAP]
 
 
+_ACRONYMS = {'cve': 'CVE', 'cves': 'CVEs', 'dns': 'DNS', 'ip': 'IP', 'spf': 'SPF', 'tls': 'TLS', 'ssl': 'SSL', 'url': 'URL', 'mx': 'MX', 'ca': 'CA',
+             'dmarc': 'DMARC', 'dkim': 'DKIM', 'ttl': 'TTL', 'http': 'HTTP', 'https': 'HTTPS', 'cname': 'CNAME', 'ns': 'NS', 'txt': 'TXT', 'ptr': 'PTR',
+             'smtp': 'SMTP', 'udp': 'UDP', 'tcp': 'TCP', 'id': 'ID', 'ai': 'AI', 'testssl': 'testssl.sh'}
+
+
+def _label(key):
+    """An internal key as a plain-English label: ``days_left`` is "Days left", ``cve`` "CVE", ``tlsa_ccs`` "TLS audit ccs"."""
+    words = [w for w in str(key).replace('-', '_').split('_') if w]
+    if words and words[0] == 'tlsa':
+        words = ['TLS', 'audit'] + words[1:]
+    out = [_ACRONYMS.get(w.lower(), w) for w in words]
+    text = ' '.join(out)
+    return (text[:1].upper() + text[1:]) if text else ''
+
+
+def _plain(value):
+    """A stored value as text a person reads: a list is "a, b" (never ``['a', 'b']``), a mapping "Key: value; Key: value", a flag Yes or No."""
+    if value is None:
+        return ''
+    if isinstance(value, bool):
+        return 'Yes' if value else 'No'
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = sorted(value, key=str) if isinstance(value, (set, frozenset)) else value
+        return ', '.join(p for p in (_plain(v) for v in items) if p)
+    if isinstance(value, dict):
+        return '; '.join(f'{_label(k)}: {p}' for k, v in value.items() for p in [_plain(v)] if p)
+    return str(value)
+
+
 def _kv(label, value):
-    return {'label': label, 'value': '' if value is None else str(value)}
+    return {'label': label, 'value': _plain(value)}
 
 
 def _how_found_match(m):
@@ -5340,9 +5369,58 @@ def _how_found_route(r):
     return {'steps': [s for s in steps if s['value']], 'excerpts': {}}
 
 
+def _rating_text(evidence):
+    """The severity an endpoint rule lowered (``hygiene_rating``): "Lowered from High: why", or ''."""
+    rating = evidence.get('rating') if isinstance(evidence.get('rating'), dict) else {}
+    if not rating:
+        return ''
+    was = SEVERITY_NAMES.get(rating.get('from'), '')
+    why = _plain(rating.get('why') or [])
+    return f'Lowered{f" from {was.capitalize()}" if was else ""}' + (f': {why}' if why else '')
+
+
+def _how_found_tls(f, ev):
+    """How a TLS audit finding was found, in plain labels: the test by name (never ``tlsa_ccs``), what it concluded and how sure that is, the CVEs as
+    text and testssl.sh's own severity. testssl.sh's raw result string is not a step: it is an excerpt, "testssl.sh output", folded on the page."""
+    from cveFeed import tls_catalogue
+    entry = tls_catalogue.entry_for(f.check_name)
+    steps = [_kv('Found by', 'testssl.sh TLS audit, run by a Sentinel'), _kv('Test', tls_catalogue.test_label(ev.get('test'))), _kv('Host', f.host)]
+    unconfirmed = ev.get('confidence') == 'unconfirmed'
+    state = ev.get('state')
+    if ev.get('confidence'):
+        steps.append(_kv('Confidence', 'Not confirmed: testssl.sh\'s own wording is a guess ("likely" or "potentially"), not proof'
+                         if unconfirmed and state != 'exposure' else
+                         'Not confirmed exploitable: the precondition is present, whether it can be used depends on clients or the application'
+                         if unconfirmed else 'Confirmed: the test answered plainly'))
+    steps.append(_kv('CVE', ev.get('cve') or (entry.cves if entry else ())))
+    reported = str(ev.get('testssl_severity') or '').capitalize()
+    steps.append(_kv('Severity reported by testssl.sh', reported))
+    if reported and reported.upper() != SEVERITY_NAMES.get(f.severity, '').upper():
+        steps.append(_kv('Severity here', f'{SEVERITY_NAMES.get(f.severity, "").capitalize()}: '
+                         + ('a result that is not confirmed is never rated above Medium' if unconfirmed else 'held to the highest rating this kind of finding deserves')))
+    steps.append(_kv('Severity adjusted', _rating_text(ev)))
+    return {'steps': [s for s in steps if s['value']], 'excerpts': {'testssl_output': ev.get('result') or ''}}
+
+
 def _how_found_hygiene(f):
-    steps = [_kv('Check', f.check_name), _kv('Host', f.host)] + [_kv(str(k), v) for k, v in list((f.evidence or {}).items())[:20]]
-    return {'steps': steps, 'excerpts': {}}
+    ev = f.evidence if isinstance(f.evidence, dict) else {}
+    if str(f.check_name).startswith('tlsa_') and ev.get('source') == 'testssl.sh' and ev.get('test'):
+        return _how_found_tls(f, ev)
+    steps = [_kv('Check', _label(f.check_name)), _kv('Host', f.host)]
+    steps += [_kv(_label(k), v) for k, v in list(ev.items())[:20] if k != 'rating']
+    steps.append(_kv('Severity adjusted', _rating_text(ev)))
+    return {'steps': [s for s in steps if s['value']], 'excerpts': {}}
+
+
+def _tls_context(f):
+    """What a TLS audit finding adds to its page: what the issue is, the confirm guide with this host's commands, and the fix. ``(None, None, '', '')``
+    for any other hygiene finding."""
+    from cveFeed import tls_catalogue
+    ev = f.evidence if isinstance(f.evidence, dict) else {}
+    entry = tls_catalogue.entry_for(f.check_name) if str(f.check_name).startswith('tlsa_') else None
+    if entry is None:
+        return None, None, '', ''
+    return entry, tls_catalogue.guide(f.check_name, ev, f.host), entry.what, entry.fix
 
 
 def _history(project, host):
@@ -5390,7 +5468,8 @@ def finding_detail(ctx, slug, kind, finding_id):
     text = triage_lib.verdict_text(v, t)  # the model's words only on a finding of the project the answer was reached in (task 256)
     severity_ai = (SEVERITY_NAMES.get(triage_lib.adjusted_severity(base, adjust, bool(t and t.hard_evidence)))
                    if base is not None and adjust else None)
-    remediation = {'text': text['remediation'], 'scanner': getattr(obj, 'remediation', '') if kind == 'vulnerability' else ''}
+    tls_entry, tls_guide, tls_what, tls_fix = _tls_context(obj) if kind == 'hygiene' else (None, None, '', '')
+    remediation = {'text': text['remediation'], 'scanner': getattr(obj, 'remediation', '') if kind == 'vulnerability' else tls_fix}
     if kind == 'match':
         remediation.update(fixed_in=_fixed_versions(obj.cve_entry, obj.matched_product), local_checks=(t.local_checks if t else None) or None)
     closed = _closure_fields(kind, obj) if kind in STATUS_KINDS else {}
@@ -5447,7 +5526,9 @@ def finding_detail(ctx, slug, kind, finding_id):
         'ai_review': _review_of(t),
         'severity': SEVERITY_NAMES.get(base) if base is not None else None, 'severity_ai': severity_ai,
         'first_seen': _iso(first), 'last_seen': _iso(last), 'history': _history(project, host),
-        'why_it_matters': text['impact'],
+        'why_it_matters': tls_what or text['impact'],  # a TLS audit finding: the catalogue's own words, not the model's
+        # a hygiene finding's own plain description; testssl.sh's raw result string is how_found.excerpts.testssl_output, never the description
+        'description': obj.detail if kind == 'hygiene' else '',
         'ai': {'classification': t.classification if t else '', 'status': t.status if t else 'untracked',
                'connected': _ai_connected(),  # "Waiting for AI triage" is only true while a model is connected to do it
                'reason': f'AI review failed ({diagnostic["category"]}); retry scheduled.' if diagnostic else t.reason if t else '',
@@ -5468,7 +5549,7 @@ def finding_detail(ctx, slug, kind, finding_id):
         'retest': {**_retest_of(obj), 'history': _retest_history(t)} if kind in STATUS_KINDS else None,
         'secrets': _tracked_secrets(obj) if kind == 'vulnerability' else [],  # "Tracked in Secrets": the inventory rows a token finding fed
         'cve': {**_cve_context(obj.cve_entry), 'detection': _detection(obj.cve_entry)} if kind == 'match' else None,
-        'confirm': _confirm_guide(obj) if kind == 'match' else None,
+        'confirm': _confirm_guide(obj) if kind == 'match' else tls_guide,
         'explain': _explain(obj) if kind == 'match' else None,
         'validation': {'status': _triage_brief(t)['validation_status'] if t else 'none', 'steps': steps, 'evidence': evidence,
                        'validated': _iso(t.validated_at) if t else None, 'next_attempt': _iso(t.next_attempt_at) if t else None,

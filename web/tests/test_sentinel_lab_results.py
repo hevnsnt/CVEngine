@@ -151,7 +151,7 @@ class LabResults(TestCase):
         self.assertTrue(result.tested)
         self.assertEqual(result.protocols.get('TLS1'), 'offered')
         titles = ' | '.join(f['title'] for f in result.findings)
-        for expected in ('anonymous ciphers', 'BEAST', 'Lucky13'):  # the certificate itself (expired, self-signed, wrong name) is the hygiene check's, which the lab reads below
+        for expected in ('anonymous ciphers', 'BEAST', 'Lucky Thirteen'):  # the certificate itself (expired, self-signed, wrong name) is the hygiene check's, which the lab reads below
             self.assertIn(expected, titles)
         _f, hygiene = self.cleaned('hygiene_check')
         cert = hygiene['certs'][0]
