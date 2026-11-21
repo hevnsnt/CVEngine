@@ -81,3 +81,26 @@ test('the next send and the last result are said in words', () => {
   assert.equal(L.lastResultText({last_status: 'sent', last_sent_at: '2026-11-17T08:00:00Z', recipients: ['a@b.co', 'c@d.co', 'e@f.co']}, () => 'Nov 17, 08:00'), 'Sent Nov 17, 08:00 to 3 recipients');
   assert.equal(L.lastResultText({last_status: 'skipped', last_error: 'outgoing mail is not set up'}), 'Skipped: outgoing mail is not set up');
 });
+
+test('the partial result is the server\'s own "1 of 3 failed" sentence, and the card words are plain', () => {
+  assert.equal(L.lastResultText({last_status: 'partial', last_error: '1 of 3 failed: the mail server refused the recipient address'}), '1 of 3 failed: the mail server refused the recipient address');
+  assert.equal(L.lastResultText({last_status: 'failed', last_error: 'could not connect to the mail server'}), 'Failed: could not connect to the mail server');
+  assert.equal(L.lastResultText({last_status: 'disabled', last_error: 'the owner no longer has access'}), 'Paused automatically: the owner no longer has access');
+  assert.equal(L.recipientsText(['a@x.org', 'b@x.org', 'c@x.org', 'd@x.org']), 'a@x.org, b@x.org +2');
+  assert.equal(L.recipientsText(['a@x.org']), 'a@x.org');
+  assert.deepEqual(['none', 'pdf', 'csv'].map(L.attachText), ['No attachment', 'PDF attached', 'CSV attached']);
+  assert.deepEqual(L.statusPill({enabled: true}), ['Active', '']);
+  assert.deepEqual(L.statusPill({enabled: false, last_status: 'disabled'}), ['Paused automatically', 'failed']);
+  assert.deepEqual(L.statusPill({enabled: false, last_status: 'sent'}), ['Paused', 'running']);
+  assert.equal(L.defaultName('monthly', 'Acme Web'), 'Monthly report: Acme Web');
+  assert.equal(L.defaultName('weekly', 'Acme Web'), 'Weekly report: Acme Web');
+});
+
+test('a server message is shown beside the field it names', () => {
+  assert.equal(L.fieldOfError('not an email address: x'), 'recipients');
+  assert.equal(L.fieldOfError('a@b.org unsubscribed on 2026-11-12; send confirm_opted_out to add it back'), 'recipients');
+  assert.equal(L.fieldOfError('timezone must be an IANA time zone name'), 'timezone');
+  assert.equal(L.fieldOfError('send_time must be HH:MM'), 'send_time');
+  assert.equal(L.fieldOfError('name is required'), 'name');
+  assert.equal(L.fieldOfError('audit role is read only'), '');
+});

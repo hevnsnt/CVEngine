@@ -13,7 +13,22 @@ from agentapi.services import ApiError
 from tenancy import roles
 
 WRITE_ROLES = (roles.ADMIN, roles.PENTESTER, roles.USER)  # the roles that may create or change things in a project; audit never
-LIMITS = {'recipients': 10, 'per_scope': 20, 'attach_max_mb': 10}  # what an email report may hold (the Email tab of the Reporting page)
+ATTACH_MAX_MB_DEFAULT, ATTACH_MAX_MB_CEILING = 10, 25
+
+
+def attach_max_mb():
+    """The largest file an email report attaches, in MB (``CVENGINE_REPORT_EMAIL_MAX_MB``, 1 to 25): a bigger one is replaced by a link."""
+    import os
+    try:
+        return min(ATTACH_MAX_MB_CEILING, max(1, int(os.environ.get('CVENGINE_REPORT_EMAIL_MAX_MB', ''))))
+    except ValueError:
+        return ATTACH_MAX_MB_DEFAULT
+
+
+def limits():
+    """What an email report may hold (the Email tab of the Reporting page)."""
+    from cveFeed.models import ReportSubscription as R
+    return {'recipients': R.MAX_RECIPIENTS, 'per_scope': R.MAX_PER_SCOPE, 'attach_max_mb': attach_max_mb()}
 
 
 @dataclass
@@ -125,7 +140,7 @@ def list_scopes(ctx):
         scope = ReportScope('project', project=p, projects=[p])
         out.append({'kind': 'project', 'slug': p.slug, 'name': p.name, 'org': p.org.slug if p.org_id else '', 'org_name': p.org.name if p.org_id else '',
                     'role': role or '', 'can_subscribe': can_manage(user, scope, ctx.token), 'can_view_subscriptions': can_view_subscriptions(user, scope)})
-    return {'scopes': out, 'me_email': user.email or '', 'mail_ready': mailer.ready(), 'limits': dict(LIMITS)}
+    return {'scopes': out, 'me_email': user.email or '', 'mail_ready': mailer.ready(), 'limits': limits()}
 
 
 def for_worker(user, kind, project_id=None, org_id=None):

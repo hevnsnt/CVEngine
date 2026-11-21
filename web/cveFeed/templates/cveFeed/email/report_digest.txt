@@ -1,0 +1,41 @@
+{% autoescape off %}{{ cadence_upper }} REPORT: {{ d.scope_name }}
+{{ d.period.label }}{% if d.scope_kind == 'org' %} - {{ d.project_names|length }} project{{ d.project_names|length|pluralize }}{% elif d.org_name %} - {{ d.org_name }}{% endif %}
+
+AT A GLANCE
+{% for t in tiles %}- {{ t.label }}: {{ t.value }}{% if t.delta %} ({{ t.delta }}){% endif %}
+{% endfor %}- CVE matches by heat: Fire {{ fire }}, Smoke {{ smoke }}, Ice {{ ice }}
+{% if not d.headline.compared %}{{ d.headline.compared_note }}
+{% endif %}{% if d.threats %}
+THIS {{ period_word|upper }}'S MOST IMPORTANT VULNERABILITIES
+{% for t in d.threats %}- {{ t.title }}{% if t.badges %} [{{ t.badges|join:", " }}]{% endif %}
+{% if t.summary %}  {{ t.summary }}
+{% endif %}{% if t.fixed_in %}  Fixed in {{ t.fixed_in|join:", " }}
+{% endif %}{% if t.impact_line %}  {{ t.impact_line }}
+{% endif %}  {{ t.link }}
+{% endfor %}{% if threats_note %}{{ threats_note }}
+{% endif %}{% endif %}
+TOP FINDINGS
+{% for f in d.top_findings %}- [{{ f.heat|upper }}] {{ f.title }}
+  {{ f.host }}{% if f.project %} in {{ f.project }}{% endif %}{% if f.age_days is not None %}, open {{ f.age_days }} day{{ f.age_days|pluralize }}{% endif %}, {{ f.status }}
+  {{ f.link }}
+{% empty %}No open findings. Nothing needs action right now.
+{% endfor %}{% if d.top_findings %}See all {{ d.headline.open_findings }} open finding{{ d.headline.open_findings|pluralize }}: {{ d.links.findings }}
+{% endif %}
+NEW HOSTS
+{% if d.new_hosts.count %}{{ d.new_hosts.count }} new host{{ d.new_hosts.count|pluralize }} this {{ period_word }}: {% for n in d.new_hosts.names %}{{ n.host }}{% if n.project %} ({{ n.project }}){% endif %}{% if not forloop.last %}, {% endif %}{% endfor %}{% if d.new_hosts.more %} and {{ d.new_hosts.more }} more{% endif %}.{% else %}No new hosts this {{ period_word }}.{% endif %}{% if d.new_hosts.gone %} {{ d.new_hosts.gone }} host{{ d.new_hosts.gone|pluralize }} went away.{% endif %}
+
+HYGIENE
+{{ d.hygiene.open }} open hygiene issue{{ d.hygiene.open|pluralize }} ({{ d.hygiene.certs_expiring }} certificate{{ d.hygiene.certs_expiring|pluralize }} expire{{ d.hygiene.certs_expiring|pluralize:"s," }} within 30 days).
+{% if attachment %}
+FULL REPORT
+{% if attachment.state == 'attached' %}The full {{ attachment.kind|upper }} report is attached ({{ attachment.filename }}).{% elif attachment.state == 'too_large' %}The full report ({{ attachment.mb }} MB) is over the {{ attachment.limit_mb }} MB attachment limit. Generate it in cvENGINE: {{ d.links.reporting }}#findings{% else %}The full report could not be attached this time. Generate it in cvENGINE: {{ d.links.reporting }}#findings{% endif %}
+{% endif %}
+Open {{ d.scope_name }} in cvENGINE: {{ d.links.open_app }}
+
+You get this because {% if owner %}{{ owner }}{% else %}someone{% endif %} added you to the {{ d.cadence }} email '{{ sub_name }}' for {{ d.scope_name }} on cvENGINE ({{ d.instance }}).
+{% if unsubscribe_url %}Unsubscribe: {{ unsubscribe_url }}
+{% endif %}Manage email reports: {{ d.links.manage }}
+Counts reflect what scans identified up to {{ d.as_of }}.
+
+Sent by cvENGINE - {{ d.instance }}
+{% endautoescape %}

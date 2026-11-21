@@ -132,16 +132,47 @@ export function nextSendText(iso, now = new Date(), format = (d) => `${d.toLocal
   return `${format(when)} (${relativeText(iso, now)})`;
 }
 
-/** One line for an email report's last result: sent, partly failed, skipped or never sent. */
+/** One line for an email report's last result: sent, partly failed ("1 of 3 failed: the mail server refused the recipient address"), skipped or never sent. */
 export function lastResultText(sub, format = (iso) => iso.slice(0, 16).replace("T", " ")) {
   const status = sub.last_status || "";
-  const to = sub.recipients ? plural(sub.recipients.length, "recipient") : "";
+  const error = sub.last_error ? `: ${sub.last_error}` : "";
   if (!status) return "Never sent";
   const when = sub.last_sent_at ? format(sub.last_sent_at) : "";
-  if (status === "sent") return `Sent ${when}${to ? ` to ${to}` : ""}`.trim();
-  if (status === "partial") return `Sent ${when}, but some recipients failed${sub.last_error ? `: ${sub.last_error}` : ""}`.replace(/\s+,/, ",");
-  if (status === "skipped") return `Skipped${sub.last_error ? `: ${sub.last_error}` : ""}`;
-  if (status === "disabled") return `Paused automatically${sub.last_error ? `: ${sub.last_error}` : ""}`;
-  if (status === "unknown") return `Interrupted while sending${sub.last_error ? `: ${sub.last_error}` : ""}`;
-  return `Failed${sub.last_error ? `: ${sub.last_error}` : ""}`;
+  if (status === "sent") return `Sent ${when} to ${plural((sub.recipients || []).length, "recipient")}`.replace("  ", " ");
+  if (status === "partial") return sub.last_error || "Some recipients failed";  // the server writes "1 of 3 failed: <why>"
+  if (status === "skipped") return `Skipped${error}`;
+  if (status === "disabled") return `Paused automatically${error}`;
+  if (status === "unknown") return `Interrupted while sending${error}`;
+  return `Failed${error}`;
+}
+
+/** "a@x.org, b@x.org +3": the first two recipients, then how many more. */
+export function recipientsText(recipients, shown = 2) {
+  const list = recipients || [];
+  return list.slice(0, shown).join(", ") + (list.length > shown ? ` +${list.length - shown}` : "");
+}
+
+/** "PDF attached", "CSV attached" or "No attachment". */
+export function attachText(attach) {
+  return attach === "pdf" ? "PDF attached" : attach === "csv" ? "CSV attached" : "No attachment";
+}
+
+/** The status pill of an email report: ``[label, tone]`` (tone is a badge class: "" for active, "running" for paused, "failed" for paused automatically). */
+export function statusPill(sub) {
+  if (sub.enabled) return ["Active", ""];
+  if (sub.last_status === "disabled") return ["Paused automatically", "failed"];
+  return ["Paused", "running"];
+}
+
+/** The name a new email report starts with: "Weekly report: <scope>", "Monthly report: <scope>". */
+export function defaultName(cadence, scopeName) {
+  return `${cadence === "monthly" ? "Monthly" : "Weekly"} report: ${scopeName}`;
+}
+
+/** The field a server message is about, so it can be shown beside it ("name", "recipients", "timezone", "send_time", else ""). */
+export function fieldOfError(message) {
+  const m = String(message || "").toLowerCase();
+  if (/recipient|email address|unsubscribed/.test(m)) return "recipients";
+  for (const key of ["timezone", "send_time", "day_of_month", "weekday", "name", "attach"]) if (m.includes(key)) return key;
+  return "";
 }

@@ -24,6 +24,8 @@ class Node {
   click() { clicks.push(this); }
   remove() {}
   focus() {}
+  showModal() { this.open = true; }
+  close() { this.open = false; }
   querySelectorAll(sel) { return sel === 'button' ? find(this, (n) => n.tag === 'button') : []; }
   set textContent(v) { this._text = String(v); this.children = []; }
   get textContent() { return this._text + this.children.map((c) => c.textContent).join(''); }
@@ -64,10 +66,14 @@ globalThis.setTimeout = (fn, ms) => { if (ms >= 60000 || ms === 4000) return 0; 
 
 const SCOPES = [
   {kind: 'org', slug: 'acme', name: 'Acme Org', projects: 2, whole: true, can_subscribe: false, can_view_subscriptions: true},
-  {kind: 'project', slug: 'acme-web', name: 'Acme Web', org: 'acme', org_name: 'Acme Org', role: 'user'},
-  {kind: 'project', slug: 'acme-api', name: 'Acme API', org: 'acme', org_name: 'Acme Org', role: 'user'},
+  {kind: 'project', slug: 'acme-web', name: 'Acme Web', org: 'acme', org_name: 'Acme Org', role: 'user', can_subscribe: true},
+  {kind: 'project', slug: 'acme-api', name: 'Acme API', org: 'acme', org_name: 'Acme Org', role: 'user', can_subscribe: true},
 ];
 const posts = [];
+const patches = [];
+const SUB = {id: 7, name: 'Weekly report: Acme Web', scope: {kind: 'project', slug: 'acme-web', name: 'Acme Web'}, recipients: ['a@b.co', 'c@d.co', 'e@f.co'], opted_out: [], cadence: 'weekly',
+  weekday: 0, day_of_month: 1, send_time: '08:00', timezone: 'Europe/London', attach: 'pdf', enabled: true, schedule: 'Weekly, Mondays 08:00 (Europe/London)',
+  next_run_at: '2026-11-23T08:00:00Z', last_sent_at: '2026-11-17T08:00:00Z', last_status: 'partial', last_error: '1 of 3 failed: the mail server refused the recipient address', can_manage: true};
 const RECENT = {results: [{id: 'r1', status: 'done', kind: 'hosts', format: 'csv', scope: {kind: 'org', slug: 'acme', name: 'Acme Org'}, host: null, created: '2026-11-21T08:00:00Z',
   download_url: '/api/v1/orgs/acme/reports/r1/download'}]};
 const json = (data, status = 202) => ({ok: status < 400, status, json: async () => data});
@@ -75,6 +81,11 @@ globalThis.fetch = async (url, opts = {}) => {
   const method = opts.method || 'GET';
   if (url === '/api/v1/reporting/scopes') return json({scopes: SCOPES, me_email: 'a@b.co', mail_ready: false, limits: {}}, 200);
   if (url === '/api/v1/reporting/reports') return json(RECENT, 200);
+  if (String(url).startsWith('/api/v1/report-subscriptions?')) return json({results: [SUB], limits: {attach_max_mb: 10}, mail_ready: false, can_create: true}, 200);
+  if (method === 'PATCH' || (method === 'POST' && url === '/api/v1/report-subscriptions')) {
+    (method === 'PATCH' ? patches : posts).push([url, JSON.parse(opts.body)]);
+    return json({...SUB, next_run_at: '2026-11-23T08:00:00Z'}, 201);
+  }
   if (method === 'POST') {
     posts.push([url, JSON.parse(opts.body)]);
     return json({id: 'r2', status: 'queued', status_url: '/api/v1/orgs/acme/reports/r2'});
@@ -124,4 +135,45 @@ test('choosing the organization and the Hosts tab, Generate asks the organizatio
   assert.deepEqual(posts.at(-1), ['/api/v1/orgs/acme/reports', {include_closed: false, kind: 'hosts', format: 'csv'}]);
   assert.equal(clicks.at(-1).attrs.download, 'cvengine-report-acme-hosts.csv');
   assert.ok(toasts().some((t) => /3 items over the report limit/.test(t)), toasts().join('|'));
+});
+
+test('the Email tab says when mail is not set up, lists the cards with their words, and offers New email report', async () => {
+  await tab('email').onclick();
+  await settle();
+  assert.match(root.textContent, /Outgoing mail is not set up/);
+  assert.match(root.textContent, /Ask an App Admin to set it up/);
+  assert.match(root.textContent, /Weekly report: Acme Web/);
+  assert.match(root.textContent, /Weekly, Mondays 08:00 \(Europe\/London\)/);
+  assert.match(root.textContent, /To a@b\.co, c@d\.co \+1/);
+  assert.match(root.textContent, /PDF attached/);
+  assert.match(root.textContent, /1 of 3 failed: the mail server refused the recipient address/);
+  assert.ok(button('Edit') && button('Pause') && button('Delete'));
+  assert.equal(button('Send test to me').disabled, true);
+  assert.ok(button('New email report'));
+  assert.equal(select().value, 'org:acme');
+});
+
+test('New email report opens the dialog with the default name, and Save sends the choices', async () => {
+  select().value = 'project:acme-web';
+  await select().fire('change');
+  await settle();
+  button('New email report').listeners.click[0]();
+  const dlg = find(body, (n) => n.tag === 'dialog').at(-1);
+  assert.match(dlg.textContent, /New email report/);
+  assert.match(dlg.textContent, /Add me/);
+  assert.match(dlg.textContent, /Attachments over 10 MB are replaced by a note/);
+  const name = find(dlg, (n) => n.tag === 'input' && n.attrs.maxlength === '80')[0];
+  assert.equal(name.value, 'Weekly report: Acme Web');
+  const area = find(dlg, (n) => n.tag === 'textarea')[0];
+  area.value = 'Dana@Example.org, nope';
+  await area.fire('input');
+  assert.match(dlg.textContent, /nope \(not an address\)/);
+  assert.match(dlg.textContent, /1 of 10/);
+  await find(dlg, (n) => n.tag === 'button' && n.textContent === 'Save')[0].onclick();
+  await settle();
+  const [url, payload] = posts.at(-1);
+  assert.equal(url, '/api/v1/report-subscriptions');
+  assert.equal(payload.project, 'acme-web');
+  assert.deepEqual(payload.recipients, ['dana@example.org']);
+  assert.deepEqual([payload.cadence, payload.weekday, payload.send_time, payload.attach], ['weekly', 0, '08:00', 'none']);
 });

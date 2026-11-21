@@ -304,6 +304,7 @@ A report of a project, a host or an organization, as a PDF or a CSV file ([Repor
 | `CVENGINE_REPORT_TTL_HOURS` | `24` | Hours a finished report can be downloaded before it is deleted (1 to 168). Expired files are also removed by the weekly maintenance. |
 | `CVENGINE_REPORT_ACTIVE_PER_USER`, `_PER_HOUR`, `_ACTIVE_TOTAL` | `3`, `20`, `8` | Reports one user may have queued or running, one user may ask for in an hour, and queued or running across the installation. Over a limit the API answers `429`. |
 | `CVENGINE_REPORT_CSV_MAX_ROWS` | `20000` | Most rows one CSV report holds (1 to 100000), hottest first. The rows left out are counted in the report's `summary.omitted.rows`. |
+| `CVENGINE_REPORT_EMAIL_MAX_MB` | `10` | Largest file an email report attaches (1 to 25 MB). A bigger PDF or CSV is not attached; the email says so and links to the Reporting page. |
 | `CVENGINE_REPORT_RENDER_SECONDS` | `900` | Longest the PDF renderer may run (at least 30). A report that takes longer fails with a message to report one host instead. |
 | `CVENGINE_REPORT_DIR` | `/usr/src/scan_results/.reports` | Where the PDFs are written, a dot-folder of the scan results volume that no media path can name. The web and worker containers must share it. |
 

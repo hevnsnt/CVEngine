@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
+from cveFeed import report_digest_views
 from tenancy.views import MFALoginView, SignOutView, admin_login_redirect, invite_view
 from reNgine.admin_masking import mask_secret_fields
 from django.urls import include, path
@@ -29,6 +30,7 @@ urlpatterns = [
         'scan/',
         include('startScan.urls')),
     path('invite/<str:token>/', invite_view, name='invite'),
+    path('unsubscribe/<str:token>/', report_digest_views.unsubscribe, name='report_unsubscribe'),
     path(
         'login/',
         MFALoginView.as_view(template_name='tenancy/login.html'),

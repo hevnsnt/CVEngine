@@ -2838,6 +2838,28 @@ def evaluate_saved_searches():
         cache.delete("cvengine:saved-searches")
 
 
+@app.task(name="send_report_digests", bind=False, queue="report_queue", time_limit=3600, soft_time_limit=3300)
+def send_report_digests():
+    """Every 15 minutes: send the email reports whose time has come (cveFeed.report_digests), retry transient failures and expire sends a dead worker left
+    half done. One run at a time; each report is claimed before it is sent, so a repeated run never sends a period twice."""
+    from django.core.cache import cache
+
+    from cveFeed import report_digests
+    if not cache.add("cvengine:report-digests", 1, timeout=3600):
+        return {"skipped": "another run is sending"}
+    try:
+        return report_digests.send_due()
+    finally:
+        cache.delete("cvengine:report-digests")
+
+
+@app.task(name="send_report_test", bind=False, queue="report_queue", time_limit=1800, soft_time_limit=1700)
+def send_report_test(subscription_id, user_id):
+    """One test send of an email report to the person who asked (cveFeed.report_digests.send_test_by_id)."""
+    from cveFeed import report_digests
+    return report_digests.send_test_by_id(subscription_id, user_id)
+
+
 @app.task(name="weekly_maintenance", bind=False, queue="cve_feed_queue")
 def weekly_maintenance():
     """Weekly: archive the AI activity feed, AI call leases and AI usage rows past their retention to a tar.gz and delete them
