@@ -393,8 +393,9 @@ class MessageTests(SubBase):
         report_digests.deliver_period(sub, NOW)
         body = mail.outbox[0].body
         self.assertIn('First report: no comparison yet', body)
-        self.assertIn('Open findings:', body)
-        self.assertIn('Fire 1', body)
+        self.assertIn('Needs attention:', body)
+        self.assertNotIn('Open findings:', body)
+        self.assertIn('1 Fire (needs action now)', body)
         self.assertIn('/cve/acme-web/vulns/', body)
 
     def test_a_comparison_with_an_earlier_snapshot_says_up_or_down(self):
@@ -414,11 +415,13 @@ class MessageTests(SubBase):
         self.assertTrue(subject.startswith('cvENGINE weekly report: Acme Web ('))
         self.assertLessEqual(len(subject), 120)
         digest['threats'] = [{'source': 'zero_wire', 'title': 'A <b>briefing</b>', 'summary': 'Update now.', 'link': 'https://radar.cloudflare.com/zero-wire/x', 'badges': ['Cloudflare Zero Wire'],
-                              'cve_ids': [], 'impact_line': '3 of your hosts match by version', 'impact': 'matched', 'fixed_in': ['1.2.3']}]
+                              'cves': [], 'cve_ids': [], 'fixed_in': ['1.2.3'], 'hosts': [{'host': 'www.acme.test', 'project': 'Acme Web'}], 'hosts_more': 2, 'hosts_total': 3, 'unknown': 0,
+                              'proven': 0, 'product': ''}]
         _, text, html = report_digest.render(digest, None, 'a@example.org', 'https://x/u/')
         self.assertIn("most important vulnerabilities", html)
         self.assertIn('A &lt;b&gt;briefing&lt;/b&gt;', html)
-        self.assertIn('3 of your hosts match by version', text)
+        self.assertIn('Found on 3 of your hosts', text)
+        self.assertIn('www.acme.test - Acme Web', text)
 
 
 class AttachmentTests(SubBase):

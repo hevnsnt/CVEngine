@@ -308,7 +308,9 @@ class BriefingTests(ThreatBase):
 
 class EmailTests(SubBase, ThreatBase):
     def test_the_email_names_a_briefing_with_its_text_escaped(self):
-        self.briefing(title='nginx <b>2root</b>', summary='Update <img src=x onerror=1> now.', cve_ids=[])
+        cve = self.kev('CVE-2099-3301')  # a briefing is listed only when it reaches a host: this one names a CVE that matches www.acme.test
+        CVEMatch.objects.create(cve_entry=cve, subdomain=self.www, matched_product='nginx', matched_version='1.18.0', version_in_range=True, confidence=.9, source='port')
+        self.briefing(title='nginx <b>2root</b>', summary='Update <img src=x onerror=1> now.', cve_ids=[cve.cve_id])
         sub = self.make(next_run_at=NOW - timedelta(hours=1))
         report_digests.deliver_period(sub, NOW)
         html, text = mail.outbox[0].alternatives[0][0], mail.outbox[0].body
@@ -335,9 +337,10 @@ class EmailTests(SubBase, ThreatBase):
         self.assertEqual(len(mail.outbox), 2)
 
     def test_the_digest_carries_the_entries_and_the_note(self):
-        self.kev('CVE-2099-3401')
+        cve = self.kev('CVE-2099-3401')
+        CVEMatch.objects.create(cve_entry=cve, subdomain=self.www, matched_product='nginx', matched_version='1.18.0', version_in_range=True, confidence=.9, source='port')
         digest = report_digest.build(self.scope(), START, END, 'weekly', NOW)
-        self.assertEqual([t['source'] for t in digest['threats']], ['kev'])
+        self.assertEqual([t['source'] for t in digest['threats']], ['cve'])
         self.assertTrue(digest['threats_note'])
         self.assertEqual(digest['threats_empty'], '')
         self.assertIn('1 important vulnerability', report_digest._preheader(digest))

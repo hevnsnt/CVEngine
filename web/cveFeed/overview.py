@@ -230,6 +230,11 @@ def host_counts(groups):
     return c
 
 
+def needs_hosts(ids):
+    """How many hosts of the projects need a person soon (proven, likely or high-priority hygiene): the Overview's own number, for a figure that is not recomputed twice."""
+    return host_counts(situations.ranked(list(ids))[0])['needs']
+
+
 def _hosts_have(n):
     return f"{n:,} host{'' if n == 1 else 's'} {'has' if n == 1 else 'have'}"
 
@@ -381,11 +386,17 @@ def _group(product_key, entries, names, many_projects):
                 fixed.append(v)
     fix = f"update {product} to {_or_list(fixed[:6])}." if fixed and product else ''
     zero = next((e for e in entries if e['source'] == 'zero_wire' and e.get('link')), None)
+    named, seen_hosts = [], set()
+    for e in entries:  # the hosts an entry was found on, when the caller asked for them (the email does; the Overview shows counts)
+        for h in e.get('hosts') or []:
+            if (h['host'], h['project']) not in seen_hosts:
+                seen_hosts.add((h['host'], h['project']))
+                named.append(h)
     hosts_query = f'cve:{cve_ids[0]}' if len(entries) == 1 and cve_ids and matched else f'tech:"{product}"' if product else (f'cve:{cve_ids[0]}' if cve_ids else '')
     return {
         'key': product_key or (cve_ids[0] if cve_ids else first['title'][:40]), 'product': product, 'title': _group_title(product, entries), 'summary': summary, 'fix': fix,
         'cve_ids': cve_ids[:12], 'badges': badges, 'items': len(entries), 'matched': len(matched), 'confirmed': len(confirmed), 'product_only': len(unknown),
-        'by_project': {'matched': _project_breakdown(matched, names), 'product_only': _project_breakdown(unknown, names)} if many_projects else None,
+        'hosts': named, 'fixed_in': fixed[:6], 'by_project': {'matched': _project_breakdown(matched, names), 'product_only': _project_breakdown(unknown, names)} if many_projects else None,
         'hosts_query': hosts_query, 'link': zero['link'] if zero else None, 'link_label': 'Read the Zero Wire briefing' if zero else '',
         'all_kev': all(e.get('kev_added') or 'CISA KEV' in ' '.join(e.get('badges') or []) for e in entries),
         'all_critical': bool(cvss) and len(cvss) == len(entries) and all(c >= 9.0 for c in cvss),

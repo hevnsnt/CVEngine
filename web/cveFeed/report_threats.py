@@ -31,6 +31,7 @@ from cveFeed.report_data import clean
 from cveFeed.source_versions import SHODAN_PROVIDER
 
 TOP_DEFAULT, TOP_CEILING = 6, 12
+HOSTS_KEPT = 25  # host names kept per entry (an email shows five); the entry's ``host_total`` is the real count
 CANDIDATES = 200  # CVEs read for a period
 IMPACT_CANDIDATES = 100  # of those, how many get an impact count (the highest by KEV and CVSS)
 FALSE_POSITIVES = report_data.FALSE_POSITIVES
@@ -164,6 +165,47 @@ def impact(ids, cves, sightings=None):
     return out
 
 
+def host_labels(ids, keys):
+    """``{host key: {'host', 'project'}}`` for the host keys that belong to the scope's projects ``ids``: the name of the machine (the shortest name when several names
+    share its addresses) and its project's name. A key of another project is never labelled, whatever it says. One query for the keys that name a set of addresses
+    and one for the project names; a key that names a host by its own name (see ``counts.with_host_key``) needs neither for the name."""
+    from dashboard.models import Project
+    from startScan.models import Subdomain
+    allowed = {int(i) for i in ids}
+    wanted, by_address = {}, set()
+    for key in keys:
+        project, _, rest = str(key).partition(':')
+        if not project.isdigit() or int(project) not in allowed:
+            continue
+        wanted[key] = int(project)
+        if not rest.startswith('n:'):
+            by_address.add(key)
+    names = {k: str(k).split(':', 2)[2] for k in wanted if k not in by_address}
+    if by_address:
+        current = Subdomain._base_manager.filter(correlation.latest_scan_q()).filter(target_domain__project_id__in=sorted({wanted[k] for k in by_address})).values('pk')
+        found = defaultdict(set)
+        for key, name in counts.with_host_key(Subdomain._base_manager.filter(pk__in=current)).filter(host_key__in=sorted(by_address)).values_list('host_key', 'name'):
+            found[key].add(name)
+        names.update({k: min(v, key=lambda n: (len(n), n)) for k, v in found.items()})
+    projects = dict(Project._base_manager.filter(id__in=set(wanted.values())).values_list('id', 'name'))
+    return {k: {'host': clean(names[k], 120), 'project': clean(projects.get(wanted[k], ''), 80)} for k in wanted if k in names}
+
+
+def _entry_hosts(ids, entries):
+    """Give each entry ``hosts`` (at most HOSTS_KEPT of the hosts it was found on, proven ones first, as ``{host, project, confirmed}``) and ``host_total`` (how many)."""
+    picked = {}
+    for e in entries:
+        hosts = e['_hosts']
+        found = hosts['matched'] | hosts['confirmed']
+        picked[id(e)] = (sorted(hosts['confirmed']) + sorted(found - hosts['confirmed']))[:HOSTS_KEPT]
+        e['host_total'] = len(found)
+    labels = host_labels(ids, {k for keys in picked.values() for k in keys})
+    for e in entries:
+        confirmed = e['_hosts']['confirmed']
+        rows = [{**labels[k], 'confirmed': k in confirmed} for k in picked[id(e)] if k in labels]
+        e['hosts'] = sorted(rows, key=lambda r: (not r['confirmed'], r['project'].lower(), r['host'].lower()))
+
+
 def _same_product(a, b):
     """Whether two product names are the same product: equal once normalised, or one is an alias of the other (``correlation.PRODUCT_ALIASES``)."""
     na, nb = correlation._norm(a), correlation._norm(b)
@@ -275,11 +317,12 @@ NOTE_CVES = ("Picked from the CVEs CISA added to its Known Exploited Vulnerabili
              "probability. Host counts come from what scans identified; a product with no version read cannot be ruled in or out.")
 
 
-def top(scope, start, end, limit=None, keep_hosts=False):
+def top(scope, start, end, limit=None, keep_hosts=False, with_hosts=False):
     """``(entries, note)`` for ``scope`` (an ``agentapi.report_scope.ReportScope``: anything with ``ids`` and ``label``) and the period ``[start, end)``: Zero Wire briefings
     first, then KEV and critical CVEs no briefing covers, at most ``limit`` (``top_limit()`` by default). ``note`` is the attribution and method footnote ('' when there
     are no entries). ``keep_hosts`` keeps each entry's ``_hosts`` (the host keys, ``{'matched', 'confirmed', 'product_only'}`` as sets) so a caller can count the hosts of
-    several entries together; they are internal, never serialised, and left out otherwise."""
+    several entries together; they are internal, never serialised, and left out otherwise. ``with_hosts`` adds ``hosts`` and ``host_total`` to each entry (see ``_entry_hosts``):
+    the names of the hosts it was found on, from the scope's projects only."""
     from cveFeed.models import CVEEntry, ReportingSettings, ZeroWireBriefing
     limit = limit or top_limit()
     base = mailer.base_url()
@@ -300,6 +343,8 @@ def top(scope, start, end, limit=None, keep_hosts=False):
             return (bool(row['matched']), bool(row['product_only']), kev_in_period[c.cve_id], bool(_kev(c).get('ransomware')), c.cvss or 0, _kev_added(c))
         for c in sorted(news, key=rank, reverse=True)[:limit - len(entries)]:
             entries.append(_cve_entry(c, rows[c.id], scope, base, 'kev' if c.kev and kev_in_period[c.cve_id] else 'critical'))
+    if with_hosts and entries:
+        _entry_hosts(scope.ids, entries)
     if not keep_hosts:
         for e in entries:
             e.pop('_hosts', None)

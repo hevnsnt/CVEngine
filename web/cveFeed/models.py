@@ -1757,6 +1757,7 @@ class StatsSnapshot(models.Model):
     cve_matches = models.JSONField(default=dict, blank=True)  # {fire, smoke, ice: n}, actionable (not ruled-out) matches
     fixed = models.IntegerField(default=0)  # findings of any kind currently marked remediation_status=fixed
     mean_days_to_fix = models.FloatField(null=True, blank=True)  # over currently-fixed findings; null when there are none
+    needs_hosts = models.IntegerField(null=True, blank=True)  # hosts with a proven, likely or high-priority hygiene situation (cveFeed.overview.needs_hosts); null for a day before this was recorded
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
