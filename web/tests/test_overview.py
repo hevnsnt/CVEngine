@@ -98,6 +98,15 @@ class StatusTests(SimpleTestCase):
         self.assertEqual(quiet['sub'], '')
         self.assertEqual(self.status(counts(proven=1), threat_group=group(matched=0))['sub'], '')  # no host matches: the clause goes
 
+    def test_every_headline_is_one_sentence_without_dashes(self):
+        variants = [counts(proven=1, likely=26), counts(proven=2), counts(likely=3), counts(hygiene=4), counts(), counts(exposure=1), counts(minor=1)]
+        for c in variants:
+            for last in (NOW - timedelta(hours=1), NOW - timedelta(days=9), None):
+                s = self.status(c, last=last)
+                for text in (s['headline'], *[t for t in s['sub'].split('. ') if t]):
+                    self.assertNotRegex(text, '[\u2013\u2014]|--', text)
+                self.assertRegex(s['headline'], r'^[^.?!]+\.$', s['headline'])
+
     def test_threat_sentence_variants(self):
         self.assertEqual(overview.threat_sentence(group(items=1, matched=1)), 'One new critical PHP flaw this week matches 1 of your hosts by version.')
         self.assertEqual(overview.threat_sentence(group(all_critical=False, all_kev=True)), 'Four new known-exploited PHP flaws this week match 3 of your hosts by version.')

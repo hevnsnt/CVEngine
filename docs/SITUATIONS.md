@@ -8,14 +8,22 @@ Everything here is computed from numbers cvENGINE already has. A situation never
 
 ## What a situation is
 
-One **host** of a project together with everything open on it that needs a person. Four tiers, worst first:
+One **host** of a project together with everything open on it that needs a person. Five tiers, worst first (the rank rule below says how a host with several is ordered):
 
 | Tier | What is in it |
 | --- | --- |
 | **Proven** | A CVE match or scanner finding that one of cvENGINE's own checks reproduced (the validation hit behind the "Proven on this host" card). |
 | **Likely** | A CVE match or scanner finding that shows fire or smoke, that no check has proven yet, and that the AI reviewer has not called a false positive. |
-| **Exposed** | An open database (a check connected with no credentials), a dangling DNS record, an open admin or cleartext service (Telnet, FTP, rlogin and the like, or a tailnet admin port), or an exposed secret that counts. |
-| **Minor** | Everything else still open: hygiene findings (certificates, email, TLS) and findings or CVE matches that show ice. |
+| **Hygiene, high** | The slips that cost something now, and an exposed secret: an **expired certificate**, a certificate that **expires within 7 days**, a **mail domain anyone can spoof**, a **dangling DNS record someone could take over**, and an **exposed secret** that counts. |
+| **Exposed** | An open database (a check connected with no credentials), a dangling DNS record nobody is known to be able to claim, or an open admin or cleartext service (Telnet, FTP, rlogin and the like, or a tailnet admin port). |
+| **Minor** | Everything else still open: the rest of hygiene (certificates that expire in a week or more, SPF and DMARC that are set but weak, TLS) and findings or CVE matches that show ice. |
+
+How high hygiene is read from the data (`cveFeed/situations.py`):
+
+- *Certificates*: the `tls_expired` and `tls_expiring` checks at high severity or worse. That is how the hygiene sweep rates a certificate that has expired or has under 7 days left; the hygiene rating lowers an expired certificate of a development host and one served by a vendor's own endpoint, and those stay **Minor**, as do certificates with a week or more left.
+- *Spoofable mail*: `dmarc_missing` at high severity (the domain receives mail and has no DMARC record), or `spf_allow_all` (an SPF record that ends in `+all` and so authorises every sender). A DMARC policy of `p=none`, a soft-fail or neutral SPF and a missing SPF with a DMARC policy in place are **Minor**.
+- *Dangling DNS*: a dangling-NS or dangling-CNAME finding that the dangling-DNS check rated high or critical, which means its target is one anyone can claim ([the rating](PIPELINE.md)). A stale record nobody can claim stays **Exposed**.
+- *Secrets*: every exposed secret that counts (they were **Exposed** before; they are at least this high now).
 
 Not part of a situation: findings that are fixed, an accepted risk or a false positive; CVE matches the AI ruled out; scanner findings the scans no longer see; informational findings; secrets that are public by design, accepted, revoked or false positives.
 
@@ -29,11 +37,11 @@ A heat set by hand is respected: setting a finding to ice moves it to **Minor** 
 
 Position 1 is the first thing to look at. A situation sorts by these, in order:
 
-1. **Worst tier**: proven, then likely, then exposed, then minor. Proof beats likelihood.
+1. **Lead**: the first of these that the host has: proven; likely with a known-exploited CVE; high hygiene; any other likely; exposed; minor. Proof beats likelihood, a known-exploited likely finding beats a hygiene slip, and a hygiene slip beats the other likely findings.
 2. **Known exploited**: a proven or likely CVE match whose CVE is on the KEV list, yes before no. Known exploited beats severity alone. (Only CVE matches carry this; a scanner finding does not.)
 3. **Internet-facing** before inside a declared internal network.
 4. **Worst severity** among its items (a CVE by its CVSS band, as the Findings list bands it).
-5. **How many** proven, likely and exposed items it has, more first.
+5. **How many** proven, likely, high-hygiene and exposed items it has, more first.
 6. **Age**: the oldest open item first.
 7. The host name, then the project, so the order is total and the same data always gives the same list.
 
@@ -57,7 +65,7 @@ To keep the words the same in a row (which carries 12 findings) and in the detai
 
 `/cve/<project>/situations/` (and `/cve/_all/situations/`). One row per host, two lines: the rank, the host, the counts (`2 proven`, `1 likely`, `3 exposed`, `4 minor`) and an **internal** badge; then the headline and the first action. Click a row (or press Enter on it) to open it in place: the narrative, why it ranks there, and its findings, each linking to the pane that already shows it (Findings, Hygiene, Secrets), with **Open the host**. A host with more findings than a row carries offers **Show all**.
 
-- **Search** matches any name of a host. **Filters, Show** keeps the situations whose worst tier is at least proven, likely or exposed.
+- **Search** matches any name of a host. **Filters, Show** keeps the situations whose worst tier is at least proven, likely, high hygiene or exposed.
 - **Load more** pages on, 30 rows at a time, like the other lists.
 - Three different empty states, from the server's `state`, never from the rows: **Nothing needs you** (hosts were scanned and nothing open needs a person; not drawn while the list is still loading), **Nothing has been scanned yet** (no host has been scanned: add a target), and, when a search or filter matches nothing, a plain line saying so.
 
@@ -68,7 +76,7 @@ To keep the words the same in a row (which carries 12 findings) and in the detai
 | Parameter | Meaning |
 | --- | --- |
 | `q` | Part of a host name (any name of the host). |
-| `tier` | `all` (default), `exposure`, `likely` or `proven`: keep situations whose worst tier is at least that. |
+| `tier` | `all` (default), `exposure`, `hygiene`, `likely` or `proven`: keep situations whose worst tier is at least that (by number: proven, likely, high hygiene, exposure, minor). |
 | `page`, `page_size` | As the other lists (`page_size=0` for the numbers alone). |
 
 The answer: `count` (situations after `q` and `tier`), `situations` (all of them), `hosts` (hosts in the project's inventory), `state` (`attention`, `clear` or `unscanned`), `last_scan_at` (set when `state` is `clear`), `page`, `page_size` and `results`. `_all` ranks across the projects you can see; each row names its project.

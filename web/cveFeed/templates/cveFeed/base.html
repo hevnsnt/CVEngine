@@ -90,7 +90,7 @@
 </div>
 {% endif %}
 <main class="wrap" id="main">
-  {% if nav.tabs %}<nav class="pagetabs" aria-label="{{ nav.group_label }} pages">{% for t in nav.tabs %}<a href="{{ t.href }}" {% if t.current %}aria-current="page"{% endif %}>{{ t.label }}</a>{% endfor %}</nav>{% endif %}
+  {% block pagetabs %}{% if nav.tabs %}<nav class="pagetabs" aria-label="{{ nav.group_label }} pages">{% for t in nav.tabs %}<a href="{{ t.href }}" {% if t.current %}aria-current="page"{% endif %}>{{ t.label }}</a>{% endfor %}</nav>{% endif %}{% endblock %}
   {% block content %}{% endblock %}
 </main>
 </div>
