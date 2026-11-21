@@ -13,7 +13,7 @@ A **Report on** picker lists every organization and project you can read, groupe
 
 Three tabs (`#findings`, `#hosts`, `#email`):
 
-- **Findings report**: **PDF report** (summary, every finding with its evidence and remediation) or **CSV spreadsheet** (one row per finding). A switch includes closed findings (fixed, accepted risk, false positive).
+- **Findings report**: **PDF report** (a penetration-test style report: executive summary, summary of findings, one write-up per serious issue, methodology, appendices) or **CSV spreadsheet** (one row per finding). A switch includes closed findings (fixed, accepted risk, false positive).
 - **Hosts report**: **PDF report** (summary and host table), **CSV spreadsheet** (heat, score, findings, technologies, owner), or **Scope list for a testing company**, the existing **Export all hosts** dialog, which holds no findings, notes, owners or scores.
 
 The **Email reports** tab is described [below](#email-reports).
@@ -24,7 +24,7 @@ The **Email reports** tab is described [below](#email-reports).
 
 | Format | For | What it holds |
 | --- | --- | --- |
-| Findings PDF | Executives, auditors, clients | The report described in [Front end](FRONTEND.md#pdf-reports): cover, executive summary, hosts, one section per finding, hygiene, exposed secrets, method and validity |
+| Findings PDF | Executives, auditors, clients | The report described in [Front end](FRONTEND.md#pdf-reports): cover, contents, executive summary, summary of findings (one numbered row per issue, by severity), one write-up per critical, high or medium issue with every affected host, scope and methodology, and appendices (low and informational issues, asset inventory, exposed secrets, closed findings) |
 | Hosts PDF | The same readers, when the question is "what do we have exposed" | Cover, summary (hosts on fire, smoke and ice, clean hosts, hosts found in the last 30 days, the most common technologies and open ports), the host table, method and validity. No finding, hygiene or secret sections; each host shows how many open findings it has |
 | Findings CSV | Spreadsheets and ticket imports | One row per finding: kind, heat, severity, title, CVE, CVSS, known exploited, host, host alias, project, organization, status, assignee, basis, fixed in, first seen, last seen, link to the Findings page |
 | Hosts CSV | Spreadsheets | One row per machine (names on the same addresses are one host): host, alias, also answers to, IP addresses, open ports, technologies, heat, score, open findings, owner, criticality, project, organization |
