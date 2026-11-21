@@ -223,6 +223,8 @@ def match_heat(match, capped=True):
         return manual
     cve = match.cve_entry
     policy = heat_policy()
+    if capped and match_policy.is_reported_only(match):
+        return ICE  # a third party's word for the version (runZero) is a candidate to check: ice until a first-party read or a check confirms it
     if policy != LEGACY_POLICY:
         if match.distro_status == "patched" or match_policy.version_unknown(match) or not is_hot(cve.kev, cve.exploit_db):
             return ICE
@@ -273,6 +275,7 @@ REASON_RANGE_READ = "only a range of the appliance's builds could be read from o
 REASON_BUNDLED = "the bundled component's version is only inferred from the product release: kept for review"
 REASON_WINDOWS_PATCH = "the Windows release is known, but its patch level cannot be read from outside: kept for review"
 REASON_NOT_HOT = "not on the KEV and no known exploit"
+REASON_REPORTED_ONLY = "the version was only reported by a third party: ice until our own read or a check confirms it"
 
 
 def heat_reason(match, heat=None):
@@ -298,6 +301,8 @@ def heat_reason(match, heat=None):
         if match_policy.evidence_flag(match.evidence, 'bundled_inferred'):
             return REASON_BUNDLED
         return REASON_RUNTIME_UNKNOWN if match_policy.evidence_flag(match.evidence, 'runtime_unknown') else REASON_VERSION_UNKNOWN
+    if heat == ICE and match_policy.is_reported_only(match) and (heat_policy() == LEGACY_POLICY or is_hot(cve.kev, cve.exploit_db)):
+        return REASON_REPORTED_ONLY
     capped_why = triage_cap_reason(match, heat)
     if heat_policy() == LEGACY_POLICY:
         why = "legacy heat policy: KEV, a public exploit, CVSS and EPSS"
@@ -333,6 +338,8 @@ def match_heat_rank_expr(capped=True):
              When(distro_status="patched", then=Value(HEAT_RANK[ICE])),
              When(version_unknown_q(), then=Value(HEAT_RANK[ICE]))]
     if capped:
+        from cveFeed.match_policy import reported_only_q
+        whens.append(When(reported_only_q(), then=Value(HEAT_RANK[ICE])))  # ``match_heat``: a reported-only version is ice
         whens.append(When(triage_clean_q(match=True), then=Value(HEAT_RANK[ICE])))
     if heat_policy() != LEGACY_POLICY:
         hot = hot_q("cve_entry__")

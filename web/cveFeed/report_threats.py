@@ -28,6 +28,7 @@ from django.db.models.fields.json import KT
 
 from cveFeed import closure, correlation, counts, mailer, report_data, tech_coverage
 from cveFeed.report_data import clean
+from cveFeed.source_versions import SHODAN_PROVIDER
 
 TOP_DEFAULT, TOP_CEILING = 6, 12
 CANDIDATES = 200  # CVEs read for a period
@@ -139,6 +140,7 @@ def impact(ids, cves, sightings=None):
         return out
     rows = list(CVEMatch._base_manager.filter(cve_entry_id__in=list(out), subdomain__target_domain__project_id__in=list(ids)).filter(correlation.latest_scan_q('subdomain__'))
                 .exclude(ai_verdict='not_affected').exclude(remediation_status__in=closure.CLOSED).exclude(triage__classification__in=FALSE_POSITIVES)
+                .exclude(Q(evidence__has_key='reported_by') & Q(evidence__reported_by=SHODAN_PROVIDER))  # a Shodan InternetDB reading is a lead, never a host that matches (cveFeed.source_versions)
                 .values_list('cve_entry_id', 'subdomain_id', 'template_result', 'triage__validation_status'))
     keys = dict(counts.with_host_key(Subdomain._base_manager.filter(pk__in={r[1] for r in rows})).values_list('pk', 'host_key')) if rows else {}
     for cve_id, sub_id, result, validation in rows:

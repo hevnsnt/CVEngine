@@ -218,6 +218,19 @@ def is_version_only(match):
                                  getattr(match, 'distro_status', '') or '', _validation_status(match))
 
 
+def is_reported_only(match):
+    """Whether a CVEMatch rests only on a third-party reported reading (``evidence.reported``: runZero's service or operating system version, never
+    Shodan's, which matches nothing) with no hard evidence and no first-party read behind it (a first-party reading of the same product replaces
+    the reported one in correlation, so the evidence says ``reported`` no more). It is a candidate to check, held at ice until a first-party read
+    or a check confirms it (``threat.match_heat``)."""
+    return evidence_flag(getattr(match, 'evidence', None), 'reported') and is_version_only(match)
+
+
+def reported_only_q(prefix=''):
+    """The database form of ``is_reported_only``."""
+    return evidence_flag_q('reported', prefix) & version_only_q(prefix)
+
+
 def version_only_q(prefix=''):
     """The database form of ``is_version_only``."""
     return ~hard_evidence_q(prefix)

@@ -1,7 +1,9 @@
 """The WordPress assessment: what the server does around a Sentinel's WordPress scan.
 
 Every host that shows any sign of WordPress is checked: a technology tag, a header or page signature, the login page, the REST API,
-the web archive's memory of the host, plugin or theme paths in crawled URLs, an earlier probe. A cheap read-only probe
+the web archive's memory of the host, plugin or theme paths in crawled URLs, an earlier probe. A product Shodan's InternetDB named
+(``cveFeed.source_versions.wordpress_leads``) is a lead, not a sign: it only moves the host to the front of the probe, and the probe's answer rules
+it in or out (``not_wordpress`` ends the lead). A cheap read-only probe
 (``cveFeed.probes``, probe ``wordpress-detect``) confirms the signature with browser-like requests, follows apex and www redirects, and
 records an edge that challenged the scanner instead of concluding "not WordPress". Then a Sentinel scans every candidate and every name of
 a grouped host that probes positive (task kind ``wpscan``, ``agentapi.sentinel_dispatch.wrap_wpscan_runner``): this server never runs the scan
@@ -674,7 +676,7 @@ def _ask_wordpress(scan, chosen):
     return results
 
 
-def detect(scan, subs, candidates, force=False, only=None):
+def detect(scan, subs, candidates, force=False, only=None, leads=()):
     """Run the read-only WordPress probe on the candidates, their grouped names and, within the cap, the other web hosts; record each result.
     The probe is a Sentinel's (``http_probe``, probe ``wordpress-detect``): this server sends nothing to a site. Returns ``{host: first observation}``
     for the hosts probed now. ``ScannerUnavailable`` (no Sentinel can take it) propagates: nothing is recorded and every site stays due."""
@@ -683,7 +685,10 @@ def detect(scan, subs, candidates, force=False, only=None):
     by_name = {s.name.lower(): s for s in subs}
     siblings = siblings_of(subs, set(candidates))
     web = {name for name, s in by_name.items() if route_auth.web_bases(s)}
-    order = list(dict.fromkeys(sorted(set(candidates) & web) + sorted(siblings & web) + sorted(web)))[:max_probe_hosts()]
+    # a host Shodan's InternetDB named WordPress on (``source_versions.wordpress_leads``: not on a shared edge, not already ruled out by an earlier
+    # probe) is asked right after the hosts with a sign of WordPress of our own: a lead for this probe, never a candidate to scan unless the probe
+    # reads WordPress there
+    order = list(dict.fromkeys(sorted(set(candidates) & web) + sorted(set(leads) & web) + sorted(siblings & web) + sorted(web)))[:max_probe_hosts()]
     if only is not None:
         order = [h for h in order if h in only]
     covered = set() if force else ledger.fresh(PROBE_SERVICE, order, project)
@@ -745,7 +750,8 @@ def run_wpscan(scan_id, runner=None, force=False, internal=False, only=None, att
     probed, probe_waiting = {}, None
     if not internal:
         try:
-            probed = detect(scan, subs, signals, force=force, only=only)
+            from cveFeed import source_versions
+            probed = detect(scan, subs, signals, force=force, only=only, leads=source_versions.wordpress_leads(subs))
         except resources.ScannerUnavailable as exc:  # no Sentinel can ask the sites: nothing is recorded, they stay due, and none is read as not WordPress
             probe_waiting = exc
             logger.warning('WordPress detection of scan %s is waiting for a scanner: %s', scan_id, exc)

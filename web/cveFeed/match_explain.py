@@ -274,6 +274,9 @@ def _where_version(match, key):
             return 'the version in the Server header'
         if ev.get('version_source') == 'body':
             return 'the version the library file states'
+        if ev.get('reported'):
+            from cveFeed import source_versions
+            return f'the version {source_versions.PROVIDER_LABELS.get(ev.get("reported_by"), "a third-party data source")} reported'
         return 'the version the technology fingerprint read'
     if match.source == 'wp-plugin':
         return 'the version the plugin\'s readme states'
@@ -632,6 +635,10 @@ def _found(match, family, key, label, version):
         port = confirm_guide._port(ev.get('port'))
         proto = 'udp' if str(ev.get('protocol') or '').lower() == 'udp' else 'tcp'
         head = (f'The service on port {port}/{proto} says it is {named}{on}.' if port else f'A service on this host says it is {named}{on}.')
+    elif match.source == 'tech' and ev.get('reported'):
+        from cveFeed import source_versions
+        who = source_versions.PROVIDER_LABELS.get(ev.get('reported_by'), 'a third-party data source')
+        head = f'{who} reports {named}{on}. cvENGINE\'s own checks have not read it on this host.'
     elif match.source == 'tech':
         if 'Server header' in _where_version(match, key):
             head = f'The web server says it is {named}{on}.'
