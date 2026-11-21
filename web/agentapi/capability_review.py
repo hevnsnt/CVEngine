@@ -22,6 +22,7 @@ def route_key(method, pattern):
 # (verdict, reason, [MCP tool names and REST route keys])
 REVIEW = [
     ('refuse', 'a person decides this in the web interface', [
+        'PUT reporting/zero-wire',  # switches a fetch of a public feed on; the handler refuses a token
         'apply_tuning_suggestion', 'revert_tuning_decision', 'release_tuning_pin',
         'POST tuning/decisions/{decision_id}/apply', 'POST tuning/decisions/{decision_id}/revert', 'POST tuning/release',
         'remove_exclusion', 'DELETE P/exclusions/{host}',

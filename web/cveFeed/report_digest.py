@@ -8,11 +8,12 @@ inbox as inert text. Links start with ``mailer.base_url()`` (never a request's H
 ``render`` turns the data into a subject, a plain-text part and an HTML part for one recipient. The HTML is table-based with inline styles, no
 image, font or tracking pixel, and stays far under the 100 KB at which Gmail clips a message.
 
-The ``threats`` list ("This week's most important vulnerabilities") is empty until ``cveFeed.report_threats`` fills it; the template shows the section
-only when it is not empty. An entry is ``{source: 'zero_wire' | 'kev' | 'critical', title, summary, link, badges: [str], cve_ids: [str],
+The ``threats`` list ("This week's most important vulnerabilities") is filled by ``cveFeed.report_threats``; with none, the section still shows
+``threats_empty`` so readers know it was checked. ``threats_note`` is its attribution footnote. An entry is ``{source: 'zero_wire' | 'kev' | 'critical', title, summary, link, badges: [str], cve_ids: [str],
 impact_line, impact: 'matched' | 'product' | 'none', fixed_in: [str]}``: ``source`` says where it came from, ``link`` is where its title goes (a
 briefing or the CVE catalog) and ``summary`` is a short plain sentence.
 """
+import logging
 from datetime import datetime, timezone as dt_timezone
 from urllib.parse import quote
 
@@ -20,7 +21,7 @@ from django.template.loader import render_to_string
 from django.urls import reverse
 
 from agentapi import services as svc
-from cveFeed import mailer, report_data, report_schedule
+from cveFeed import mailer, report_data, report_schedule, report_threats
 from cveFeed.report_data import HEAT_NAMES, clean
 
 TOP_FINDINGS = 5
@@ -136,6 +137,11 @@ def build(scope, start, end, cadence, now, tz='UTC'):
     closed, _ = report_data._sources(scope.svc_scope(), True)
     new_findings = sum(_in_period(sources[key], field, start, end).count() for key, field in SOURCE_FIELD.items())
     fixed = sum(_in_period(closed[key].filter(remediation_status='fixed'), 'remediation_updated_at', start, end).count() for key in SOURCE_FIELD)
+    try:
+        threats, note = report_threats.top(scope, start, end)
+    except Exception:  # noqa: BLE001 - the section is a bonus: a failure in it never stops the email
+        logging.getLogger(__name__).warning('could not build the most important vulnerabilities', exc_info=True)
+        threats, note = [], ''
     now_numbers = _current(scope)
     before = _previous(scope, start)
     monthly = cadence == 'monthly'
@@ -151,7 +157,8 @@ def build(scope, start, end, cadence, now, tz='UTC'):
         'project_names': [clean(n, 80) for n in sorted(p.name for p in scope.projects)],
         'period': {'start': start.isoformat(), 'end': end.isoformat(), 'label': label,
                    'short': label if label != report_schedule.period_label(start, end, tz) else report_schedule.short_label(start, end, tz)},
-        'headline': headline, 'threats': [], 'top_findings': _top_findings(scope, sources, base, now),
+        'headline': headline, 'threats': threats, 'threats_note': note, 'threats_empty': '' if threats else
+        f"No newly exploited or critical vulnerabilities were announced this {'month' if monthly else 'week'}.", 'top_findings': _top_findings(scope, sources, base, now),
         'new_hosts': _new_hosts(scope, start, end), 'hygiene': _hygiene(scope, sources), 'links': _links(scope, base),
         'instance': mailer._instance(mailer.row()), 'as_of': f'{local_end:%b} {local_end.day}, {local_end:%H:%M} ({tz})',
     }
@@ -207,7 +214,7 @@ def render(digest, sub=None, recipient='', unsubscribe_url='', attachment=None, 
     or None for none."""
     h = digest['headline']
     tiles = _tiles(digest)
-    context = {'d': digest, 'tiles': tiles, 'tile_rows': [tiles[i:i + 2] for i in range(0, len(tiles), 2)], 'threats_note': digest.get('threats_note', ''), 'sub_name': clean(sub.name, 80) if sub is not None else digest['title'],
+    context = {'d': digest, 'tiles': tiles, 'tile_rows': [tiles[i:i + 2] for i in range(0, len(tiles), 2)],  'sub_name': clean(sub.name, 80) if sub is not None else digest['title'],
                'owner': clean(owner_name, 80), 'unsubscribe_url': unsubscribe_url, 'attachment': attachment, 'preheader': _preheader(digest),
                'fire': h['heat']['fire'], 'smoke': h['heat']['smoke'], 'ice': h['heat']['ice'], 'colours': HEAT_COLOURS,
                'period_word': 'month' if digest['cadence'] == 'monthly' else 'week', 'cadence_upper': digest['cadence'].upper()}

@@ -2199,6 +2199,46 @@ class ReportDelivery(models.Model):
         ordering = ["-id"]
 
 
+class ReportingSettings(models.Model):
+    """Single-row switches of the Reporting page (an App Admin sets them there). ``zero_wire_enabled``: fetch Cloudflare Radar's Zero Wire briefings every
+    six hours (``cveFeed.zero_wire``) so email reports can name them; on by default. With no row stored the defaults apply."""
+
+    zero_wire_enabled = models.BooleanField(default=True)
+    zero_wire_synced_at = models.DateTimeField(null=True, blank=True)
+    zero_wire_error = models.CharField(max_length=200, blank=True, default="")  # why the last fetch failed; empty after a good one
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    @classmethod
+    def current(cls):
+        return cls.objects.first() or cls()
+
+    def __str__(self):
+        return f"Reporting settings (Zero Wire {'on' if self.zero_wire_enabled else 'off'})"
+
+
+class ZeroWireBriefing(models.Model):
+    """One briefing of Cloudflare Radar's Zero Wire feed, as ``cveFeed.zero_wire`` keeps it: the title, the link, a short plain summary and the CVE ids
+    and tags the briefing names. Only these: the briefing's own HTML is never stored or shown. All of it is third-party text, escaped wherever it is shown."""
+
+    guid = models.CharField(max_length=200, unique=True)
+    slug = models.CharField(max_length=100)
+    title = models.CharField(max_length=200)
+    link = models.CharField(max_length=300)  # always https://radar.cloudflare.com/zero-wire/<slug>
+    published_at = models.DateTimeField()
+    summary = models.TextField(blank=True, default="")  # the feed's short description, tags removed, at most 400 characters
+    cve_ids = models.JSONField(default=list, blank=True)  # at most 30
+    categories = models.JSONField(default=list, blank=True)  # at most 15, each at most 40 characters
+    fetched_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["-published_at"], name="zerowire_published_idx")]
+        ordering = ["-published_at", "-id"]
+
+    def __str__(self):
+        return self.title
+
+
 class OpenvasSettings(models.Model):
     """Single-row state of the optional OpenVAS (Greenbone) add-on (see cveFeed.openvas_scan): the App Admin's switch, the GMP login of the
     sidecar and what the worker last saw of it. Off by default; while it is off nothing contacts the sidecar and the beat task is disabled.

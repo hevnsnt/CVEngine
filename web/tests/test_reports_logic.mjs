@@ -104,3 +104,10 @@ test('a server message is shown beside the field it names', () => {
   assert.equal(L.fieldOfError('name is required'), 'name');
   assert.equal(L.fieldOfError('audit role is read only'), '');
 });
+
+test('a link is shown only for an http or https address, and the impact has a tone', () => {
+  assert.equal(L.safeLink('https://radar.cloudflare.com/zero-wire/x'), 'https://radar.cloudflare.com/zero-wire/x');
+  assert.equal(L.safeLink('http://cve.example.org/cve/cves/?id=CVE-2026-1'), 'http://cve.example.org/cve/cves/?id=CVE-2026-1');
+  for (const bad of ['javascript:alert(1)', 'data:text/html,x', '//evil.example', '', null, 'https://a b']) assert.equal(L.safeLink(bad), '', String(bad));
+  assert.deepEqual(['matched', 'product', 'none', ''].map(L.impactTone), ['bad', 'warn', '', '']);
+});

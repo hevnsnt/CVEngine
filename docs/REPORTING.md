@@ -51,6 +51,8 @@ An email report sends a weekly or monthly summary of one project or one whole or
 
 **What the email says**, in order: the scope and period; **At a glance** (open findings and exposed hosts with the change since the last report, new findings and fixed findings in the period, and the fire, smoke and ice counts of CVE matches; the first report says there is nothing to compare with yet); the **Top findings** (up to five, hottest first, each linking into cvENGINE); **New hosts** and hosts that went away; **Hygiene** (open issues, certificates expiring within 30 days); a line about the full report (attached, over the size limit with a link, or could not be attached); and a button into cvENGINE. The HTML is table-based with inline styles, readable in a dark theme and on a phone, with no image or tracking, and always under 100 KB so Gmail does not clip it; a plain-text part says the same. Everything that came from a scanned host is escaped.
 
+**Most important vulnerabilities.** The section of the email called *This week's most important vulnerabilities* (this month's for a monthly report) is also at the top of the Email reports tab for the selected scope, and is `GET reporting/threats` and the MCP tool `get_threat_digest`. See [below](#the-most-important-vulnerabilities).
+
 **Schedule.** Weekly (a weekday) or monthly (a day from 1 to 28, where day 1 covers the whole previous month), a time on the quarter hour and an IANA time zone. A time that does not exist on a spring-forward day is sent the hour after. The period of an email is the week or month that ends at its send time.
 
 **Never sent twice.** The next slot is claimed before the email is made (a compare-and-set), every period has one delivery row, and a send interrupted part-way (a worker that died) is marked *unknown* after two hours and is never retried by itself. After an outage only the latest period is sent, once; missed weeks are not made up. A refused recipient address is final. A failure that cannot have delivered the email (the connection, a time-out) is retried for the recipients it failed for, after 30 minutes and after 2 hours, then given up. The result is on the card: *Sent Nov 17, 08:00 to 3 recipients*, *1 of 3 failed: the mail server refused the recipient address*, *Skipped: outgoing mail is not set up*, *Never sent*.
@@ -72,6 +74,24 @@ An email report sends a weekly or monthly summary of one project or one whole or
 
 An organization's email reports are managed by an Org Admin or App Admin only, so they always cover the whole organization. Every change is audited (`report.subscription.*`), with the recipients.
 
+## The most important vulnerabilities
+
+Built from what cvENGINE already holds, with no AI model and no scan: nothing in it is asked of a model or run, and it never contacts a host.
+
+**What is picked**, newest first within each group, at most `CVENGINE_DIGEST_TOP_VULNS` (6; 1 to 12):
+
+1. **Zero Wire briefings** published in the period. Cloudflare Radar's [Zero Wire](https://radar.cloudflare.com/zero-wire) is a public feed of short security briefings. cvENGINE reads its RSS feed every six hours (`radar.cloudflare.com/zero-wire/feed`, the same fixed-address fetch, time-outs and proxy settings as the other feeds, at most 2 MB and 50 items) and keeps only each briefing's title, link, a one-sentence summary (the action to take), the CVE ids it names and its tags. The briefing's own text is never stored or shown, a link that is not under `https://radar.cloudflare.com/zero-wire/` is dropped, an XML document with a type declaration or entities is refused, and no feed text is ever sent to an AI model or run: it is data, escaped wherever it is shown. It is **on by default**; an App Admin switches it off with the checkbox at the top of the Email reports tab (nothing is fetched while it is off). A failed read is shown there and retried at the next run; emails use whatever is stored.
+2. **CVEs** that CISA (or VulnCheck) added to its Known Exploited Vulnerabilities catalog in the period, and CVEs published in the period with a CVSS of 9.0 or more and a public exploit or a high exploitation probability, that no picked briefing already names. A CVE that only works from the host itself is left out. They are ranked by what they reach (hosts that match, then hosts that run the product), known ransomware use, CVSS and the date added.
+
+**How many of your hosts it reaches** is two numbers in distinct machines (two names on the same addresses are one host):
+
+- *N of your hosts match by version*: open CVE matches in the scope that are not closed, not ruled out by the AI and not false positives; *(M confirmed by a check)* when a check reproduced it.
+- *K more run <product>, version unknown*: hosts with a technology or an open-port product the correlation connects to the CVE and no version read for it, that do not already match. A product with no version read can be neither ruled in nor out, so it is counted apart, never as a match.
+
+A briefing that names CVEs we hold is counted through them (merged per host). One that names none is matched by its product tags (*N of your hosts run nginx*, through the same product-name aliases correlation uses; class tags such as RCE, Memory corruption, CMS or Runtime are ignored); a product nobody runs says *No host in <scope> is known to run <product>.* A period with nothing new says so, so readers know it was checked.
+
+Footnotes say where the text comes from: *Briefings from Cloudflare Radar Zero Wire (radar.cloudflare.com/zero-wire); summaries quoted from the feed; host counts from cvENGINE's own scans.* and, for CVEs, which catalog they were picked from.
+
 ## Who may ask, and who may download
 
 A report is a read: any role that can read the scope may ask for one, audit included, and so may a read-only API token. Only the person who asked can download a report, for 24 hours (`CVENGINE_REPORT_TTL_HOURS`); anyone else, an App Admin included, gets the same `404` as for a report that does not exist. Every request is written to the audit log with its scope, kind and format. Limits on how many reports one person or the whole server may have in progress are in [Configuration](CONFIGURATION.md#pdf-reports).
@@ -86,10 +106,11 @@ A report is a read: any role that can read the scope may ask for one, audit incl
 | Download it | `GET .../reports/{id}/download` (`application/pdf` or `text/csv`) | over REST |
 | What you can report on | `GET reporting/scopes` | `list_report_scopes` |
 | Your recent reports | `GET reporting/reports` | |
+| Most important vulnerabilities | `GET reporting/threats`; `GET/PUT reporting/zero-wire` (the switch: an App Admin in the web interface only) | `get_threat_digest` |
 | Email reports | `GET/POST report-subscriptions`, `GET/PATCH/DELETE report-subscriptions/{id}`, `POST .../{id}/test`, `GET .../{id}/preview`, `GET .../{id}/deliveries`, `GET reporting/digest-preview` | `list_report_subscriptions`, `get_report_subscription`, `create_report_subscription`, `update_report_subscription`, `delete_report_subscription`, `send_report_subscription_test`, `preview_report_subscription`, `list_report_deliveries` |
 
 The details, with the limits and the errors, are in [Agent API](AGENT-API.md#pdf-reports) and [Agent API, Email reports](AGENT-API.md#email-reports).
 
 ## Code
 
-`agentapi/report_scope.py` (the scope and its access rules), `cveFeed/report_export.py` (the queue, the job and the download), `cveFeed/report_data.py` and `cveFeed/templates/cveFeed/report.html` (what a PDF prints), `cveFeed/report_csv.py` (the CSV), `agentapi/reports.py` (REST and MCP), `cveFeed/report_digest.py` and `cveFeed/templates/cveFeed/email/` (the email's content and look), `cveFeed/report_digests.py` and `cveFeed/report_schedule.py` (sending and the schedule), `agentapi/report_subscriptions.py` (REST and MCP), `cveFeed/report_digest_views.py` (unsubscribe), `static/cve/reports.js`, `report-email.js` and `reports-logic.js` (the page). Tests: `tests/test_reporting.py`, `tests/test_report_subscriptions.py`, `tests/test_report_pdf.py`, `tests/test_reports_logic.mjs`, `tests/test_reports_page.mjs`.
+`agentapi/report_scope.py` (the scope and its access rules), `cveFeed/report_export.py` (the queue, the job and the download), `cveFeed/report_data.py` and `cveFeed/templates/cveFeed/report.html` (what a PDF prints), `cveFeed/report_csv.py` (the CSV), `agentapi/reports.py` (REST and MCP), `cveFeed/report_threats.py` and `cveFeed/zero_wire.py` (the section and the feed; fixture `tests/fixtures/zero-wire-feed.xml`, tests `tests/test_report_threats.py`), `cveFeed/report_digest.py` and `cveFeed/templates/cveFeed/email/` (the email's content and look), `cveFeed/report_digests.py` and `cveFeed/report_schedule.py` (sending and the schedule), `agentapi/report_subscriptions.py` (REST and MCP), `cveFeed/report_digest_views.py` (unsubscribe), `static/cve/reports.js`, `report-email.js` and `reports-logic.js` (the page). Tests: `tests/test_reporting.py`, `tests/test_report_subscriptions.py`, `tests/test_report_pdf.py`, `tests/test_reports_logic.mjs`, `tests/test_reports_page.mjs`.

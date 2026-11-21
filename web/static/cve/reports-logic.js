@@ -164,6 +164,16 @@ export function statusPill(sub) {
   return ["Paused", "running"];
 }
 
+/** ``url`` when it is an http or https address (a link the server built, shown as a link), else "": never a script or data address. */
+export function safeLink(url) {
+  return /^https?:\/\/[^\s]+$/i.test(String(url || "")) ? String(url) : "";
+}
+
+/** The class of an impact sentence in the threats card: "bad" when hosts match, "warn" when only the product runs, else "" . */
+export function impactTone(impact) {
+  return impact === "matched" ? "bad" : impact === "product" ? "warn" : "";
+}
+
 /** The name a new email report starts with: "Weekly report: <scope>", "Monthly report: <scope>". */
 export function defaultName(cadence, scopeName) {
   return `${cadence === "monthly" ? "Monthly" : "Weekly"} report: ${scopeName}`;

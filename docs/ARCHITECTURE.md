@@ -57,6 +57,7 @@ Ubuntu 26.04, Python 3.14, Django 6.0, PostgreSQL 18, nmap 7.993, and Go 1.27 fo
 | `HostInventory`, `HostInventoryReport` | What a host reported about itself with the reporter script, one row per machine, and its summarised report history ([HOST-INVENTORY.md](HOST-INVENTORY.md)) |
 | `ServiceRun` | The last finished run of each scanner on each asset |
 | `ReportExport` | One requested report: who asked, for what (a project or an organization, a findings or a hosts report, as a PDF or a CSV file), its state and the random file name, until it expires ([REPORTING.md](REPORTING.md)) |
+| `ZeroWireBriefing`, `ReportingSettings` | A Cloudflare Radar Zero Wire briefing as `cveFeed.zero_wire` keeps it (title, link, short summary, CVE ids, tags; never its HTML), and the single row of Reporting switches (Zero Wire on or off, last read, last error) ([REPORTING.md](REPORTING.md#the-most-important-vulnerabilities)) |
 | `ReportSubscription`, `ReportDelivery` | An email report (a project or a whole organization, recipients, schedule, owner, next send, last result) and each email it sent for one period or as a test, with the per-recipient outcome ([REPORTING.md](REPORTING.md#email-reports)) |
 | `AgentActivity`, `AIUsage` | The activity feed, and the AI call ledger ([AI-USAGE.md](AI-USAGE.md)) |
 | `Agent`, `AgentTask` | A registered agent (an API token that identified itself, including a Sentinel: `kind='scanner'`) and remediation/validation work leased to one |

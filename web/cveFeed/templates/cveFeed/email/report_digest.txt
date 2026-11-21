@@ -5,14 +5,16 @@ AT A GLANCE
 {% for t in tiles %}- {{ t.label }}: {{ t.value }}{% if t.delta %} ({{ t.delta }}){% endif %}
 {% endfor %}- CVE matches by heat: Fire {{ fire }}, Smoke {{ smoke }}, Ice {{ ice }}
 {% if not d.headline.compared %}{{ d.headline.compared_note }}
-{% endif %}{% if d.threats %}
+{% endif %}{% if d.threats or d.threats_empty %}
 THIS {{ period_word|upper }}'S MOST IMPORTANT VULNERABILITIES
 {% for t in d.threats %}- {{ t.title }}{% if t.badges %} [{{ t.badges|join:", " }}]{% endif %}
-{% if t.summary %}  {{ t.summary }}
+{% if t.cve_ids %}  {{ t.cve_ids|join:", " }}
+{% endif %}{% if t.summary %}  {{ t.summary }}
 {% endif %}{% if t.fixed_in %}  Fixed in {{ t.fixed_in|join:", " }}
 {% endif %}{% if t.impact_line %}  {{ t.impact_line }}
 {% endif %}  {{ t.link }}
-{% endfor %}{% if threats_note %}{{ threats_note }}
+{% empty %}{{ d.threats_empty }}
+{% endfor %}{% if d.threats_note %}{{ d.threats_note }}
 {% endif %}{% endif %}
 TOP FINDINGS
 {% for f in d.top_findings %}- [{{ f.heat|upper }}] {{ f.title }}
