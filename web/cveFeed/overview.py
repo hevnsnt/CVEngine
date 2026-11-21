@@ -173,7 +173,7 @@ def kpis(ids, live=None, now=None):
         if live.get('hosts') is not None:
             hosts[today] = live['hosts']
     ref = max(exposed, default=None)
-    tiles = [_tile('exposed', 'Exposed hosts', exposed, ref, f'of {hosts[ref]:,} hosts' if ref in hosts and hosts[ref] else '')]
+    tiles = [_tile('exposed', 'Externally facing hosts', exposed, ref, f'of {hosts[ref]:,} hosts' if ref in hosts and hosts[ref] else '')]
     needs = _metric(days, 'needs')
     ref = max(needs, default=None)
     tiles.append(_tile('needs', 'Needs action (Fire + Smoke)', needs, ref, f"{days[ref]['fire']:,} Fire, {days[ref]['smoke']:,} Smoke" if ref else ''))
@@ -201,13 +201,13 @@ def threat_sentence(group):
 
 
 def exposure_sentence(tile):
-    """"Internet-exposed hosts went from 26 to 55 since last Saturday.", or '' when there is nothing to compare or nothing moved."""
+    """"Externally facing hosts went from 26 to 55 since last Saturday.", or '' when there is nothing to compare or nothing moved."""
     if not tile or tile['delta'] in (None, 0) or tile['since'] is None:
         return ''
     base_day = date.fromisoformat(tile['since'])
     ref = date.fromisoformat(tile['as_of']) if tile.get('as_of') else timezone.localdate()
     was = tile['value'] - tile['delta']
-    return f"Internet-exposed hosts went from {was:,} to {tile['value']:,} since {since_words(base_day, ref)}."
+    return f"Externally facing hosts went from {was:,} to {tile['value']:,} since {since_words(base_day, ref)}."
 
 
 def host_counts(groups):
