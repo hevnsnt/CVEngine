@@ -668,7 +668,11 @@ def _rating_reason(issue):
         proof = {'Confirmed': f'a check reproduced it on {_plural(sum(1 for m in issue["members"] if m["confirmed"]), "host")}',
                  'Likely': 'the version is proven on the host but the flaw was not reproduced',
                  'Version match': 'it rests on the detected version only'}.get(issue['basis'], '')
-        text = f'{cvss} ({base} on its own); {exploited}; {proof}.'
+        by_score = LEVEL_LABELS[cve_base(top['cvss'], False)] if top['cvss'] is not None else ''
+        if top['kev'] and by_score and by_score != base:  # the KEV listing, not the score, makes it Critical: say so instead of "CVSS 5.7 (Critical)"
+            text = f'{cvss} ({by_score} by score, {base} because CISA lists it as exploited in the wild); {proof}.'
+        else:
+            text = f'{cvss} ({base} on its own); {exploited}; {proof}.'
         if level != base:
             why = ('the version is not proven and the flaw not reproduced' if issue['level'] == 'high' else
                    'it is not known to be exploited' if top['heat'] == 'ice' and issue['basis'] != 'Confirmed' else

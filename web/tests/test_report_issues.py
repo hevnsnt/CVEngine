@@ -53,6 +53,15 @@ class SeverityTests(SimpleTestCase):
         self.assertEqual(rate('cve', 'fire', 'critical', version_only=True), 'high')
         self.assertEqual(rate('cve', 'fire', 'critical', version_only=True, kev=True), 'critical')
 
+    def test_the_rating_reason_says_when_the_kev_listing_not_the_score_makes_it_critical(self):
+        member = {'cvss': 5.7, 'kev': True, 'exploit': True, 'confirmed': True, 'heat': 'fire', 'base': 'critical'}
+        issue = {'kind': 'cve', 'level': 'critical', 'basis': 'Confirmed', 'members': [member]}
+        text = report_data._rating_reason(issue)
+        self.assertNotIn('Critical on its own', text)
+        self.assertIn('CVSS 5.7 (Medium by score, Critical because CISA lists it as exploited in the wild)', text)
+        member.update(cvss=9.8)
+        self.assertIn('CVSS 9.8 (Critical on its own); listed by CISA as exploited in the wild', report_data._rating_reason(issue))
+
     def test_the_fixed_release_that_applies_is_on_the_hosts_branch(self):
         fixed = ['8.1.29', '8.2.20', '8.3.8']
         self.assertEqual(report_data._fix_for('8.1.2', fixed), '8.1.29')
