@@ -2,6 +2,11 @@
 
 cvENGINE is a fork of [reNgine](https://github.com/yogeshojha/rengine) 2.x. The history of reNgine up to the fork is in [its changelog](https://github.com/yogeshojha/rengine/blob/master/CHANGELOG.md).
 
+## Unreleased
+
+### Changed
+- **Rescan host is never told the queue is full: a person's rescan goes to the front of the queue.** Pressing **Rescan host** with 32 assessments in flight answered "host assessment queue is at capacity: 32 host assessments are queued or running across the installation (limit 32). Retry when some finish." A request from a person (**Rescan host**, `POST /api/v1/projects/{slug}/host-assessments`, the MCP `assess_host` tool) is no longer held to the caps on host assessments in flight (`host_assessment.enqueue`); those still bound the coverage top-up and the AI host review's recommendations. It is sent at the front of the discovery queue (`PERSON_PRIORITY`, the broker's first step, ahead of every assessment the top-up queued) and is never put off for the scans' share of the pool (`assess_host(front=True)`). Its pipeline's Sentinel tasks are offered before the top-up's (`sentinel_dispatch.PERSON_PRIORITY` 4, above fire, for a host run with `ScanHistory.initiated_by`; a full discovery a person started is not lifted). When the host already waits in the queue, the rescan does not make a second row: the queued row is moved to the front (`_to_front`: a fresh message becomes its task, it leaves its batch, it becomes the person's so its run is treated as theirs, and whichever message runs first takes it), and the host page offers **Rescan now** for a row the top-up queued instead of a disabled **Rescan queued**. A host already being scanned is left as it is. A person's row is marked by a new column, `HostAssessment.front` (`cveFeed` 0178, default false; a token start of the AI host review keeps its user on the record but is not at the front), which the API returns as `front`, and the reaper's redispatch keeps such a row at the front ([PIPELINE.md](docs/PIPELINE.md#keeping-scans-fast-and-polite)).
+
 ## v1.4.2 (2026-11-20)
 
 ### Added

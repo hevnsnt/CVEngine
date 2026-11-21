@@ -1049,6 +1049,7 @@ class HostAssessment(models.Model):
     host = models.CharField(max_length=500)
     source = models.CharField(max_length=20, default='manual')
     requested_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    front = models.BooleanField(default=False)  # a person asked for it (Rescan host): sent at the front of the queue, its Sentinel tasks first
     status = models.CharField(max_length=16, default='queued')  # queued | running | completed | inconclusive | failed | stopped
     scan = models.ForeignKey('startScan.ScanHistory', on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     celery_id = models.CharField(max_length=100, blank=True, default='')

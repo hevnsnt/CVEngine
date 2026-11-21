@@ -1046,7 +1046,8 @@ def _announce(scan, result, summary=True):
 
 @scanner_wait.requeues(_named_hosts)
 def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=False, source_scan_id=None,
-                      force=False, hygiene=False, assessment_id=None, by_person=False, assessment_ids=None, then=None, **stage_kwargs):
+                      force=False, hygiene=False, assessment_id=None, by_person=False, assessment_ids=None, then=None, initiated_by_id=None,
+                      **stage_kwargs):
     """Take a handful of new hosts of a target (certificate transparency found them between scans) through the same stages
     a discovery ends with: resolve and record them, then nmap, the database exposure check, the light nuclei pass, CVE
     correlation and the targeted nuclei pass. The ledger still dedupes each scanner per asset, so a host or IP covered
@@ -1105,6 +1106,7 @@ def run_host_pipeline(domain_id, names, resolver=None, celery_id=None, retest=Fa
         raise RuntimeError('no scan engine is configured')
     now = timezone.now()
     scan = ScanHistory.objects.create(domain=domain, scan_type=engine, start_scan_date=now, scan_status=QUEUED,
+                                      initiated_by_id=initiated_by_id if by_person else None,  # the person a host assessment is for: its Sentinel tasks go first
                                       results_dir='/usr/src/scan_results',
                                       tasks=[HOST_PIPELINE_TASK, RETEST_TASK] if retest else [HOST_PIPELINE_TASK],
                                       celery_ids=[celery_id] if celery_id else [])

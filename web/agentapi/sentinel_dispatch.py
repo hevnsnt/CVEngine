@@ -42,6 +42,7 @@ COMPLETION_CEILING = {'nmap': 900, 'naabu': 1020, 'nuclei_light': 900, 'nuclei_t
 # identity_check and page_read: no batch of theirs is bounded by one tool, so the wait is above the Sentinel's hard stop (watchdog 900 s + 300 s grace) and a minute: identity may run
 # 200 DNS questions at 5 s and 50 certificates at 3 s (1150 s), a page read 540 s of reads and one read of up to 600 s (tests.test_sentinel_time_limits).
 DEFAULT_CEILING = 900
+PERSON_PRIORITY = 4  # a Sentinel task of a host run a person asked for (Rescan host): above fire (3), smoke (2), ice (1) and the planner (0)
 # Added to a kind's ceiling for each target beyond the first (an address of a chunk, a template-pass target): a chunk of 64 addresses takes longer than one.
 # Only the kinds that take a chunk of targets are listed; any other adds nothing.
 PER_TARGET_SECONDS = {'nmap': 90, 'naabu': 150, 'nuclei_light': 20, 'nuclei_targeted': 30, 'nuclei_deep': 60, 'nuclei_validate': 15, 'ssh_probe': 20}
@@ -278,6 +279,16 @@ def capacity_flags(secret_ref):
     return {'builtin_only': bool(secret_ref), 'secret': bool(secret_ref)}
 
 
+def person_priority(scan, priority):
+    """``priority``, lifted to ``PERSON_PRIORITY`` for a stage of a host run a person asked for (``ScanHistory.initiated_by`` on a host pipeline run:
+    Rescan host, the REST and MCP host assessment), so a Sentinel takes its tasks before the top-up's. A full discovery a person started is not
+    lifted (it can hold many targets), nor a planner task (0)."""
+    if not priority or scan is None or not getattr(scan, 'initiated_by_id', None):
+        return priority
+    from cveFeed.discovery import HOST_PIPELINE_TASK
+    return max(priority, PERSON_PRIORITY) if HOST_PIPELINE_TASK in (getattr(scan, 'tasks', None) or []) else priority
+
+
 class _Dispatch:
     """One dispatched SentinelTask and its wait: the state ``dispatch_or_none`` keeps for a single task, as an object, so a stage that sends
     several chunks at once (``dispatch_many``) can wait for all of them in one loop. ``step`` is one look at a freshly read task row."""
@@ -287,6 +298,7 @@ class _Dispatch:
         from agentapi.models import SentinelTask
         from cveFeed import activity
         _refuse(project, kind, target, host, ips, scan)  # every task is made here: nothing is created for an address on the do-not-scan list
+        priority = person_priority(scan, priority)
         self.project, self.kind, self.scan, self.internal = project, kind, scan, internal
         self.capacity_flags = capacity_flags(secret_ref)  # signed-in work: only the built-in scanner's slots count, and only it may take the task; a discovery's keys: the ones that may be sent them
         self.siblings = siblings  # a callable for a fanned-out chunk: the other chunk tasks of the same stage, which a slot of this one's waits on
