@@ -170,17 +170,105 @@ class MembershipTests(Seeded):
 		self.assertTrue(all(r['project'] == 'sa' for r in data['results']))
 
 
+class HygieneTierTests(Seeded):
+	"""High hygiene: an expired certificate, one that expires within 7 days, a spoofable mail domain, a takeover-able dangling record and an exposed secret rank
+	after proven and known-exploited likely findings and ahead of the other likely ones; the rest of hygiene stays minor."""
+
+	def hygiene_row(self, host, check, severity, title='x', **kw):
+		sub = self.host(host)
+		HygieneFinding.objects.create(domain=self.da, host=host, check_name=check, severity=severity, title=title, **kw)
+		cache.clear()
+		return next(r for r in self.api('projects/sa/situations')[1]['results'] if r['host'] == host)
+
+	def test_what_counts_as_high_hygiene(self):
+		cases = [('exp.sa.test', 'tls_expired', 4, 'hygiene'), ('soon.sa.test', 'tls_expiring', 3, 'hygiene'), ('month.sa.test', 'tls_expiring', 2, 'minor'),
+				 ('dev.sa.test', 'tls_expired', 2, 'minor'),  # the hygiene rating lowered it (a development host): not a slip that costs anything now
+				 ('mail.sa.test', 'dmarc_missing', 3, 'hygiene'), ('nomail.sa.test', 'dmarc_missing', 1, 'minor'),  # no MX: rated low
+				 ('open.sa.test', 'spf_allow_all', 4, 'hygiene'), ('mon.sa.test', 'dmarc_none', 2, 'minor'), ('soft.sa.test', 'spf_softfail', 1, 'minor')]
+		for host, check, severity, lead in cases:
+			row = self.hygiene_row(host, check, severity)
+			self.assertEqual(row['lead'], lead, (host, check))
+			self.assertEqual(row['counts']['hygiene'], 1 if lead == 'hygiene' else 0, (host, check))
+
+	def test_a_dangling_record_is_high_hygiene_only_when_someone_can_take_it_over(self):
+		claimable, stale = self.host('claim.sa.test'), self.host('stale.sa.test')
+		self.finding(claimable, 3, 'Dangling CNAME Record', source='bbot')
+		self.finding(stale, 2, 'Dangling CNAME Record', source='bbot')  # medium: baddns's own rating, nobody is known to be able to claim it
+		cache.clear()
+		rows = {r['host']: r for r in self.api('projects/sa/situations')[1]['results']}
+		self.assertEqual((rows['claim.sa.test']['lead'], rows['claim.sa.test']['counts']['hygiene']), ('hygiene', 1))
+		self.assertEqual((rows['stale.sa.test']['lead'], rows['stale.sa.test']['counts']['exposure']), ('exposure', 1))
+		self.assertEqual(rows['claim.sa.test']['findings'][0]['tier'], 'hygiene')
+
+	def test_an_exposed_secret_stays_at_least_this_high(self):
+		row = next(r for r in self.api('projects/sa/situations')[1]['results'] if r['host'] == 'secret.sa.test')
+		self.assertEqual((row['lead'], row['counts']['hygiene'], row['counts']['exposure']), ('hygiene', 1, 0))
+		self.assertEqual(row['first_action'], 'Revoke the exposed secret and issue a new one')
+
+	def test_it_ranks_after_known_exploited_likely_and_ahead_of_the_other_likely(self):
+		self.hygiene_row('cert.sa.test', 'tls_expired', 4, 'Certificate for cert.sa.test:443 expired 39 days ago')
+		names = self.names()
+		self.assertLess(names.index('proven.sa.test'), names.index('cert.sa.test'))
+		self.assertLess(names.index('likely-kev.sa.test'), names.index('cert.sa.test'))
+		self.assertLess(names.index('cert.sa.test'), names.index('likely-hot.sa.test'))
+		self.assertLess(names.index('cert.sa.test'), names.index('db.sa.test'))
+
+	def test_a_host_with_both_ranks_by_its_best_class_and_leads_with_that_first_action(self):
+		both = self.host('both.sa.test')
+		self.match(both, self.exploit)  # likely, not known exploited
+		HygieneFinding.objects.create(domain=self.da, host='both.sa.test', check_name='tls_expired', severity=4, title='Certificate for both.sa.test:443 expired 3 days ago')
+		kev = self.host('kevboth.sa.test')
+		self.match(kev, self.kev)
+		HygieneFinding.objects.create(domain=self.da, host='kevboth.sa.test', check_name='tls_expired', severity=4, title='Certificate for kevboth.sa.test:443 expired 3 days ago')
+		cache.clear()
+		rows = {r['host']: r for r in self.api('projects/sa/situations')[1]['results']}
+		self.assertEqual(rows['both.sa.test']['lead'], 'hygiene')
+		self.assertEqual(rows['both.sa.test']['first_action'], 'Renew the certificate')
+		self.assertEqual(rows['both.sa.test']['counts']['likely'], 1)
+		self.assertIn('1 finding looks real', rows['both.sa.test']['narrative'])
+		self.assertEqual(rows['kevboth.sa.test']['lead'], 'likely')  # a known-exploited likely finding beats the slip
+		self.assertTrue(rows['kevboth.sa.test']['first_action'].startswith('Update nginx'))
+		self.assertIn('also has 1 high-priority hygiene issue', rows['kevboth.sa.test']['narrative'])
+		names = [r['host'] for r in self.api('projects/sa/situations')[1]['results']]
+		self.assertLess(names.index('kevboth.sa.test'), names.index('both.sa.test'))
+		self.assertLess(names.index('both.sa.test'), names.index('likely-hot.sa.test'))
+
+	def test_the_words_and_first_actions(self):
+		cert = self.hygiene_row('w1.sa.test', 'tls_expired', 4)
+		self.assertEqual(cert['first_action'], 'Renew the certificate')
+		self.assertIn('an expired certificate', cert['narrative'])
+		self.assertTrue(cert['headline'].startswith('Fix soon: an expired certificate'))
+		soon = self.hygiene_row('w2.sa.test', 'tls_expiring', 3)
+		self.assertEqual(soon['first_action'], 'Renew the certificate before it expires')
+		mail = self.hygiene_row('w3.sa.test', 'dmarc_missing', 3)
+		self.assertEqual(mail['first_action'], 'Publish SPF and DMARC records that reject spoofed mail')
+		self.assertIn('a mail domain that anyone can spoof', mail['narrative'])
+
+	def test_the_tier_filter_takes_hygiene(self):
+		self.hygiene_row('f1.sa.test', 'tls_expired', 4)
+		names = self.names(tier='hygiene')
+		self.assertIn('f1.sa.test', names)
+		self.assertIn('proven.sa.test', names)
+		self.assertNotIn('db.sa.test', names)  # exposure is below high hygiene
+		self.assertNotIn('hygiene.sa.test', names)
+		self.assertIn('db.sa.test', self.names(tier='exposure'))
+		self.assertNotIn('f1.sa.test', self.names(tier='likely'))
+
+
 class RankTests(Seeded):
 	def test_the_order(self):
-		self.assertEqual(self.names(), ['proven.sa.test', 'likely-kev.sa.test', 'likely-hot.sa.test', 'db.sa.test', 'dangling.sa.test',
-										'secret.sa.test', 'hygiene.sa.test'])
+		# proven; likely and known exploited; high hygiene (a takeover-able dangling record, an exposed secret); the other likely; exposure; minor
+		self.assertEqual(self.names(), ['proven.sa.test', 'likely-kev.sa.test', 'dangling.sa.test', 'secret.sa.test', 'likely-hot.sa.test', 'db.sa.test',
+										'hygiene.sa.test'])
 
 	def test_rank_numbers_and_reasons(self):
 		rows = self.api('projects/sa/situations')[1]['results']
 		self.assertEqual([r['rank'] for r in rows], list(range(1, len(rows) + 1)))
 		self.assertEqual(rows[0]['rank_reason'], 'Proven by a check, known exploited, internet-facing')
 		self.assertEqual(rows[1]['rank_reason'], 'Likely real, known exploited, internet-facing')
-		self.assertEqual(rows[2]['rank_reason'], 'Likely real, internet-facing')
+		self.assertEqual(rows[2]['rank_reason'], 'High-priority hygiene, internet-facing')
+		self.assertEqual(rows[4]['rank_reason'], 'Likely real, internet-facing')
+		self.assertEqual([r['lead'] for r in rows], ['proven', 'likely', 'hygiene', 'hygiene', 'likely', 'exposure', 'minor'])
 		self.assertEqual(rows[-1]['rank_reason'], 'Lower priority only, internet-facing')
 		for r in rows:
 			self.assertLess(len(r['rank_reason']), 70)

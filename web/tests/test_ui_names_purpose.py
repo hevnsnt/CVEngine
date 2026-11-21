@@ -44,6 +44,9 @@ class OneNamePerPageTests(TestCase):
 		for label, href in rail(html):
 			page = self.get(self.analyst, href)
 			heading, _ = h1_and_sub(page)
+			if label == 'Overview':  # its title line is the status sentence about your hosts (cveFeed.overview): the page is named by its current tab and its <title>
+				heading = next((t for _, current, t in tabs(page) if current), '')
+				self.assertIn('<title>CVEngine · Overview', page)
 			self.assertEqual(heading, label, (href, heading, label))
 			own = [t for _, _, t in tabs(page)]
 			if own:
@@ -94,12 +97,13 @@ class PurposeLineTests(TestCase):
 		cls.proj = Project.objects.create(name='Alpha', slug='alpha', insert_date=timezone.now(), org=cls.org)
 		cls.root = User.objects.create_superuser('pl-root', 'root@example.test', 'pw-12345-long')
 
-	def test_the_overview_has_a_visible_title_and_a_sentence(self):
+	def test_the_overview_leads_with_a_visible_status_sentence_and_names_itself_by_its_tab(self):
+		"""The Overview's h1 is the status headline (a template filled from counts, cveFeed.overview), with its sentence under it; its name is the current tab of the head row and its title."""
 		html = client_for(self.root).get('/cve/?project=alpha&skip=1').content.decode()
 		self.assertNotRegex(html, r'<h1 class="sr">')
-		heading, sub = h1_and_sub(html)
-		self.assertEqual(heading, 'Overview')
-		self.assertGreater(len(sub), 40)
+		self.assertRegex(html, r'<h1 id="status-h" class="ov-headline">[^<]+\.</h1>')
+		self.assertIn('id="status-sub"', html)
+		self.assertEqual([t for _, current, t in tabs(html) if current], ['Overview'])
 		self.assertIn('<title>CVEngine · Overview', html)
 
 	def test_every_list_page_says_what_it_is_for(self):
@@ -159,7 +163,7 @@ class PurposeCopyTests(SimpleTestCase):
 					with open(os.path.join(root, name), encoding='utf-8') as f:
 						for m in re.finditer(r'<p class="sub"[^>]*>(.*?)</p>', f.read(), re.S):
 							found.setdefault(name, []).append(m.group(1))
-		for must in ('graph.html', 'cve_explorer.html', 'agents.html', 'scanners.html', 'sentinels.html', 'project_sentinels.html', 'onboarding.html', 'settings.html', 'dashboard.html', 'how.html'):
+		for must in ('graph.html', 'cve_explorer.html', 'agents.html', 'scanners.html', 'sentinels.html', 'project_sentinels.html', 'onboarding.html', 'settings.html', 'how.html'):  # the Overview's sentence is the status block's, one sentence by construction (tests/test_overview.py)
 			self.assertIn(must, found)
 		self.assertGreaterEqual(len(found), 15)
 		for name, subs in found.items():
@@ -181,11 +185,11 @@ class PurposeCopyTests(SimpleTestCase):
 	def test_the_matches_line_does_not_claim_a_confirmation_the_product_does_not_do(self):
 		self.assertNotRegex(SECTION_PURPOSE['matches'] + ALL_PROJECTS_PURPOSE['matches'], r'(?i)confirm')
 
-	def test_the_overview_line_is_one_sentence(self):
+	def test_the_overview_headline_before_the_first_answer_is_one_sentence(self):
 		html = read_template('dashboard.html')
-		sub = re.search(r'<p class="sub">(.*?)</p>', html, re.S).group(1)
-		self.assertEqual(sub.count('.'), 1, sub)
-		self.assertTrue(sub.endswith('.'), sub)
+		headline = re.search(r'<h1 id="status-h"[^>]*>(.*?)</h1>', html, re.S).group(1)
+		self.assertEqual(headline.count('.'), 1, headline)
+		self.assertTrue(headline.endswith('.'), headline)
 
 
 def read_template(name):

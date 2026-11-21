@@ -14,6 +14,7 @@ from django.db.models import Count
 from django.http import JsonResponse
 from django.http import Http404, HttpResponseBadRequest
 from django.shortcuts import redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET, require_POST
@@ -537,9 +538,22 @@ def dashboard(request):
         slug = ALL_PROJECTS
     else:
         slug = projects[0] if projects else None
+    shell = ui_context(request, 'dashboard', slug)
     return render(request, 'cveFeed/dashboard.html', {
-        'ai_ready': bool(cfg and cfg.enabled), **ui_context(request, 'dashboard', slug),
+        'ai_ready': bool(cfg and cfg.enabled), 'email_href': _email_report_href(slug, shell), **shell,
     })
+
+
+def _email_report_href(slug, shell):
+    """Where "Email this weekly" goes: the Reporting page on its Email tab with the scope the Overview shows preselected (the project, or the organization the
+    All projects view is narrowed to; nothing when it spans every organization)."""
+    from urllib.parse import urlencode
+    base = reverse('cve_reports')
+    if slug and slug != ALL_PROJECTS:
+        return f"{base}?{urlencode({'project': slug})}#email"
+    if shell.get('scope_org'):
+        return f"{base}?{urlencode({'org': shell['scope_org']})}#email"
+    return f'{base}#email'
 
 
 def graph(request):
@@ -977,6 +991,21 @@ def api_stats(request):
     live = live_scan_counts()  # fresh on every poll: five cheap counts, and the first thing a person watches
     # the ETag is the snapshot's (computed once, when it was built) and the live counts: a poll that finds both unchanged gets a 304 and no body
     return snapshot_cache.respond(request, snapshot_cache.token_of([snap['etag'], live]), lambda: {**snap['payload'], **live})
+
+
+@require_GET
+@project_scoped
+def api_overview(request):
+    """The Overview's summary (``cveFeed.overview``): the status sentences, the four tiles, this week's threats, Fix first and What changed, as JSON. Same scope and the
+    same permission model as ``api_stats`` (``project_scoped``: ``?project=<slug>`` or ``_all``, narrowed to the caller's projects); shared for a minute by every viewer
+    of the same projects. The Sentinel line is added for an App Admin only. A poll that finds nothing new gets a 304."""
+    from cveFeed import overview
+    from dashboard.models import Project
+    ids = sorted(Project.objects.values_list('id', flat=True))  # scoped to the caller
+    stats = cached_stats_snapshot((request.GET.get('project', ''), _live_org(request)))['payload']
+    payload = overview.summary(ids, live={'hosts': stats.get('hosts'), 'exposed_hosts': stats.get('exposed_hosts')}, sentinels_too=request.user.is_superuser)
+    # the ETag leaves out the build time: a summary that says the same again is a 304
+    return snapshot_cache.respond_payload(request, payload, etag=snapshot_cache.token_of({k: v for k, v in payload.items() if k != 'updated_at'}))
 
 
 GRAPH_CACHE_SECONDS = 30

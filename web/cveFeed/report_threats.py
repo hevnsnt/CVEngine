@@ -213,6 +213,13 @@ def _cve_badges(cve):
     return badges
 
 
+def remote_no_login(vector):
+    """Whether a CVSS vector says the flaw is reachable over the network with no privileges (``AV:N`` and ``PR:N``): the one claim of "Remote, no login" the
+    stored data supports. A CVE with no vector says nothing."""
+    parts = set(str(vector or '').split('/'))
+    return 'AV:N' in parts and 'PR:N' in parts
+
+
 def _cve_entry(cve, row, scope, base, source):
     from agentapi import services as svc
     product = _product(cve)
@@ -220,7 +227,8 @@ def _cve_entry(cve, row, scope, base, source):
     return {'source': source, 'title': clean(f"{cve.cve_id}: {cve.title or _kev(cve).get('name') or ''}".strip(': '), 200), 'summary': writeup(cve),
             'link': f'{base}/cve/cves/?id={cve.cve_id}', 'badges': _cve_badges(cve), 'cve_ids': [cve.cve_id], 'impact_line': line, 'impact': tone,
             'fixed_in': [clean(v, 60) for v in svc._fixed_versions(cve, product)[:4]], 'matched': len(row['matched']), 'confirmed': len(row['confirmed']),
-            'product_only': len(row['product_only']), 'product': product, 'cvss': cve.cvss, 'kev_added': _kev_added(cve) or None}
+            'product_only': len(row['product_only']), 'product': product, 'cvss': cve.cvss, 'kev_added': _kev_added(cve) or None,
+            'remote_no_login': remote_no_login(cve.cvss_vector), '_hosts': {k: set(row[k]) for k in ('matched', 'confirmed', 'product_only')}}
 
 
 def _briefing_entry(b, held, rows, sightings, scope, base):
@@ -255,7 +263,9 @@ def _briefing_entry(b, held, rows, sightings, scope, base):
         badges.append('Public exploit')
     return {'source': 'zero_wire', 'title': clean(b.title, 200), 'summary': clean(b.summary, 400), 'link': b.link, 'badges': badges, 'cve_ids': list(b.cve_ids)[:8],
             'impact_line': line, 'impact': tone, 'fixed_in': [], 'matched': len(matched), 'confirmed': len(confirmed), 'product_only': len(product_only),
-            'product': product, 'published': b.published_at.isoformat(), 'categories': list(b.categories)[:8]}
+            'product': product, 'published': b.published_at.isoformat(), 'categories': list(b.categories)[:8],
+            'remote_no_login': bool(cves) and all(remote_no_login(c.cvss_vector) for c in cves),
+            '_hosts': {'matched': set(matched), 'confirmed': set(confirmed), 'product_only': set(product_only)}}
 
 
 NOTE_ZERO_WIRE = "Briefings from Cloudflare Radar Zero Wire (radar.cloudflare.com/zero-wire); summaries quoted from the feed; host counts from cvENGINE's own scans."
@@ -263,9 +273,11 @@ NOTE_CVES = ("Picked from the CVEs CISA added to its Known Exploited Vulnerabili
              "probability. Host counts come from what scans identified; a product with no version read cannot be ruled in or out.")
 
 
-def top(scope, start, end, limit=None):
-    """``(entries, note)`` for ``scope`` (an ``agentapi.report_scope.ReportScope``) and the period ``[start, end)``: Zero Wire briefings first, then KEV and critical CVEs
-    no briefing covers, at most ``limit`` (``top_limit()`` by default). ``note`` is the attribution and method footnote ('' when there are no entries)."""
+def top(scope, start, end, limit=None, keep_hosts=False):
+    """``(entries, note)`` for ``scope`` (an ``agentapi.report_scope.ReportScope``: anything with ``ids`` and ``label``) and the period ``[start, end)``: Zero Wire briefings
+    first, then KEV and critical CVEs no briefing covers, at most ``limit`` (``top_limit()`` by default). ``note`` is the attribution and method footnote ('' when there
+    are no entries). ``keep_hosts`` keeps each entry's ``_hosts`` (the host keys, ``{'matched', 'confirmed', 'product_only'}`` as sets) so a caller can count the hosts of
+    several entries together; they are internal, never serialised, and left out otherwise."""
     from cveFeed.models import CVEEntry, ReportingSettings, ZeroWireBriefing
     limit = limit or top_limit()
     base = mailer.base_url()
@@ -286,5 +298,8 @@ def top(scope, start, end, limit=None):
             return (bool(row['matched']), bool(row['product_only']), kev_in_period[c.cve_id], bool(_kev(c).get('ransomware')), c.cvss or 0, _kev_added(c))
         for c in sorted(news, key=rank, reverse=True)[:limit - len(entries)]:
             entries.append(_cve_entry(c, rows[c.id], scope, base, 'kev' if c.kev and kev_in_period[c.cve_id] else 'critical'))
+    if not keep_hosts:
+        for e in entries:
+            e.pop('_hosts', None)
     note = ' '.join(n for n, on in ((NOTE_ZERO_WIRE, any(e['source'] == 'zero_wire' for e in entries)), (NOTE_CVES, any(e['source'] != 'zero_wire' for e in entries))) if on)
     return entries, note
