@@ -344,7 +344,7 @@ export async function emailTab(panel, env) {
     const local = { ...env, mail_ready: data.mail_ready, limits: data.limits || env.limits, mailNote, done: draw };
     if (!data.mail_ready) {
       root.append(emptyState({ icon: "report", tone: "warn", title: "Outgoing mail is not set up", body: mailNote.replace(/^Outgoing mail is not set up\. /, ""),
-        actions: env.isAppAdmin ? [{ label: "Open Settings, Email", href: "/cve/settings/#alerts" }] : [] }));
+        actions: env.isAppAdmin ? [{ label: "Open Settings, Email", href: "/cve/settings/#email" }] : [] }));
     }
     const tools = el("div", "tools");
     const filter = selectOf([["scope", "This scope"], ["all", "Everything I can see"]], everything ? "all" : "scope", "Which email reports");
