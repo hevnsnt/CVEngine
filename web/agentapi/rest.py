@@ -440,8 +440,8 @@ ROUTES = [
      'group=none|cve: cve folds the same client-side JavaScript library file on sibling hosts of one site into one row with its member ids and statuses; '
      'servers and other products never group; the default none is one row per host)',
      lambda r, c, slug, **k: svc.list_findings(c, slug, r.GET)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/situations', 'What needs you, one host at a time, ranked: each row is a host with a plain narrative, counts (proven, likely, exposure, minor), the first action, '
-     'the reason for its rank and its top findings with links (q= part of a host name, tier=all|exposure|likely|proven keeps the situations whose worst tier is at least that, page, page_size; state is attention, clear or unscanned)',
+    ('GET', r'projects/(?P<slug>[-\w]+)/situations', 'What needs you, one host at a time, ranked: each row is a host with a plain narrative, counts (proven, likely, hygiene, exposure, minor), the lead tier, the first action, '
+     'the reason for its rank and its top findings with links (q= part of a host name, tier=all|exposure|hygiene|likely|proven keeps the situations whose worst tier is at least that, page, page_size; state is attention, clear or unscanned)',
      lambda r, c, slug, **k: svc.list_situations(c, slug, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/situations/(?P<host>[^/]+)', 'One situation in full: the narrative and up to 200 findings of the host, each with its link (404 when nothing open there needs a person)',
      lambda r, c, slug, host, **k: svc.get_situation(c, slug, host)),

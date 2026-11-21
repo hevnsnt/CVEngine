@@ -1,14 +1,19 @@
 """Situations: what needs a person, one host at a time, ranked.
 
-A **situation** is one host of a project together with everything open on it that needs a person, in four tiers:
+A **situation** is one host of a project together with everything open on it that needs a person, in five tiers:
 
 1. **proven**: a CVE match or scanner finding that one of cvENGINE's own checks reproduced (``Triage.validation_status == 'hit'``, the "Proven
    on this host" card), unless a person set its heat to ice;
 2. **likely**: a CVE match or scanner finding that shows fire or smoke (``cveFeed.threat``: the one definition of heat, including a heat a
    person set by hand), not proven, and not called a false positive by the AI reviewer;
-3. **exposure**: an open database (``source == 'db_exposure'``), a dangling DNS record (the dangling-DNS check), an open admin or cleartext service
-   (Telnet, FTP, r-services, a tailnet admin port) or an exposed secret that counts (not public by design, accepted, revoked or a false positive);
-4. **minor**: everything else that is still open: hygiene findings and ice-heat matches and findings.
+3. **hygiene, high** (``HYGIENE``): the hygiene slips that cost something now, and an exposed secret. An expired certificate, a certificate that
+   expires within 7 days (the ``tls_expired`` and ``tls_expiring`` checks at high severity or worse, which the hygiene rating has not lowered for a
+   development host or a managed platform), a mail domain anyone can spoof (``dmarc_missing`` on a domain that receives mail, or an SPF record that
+   allows every sender: ``spf_allow_all``), a dangling DNS record someone could take over (the dangling-DNS check rated it high or critical, i.e. the
+   target is claimable) and an exposed secret that counts (not public by design, accepted, revoked or a false positive);
+4. **exposure**: an open database (``source == 'db_exposure'``), a dangling DNS record nobody is known to be able to take over, an open admin or
+   cleartext service (Telnet, FTP, r-services, a tailnet admin port);
+5. **minor**: everything else that is still open: other hygiene findings and ice-heat matches and findings.
 
 What is closed is not part of it: fixed, accepted risk, false positive (``cveFeed.closure.CLOSED``), a CVE match the AI ruled out, a scanner
 finding the scans no longer see, informational findings. The sets are the Overview's own: ``counts.exposed_matches``,
@@ -20,11 +25,12 @@ page names it (``agentapi.services._one_per_host``); the other names are ``also_
 
 **The rank rule** (the order is the same in the page, REST and MCP; position 1 is the first thing to look at). A situation sorts by, in order:
 
-1. its worst tier: proven, then likely, then exposure, then minor (proof beats likelihood, likelihood beats exposure);
+1. its **lead**, the first of these it has: proven; likely with a known-exploited CVE (on the KEV); high hygiene; any other likely; exposure; minor
+   (proof beats likelihood, a known-exploited likely finding beats a hygiene slip, a hygiene slip beats the other likely findings, and those beat exposure);
 2. known exploited (the CVE is on the KEV) among its proven and likely CVE matches, yes before no (known-exploited beats severity alone);
 3. internet-facing before inside a declared internal network (``cveFeed.internal_view``);
 4. the worst severity among its items (a CVE by its CVSS band, as the Findings list bands it);
-5. how many proven, likely and exposure items it has, more first;
+5. how many proven, likely, high-hygiene and exposure items it has, more first;
 6. the oldest open item, oldest first (age breaks ties);
 7. the host name, then the project id, so the order is total and the same data always gives the same list.
 
@@ -35,6 +41,8 @@ The reason for the rank is the same facts in one short phrase (``rank_reason``).
 is exposed, and what to do first. Same data, same text. Free text that came from a scan (a banner, a finding name) is stripped of control and
 invisible characters and cut short (``clean``), and a banner is used only when it looks like a product name (``product``), so a hostile string can
 neither break a page nor talk to an agent; the page draws every field with ``textContent``.
+
+The ``tier`` of a situation (``top``, what the ``tier`` filter keeps) is its worst tier by number, ``lead`` is the tier that decides its rank above.
 
 Set-based: four grouped queries (matches, scanner findings, hygiene findings, secrets) give each host's counts, the two inventory queries give
 the hosts, and only the hosts of the page are read item by item (at most ``LIST_ITEMS`` each, one windowed query per source). The number of queries
@@ -51,10 +59,10 @@ from cveFeed import counts
 from cveFeed.closure import CLOSED, _CONTROL
 from cveFeed.threat import CRITICAL_CVSS, FIRE, HEAT_RANK, HIGH_CVSS, ICE, SMOKE, VALIDATION_HIT
 
-PROVEN, LIKELY, EXPOSURE, MINOR = 3, 2, 1, 0
-TIER_NAMES = {PROVEN: 'proven', LIKELY: 'likely', EXPOSURE: 'exposure', MINOR: 'minor'}
-TIER_ORDER = (PROVEN, LIKELY, EXPOSURE, MINOR)
-TIER_PHRASE = {PROVEN: 'Proven by a check', LIKELY: 'Likely real', EXPOSURE: 'Exposed', MINOR: 'Lower priority only'}
+PROVEN, LIKELY, HYGIENE, EXPOSURE, MINOR = 4, 3, 2, 1, 0
+TIER_NAMES = {PROVEN: 'proven', LIKELY: 'likely', HYGIENE: 'hygiene', EXPOSURE: 'exposure', MINOR: 'minor'}
+TIER_ORDER = (PROVEN, LIKELY, HYGIENE, EXPOSURE, MINOR)
+TIER_PHRASE = {PROVEN: 'Proven by a check', LIKELY: 'Likely real', HYGIENE: 'High-priority hygiene', EXPOSURE: 'Exposed', MINOR: 'Lower priority only'}
 
 LIST_ITEMS = 12  # items of one host a list row carries
 DETAIL_ITEMS = 200  # items of one host the detail carries
@@ -64,6 +72,10 @@ HEAT_NAMES = {rank: name for name, rank in HEAT_RANK.items()}
 
 # hygiene findings that are an open service (cveFeed.cleartext, cveFeed.tailscale_checks), not a configuration slip
 EXPOSURE_HYGIENE = ('cleartext_telnet', 'cleartext_ftp', 'cleartext_rservices', 'ts_remote_admin_exposed')
+# the hygiene findings that rank as HYGIENE (high hygiene): see the module text. Severity is the one the hygiene rating left (cveFeed.hygiene_rating lowers an
+# expired certificate of a development host and a vendor's own endpoint), so only a certificate that really is a problem now counts.
+HIGH_SEVERITY = 3
+HYGIENE_WHAT = {'tls_expired': 'cert_expired', 'tls_expiring': 'cert_expiring', 'dmarc_missing': 'mail', 'spf_allow_all': 'mail'}
 SOURCE_DB = 'db_exposure'
 DANGLING_NAMES = ('dangling ns', 'dangling cname')  # the names the dangling-DNS check gives its findings (cveFeed.dangling_dns)
 
@@ -92,8 +104,10 @@ def _cve_band():
                 When(cve_entry__cvss__gte=4.0, then=Value(2)), default=Value(1), output_field=IntegerField())
 
 
-def _tier_case(proven, manual_ice, manual_hot, likely, exposure=None):
+def _tier_case(proven, manual_ice, manual_hot, likely, exposure=None, hygiene=None):
     whens = [When(manual_ice, then=Value(MINOR)), When(proven, then=Value(PROVEN))]
+    if hygiene is not None:
+        whens.append(When(hygiene, then=Value(HYGIENE)))
     if exposure is not None:
         whens.append(When(exposure, then=Value(EXPOSURE)))
     whens.append(When(manual_hot | likely, then=Value(LIKELY)))
@@ -132,11 +146,20 @@ def _matches(ids):
                                        Q(disputed=False, heat__gte=HEAT_RANK[SMOKE]))), Q(triage__heat_override__in=(FIRE, SMOKE, ICE))
 
 
-def _exposure_q():
-    q = Q(source=SOURCE_DB)
+def _dangling_q():
+    q = Q(pk__in=[])
     for prefix in DANGLING_NAMES:
         q |= Q(name__istartswith=prefix)
     return q
+
+
+def _exposure_q():
+    return Q(source=SOURCE_DB) | _dangling_q()
+
+
+def _takeover_q():
+    """A dangling DNS record the check rated high or critical: its target is one anyone can claim (cveFeed.dangling_dns), not merely a stale record."""
+    return _dangling_q() & Q(severity__gte=HIGH_SEVERITY)
 
 
 def _vulns(ids):
@@ -150,7 +173,7 @@ def _vulns(ids):
     qs = qs.annotate(disputed=_disputed())
     manual_hot = Q(triage__heat_override__in=(FIRE, SMOKE))
     return qs.annotate(tier=_tier_case(Q(triage__validation_status=VALIDATION_HIT), Q(triage__heat_override=ICE), manual_hot,
-                                       Q(disputed=False, heat__gte=HEAT_RANK[SMOKE]), exposure=_exposure_q())), Q(triage__heat_override__in=(FIRE, SMOKE, ICE))
+                                       Q(disputed=False, heat__gte=HEAT_RANK[SMOKE]), exposure=_exposure_q(), hygiene=_takeover_q())), Q(triage__heat_override__in=(FIRE, SMOKE, ICE))
 
 
 def counts_latest(prefix):
@@ -158,21 +181,28 @@ def counts_latest(prefix):
     return latest_scan_q(prefix)
 
 
+def _high_hygiene_q():
+    """The hygiene findings that are HYGIENE (see the module text): an expired certificate or one that expires within 7 days, a mail domain anyone can spoof."""
+    return (Q(check_name__in=('tls_expired', 'tls_expiring'), severity__gte=HIGH_SEVERITY)
+            | Q(check_name='dmarc_missing', severity__gte=HIGH_SEVERITY) | Q(check_name='spf_allow_all'))
+
+
 def _hygiene(ids):
     from cveFeed.models import HygieneFinding
     qs = counts.actionable_hygiene(HygieneFinding.objects.filter(domain__project_id__in=ids)).order_by()
     return qs.annotate(pid=F('domain__project_id'), lname=Lower('host'), sev=F('severity'), first=F('first_seen'), heat=Value(0, output_field=IntegerField()),
-                       tier=Case(When(check_name__in=EXPOSURE_HYGIENE, then=Value(EXPOSURE)), default=Value(MINOR), output_field=IntegerField()))
+                       tier=Case(When(check_name__in=EXPOSURE_HYGIENE, then=Value(EXPOSURE)), When(_high_hygiene_q(), then=Value(HYGIENE)),
+                                 default=Value(MINOR), output_field=IntegerField()))
 
 
 def _secrets(ids):
-    """One row per (secret, host) that counts: the Hosts page's Secrets chip, minus the secrets no person needs to act on."""
+    """One row per (secret, host) that counts: the Hosts page's Secrets chip, minus the secrets no person needs to act on. An exposed secret is high hygiene."""
     from cveFeed import secrets_catalog
     from cveFeed.models import SecretOccurrence
     qs = (SecretOccurrence.objects.filter(project_id__in=ids, retired_at__isnull=True, finding__severity__gte=1).exclude(finding__status__in=secrets_catalog.QUIET_STATUSES)
           .exclude(finding__remediation_status__in=CLOSED).order_by())
     return qs.annotate(pid=F('project_id'), lname=Lower('host'), sev=F('finding__severity'), first=F('finding__first_seen'), heat=Value(0, output_field=IntegerField()),
-                       tier=Value(EXPOSURE, output_field=IntegerField()))
+                       tier=Value(HYGIENE, output_field=IntegerField()))
 
 
 def _group_rows(qs, kev=None, manual=None, distinct=None):
@@ -269,16 +299,39 @@ def _build_groups(ids):
     return out, len(reps)
 
 
+def lead_of(n, kev):
+    """``(lead tier, rank class)`` of a host with ``n`` items per tier, ``kev`` of them known exploited among its proven and likely CVE matches: the first of proven,
+    likely and known exploited, high hygiene, any other likely, exposure, minor (the rank rule, first line). The class is 0 to 5 in that order."""
+    if n[PROVEN]:
+        return PROVEN, 0
+    if n[LIKELY] and kev:
+        return LIKELY, 1
+    if n[HYGIENE]:
+        return HYGIENE, 2
+    if n[LIKELY]:
+        return LIKELY, 3
+    if n[EXPOSURE]:
+        return EXPOSURE, 4
+    return MINOR, 5
+
+
+def item_class(tier, kev=False):
+    """The rank class of one item (``lead_of`` for a single item), so a host's items are ordered the way hosts are: its first item is what its first action is about."""
+    return lead_of({t: int(t == tier) for t in TIER_ORDER}, kev)[1]
+
+
 def _finish(g):
-    """Rank key, tier, counts and reason of one group."""
+    """Rank key, tier, lead, counts and reason of one group."""
     n = g['n']
     top = next(t for t in TIER_ORDER if n[t]) if any(n.values()) else MINOR
     g['top'] = top
+    lead, klass = lead_of(n, g['kev'])
+    g['lead'] = lead
     g['internal'] = _is_internal(g['pid'], g['all'])
     worst = max((g['sev'][t] for t in TIER_ORDER if n[t] and (t >= EXPOSURE or top == MINOR)), default=0)
-    g['key'] = (-top, -(1 if g['kev'] else 0), 1 if g['internal'] else 0, -worst, -(n[PROVEN] + n[LIKELY] + n[EXPOSURE]),
+    g['key'] = (klass, -(1 if g['kev'] else 0), 1 if g['internal'] else 0, -worst, -(n[PROVEN] + n[LIKELY] + n[HYGIENE] + n[EXPOSURE]),
                 g['oldest'].timestamp() if g['oldest'] else float('inf'), g['name'].lower(), g['pid'])
-    g['reason'] = _reason(top, g['kev'], g['internal'], g['manual'])
+    g['reason'] = _reason(lead, g['kev'], g['internal'], g['manual'])
     g['counts'] = {TIER_NAMES[t]: n[t] for t in TIER_ORDER}
     return g
 
@@ -325,13 +378,13 @@ def _read_items(groups, cap):
     qs, manual = _vulns(list(wanted))
     rows = list(_windowed(qs, wanted, cap).values('pk', 'pid', 'lname', 'tier', 'sev', 'heat', 'first', 'name', 'source', 'triage__heat_override', 'triage__id'))
     for r in rows:
-        what = 'database' if r['source'] == SOURCE_DB else 'dns' if r['tier'] == EXPOSURE else 'finding'
+        what = 'database' if r['source'] == SOURCE_DB else 'dns' if r['tier'] in (EXPOSURE, HYGIENE) else 'finding'
         items[(r['pid'], r['lname'])].append(_item('vulnerability', r['pk'], r['name'], r['tier'], r['sev'], r['heat'], r['first'], what,
                                                    manual=bool(r['triage__heat_override']), triage=r['triage__id']))
     rows = list(_windowed(_hygiene(list(wanted)), wanted, cap).values('pk', 'pid', 'lname', 'tier', 'sev', 'first', 'title', 'check_name'))
     for r in rows:
-        items[(r['pid'], r['lname'])].append(_item('hygiene', r['pk'], r['title'], r['tier'], r['sev'], 0, r['first'], 'admin' if r['tier'] == EXPOSURE else 'hygiene',
-                                                   check=r['check_name']))
+        what = HYGIENE_WHAT.get(r['check_name'], 'hygiene') if r['tier'] == HYGIENE else 'admin' if r['tier'] == EXPOSURE else 'hygiene'
+        items[(r['pid'], r['lname'])].append(_item('hygiene', r['pk'], r['title'], r['tier'], r['sev'], 0, r['first'], what, check=r['check_name']))
     qs = _secrets(list(wanted)).filter(_host_filter(wanted)).order_by('pid', 'lname', '-finding__severity', 'finding_id').values(
         'pid', 'lname', 'finding_id', 'finding__masked', 'finding__provider', 'finding__kind', 'sev', 'first').distinct()
     seen, per_host = set(), defaultdict(int)
@@ -342,7 +395,7 @@ def _read_items(groups, cap):
         seen.add((key, r['finding_id']))
         per_host[key] += 1
         label = ' '.join(filter(None, [clean(r['finding__provider'], 40) or clean(r['finding__kind'], 40), 'secret', clean(r['finding__masked'], 40)]))
-        items[key].append(_item('secret', r['finding_id'], label, EXPOSURE, r['sev'], 0, r['first'], 'secret'))
+        items[key].append(_item('secret', r['finding_id'], label, HYGIENE, r['sev'], 0, r['first'], 'secret'))
     # the proof of a proven item: the newest check that reproduced it
     proven = [i['triage'] for rows_ in items.values() for i in rows_ if i['tier'] == PROVEN and i.get('triage')]
     steps = dict(Triage.objects.filter(pk__in=proven).values_list('pk', 'validation_steps')) if proven else {}
@@ -355,7 +408,7 @@ def _read_items(groups, cap):
 
 
 def _item_key(i):
-    return (-i['tier'], -i['severity_n'], -i['heat_n'], i['first'].timestamp() if i['first'] else float('inf'), ('match', 'vulnerability', 'hygiene', 'secret').index(i['kind']), i['id'])
+    return (item_class(i['tier'], bool(i.get('kev'))), -i['severity_n'], -i['heat_n'], i['first'].timestamp() if i['first'] else float('inf'), ('match', 'vulnerability', 'hygiene', 'secret').index(i['kind']), i['id'])
 
 
 def _proof(steps):
@@ -377,14 +430,15 @@ def _plural(n, one, many):
     return f'{n} {one if n == 1 else many}'
 
 
-EXPOSURE_WORDS = {'database': 'an open database port', 'dns': 'a dangling DNS record', 'secret': 'a secret that anyone can read',
-                  'admin': 'an open admin or cleartext service', 'finding': 'an exposed service'}
+EXPOSURE_WORDS = {'database': 'an open database port', 'dns': 'a dangling DNS record', 'admin': 'an open admin or cleartext service', 'finding': 'an exposed service'}
+HYGIENE_WORDS = {'cert_expired': 'an expired certificate', 'cert_expiring': 'a certificate that expires within a week', 'mail': 'a mail domain that anyone can spoof',
+                 'dns': 'a dangling DNS record that someone could take over', 'secret': 'a secret that anyone can read'}
 TOP = 5  # the items the words are built from: the same first five in a list row (12 items) and in the detail (200), so the text is the same in both
 
 
-def _exposed_phrase(exposed, total):
+def _exposed_phrase(exposed, total, words=EXPOSURE_WORDS):
     """'an open database port and a dangling DNS record (3 in all)': the kinds among the top items, in a fixed order, and how many there are in all."""
-    kinds = [EXPOSURE_WORDS[what] for what in EXPOSURE_WORDS if any(i['what'] == what for i in exposed)]
+    kinds = [words[what] for what in words if any(i['what'] == what for i in exposed)]
     if not kinds:
         return ''
     text = ' and '.join([', '.join(kinds[:-1]), kinds[-1]] if len(kinds) > 2 else kinds)
@@ -402,6 +456,12 @@ def _action(item):
         return 'Close the open database port or require a login'
     if what == 'dns':
         return 'Remove the dangling DNS record or claim its target'
+    if what == 'cert_expired':
+        return 'Renew the certificate'
+    if what == 'cert_expiring':
+        return 'Renew the certificate before it expires'
+    if what == 'mail':
+        return 'Publish SPF and DMARC records that reject spoofed mail'
     if what == 'admin':
         return f'Close or restrict the open service: {title}'
     return f'Fix {title}'
@@ -416,6 +476,8 @@ def _headline(top, shown, n):
         return f"Proven: {first['title']}{_more(n[PROVEN])}"
     if top == LIKELY:
         return f"Likely real: {first['title']}{_more(n[LIKELY])}"
+    if top == HYGIENE:
+        return f"Fix soon: {_exposed_phrase([i for i in shown if i['tier'] == HYGIENE], n[HYGIENE], HYGIENE_WORDS) or _plural(n[HYGIENE], 'item', 'items')}"
     if top == EXPOSURE:
         return f"Exposed: {_exposed_phrase([i for i in shown if i['tier'] == EXPOSURE], n[EXPOSURE]) or _plural(n[EXPOSURE], 'item', 'items')}"
     return _plural(n[MINOR], 'lower-priority item', 'lower-priority items')
@@ -433,7 +495,7 @@ def _what_it_is(g):
 
 def narrative(g, items):
     """Two to four plain sentences from a group's numbers and its top items: what the host is, what is proven or likely, what is exposed, what to do first."""
-    n, top = g['n'], g['top']
+    n, top = g['n'], g['lead']
     items = items[:TOP]
     parts = [_what_it_is(g)]
     proven = [i for i in items if i['tier'] == PROVEN]
@@ -450,12 +512,19 @@ def narrative(g, items):
             parts.append(f"Nothing is proven yet, but 1 finding looks real: {first['title']}{kev}.")
         else:
             parts.append(f"Nothing is proven yet, but {n[LIKELY]} findings look real, the first being {first['title']}{kev}.")
+    elif top == HYGIENE:
+        phrase = _exposed_phrase([i for i in items if i['tier'] == HYGIENE], n[HYGIENE], HYGIENE_WORDS)
+        parts.append(f"It has {phrase}." if phrase else f"It has {_plural(n[HYGIENE], 'high-priority hygiene issue', 'high-priority hygiene issues')}.")
+        if n[LIKELY]:
+            parts.append(f"Nothing is proven yet, but {_plural(n[LIKELY], 'finding looks', 'findings look')} real.")
     elif top == MINOR:
         parts.append(f"Only lower-priority items are open ({n[MINOR]}).")
+    if n[HYGIENE] and top in (PROVEN, LIKELY):
+        parts.append(f"It also has {_plural(n[HYGIENE], 'high-priority hygiene issue', 'high-priority hygiene issues')}.")
     exposed = [i for i in items if i['tier'] == EXPOSURE]
     if n[EXPOSURE]:
         phrase = _exposed_phrase(exposed, n[EXPOSURE])
-        also = 'also ' if top in (PROVEN, LIKELY) else ''
+        also = 'also ' if top in (PROVEN, LIKELY, HYGIENE) else ''
         parts.append(f"It {also}exposes {phrase}." if phrase else f"It also has {_plural(n[EXPOSURE], 'exposed item', 'exposed items')}.")
     parts.append(f"Do this first: {_action(items[0]) if items else 'look at the open findings'}.")
     return ' '.join(parts)
@@ -478,7 +547,7 @@ def _row(g, items, rank, slug, project_name, cap):
     return {
         'rank': rank, 'project': slug, 'project_name': project_name, 'host': g['name'], 'also_known_as': [n for n in g['also'] if n != g['name']],
         'host_id': rep['id'] if rep else None, 'host_link': f"/cve/{slug}/hosts/?host={quote(g['name'], safe='')}", 'internal': g['internal'],
-        'headline': clean(_headline(g['top'], items, g['n']), 200), 'rank_reason': g['reason'], 'counts': g['counts'],
+        'headline': clean(_headline(g['lead'], items, g['n']), 200), 'rank_reason': g['reason'], 'counts': g['counts'], 'lead': TIER_NAMES[g['lead']],
         'first_action': clean(_action(items[0]) if items else 'Look at the open findings', 200), 'narrative': narrative(g, items),
         'oldest': g['oldest'].isoformat() if g['oldest'] else None,
         'findings_total': sum(g['n'].values()), 'findings_truncated': sum(g['n'].values()) > len(shown),
@@ -520,7 +589,7 @@ def ranked(ids):
     return snapshot_cache.snapshot('situations', scope, lambda: _rank(ids), SITUATIONS_SECONDS, etag_of=lambda _ranking: '')['payload']
 
 
-WORST_AT_LEAST = {'all': MINOR, 'exposure': EXPOSURE, 'likely': LIKELY, 'proven': PROVEN}  # the ``tier`` filter: keep a situation whose worst tier is at least this
+WORST_AT_LEAST = {'all': MINOR, 'exposure': EXPOSURE, 'hygiene': HYGIENE, 'likely': LIKELY, 'proven': PROVEN}  # the ``tier`` filter: keep a situation whose worst tier is at least this
 
 
 def listing(ids, q='', page=1, size=50, tier='all'):
