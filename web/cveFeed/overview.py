@@ -249,11 +249,13 @@ def status_block(hosts, counts, last_scan_at, now, threat_group=None, exposed_ti
                 'sub': 'Add a target to start a first look; hosts appear here as they are found.'}
     sentences = []
     if p and l:
-        headline = f"{_hosts_have(p)} a flaw a check proved, and {l:,} more {'has a finding that looks' if l == 1 else 'have findings that look'} real."
+        headline = (f"{_hosts_have(p)} a confirmed vulnerability, and {l:,} more "
+                    f"{'has a likely one' if l == 1 else 'have likely ones'} to review.")
     elif p:
-        headline = f"{_hosts_have(p)} a flaw a check proved."
+        headline = f"{_hosts_have(p)} a confirmed vulnerability."
     elif l:
-        headline = f"{_hosts_have(l)} {'a finding that looks' if l == 1 else 'findings that look'} real, and no check has proved one yet."
+        headline = (f"{_hosts_have(l)} a likely vulnerability to review, not confirmed yet." if l == 1
+                    else f"{_hosts_have(l)} likely vulnerabilities to review, none confirmed yet.")
     elif h:
         headline = f"{_hosts_have(h)} a high-priority hygiene problem, such as an expired certificate."
     else:
