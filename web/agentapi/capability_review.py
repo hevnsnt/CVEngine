@@ -57,7 +57,7 @@ REVIEW = [
         'assess_host', 'POST P/host-assessments', 'request_host_review', 'POST P/hosts/{host_id}/review', 'start_host_review_step', 'POST P/hosts/{host_id}/review/step',
         'screenshot_host', 'POST P/hosts/{host_id}/screenshot', 'run_hygiene_checks', 'POST P/hygiene/run', 'run_runzero_sync', 'POST P/runzero/sync', 'sync_tailscale',
         'POST P/tailscale/sync', 'validate_cve_match', 'POST P/matches/{match_id}/validate', 'retriage_finding', 'POST P/findings/{kind}/{finding_id}/retriage',
-        'retest_finding', 'POST P/findings/{kind}/{finding_id}/retest', 'run_saved_search', 'POST P/saved-searches/{search_id}/run', 'POST P/reports',
+        'retest_finding', 'POST P/findings/{kind}/{finding_id}/retest', 'run_saved_search', 'POST P/saved-searches/{search_id}/run', 'POST P/reports', 'POST orgs/{org}/reports',
         'POST P/internal-ranges/{range_id}/discover', 'queue_agent_work', 'POST P/agent-tasks',
         'request_secret_validation', 'POST P/secrets/{secret_id}/validate',  # only in a project where a person switched validation on
     ]),

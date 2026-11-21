@@ -1,4 +1,4 @@
-"""The shell's navigation: eight rail entries, and a tab strip inside the page for the pages that share one entry.
+"""The shell's navigation: nine rail entries, and a tab strip inside the page for the pages that share one entry.
 
 Every page keeps its own address; this module only decides which entry a page belongs to and which sibling pages to offer.
 Nothing here grants access: each page and API still enforce their own role checks. What it does is keep the links a person
@@ -12,6 +12,7 @@ GROUP_OF = {
     'vulns': 'findings', 'matches': 'findings', 'hygiene': 'findings', 'changes': 'findings', 'cves': 'findings',
     'hosts': 'assets', 'targets': 'assets', 'graph': 'assets', 'secrets': 'assets', 'suppliers': 'assets',
     'scans': 'scans', 'activity': 'scans',
+    'reports': 'reporting',
     'scanners': 'scanners', 'sentinels': 'scanners', 'project-sentinels': 'scanners',
     'bounty': 'bounty',
 }
@@ -27,9 +28,9 @@ UTILITY = {'account': 'My account', 'admin': 'Administration', 'settings': 'Sett
            'welcome': ''}
 
 SECTION_ICON = {'overview': 'pulse', 'findings': 'bug', 'hygiene': 'shield', 'assets': 'server', 'suppliers': 'building', 'scans': 'radar',
-                'scanners': 'bot', 'bounty': 'flag'}
+                'reporting': 'report', 'scanners': 'bot', 'bounty': 'flag'}
 SECTION_LABEL = {'overview': 'Overview', 'findings': 'Findings', 'hygiene': 'Hygiene', 'assets': 'Hosts', 'suppliers': 'Suppliers',
-                 'scans': 'Scans', 'scanners': 'Scanners', 'bounty': 'Bug bounty'}
+                 'scans': 'Scans', 'reporting': 'Reporting', 'scanners': 'Scanners', 'bounty': 'Bug bounty'}
 
 
 def _section(slug, name):
@@ -79,6 +80,7 @@ def build(active, slug, *, bounty_enabled, sentinels_enabled, all_projects=False
                     ('scans', 'Scans', _section(slug, 'scans'))]
     else:
         entries.append(('assets', 'Graph', reverse('cve_graph')))  # the one page of this entry that needs no project: named for what it opens
+    entries.append(('reporting', 'Reporting', reverse('cve_reports')))  # a page of its own: it picks its project or organization itself
     entries.append(('scanners', 'Scanners', reverse('cve_scanners')))
     if bounty_enabled:
         entries.append(('bounty', 'Bug bounty', bounty_href))
@@ -99,6 +101,7 @@ def build(active, slug, *, bounty_enabled, sentinels_enabled, all_projects=False
             if href not in seen:
                 seen.add(href)
                 index.append({'label': full, 'href': href})
+    index.insert(next((i for i, e in enumerate(index) if e['label'] == 'Scanners'), len(index)), {'label': 'Reporting', 'href': reverse('cve_reports')})  # Ctrl K finds it
     primary = {e['href'] for e in rail}
     more = [i for i in index if i['href'] not in primary]  # the phone's More sheet: everything the tab bar and the rail entries do not already open
     return {'rail': rail, 'tabs': tabs, 'group': group, 'group_label': SECTION_LABEL.get(group, ''), 'current': current, 'utility': UTILITY.get(active), 'index': index, 'more': more, 'bounty_href': bounty_href}

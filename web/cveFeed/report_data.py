@@ -1,7 +1,8 @@
-"""What goes into a PDF report: one project's (or one host's) hosts and findings, read for the report and cleaned for printing.
+"""What goes into a report: one project's (or one host's) hosts and findings, or an organization's, read for the report and cleaned for printing.
 
-Everything here runs in a worker as a named user (cveFeed.report_export re-checks that user's role first) and is filtered to the
-project explicitly, never by the request scope, which a worker does not have. The functions return plain dicts of short strings and
+Everything here runs in a worker as a named user (cveFeed.report_export re-checks that user's access first) and is filtered to the
+project (or to the organization's project ids the user can read) explicitly, never by the request scope, which a worker does not have.
+``project`` below is a Project, or ``svc.AllProjects`` over the ids of an organization report. The functions return plain dicts of short strings and
 numbers: every string that came from a scanned host, a feed or a person is stripped of control characters and clipped here, and
 HTML-escaped by the template (cveFeed/templates/cveFeed/report.html, autoescape on, no ``safe``), so a hostile banner or finding title
 reaches the PDF as inert text.
@@ -12,7 +13,7 @@ every finding, and the report says what the caps left out.
 import os
 import re
 from collections import Counter
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.db.models import Count, Max, Min, Q
 from django.utils import timezone
@@ -148,14 +149,19 @@ def _status_counts(sources):
     return {labels.get(k, clean(k, 24)): tally[k] for k in (*order, *sorted(set(tally) - set(order))) if tally[k]}
 
 
-def _per_host(sources):
-    """``{lowercase host: how many findings it has}`` over the whole set, for the host table."""
+_PROJECT_SLUG = {'cve': 'subdomain__target_domain__project__slug', 'scanner': 'target_domain__project__slug', 'hygiene': 'domain__project__slug'}
+
+
+def _per_host(sources, everywhere=False):
+    """``{lowercase host: how many findings it has}`` over the whole set, for the host table. For an organization the key is ``(project slug,
+    host)``: the same name in two projects is two hosts."""
     out = Counter()
     for key, qs in sources.items():
         field = 'host' if key == 'hygiene' else 'subdomain__name'
-        for row in qs.order_by().values(field).annotate(n=Count('id')):
+        fields = (field, _PROJECT_SLUG[key]) if everywhere else (field,)
+        for row in qs.order_by().values(*fields).annotate(n=Count('id')):
             if row[field]:
-                out[row[field].lower()] += row['n']
+                out[(row[_PROJECT_SLUG[key]], row[field].lower()) if everywhere else row[field].lower()] += row['n']
     return out
 
 
@@ -235,15 +241,22 @@ def _confirm(m):
             'needs': clean(precondition.get('needs') or (f"The advisory says: {precondition['quote']}" if precondition.get('quote') else ''), 400)}
 
 
+def match_basis(m):
+    """``(basis sentence, confirmed)`` of a CVE match: what the finding rests on, as the report and the CSV say it."""
+    from agentapi import services as svc
+    t = svc._triage_of(m)
+    confirmed = m.template_result == 'vulnerable' or bool(t and t.validation_status == 'hit')
+    return ('Confirmed: a check on the host reproduced it' if confirmed else
+            'Reported by the host itself (its own inventory)' if m.source == 'host' else
+            'Version-based: the detected version is inside the advisory range; not reproduced'), confirmed
+
+
 def _match_entry(m, heat):
     from agentapi import services as svc
     from cveFeed.triage import verdict_text
     cve, t = m.cve_entry, svc._triage_of(m)
     text = verdict_text(t.verdict if t else None, t)  # the model's words only in the project the answer was reached in (task 256)
-    confirmed = m.template_result == 'vulnerable' or bool(t and t.validation_status == 'hit')
-    basis = ('Confirmed: a check on the host reproduced it' if confirmed else
-             'Reported by the host itself (its own inventory)' if m.source == 'host' else
-             'Version-based: the detected version is inside the advisory range; not reproduced')
+    basis, confirmed = match_basis(m)
     flags = [text for on, text in ((cve.kev, 'listed as exploited (CISA KEV)'), (cve.exploit_db, 'public exploit'),
                                    (cve.epss_reached, 'high exploitation probability (EPSS)')) if on]
     product = ' '.join(x for x in (m.matched_product, m.matched_version) if x)
@@ -283,12 +296,24 @@ def _vulnerability_entry(v, heat):
             'first_seen': _date(svc._seen(v, 'first_seen', v.discovered_date)), 'last_seen': _date(svc._seen(v, 'last_seen', v.discovered_date))}
 
 
-def _findings(sources, cap):
-    """The top ``cap`` CVE matches and scanner findings together, hottest first, as report entries."""
+def _tag_project(entry, project):
+    """Name the project of an entry of an organization report (the rows were read with their project joined, so this is no query)."""
+    entry['project'], entry['project_slug'] = clean(project.name, 200), project.slug
+    return entry
+
+
+def _findings(sources, cap, everywhere=False):
+    """The top ``cap`` CVE matches and scanner findings together, hottest first, as report entries. ``everywhere``: an organization report, so each entry names its project."""
     epoch = datetime(1970, 1, 1, tzinfo=dt_timezone.utc)
     merged = [('cve', o) for o in sources['cve'][:cap]] + [('scanner', o) for o in sources['scanner'].prefetch_related('cve_ids')[:cap]]
     merged.sort(key=lambda p: (p[1].heat_rank, p[1].sev, p[1].when or epoch, p[1].id), reverse=True)
-    return [(_match_entry if key == 'cve' else _vulnerability_entry)(obj, HEAT_NAMES.get(obj.heat_rank, '')) for key, obj in merged[:cap]]
+    out = []
+    for key, obj in merged[:cap]:
+        entry = (_match_entry if key == 'cve' else _vulnerability_entry)(obj, HEAT_NAMES.get(obj.heat_rank, ''))
+        if everywhere:
+            _tag_project(entry, obj.subdomain.target_domain.project if key == 'cve' else obj.target_domain.project)
+        out.append(entry)
+    return out
 
 
 def _hygiene_group(check):
@@ -301,7 +326,7 @@ def _hygiene_group(check):
     return 'Other configuration'
 
 
-def _hygiene(qs, cap):
+def _hygiene(qs, cap, everywhere=False):
     """Hygiene findings (TLS, certificates, email, cleartext services) grouped by kind; each is {title, host, severity, detail, evidence, tracking}."""
     from agentapi import services as svc
     from cveFeed.triage import verdict_text
@@ -309,25 +334,30 @@ def _hygiene(qs, cap):
     for f in qs[:cap]:
         t = svc._triage_of(f)
         text = verdict_text(t.verdict if t else None, t)
-        groups.setdefault(_hygiene_group(f.check_name), []).append({
+        entry = {
             'title': clean(f.title, 200), 'host': clean(f.host, 200), 'severity': svc.SEVERITY_NAMES.get(f.sev, ''),
             'heat': HEAT_NAMES.get(f.heat_rank, ''), 'check': clean(f.check_name, 40), 'detail': clean(f.detail, 600),
             'evidence': [{'label': clean(k, 40), 'value': clean(v, 160)} for k, v in list((f.evidence or {}).items())[:6]],
             'remediation': clean(text['remediation'], 800), 'tracking': _tracking(f),
-            'first_seen': _date(f.first_seen)})
+            'first_seen': _date(f.first_seen)}
+        groups.setdefault(_hygiene_group(f.check_name), []).append(_tag_project(entry, f.domain.project) if everywhere else entry)
     return [{'name': name, 'items': groups[name]} for name in ('TLS and certificates', 'Email', 'Cleartext services', 'Other configuration') if name in groups]
 
 
 # --- hosts ---------------------------------------------------------------------------------------------------------------------
 
-def _host_row(h, findings_by_host, detail):
+def _host_row(h, findings_by_host, detail, everywhere=False):
     ports = sorted({(p['number'], p['protocol'] or '') for ip in h['ips'] for p in ip['ports']})
     names = {h['host'].lower()} | {alias.lower() for alias in h['aliases']}
+    if everywhere:
+        names = {(h['project'], name) for name in names}
     row = {'host': clean(h['host'], 200), 'alias': clean(h['alias'], ALIAS_MAX), 'heat': h['heat'] if h['heat'] in ('fire', 'smoke', 'ice', 'clean', 'unscanned') else 'unscanned',
            'score': int(h['score'] or 0), 'findings': sum(findings_by_host.get(name, 0) for name in names), 'addresses': len(h['ips']),
            'ports': [f'{n}/{proto}' if proto else str(n) for n, proto in ports][:14], 'port_count': len(ports), 'ports_more': max(0, len(ports) - 14),
            'owner': clean(h['profile'].get('owner'), 80), 'criticality': clean(h['profile'].get('criticality'), 12),
            'technologies': [clean(t, 40) for t in h['technologies'][:6]]}
+    if everywhere:
+        row['project'], row['project_slug'] = clean(h['project_name'], 200), h['project']
     if detail:
         row['title'] = clean(h['title'], 200)
         row['http_status'] = h['http_status'] or ''
@@ -342,47 +372,95 @@ def _host_row(h, findings_by_host, detail):
     return row
 
 
-def _hosts(project, host, findings_by_host, cap):
-    """``(total, host rows, aliases)``. A host report reads one host and keeps its full alias list for finding scope."""
+def _host_qs(project, host=None):
+    """The current inventory's hosts of the scope as a queryset, one row per machine (a project: its own; an organization: one per project and name), with what a host row reads prefetched."""
     from agentapi import services as svc
     from cveFeed.correlation import latest_scan_q
     from startScan.models import Subdomain
+    everywhere = svc._is_all(project)
     qs = svc._scoped(Subdomain.objects.all(), project, 'target_domain__project').filter(latest_scan_q())
     if host:
         qs = qs.filter(name__iexact=host)
-    qs = svc._one_per_host(qs).select_related('target_domain').prefetch_related(
+    return svc._one_per_host(qs, per_project=everywhere).select_related('target_domain__project' if everywhere else 'target_domain').prefetch_related(
         'ip_addresses__ports', 'cve_matches__cve_entry', svc.triage_prefetch('cve_matches__triage'), 'vulnerability_set', svc.triage_prefetch('vulnerability_set__triage'), 'vulnerability_set__cve_ids', 'vulnerability_set__tags',
-        'technologies').order_by('-score', 'name')
-    total, rows, page = qs.count(), [], 1
-    while len(rows) < min(cap, total):
+        'technologies').order_by('-score', 'name', 'id')
+
+
+def host_pages(project, qs, cap):
+    """The host dicts of ``qs`` (``_host_qs``), hottest score first, a page of ``HOST_PAGE`` at a time, at most ``cap`` of them: a generator, so a CSV never holds them all."""
+    from agentapi import services as svc
+    total, sent, page = qs.count(), 0, 1
+    while sent < min(cap, total):
         got = svc._hosts_page(project, qs, {'page': page, 'page_size': HOST_PAGE}, coverage=False)['results']
         if not got:
             break
-        rows += got
+        for row in got[:cap - sent]:
+            yield row
+        sent += len(got)
         page += 1
-    aliases = rows[0]['aliases'] if host and rows else []
-    return total, [_host_row(h, findings_by_host, detail=bool(host)) for h in rows[:cap]], aliases
+
+
+def _hosts(project, host, findings_by_host, cap):
+    """``(total, host rows, aliases, raw)``. A host report reads one host and keeps its full alias list for finding scope. ``raw`` are the host dicts the rows were made from."""
+    from agentapi import services as svc
+    qs = _host_qs(project, host)
+    raw = list(host_pages(project, qs, cap))
+    aliases = raw[0]['aliases'] if host and raw else []
+    everywhere = svc._is_all(project)
+    return qs.count(), [_host_row(h, findings_by_host, detail=bool(host), everywhere=everywhere) for h in raw], aliases, raw
+
+
+def _hosts_overview(raw, hosts, new_hosts):
+    """The hosts report's summary over the hosts it lists: how many are on fire, smoke or ice, the technologies and open ports most of them share, and the hosts found in the last 30 days."""
+    heat = Counter(h['heat'] for h in hosts)
+    techs = Counter(clean(t, 40) for h in raw for t in h['technologies'])
+    ports = Counter(f'{n}/{proto}' if proto else str(n) for h in raw for n, proto in {(p['number'], p['protocol'] or '') for ip in h['ips'] for p in ip['ports']})
+    return {'heat': {k: heat[k] for k in ('fire', 'smoke', 'ice', 'clean', 'unscanned')},
+            'technologies': [{'name': name, 'hosts': n} for name, n in sorted(techs.items(), key=lambda kv: (-kv[1], kv[0]))[:10]],
+            'ports': [{'port': port, 'hosts': n} for port, n in sorted(ports.items(), key=lambda kv: (-kv[1], kv[0]))[:10]],
+            'new_30d': new_hosts}
+
+
+def _new_hosts(project, now):
+    """How many machines the scope's projects found in the 30 days to ``now`` (an AssetChange ``host_new`` row each, a name once per project)."""
+    from agentapi import services as svc
+    from cveFeed.models import AssetChange
+    qs = svc._scoped(AssetChange.objects.all(), project, 'project').filter(kind='host_new', detected_at__gte=now - timedelta(days=30), detected_at__lte=now)
+    return len({(pid, host.lower()) for pid, host in qs.values_list('project_id', 'host')})
 
 
 def _label_hosts(project, hosts, entries):
     """Set ``host_alias`` on each of ``entries`` (findings, hygiene rows): the alias of the host it names, from the listed hosts (which resolve it
-    across the names on one set of addresses) or else the host's own profile, one query. Display only; ``host`` stays the name."""
+    across the names on one set of addresses) or else the host's own profile, one query. Display only; ``host`` stays the name. In an
+    organization report a host is its project and its name."""
+    from agentapi import services as svc
     from cveFeed.models import HostProfile
-    known = {h['host'].lower(): h['alias'] for h in hosts if h['alias']}
+    everywhere = svc._is_all(project)
+    key = (lambda e_or_h, name: (e_or_h.get('project_slug', ''), name.lower())) if everywhere else (lambda e_or_h, name: name.lower())
+    known = {key(h, h['host']): h['alias'] for h in hosts if h['alias']}
     for h in hosts:
-        known.update({a.lower(): h['alias'] for a in h.get('aliases', ()) if h['alias']})
-    named = {e['host'].lower() for e in entries if e['host']} - set(known)
+        known.update({key(h, a): h['alias'] for a in h.get('aliases', ()) if h['alias']})
+    named = {key(e, e['host']) for e in entries if e['host']} - set(known)
     if named:
-        known.update({row.host: clean(row.alias, ALIAS_MAX) for row in HostProfile.objects.filter(project=project, host__in=named).exclude(alias='')})
+        qs = HostProfile.objects.filter(project_id__in=list(project.ids), host__in={n[1] for n in named}).select_related('project') if everywhere else \
+            HostProfile.objects.filter(project=project, host__in=named)
+        known.update({((row.project.slug, row.host) if everywhere else row.host): clean(row.alias, ALIAS_MAX) for row in qs.exclude(alias='')})
     for e in entries:
-        e['host_alias'] = known.get((e['host'] or '').lower(), '')
+        e['host_alias'] = known.get(key(e, e['host'] or ''), '')
 
 
 # --- scope and method ----------------------------------------------------------------------------------------------------------
 
+def _pq(project, field):
+    """A filter on ``field`` (a foreign key to a project): that project, or the organization report's project ids."""
+    from agentapi import services as svc
+    return Q(**{f'{field}_id__in': list(project.ids)}) if svc._is_all(project) else Q(**{field: project})
+
+
 def _scope(project, host):
+    from agentapi import services as svc
     from targetApp.models import Domain
-    domains = Domain.objects.filter(project=project).order_by('name')
+    domains = svc._scoped(Domain.objects.all(), project, 'project').order_by('name')
     count = domains.count()
     return {'targets': count, 'targets_more': max(0, count - 15),
             'target_names': [clean(f'{n} ({a})' if a else n, 180) for n, a in domains.values_list('name', 'alias')[:15]]}  # a target's alias beside its name
@@ -396,18 +474,18 @@ def _method(project, names, addresses):
     ``addresses`` narrow it to one host's names and IPs; None is the whole project."""
     from cveFeed.models import ServiceRun
     from startScan.models import IpAddress, ScanHistory
-    scans = ScanHistory.objects.filter(domain__project=project, scan_status=SCAN_DONE).aggregate(
+    scans = ScanHistory.objects.filter(_pq(project, 'domain__project'), scan_status=SCAN_DONE).aggregate(
         n=Count('id'), first=Min('start_scan_date'), last=Max('start_scan_date'))
     runs = ServiceRun.objects.filter(status='done')
     if names is None:  # the global nmap rows (no project) count when they are about one of this project's addresses
-        mine = IpAddress.objects.filter(ip_addresses__target_domain__project=project).values('address')
-        runs = runs.filter(Q(project=project) | Q(project__isnull=True, asset__in=mine))
+        mine = IpAddress.objects.filter(_pq(project, 'ip_addresses__target_domain__project')).values('address')
+        runs = runs.filter(_pq(project, 'project') | Q(project__isnull=True, asset__in=mine))
     else:
         assets = {n.lower() for n in names} | set(addresses)
         q = Q(asset__in=sorted(assets))
         for asset in sorted(assets):
             q |= Q(asset__startswith=f'{asset}:')  # a host:port asset
-        runs = runs.filter(Q(project=project) | Q(project__isnull=True)).filter(q)
+        runs = runs.filter(_pq(project, 'project') | Q(project__isnull=True)).filter(q)
     by_service = {}
     for row in runs.order_by().values('service').annotate(assets=Count('asset', distinct=True), last=Max('finished_at')):
         entry = by_service.setdefault(row['service'].split(':')[0], {'assets': 0, 'last': None})
@@ -428,7 +506,8 @@ def _secrets(project, names, include_closed):
     report never holds a secret. For a host report, the ones that host serves."""
     from cveFeed import secrets_catalog, secrets_inventory
     from cveFeed.models import SecretFinding
-    qs = SecretFinding.objects.filter(project=project)
+    from agentapi import services as svc
+    qs = svc._scoped(SecretFinding.objects.all(), project, 'project')
     if not include_closed:
         qs = qs.exclude(status__in=secrets_catalog.QUIET_STATUSES)
     if names is not None:
@@ -444,43 +523,66 @@ def _secrets(project, names, include_closed):
     return total, rows
 
 
-def collect(project, host=None, include_closed=False, now=None):
+def collect(project, host=None, include_closed=False, now=None, kind='findings', org=None, whole=True):
     """Everything one report prints, for the whole project or for one host (``host``: its exact name). Raises LookupError for a host the
-    project's current inventory does not hold."""
+    project's current inventory does not hold.
+
+    ``project`` is a Project, or ``svc.AllProjects`` over the ids of an organization report (``org``: the Organization; ``whole`` False when the person
+    can read only some of its projects, which the cover says). ``kind='hosts'`` makes the discovered hosts report: the host table and its summary,
+    with no finding, hygiene or secret sections (a host row still counts its open findings)."""
+    from agentapi import services as svc
     from startScan.models import Subdomain
     now = now or timezone.now()
     caps = limits()
     names = None
+    everywhere = svc._is_all(project)
+    if kind not in ('findings', 'hosts') or (everywhere and (host or org is None)):
+        raise ValueError('a report is of one project or one organization, as a findings or a hosts report; a host report is of one project')
     if host:
         from cveFeed.correlation import latest_scan_q
-        from agentapi import services as svc
         if not svc._scoped(Subdomain.objects.all(), project, 'target_domain__project').filter(latest_scan_q()).filter(name__iexact=host).exists():
             raise LookupError('host not found')
         names = {host.lower()}
-    sources, ruled_out = _sources(project, include_closed, names=None if names is None else sorted(names))
-    host_total, hosts, aliases = _hosts(project, host, _per_host(sources), caps['hosts'])
+    hosts_report = kind == 'hosts'
+    sources, ruled_out = _sources(project, False if hosts_report else include_closed, names=None if names is None else sorted(names))
+    host_total, hosts, aliases, raw = _hosts(project, host, _per_host(sources, everywhere), caps['hosts'])
     if host and hosts:  # the host may answer to other names (same addresses): their findings are this host's too
         names |= {a.lower() for a in aliases}
         sources, ruled_out = _sources(project, include_closed, names=sorted(names))
         hosts[0]['findings'] = sum(_per_host(sources).values())
     total, heat, severity = _tally({k: v for k, v in sources.items() if k != 'hygiene'})
     hygiene_total, _, hygiene_severity = _tally({'hygiene': sources['hygiene']})
-    detailed = _findings(sources, caps['findings'])
-    hygiene = _hygiene(sources['hygiene'], caps['hygiene'])
-    _label_hosts(project, hosts, [*detailed, *(item for g in hygiene for item in g['items'])])
-    secrets_total, secrets = _secrets(project, names, include_closed)
-    org = project.org
+    if hosts_report:
+        detailed, hygiene, secrets_total, secrets = [], [], 0, []
+        _label_hosts(project, hosts, [])
+    else:
+        detailed = _findings(sources, caps['findings'], everywhere)
+        hygiene = _hygiene(sources['hygiene'], caps['hygiene'], everywhere)
+        _label_hosts(project, hosts, [*detailed, *(item for g in hygiene for item in g['items'])])
+        secrets_total, secrets = _secrets(project, names, include_closed)
+    if everywhere:
+        from dashboard.models import Project
+        project_names = [clean(n, 200) for n in Project._base_manager.filter(pk__in=list(project.ids)).order_by('name').values_list('name', flat=True)]
+        label, organization = clean(org.name, 200), clean(org.name, 200)
+        scope_projects = {'count': len(project_names), 'names': project_names[:15], 'more': max(0, len(project_names) - 15), 'whole': bool(whole)}
+        project_line = f"{len(project_names)} project{'' if len(project_names) == 1 else 's'}"
+    else:
+        label, organization = clean(host or project.name, 200), clean(project.org.name if project.org else '', 200)
+        scope_projects = None
+        project_line = clean(project.name, 200)
     return {
-        'title': 'Host security report' if host else 'Security exposure report', 'subject': clean(host or project.name, 200),
-        'project': clean(project.name, 200), 'organization': clean(org.name if org else '', 200), 'host': clean(host or '', 200),
+        'kind': kind, 'scope_kind': 'org' if everywhere else 'project', 'scope_projects': scope_projects,
+        'title': 'Discovered hosts report' if hosts_report else 'Host security report' if host else 'Security exposure report', 'subject': label,
+        'project': project_line, 'organization': organization, 'host': clean(host or '', 200),
         'host_alias': hosts[0]['alias'] if host and hosts else '', 'host_note': hosts[0].get('note', '') if host and hosts else '',
-        'generated': _stamp(now), 'generated_date': _date(now), 'include_closed': include_closed, 'branding': _branding(),
+        'generated': _stamp(now), 'generated_date': _date(now), 'include_closed': False if hosts_report else include_closed, 'branding': _branding(),
         'scope': {**_scope(project, host), 'hosts_total': host_total, 'hosts_listed': len(hosts)},
         'summary': {'findings': total, 'heat': heat, 'heat_policy': _heat_policy(), 'severity': severity, 'hygiene': hygiene_total,
                     'hygiene_severity': hygiene_severity,
                     'hosts_exposed': sum(1 for h in hosts if h['heat'] in ('fire', 'smoke')), 'ruled_out': ruled_out,
-                    'status_counts': _status_counts(sources),
+                    'status_counts': _status_counts(sources) if not hosts_report else {},
                     'top': detailed[:TOP_RISKS]},
+        'hosts_summary': _hosts_overview(raw, hosts, _new_hosts(project, now)) if hosts_report else None,
         'hosts': hosts, 'findings': detailed, 'hygiene': hygiene, 'secrets': secrets, 'secrets_total': secrets_total,
         'caps': {**caps, 'findings_omitted': max(0, total - len(detailed)), 'hosts_omitted': max(0, host_total - len(hosts)),
                  'hygiene_omitted': max(0, hygiene_total - sum(len(g['items']) for g in hygiene)),

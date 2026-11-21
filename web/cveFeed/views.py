@@ -794,6 +794,20 @@ def scanners_page(request):
     return render(request, 'cveFeed/scanners.html', ui_context(request, 'scanners'))
 
 
+def reports_page(request):
+    """Reporting: findings and hosts reports of a project or an organization, as a PDF or a CSV file (static/cve/reports.js). The scope picker reads
+    /api/v1/reporting/scopes; ``?project=`` or ``?org=`` preselects it. A project the caller cannot see is a 404 before this runs (the tenancy
+    middleware reads ``?project=``); one that is not a real project falls back to the remembered one."""
+    from dashboard.models import Project
+    visible = list(Project.objects.values_list('slug', flat=True))  # scoped to the caller
+    want = request.GET.get('project') or ''
+    chosen = want in visible and want != ALL_PROJECTS
+    slug = want if chosen else remembered_scope(request, visible)
+    ctx = ui_context(request, 'reports', slug, remember=chosen)
+    initial_org = (request.GET.get('org') or '') or ctx['scope_org']
+    return render(request, 'cveFeed/reports.html', {**ctx, 'initial_project': want if chosen else '', 'initial_org': initial_org[:80]})
+
+
 def cve_explorer_page(request):
     """The CVE catalog: the whole catalog searched by id or technology (static/cve/explorer.js reads /cve/api/cves). ?q= is the search."""
     from cveFeed.cve_explorer import SEVERITIES, clean_query

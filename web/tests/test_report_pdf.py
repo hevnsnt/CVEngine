@@ -465,7 +465,7 @@ class PermissionTests(ReportBase):
         queued(self.auditor, 'acme', host='quiet.acme.test', include_closed=True, run=False)
         row = AuditLog.objects.get(action='report.export')
         self.assertEqual((row.actor, row.target, row.org_id), (self.auditor, 'acme', self.pa.org_id))
-        self.assertEqual(row.detail, {'host': 'quiet.acme.test', 'include_closed': True})
+        self.assertEqual(row.detail, {'host': 'quiet.acme.test', 'include_closed': True, 'kind': 'findings', 'format': 'pdf', 'scope': 'project'})
 
     def test_making_a_report_also_removes_the_expired_ones(self):
         old = queued(self.worker, 'acme')

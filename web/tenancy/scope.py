@@ -86,7 +86,8 @@ SCOPES = {
     'cveFeed.ResourceRef': 'project_id',
     'dashboard.ApiCredential': 'project_id',  # an organization's own credential has no project (NULLABLE)
 }
-NULLABLE = {'cveFeed.AgentActivity', 'dashboard.ApiCredential', 'cveFeed.AIJob', 'agentapi.StageRun'}  # system-wide (or organization-wide) entries have no project
+NULLABLE = {'cveFeed.AgentActivity', 'dashboard.ApiCredential', 'cveFeed.AIJob', 'agentapi.StageRun',
+            'cveFeed.ReportExport'}  # system-wide (or organization-wide) entries have no project; an organization report has none and is only ever read by requested_by (report_export._mine)
 
 # Models that hold a foreign key to a project, domain, scan or organization and are deliberately NOT in SCOPES. Every other one must be listed above
 # (tests.test_sentinel_hardening checks this), so a model that gains a project owner cannot be forgotten.

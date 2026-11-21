@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 
 from agentapi import services as svc
 from agentapi.services import ApiError
-from tenancy import audit, roles
+from tenancy import audit
 
 CHUNK = 500
 LOOKUP_CHUNK = 2000  # ids in one IN list
@@ -84,20 +84,9 @@ def _iso(value):
 
 def _projects(ctx, slug, org_slug):
     """``(label for the file name, [projects])``: the one project (any role may read it), or the projects of the organization that the caller may see."""
-    from dashboard.models import Org, Project
-    if bool(slug) == bool(org_slug):
-        raise ApiError(400, 'give a project or an organization, not both')
-    if slug:
-        project, _ = svc.get_one_project(ctx, slug)  # _all is a 400: an export names its project or its organization
-        return project.slug, [project]
-    org = Org.objects.filter(slug=str(org_slug)).first()
-    if org is None or not svc._visible_org(ctx.user, org):
-        raise ApiError(404, 'organization not found')  # the same answer whether it is missing or not yours
-    allowed = roles.allowed_project_ids(ctx.user)  # None: an App Admin, every project
-    qs = Project.objects.filter(org=org).select_related('org').order_by('slug')
-    if allowed is not None:
-        qs = qs.filter(id__in=sorted(allowed))
-    return org.slug, list(qs)
+    from agentapi import report_scope
+    scope = report_scope.resolve(ctx, project=slug, org=org_slug)  # both or neither is a 400; _all is a 400; a missing or foreign organization is a 404
+    return scope.slug, scope.projects
 
 
 def _plan(project, external, include_archived):

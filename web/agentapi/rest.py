@@ -503,12 +503,22 @@ ROUTES = [
     ('GET', r'projects/(?P<slug>[-\w]+)/findings/(?P<kind>match|vulnerability|hygiene)/(?P<finding_id>\d+)/audit',
      "One finding's audit trail (status, assignee and comment events, newest first), each with who, when, and before/after",
      lambda r, c, slug, kind, finding_id, **k: svc.finding_audit(c, slug, kind, int(finding_id), r.GET)),
-    ('POST', r'projects/(?P<slug>[-\w]+)/reports', 'Queue a PDF report of the project, or of one host; body {host, include_closed}. Open findings only unless include_closed. Answers 202 with the report id and a status_url to poll; a read, so a read-only token may ask',
+    ('POST', r'projects/(?P<slug>[-\w]+)/reports', 'Queue a report of the project, or of one host; body {kind: findings (default) or hosts, format: pdf (default) or csv, host (findings reports only), include_closed}. Open findings only unless include_closed. Answers 202 with the report id and a status_url to poll; a read, so a read-only token may ask',
      lambda r, c, slug, **k: reports.export_report(c, slug, _body(r))),
     ('GET', r'projects/(?P<slug>[-\w]+)/reports/(?P<token>[-\w]+)', 'The state of a report you asked for: queued, running, done (with download_url), failed or expired',
      lambda r, c, slug, token, **k: reports.report_status(c, slug, token)),
-    ('GET', r'projects/(?P<slug>[-\w]+)/reports/(?P<token>[-\w]+)/download', 'Download a finished report as application/pdf (only the user who asked, until it expires, 24 hours by default)',
+    ('GET', r'projects/(?P<slug>[-\w]+)/reports/(?P<token>[-\w]+)/download', 'Download a finished report as application/pdf or text/csv (only the user who asked, until it expires, 24 hours by default)',
      lambda r, c, slug, token, **k: reports.report_download(c, slug, token)),
+    ('POST', r'orgs/(?P<org>[-\w]+)/reports', 'Queue a report of every project of the organization that you can read; body {kind: findings (default) or hosts, format: pdf (default) or csv, include_closed}. A person added to only some of its projects gets a report of those, and the cover says so. Answers 202 with the report id and a status_url to poll (200 when the same report is already being made); a read, so a read-only token may ask',
+     lambda r, c, org, **k: reports.export_org_report(c, org, _body(r))),
+    ('GET', r'orgs/(?P<org>[-\w]+)/reports/(?P<token>[-\w]+)', 'The state of an organization report you asked for: queued, running, done (with download_url), failed or expired',
+     lambda r, c, org, token, **k: reports.report_status(c, None, token, org=org)),
+    ('GET', r'orgs/(?P<org>[-\w]+)/reports/(?P<token>[-\w]+)/download', 'Download a finished organization report as application/pdf or text/csv (only the user who asked, until it expires)',
+     lambda r, c, org, token, **k: reports.report_download(c, None, token, org=org)),
+    ('GET', r'reporting/scopes', 'What the Reporting page offers: every organization and project you can report on ({kind, slug, name, projects, whole for an organization; org, role for a project}, each with can_subscribe and can_view_subscriptions), your account email, whether outgoing mail is set up (mail_ready) and the email report limits',
+     lambda r, c, **k: reports.list_report_scopes(c, r.GET)),
+    ('GET', r'reporting/reports', 'The reports you asked for that have not expired, newest first (at most 20), each as the state of GET projects/{slug}/reports/{id}',
+     lambda r, c, **k: reports.list_my_reports(c, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/settings', "The project's settings: sla_days (days to fix per severity: critical, high, medium, low) and the defaults",
      lambda r, c, slug, **k: svc.get_project_settings(c, slug)),
     ('PUT', r'projects/(?P<slug>[-\w]+)/settings', "Change the project's settings; sla_days is a partial update, a severity set to null goes back to its default",
@@ -642,7 +652,7 @@ ROUTES = [
 ]
 NO_TOKEN_ROUTES = ('sentinels/bootstrap',)  # authenticated by their own one-time secret, not a bearer token
 MAX_ID_DIGITS = 18  # an id in a path longer than this cannot exist (the keys are 64-bit)
-READ_ONLY_POSTS =re.compile(r'^projects/[-\w]+/reports$')  # asking for a report changes nothing a read-only token protects
+READ_ONLY_POSTS =re.compile(r'^(projects|orgs)/[-\w]+/reports$')  # asking for a report changes nothing a read-only token protects
 SELF_GATED_POSTS = re.compile(r'^sentinel/tasks/\d+/secret$')  # refuses a read-only token itself, so that the refusal is audited (sentinel_broker.read_secret)
 COMPILED = [(m, re.compile(f'^{pat}/?$'), summary, fn) for m, pat, summary, fn in ROUTES]
 

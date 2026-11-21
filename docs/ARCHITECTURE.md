@@ -56,7 +56,7 @@ Ubuntu 26.04, Python 3.14, Django 6.0, PostgreSQL 18, nmap 7.993, and Go 1.27 fo
 | `HostProfile`, `HostLabel`, `HostExclusion`, `HostAssessment` | Owner, criticality, alias and note (one row per project and host name, so they outlast rescans), detection chips, exclusions, and rescans |
 | `HostInventory`, `HostInventoryReport` | What a host reported about itself with the reporter script, one row per machine, and its summarised report history ([HOST-INVENTORY.md](HOST-INVENTORY.md)) |
 | `ServiceRun` | The last finished run of each scanner on each asset |
-| `ReportExport` | One requested PDF report: who asked, for what, its state and the random file name, until it expires ([FRONTEND.md](FRONTEND.md#pdf-reports)) |
+| `ReportExport` | One requested report: who asked, for what (a project or an organization, a findings or a hosts report, as a PDF or a CSV file), its state and the random file name, until it expires ([REPORTING.md](REPORTING.md)) |
 | `AgentActivity`, `AIUsage` | The activity feed, and the AI call ledger ([AI-USAGE.md](AI-USAGE.md)) |
 | `Agent`, `AgentTask` | A registered agent (an API token that identified itself, including a Sentinel: `kind='scanner'`) and remediation/validation work leased to one |
 | `SentinelTask`, `SentinelEnrollment`, `SentinelDefaults` | Scan-stage work (all forty kinds of the result contract) leased to a Sentinel, a one-time secret for a Sentinel's first registration, and the instance-wide Sentinel defaults ([AGENT-API.md](AGENT-API.md#sentinels-scan-stage-agents)) |

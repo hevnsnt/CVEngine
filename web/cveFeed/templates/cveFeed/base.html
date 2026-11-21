@@ -31,6 +31,7 @@
     <symbol id="i-bot" viewBox="0 0 24 24"><rect x="4" y="8" width="16" height="11" rx="3"/><path d="M12 8V5M9 13h.01M15 13h.01M9.5 16.5h5"/><circle cx="12" cy="4" r="1"/></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></symbol>
+    <symbol id="i-report" viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4M10 12h5M10 15.5h5M10 19h3"/></symbol>
     <symbol id="i-more" viewBox="0 0 24 24"><path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3"/></symbol>
     <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
@@ -97,7 +98,7 @@
 
 <nav class="tabbar" aria-label="Main">
   {% for e in nav.rail %}{% if e.key == 'overview' or e.key == 'findings' or e.key == 'assets' or e.key == 'scans' %}<a href="{{ e.href }}" {% if e.current %}aria-current="page"{% endif %}><svg width="22" height="22" viewBox="0 0 24 24"><use href="#i-{{ e.icon }}"/></svg>{{ e.label }}</a>{% endif %}{% endfor %}
-  <button type="button" id="more-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="sheet" {% if nav.current == 'hygiene' or nav.current == 'suppliers' or nav.current == 'scanners' or nav.current == 'bounty' %}aria-current="page"{% endif %}><svg width="22" height="22" viewBox="0 0 24 24"><use href="#i-more"/></svg>More</button>
+  <button type="button" id="more-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="sheet" {% if nav.current == 'hygiene' or nav.current == 'suppliers' or nav.current == 'reporting' or nav.current == 'scanners' or nav.current == 'bounty' %}aria-current="page"{% endif %}><svg width="22" height="22" viewBox="0 0 24 24"><use href="#i-more"/></svg>More</button>
   <button type="button" id="acct-btn" aria-haspopup="dialog" aria-expanded="false" aria-controls="acct-sheet" {% if nav.utility %}aria-current="page"{% endif %}><span class="tab-avatar" aria-hidden="true">{{ request.user.first_name|default:request.user.username|slice:":1"|upper }}</span>Account</button>
 </nav>
 
@@ -107,7 +108,7 @@
 <div class="sheet" id="sheet" role="dialog" aria-label="More" hidden>
   <div class="sheet-grip" aria-hidden="true"></div>
   <div class="sheet-grid">
-    {% for e in nav.rail %}{% if e.key == 'hygiene' or e.key == 'suppliers' or e.key == 'scanners' or e.key == 'bounty' %}<a href="{{ e.href }}" {% if e.current %}aria-current="page"{% endif %}><svg width="20" height="20" viewBox="0 0 24 24"><use href="#i-{{ e.icon }}"/></svg>{{ e.label }}</a>{% endif %}{% endfor %}
+    {% for e in nav.rail %}{% if e.key == 'hygiene' or e.key == 'suppliers' or e.key == 'reporting' or e.key == 'scanners' or e.key == 'bounty' %}<a href="{{ e.href }}" {% if e.current %}aria-current="page"{% endif %}><svg width="20" height="20" viewBox="0 0 24 24"><use href="#i-{{ e.icon }}"/></svg>{{ e.label }}</a>{% endif %}{% endfor %}
     {% for e in nav.more %}<a href="{{ e.href }}"><svg width="20" height="20" viewBox="0 0 24 24"><use href="#i-chevron"/></svg>{{ e.label }}</a>{% endfor %}
   </div>
 </div>
