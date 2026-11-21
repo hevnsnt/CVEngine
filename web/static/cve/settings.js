@@ -1581,12 +1581,13 @@ const tabs = el("nav", "set-nav", null, {
 });
 const panel = el("div", "set-panel");
 view.append(tabs, panel);
-// Essentials are the four things most installs ever touch; everything else is under Advanced, collapsed. OpenVAS is not in Settings: its one
+// Essentials are the few things most installs ever touch; everything else is under Advanced, collapsed. OpenVAS is not in Settings: its one
 // place is Administration > OpenVAS, which an organization admin can open too (the panel is the same).
-const essentials = ["ai", "alerts", "reports", "updates", "sentinels"];
+const essentials = ["ai", "email", "alerts", "reports", "updates", "sentinels"];
 const advanced = ["keys", "tailscale", "scan_policy", "ip_allowlist", "proxy", "resources", "reset"];
 const labels = {
   ai: "AI model",
+  email: "Email",
   alerts: "Alerts",
   reports: "Reports",
   updates: "Updates",
@@ -1599,12 +1600,9 @@ const labels = {
   resources: "Resources",
   reset: "Factory reset",
 };
-// Alerts: where this server sends notices (chat webhooks) and how it sends mail, one pane instead of two
+// Alerts: where this server sends notices (chat webhooks). Outgoing mail has its own tab, Email, where every message that names it points.
 sections.alerts = async (m) => {
-  const mail = el("div");
   await sections.notifications(m);
-  m.append(mail);
-  await sections.email(mail);
 };
 
 // configMaxxing: the advanced tunables. A group of its own that is collapsed until opened; whether it is open is remembered per viewer.
@@ -1686,7 +1684,7 @@ setCmOpen(readOpen(storage), false);
 setAdvOpen(false);
 
 // an old link to #engines (the tab this replaced) opens the scan policy
-const legacyTabs = { engines: "scan_policy", notifications: "alerts", email: "alerts" };
+const legacyTabs = { engines: "scan_policy", notifications: "alerts" };
 const hash = location.hash.slice(1);
 if (hash === "openvas") window.location.replace("/cve/admin/#openvas"); // its one place now
 const hashTab = isSectionHash(location.hash) ? SECTION_ID : legacyTabs[hash] || hash;
