@@ -122,7 +122,7 @@ class OperatorNotesTests(SimpleTestCase):
     def test_the_notes_cover_what_the_owner_asked_for(self):
         text = doc_text('docs/1.4-OPERATOR-NOTES.md')
         for needle in ('CVENGINE_DB_CONN_MAX_AGE', 'CVENGINE_AGENT_TASK_RETENTION_DAYS', 'CVENGINE_NUCLEI_AI_MAX_PER_DAY', 'CVENGINE_REPORT_MAX_HOSTS',
-                       'CVENGINE_REPORT_MAX_FINDINGS', 'CVENGINE_BULK_DISCOVER_NOW', 'CVENGINE_SENTINEL_DENY_RANGES', 'POSTGRES_SHARED_BUFFERS',
+                       'CVENGINE_REPORT_MAX_WRITEUPS', 'CVENGINE_BULK_DISCOVER_NOW', 'CVENGINE_SENTINEL_DENY_RANGES', 'POSTGRES_SHARED_BUFFERS',
                        'Addresses we must never scan', 'BUILTIN-SCANNER.md', 'waiting for a free slot', 'Haiku', 'refusal', 'Rolling back'):
             self.assertIn(needle, text)
         self.assertNotIn('pin', re.sub(r'(?i)\b(?:pinned|pins|spinning)\b', '', text).lower().replace('chaining', ''), 'the scanner section must not describe pinning')
