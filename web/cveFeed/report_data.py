@@ -7,13 +7,17 @@ numbers: every string that came from a scanned host, a feed or a person is strip
 HTML-escaped by the template (cveFeed/templates/cveFeed/report.html, autoescape on, no ``safe``), so a hostile banner or finding title
 reaches the PDF as inert text.
 
-The caps (hosts, detailed findings, hygiene rows) keep one report bounded: the totals and the heat and severity counts always cover
-every finding, and the report says what the caps left out.
+The findings report reads like a penetration test report. The open findings are grouped into ISSUES (``_issues``): one CVE on five hosts
+is one issue that lists the five hosts, a scanner finding is grouped by its template and title, a hygiene finding by its check. Each issue
+gets one of five professional severities (``rate``, documented there and on the report's methodology page), the issues are numbered and
+ordered by severity and then by how many hosts they affect, and only the critical, high and medium ones get a full write-up; low and
+informational issues are one line each in an appendix. The caps (``limits``) bound the write-ups, the host rows of one issue, the appendix
+tables and the rows read; the counts always cover every finding read, and the report says what the caps left out.
 """
 import os
 import re
 from collections import Counter
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import timedelta
 
 from django.db.models import Count, Max, Min, Q
 from django.utils import timezone
@@ -28,10 +32,87 @@ PROVING = ('hit', 'observed', 'reaffirmed')  # the validation results that show 
 FALSE_POSITIVES = ('likely_false_positive', 'not_applicable')  # triage classes a client report leaves out
 HOST_PAGE = 100
 
-DEFAULT_MAX_HOSTS, CEILING_HOSTS = 500, 5000
-DEFAULT_MAX_FINDINGS, CEILING_FINDINGS = 1000, 5000
-DEFAULT_MAX_HYGIENE, CEILING_HYGIENE = 500, 5000
-TOP_RISKS = 10
+# the caps of one report: (environment variable, default, ceiling). docs/CONFIGURATION.md lists them.
+CAPS = {
+    'hosts': ('CVENGINE_REPORT_MAX_HOSTS', 500, 5000),  # rows of the discovered hosts report
+    'writeups': ('CVENGINE_REPORT_MAX_WRITEUPS', 50, 500),  # detailed write-ups (critical, high and medium issues)
+    'issue_hosts': ('CVENGINE_REPORT_MAX_ISSUE_HOSTS', 25, 500),  # affected-host rows printed under one issue
+    'minor': ('CVENGINE_REPORT_MAX_MINOR', 200, 5000),  # rows of the low and informational appendix
+    'inventory': ('CVENGINE_REPORT_MAX_INVENTORY', 200, 5000),  # rows of the asset inventory appendix of a findings report
+    'closed': ('CVENGINE_REPORT_MAX_CLOSED', 300, 5000),  # rows of the closed findings appendix
+    'rows': ('CVENGINE_REPORT_MAX_ROWS', 20000, 100000),  # findings read per kind (CVE, scanner, hygiene) to group
+}
+SUMMARY_ROWS = 150  # rows of the summary of findings table (critical, high and medium issues)
+TRACKING_ROWS = 10  # hosts whose assignee or note an issue prints
+PROOF_HOSTS = 3  # confirmed hosts whose proof an issue prints
+TOP_ISSUES = 4  # issues the executive summary names
+TOP_ACTIONS = 5  # key recommendations
+
+# --- severity -----------------------------------------------------------------------------------------------------------------
+
+LEVELS = ('critical', 'high', 'medium', 'low', 'info')
+LEVEL_LABELS = {'critical': 'Critical', 'high': 'High', 'medium': 'Medium', 'low': 'Low', 'info': 'Informational'}
+LEVEL_RANK = {'info': 0, 'low': 1, 'medium': 2, 'high': 3, 'critical': 4}
+DETAILED = ('critical', 'high', 'medium')  # the levels that get a full write-up
+SCANNER_LEVELS = {0: 'info', 1: 'low', 2: 'medium', 3: 'high', 4: 'critical'}
+HYGIENE_CEILING = 'high'  # a configuration finding is at most High, whatever its check says
+
+# what a finding rests on, strongest first
+BASIS = ('Confirmed', 'Likely', 'Detected', 'Version match')
+BASIS_TEXT = {
+    'Confirmed': 'Confirmed: a check on the host reproduced it.',
+    'Likely': 'Likely: the version was proven on the host (its own inventory, its distribution or the component itself), but the flaw was not reproduced.',
+    'Detected': 'Detected: a scanner check or configuration check observed it directly; not independently reproduced.',
+    'Version match': 'Version match: the version the service reports is inside the affected range. This suggests the flaw is present but does not prove it.',
+}
+
+
+def cve_base(cvss, kev):
+    """The severity a CVE carries on its own, before what cvENGINE knows about the host: Critical when it is on CISA's KEV list or rated
+    CVSS 9.0 or higher, High from 7.0, Medium from 4.0, Low below; Medium when the advisory has no CVSS score."""
+    if kev or (cvss is not None and cvss >= 9.0):
+        return 'critical'
+    if cvss is None:
+        return 'medium'
+    return 'high' if cvss >= 7.0 else 'medium' if cvss >= 4.0 else 'low'
+
+
+def rate(kind, heat, base, kev=False, confirmed=False, version_only=False, weak=False):
+    """The report's severity of one finding: one of ``LEVELS``. The one place the five professional levels come from; the methodology page
+    of the report says the same in words.
+
+    ``base`` is the finding's own severity: a CVE's from its CVSS and KEV listing (``cve_base``), a scanner or hygiene finding's the one its
+    check states. ``heat`` is cvENGINE's fire, smoke or ice for it (``threat``: how dangerous it is on THIS host, from exploitation
+    signals and proof), and caps the base so the report agrees with the rest of cvENGINE:
+
+      * fire: the base stands;
+      * smoke: at most High;
+      * ice: Low (not known to be exploited, or not proven); Informational for a CVE match that is weak on its face (a fix the
+        distribution backported, a version that could not be read, CVSS below 4.0) or a finding whose check rates it informational;
+        Medium when a check confirmed it and its base is High or Critical (proof outranks the missing exploitation signal);
+      * no heat: Informational.
+
+    Two rules on top: a CVE match that rests on its version alone is never Critical unless the CVE is on the KEV list (a version is no
+    proof), and a hygiene (configuration) finding is at most High."""
+    if heat == 'fire':
+        level = base
+    elif heat == 'smoke':
+        level = base if LEVEL_RANK[base] <= LEVEL_RANK['high'] else 'high'
+    elif heat == 'ice':
+        if weak or base == 'info':
+            level = 'info'
+        elif confirmed and LEVEL_RANK[base] >= LEVEL_RANK['high']:
+            level = 'medium'
+        else:
+            level = 'low'
+    else:
+        level = 'info'
+    if level == 'critical' and kind == 'cve' and version_only and not kev:
+        level = 'high'
+    if kind == 'hygiene' and LEVEL_RANK[level] > LEVEL_RANK[HYGIENE_CEILING]:
+        level = HYGIENE_CEILING
+    return level
+
 
 # a short, plain reading of what each ledger service is, for the method page
 SERVICE_LABELS = {
@@ -65,13 +146,15 @@ def _env_int(name, default, ceiling):
 
 def limits():
     """The caps of one report, from the environment (docs/CONFIGURATION.md), each held under a hard ceiling."""
-    return {'hosts': _env_int('CVENGINE_REPORT_MAX_HOSTS', DEFAULT_MAX_HOSTS, CEILING_HOSTS),
-            'findings': _env_int('CVENGINE_REPORT_MAX_FINDINGS', DEFAULT_MAX_FINDINGS, CEILING_FINDINGS),
-            'hygiene': _env_int('CVENGINE_REPORT_MAX_HYGIENE', DEFAULT_MAX_HYGIENE, CEILING_HYGIENE)}
+    return {key: _env_int(name, default, ceiling) for key, (name, default, ceiling) in CAPS.items()}
 
 
 def _date(value):
     return value.strftime('%Y-%m-%d') if value else ''
+
+
+def _long_date(value):
+    return f'{value:%B} {value.day}, {value:%Y}' if value else ''
 
 
 def _stamp(value):
@@ -80,6 +163,16 @@ def _stamp(value):
 
 def _person(user):
     return clean(user.get_full_name() or user.username, 80) if user else ''
+
+
+def _plural(n, word, plural=None):
+    return f'{n:,} {word if n == 1 else plural or word + "s"}'
+
+
+def _first_sentence(text, limit=240):
+    text = ' '.join((text or '').split())
+    m = re.match(r'(.+?[.!?])(\s|$)', text)
+    return clean(m.group(1) if m else text, limit)
 
 
 def _branding():
@@ -251,6 +344,18 @@ def match_basis(m):
             'Version-based: the detected version is inside the advisory range; not reproduced'), confirmed
 
 
+def _cve_references(cve, cap=3):
+    """Up to ``cap`` https links the advisory lists (printed as text; the renderer fetches nothing), the NVD page first."""
+    out = [f'https://nvd.nist.gov/vuln/detail/{cve.cve_id}'] if re.fullmatch(r'CVE-\d{4}-\d{4,}', cve.cve_id or '') else []
+    for ref in (cve.references if isinstance(cve.references, list) else [])[:40]:
+        url = ref if isinstance(ref, str) else ref.get('url', '') if isinstance(ref, dict) else ''
+        if isinstance(url, str) and url.startswith('https://') and len(url) <= 200 and '@' not in url.split('/')[2] and url not in out:
+            out.append(clean(url, 200))
+        if len(out) >= cap:
+            break
+    return out
+
+
 def _match_entry(m, heat):
     from agentapi import services as svc
     from cveFeed.triage import verdict_text
@@ -264,10 +369,10 @@ def _match_entry(m, heat):
     sub = m.subdomain
     from cveFeed.threat import heat_reason
     return {'kind': 'CVE match', 'title': clean(f'{cve.cve_id} in {product}' if product else cve.cve_id, 200), 'subtitle': clean(cve.title, 200),
-            'host': clean(sub.name if sub else '', 200), 'heat': heat, 'severity': svc.SEVERITY_NAMES.get(m.sev, ''),
+            'host': clean(sub.name if sub else '', 200), 'heat': heat, 'severity': svc.SEVERITY_NAMES.get(getattr(m, 'sev', None), ''),
             'cves': [clean(cve.cve_id, 40)], 'cvss': cve.cvss, 'signals': flags, 'basis': basis, 'confirmed': confirmed,
             'heat_reason': clean(heat_reason(m, heat) if heat else '', 200),
-            'description': clean(svc._cve_description(cve, 500), 500), 'impact': clean(text['impact'], 600),
+            'description': clean(svc._cve_description(cve, 700), 700), 'impact': clean(text['impact'], 600),
             'evidence': _steps(svc._how_found_match(m)), 'proof': _proof(t), 'confirm': None if confirmed else _confirm(m),
             'remediation': clean(text['remediation'], 1200), 'fixed_in': [clean(v, 60) for v in fixed[:6]],
             'tracking': _tracking(m), 'first_seen': _date(svc._seen(m, 'first_seen', m.created_at)),
@@ -289,31 +394,11 @@ def _vulnerability_entry(v, heat):
             'severity': svc.SEVERITY_NAMES.get(v.severity, ''), 'cves': [clean(c.name, 40) for c in v.cve_ids.all()][:8],
             'cvss': v.cvss_score, 'signals': [],
             'basis': 'Confirmed: a check on the host reproduced it' if confirmed else 'Detected by the scanner template (a response matched); not independently reproduced',
-            'confirmed': confirmed, 'description': clean(v.description, 500), 'impact': clean(text['impact'] or v.impact, 600),
+            'confirmed': confirmed, 'description': clean(v.description, 700), 'impact': clean(text['impact'] or v.impact, 600),
             'evidence': _steps(svc._how_found_vulnerability(v)), 'proof': proof[:5],
             'remediation': clean(text['remediation'] or v.remediation, 1200), 'fixed_in': [],
             'tracking': {**_tracking(v), **({'status': 'No longer detected'} if not v.open_status and v.remediation_status == 'open' else {})},
             'first_seen': _date(svc._seen(v, 'first_seen', v.discovered_date)), 'last_seen': _date(svc._seen(v, 'last_seen', v.discovered_date))}
-
-
-def _tag_project(entry, project):
-    """Name the project of an entry of an organization report (the rows were read with their project joined, so this is no query)."""
-    entry['project'], entry['project_slug'] = clean(project.name, 200), project.slug
-    return entry
-
-
-def _findings(sources, cap, everywhere=False):
-    """The top ``cap`` CVE matches and scanner findings together, hottest first, as report entries. ``everywhere``: an organization report, so each entry names its project."""
-    epoch = datetime(1970, 1, 1, tzinfo=dt_timezone.utc)
-    merged = [('cve', o) for o in sources['cve'][:cap]] + [('scanner', o) for o in sources['scanner'].prefetch_related('cve_ids')[:cap]]
-    merged.sort(key=lambda p: (p[1].heat_rank, p[1].sev, p[1].when or epoch, p[1].id), reverse=True)
-    out = []
-    for key, obj in merged[:cap]:
-        entry = (_match_entry if key == 'cve' else _vulnerability_entry)(obj, HEAT_NAMES.get(obj.heat_rank, ''))
-        if everywhere:
-            _tag_project(entry, obj.subdomain.target_domain.project if key == 'cve' else obj.target_domain.project)
-        out.append(entry)
-    return out
 
 
 def _hygiene_group(check):
@@ -326,22 +411,484 @@ def _hygiene_group(check):
     return 'Other configuration'
 
 
-def _hygiene(qs, cap, everywhere=False):
-    """Hygiene findings (TLS, certificates, email, cleartext services) grouped by kind; each is {title, host, severity, detail, evidence, tracking}."""
+# the common hygiene checks in a report's words: (issue title, why it matters, what to do). A check not listed takes its own title.
+_CERT_EXPIRED = ('Expired TLS certificate',
+                 'Clients reject the certificate or show a warning. People learn to click through warnings, which makes it easier for an attacker on the network path to impersonate the service.',
+                 'Renew the certificate and install it with its full chain. Automate renewal (for example with ACME) and monitor expiry dates.')
+_CERT_EXPIRING = ('TLS certificate about to expire',
+                  'When the certificate expires, clients will reject it or show a warning, and the service may become unusable.',
+                  'Renew the certificate before it expires, and automate renewal so it does not lapse again.')
+CHECK_TEXT = {
+    'tls_expired': _CERT_EXPIRED, 'cert_expired': _CERT_EXPIRED, 'tls_expiring': _CERT_EXPIRING, 'cert_expiring': _CERT_EXPIRING,
+    'tls_self_signed': ('Self-signed TLS certificate',
+                        'Users cannot verify that they are talking to the real service, so an attacker on the network path can intercept the connection without a warning that stands out.',
+                        'Replace the certificate with one issued by a trusted certificate authority.'),
+    'tls_untrusted_chain': ('Untrusted TLS certificate chain', 'Clients cannot build a path to a trusted root, so they reject the connection or warn the user.',
+                            'Install the intermediate certificates the issuing authority provides, or replace the certificate with one from a trusted authority.'),
+    'tls_hostname_mismatch': ('TLS certificate does not match the host name', 'Clients warn that the certificate is for another name, which trains users to ignore warnings.',
+                              'Issue a certificate that names this host, or stop serving TLS on a name the certificate does not cover.'),
+    'tls_weak_key': ('Weak TLS certificate key', 'A short key can be broken with enough computing power, which would let an attacker impersonate the service.',
+                     'Reissue the certificate with an RSA key of at least 2048 bits or an ECDSA key of at least 256 bits.'),
+    'tls_weak_signature': ('Weak TLS certificate signature', 'A weak signature algorithm (such as SHA-1) can allow a forged certificate.',
+                           'Reissue the certificate with a SHA-256 or stronger signature.'),
+    'tls_legacy_protocol': ('Legacy TLS protocol versions enabled', 'Old protocol versions (SSLv3, TLS 1.0 and 1.1) have known weaknesses that can expose traffic.',
+                            'Disable SSLv3, TLS 1.0 and TLS 1.1 and offer TLS 1.2 and 1.3 only.'),
+    'hsts_missing': ('No HTTP Strict Transport Security policy', 'Browsers may connect over plain HTTP first, which lets an attacker on the network path downgrade the connection.',
+                     'Send a Strict-Transport-Security header with a max-age of at least six months on every HTTPS response.'),
+    'hsts_weak': ('Weak HTTP Strict Transport Security policy', 'A short max-age leaves gaps in which browsers may connect over plain HTTP.',
+                  'Raise the Strict-Transport-Security max-age to at least six months.'),
+    'spf_missing': ('No SPF record', 'Receiving mail servers cannot tell which servers may send mail for the domain, which makes spoofed mail from it easier to deliver.',
+                    'Publish an SPF record that lists the servers allowed to send mail for the domain and ends in -all or ~all.'),
+    'spf_allow_all': ('SPF record allows any sender', 'An SPF record ending in +all lets any server send mail as the domain.',
+                      'End the SPF record in -all or ~all and list only the servers that send mail for the domain.'),
+    'spf_softfail': ('SPF record ends in a soft fail', 'Receivers accept mail that fails SPF, so the record does little to stop spoofing on its own.',
+                     'Move to -all once every legitimate sender is listed, and enforce DMARC.'),
+    'spf_too_many_lookups': ('SPF record needs too many DNS lookups', 'Receivers stop after 10 lookups and treat the record as broken, so legitimate mail can fail SPF.',
+                             'Flatten or reduce the include chain so the record needs at most 10 lookups.'),
+    'dmarc_missing': ('No DMARC record', 'Receivers have no policy for mail that fails SPF and DKIM, so spoofed mail from the domain is more likely to be delivered.',
+                      'Publish a DMARC record, start with p=none and reports, then move to p=quarantine or p=reject.'),
+    'dmarc_none': ('DMARC policy does not act on failing mail (p=none)', 'Mail that fails authentication is still delivered, so the domain can be spoofed.',
+                   'Move the DMARC policy to p=quarantine and then p=reject once legitimate senders pass.'),
+    'dkim_not_found': ('No DKIM key found', 'Without DKIM, receivers cannot verify that mail from the domain was not altered or forged.',
+                       'Sign outgoing mail with DKIM and publish the public key in DNS.'),
+    'mta_sts_missing': ('No MTA-STS policy', 'Mail servers sending to the domain may fall back to unencrypted delivery if an attacker interferes with STARTTLS.',
+                        'Publish an MTA-STS policy and a TLS-RPT record for the domain.'),
+    'cleartext_telnet': ('Telnet service reachable', 'Telnet sends logins and commands in clear text, so anyone on the network path can read them.',
+                         'Turn Telnet off and use SSH. If it must stay, limit it to a management network.'),
+    'cleartext_ftp': ('FTP service reachable', 'FTP sends logins and files in clear text, so anyone on the network path can read them.',
+                      'Replace FTP with SFTP or FTPS, or limit it to a trusted network.'),
+    'cleartext_rservices': ('rlogin or rsh service reachable', 'The r-services send logins in clear text and trust addresses that can be spoofed.',
+                            'Turn the r-services off and use SSH.'),
+}
+
+
+def _hygiene_title(check, titles):
+    if check in CHECK_TEXT:
+        return CHECK_TEXT[check][0]
+    distinct = {t for t in titles if t}
+    if len(distinct) == 1:
+        return next(iter(distinct))
+    return clean(check.replace('_', ' ').strip().capitalize() or 'Configuration finding', 120)
+
+
+def _hygiene_entry(f):
+    """One hygiene finding as a report entry (description, evidence, remediation), for the write-up of its issue."""
     from agentapi import services as svc
     from cveFeed.triage import verdict_text
+    t = svc._triage_of(f)
+    text = verdict_text(t.verdict if t else None, t)
+    known = CHECK_TEXT.get(f.check_name)
+    return {'description': clean(f.detail, 700), 'impact': clean(text['impact'] or (known[1] if known else ''), 600),
+            'remediation': clean(text['remediation'] or (known[2] if known else ''), 800),
+            'evidence': [{'label': clean(k, 40), 'value': clean(v, 160)} for k, v in list((f.evidence or {}).items())[:6]]}
+
+
+# --- issues: the findings grouped across hosts -----------------------------------------------------------------------------------
+
+def _host_of(kind, obj):
+    if kind == 'hygiene':
+        return obj.host or ''
+    if obj.subdomain_id:
+        return obj.subdomain.name
+    return obj.target_domain.name if kind == 'scanner' and obj.target_domain_id else ''
+
+
+def _project_of(kind, obj):
+    if kind == 'cve':
+        return obj.subdomain.target_domain.project if obj.subdomain_id else None
+    return obj.target_domain.project if kind == 'scanner' else obj.domain.project
+
+
+def _is_open(kind, obj):
+    if closure.is_closed(obj.remediation_status):
+        return False
+    if kind == 'scanner':
+        return bool(obj.open_status)
+    if kind == 'hygiene':
+        return obj.status == 'open'
+    return True
+
+
+def _instance(kind, obj, everywhere):
+    """One finding as a row of its issue: the grouping key, the report severity and basis, the host and where it was seen, and its
+    tracking. ``obj`` stays on the row (``_obj``) for the write-up; it is dropped before the data leaves ``collect``."""
+    from agentapi import services as svc
+    from cveFeed import match_policy
+    heat = HEAT_NAMES.get(obj.heat_rank, '')
+    host = clean(_host_of(kind, obj), 200)
+    detail, cvss, kev, exploit, cve_ids = '', None, False, False, []
+    if kind == 'cve':
+        cve = obj.cve_entry
+        _, confirmed = match_basis(obj)
+        version_only = match_policy.is_version_only(obj)
+        basis = 'Confirmed' if confirmed else 'Likely' if (not version_only or match_policy.version_proven(obj)) else 'Version match'
+        weak = obj.distro_status == 'patched' or match_policy.version_unknown(obj) or (cve.cvss is not None and cve.cvss < 4.0)
+        base = cve_base(cve.cvss, cve.kev)
+        level = rate('cve', heat, base, kev=bool(cve.kev), confirmed=confirmed, version_only=version_only, weak=weak)
+        product = ' '.join(x for x in (obj.matched_product, obj.matched_version) if x)
+        ev = obj.evidence if isinstance(obj.evidence, dict) else {}
+        where = f"port {ev['port']}" if obj.source == 'port' and ev.get('port') else 'host inventory' if obj.source == 'host' else ''
+        detail = clean(', '.join(x for x in (product, where) if x), 160)
+        key = ('cve', cve.cve_id.upper())
+        title = clean(f'{cve.cve_id} in {product}' if product else cve.cve_id, 200)
+        cvss, kev, cve_ids = cve.cvss, bool(cve.kev), [clean(cve.cve_id, 40)]
+        exploit = bool(cve.exploit_db)
+        first = svc._seen(obj, 'first_seen', obj.created_at)
+        product_key = clean((obj.matched_product or '').strip(), 80)
+    elif kind == 'scanner':
+        t = svc._triage_of(obj)
+        confirmed = bool(t and t.validation_status == 'hit')
+        basis = 'Confirmed' if confirmed else 'Detected'
+        base = SCANNER_LEVELS.get(obj.severity, 'info')
+        level = rate('scanner', heat, base, confirmed=confirmed)
+        key = ('scanner', (obj.template_id or '').strip().lower(), ' '.join((obj.name or '').split()).lower())
+        title = clean(obj.name, 200)
+        detail = clean(obj.http_url, 160)
+        cvss = obj.cvss_score
+        first = svc._seen(obj, 'first_seen', obj.discovered_date)
+        product_key = ''
+    else:
+        confirmed = False
+        basis = 'Detected'
+        base = SCANNER_LEVELS.get(obj.severity, 'info')
+        level = rate('hygiene', heat, base)
+        key = ('hygiene', obj.check_name)
+        title = clean(obj.title, 200)
+        ev = obj.evidence if isinstance(obj.evidence, dict) else {}
+        detail = clean('; '.join(f'{k}: {v}' for k, v in list(ev.items())[:2]), 160)
+        first = obj.first_seen
+        product_key = ''
+    row = {'kind': kind, 'key': key, 'title': title, 'host': host, 'host_alias': '', 'level': level, 'base': base, 'heat': heat, 'basis': basis,
+           'confirmed': confirmed, 'detail': detail, 'cvss': cvss, 'kev': kev, 'exploit': exploit, 'cves': cve_ids, 'product_key': product_key,
+           'open': _is_open(kind, obj), 'first_seen': _date(first), 'tracking': _tracking(obj), '_obj': obj}
+    if kind == 'scanner' and not obj.open_status and obj.remediation_status == 'open':
+        row['tracking']['status'] = 'No longer detected'
+    if kind == 'hygiene' and obj.status == 'resolved' and obj.remediation_status == 'open':
+        row['tracking']['status'] = 'No longer detected'
+    if everywhere:
+        project = _project_of(kind, obj)
+        row['project'], row['project_slug'] = (clean(project.name, 200), project.slug) if project else ('', '')
+    return row
+
+
+def _read(sources, cap, everywhere):
+    """Every finding of ``sources`` as an instance row, at most ``cap`` of each kind (hottest first). Returns ``(rows, cut)``: ``cut`` is how
+    many the read cap left out."""
+    rows, cut = [], 0
+    for kind in ('cve', 'scanner', 'hygiene'):
+        qs = sources[kind]
+        if kind == 'scanner':
+            qs = qs.prefetch_related('cve_ids')
+        got = list(qs[:cap + 1])
+        if len(got) > cap:
+            cut += qs.count() - cap
+            got = got[:cap]
+        rows.extend(_instance(kind, obj, everywhere) for obj in got)
+    return rows, cut
+
+
+def _host_key(row):
+    return (row.get('project_slug', ''), row['host'].lower())
+
+
+def _basis_summary(members):
+    """The basis of an issue: its strongest, and how many hosts that covers when the hosts differ ("Confirmed on 1 of 5 hosts")."""
+    best = min((m['basis'] for m in members), key=BASIS.index)
+    hosts = {_host_key(m) for m in members}
+    on = {_host_key(m) for m in members if m['basis'] == best}
+    note = '' if len(on) == len(hosts) else f'{best} on {len(on)} of {len(hosts)} hosts'
+    return best, note
+
+
+def _issues(rows):
+    """The open instance rows grouped into issues, in report order (severity, then hosts affected, then the strength of the basis, CVSS
+    and title), numbered from 1. Each issue is a dict with its members (hottest first)."""
     groups = {}
-    for f in qs[:cap]:
-        t = svc._triage_of(f)
-        text = verdict_text(t.verdict if t else None, t)
-        entry = {
-            'title': clean(f.title, 200), 'host': clean(f.host, 200), 'severity': svc.SEVERITY_NAMES.get(f.sev, ''),
-            'heat': HEAT_NAMES.get(f.heat_rank, ''), 'check': clean(f.check_name, 40), 'detail': clean(f.detail, 600),
-            'evidence': [{'label': clean(k, 40), 'value': clean(v, 160)} for k, v in list((f.evidence or {}).items())[:6]],
-            'remediation': clean(text['remediation'], 800), 'tracking': _tracking(f),
-            'first_seen': _date(f.first_seen)}
-        groups.setdefault(_hygiene_group(f.check_name), []).append(_tag_project(entry, f.domain.project) if everywhere else entry)
-    return [{'name': name, 'items': groups[name]} for name in ('TLS and certificates', 'Email', 'Cleartext services', 'Other configuration') if name in groups]
+    for row in rows:
+        if row['open']:
+            groups.setdefault(row['key'], []).append(row)
+    issues = []
+    for key, members in groups.items():
+        members.sort(key=lambda m: (-LEVEL_RANK[m['level']], BASIS.index(m['basis']), m['host']))
+        top = members[0]
+        level = top['level']
+        basis, basis_note = _basis_summary(members)
+        hosts = {_host_key(m) for m in members}
+        title = top['title']
+        if top['kind'] == 'hygiene':
+            title = _hygiene_title(key[1], [m['title'] for m in members])
+        elif top['kind'] == 'cve':
+            products = Counter(m['product_key'] for m in members if m['product_key'])
+            title = clean(f'{key[1]} in {products.most_common(1)[0][0]}' if products else key[1], 200)
+        cvss = max((m['cvss'] for m in members if m['cvss'] is not None), default=None)
+        issues.append({'kind': top['kind'], 'key': key, 'title': title, 'level': level, 'level_label': LEVEL_LABELS[level],
+                       'basis': basis, 'basis_note': basis_note, 'host_count': len(hosts), 'instances': len(members),
+                       'cvss': cvss, 'kev': any(m['kev'] for m in members), 'members': members})
+    issues.sort(key=lambda i: (-LEVEL_RANK[i['level']], -i['host_count'], BASIS.index(i['basis']), -(i['cvss'] or 0), i['title'].lower()))
+    for n, issue in enumerate(issues, 1):
+        issue['number'] = n
+        issue['anchor'] = f'issue-{n}'
+    return issues
+
+
+KIND_LABELS = {'cve': 'Known vulnerability (CVE)', 'scanner': 'Scanner finding', 'hygiene': 'Configuration'}
+
+
+def _cve_impact(cve, product, confirmed):
+    """A plain impact statement for a CVE when the triage wrote none, from the advisory's own signals only."""
+    reach = product or 'the service'
+    parts = [f'An attacker who can reach {reach} on the confirmed hosts can exploit {cve.cve_id}.' if confirmed else
+             f'If the version on these hosts is affected, an attacker who can reach {reach} could exploit {cve.cve_id}.']
+    if cve.cvss is not None:
+        parts.append(f'The advisory rates it CVSS {cve.cvss:.1f}.')
+    if cve.kev:
+        parts.append('CISA lists it as exploited in the wild, so working attacks exist.')
+    elif cve.exploit_db:
+        parts.append('A public exploit is available.')
+    else:
+        parts.append('It is not known to be exploited and no public exploit is recorded.')
+    return ' '.join(parts)
+
+
+def _upgrade_text(product, fixed):
+    if fixed:
+        return f'Upgrade {product or "the affected software"} to {" or ".join(fixed[:3])} or later (whichever matches the branch in use) on each affected host.'
+    return f'Apply the vendor\'s fix for this issue to {product or "the affected software"} on each affected host.'
+
+
+def _rating_reason(issue):
+    """Why the issue has its rating, in one or two plain sentences: its own severity, what is known about exploitation and proof, and why
+    it was rated below its own severity when it was (``rate``)."""
+    top = issue['members'][0]
+    level, base = LEVEL_LABELS[issue['level']], LEVEL_LABELS[top['base']]
+    if issue['kind'] == 'cve':
+        cvss = f'CVSS {top["cvss"]:.1f}' if top['cvss'] is not None else 'no CVSS score'
+        exploited = ('listed by CISA as exploited in the wild' if top['kev'] else 'a public exploit exists' if top['exploit']
+                     else 'not known to be exploited and no public exploit is recorded')
+        proof = {'Confirmed': f'a check reproduced it on {_plural(sum(1 for m in issue["members"] if m["confirmed"]), "host")}',
+                 'Likely': 'the version is proven on the host but the flaw was not reproduced',
+                 'Version match': 'it rests on the detected version only'}.get(issue['basis'], '')
+        by_score = LEVEL_LABELS[cve_base(top['cvss'], False)] if top['cvss'] is not None else ''
+        if top['kev'] and by_score and by_score != base:  # the KEV listing, not the score, makes it Critical: say so instead of "CVSS 5.7 (Critical)"
+            text = f'{cvss} ({by_score} by score, {base} because CISA lists it as exploited in the wild); {proof}.'
+        else:
+            text = f'{cvss} ({base} on its own); {exploited}; {proof}.'
+        if level != base:
+            why = ('the version is not proven and the flaw not reproduced' if issue['level'] == 'high' else
+                   'it is not known to be exploited' if top['heat'] == 'ice' and issue['basis'] != 'Confirmed' else
+                   'it is not known to be exploited, though a check confirmed it' if top['heat'] == 'ice' else
+                   'the fix may be backported, the version could not be read, or its CVSS is below 4.0' if issue['level'] == 'info' else
+                   'of what is known about these hosts')
+            text += f' Rated {level} rather than {base} because {why}.'
+        return text
+    if issue['kind'] == 'scanner':
+        text = f'The scanner rates it {base}.'
+        if level != base:
+            text += (f' Held at {level} until a check on the host confirms it.' if top['heat'] == 'smoke' else
+                     f' Rated {level} because it is not known to be exploited or a check did not reproduce it.')
+        return text
+    text = f'The configuration check rates it {base}.'
+    if level != base and LEVEL_RANK[top['base']] > LEVEL_RANK[HYGIENE_CEILING]:
+        text += f' Configuration findings are rated at most {LEVEL_LABELS[HYGIENE_CEILING]}.'
+    return text
+
+
+def _writeup(issue, caps):
+    """Fill in a full write-up of ``issue``: description, impact, evidence, the affected hosts, the recommendation, how to confirm it and the
+    references. Read from the issue's strongest member, with the other members' proof, tracking and confirm guide where they add to it."""
+    members = issue['members']
+    rep = members[0]
+    obj = rep['_obj']
+    kind = issue['kind']
+    out = {'kind_label': KIND_LABELS[kind], 'confirm': None, 'proof': [], 'references': [], 'signals': [], 'cves': [], 'fixed_in': [],
+           'subtitle': '', 'rating_reason': _rating_reason(issue)}
+    if kind == 'cve':
+        entry = _match_entry(obj, rep['heat'])
+        cve = obj.cve_entry
+        product = clean(obj.matched_product, 80)
+        out.update(description=entry['description'] or entry['subtitle'], subtitle=entry['subtitle'], signals=entry['signals'], cves=entry['cves'],
+                   fixed_in=entry['fixed_in'], evidence=entry['evidence'], references=_cve_references(cve))
+        out['impact'] = entry['impact'] or _cve_impact(cve, product, issue['basis'] == 'Confirmed')
+        out['remediation'] = entry['remediation']
+        # the generic upgrade line, unless the remediation text already names a fixed release
+        named = any(v and v in out['remediation'] for v in entry['fixed_in'])
+        out['upgrade'] = '' if named else _upgrade_text(product, entry['fixed_in'])
+        unconfirmed = next((m for m in members if not m['confirmed']), None)
+        if unconfirmed is not None:
+            out['confirm'] = _confirm(unconfirmed['_obj']) if unconfirmed is not rep else entry['confirm']
+    elif kind == 'scanner':
+        entry = _vulnerability_entry(obj, rep['heat'])
+        out.update(description=entry['description'], subtitle=entry['subtitle'], cves=entry['cves'], evidence=entry['evidence'],
+                   impact=entry['impact'], remediation=entry['remediation'], upgrade='')
+        out['proof'] = [{**p, 'host': rep['host']} for p in entry['proof'] if p['proved']][:3]
+    else:
+        entry = _hygiene_entry(obj)
+        description = entry['description']
+        if issue['host_count'] > 1 and description:  # the check's text is about one host: say so
+            description = f'Found on {_plural(issue["host_count"], "host")}. For example, on {rep["host"]}: {description}'
+        out.update(description=description, impact=entry['impact'], remediation=entry['remediation'], upgrade='',
+                   evidence=entry['evidence'], subtitle=_hygiene_group(obj.check_name))
+    if not out['remediation'] and not out['upgrade']:
+        out['remediation'] = 'No remediation text is recorded for this issue. Review the affected hosts and correct the condition described above.'
+    # the proof each confirmed host has (the exact command that showed it), a few hosts at most
+    if kind != 'hygiene':
+        from agentapi import services as svc
+        seen = {p['command'] for p in out['proof']}
+        for m in members:
+            if len(out['proof']) >= PROOF_HOSTS + 2:
+                break
+            if not m['confirmed']:
+                continue
+            for p in _proof(svc._triage_of(m['_obj'])):
+                if p['proved'] and p['command'] not in seen:
+                    out['proof'].append({**p, 'host': m['host']})
+                    seen.add(p['command'])
+                    break
+    out['hosts_more'] = max(0, len(members) - caps['issue_hosts'])
+    out['mixed_basis'] = len({m['basis'] for m in members}) > 1
+    issue.update(out)
+
+
+# --- the executive summary -----------------------------------------------------------------------------------------------------
+
+def _version_tuple(text):
+    from cveFeed.correlation import parse_version
+    try:
+        parsed = parse_version(text)
+    except Exception:  # noqa: BLE001 - a version that does not parse is simply not compared
+        return None
+    return tuple(parsed) if parsed else None
+
+
+def _fix_for(detected, fixed):
+    """The fixed version that applies to ``detected``: the lowest fixed release above it on the same branch (major.minor), else on the same
+    major version, else the lowest above it."""
+    have = _version_tuple(detected)
+    options = sorted(((v, f) for f in fixed if (v := _version_tuple(f))), key=lambda p: p[0])
+    if not options:
+        return ''
+    if have is None:
+        return options[-1][1]
+    above = [p for p in options if p[0] > have]
+    branch = [p for p in above if p[0][:2] == have[:2]]
+    major = [p for p in above if p[0][:1] == have[:1]]
+    return (branch or major or above or [options[-1]])[0][1]
+
+
+def _key_actions(issues):
+    """The top actions, built from the critical, high and medium issues: CVE issues of one product become one upgrade ("Upgrade PHP on 5
+    hosts to 8.3.37 or later"), the others take their issue's recommendation. Strongest severity first, then the most hosts."""
+    from agentapi import services as svc
+    products, others = {}, []
+    for issue in issues:
+        if issue['level'] not in DETAILED:
+            continue
+        if issue['kind'] == 'cve' and issue['members'][0]['product_key']:
+            name = issue['members'][0]['product_key']
+            p = products.setdefault(name.lower(), {'name': name, 'hosts': set(), 'issues': 0, 'level': issue['level'], 'fix': [], 'likely': True})
+            p['issues'] += 1
+            p['hosts'] |= {_host_key(m) for m in issue['members']}
+            if LEVEL_RANK[issue['level']] > LEVEL_RANK[p['level']]:
+                p['level'] = issue['level']
+            p['likely'] = p['likely'] and issue['basis'] == 'Version match'
+            for m in issue['members']:
+                obj = m['_obj']
+                fix = _fix_for(obj.matched_version, svc._fixed_versions(obj.cve_entry, obj.matched_product))
+                if fix:
+                    p['fix'].append(fix)
+        else:
+            others.append(issue)
+    actions = []
+    for p in products.values():
+        hosts = len(p['hosts'])
+        fix = max(p['fix'], key=lambda f: _version_tuple(f) or (), default='')
+        text = (f'Upgrade {p["name"]} on {_plural(hosts, "host")} to {fix} or later' if fix else
+                f'Upgrade {p["name"]} on {_plural(hosts, "host")} to a supported, patched release')
+        text += f' ({_plural(p["issues"], "issue")} in this report' + (', based on the detected version' if p['likely'] else '') + ').'
+        actions.append((LEVEL_RANK[p['level']], hosts, text))
+    for issue in others:
+        hosts = issue['host_count']
+        rec = _first_sentence(issue.get('remediation') or '', 200) if issue.get('remediation') else ''
+        text = f'{issue["title"]} ({_plural(hosts, "host")}): {rec[0].lower() + rec[1:] if rec else "correct it on each affected host."}'
+        actions.append((LEVEL_RANK[issue['level']], hosts, clean(text, 300)))
+    actions.sort(key=lambda a: (-a[0], -a[1]))
+    out = [a[2] for a in actions[:TOP_ACTIONS]]
+    if any(i['level'] in DETAILED and i['basis'] == 'Version match' for i in issues) and len(out) < TOP_ACTIONS + 1:
+        out.append('Confirm the findings that rest on a version match (each write-up says how) and record fixes the vendor or the '
+                   'distribution backported, so the list reflects real exposure.')
+    return out
+
+
+def _basis_words(issue):
+    return {'Confirmed': 'confirmed by a check', 'Likely': 'likely: the version is proven on the host but the flaw was not reproduced',
+            'Detected': 'detected by a scanner or configuration check', 'Version match': 'likely, based on the detected version only; not proven'}[issue['basis']]
+
+
+def _executive(issues, summary, scope, method, host):
+    """The executive summary in plain sentences: the posture, the most serious issues with how many hosts each affects and how sure we are,
+    and the positive notes the data supports. Deterministic: no AI model writes it."""
+    counts = Counter(i['level'] for i in issues)
+    serious = [i for i in issues if i['level'] in DETAILED]
+    where = 'this host' if host else _plural(scope['hosts_total'], 'host') + ' in scope'
+    paragraphs = []
+    if not issues:
+        paragraphs.append(f'No open security issues were found on {where}. ' +
+                          ('No CVE match, scanner finding or configuration finding is open at the time of this report.'))
+        posture = 'No open issues.'
+    else:
+        if counts['critical']:
+            posture = 'The external security posture needs urgent attention.'
+        elif counts['high']:
+            posture = 'The external security posture needs attention: some issues should be fixed promptly.'
+        elif counts['medium']:
+            posture = 'The external security posture is fair: no critical or high issues were found, but some medium issues should be planned for.'
+        else:
+            posture = 'The external security posture is good: no critical, high or medium issues were found.'
+        levels = ', '.join(f'{counts[k]} {LEVEL_LABELS[k].lower()}' for k in DETAILED if counts[k]) or 'none of them critical, high or medium'
+        minor = counts['low'] + counts['info']
+        text = (f'{posture} cvENGINE grouped {_plural(summary["findings"] + summary["hygiene"], "open finding")} on {where} into '
+                f'{_plural(len(issues), "distinct issue")}: {levels}.')
+        if minor:
+            text += f' A further {_plural(minor, "low or informational issue", "low or informational issues")} {"is" if minor == 1 else "are"} listed in Appendix A.'
+        paragraphs.append(text)
+        sentences = []
+        on = (lambda i: 'on this host') if host else (lambda i: f'on {_plural(i["host_count"], "host")}')
+        for n, issue in enumerate(serious[:2]):
+            lead = 'The most serious issue is' if n == 0 else 'The next is'
+            sentence = f'{lead} {issue["title"]} ({issue["level_label"]}, {on(issue)}), {_basis_words(issue)}.'
+            impact = _first_sentence(issue.get('impact') or '', 260)
+            if impact:
+                sentence += f' {impact}'
+            sentences.append(sentence)
+        rest = serious[2:TOP_ISSUES]
+        if rest:
+            named = [f'{i["title"]} ({i["level_label"]}, {on(i)})' for i in rest]
+            sentences.append('Other issues that need attention include ' + (', '.join(named[:-1]) + ' and ' + named[-1] if len(named) > 1 else named[0]) + '.')
+        if len(serious) > TOP_ISSUES:
+            more = len(serious) - TOP_ISSUES
+            sentences.append(f'{_plural(more, "further critical, high or medium issue", "further critical, high or medium issues")} '
+                             f'{"is" if more == 1 else "are"} listed in the summary of findings.')
+        if sentences:
+            paragraphs.append(' '.join(sentences))
+        likely = sum(1 for i in serious if i['basis'] == 'Version match')
+        if likely:
+            paragraphs.append(f'{_plural(likely, "of these issues rests", "of these issues rest")} on a version match: the version a service reports is in the '
+                              'affected range. Vendors and Linux distributions often fix a flaw without changing the version number, so each of '
+                              'these needs to be confirmed on the host before it is treated as proven.')
+    positives = []
+    hygiene_ran = 'hygiene' in method.get('keys', ())
+    open_checks = {i['key'][1] for i in issues if i['kind'] == 'hygiene'}
+    if issues and not any(i['basis'] == 'Confirmed' for i in issues):
+        positives.append('No issue was reproduced by an active check; the issues rest on version information, scanner detections and configuration checks.')
+    if not any(i['kind'] == 'cve' and i['kev'] for i in issues):
+        positives.append('No CVE listed in CISA\'s Known Exploited Vulnerabilities catalog was matched to these hosts.')
+    if hygiene_ran and not open_checks & {'tls_expired', 'cert_expired'}:
+        positives.append('No expired TLS certificates were found.')
+    if hygiene_ran and not any(c.startswith('cleartext_') for c in open_checks):
+        positives.append('No cleartext login services (Telnet, FTP, rlogin or rsh) were found.')
+    if issues and not counts['critical']:
+        positives.append('No critical issues were found.')
+    return {'posture': posture, 'paragraphs': paragraphs, 'positives': positives}
 
 
 # --- hosts ---------------------------------------------------------------------------------------------------------------------
@@ -394,8 +941,7 @@ def host_pages(project, qs, cap):
         got = svc._hosts_page(project, qs, {'page': page, 'page_size': HOST_PAGE}, coverage=False)['results']
         if not got:
             break
-        for row in got[:cap - sent]:
-            yield row
+        yield from got[:cap - sent]
         sent += len(got)
         page += 1
 
@@ -471,7 +1017,7 @@ SCAN_DONE = 2
 
 def _method(project, names, addresses):
     """What was scanned and when: scan counts and dates, and the last run of each scanner (the service ledger) on this scope. ``names`` and
-    ``addresses`` narrow it to one host's names and IPs; None is the whole project."""
+    ``addresses`` narrow it to one host's names and IPs; None is the whole project. ``keys`` are the ledger services that ran."""
     from cveFeed.models import ServiceRun
     from startScan.models import IpAddress, ScanHistory
     scans = ScanHistory.objects.filter(_pq(project, 'domain__project'), scan_status=SCAN_DONE).aggregate(
@@ -493,7 +1039,8 @@ def _method(project, names, addresses):
         entry['last'] = max(filter(None, [entry['last'], row['last']]), default=None)
     services = [{'name': SERVICE_LABELS.get(k, clean(k, 60)), 'assets': v['assets'], 'last': _stamp(v['last'])}
                 for k, v in sorted(by_service.items())]
-    return {'scans': scans['n'] or 0, 'first_scan': _date(scans['first']), 'last_scan': _date(scans['last']), 'services': services}
+    return {'scans': scans['n'] or 0, 'first_scan': _date(scans['first']), 'last_scan': _date(scans['last']), 'services': services,
+            'first_scan_long': _long_date(scans['first']), 'last_scan_long': _long_date(scans['last']), 'keys': sorted(by_service)}
 
 
 # --- the whole report ----------------------------------------------------------------------------------------------------------
@@ -504,9 +1051,9 @@ MAX_SECRETS = 100  # inventory rows printed in one report, worst first
 def _secrets(project, names, include_closed):
     """``(total, rows)``: the project's exposed secrets (cveFeed.secrets_inventory), worst first, at most MAX_SECRETS. Masked values only: the
     report never holds a secret. For a host report, the ones that host serves."""
+    from agentapi import services as svc
     from cveFeed import secrets_catalog, secrets_inventory
     from cveFeed.models import SecretFinding
-    from agentapi import services as svc
     qs = svc._scoped(SecretFinding.objects.all(), project, 'project')
     if not include_closed:
         qs = qs.exclude(status__in=secrets_catalog.QUIET_STATUSES)
@@ -521,6 +1068,35 @@ def _secrets(project, names, include_closed):
                      'class': secrets_catalog.CLASS_WORDS.get(s.klass, ''), 'status': s.status.replace('_', ' '), 'basis': clean(s.severity_basis, 300),
                      'remediation': clean(kind.remediation, 400), 'hosts': ', '.join(clean(h, 120) for h in hosts[:5]) + (f' and {len(hosts) - 5} more' if len(hosts) > 5 else '')})
     return total, rows
+
+
+def _public(row):
+    """An instance row without the ORM object it was read from."""
+    return {k: v for k, v in row.items() if k != '_obj'}
+
+
+def _severity_table(issues):
+    """``[{level, label, issues, hosts, findings}]`` for the five levels: issues, distinct hosts and findings at each."""
+    out = []
+    for level in LEVELS:
+        mine = [i for i in issues if i['level'] == level]
+        hosts = {_host_key(m) for i in mine for m in i['members']}
+        out.append({'level': level, 'label': LEVEL_LABELS[level], 'issues': len(mine), 'hosts': len(hosts), 'findings': sum(i['instances'] for i in mine)})
+    return out
+
+
+def _appendices(secrets_total, include_closed, host):
+    """The appendices this report has, lettered in order: ``{key: letter}`` and the list for the table of contents."""
+    keys = [('minor', 'Low and informational findings'), ('inventory', 'Host detail' if host else 'Asset inventory')]
+    if secrets_total:
+        keys.append(('secrets', 'Exposed secrets'))
+    if include_closed:
+        keys.append(('closed', 'Closed findings'))
+    out = [{'key': k, 'letter': chr(ord('A') + n), 'title': t, 'anchor': f'appendix-{k}'} for n, (k, t) in enumerate(keys)]
+    return {a['key']: a['letter'] for a in out}, out
+
+
+REPORT_TITLES = {'findings': 'External Attack Surface Assessment', 'host': 'Host Security Assessment', 'hosts': 'Discovered Hosts Report'}
 
 
 def collect(project, host=None, include_closed=False, now=None, kind='findings', org=None, whole=True):
@@ -544,21 +1120,31 @@ def collect(project, host=None, include_closed=False, now=None, kind='findings',
             raise LookupError('host not found')
         names = {host.lower()}
     hosts_report = kind == 'hosts'
+    host_cap = caps['hosts'] if hosts_report or host else caps['inventory']
     sources, ruled_out = _sources(project, False if hosts_report else include_closed, names=None if names is None else sorted(names))
-    host_total, hosts, aliases, raw = _hosts(project, host, _per_host(sources, everywhere), caps['hosts'])
+    host_total, hosts, aliases, raw = _hosts(project, host, _per_host(sources, everywhere), host_cap)
     if host and hosts:  # the host may answer to other names (same addresses): their findings are this host's too
         names |= {a.lower() for a in aliases}
         sources, ruled_out = _sources(project, include_closed, names=sorted(names))
         hosts[0]['findings'] = sum(_per_host(sources).values())
-    total, heat, severity = _tally({k: v for k, v in sources.items() if k != 'hygiene'})
-    hygiene_total, _, hygiene_severity = _tally({'hygiene': sources['hygiene']})
+    open_sources = sources
+    if include_closed and not hosts_report:
+        open_sources, _ = _sources(project, False, names=None if names is None else sorted(names))
+    total, heat, severity = _tally({k: v for k, v in open_sources.items() if k != 'hygiene'})
+    hygiene_total, _, hygiene_severity = _tally({'hygiene': open_sources['hygiene']})
+    rows, issues, closed, rows_cut = [], [], [], 0
+    secrets_total, secrets = 0, []
     if hosts_report:
-        detailed, hygiene, secrets_total, secrets = [], [], 0, []
         _label_hosts(project, hosts, [])
     else:
-        detailed = _findings(sources, caps['findings'], everywhere)
-        hygiene = _hygiene(sources['hygiene'], caps['hygiene'], everywhere)
-        _label_hosts(project, hosts, [*detailed, *(item for g in hygiene for item in g['items'])])
+        rows, rows_cut = _read(sources, caps['rows'], everywhere)
+        _label_hosts(project, hosts, rows)
+        issues = _issues(rows)
+        major = [i for i in issues if i['level'] in DETAILED]
+        for issue in major[:caps['writeups']]:
+            _writeup(issue, caps)
+            issue['detailed'] = True
+        closed = [r for r in rows if not r['open']]
         secrets_total, secrets = _secrets(project, names, include_closed)
     if everywhere:
         from dashboard.models import Project
@@ -570,22 +1156,50 @@ def collect(project, host=None, include_closed=False, now=None, kind='findings',
         label, organization = clean(host or project.name, 200), clean(project.org.name if project.org else '', 200)
         scope_projects = None
         project_line = clean(project.name, 200)
+    scope = {**_scope(project, host), 'hosts_total': host_total, 'hosts_listed': len(hosts)}
+    method = _method(project, names, [a for h in hosts for a in h.get('address_list', [])])
+    major = [i for i in issues if i['level'] in DETAILED]
+    minor = [i for i in issues if i['level'] not in DETAILED]
+    detailed = [i for i in major if i.get('detailed')]
+    letters, appendices = _appendices(secrets_total, include_closed and not hosts_report, host)
+    summary = {'findings': total, 'heat': heat, 'heat_policy': _heat_policy(), 'severity': severity, 'hygiene': hygiene_total,
+               'hygiene_severity': hygiene_severity, 'ruled_out': ruled_out,
+               'hosts_exposed': sum(1 for h in hosts if h['heat'] in ('fire', 'smoke')),
+               'status_counts': _status_counts(sources) if not hosts_report else {},
+               'issues': len(issues), 'levels': _severity_table(issues)}
+    executive = None if hosts_report else _executive(issues, summary, scope, method, host)
+    actions = [] if hosts_report else _key_actions(issues)
+    if host:
+        client = organization or project_line
+    else:
+        client = label
+    title = REPORT_TITLES['hosts' if hosts_report else 'host' if host else 'findings']
+    # the ORM objects stay here: what leaves is plain data
+    for issue in issues:
+        issue['members'] = [_public(m) for m in issue['members']]
+        if issue.get('detailed'):
+            issue['hosts'] = issue['members'][:caps['issue_hosts']]
+            issue['tracking'] = [m for m in issue['members'] if m['tracking']['assignee'] or m['tracking']['note']][:TRACKING_ROWS]
+    findings = [_public(r) for r in rows]
+    closed = [_public(r) for r in closed]
     return {
         'kind': kind, 'scope_kind': 'org' if everywhere else 'project', 'scope_projects': scope_projects,
-        'title': 'Discovered hosts report' if hosts_report else 'Host security report' if host else 'Security exposure report', 'subject': label,
+        'title': title, 'subject': label, 'client': client, 'header': clean(host, 200) if host else client,
         'project': project_line, 'organization': organization, 'host': clean(host or '', 200),
         'host_alias': hosts[0]['alias'] if host and hosts else '', 'host_note': hosts[0].get('note', '') if host and hosts else '',
-        'generated': _stamp(now), 'generated_date': _date(now), 'include_closed': False if hosts_report else include_closed, 'branding': _branding(),
-        'scope': {**_scope(project, host), 'hosts_total': host_total, 'hosts_listed': len(hosts)},
-        'summary': {'findings': total, 'heat': heat, 'heat_policy': _heat_policy(), 'severity': severity, 'hygiene': hygiene_total,
-                    'hygiene_severity': hygiene_severity,
-                    'hosts_exposed': sum(1 for h in hosts if h['heat'] in ('fire', 'smoke')), 'ruled_out': ruled_out,
-                    'status_counts': _status_counts(sources) if not hosts_report else {},
-                    'top': detailed[:TOP_RISKS]},
+        'generated': _stamp(now), 'generated_date': _date(now), 'report_date': _long_date(now),
+        'include_closed': False if hosts_report else include_closed, 'branding': _branding(),
+        'scope': scope, 'summary': summary, 'executive': executive,
         'hosts_summary': _hosts_overview(raw, hosts, _new_hosts(project, now)) if hosts_report else None,
-        'hosts': hosts, 'findings': detailed, 'hygiene': hygiene, 'secrets': secrets, 'secrets_total': secrets_total,
-        'caps': {**caps, 'findings_omitted': max(0, total - len(detailed)), 'hosts_omitted': max(0, host_total - len(hosts)),
-                 'hygiene_omitted': max(0, hygiene_total - sum(len(g['items']) for g in hygiene)),
-                 'hygiene_shown': sum(len(g['items']) for g in hygiene)},
-        'method': _method(project, names, [a for h in hosts for a in h.get('address_list', [])]),
+        'hosts': hosts, 'findings': findings, 'issues': issues, 'major': major[:SUMMARY_ROWS], 'major_more': max(0, len(major) - SUMMARY_ROWS),
+        'detailed': detailed, 'minor': minor[:caps['minor']], 'minor_more': max(0, len(minor) - caps['minor']), 'minor_total': len(minor),
+        'actions': actions,
+        'closed': closed[:caps['closed']], 'closed_more': max(0, len(closed) - caps['closed']),
+        'secrets': secrets, 'secrets_total': secrets_total, 'appendix': letters, 'appendices': appendices,
+        'caps': {**caps, 'hosts_omitted': max(0, host_total - len(hosts)), 'host_cap': host_cap,
+                 'writeups_omitted': max(0, len(major) - len(detailed)), 'minor_omitted': max(0, len(minor) - caps['minor']),
+                 'closed_omitted': max(0, len(closed) - caps['closed']), 'rows_omitted': rows_cut,
+                 'issue_hosts_cut': sum(1 for i in detailed if i['hosts_more'])},
+        'levels': [{'level': k, 'label': LEVEL_LABELS[k]} for k in LEVELS],
+        'method': method,
     }

@@ -62,3 +62,25 @@ test('a finding with no review draws without the block, and a verdict with no no
   assert.doesNotMatch(texts(draw(null)), /AI reviewer/);
   assert.match(texts(draw({...review, note: ''})), /The AI reviewer thinks/);
 });
+
+test('a note the reviewer and the triage both state is drawn once, and the repeat is kept under one fold', () => {
+  const same = 'testssl.sh says likely vulnerable, a heuristic; a load balancer often answers this probe, so it needs validation against the origin server.';
+  const d = detail({...review, note: same});
+  d.ai = {...d.ai, reason: same + ' (triage)'};
+  const nodes = glance(d, {row: null, aiBadge: new Node('span'), note: ''});
+  const text = texts(nodes);
+  assert.equal(text.split('needs validation against the origin server').length - 1, 2); // once drawn, once under the fold
+  assert.equal(find(nodes, (n) => n.tag === 'details' && n.className === 'gl-repeats').length, 1);
+  assert.match(text, /Same text, also recorded as/);
+  const different = glance({...d, ai: {...d.ai, reason: 'Upgrade OpenSSL.'}}, {row: null, aiBadge: new Node('span'), note: ''});
+  assert.equal(find(different, (n) => n.className === 'gl-repeats').length, 0);
+});
+
+test('a hygiene finding states its plain description first, and the raw tool output is not drawn on the card', () => {
+  const d = {...detail(null), kind: 'hygiene', description: 'The server answered an early ChangeCipherSpec probe with a 0x00 byte.',
+    how_found: {steps: [{label: 'Test', value: 'testssl.sh CCS injection test'}], excerpts: {testssl_output: 'likely VULNERABLE with 00'}}};
+  const text = texts(glance(d, {row: null, aiBadge: new Node('span'), note: ''}));
+  assert.match(text, /answered an early ChangeCipherSpec probe/);
+  assert.match(text, /testssl\.sh CCS injection test/);
+  assert.doesNotMatch(text, /likely VULNERABLE with 00/);
+});

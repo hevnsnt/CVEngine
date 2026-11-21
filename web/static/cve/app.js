@@ -1807,10 +1807,14 @@ function renderFinding(d, cfg, row) {
   const excerpts = Object.entries(d.how_found.excerpts || {}).filter(([, v]) => v);
   if (excerpts.length) {
     const scriptOnly = excerpts.every(([k]) => k === "script_url" || k === "banner");
-    requestFold = scriptOnly
-      ? fold("Script read", "The library file cvENGINE fetched and read itself")
-      : fold("Request and response", "The exact exchange the scanner matched (excerpts)");
-    const EXCERPT_LABEL = { request: "Request (excerpt)", response: "Response (excerpt)", script_url: "Script fetched", banner: "Banner (excerpt)" };
+    // a TLS audit finding keeps the tool's own result string here, folded: the page's description is the plain sentence
+    const toolOnly = excerpts.every(([k]) => k === "testssl_output");
+    requestFold = toolOnly
+      ? fold("testssl.sh output", "The raw result line the tool reported, for the record")
+      : scriptOnly
+        ? fold("Script read", "The library file cvENGINE fetched and read itself")
+        : fold("Request and response", "The exact exchange the scanner matched (excerpts)");
+    const EXCERPT_LABEL = { request: "Request (excerpt)", response: "Response (excerpt)", script_url: "Script fetched", banner: "Banner (excerpt)", testssl_output: "testssl.sh output" };
     excerpts.forEach(([k, v]) => requestFold.body.append(excerpt(EXCERPT_LABEL[k] || k, v)));
   }
 
@@ -1963,7 +1967,7 @@ function renderFinding(d, cfg, row) {
 
   const checkFold = fold("Confirm it yourself", `${d.validation.steps.length ? `${d.validation.steps.length} check${d.validation.steps.length === 1 ? "" : "s"} run. ` : ""}${d.confirm?.where?.length ? "Where to look on this host, what to look for, " : ""}How to verify it by hand, and every check that ran`);
   const check = checkFold.body;
-  const mine = d.kind === "match" ? confirmBox(d.confirm) : null;
+  const mine = confirmBox(d.confirm); // a CVE match's guide, or a TLS audit finding's (the tool's read-only commands for this host and port)
   if (mine) check.append(mine);
   const guide = d.kind === "match" ? guidanceBox(d.cve?.detection, cveId, d.confirm?.fill) : null;
   if (guide && mine) {

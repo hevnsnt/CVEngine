@@ -203,10 +203,10 @@ class DataTests(ReportingBase):
         scope = report_scope.resolve(Ctx(user=self.org_member), org='acme-org')
         data = report_data.collect(scope.svc_scope(), org=scope.org, kind='hosts', now=NOW)
         html = report_pdf.build_html(data)
-        self.assertIn('Discovered hosts report', html)
-        self.assertNotIn('<h2>Findings</h2>', html)
-        self.assertNotIn('<h2>Exposed secrets</h2>', html)
-        self.assertNotIn('<h2>Hygiene', html)
+        self.assertIn('Discovered Hosts Report', html)
+        self.assertNotIn('Detailed findings</h2>', html)
+        self.assertNotIn('Exposed secrets</h2>', html)
+        self.assertNotIn('Summary of findings</h2>', html)
         self.assertIn('www.acme.test', html)
         self.assertEqual(data['findings'], [])
         self.assertEqual(data['hosts_summary']['ports'][0]['hosts'], 1)
@@ -214,8 +214,10 @@ class DataTests(ReportingBase):
     def test_a_findings_report_keeps_its_sections_and_names_the_projects_on_an_organization_cover(self):
         scope = report_scope.resolve(Ctx(user=self.web_user), org='acme-org')
         html = report_pdf.build_html(report_data.collect(scope.svc_scope(), org=scope.org, whole=scope.whole))
-        for heading in ('<h2>Findings</h2>', '<h2>Exposed secrets</h2>', '<h2>Executive summary</h2>'):
+        for heading in ('<h2>Executive summary</h2>', '<h2>Summary of findings</h2>', '<h2>Detailed findings</h2>', '<h2>Scope and methodology</h2>',
+                        'Low and informational findings</h2>', 'Asset inventory</h2>'):
             self.assertIn(heading, html)
+        self.assertNotIn('Exposed secrets</h2>', html)  # an appendix only when there are secrets
         self.assertIn('Acme Web', html)
         self.assertIn('do not have access to', html)  # the cover says it covers only the projects they can read
 
@@ -236,9 +238,9 @@ class RenderTests(ReportingBase):
             job.refresh_from_db()
             reader = PdfReader(os.path.join(self.reports_dir, job.filename))
             texts[kind] = ' '.join(' '.join(page.extract_text().split()) for page in reader.pages)
-        self.assertIn('Security exposure report', texts['findings'])
+        self.assertIn('External Attack Surface Assessment', texts['findings'])
         self.assertIn('Acme Org', texts['findings'])
-        self.assertIn('Discovered hosts report', texts['hosts'])
+        self.assertIn('Discovered Hosts Report', texts['hosts'])
         self.assertIn('api.acme.test', texts['hosts'])
         self.assertNotIn('OTHERORG', texts['findings'] + texts['hosts'])
         self.assertNotIn('Exposed secrets', texts['hosts'])

@@ -1975,6 +1975,9 @@ html.updating .layout,html.updating #main{filter:grayscale(1);opacity:.55;pointe
 .gl-big{font-size:var(--fs-5);font-weight:var(--fw-semi);line-height:1.2;overflow-wrap:break-word;word-break:normal}
 .gl-big.mono{font-family:var(--mono);font-size:var(--fs-4)}
 .gl-sub{color:var(--muted);font-size:var(--fs-2)}
+.gl-desc{margin:0 0 var(--s-2,.5rem);font-size:var(--fs-3,1rem);line-height:1.45;overflow-wrap:break-word}
+.gl-repeats{margin-top:var(--s-2,.5rem)}
+.gl-repeats summary{cursor:pointer}
 /* narrow card: the label sits above its value; wide card: a label column of fit to its longest label (up to 12em: "Template check" stays on one line) beside it. Values wrap at spaces, and only a token longer than the line (a URL) may break. */
 .gl-facts{display:grid;grid-template-columns:minmax(0,1fr);gap:0;margin:var(--s-1) 0 0;font-size:var(--fs-2)}
 .gl-facts dt{color:var(--muted);font-family:var(--mono);margin-top:var(--s-2);padding-right:.25em}
