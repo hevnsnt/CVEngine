@@ -174,10 +174,12 @@ def discovered_pages(sub):
 def host_products(sub, ports):
     """``[(name, version)]`` of what the host runs: its technologies, its open ports' products and the products an identity reading names with
     no version (``cveFeed.identities``: a FortiGate's OS guess or factory certificate leads to the FortiOS build read)."""
-    from cveFeed import identities
+    from cveFeed import identities, source_versions
     out = [_split(t.name) for t in sub.technologies.all() if t.name]
     out += [((p.product or '').strip(), (p.version or '').strip()) for p in ports if (p.product or '').strip()]
-    return out + identities.products(sub)
+    # a product Shodan's InternetDB named that nothing first-party names yet: a lead for our own read of it, never a finding
+    # (source_versions.lead_products: none on a shared edge address or once our own check ruled it out)
+    return out + identities.products(sub) + source_versions.lead_products(sub)
 
 
 def _ports(sub):
@@ -213,6 +215,9 @@ def plan(project_id, subdomains, unattended=False):
     if unattended and gate.project_blocked(project_id):
         return {}
     out = {}
+    subdomains = list(subdomains)
+    from cveFeed import source_versions
+    source_versions.prefetch(subdomains)  # the hosts' stored readings (Shodan leads among them) in one query, not one per host
     for sub in subdomains:
         name = sub.name.lower().rstrip('.')
         if normalize(sub.name) in banned or name in archived or gate.refusal(project_id, sub.name, unattended=unattended):
@@ -1051,10 +1056,16 @@ def _reported_fields(row):
 _ORDER = {'exact': 0, 'inferred': 1, 'weak': 2}
 
 
-def readings_qs():
+def readings_qs(leads=False):
+    """The version source readings a host runs: never a Shodan InternetDB reading (a lead for our own checks, not a product seen on the host),
+    unless ``leads`` (the explicit ``vsource:shodan-idb`` search)."""
     from django.db.models import Q
     from cveFeed.models import ProbeObservation
-    return ProbeObservation.objects.filter(Q(probe__startswith=PROBE_PREFIX)).filter(evidence__version_source=True)
+    rows = ProbeObservation.objects.filter(Q(probe__startswith=PROBE_PREFIX)).filter(evidence__version_source=True)
+    if leads:
+        return rows
+    from cveFeed import source_versions
+    return rows.exclude(probe=source_versions.SHODAN_PROBE)
 
 
 def readings_for(project_ids, hosts):
@@ -1093,6 +1104,9 @@ def search_rows(field, value):
         return None
     rows = readings_qs()
     if field == 'vsource':
+        from cveFeed import source_versions
+        if text == source_versions.SHODAN_PROBE[len(PROBE_PREFIX):]:  # the one way to find Shodan's readings: they are leads, not products on the host
+            return readings_qs(leads=True).filter(probe=source_versions.SHODAN_PROBE)
         if text == 'any':
             return rows
         if text in ('header', 'passive', 'technology'):
@@ -1104,8 +1118,8 @@ def search_rows(field, value):
         from cveFeed import source_versions
         if text in source_versions.SEARCH:  # the sources of data already received (cveFeed.source_versions.SEARCH)
             return rows.filter(probe=source_versions.SEARCH[text])
-        if text == source_versions.REPORTED:  # every third-party reading
-            return rows.filter(kind=source_versions.REPORTED)
+        if text == source_versions.REPORTED:  # every third-party reading (Shodan's included: an explicit, labelled filter)
+            return readings_qs(leads=True).filter(kind=source_versions.REPORTED)
         if text not in catalogue.BY_ID:
             return None
         return rows.filter(probe=f'{PROBE_PREFIX}{text}')

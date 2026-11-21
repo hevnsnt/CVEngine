@@ -2012,10 +2012,17 @@ def close_stale(current, covered):
     if not subdomain_ids:
         return set()
     stale_keep, hosts = [], set()
-    for m in CVEMatch.objects.filter(subdomain_id__in=list(subdomain_ids), source__in=_CORRELATED_SOURCES).order_by().only(
+    candidates = [m for m in CVEMatch.objects.filter(subdomain_id__in=list(subdomain_ids), source__in=_CORRELATED_SOURCES).order_by().only(
             "id", "cve_entry_id", "subdomain_id", "source", "matched_product", "matched_version", "evidence", "ai_verdict", "ai_reason",
-            "template_result", "remediation_status", "version_in_range", "assignee_id", "distro_status"):
-        if m.cve_entry_id not in cve_ids or (m.cve_entry_id, m.subdomain_id, m.source, m.matched_product) in current:
+            "template_result", "remediation_status", "remediation_by", "version_in_range", "assignee_id", "distro_status")
+            if m.cve_entry_id in cve_ids and (m.cve_entry_id, m.subdomain_id, m.source, m.matched_product) not in current]
+    # A match made only from a Shodan InternetDB reading (a lead for our own checks, never a finding: cveFeed.source_versions) is closed as a
+    # false positive with its own note, not with the generic "no longer matches" closure below
+    from cveFeed import source_versions
+    shodan_closed = set(source_versions.close_shodan_matches([m for m in candidates if (m.evidence or {}).get("reported")]))
+    for m in candidates:
+        if m.pk in shodan_closed:
+            hosts.add(m.subdomain_id)
             continue
         if m.template_result == 'vulnerable':
             continue  # a template hit is evidence of the vulnerability itself: not seeing the product's banner again does not retire it

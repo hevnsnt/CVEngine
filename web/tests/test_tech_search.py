@@ -107,7 +107,7 @@ class TechSearchTests(TestCase):
         def reading(name, product, version, probe='vsrc:nmap', kind='version', component='', project=None, domain=None):
             evidence = {'version_source': True, 'component': component or product.lower(), 'confidence': 'exact'}
             if kind == 'reported':
-                evidence.update(reported=True, provider='shodan_idb')
+                evidence.update(reported=True, provider='shodan_idb' if probe == 'vsrc:shodan-idb' else 'runzero')
             ProbeObservation.objects.create(project=project or cls.pa, domain=domain or cls.da, host=name, probe=probe, kind=kind, product=product,
                                             version=version, outcome='found' if kind != 'reported' else 'reported', evidence=evidence)
 
@@ -120,7 +120,10 @@ class TechSearchTests(TestCase):
         host('reading.ts.example')
         reading('reading.ts.example', 'Apache HTTP Server', '2.4.57')
         host('reported.ts.example')
-        reading('reported.ts.example', 'Apache HTTP Server', '2.4.49', probe='vsrc:shodan-idb', kind='reported')
+        reading('reported.ts.example', 'Apache HTTP Server', '2.4.49', probe='vsrc:runzero', kind='reported')
+        # Shodan InternetDB's reading for the address is a lead, not Apache on the host: no tech:, component: or os: search finds it
+        host('shodan.ts.example')
+        reading('shodan.ts.example', 'Apache HTTP Server', '2.4.49', probe='vsrc:shodan-idb', kind='reported')
         host('closed.ts.example', ports=[(80, 'Apache httpd', '2.4.58', {'state': 'closed'})])  # a closed port is not on the host
         host('oracle.ts.example', ports=[(7777, 'Oracle HTTP Server', '12.2.1', {})])  # a different product with the same words
         # the platforms, through what runs on them
@@ -172,8 +175,16 @@ class TechSearchTests(TestCase):
         self.assertEqual(why['port.ts.example'], ['port 80 Apache httpd 2.4.58'])
         self.assertEqual(why['web.ts.example'], ['web server Apache/2.4.62 (Debian)'])
         self.assertEqual(why['reading.ts.example'], ['version source Apache HTTP Server 2.4.57 (nmap)'])
-        self.assertEqual(why['reported.ts.example'], ['version source Apache HTTP Server 2.4.49 (shodan-idb)'])
+        self.assertEqual(why['reported.ts.example'], ['version source Apache HTTP Server 2.4.49 (runzero)'])
         self.assertEqual(why['generic.ts.example'], ['technology apachegeneric', 'apache http server version not known'])
+
+    def test_a_shodan_reading_is_no_product_on_the_host_and_is_found_only_by_its_own_source(self):
+        for q in ('tech:"apache httpd"', 'tech:apache', 'tech:"apache httpd@known"', 'tech:"apache httpd@2.4.49"', 'component:"apache httpd"'):
+            self.assertNotIn('shodan.ts.example', self.names(q), q)
+        self.assertEqual(self.names('vsource:shodan-idb'), ['shodan.ts.example'])
+        self.assertNotIn('shodan.ts.example', self.names('vsource:any'))
+        self.assertIn('shodan.ts.example', self.names('vsource:reported'))  # the explicit, labelled filter
+        self.assertIn('reported.ts.example', self.names('tech:"apache httpd"'))  # runZero's reading still counts
 
     def test_substring_matching_is_kept(self):
         self.assertIn('oracle.ts.example', self.names('tech:oracle'))
@@ -251,7 +262,7 @@ class TechSearchTests(TestCase):
         self.assertEqual(self.names('product:"apache httpd"'), ['port.ts.example'])  # a port row's product, as text
         self.assertEqual(self.names('runtime:php'), ['wpphp.ts.example'])
         self.assertEqual(self.names('component:any'), ['reading.ts.example', 'reported.ts.example', 'wpphp.ts.example'])
-        self.assertEqual(self.names('vsource:reported'), ['reported.ts.example'])
+        self.assertEqual(self.names('vsource:reported'), ['reported.ts.example', 'shodan.ts.example'])  # every third-party reading, Shodan's too: an explicit filter
 
     def test_component_takes_any_name_tech_takes(self):
         # a reading's product by its aliases, a vendor in front, a quoted name with spaces; the slug still works

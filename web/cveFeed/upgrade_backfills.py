@@ -54,6 +54,7 @@ BACKFILLS = (
     'neutralise_screenshots',             # stored discovery screenshots named by a Sentinel (x.html, x.svg): renamed to a picture name or removed
     'backfill_shodan_cpes',               # every Shodan InternetDB CPE a reported reading ("vendor product"), CPE technologies removed (re-correlated)
     'backfill_technology_names',          # technology rows folded onto one spelling, MariaDB's "5.5.5-" prefix off port versions (re-correlated)
+    'cleanup_shodan_matches',             # open CVE matches whose only basis is a Shodan InternetDB reading close as false positives (a lead, not a finding)
     'recheck_openvas_reference_checks',   # OpenVAS matches a behaviour check (TRACE enabled) or a protocol, cipher or end-of-life check confirmed (#414)
     'backfill_version_scripts',           # vmware-version's ESXi build and the other version script output stored ports keep, runZero hw hints (re-correlated)
     'revalidate_ai_drafts',               # AI-written checks closed only because no scanner could check them go back to validation; reasons named

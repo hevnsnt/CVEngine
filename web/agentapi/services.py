@@ -1653,6 +1653,9 @@ def _host(sub, others=(), labels=(), profile=None, excluded=False, root=None, sh
             'java_runtimes': ((shared or {}).get('java') or {}).get(host_key) or [],
             # what the host's version sources state (cveFeed.version_sources): products and language runtimes, with source and confidence
             'version_sources': ((shared or {}).get('versions') or {}).get(host_key) or [],
+            # what Shodan's InternetDB reported for the host's address: leads for our own checks, never products seen on the host (cveFeed.source_versions.leads_of);
+            # each says whether our probe ruled it out or the address is a shared edge, whose data is about another site
+            'shodan_leads': _shodan_leads(sub, probe_rows),
             # what Sentinels read about the features of the host's services (cveFeed.service_features): HTTP/2 per TLS port, with when and how
             'service_features': ((shared or {}).get('features') or {}).get(host_key) or [],
             'wordpress': host_context.wordpress_summary(probe_rows), 'heat': _host_heat_merged(sub, others, reasons), 'heat_reasons': reasons[:12], 'host': sub.name,
@@ -1812,6 +1815,15 @@ def _inventories_for(project, subs, others):
     for inv in HostInventory.objects.filter(project_id__in=pids, host__in=wanted).order_by('reported_at', 'id'):
         out[(inv.project_id, inv.host)] = host_inventory.brief(inv, days[inv.project_id])
     return out
+
+
+def _shodan_leads(sub, probe_rows):
+    from cveFeed import source_versions
+    try:
+        return source_versions.leads_of(sub, list(probe_rows or []))
+    except Exception:  # noqa: BLE001 - a lead is context; the host record never fails over it
+        logger.exception('Shodan leads of host %s', getattr(sub, 'pk', None))
+        return []
 
 
 def _unverified_products(sub, others, ips):
@@ -5284,6 +5296,13 @@ def _how_found_match(m):
                             'unresolved': ' (the page does not show which copy runs)'}.get(state, '')))
         steps.append(_kv('Found by', 'library body read' + (f', {_iso(reading["read_at"])}' if reading.get('read_at') else '')))
         excerpts['script_url'] = _cap_text(ev['script_url'])
+    elif ev.get('reported'):
+        # a third party's reading (runZero's inventory; never Shodan's, which matches nothing now): not seen by our own fingerprint, and said so
+        from cveFeed import source_versions
+        who = source_versions.PROVIDER_LABELS.get(ev.get('reported_by'), 'a third-party data source')
+        when = f' as of {ev["reported_at"][:10]}' if ev.get('reported_at') else ''
+        steps.append(_kv('Observed', f'{found}, reported by {who}{when}'))
+        steps.append(_kv('Found by', f'{who} (third-party data, not read by cvENGINE\'s own checks)'))
     else:
         steps.append(_kv('Observed', f'{found} (technology fingerprint of the web server)'))
         steps.append(_kv('Found by', 'technology detection'))

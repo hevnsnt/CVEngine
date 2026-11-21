@@ -207,6 +207,7 @@ class Evidence:
         self.openvas = {}      # project id -> hosts someone listed for OpenVAS, for each project opted in (only while the add-on is on)
         self.openvas_forced = {}  # project id -> the listed hosts scanned whatever their heat
         self.openvas_heat = {}    # (project id, host) -> fire | smoke | ice | clean | unscanned, for the page's hosts of an opted-in project
+        self.leads = {}        # (project id, host) -> the host's Shodan InternetDB readings and first-party readings, for the hosts with a Shodan reading
         self.credentials = {}  # project id -> stored sign-ins
         self.facts = {}        # Subdomain id -> HostFacts built while loading
         self.sentinels = {}    # project id -> whether a live internal Sentinel exists (read lazily, only for internal hosts)
@@ -395,7 +396,22 @@ def load(entries, now=None):
         ev.credentials.setdefault(cred.project_id, []).append(cred)
     if ev.credentials:
         _load_signed(ev, pids)
+    _load_leads(ev, pids, names)
     return ev
+
+
+def _load_leads(ev, pids, names):
+    """The Shodan InternetDB readings of the page's hosts (leads for our own checks, ``source_versions.planner_leads``) and, for the hosts that have
+    one, their first-party readings: two queries however many hosts."""
+    from cveFeed import source_versions
+    from cveFeed.models import ProbeObservation
+    shodan = {(r.project_id, r.host) for r in ProbeObservation.objects.filter(project_id__in=pids, host__in=names, probe=source_versions.SHODAN_PROBE)}
+    if not shodan:
+        return
+    probes = (source_versions.SHODAN_PROBE, *source_versions.FIRST_PARTY_PROBES)
+    for r in ProbeObservation.objects.filter(project_id__in=pids, host__in={h for _p, h in shodan}, probe__in=probes):
+        if (r.project_id, r.host) in shodan:
+            ev.leads.setdefault((r.project_id, r.host), []).append(r)
 
 
 def _load_signed(ev, pids):
@@ -568,6 +584,10 @@ def plan_versions(h, ev):
     ports = [p for a in h.scannable() for p in a.ports]
     products = [split_name_version(t) for t in h.techs] + [((getattr(p, 'product', '') or '').strip(), getattr(p, 'version', '') or '')
                                                             for a in h.addresses.values() for p in a.ports]
+    # a product Shodan's InternetDB named, with nothing first-party naming it, no ruling out and no shared edge address: our own read of it is due
+    # (``source_versions.planner_leads``); Shodan's word alone is never a finding
+    from cveFeed import source_versions
+    products += source_versions.planner_leads(ev.leads.get((h.project_id, h.name), ()), h, ev.now)
     if not version_sources.wanted(h.name, products, ports, h.web_bases):
         return 'no product, platform or port with a known version source (Grafana, Jira, Vault, Docker, Kubernetes, a Prometheus exporter ...)'
     return _targetable(h) or [Unit(h.name, ev.ledger_runs(('version-source', 'version-source-failed'), h.project_id, h.name))]

@@ -54,16 +54,25 @@ Third-party readings (kind and outcome ``reported``): passive data another servi
 
   vsrc:shodan-idb  every CPE bbot's ``shodan_idb`` module (Shodan's InternetDB) gives a discovered host, labelled "vendor product"
                    (``shodan_reading``): versioned or not (``cpe:/a:openbsd:openssh:8.9p1``, ``cpe:/a:apache:http_server``), an application or an
-                   operating system (``cpe:/o:canonical:ubuntu_linux``). Only a versioned one is matched. InternetDB states no scan date: the
-                   reading is dated when cvENGINE received it, and marked ``undated``.
+                   operating system (``cpe:/o:canonical:ubuntu_linux``). InternetDB is keyed by IP address, not by host: behind a CDN or any
+                   shared edge address it describes whatever other site Shodan once saw there. **A Shodan reading is a lead, never a finding**:
+                   it never makes a CVE match (``collect_reported`` skips it, ``in_use`` never returns it), is never a technology and is
+                   found only by the explicit ``vsource:shodan-idb`` search. It guides our own checks instead (``leads_of``, ``lead_state``):
+                   a Shodan-named product with no first-party reading of it queues the matching first-party check (the WordPress probe, or
+                   the version source reads of ``version_sources.host_products``), unless the host sits on a shared edge address (CDN) or our
+                   own check already ruled the product out (the WordPress probe found none, the port is closed or answers with another
+                   product). The host page lists the readings apart as "Reported by Shodan (unverified lead)". InternetDB states no scan date:
+                   the reading is dated when cvENGINE received it, and marked ``undated``. Do not turn matching back on: ``cleanup_shodan_matches``
+                   closes any open match whose only basis is one.
   vsrc:runzero     the operating system and its version runZero's inventory states for an address (``os``, ``os_version``), dated by the
                    asset's ``last_seen``; each service runZero read a product version on (its services export: Recog's ``service.*`` and
                    ``service.component.*`` attributes, with the CPE), per port, dated by the service's ``updated_at``; and the firmware a
                    hardware description ends with (``hw``: "Ubiquiti UniFi AP 6.5.28"), a hint: shown and searched, never matched.
 
-The freshness rule (``in_use``). A reported reading is matched (``collect_reported``: correlation source ``tech``, the CPE first, confidence at
-most ``REPORTED_CONFIDENCE``, never proof of a version) only while all of these hold, and is otherwise shown and searched but matched to nothing,
-so the next correlation closes a match it made:
+The freshness rule (``in_use``). A reported reading of a source that may match (runZero: the customer's own active scanner, not a passive
+internet dataset; never Shodan InternetDB, see above) is matched (``collect_reported``: correlation source ``tech``, the CPE first,
+confidence at most ``REPORTED_CONFIDENCE``, never proof of a version) only while all of these hold, and is otherwise shown and searched but
+matched to nothing, so the next correlation closes a match it made:
 
   1. it is at most ``REPORTED_MAX_AGE_DAYS`` old (its source's date, else when it was received);
   2. nothing first-party names the same product on the host: a technology, a port's product or CPE (a closed port counts: our scan saw the
@@ -71,6 +80,8 @@ so the next correlation closes a match it made:
      third-party one is, and a product our scan saw with no version is not given the third-party version either;
   3. when it names a port, our own scan of that port does not show it closed or answering with another product;
   4. it is no hint (a device's firmware, ``evidence.hint``): those are shown and searched only.
+
+A match made from a reported reading is never hotter than ice (``threat.match_heat``) until a first-party read or a check confirms it.
 
 Tenancy: a reading belongs to the project of the host it was stored for (the discovery's target, the project whose runZero sync wrote the
 address's block); correlation reads only the rows of the host's own project.
@@ -112,6 +123,12 @@ REPORTED_MAX_AGE_DAYS = 90          # older than this, a third-party reading is 
 REPORTED_CONFIDENCE = 0.5           # the most a match made from a third-party reading can carry: a candidate to validate
 SHODAN_PROVIDER = 'shodan_idb'
 RUNZERO_PROVIDER = 'runzero'
+# the providers whose readings may become CVE matches (``in_use``). Shodan's InternetDB is keyed by IP address and says nothing about which host
+# answers there (a CDN's shared edge address describes other sites): its readings are leads for our own checks, never findings.
+NEVER_MATCHED = (SHODAN_PROVIDER,)
+PROVIDER_LABELS = {SHODAN_PROVIDER: 'Shodan InternetDB', RUNZERO_PROVIDER: 'runZero'}
+SHODAN_CLOSURE = ('Closed automatically: based only on Shodan InternetDB data for the host\'s address, which cvENGINE uses as a lead, not as a '
+                  'finding; our own checks did not confirm {what} on this host.')
 MAX_READINGS_PER_PORT = 12
 _STATED = re.compile(r'^v?\d{1,5}\.\d{1,9}[0-9A-Za-z.()+~_-]{0,50}$')  # a version as a source states it: 8.9p1, 1.0.2k-fips, 15.2(4)M7; never a bare major
 _MIN_CONTAIN = 4                    # a product token this short is compared whole, never by containment
@@ -1067,9 +1084,15 @@ def verdict(row, seen, now=None):
     return ''
 
 
+def is_lead(row):
+    """Whether a reading is a lead, never a finding (Shodan's InternetDB: ``NEVER_MATCHED``)."""
+    ev = row.evidence if isinstance(row.evidence, dict) else {}
+    return row.probe == SHODAN_PROBE or (ev.get('provider') or row.source) in NEVER_MATCHED
+
+
 def in_use(sub, now=None):
-    """The reported readings of ``sub`` the freshness rule lets correlation match (``verdict``)."""
-    rows = [r for r in _rows(sub) if r.kind == REPORTED and r.outcome == REPORTED and r.version
+    """The reported readings of ``sub`` the freshness rule lets correlation match (``verdict``), never a Shodan InternetDB one (``is_lead``)."""
+    rows = [r for r in _rows(sub) if r.kind == REPORTED and r.outcome == REPORTED and r.version and not is_lead(r)
             and not (isinstance(r.evidence, dict) and r.evidence.get('hint'))]  # a hint (a device's firmware) is shown and searched only
     if not rows:
         return []
@@ -1079,12 +1102,15 @@ def in_use(sub, now=None):
 
 def collect_reported(subdomain, product_index, cve_by_id, rows, scan_history=None, min_confidence=0.0, fix_lookup=None):
     """Append the matches of the reported readings ``in_use`` lets through: named like a technology (correlation source ``tech``), the CPE
-    first, the confidence capped at ``REPORTED_CONFIDENCE``, the provider and its date in the evidence. Returns how many."""
+    first, the confidence capped at ``REPORTED_CONFIDENCE``, the provider and its date in the evidence. Returns how many. Shodan InternetDB
+    readings are skipped entirely (``is_lead``): they are leads for our own checks, never matches."""
     from cveFeed.correlation import _MIN_TOKEN, _norm, _record_matches, parse_cpe
     if not product_index:
         return 0
     found = 0
     for row in in_use(subdomain):
+        if is_lead(row):
+            continue
         ev = row.evidence if isinstance(row.evidence, dict) else {}
         cpe = ev.get('cpe') or ''
         token = _norm(row.product)
@@ -1102,8 +1128,8 @@ def collect_reported(subdomain, product_index, cve_by_id, rows, scan_history=Non
 def os_rows(value):
     """The version source rows that name an operating system containing ``value`` (``os:``): the Windows release an NTLM challenge states
     (``vsrc:ntlm``), runZero's operating system (``vsrc:runzero``, the address-wide reading that is no hardware hint: its services are
-    applications) and any reading carrying an operating system CPE (a network operating system's identity, Shodan's ``cpe:/o:`` CPEs, VMware
-    ESXi as vmware-version states it)."""
+    applications) and any reading carrying an operating system CPE (a network operating system's identity, VMware ESXi as vmware-version
+    states it). Shodan InternetDB's ``cpe:/o:`` CPEs are leads, not the host's operating system: ``readings_qs`` leaves them out."""
     from cveFeed import version_sources
     runzero_os = Q(probe=RUNZERO_PROBE, port=0) & (Q(evidence__part='os') | ~Q(evidence__has_key='part'))
     return version_sources.readings_qs().filter(Q(probe=NTLM_PROBE) | runzero_os | Q(evidence__cpe__istartswith='cpe:/o:')
@@ -1112,11 +1138,264 @@ def os_rows(value):
 
 
 def reported_host_ids(base_qs):
-    """The ids of the Subdomain rows of ``base_qs`` with a reported reading (``correlation.candidate_subdomains``)."""
+    """The ids of the Subdomain rows of ``base_qs`` with a reported reading that may match (``correlation.candidate_subdomains``): never one
+    that only has Shodan InternetDB readings."""
     from django.db.models import Exists, OuterRef
     from cveFeed.models import ProbeObservation
-    readings = ProbeObservation.objects.filter(project_id=OuterRef('target_domain__project_id'), host=OuterRef('name'), kind=REPORTED)
+    readings = ProbeObservation.objects.filter(project_id=OuterRef('target_domain__project_id'), host=OuterRef('name'), kind=REPORTED) \
+        .exclude(probe=SHODAN_PROBE)
     return base_qs.filter(Exists(readings)).values('id')
+
+
+# ----------------------------------------------------------------------------- Shodan readings are leads for our own checks
+
+LEAD_LABELS = {
+    'open': 'Reported by Shodan (unverified lead)',
+    'ruled_out': 'Reported by Shodan, ruled out by our probe',
+    'confirmed': 'Reported by Shodan, also found by our own scan',
+    'aged': 'Reported by Shodan, not refreshed for 90 days',
+}
+_WORDPRESS = re.compile(r'wordpress', re.IGNORECASE)
+
+
+def edge_label(provider):
+    return f'Shodan data for a shared edge address ({provider}), probably another site'
+
+
+def shared_edge_for(addresses, name='', cname='', webserver='', cdn_name='', flagged=False):
+    """The provider of the shared edge (a CDN, a platform other tenants share) the host's addresses sit on, else ''. Reads only what is stored: a
+    provider's published address ranges (``hosting.provider_range``), the CDN flag of the host or an address, its recorded CNAME, name and Server header
+    (``hosting.classify``). A name is never resolved here: the server resolves and probes nothing, only Sentinels do."""
+    from cveFeed import hosting
+    for address in addresses:
+        known = hosting.provider_range(address)
+        if known:
+            return known[0]
+    info = hosting.classify(name=name, cname=cname or '', webserver=webserver or '', cdn_name=cdn_name or '', is_cdn=bool(flagged))
+    if info['shared_ip'] and info['provider']:
+        return info['provider']
+    return (cdn_name or 'a CDN').strip()[:60] if flagged else ''
+
+
+def shared_edge(sub):
+    """``shared_edge_for`` the stored row of a host: Cloudflare's published range or CDN flag on one of its addresses, its CNAME, name or Server header."""
+    ips = list(sub.ip_addresses.all())
+    return shared_edge_for([ip.address for ip in ips if ip.address], name=sub.name, cname=sub.cname, webserver=sub.webserver, cdn_name=sub.cdn_name,
+                           flagged=bool(sub.is_cdn or any(ip.is_cdn for ip in ips)))
+
+
+def is_wordpress_lead(row):
+    ev = row.evidence if isinstance(row.evidence, dict) else {}
+    return bool(_WORDPRESS.search(row.product or '') or _WORDPRESS.search(ev.get('cpe') or ''))
+
+
+def lead_state(row, seen, edge='', wordpress_absent=False, now=None):
+    """Where a Shodan reading stands as a lead: ``edge`` (the host's addresses are a shared edge: Shodan's IP-keyed data is about another site, no
+    check is queued from it), ``ruled_out`` (our own probe says the product is absent: the WordPress probe found no WordPress, the port is closed
+    or answers with another product), ``confirmed`` (a first-party reading names the product: nothing left to check), ``aged`` (older than
+    ``REPORTED_MAX_AGE_DAYS``) or ``open`` (a check is wanted). ``seen`` is ``first_party(sub)``."""
+    if edge:
+        return 'edge'
+    if wordpress_absent and is_wordpress_lead(row):
+        return 'ruled_out'
+    why = verdict(row, seen, now)
+    return {'': 'open', 'aged': 'aged', 'superseded': 'confirmed'}.get(why, 'ruled_out')
+
+
+def lead_item(row, state, edge=''):
+    ev = row.evidence if isinstance(row.evidence, dict) else {}
+    return {'product': row.product, 'version': row.version, 'cpe': ev.get('cpe') or '', 'state': state, 'ruled_out': state == 'ruled_out',
+            'edge': edge or None, 'label': edge_label(edge) if state == 'edge' else LEAD_LABELS.get(state, LEAD_LABELS['open']),
+            'port': row.port or None, 'reported': {'by': ev.get('provider') or SHODAN_PROVIDER, 'at': ev.get('reported_at') or '',
+                                                   'undated': bool(ev.get('undated'))}}
+
+
+def leads_of(sub, rows=None, now=None):
+    """The Shodan readings of ``sub`` as leads, each with where it stands (``lead_state``) and its wording for the host page. ``rows``: the host's
+    probe rows when the caller has them (the WordPress state is read from them), else the stored readings and a query for the WordPress probe."""
+    from cveFeed import wpscan_scan
+    from cveFeed.models import ProbeObservation
+    if sub.target_domain_id is None:
+        return []
+    if rows is None:
+        rows = list(ProbeObservation.objects.filter(project_id=sub.target_domain.project_id, host=_host(sub)))
+    shodan = [r for r in rows if r.probe == SHODAN_PROBE and r.kind == REPORTED]
+    if not shodan:
+        return []
+    if getattr(sub, '_source_rows', None) is None:
+        sub._source_rows = [r for r in rows if r.probe in PROBES]
+    wp = wpscan_scan.state_of([r for r in rows if r.kind == 'wordpress'])
+    absent = bool(wp and wp['state'] == 'not_wordpress')
+    seen, edge = first_party(sub), shared_edge(sub)
+    return [lead_item(r, lead_state(r, seen, edge, absent, now), edge) for r in sorted(shodan, key=lambda r: (r.product, r.port))][:30]
+
+
+def lead_products(sub, now=None):
+    """``[(product, '')]`` of the Shodan leads of ``sub`` still open: a product Shodan named that nothing first-party names and our checks did not rule
+    out, on a host that is not on a shared edge address. They go to ``version_sources.host_products``, so the existing version source reads
+    (``wanted``: a catalogue entry whose ``leads`` the product matches, asked on the port or the web base) check it ourselves. WordPress is the
+    WordPress probe's lead (``wordpress_leads``), not an entry of the catalogue."""
+    shodan = [r for r in _rows(sub) if r.probe == SHODAN_PROBE and r.kind == REPORTED]
+    if not shodan:
+        return []
+    edge = shared_edge(sub)
+    if edge:
+        return []
+    seen = first_party(sub)
+    return [(r.product, '') for r in shodan if not is_wordpress_lead(r) and lead_state(r, seen, '', False, now) == 'open']
+
+
+def planner_leads(rows, facts, now=None):
+    """``[(product, '')]`` of the open Shodan leads of the host ``facts`` (``check_coverage.HostFacts``) for the work planner, from ``rows``: the
+    host's Shodan readings and first-party readings (``check_coverage.load``). The same rule as ``lead_products``, read from the planner's facts:
+    nothing on a shared edge address (the host's addresses, its CDN flags), nothing a first-party technology, port product or reading names,
+    nothing our own scan ruled out. WordPress is the probe's lead."""
+    from cveFeed.correlation import _norm, split_name_version
+    shodan = [r for r in rows if r.probe == SHODAN_PROBE and r.kind == REPORTED]
+    if not shodan:
+        return []
+    addresses = list(facts.addresses.values())
+    if facts.shared_platform or shared_edge_for([a.address for a in addresses], name=facts.name, flagged=any(a.is_cdn for a in addresses)):
+        return []
+    tokens = {_norm(split_name_version(t)[0]) for t in facts.techs}
+    ports = {}
+    for a in addresses:
+        for port in a.ports:
+            token = _norm(getattr(port, 'product', '') or '')
+            tokens.add(token)
+            ports.setdefault(port.number, []).append((getattr(port, 'state', '') or 'open', token))
+    cpes = set()
+    for r in rows:
+        if r.probe in FIRST_PARTY_PROBES:
+            tokens.add(_norm(r.product))
+    tokens.discard('')
+    seen = (tokens, cpes, ports)
+    return [(r.product, '') for r in shodan if not is_wordpress_lead(r) and lead_state(r, seen, '', False, now) == 'open']
+
+
+def wordpress_leads(subs, now=None):
+    """The lower-cased names of ``subs`` (current rows of one scan) where Shodan named WordPress, nothing first-party names it, no probe ruled it
+    out and the addresses are no shared edge: the WordPress probe asks these first (``wpscan_scan.detect``). Reads only stored rows."""
+    from cveFeed.models import ProbeObservation
+    from cveFeed import wpscan_scan
+    subs = [s for s in subs if getattr(s, 'target_domain_id', None)]
+    if not subs:
+        return set()
+    projects = {s.target_domain_id: s.target_domain.project_id for s in subs}
+    names = {_host(s) for s in subs}
+    rows = {}
+    for row in ProbeObservation.objects.filter(project_id__in=set(projects.values()), host__in=names).filter(Q(probe=SHODAN_PROBE) | Q(kind='wordpress')):
+        rows.setdefault((row.project_id, row.host), []).append(row)
+    out = set()
+    for sub in subs:
+        mine = rows.get((projects[sub.target_domain_id], _host(sub)), [])
+        leads = [r for r in mine if r.probe == SHODAN_PROBE and is_wordpress_lead(r)]
+        if not leads:
+            continue
+        wp = wpscan_scan.state_of([r for r in mine if r.kind == 'wordpress'])
+        if (wp and wp['state'] == 'not_wordpress') or shared_edge(sub):
+            continue
+        seen = first_party(sub)
+        if any(lead_state(r, seen, '', False, now) == 'open' for r in leads):
+            out.add(_host(sub))
+    return out
+
+
+# ----------------------------------------------------------------------------- Shodan-only matches are closed
+
+def _shodan_made(match, reading_ids):
+    ev = match.evidence if isinstance(match.evidence, dict) else {}
+    return bool(ev.get('reported')) and (ev.get('reported_by') in NEVER_MATCHED or ev.get('reading_id') in reading_ids)
+
+
+def close_shodan_matches(matches):
+    """Close, automatically and as a false positive, the open matches among ``matches`` whose only basis is a Shodan InternetDB reading (evidence
+    ``reported`` with ``reported_by`` shodan_idb, or a ``reading_id`` that is a ``vsrc:shodan-idb`` row): one nobody worked (still open, no one set
+    it), with no hard evidence (a template hit, the distribution's tracker, a validation hit). The note says why; the audit trail and the activity
+    feed say it too. Idempotent: a closed match is not touched again. Returns the ids closed."""
+    from django.db import transaction
+    from cveFeed import activity, match_policy, scoring
+    from cveFeed.models import CVEMatch, FindingAuditEvent, Triage, ProbeObservation
+    from reNgine.state_machines import REMEDIATION
+    matches = [m for m in matches if m.remediation_status == 'open' and getattr(m, 'remediation_by_id', None) is None]
+    if not matches:
+        return []
+    reading_ids = None
+    shodan = []
+    for m in matches:
+        ev = m.evidence if isinstance(m.evidence, dict) else {}
+        if not ev.get('reported'):
+            continue
+        if ev.get('reported_by') not in NEVER_MATCHED and reading_ids is None:
+            reading_ids = set(ProbeObservation.objects.filter(probe=SHODAN_PROBE).values_list('pk', flat=True))
+        if _shodan_made(m, reading_ids or set()):
+            shodan.append(m)
+    if not shodan:
+        return []
+    hits = set(Triage.objects.filter(match_id__in=[m.pk for m in shodan], validation_status='hit').values_list('match_id', flat=True))
+    now = timezone.now()
+    closed, audit, by_project = [], [], {}
+    for m in shodan:
+        if m.pk in hits or match_policy.has_hard_evidence(m.source, m.evidence, m.template_result or '', m.distro_status or ''):
+            continue
+        what = ' '.join(x for x in (m.matched_product, m.matched_version) if x) or 'this product'
+        note = SHODAN_CLOSURE.format(what=what)
+        with transaction.atomic():
+            moved = REMEDIATION.move(CVEMatch._base_manager.filter(pk=m.pk, remediation_by__isnull=True), 'false_positive', only_from=('open',),
+                                     remediation_note=note, remediation_updated_at=now, ai_verdict='not_affected', ai_reason=note,
+                                     ai_model='deterministic-correlation', confidence=0.0, updated_at=now)
+            if not moved:
+                continue
+            Triage.objects.filter(match_id=m.pk).update(verdict=None, status='triaged', classification='not_applicable', reason=note, updated_at=now)
+        m.remediation_status, m.remediation_note, m.ai_verdict, m.ai_reason, m.confidence = 'false_positive', note, 'not_affected', note, 0.0
+        closed.append(m)
+        project = m.subdomain.target_domain.project_id if m.subdomain_id and m.subdomain.target_domain_id else None
+        if project:
+            audit.append(FindingAuditEvent(project_id=project, finding_kind='match', finding_id=m.pk, event='status', actor=None,
+                                           before={'status': 'open'}, after={'status': 'false_positive', 'note': note, 'by': 'shodan_lead_rule'}))
+            by_project.setdefault(project, []).append(m.pk)
+    if audit:
+        FindingAuditEvent.objects.bulk_create(audit)
+    for project, pks in by_project.items():
+        activity.log('confirm', (f'{len(pks)} CVE match(es) closed: based only on Shodan InternetDB data for the host\'s address, which is a lead for our '
+                                 'own checks, not a finding'), project=project, match_id=pks[0], match_ids=pks[:20], count=len(pks),
+                     decision='closed_not_applicable')
+    if closed:
+        try:
+            scoring.rescore_for_matches(closed)
+        except Exception:  # noqa: BLE001 - the closure stands; the next rescore counts it
+            logger.exception('could not rescore the hosts of %d Shodan-only matches', len(closed))
+    return [m.pk for m in closed]
+
+
+def cleanup_shodan_matches(apply=False, batch=500):
+    """The one-time cleanup an update runs (``manage.py cleanup_shodan_matches --apply``) and what every correlation of a host repeats
+    (``correlation.close_stale``): close the open CVE matches whose only basis is a Shodan InternetDB reading (``close_shodan_matches``). Bounded
+    (``batch`` matches a read, one query for the readings) and idempotent: a closed match no longer reads as open. Returns
+    ``{'matches': found, 'closed': closed}``."""
+    from cveFeed.models import CVEMatch
+    out = {'matches': 0, 'closed': 0}
+    base = (CVEMatch._base_manager.filter(remediation_status='open', remediation_by__isnull=True, evidence__reported=True)
+            .exclude(template_result='vulnerable').exclude(distro_status='vulnerable').select_related('subdomain__target_domain').order_by('pk'))
+    last = 0
+    while True:
+        rows = list(base.filter(pk__gt=last)[:batch])
+        if not rows:
+            break
+        last = rows[-1].pk
+        reading_ids = None
+        mine = []
+        for m in rows:
+            ev = m.evidence if isinstance(m.evidence, dict) else {}
+            if ev.get('reported_by') not in NEVER_MATCHED and reading_ids is None:
+                from cveFeed.models import ProbeObservation
+                reading_ids = set(ProbeObservation.objects.filter(probe=SHODAN_PROBE).values_list('pk', flat=True))
+            if _shodan_made(m, reading_ids or set()):
+                mine.append(m)
+        out['matches'] += len(mine)
+        if apply and mine:
+            out['closed'] += len(close_shodan_matches(mine))
+    return out
 
 
 # ----------------------------------------------------------------------------- the one-time backfill

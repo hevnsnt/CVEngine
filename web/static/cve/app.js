@@ -1107,7 +1107,8 @@ const technologyTable = (h) => {
   const unverified = h.unverified_products || [];
   const javas = h.java_runtimes || [];
   const versions = h.version_sources || [];
-  if (!details.length && !archived.length && !unverified.length && !javas.length && !versions.length) return null;
+  const leads = h.shodan_leads || [];
+  if (!details.length && !archived.length && !unverified.length && !javas.length && !versions.length && !leads.length) return null;
   const box = el("div", "tech-table");
   if (details.length) {
     box.append(el("h3", "sec", `Technologies (${details.length})`));
@@ -1168,6 +1169,18 @@ const technologyTable = (h) => {
       if (v.bundled_with) box.append(el("p", "note", `Inferred: ${v.bundled_with.product} ${v.bundled_with.product_version} bundles it (${v.bundled_with.source})`));
       else if (v.evidence) box.append(el("p", "note", `Seen on the host: ${v.evidence}`));
       if (range && v.range.basis) box.append(el("p", "note", `Read as a range: ${v.range.basis}. Its CVEs wait for review; the appliance's own version page decides.`));
+    });
+  }
+  if (leads.length) {
+    // what Shodan's InternetDB reported for the host's address (cveFeed.source_versions.leads_of): leads for our own checks, never products seen on the host
+    box.append(el("h3", "sec", `Reported by Shodan (unverified lead) (${leads.length})`));
+    box.append(el("p", "note", "Shodan's InternetDB is keyed by IP address, so it says what it once saw on the address, not what this host runs. cvENGINE never matches CVEs from it: it is a lead that queues our own check of the product, and our own result decides."));
+    leads.forEach((l) => {
+      const line = el("div", "find tech-line");
+      line.append(el("strong", "", l.version ? `${l.product} ${l.version}` : l.product));
+      line.append(badge(l.state === "open" ? "lead" : l.state === "ruled_out" ? "ruled out by our probe" : l.state === "edge" ? "shared edge address" : l.state === "confirmed" ? "also found by our scan" : "old", l.state === "open" ? "queued" : "ice"));
+      line.append(el("span", "note", l.label || ""));
+      box.append(line);
     });
   }
   if (unverified.length) {
