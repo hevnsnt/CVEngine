@@ -146,6 +146,18 @@ export function lastResultText(sub, format = (iso) => iso.slice(0, 16).replace("
   return `Failed${error}`;
 }
 
+/** One line for the last "Send test to me": "Test sent Nov 21, 20:44 to you@x.org", "Test failed: <why>", "Test being made and sent to you@x.org", or ""
+ * when there has been none. Tests go to the address on the account of the person who asked, never to the report's recipients. */
+export function lastTestText(test, format = (iso) => iso.slice(0, 16).replace("T", " ")) {
+  if (!test || !test.status) return "";
+  const to = test.to ? ` to ${test.to}` : "";
+  const when = test.at ? ` ${format(test.at)}` : "";
+  if (test.status === "sent") return `Test sent${when}${to}`;
+  if (test.status === "sending") return `Test being made and sent${to} (started${when})`;
+  if (test.status === "unknown") return `Test${to} was interrupted while sending`;
+  return `Test${to} failed${test.error ? `: ${test.error}` : ""}`;
+}
+
 /** "a@x.org, b@x.org +3": the first two recipients, then how many more. */
 export function recipientsText(recipients, shown = 2) {
   const list = recipients || [];
