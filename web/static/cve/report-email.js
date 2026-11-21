@@ -4,7 +4,7 @@
 import { api, ask, badge, couldNotRead, dialog, el, emptyState, field, selectOf, toast, waiting } from "/staticfiles/cve/ui.js";
 import { fmtDateTime } from "/staticfiles/cve/prefs.js";
 import { attachRowMenu } from "/staticfiles/cve/rowmenu.js";
-import { attachText, defaultName, impactTone, safeLink, fieldOfError, lastResultText, MAX_RECIPIENTS, nextSendText, parseRecipients, recipientsText, scheduleSummary, statusPill } from "/staticfiles/cve/reports-logic.js";
+import { attachText, defaultName, impactTone, safeLink, fieldOfError, lastResultText, lastTestText, MAX_RECIPIENTS, nextSendText, parseRecipients, recipientsText, scheduleSummary, statusPill } from "/staticfiles/cve/reports-logic.js";
 
 const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const BASE = "/api/v1/report-subscriptions";
@@ -223,13 +223,16 @@ function card(sub, env) {
     `Last result: ${lastResultText(sub, when)}`,
   ];
   lines.forEach((l) => box.append(el("p", "note report-line", l)));
+  const testLine = lastTestText(sub.last_test, when);  // a test never changes "Last result", so it gets its own line
+  if (testLine) box.append(el("p", `note report-line${sub.last_test.status === "failed" ? " msg err" : ""}`, testLine));
   if (!sub.enabled && sub.last_status === "disabled" && sub.last_error) box.append(el("p", "msg err", sub.last_error));
   const act = {
     preview: () => openPreview(`${BASE}/${sub.id}/preview`),
     test: async () => {
       if (!env.mail_ready) return toast("Outgoing mail is not set up.", true);
       const r = await api("POST", `${BASE}/${sub.id}/test`);
-      toast(`A test email is on its way to ${r.to}.`);
+      toast(`A test email is being made and sent to ${r.to}. This card shows the result.`);
+      env.done();
     },
     edit: () => editDialog(sub, env),
     pause: async () => {

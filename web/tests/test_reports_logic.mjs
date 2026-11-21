@@ -82,6 +82,15 @@ test('the next send and the last result are said in words', () => {
   assert.equal(L.lastResultText({last_status: 'skipped', last_error: 'outgoing mail is not set up'}), 'Skipped: outgoing mail is not set up');
 });
 
+test('the last test send has its own line, with where it went and why it failed', () => {
+  const f = () => 'Nov 21, 20:44';
+  assert.equal(L.lastTestText(null), '');
+  assert.equal(L.lastTestText({status: 'sent', at: '2026-11-21T20:44:00Z', to: 'me@x.org'}, f), 'Test sent Nov 21, 20:44 to me@x.org');
+  assert.equal(L.lastTestText({status: 'sending', at: '2026-11-21T20:44:00Z', to: 'me@x.org'}, f), 'Test being made and sent to me@x.org (started Nov 21, 20:44)');
+  assert.equal(L.lastTestText({status: 'failed', to: 'me@x.org', error: 'the mail server refused the recipient address'}), 'Test to me@x.org failed: the mail server refused the recipient address');
+  assert.equal(L.lastTestText({status: 'unknown', to: 'me@x.org'}), 'Test to me@x.org was interrupted while sending');
+});
+
 test('the partial result is the server\'s own "1 of 3 failed" sentence, and the card words are plain', () => {
   assert.equal(L.lastResultText({last_status: 'partial', last_error: '1 of 3 failed: the mail server refused the recipient address'}), '1 of 3 failed: the mail server refused the recipient address');
   assert.equal(L.lastResultText({last_status: 'failed', last_error: 'could not connect to the mail server'}), 'Failed: could not connect to the mail server');
