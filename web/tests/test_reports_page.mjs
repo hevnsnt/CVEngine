@@ -71,6 +71,12 @@ const SCOPES = [
 ];
 const posts = [];
 const patches = [];
+const zeroWire = [];
+const THREATS = [
+  {source: 'zero_wire', title: 'nginx2root: update <b>now</b>', summary: 'Prioritize patching.', link: 'https://radar.cloudflare.com/zero-wire/nginx2root', badges: ['Cloudflare Zero Wire', 'CISA KEV'],
+    cve_ids: ['CVE-2026-1'], impact_line: '3 of your hosts match by version', impact: 'matched'},
+  {source: 'kev', title: 'CVE-2026-2: x', summary: '', link: 'javascript:alert(1)', badges: [], cve_ids: [], impact_line: 'No host in Acme Web is known to run x.', impact: 'none'},
+];
 const SUB = {id: 7, name: 'Weekly report: Acme Web', scope: {kind: 'project', slug: 'acme-web', name: 'Acme Web'}, recipients: ['a@b.co', 'c@d.co', 'e@f.co'], opted_out: [], cadence: 'weekly',
   weekday: 0, day_of_month: 1, send_time: '08:00', timezone: 'Europe/London', attach: 'pdf', enabled: true, schedule: 'Weekly, Mondays 08:00 (Europe/London)',
   next_run_at: '2026-11-23T08:00:00Z', last_sent_at: '2026-11-17T08:00:00Z', last_status: 'partial', last_error: '1 of 3 failed: the mail server refused the recipient address', can_manage: true};
@@ -81,6 +87,9 @@ globalThis.fetch = async (url, opts = {}) => {
   const method = opts.method || 'GET';
   if (url === '/api/v1/reporting/scopes') return json({scopes: SCOPES, me_email: 'a@b.co', mail_ready: false, limits: {}}, 200);
   if (url === '/api/v1/reporting/reports') return json(RECENT, 200);
+  if (String(url).startsWith('/api/v1/reporting/threats')) return json({items: THREATS, note: 'Briefings from Cloudflare Radar Zero Wire (radar.cloudflare.com/zero-wire); summaries quoted from the feed; host counts from cvENGINE\'s own scans.'}, 200);
+  if (url === '/api/v1/reporting/zero-wire' && method === 'PUT') { zeroWire.push(JSON.parse(opts.body)); return json({enabled: JSON.parse(opts.body).enabled}, 200); }
+  if (url === '/api/v1/reporting/zero-wire') return json({enabled: true, synced_at: '2026-11-21T06:00:00Z', error: '', briefings: 3}, 200);
   if (String(url).startsWith('/api/v1/report-subscriptions?')) return json({results: [SUB], limits: {attach_max_mb: 10}, mail_ready: false, can_create: true}, 200);
   if (method === 'PATCH' || (method === 'POST' && url === '/api/v1/report-subscriptions')) {
     (method === 'PATCH' ? patches : posts).push([url, JSON.parse(opts.body)]);
@@ -176,4 +185,34 @@ test('New email report opens the dialog with the default name, and Save sends th
   assert.equal(payload.project, 'acme-web');
   assert.deepEqual(payload.recipients, ['dana@example.org']);
   assert.deepEqual([payload.cadence, payload.weekday, payload.send_time, payload.attach], ['weekly', 0, '08:00', 'none']);
+});
+
+test('the Email tab starts with this week\'s vulnerabilities as text, a link only for an http address, and the footnote', async () => {
+  select().value = 'project:acme-web';
+  await select().fire('change');
+  await tab('email').onclick();
+  await settle();
+  assert.match(root.textContent, /This week's most important vulnerabilities for Acme Web/);
+  assert.match(root.textContent, /nginx2root: update <b>now<\/b>/);  // set as text: the markup is shown, never run
+  assert.match(root.textContent, /3 of your hosts match by version/);
+  assert.match(root.textContent, /Cloudflare Radar Zero Wire/);
+  const links = find(root, (n) => n.tag === 'a' && n.className === 'report-threat-title');
+  assert.equal(links.length, 1);
+  assert.equal(links[0].attrs.href, 'https://radar.cloudflare.com/zero-wire/nginx2root');
+  assert.equal(links[0].attrs.rel, 'noopener noreferrer');
+});
+
+test('an App Admin sees the Zero Wire switch and a change is sent as a PUT', async () => {
+  root.dataset.superuser = '1';
+  await tab('email').onclick();
+  await settle();
+  const box = find(root, (n) => n.tag === 'input' && n.attrs.id === 'zero-wire-on')[0];
+  assert.ok(box);
+  assert.equal(box.checked, true);
+  assert.match(root.textContent, /3 briefings kept/);
+  box.checked = false;
+  await box.fire('change');
+  await settle();
+  assert.deepEqual(zeroWire, [{enabled: false}]);
+  root.dataset.superuser = '';
 });

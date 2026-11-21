@@ -4,7 +4,7 @@
 import { api, ask, badge, couldNotRead, dialog, el, emptyState, field, selectOf, toast, waiting } from "/staticfiles/cve/ui.js";
 import { fmtDateTime } from "/staticfiles/cve/prefs.js";
 import { attachRowMenu } from "/staticfiles/cve/rowmenu.js";
-import { attachText, defaultName, fieldOfError, lastResultText, MAX_RECIPIENTS, nextSendText, parseRecipients, recipientsText, scheduleSummary, statusPill } from "/staticfiles/cve/reports-logic.js";
+import { attachText, defaultName, impactTone, safeLink, fieldOfError, lastResultText, MAX_RECIPIENTS, nextSendText, parseRecipients, recipientsText, scheduleSummary, statusPill } from "/staticfiles/cve/reports-logic.js";
 
 const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const BASE = "/api/v1/report-subscriptions";
@@ -265,6 +265,61 @@ function card(sub, env) {
   return box;
 }
 
+// --- this week's most important vulnerabilities ---------------------------------------------------------------------------------
+
+/** The card at the top of the tab: what the email's "most important vulnerabilities" section would say for the selected scope now, and the App Admin's switch. */
+function threatsCard(env) {
+  const box = el("div", "card report-threats");
+  box.append(el("h2", "", `This week's most important vulnerabilities for ${env.scope.name}`));
+  const list = el("div", "report-threat-list");
+  const note = el("p", "note");
+  box.append(list, note);
+  list.append(waiting("Reading this week's vulnerabilities"));
+  api("GET", `/api/v1/reporting/threats?${query(env.scope)}&days=7`)
+    .then((data) => {
+      list.textContent = "";
+      if (!data.items.length) list.append(el("p", "note", "No newly exploited or critical vulnerabilities were announced this week."));
+      data.items.forEach((t) => {
+        const row = el("div", "report-threat");
+        const href = safeLink(t.link);
+        row.append(href ? el("a", "report-threat-title", t.title, { href, target: "_blank", rel: "noopener noreferrer" }) : el("b", "report-threat-title", t.title));
+        const chips = el("div", "chips");
+        t.badges.forEach((b) => chips.append(el("span", "chip", b)));
+        row.append(chips);
+        if (t.cve_ids && t.cve_ids.length) row.append(el("p", "note", t.cve_ids.join(", ")));
+        if (t.summary) row.append(el("p", "", t.summary));
+        if (t.impact_line) row.append(el("p", `report-impact ${impactTone(t.impact)}`.trim(), t.impact_line));
+        list.append(row);
+      });
+      note.textContent = data.note || "";
+    })
+    .catch((err) => {
+      list.textContent = "";
+      list.append(couldNotRead("This week's vulnerabilities", () => {}, err.message));
+    });
+  if (env.isAppAdmin) {
+    const row = el("label", "plan-opt", null, { for: "zero-wire-on" });
+    const on = el("input", "", null, { type: "checkbox", id: "zero-wire-on" });
+    const status = el("span", "note");
+    row.append(on, el("span", "", "Include Cloudflare Zero Wire briefings (read every six hours from radar.cloudflare.com)"));
+    box.append(row, status);
+    api("GET", "/api/v1/reporting/zero-wire").then((z) => {
+      on.checked = z.enabled;
+      status.textContent = z.error ? `The last read failed: ${z.error}` : z.synced_at ? `Last read ${when(z.synced_at)}, ${z.briefings} briefing${z.briefings === 1 ? "" : "s"} kept.` : "Not read yet.";
+    }).catch(() => {});
+    on.addEventListener("change", async () => {
+      try {
+        const z = await api("PUT", "/api/v1/reporting/zero-wire", { enabled: on.checked });
+        toast(z.enabled ? "Zero Wire briefings are on." : "Zero Wire briefings are off.");
+      } catch (err) {
+        on.checked = !on.checked;
+        toast(err.message, true);
+      }
+    });
+  }
+  return box;
+}
+
 /**
  * Draws the tab into ``panel``. ``env``: {scopes, scope (the selected scope of the page), me_email, isAppAdmin, limits (from the scopes route)}.
  */
@@ -284,6 +339,7 @@ export async function emailTab(panel, env) {
       return;
     }
     root.textContent = "";
+    root.append(threatsCard(env));
     const mailNote = env.isAppAdmin ? "Outgoing mail is not set up. Set it up in Settings, Email." : "Outgoing mail is not set up. Ask an App Admin to set it up; email reports are kept and start sending once it is.";
     const local = { ...env, mail_ready: data.mail_ready, limits: data.limits || env.limits, mailNote, done: draw };
     if (!data.mail_ready) {

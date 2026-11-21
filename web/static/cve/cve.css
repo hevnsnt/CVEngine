@@ -3016,3 +3016,12 @@ a.hr-name{text-underline-offset:2px}
   .report-preview{height:70dvh}
   .reports-tabs [role=tablist]{display:flex;overflow-x:auto}
 }
+/* Reporting, Email reports tab: this week's most important vulnerabilities */
+.report-threats{margin-bottom:var(--s-4)}
+.report-threats h2{margin-bottom:var(--s-3)}
+.report-threat{padding:var(--s-3) 0;border-top:1px solid var(--line)}
+.report-threat:first-child{border-top:0}
+.report-threat-title{font-weight:var(--fw-semi);overflow-wrap:anywhere}
+.report-threat p{margin:var(--s-1) 0 0;overflow-wrap:anywhere}
+.report-impact{font-weight:var(--fw-semi)}
+.report-impact.bad{color:var(--fire-ink)}.report-impact.warn{color:var(--smoke-ink)}

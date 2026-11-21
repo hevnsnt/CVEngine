@@ -28,18 +28,20 @@
       <p class="ink" style="margin:0 0 4px 0;font-size:14px;color:#2e2e32"><strong style="color:{{ colours.fire }}">Fire {{ fire }}</strong> &middot; <strong style="color:{{ colours.smoke }}">Smoke {{ smoke }}</strong> &middot; <strong style="color:{{ colours.ice }}">Ice {{ ice }}</strong> <span class="soft" style="color:#68686f">CVE matches by heat</span></p>
       {% if not d.headline.compared %}<p class="soft" style="margin:0 0 4px 0;font-size:13px;color:#68686f">{{ d.headline.compared_note }}</p>{% endif %}
 
-      {% if d.threats %}
+      {% if d.threats or d.threats_empty %}
       <p class="soft" style="margin:26px 0 10px 0;font:700 11px/1 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:1.4px;text-transform:uppercase;color:#68686f">This {{ period_word }}&rsquo;s most important vulnerabilities</p>
       {% for t in d.threats %}
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="threat box" style="width:100%;background:#f7f7f8;border:1px solid #e4e4e7;border-radius:10px;margin:0 0 10px 0"><tr><td style="padding:14px 16px">
         <div class="ink" style="font:700 15px/1.4 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0a0a0b"><a class="plain" href="{{ t.link }}" style="color:#0a0a0b">{{ t.title }}</a></div>
         {% if t.badges %}<div style="margin:6px 0 0 0">{% for b in t.badges %}<span class="chip" style="display:inline-block;margin:0 4px 4px 0;padding:3px 8px;border-radius:6px;background:#e4e4e7;color:#2e2e32;font:700 11px/1.2 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">{{ b }}</span>{% endfor %}</div>{% endif %}
+        {% if t.cve_ids %}<p class="soft" style="margin:6px 0 0 0;font-size:13px;color:#68686f">{{ t.cve_ids|join:", " }}</p>{% endif %}
         {% if t.summary %}<p class="ink" style="margin:6px 0 0 0;font-size:14px;color:#2e2e32">{{ t.summary }}</p>{% endif %}
         {% if t.fixed_in %}<p class="soft" style="margin:6px 0 0 0;font-size:13px;color:#68686f">Fixed in {{ t.fixed_in|join:", " }}</p>{% endif %}
         {% if t.impact_line %}<p class="{% if t.impact == 'matched' %}bad{% elif t.impact == 'product' %}warn{% else %}soft{% endif %}" style="margin:8px 0 0 0;font:700 14px/1.4 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:{% if t.impact == 'matched' %}#9b1f18{% elif t.impact == 'product' %}#80560f{% else %}#68686f{% endif %}">{{ t.impact_line }}</p>{% endif %}
       </td></tr></table>
+      {% empty %}<p class="ink" style="margin:0;font-size:14px;color:#2e2e32">{{ d.threats_empty }}</p>
       {% endfor %}
-      {% if threats_note %}<p class="soft" style="margin:0 0 4px 0;font-size:12.5px;color:#68686f">{{ threats_note }}</p>{% endif %}
+      {% if d.threats_note %}<p class="soft" style="margin:0 0 4px 0;font-size:12.5px;color:#68686f">{{ d.threats_note }}</p>{% endif %}
       {% endif %}
 
       <p class="soft" style="margin:26px 0 10px 0;font:700 11px/1 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:1.4px;text-transform:uppercase;color:#68686f">Top findings</p>

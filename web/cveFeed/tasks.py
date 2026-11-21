@@ -2838,6 +2838,14 @@ def evaluate_saved_searches():
         cache.delete("cvengine:saved-searches")
 
 
+@app.task(name="sync_zero_wire", bind=False, queue="cve_feed_queue", time_limit=300, soft_time_limit=240)
+def sync_zero_wire():
+    """Every six hours: read Cloudflare Radar's Zero Wire feed for the email reports (cveFeed.zero_wire). It fetches nothing while an App Admin has the switch
+    off, and a failure is stored for the Reporting page and retried at the next run."""
+    from cveFeed import zero_wire
+    return zero_wire.sync()
+
+
 @app.task(name="send_report_digests", bind=False, queue="report_queue", time_limit=3600, soft_time_limit=3300)
 def send_report_digests():
     """Every 15 minutes: send the email reports whose time has come (cveFeed.report_digests), retry transient failures and expire sends a dead worker left
