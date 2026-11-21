@@ -49,7 +49,7 @@ Paths are relative to `/api/v1/`. `{slug}` is a project slug.
 | project settings | `GET/PUT projects/{slug}/settings` | `get_project_settings`, `set_project_settings` |
 | stats history | `GET projects/{slug}/stats/history?days=90` | `stats_history` |
 | activity per day | `GET projects/{slug}/activity-days?days=90&tz=&series=findings,changes,scans` | `activity_days` |
-| situations (what needs you, one host at a time, ranked, with a plain narrative; `?q=`, `tier=all|exposure|likely|proven`, `page`, `page_size`; [the rank rule and the fields](SITUATIONS.md)) | `GET projects/{slug}/situations`, `GET projects/{slug}/situations/{host}` | `list_situations`, `get_situation` |
+| situations (what needs you, one host at a time, ranked, with a plain narrative; `?q=`, `tier=all|exposure|hygiene|likely|proven`, `page`, `page_size`; [the rank rule and the fields](SITUATIONS.md)) | `GET projects/{slug}/situations`, `GET projects/{slug}/situations/{host}` | `list_situations`, `get_situation` |
 | all findings | `GET projects/{slug}/findings?type=&heat=&severity=&status=&host=&ai=&group=` (`group=cve`: [one row per script on sibling hosts](#grouped-findings)) | `list_findings` |
 | scanner findings | `GET projects/{slug}/vulnerabilities` | `list_vulnerabilities` |
 | finding detail | `GET projects/{slug}/findings/{match,vulnerability,route,hygiene}/{id}` | `get_finding` |

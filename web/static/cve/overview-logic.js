@@ -83,7 +83,7 @@ export const seeHostsText = (n) => `See the ${plural(n, "host", "hosts")}`;
 export const sentinelText = (s) => (s && typeof s.text === "string" ? s.text : "");
 
 // A fix-first row's host link may only open a pane of a project.
-const PANE = /^\/cve\/[-\w]+\/(hosts|situations)\/(\?[-\w=%.&]*)?$/;
+const PANE = /^\/cve\/[-\w]+\/(hosts|situations)\/(\?[-\w=%.&~]*)?$/;
 export const rowHref = (href) => (typeof href === "string" && PANE.test(href) ? href : "");
 
 // The changes link: the Changes page narrowed to the week (the server sends the start as an ISO time; only its date is used).

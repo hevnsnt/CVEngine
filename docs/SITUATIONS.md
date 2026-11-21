@@ -2,6 +2,8 @@
 
 The **Situations** page answers one question: *what needs me?* It lists your hosts that have something open on them that needs a person, most urgent first, one host a row, each with a short plain account of what is wrong and what to do first. When nothing needs you, it says so.
 
+The Overview's **Fix first** list is the first rows of this same ranking (the same order, narrative and first actions), with the hosts of one project that share a first action folded into one row ([FRONTEND.md](FRONTEND.md)).
+
 It is a tab of the **Overview** (Overview, Situations), so the left rail keeps its nine entries and Overview stays the current one. The same answer, in the same order and words, is available to agents: `GET projects/{slug}/situations` and the MCP tools `list_situations` and `get_situation` ([AGENT-API.md](AGENT-API.md)).
 
 Everything here is computed from numbers cvENGINE already has. A situation never defines a second meaning of a number: heat is [fire, smoke and ice](FIRE-SMOKE-ICE.md) (including a heat a person set by hand), proof is the "Proven on this host" card of a finding, and what is closed is what the Findings page calls closed.
@@ -63,7 +65,7 @@ To keep the words the same in a row (which carries 12 findings) and in the detai
 
 ## The page
 
-`/cve/<project>/situations/` (and `/cve/_all/situations/`). One row per host, two lines: the rank, the host, the counts (`2 proven`, `1 likely`, `3 exposed`, `4 minor`) and an **internal** badge; then the headline and the first action. Click a row (or press Enter on it) to open it in place: the narrative, why it ranks there, and its findings, each linking to the pane that already shows it (Findings, Hygiene, Secrets), with **Open the host**. A host with more findings than a row carries offers **Show all**.
+`/cve/<project>/situations/` (and `/cve/_all/situations/`). One row per host, two lines: the rank, the host, the counts (`2 proven`, `1 likely`, `1 high hygiene`, `3 exposed`, `4 minor`) and an **internal** badge; then the headline and the first action. Click a row (or press Enter on it) to open it in place: the narrative, why it ranks there, and its findings, each linking to the pane that already shows it (Findings, Hygiene, Secrets), with **Open the host**. A host with more findings than a row carries offers **Show all**.
 
 - **Search** matches any name of a host. **Filters, Show** keeps the situations whose worst tier is at least proven, likely, high hygiene or exposed.
 - **Load more** pages on, 30 rows at a time, like the other lists.
@@ -90,7 +92,8 @@ Each row of `results` has:
 | `host`, `also_known_as`, `host_id`, `host_link`, `internal` | The host as the Hosts page names it, its other names, its host row id (null for a name with no scanned record), the Hosts page link, and whether it is inside a declared internal network. |
 | `headline` | One short line: `Proven: CVE-2099-1 and 2 more`. |
 | `rank_reason` | Why it is where it is, one short phrase. |
-| `counts` | `{proven, likely, exposure, minor}`: items open in each tier. |
+| `counts` | `{proven, likely, hygiene, exposure, minor}`: items open in each tier. |
+| `lead` | The tier that decides the row's rank (see the rank rule): `proven`, `likely`, `hygiene`, `exposure` or `minor`. A host with a known-exploited likely finding and an expired certificate leads with `likely`; one with the certificate and only other likely findings leads with `hygiene`. |
 | `first_action` | What to do first, one phrase. |
 | `narrative` | The two to four sentences. |
 | `oldest` | When the oldest open item was first seen. |

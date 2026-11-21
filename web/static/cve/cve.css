@@ -3104,7 +3104,7 @@ details[open]>summary .ov-chev{transform:rotate(45deg)}
 /* Fix first beside What changed and the AI activity: equal height, the list's rows share what the right column needs */
 .ov-cols{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s-5);align-items:stretch;margin:var(--s-4) 0 var(--s-8)}
 @media (min-width:1000px){.ov-cols{grid-template-columns:minmax(0,3fr) minmax(0,2fr)}}
-.ov-fix{display:flex;flex-direction:column;gap:var(--s-3);min-width:0}
+.ov-fixfirst{display:flex;flex-direction:column;gap:var(--s-3);min-width:0}
 .ov-fix-list{flex:1 1 auto;display:flex;flex-direction:column;list-style:none;margin:0;padding:0;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-l);overflow:hidden}
 .ov-fix-list[hidden]{display:none}
 .ov-fix-row{flex:1 1 auto;display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-3) var(--s-5);padding:var(--s-4) 18px;border-bottom:1px solid var(--line)}
@@ -3147,3 +3147,4 @@ details[open]>summary .ov-chev{transform:rotate(45deg)}
 .ov-det-feed .feed-card{margin-top:0!important;border:0;border-radius:0}
 .ov-det-body .trends{margin:0;padding:0 var(--s-4) var(--s-4)}
 @media (max-width:719px){.ov-headline{font-size:var(--fs-6)}.ov-kpi-value{font-size:var(--fs-7)}.ov-threat{padding:var(--s-4);gap:var(--s-4)}}
+@media (max-width:1023px),(pointer:coarse){.ov-link,a.ov-fix-host{display:inline-flex;align-items:center;min-height:44px}}

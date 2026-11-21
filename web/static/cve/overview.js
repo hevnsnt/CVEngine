@@ -3,6 +3,7 @@
 // answer on the same cadence the page polls its counters, with the same pace and conditional GET (static/cve/poll.js), so an unchanged answer is a 304 and
 // no redraw. Every string that came from a scan or a third-party feed is set with textContent, never as markup, and every link is checked by overview-logic.js.
 // The AI activity box and the Live discovery card are dashboard.js's and are not touched here.
+import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
 import { fmtTime } from "/staticfiles/cve/prefs.js";
 import { createGet, createPace, every } from "/staticfiles/cve/poll.js";
 import {
@@ -70,7 +71,7 @@ if (root) {
       value.textContent = k.value_text;
       if (k.unit && k.value != null) value.append(el("small", "", ` ${k.unit}`));
       const spark = tile.querySelector(".ov-spark");
-      spark.textContent = "";
+      while (spark.firstChild) spark.removeChild(spark.firstChild);
       const pts = sparkPoints(k.series);
       if (k.series.length > 1 && pts) {
         spark.setAttribute("aria-label", sparkLabel(k.label, k.series));
@@ -129,36 +130,40 @@ if (root) {
     return art;
   }
   function paintThreats(t) {
-    const body = $("threats-body");
-    const open = body.querySelector("details.ov-folded")?.open === true;
-    body.textContent = "";
     $("threats-period").textContent = t.period ? `${t.period} · CISA KEV, new critical CVEs with an exploit${t.note && /Zero Wire/.test(t.note) ? ", Cloudflare Zero Wire" : ""}` : "";
-    if (t.failed) {
-      body.append(el("p", "ov-empty", "This week's threats could not be read just now. They will be tried again."));
-      return;
-    }
-    t.groups.forEach((g) => body.append(threatCard(g)));
-    if (t.folded.length) {
-      const d = el("details", "ov-folded");
-      d.open = open;
-      const sum = el("summary");
-      sum.append(el("span", "ov-chev", null, { "aria-hidden": "true" }), el("span", "ov-folded-title", foldedTitle(t.folded.length)));
-      if (t.folded_note) sum.append(el("span", "ov-folded-note", t.folded_note));
-      const ul = el("ul");
-      t.folded.forEach((f) => {
-        const li = el("li");
-        const what = el("span", "ov-folded-what");
-        what.append(el("strong", "", f.product || "Unknown product"), f.title ? ` ${f.title}` : "");
-        li.append(what, el("span", "ov-folded-detail", f.detail));
-        ul.append(li);
-      });
-      d.append(sum, ul);
-      const wrap = el("div", "ov-folded-wrap");
-      wrap.append(d);
-      body.append(wrap);
-    }
-    if (!t.groups.length && !t.folded.length) body.append(el("p", "ov-empty", t.empty || "No new KEV or critical CVEs this week."));
-    if (t.note && (t.groups.length || t.folded.length)) body.append(el("p", "ov-note", t.note));
+    renderKeepingState($("threats-body"), () => {
+      const blocks = [];
+      const keyed = (node, key) => {
+        node.setAttribute("data-keep-key", key);
+        blocks.push(node);
+      };
+      if (t.failed) {
+        keyed(el("p", "ov-empty", "This week's threats could not be read just now. They will be tried again."), "failed");
+        return blocks;
+      }
+      t.groups.forEach((g, i) => keyed(threatCard(g), `threat-${g.key || i}`));
+      if (t.folded.length) {
+        const d = el("details", "ov-folded", null, { "data-keep-key": "folded" });
+        const sum = el("summary");
+        sum.append(el("span", "ov-chev", null, { "aria-hidden": "true" }), el("span", "ov-folded-title", foldedTitle(t.folded.length)));
+        if (t.folded_note) sum.append(el("span", "ov-folded-note", t.folded_note));
+        const ul = el("ul");
+        t.folded.forEach((f) => {
+          const li = el("li");
+          const what = el("span", "ov-folded-what");
+          what.append(el("strong", "", f.product || "Unknown product"), f.title ? ` ${f.title}` : "");
+          li.append(what, el("span", "ov-folded-detail", f.detail));
+          ul.append(li);
+        });
+        d.append(sum, ul);
+        const wrap = el("div", "ov-folded-wrap");
+        wrap.append(d);
+        keyed(wrap, "folded-wrap");
+      }
+      if (!t.groups.length && !t.folded.length) keyed(el("p", "ov-empty", t.empty || "No new KEV or critical CVEs this week."), "empty");
+      if (t.note && (t.groups.length || t.folded.length)) keyed(el("p", "ov-note", t.note), "note");
+      return blocks;
+    });
   }
 
   // --- fix first ----------------------------------------------------------------------
@@ -181,13 +186,16 @@ if (root) {
   function paintFix(f) {
     const list = $("fix-list");
     const link = $("fix-all");
-    list.textContent = "";
     $("fix-empty").hidden = true;
     link.hidden = !f.total;
     if (f.total) {
       link.textContent = allHostsText(f.total);
     }
-    f.rows.forEach((r) => list.append(fixRow(r)));
+    renderKeepingState(list, () => f.rows.map((r, i) => {
+      const li = fixRow(r);
+      li.setAttribute("data-keep-key", `fix-${i}`);
+      return li;
+    }));
     list.hidden = !f.rows.length;
     if (!f.rows.length) {
       const empty = $("fix-empty");
@@ -199,15 +207,15 @@ if (root) {
   // --- what changed -------------------------------------------------------------------
   function paintChanged(c) {
     const list = $("changed-list");
-    list.textContent = "";
-    c.lines.forEach((l) => {
+    renderKeepingState(list, () => c.lines.map((l) => {
       const li = el("li", "ov-changed-row");
       li.append(el("span", `ov-changed-n ${toneClass(l.tone)}`, l.value));
       const t = el("span", "ov-changed-text");
       t.append(el("strong", "", l.title), document.createElement("br"), l.detail);
       li.append(t);
-      list.append(li);
-    });
+      li.setAttribute("data-keep-key", l.key);
+      return li;
+    }));
     const href = changesHref(slug, c.since);
     const link = $("changed-all");
     if (href) link.setAttribute("href", href);
