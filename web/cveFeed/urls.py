@@ -35,6 +35,7 @@ urlpatterns = [
     re_path(r'^api/cves/(?P<cve_id>[A-Za-z0-9-]{1,64})$', views.api_cve_detail, name='cve_api_cve_detail'),
     path('api/alive', views.api_alive, name='cve_api_alive'),
     path('api/stats', views.api_stats, name='cve_api_stats'),
+    path('api/overview', views.api_overview, name='cve_api_overview'),
     path('api/scanner', views.api_scanner, name='cve_api_scanner'),
     path('api/graph', views.api_graph, name='cve_api_graph'),
     path('api/graph-live', views.api_graph_live, name='cve_api_graph_live'),

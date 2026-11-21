@@ -9,6 +9,10 @@ test('chips list the tiers a situation has, worst first, and leave out the empty
   assert.deepEqual(chipsOf(null), []);
 });
 
+test('high hygiene sits between likely and exposed', () => {
+  assert.deepEqual(chipsOf({proven: 1, likely: 2, hygiene: 3, exposure: 1, minor: 4}).map((c) => c.label), ['1 proven', '2 likely', '3 high hygiene', '1 exposed', '4 minor']);
+});
+
 test('the edge colour is the worst tier: proof is fire, likely is smoke, the rest is not coloured', () => {
   assert.equal(heatOf({proven: 1, likely: 3}), 'fire');
   assert.equal(heatOf({proven: 0, likely: 1}), 'smoke');

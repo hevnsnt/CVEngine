@@ -635,3 +635,8 @@ def one(ids, host):
             info = _scope_info(ids)
             return _row(g, _items_of(g, items), rank, *info.get(g['pid'], ('', '')), DETAIL_ITEMS)
     return None
+
+
+def last_scan(ids):
+    """When the newest finished scan of these projects started (``None`` when none has finished): the Overview says when nothing was scanned lately."""
+    return _last_scan(list(ids))
