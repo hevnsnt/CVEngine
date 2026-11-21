@@ -3944,8 +3944,10 @@ const pages = {
           assessBody.append(el("p", "note", `${stage.title || stage.name}: ${state}${stage.error_message ? `: ${stage.error_message}` : ""}`));
         });
         if (job.status === "queued" || job.status === "running") {
-          assessButton.disabled = true;
-          assessButton.textContent = job.status === "queued" ? "Rescan queued" : "Scanning host";
+          // queued by the background top-up: a person's Rescan moves it to the front of the queue
+          const movable = job.status === "queued" && !job.front;
+          assessButton.disabled = !movable;
+          assessButton.textContent = movable ? "Rescan now" : job.status === "queued" ? "Rescan queued" : "Scanning host";
           const stop = el("button", "btn ghost sm", "Stop assessment");
           stop.type = "button";
           stop.onclick = async () => {
@@ -3972,7 +3974,7 @@ const pages = {
         assessBody.textContent = "Queueing a fresh assessment…";
         try {
           drawAssessment(await api("POST", assessPath, { host_id: h.id }));
-          toast("Rescan queued");
+          toast("Rescan queued at the front of the queue");
         } catch (e) {
           assessBody.textContent = e.message;
           assessButton.textContent = "Rescan host";

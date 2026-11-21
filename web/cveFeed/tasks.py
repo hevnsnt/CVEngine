@@ -2158,12 +2158,13 @@ def host_pipeline(self, domain_id, names, by_person=False):
 
 
 @app.task(name='assess_host', bind=True, queue='discovery_queue')
-def assess_host(self, assessment_id):
-    """Execute one stored, scope-checked host assessment; the broker carries no target text."""
+def assess_host(self, assessment_id, front=False):
+    """Execute one stored, scope-checked host assessment; the broker carries no target text. ``front``: a person asked for it
+    (``host_assessment.PERSON_PRIORITY``), so it is never put off for the scans' share of the pool."""
     from cveFeed import host_assessment
     if not host_assessment.still_queued([assessment_id]):
         return {'status': 'dropped', 'reason': 'the assessment already ended'}  # FC-4: its row is stopped, done, failed or gone: nothing to put off
-    if host_assessment.over_share() and host_assessment.deferral_count(self.request.id) <= host_assessment.SHARE_DEFER_LIMIT:  # a scan waits and assessments already hold their share of the pool: look again shortly (the row stays queued)
+    if not front and host_assessment.over_share() and host_assessment.deferral_count(self.request.id) <= host_assessment.SHARE_DEFER_LIMIT:  # a scan waits and assessments already hold their share of the pool: look again shortly (the row stays queued)
         assess_host.apply_async(args=[assessment_id], task_id=self.request.id, countdown=host_assessment.SHARE_DEFER_SECONDS, queue='discovery_queue', priority=host_assessment.ASSESS_PRIORITY)
         return {'status': 'deferred', 'reason': 'scans are waiting and host assessments hold their share of the discovery pool'}
     return host_assessment.execute(assessment_id, celery_id=self.request.id)

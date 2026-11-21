@@ -300,7 +300,7 @@ The celery container runs four workers (`discovery_worker`, `cve_feed_worker`, `
 
 ## A DISCOVERY_CONCURRENCY left over from 1.3
 
-On 1.4 a host assessment holds a discovery slot while it waits for a Sentinel. A `DISCOVERY_CONCURRENCY` of 1 to 3 in `.env` (the 1.3 era, when that pool only ran discovery) lets one to three hosts be assessed at a time for the whole instance while the Sentinels idle, and it pins the value so the auto-tuner will not raise it. The update never edits `.env`; it says so in the update log (`warn_discovery_pin`), the Update panel in Settings, the Scanners page and the system status show the same line, and the "host assessment queue is at capacity" error names the pin. Remove the line or set it to 4 or more and restart.
+On 1.4 a host assessment holds a discovery slot while it waits for a Sentinel. A `DISCOVERY_CONCURRENCY` of 1 to 3 in `.env` (the 1.3 era, when that pool only ran discovery) lets one to three hosts be assessed at a time for the whole instance while the Sentinels idle, and it pins the value so the auto-tuner will not raise it. The update never edits `.env`; it says so in the update log (`warn_discovery_pin`), the Update panel in Settings, the Scanners page and the system status show the same line, and the "host assessment queue is at capacity" message (which only the background top-up and the AI host review see; a person's **Rescan host** is never refused) names the pin. Remove the line or set it to 4 or more and restart.
 
 ## An approved update that never starts
 

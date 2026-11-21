@@ -14,7 +14,7 @@ from agentapi import sentinel_dispatch
 from agentapi.auth import create_token
 from agentapi.models import Agent
 from cveFeed import coverage_topup, discovery, host_assessment, reaper
-from cveFeed.host_assessment import ASSESS_PRIORITY, BATCH_STOPPED, batch_size, batches, enqueue, enqueue_batch, execute_batch
+from cveFeed.host_assessment import ASSESS_PRIORITY, PERSON_PRIORITY, BATCH_STOPPED, batch_size, batches, enqueue, enqueue_batch, execute_batch
 from cveFeed.models import HostAssessment, HostState
 from dashboard.models import Org, Project, ProjectMembership
 from scanEngine.models import EngineType
@@ -322,7 +322,9 @@ class TenancyTests(Base):
         self.assertTrue(created)
         one.assert_called_once()
         many.assert_not_called()
-        self.assertEqual(one.call_args.kwargs, {'args': [job.pk], 'queue': 'discovery_queue', 'priority': ASSESS_PRIORITY})
+        # a person's request goes to the front of the queue (the top-up's wait at ASSESS_PRIORITY) and is never put off for the scans' share
+        self.assertEqual(one.call_args.kwargs, {'args': [job.pk], 'kwargs': {'front': True}, 'queue': 'discovery_queue', 'priority': PERSON_PRIORITY})
+        self.assertLess(PERSON_PRIORITY, ASSESS_PRIORITY)
 
     def test_assessments_queue_behind_scans_on_the_shared_discovery_queue(self):
         """Scans and assessments share ``discovery_queue``; a scan sent without a priority is served before any assessment (the broker
