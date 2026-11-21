@@ -2,11 +2,11 @@
 // person may report on), a report is queued, polled and downloaded by report-export.js (the server builds it from stored results only), and "Your recent
 // reports" is GET /api/v1/reporting/reports. Every name from the server is set with textContent.
 //
-// The tabs are #findings and #hosts. The email reports tab (#email) is added to TABS when that feature ships; the tab strip, the scope in the address and the
-// per-tab render function below are already what it needs.
+// The tabs are #findings, #hosts and #email (report-email.js: the weekly and monthly email reports of the selected scope).
 import { api, couldNotRead, el, emptyState, tabs, toast, waiting } from "/staticfiles/cve/ui.js";
 import { fmtDateTime } from "/staticfiles/cve/prefs.js";
 import { downloadedMessage, reportFilename, runReport, save } from "/staticfiles/cve/report-export.js";
+import { emailTab } from "/staticfiles/cve/report-email.js";
 import { openHostExport } from "/staticfiles/cve/host-export.js";
 import { includesNote, initialScope, pagePath, scopeOf, scopeOptions } from "/staticfiles/cve/reports-logic.js";
 
@@ -26,6 +26,7 @@ const KIND_WORDS = { findings: "Findings", hosts: "Hosts" };
 const STATUS_WORDS = { queued: "Queued", running: "Building", done: "Ready", failed: "Failed", expired: "Expired" };
 
 let scopes = [];
+let meta = { me_email: "", limits: { attach_max_mb: 10 } };
 let selected = "";
 let tabApi = null;
 let currentTab = "findings";
@@ -188,7 +189,9 @@ async function start() {
   root.textContent = "";
   root.append(waiting("Reading what you can report on"));
   try {
-    scopes = (await api("GET", "/api/v1/reporting/scopes")).scopes || [];
+    const data = await api("GET", "/api/v1/reporting/scopes");
+    scopes = data.scopes || [];
+    meta = { me_email: data.me_email || "", limits: data.limits || meta.limits };
   } catch (err) {
     root.textContent = "";
     root.append(couldNotRead("The reporting scopes", start, err.message));
@@ -206,6 +209,13 @@ async function start() {
   const TABS = {
     findings: { label: "Findings report", open: async (panel) => { currentTab = "findings"; findingsTab(panel); } },
     hosts: { label: "Hosts report", open: async (panel) => { currentTab = "hosts"; hostsTab(panel); } },
+    email: {
+      label: "Email reports",
+      open: async (panel) => {
+        currentTab = "email";
+        await emailTab(panel, { scopes, scope: current(), me_email: meta.me_email, limits: meta.limits, isAppAdmin: root.dataset.superuser === "1" });
+      },
+    },
   };
   tabApi = tabs(tabRoot, TABS, "findings");
   history.replaceState(null, "", `${location.pathname}${pagePath(current(), currentTab)}`);

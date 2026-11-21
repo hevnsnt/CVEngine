@@ -71,6 +71,12 @@ REVIEW = [
         'POST P/findings/{kind}/{finding_id}/comments', 'add_supplier', 'POST P/suppliers', 'set_supplier_finding_status', 'PATCH P/suppliers/findings/{finding_id}',
         'update_cve_detection', 'PUT cves/{cve_id}/detection', 'PUT secrets/rules',
     ]),
+    ('allow', 'email reports: a summary of what the token\'s owner can already read, sent by email through the server an App Admin set up. It widens no scan, spends nothing, '
+     'raises no autonomy and sends no credentials; a write role (project) or an Org Admin (organization) is needed, a read-only token is refused, at most 10 recipients, 20 per '
+     'scope and 50 per person, a test goes only to the owner of the token, and every change is audited with its recipients', [
+        'create_report_subscription', 'POST report-subscriptions', 'update_report_subscription', 'PATCH report-subscriptions/{subscription_id}',
+        'delete_report_subscription', 'DELETE report-subscriptions/{subscription_id}', 'send_report_subscription_test', 'POST report-subscriptions/{subscription_id}/test',
+    ]),
     ('allow', 'App Admin only (refused to every other role): a verdict on an AI-written template or a revision of it. Retiring only stops a check '
      'and withdraws what it confirmed; a revision is a new draft that passes every automatic gate an AI draft passes before it may run (its '
      'spend is the two AI calls of that validation, and only while a person has it switched on), and it widens no scope, sends no credentials '

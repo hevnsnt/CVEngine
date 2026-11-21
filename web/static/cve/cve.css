@@ -2998,3 +2998,21 @@ a.hr-name{text-underline-offset:2px}
 .report-what .note{overflow-wrap:anywhere}
 .report-error{flex-basis:100%}
 @media (max-width:619px){.report-generate .btn,.report-row .btn{min-height:44px}.report-row{align-items:flex-start}}
+/* Reporting, Email reports tab: a card per email report, the create and edit dialog, the preview frame */
+.report-email{max-width:760px}
+.report-sub{margin-bottom:var(--s-3)}
+.report-sub .card-head h3{margin:0;overflow-wrap:anywhere}
+.report-line{margin:var(--s-1) 0 0;overflow-wrap:anywhere}
+.report-actions{display:flex;flex-wrap:wrap;gap:var(--s-2);margin-top:var(--s-3)}
+.report-seg{margin-bottom:var(--s-3)}
+.report-seg [aria-pressed="true"]{background:var(--ink);color:var(--on-ink);border-color:var(--ink)}
+.chip.bad{background:var(--fire-bg);color:var(--fire-ink)}
+.report-preview{width:100%;height:60vh;min-height:320px;border:1px solid var(--line);border-radius:var(--r);background:var(--surface)}
+.report-plain{white-space:pre-wrap;overflow-wrap:anywhere;max-height:60vh;overflow:auto;font:var(--fs-2)/1.5 var(--mono);margin:0}
+.dlg[aria-label$="email report"] textarea{width:100%}
+@media (max-width:619px){
+  .dlg[aria-label$="email report"],.dlg[aria-label^="Preview of the email"]{width:100vw;max-width:100vw;height:100dvh;max-height:100dvh;margin:0;border-radius:0}
+  .dlg[aria-label$="email report"] .btn,.dlg[aria-label^="Preview of the email"] .btn,.report-actions .btn{min-height:44px}
+  .report-preview{height:70dvh}
+  .reports-tabs [role=tablist]{display:flex;overflow-x:auto}
+}

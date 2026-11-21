@@ -1,6 +1,6 @@
 # Reporting
 
-The **Reporting** page (`/cve/reports/`, the rail entry between Scans and Scanners) makes a findings report or a hosts report for an organization or for one project, as a PDF or a CSV file. Everything in a report is read from results cvENGINE already holds: making one never scans, probes or resolves a host.
+The **Reporting** page (`/cve/reports/`, the rail entry between Scans and Scanners) makes a findings report or a hosts report for an organization or for one project, as a PDF or a CSV file, and sets up weekly or monthly summaries sent by email. Everything in a report is read from results cvENGINE already holds: making one never scans, probes or resolves a host.
 
 ## The page
 
@@ -11,10 +11,12 @@ A **Report on** picker lists every organization and project you can read, groupe
 
 `?project=<slug>` or `?org=<slug>` in the address preselects the scope, and the address follows your choice, so a link can be shared. Without either, the page starts on the project you are working in, then on the organization the All projects view is narrowed to, then on the first entry.
 
-Two tabs (`#findings`, `#hosts`):
+Three tabs (`#findings`, `#hosts`, `#email`):
 
 - **Findings report**: **PDF report** (summary, every finding with its evidence and remediation) or **CSV spreadsheet** (one row per finding). A switch includes closed findings (fixed, accepted risk, false positive).
 - **Hosts report**: **PDF report** (summary and host table), **CSV spreadsheet** (heat, score, findings, technologies, owner), or **Scope list for a testing company**, the existing **Export all hosts** dialog, which holds no findings, notes, owners or scores.
+
+The **Email reports** tab is described [below](#email-reports).
 
 **Generate** queues the report, shows *Queued* and *Building*, and downloads the file when it is ready. **Your recent reports** lists your reports of the last 24 hours (kind, format, scope, state) with a **Download** button.
 
@@ -41,6 +43,35 @@ A project report holds that project's rows. An organization report holds the org
 
 The same host name in two projects of an organization is two hosts in the report, each with its own findings and alias. Another organization's rows never appear. The worker works out your access again when it runs, so a report asked for just before you lost access fails with "you no longer have access" and leaves no file.
 
+## Email reports
+
+An email report sends a weekly or monthly summary of one project or one whole organization to up to ten addresses. Everything in it is read from stored results; sending it never contacts a host.
+
+**Prerequisite: outgoing mail.** An App Admin sets up the SMTP server under Settings, Email. Until then email reports can be created and are kept, but nothing is sent: each period is recorded as *Skipped: outgoing mail is not set up*, and sending starts by itself once mail is set up (a skipped period is not made up). Deliverability depends on that server: set SPF and DKIM for its sender address.
+
+**What the email says**, in order: the scope and period; **At a glance** (open findings and exposed hosts with the change since the last report, new findings and fixed findings in the period, and the fire, smoke and ice counts of CVE matches; the first report says there is nothing to compare with yet); the **Top findings** (up to five, hottest first, each linking into cvENGINE); **New hosts** and hosts that went away; **Hygiene** (open issues, certificates expiring within 30 days); a line about the full report (attached, over the size limit with a link, or could not be attached); and a button into cvENGINE. The HTML is table-based with inline styles, readable in a dark theme and on a phone, with no image or tracking, and always under 100 KB so Gmail does not clip it; a plain-text part says the same. Everything that came from a scanned host is escaped.
+
+**Schedule.** Weekly (a weekday) or monthly (a day from 1 to 28, where day 1 covers the whole previous month), a time on the quarter hour and an IANA time zone. A time that does not exist on a spring-forward day is sent the hour after. The period of an email is the week or month that ends at its send time.
+
+**Never sent twice.** The next slot is claimed before the email is made (a compare-and-set), every period has one delivery row, and a send interrupted part-way (a worker that died) is marked *unknown* after two hours and is never retried by itself. After an outage only the latest period is sent, once; missed weeks are not made up. A refused recipient address is final. A failure that cannot have delivered the email (the connection, a time-out) is retried for the recipients it failed for, after 30 minutes and after 2 hours, then given up. The result is on the card: *Sent Nov 17, 08:00 to 3 recipients*, *1 of 3 failed: the mail server refused the recipient address*, *Skipped: outgoing mail is not set up*, *Never sent*.
+
+**Who it runs as.** The email is made with the access of the subscription's *owner*, the last person who saved it, worked out again at every send. When that person is removed, disabled or can no longer manage the scope, the report switches itself off (*Paused automatically*) and says why; someone with access saves it again to resume.
+
+**Attachments.** *None*, *PDF* or *CSV*: the findings report of the scope, as on demand. A file over `CVENGINE_REPORT_EMAIL_MAX_MB` (10 by default, 1 to 25) is not attached; the email says so and links to the Reporting page. A report that cannot be made does not stop the email.
+
+**Unsubscribe.** Every message carries `List-Unsubscribe` and `List-Unsubscribe-Post` (RFC 8058, the mail program's own Unsubscribe button) and a link of its own per recipient. Opening the link shows a confirmation and changes nothing; pressing its button removes that address. The address is remembered as unsubscribed: adding it back needs a tick in the dialog (`confirm_opted_out` in the API). When the last recipient unsubscribes the report switches itself off. Links are signed and stop working if a report's key is rotated; a bad link gets one plain answer.
+
+**Test and preview.** *Send test to me* sends the real email, marked *[Test]*, to your own address only (one a minute per report, ten an hour per person). *Preview* shows it without sending anything, for the saved report or for unsaved settings, as HTML in a sandboxed frame or as plain text.
+
+| | App Admin | Org Admin | Org Member | Project member (write role) | Audit | Read-only token |
+| --- | --- | --- | --- | --- | --- | --- |
+| See a project's email reports | yes | yes | yes | their projects | yes | yes |
+| See an organization's email reports | yes | yes | yes | no (404) | organization audit: yes; project audit: no | as the person |
+| Create, change, pause, test, delete a project's | yes | yes | yes | yes | no (403) | no (403) |
+| Create, change, pause, test, delete an organization's | yes | yes | no (403) | no | no | no |
+
+An organization's email reports are managed by an Org Admin or App Admin only, so they always cover the whole organization. Every change is audited (`report.subscription.*`), with the recipients.
+
 ## Who may ask, and who may download
 
 A report is a read: any role that can read the scope may ask for one, audit included, and so may a read-only API token. Only the person who asked can download a report, for 24 hours (`CVENGINE_REPORT_TTL_HOURS`); anyone else, an App Admin included, gets the same `404` as for a report that does not exist. Every request is written to the audit log with its scope, kind and format. Limits on how many reports one person or the whole server may have in progress are in [Configuration](CONFIGURATION.md#pdf-reports).
@@ -55,9 +86,10 @@ A report is a read: any role that can read the scope may ask for one, audit incl
 | Download it | `GET .../reports/{id}/download` (`application/pdf` or `text/csv`) | over REST |
 | What you can report on | `GET reporting/scopes` | `list_report_scopes` |
 | Your recent reports | `GET reporting/reports` | |
+| Email reports | `GET/POST report-subscriptions`, `GET/PATCH/DELETE report-subscriptions/{id}`, `POST .../{id}/test`, `GET .../{id}/preview`, `GET .../{id}/deliveries`, `GET reporting/digest-preview` | `list_report_subscriptions`, `get_report_subscription`, `create_report_subscription`, `update_report_subscription`, `delete_report_subscription`, `send_report_subscription_test`, `preview_report_subscription`, `list_report_deliveries` |
 
-The details, with the limits and the errors, are in [Agent API](AGENT-API.md#pdf-reports).
+The details, with the limits and the errors, are in [Agent API](AGENT-API.md#pdf-reports) and [Agent API, Email reports](AGENT-API.md#email-reports).
 
 ## Code
 
-`agentapi/report_scope.py` (the scope and its access rules), `cveFeed/report_export.py` (the queue, the job and the download), `cveFeed/report_data.py` and `cveFeed/templates/cveFeed/report.html` (what a PDF prints), `cveFeed/report_csv.py` (the CSV), `agentapi/reports.py` (REST and MCP), `static/cve/reports.js` and `reports-logic.js` (the page). Tests: `tests/test_reporting.py`, `tests/test_report_pdf.py`, `tests/test_reports_logic.mjs`.
+`agentapi/report_scope.py` (the scope and its access rules), `cveFeed/report_export.py` (the queue, the job and the download), `cveFeed/report_data.py` and `cveFeed/templates/cveFeed/report.html` (what a PDF prints), `cveFeed/report_csv.py` (the CSV), `agentapi/reports.py` (REST and MCP), `cveFeed/report_digest.py` and `cveFeed/templates/cveFeed/email/` (the email's content and look), `cveFeed/report_digests.py` and `cveFeed/report_schedule.py` (sending and the schedule), `agentapi/report_subscriptions.py` (REST and MCP), `cveFeed/report_digest_views.py` (unsubscribe), `static/cve/reports.js`, `report-email.js` and `reports-logic.js` (the page). Tests: `tests/test_reporting.py`, `tests/test_report_subscriptions.py`, `tests/test_report_pdf.py`, `tests/test_reports_logic.mjs`, `tests/test_reports_page.mjs`.

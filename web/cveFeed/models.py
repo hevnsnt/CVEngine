@@ -4,6 +4,8 @@ One row per cve.now entry, carrying the merged severity, exploitation
 (CISA KEV / EPSS / Exploit-DB) and affected-product data that the AI
 correlation engine matches against the discovered asset inventory.
 """
+import datetime
+
 from django.contrib.postgres.fields import ArrayField
 from django.db import models
 from django.db.models.signals import post_delete
@@ -2115,6 +2117,86 @@ class ReportExport(models.Model):
 
     def __str__(self):
         return f"report {self.pk} {self.project_id or 'org ' + str(self.org_id)} {self.kind} {self.format} {self.host or 'scope'} [{self.status}]"
+
+
+def _unsub_key():
+    import secrets
+    return secrets.token_hex(16)
+
+
+class ReportSubscription(models.Model):
+    """A weekly or monthly email summary of one project or one whole organization (cveFeed.report_digests).
+
+    It runs with the access of ``owner``, the last person who saved it: when that person can no longer manage the scope, the subscription switches
+    itself off and says why (``last_error``). ``next_run_at`` is the slot the next email is for; it is moved with a compare-and-set before a send, so
+    two workers never send the same period."""
+
+    CADENCES = ("weekly", "monthly")
+    ATTACH = ("none", "pdf", "csv")
+    STATUSES = ("sent", "partial", "failed", "skipped", "disabled", "unknown")
+    MAX_RECIPIENTS, MAX_PER_SCOPE, MAX_PER_OWNER, MAX_NAME = 10, 20, 50, 80
+
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+    org = models.ForeignKey("dashboard.Org", on_delete=models.CASCADE, null=True, blank=True, related_name="+")  # set only for a whole-organization report
+    name = models.CharField(max_length=MAX_NAME)
+    recipients = models.JSONField(default=list)  # lower-cased, unique, mailer.EMAIL_RE, at most MAX_RECIPIENTS
+    opted_out = models.JSONField(default=list, blank=True)  # [{"email", "at"}]: addresses that used the unsubscribe link
+    cadence = models.CharField(max_length=8, default="weekly")
+    weekday = models.PositiveSmallIntegerField(default=0)  # 0 Monday .. 6 Sunday (weekly)
+    day_of_month = models.PositiveSmallIntegerField(default=1)  # 1..28 (monthly)
+    send_time = models.TimeField(default=datetime.time(8, 0))
+    timezone = models.CharField(max_length=64, default="UTC")  # an IANA name, checked with zoneinfo
+    attach = models.CharField(max_length=4, default="none")
+    enabled = models.BooleanField(default=True)
+    owner = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, related_name="+")  # whose access it runs with: the last person who saved it
+    created_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, related_name="+")
+    unsubscribe_key = models.CharField(max_length=32, default=_unsub_key)  # part of every unsubscribe token; rotating it voids old links
+    next_run_at = models.DateTimeField(null=True, blank=True)  # None while switched off
+    last_sent_at = models.DateTimeField(null=True, blank=True)
+    last_status = models.CharField(max_length=10, blank=True, default="")
+    last_error = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=models.Q(project__isnull=False, org__isnull=True) | models.Q(project__isnull=True, org__isnull=False), name="reportsub_one_scope"),
+            models.CheckConstraint(condition=models.Q(weekday__lte=6), name="reportsub_weekday"),
+            models.CheckConstraint(condition=models.Q(day_of_month__gte=1, day_of_month__lte=28), name="reportsub_day"),
+        ]
+        indexes = [models.Index(fields=["enabled", "next_run_at"], name="reportsub_due_idx"),
+                   models.Index(fields=["project"], name="reportsub_project_idx"),
+                   models.Index(fields=["org"], name="reportsub_org_idx")]
+        ordering = ["name", "id"]
+
+    def __str__(self):
+        return f"{self.name} [{self.cadence}]"
+
+
+class ReportDelivery(models.Model):
+    """One email of a subscription for one period (or one test send). The unique (subscription, period_start) row of a real send is what keeps a
+    period from being sent twice."""
+
+    subscription = models.ForeignKey(ReportSubscription, on_delete=models.CASCADE, related_name="deliveries")
+    period_start = models.DateTimeField()
+    period_end = models.DateTimeField()
+    test = models.BooleanField(default=False)
+    requested_by = models.ForeignKey("auth.User", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")  # a test send
+    status = models.CharField(max_length=10, default="sending")  # sending | sent | partial | failed | skipped | unknown
+    recipients = models.JSONField(default=list)  # [{"email", "status": "pending"|"sent"|"failed"|"refused", "error": a short sentence, "transient": bool}]
+    attempts = models.PositiveSmallIntegerField(default=1)
+    next_retry_at = models.DateTimeField(null=True, blank=True)
+    attachment = models.CharField(max_length=10, blank=True, default="")  # pdf | csv | too_large | failed | ''
+    attachment_bytes = models.PositiveBigIntegerField(default=0)
+    summary = models.JSONField(default=dict, blank=True)  # the headline numbers that were sent
+    error = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["subscription", "period_start"], condition=models.Q(test=False), name="uniq_reportdelivery_period")]
+        indexes = [models.Index(fields=["status", "next_retry_at"], name="reportdelivery_retry_idx")]
+        ordering = ["-id"]
 
 
 class OpenvasSettings(models.Model):

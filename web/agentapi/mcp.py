@@ -13,6 +13,7 @@ from agentapi import db_timeout, storage_safe
 from agentapi import agent_broker as broker
 from agentapi import host_export
 from agentapi import host_manage as hosts
+from agentapi import report_subscriptions as subscriptions
 from agentapi import saved_search as saved
 from agentapi import secrets_api
 from agentapi import inventory
@@ -92,6 +93,13 @@ def _page_props(extra=None):
     return props
 
 
+REPORT_SUB_PROPS = {'project': SLUG, 'org': {'type': 'string', 'description': 'Organization slug, for an email report of a whole organization (give project or org, not both; the scope cannot change later)'},
+    'name': {'type': 'string'}, 'recipients': {'type': 'array', 'items': {'type': 'string'}, 'description': '1 to 10 email addresses'},
+    'cadence': {'type': 'string', 'enum': ['weekly', 'monthly']}, 'weekday': {'type': 'integer', 'description': '0 Monday to 6 Sunday (weekly)'},
+    'day_of_month': {'type': 'integer', 'description': '1 to 28 (monthly); day 1 covers the whole previous month'},
+    'send_time': {'type': 'string', 'description': 'HH:MM on the quarter hour (00, 15, 30, 45), in the time zone'},
+    'timezone': {'type': 'string', 'description': 'an IANA name such as Europe/London'}, 'attach': {'type': 'string', 'enum': ['none', 'pdf', 'csv']},
+    'enabled': {'type': 'boolean', 'description': 'false pauses it'}, 'confirm_opted_out': {'type': 'boolean', 'description': 'add back an address that used the unsubscribe link'}}
 SAVED_SEARCH_PROPS = {'project': SLUG, 'name': {'type': 'string'}, 'query': {'type': 'string', 'description': 'a search_hosts query, for example "port:5432 -ip:10.0.0.0/8"'},
     'enabled': {'type': 'boolean'}, 'alert_new': {'type': 'boolean', 'description': 'alert when a host starts to match (default true)'},
     'alert_gone': {'type': 'boolean', 'description': 'alert when a host stops matching'},
@@ -310,6 +318,23 @@ TOOLS = [
      lambda c, a: reports.report_status(c, a.get('project'), str(a['report_id']), org=a.get('org')), False),
     ('list_report_scopes', 'What you can report on: each organization (with how many of its projects you can read, and whole: false when that is only some of them) and each project, with your role there and, for the email reports, whether you may view and create them (can_view_subscriptions, can_subscribe), plus your account email, whether outgoing mail is set up (mail_ready) and the limits. Read only.',
      _schema(), lambda c, a: reports.list_report_scopes(c), False),
+    ('list_report_subscriptions', 'Email reports (a weekly or monthly summary sent by email) you can see, optionally for one project or organization: name, scope, recipients, schedule, next send, last result and whether you may change each. Read only.',
+     _schema({'project': SLUG, 'org': {'type': 'string', 'description': 'Organization slug'}}), lambda c, a: subscriptions.list_subscriptions(c, a), False),
+    ('get_report_subscription', 'One email report with its schedule, recipients, next send and last result. Read only.',
+     _schema({'id': {'type': 'integer'}}, ['id']), lambda c, a: subscriptions.get_subscription(c, int(a['id'])), False),
+    ('create_report_subscription', 'Create an email report: a weekly or monthly summary of a project or a whole organization (fire, smoke and ice, open findings, new and fixed, top findings, new hosts, hygiene), optionally with the full PDF or CSV report attached. Needs a write role in the project, or Org Admin for an organization; an audit role or a read-only token is refused. It runs with your access and sends nothing until outgoing mail is set up. Limits: 10 recipients, 20 per scope, 50 per person.',
+     _schema(REPORT_SUB_PROPS, ['name', 'recipients']), lambda c, a: subscriptions.create_subscription(c, a)[0], True),
+    ('update_report_subscription', 'Change an email report: any subset of name, recipients, cadence, weekday, day_of_month, send_time, timezone, attach, enabled (false pauses it, true resumes it), confirm_opted_out. The scope cannot change. Saving makes you the owner: it then runs with your access.',
+     _schema({k: v for k, v in REPORT_SUB_PROPS.items() if k not in ('project', 'org')} | {'id': {'type': 'integer'}}, ['id']),
+     lambda c, a: subscriptions.update_subscription(c, int(a['id']), {k: v for k, v in a.items() if k != 'id'}), True),
+    ('delete_report_subscription', 'Delete an email report and its delivery history.', _schema({'id': {'type': 'integer'}}, ['id']),
+     lambda c, a: subscriptions.delete_subscription(c, int(a['id'])), True),
+    ('send_report_subscription_test', 'Send one test email of the report to your own address (never to its recipients). At most one a minute per report; 409 when outgoing mail is not set up.',
+     _schema({'id': {'type': 'integer'}}, ['id']), lambda c, a: subscriptions.test_subscription(c, int(a['id']))[0], True),
+    ('preview_report_subscription', 'The email as it would be made now, as {subject, text, digest} (the digest is the data the email is built from). Read only; nothing is sent.',
+     _schema({'id': {'type': 'integer'}}, ['id']), lambda c, a: subscriptions.preview_subscription(c, int(a['id']), {'format': 'json'}), False),
+    ('list_report_deliveries', 'The last 20 emails of an email report: period, status, what happened for each recipient, whether the report was attached. Read only.',
+     _schema({'id': {'type': 'integer'}}, ['id']), lambda c, a: subscriptions.list_deliveries(c, int(a['id'])), False),
     ('list_vulnerabilities', 'Scanner findings. severity: info|low|medium|high|critical, or actionable (everything but info); open: true|false.',
      _schema(_page_props({'project': SLUG_OR_ALL, 'severity': {'type': 'string'}, 'open': {'type': 'string'}}), ['project']),
      lambda c, a: svc.list_vulnerabilities(c, a.get('project'), a), False),

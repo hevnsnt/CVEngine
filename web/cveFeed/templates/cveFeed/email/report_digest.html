@@ -1,0 +1,85 @@
+{% include 'cveFeed/email/_digest_head.html' %}
+<body class="page" style="margin:0;padding:0;background:#f4f4f5">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:#f4f4f5;font-size:1px;line-height:1px">{{ preheader }}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="page" style="width:100%;background:#f4f4f5">
+<tr><td align="center" class="wrap" style="padding:32px 16px">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px">
+    <tr><td style="padding:0 4px 18px 4px">
+      <span class="ink" style="font:900 italic 26px/1 'Helvetica Neue',Arial,sans-serif;letter-spacing:-1.5px;color:#0a0a0b">cv</span><span class="ink" style="font:900 italic 26px/1 'Helvetica Neue',Arial,sans-serif;letter-spacing:-1.5px;color:#0a0a0b">ENG</span><span style="font:900 italic 26px/1 'Helvetica Neue',Arial,sans-serif;letter-spacing:-1.5px;color:#ff5a00">I</span><span class="ink" style="font:900 italic 26px/1 'Helvetica Neue',Arial,sans-serif;letter-spacing:-1.5px;color:#0a0a0b">NE</span>
+    </td></tr>
+    <tr><td class="card" style="background:#ffffff;border:1px solid #e4e4e7;border-radius:14px;padding:32px 32px 28px 32px;font:400 15px/1.6 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#2e2e32">
+
+      <p class="soft" style="margin:0 0 6px 0;font:700 11px/1 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:1.6px;text-transform:uppercase;color:#68686f">{{ cadence_upper }} REPORT</p>
+      <h1 class="ink" style="margin:0 0 6px 0;font:800 26px/1.2 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:-.4px;color:#0a0a0b">{{ d.scope_name }}</h1>
+      <p class="soft" style="margin:0 0 24px 0;font-size:14px;color:#68686f">{{ d.period.label }}{% if d.scope_kind == 'org' %} &middot; {{ d.project_names|length }} project{{ d.project_names|length|pluralize }}{% elif d.org_name %} &middot; {{ d.org_name }}{% endif %}</p>
+
+      <p class="soft" style="margin:0 0 10px 0;font:700 11px/1 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:1.4px;text-transform:uppercase;color:#68686f">At a glance</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="stack" style="width:100%;margin:0 0 10px 0">
+        {% for pair in tile_rows %}<tr>
+          {% for t in pair %}<td width="50%" valign="top" style="padding:0 {% if forloop.first %}5px 10px 0{% else %}0 10px 5px{% endif %}">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="tile box" style="width:100%;background:#f7f7f8;border:1px solid #e4e4e7;border-radius:10px"><tr><td style="padding:14px 16px">
+              <div class="soft" style="font:700 11px/1.2 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:1.2px;text-transform:uppercase;color:#68686f">{{ t.label }}</div>
+              <div class="ink" style="font:800 32px/1.2 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0a0a0b;margin:4px 0 2px 0">{{ t.value }}</div>
+              <div class="{% if t.tone == 'good' %}good{% elif t.tone == 'bad' %}bad{% else %}soft{% endif %}" style="font:600 13px/1.3 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:{% if t.tone == 'good' %}#2f6048{% elif t.tone == 'bad' %}#9b1f18{% else %}#68686f{% endif %}">{% if t.delta %}{{ t.delta }}{% else %}&nbsp;{% endif %}</div>
+            </td></tr></table>
+          </td>{% endfor %}
+        </tr>{% endfor %}
+      </table>
+      <p class="ink" style="margin:0 0 4px 0;font-size:14px;color:#2e2e32"><strong style="color:{{ colours.fire }}">Fire {{ fire }}</strong> &middot; <strong style="color:{{ colours.smoke }}">Smoke {{ smoke }}</strong> &middot; <strong style="color:{{ colours.ice }}">Ice {{ ice }}</strong> <span class="soft" style="color:#68686f">CVE matches by heat</span></p>
+      {% if not d.headline.compared %}<p class="soft" style="margin:0 0 4px 0;font-size:13px;color:#68686f">{{ d.headline.compared_note }}</p>{% endif %}
+
+      {% if d.threats %}
+      <p class="soft" style="margin:26px 0 10px 0;font:700 11px/1 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:1.4px;text-transform:uppercase;color:#68686f">This {{ period_word }}&rsquo;s most important vulnerabilities</p>
+      {% for t in d.threats %}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="threat box" style="width:100%;background:#f7f7f8;border:1px solid #e4e4e7;border-radius:10px;margin:0 0 10px 0"><tr><td style="padding:14px 16px">
+        <div class="ink" style="font:700 15px/1.4 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0a0a0b"><a class="plain" href="{{ t.link }}" style="color:#0a0a0b">{{ t.title }}</a></div>
+        {% if t.badges %}<div style="margin:6px 0 0 0">{% for b in t.badges %}<span class="chip" style="display:inline-block;margin:0 4px 4px 0;padding:3px 8px;border-radius:6px;background:#e4e4e7;color:#2e2e32;font:700 11px/1.2 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">{{ b }}</span>{% endfor %}</div>{% endif %}
+        {% if t.summary %}<p class="ink" style="margin:6px 0 0 0;font-size:14px;color:#2e2e32">{{ t.summary }}</p>{% endif %}
+        {% if t.fixed_in %}<p class="soft" style="margin:6px 0 0 0;font-size:13px;color:#68686f">Fixed in {{ t.fixed_in|join:", " }}</p>{% endif %}
+        {% if t.impact_line %}<p class="{% if t.impact == 'matched' %}bad{% elif t.impact == 'product' %}warn{% else %}soft{% endif %}" style="margin:8px 0 0 0;font:700 14px/1.4 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:{% if t.impact == 'matched' %}#9b1f18{% elif t.impact == 'product' %}#80560f{% else %}#68686f{% endif %}">{{ t.impact_line }}</p>{% endif %}
+      </td></tr></table>
+      {% endfor %}
+      {% if threats_note %}<p class="soft" style="margin:0 0 4px 0;font-size:12.5px;color:#68686f">{{ threats_note }}</p>{% endif %}
+      {% endif %}
+
+      <p class="soft" style="margin:26px 0 10px 0;font:700 11px/1 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:1.4px;text-transform:uppercase;color:#68686f">Top findings</p>
+      {% if d.top_findings %}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%">
+        {% for f in d.top_findings %}<tr><td class="rule" style="padding:10px 0;border-top:1px solid #e4e4e7">
+          <span class="chip" style="display:inline-block;padding:2px 8px;border-radius:6px;background:{% if f.heat == 'fire' %}{{ colours.fire }}{% elif f.heat == 'smoke' %}{{ colours.smoke }}{% else %}{{ colours.ice }}{% endif %};color:#ffffff;font:700 11px/1.4 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:.6px;text-transform:uppercase">{{ f.heat }}</span>
+          <a class="plain" href="{{ f.link }}" style="color:#0a0a0b;font:700 15px/1.4 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">{{ f.title }}</a>
+          <div class="soft" style="font-size:13px;color:#68686f;margin:2px 0 0 0">{{ f.host }}{% if f.project %} in {{ f.project }}{% endif %}{% if f.age_days is not None %} &middot; open {{ f.age_days }} day{{ f.age_days|pluralize }}{% endif %} &middot; {{ f.status }}</div>
+        </td></tr>{% endfor %}
+      </table>
+      <p style="margin:6px 0 0 0;font-size:14px"><a class="plain" href="{{ d.links.findings }}" style="color:#0a0a0b;font-weight:600">See all {{ d.headline.open_findings }} open finding{{ d.headline.open_findings|pluralize }}</a></p>
+      {% else %}<p class="ink" style="margin:0;font-size:14px;color:#2e2e32">No open findings. Nothing needs action right now.</p>{% endif %}
+
+      <p class="soft" style="margin:26px 0 8px 0;font:700 11px/1 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:1.4px;text-transform:uppercase;color:#68686f">New hosts</p>
+      {% if d.new_hosts.count %}<p class="ink" style="margin:0;font-size:14px;color:#2e2e32">{{ d.new_hosts.count }} new host{{ d.new_hosts.count|pluralize }} this {{ period_word }}: {% for n in d.new_hosts.names %}{{ n.host }}{% if n.project %} ({{ n.project }}){% endif %}{% if not forloop.last %}, {% endif %}{% endfor %}{% if d.new_hosts.more %} and {{ d.new_hosts.more }} more{% endif %}.{% if d.new_hosts.gone %} {{ d.new_hosts.gone }} host{{ d.new_hosts.gone|pluralize }} went away.{% endif %}</p>
+      {% else %}<p class="ink" style="margin:0;font-size:14px;color:#2e2e32">No new hosts this {{ period_word }}.{% if d.new_hosts.gone %} {{ d.new_hosts.gone }} host{{ d.new_hosts.gone|pluralize }} went away.{% endif %}</p>{% endif %}
+
+      <p class="soft" style="margin:26px 0 8px 0;font:700 11px/1 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:1.4px;text-transform:uppercase;color:#68686f">Hygiene</p>
+      <p class="ink" style="margin:0;font-size:14px;color:#2e2e32">{{ d.hygiene.open }} open hygiene issue{{ d.hygiene.open|pluralize }} ({{ d.hygiene.certs_expiring }} certificate{{ d.hygiene.certs_expiring|pluralize }} expire{{ d.hygiene.certs_expiring|pluralize:"s," }} within 30 days).</p>
+
+      {% if attachment %}
+      <p class="soft" style="margin:26px 0 8px 0;font:700 11px/1 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:1.4px;text-transform:uppercase;color:#68686f">Full report</p>
+      <p class="ink" style="margin:0;font-size:14px;color:#2e2e32">{% if attachment.state == 'attached' %}The full {{ attachment.kind|upper }} report is attached ({{ attachment.filename }}).{% elif attachment.state == 'too_large' %}The full report ({{ attachment.mb }} MB) is over the {{ attachment.limit_mb }} MB attachment limit. <a class="plain" href="{{ d.links.reporting }}#findings" style="color:#0a0a0b;font-weight:600">Generate it in cvENGINE</a>.{% else %}The full report could not be attached this time. <a class="plain" href="{{ d.links.reporting }}#findings" style="color:#0a0a0b;font-weight:600">Generate it in cvENGINE</a>.{% endif %}</p>
+      {% endif %}
+
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:28px 0 0 0">
+        <tr><td class="btn" align="center" style="border-radius:10px;background:#0a0a0b">
+          <a href="{{ d.links.open_app }}" style="display:inline-block;padding:15px 28px;min-height:18px;font:700 16px/18px -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#ffffff;text-decoration:none;border-radius:10px;background:#0a0a0b">Open {{ d.scope_name }} in cvENGINE</a>
+        </td></tr>
+      </table>
+    </td></tr>
+    <tr><td style="padding:18px 8px 0 8px;text-align:center">
+      <p class="soft" style="margin:0 0 6px 0;font:400 12.5px/1.6 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#68686f">You get this because {% if owner %}{{ owner }}{% else %}someone{% endif %} added you to the {{ d.cadence }} email &lsquo;{{ sub_name }}&rsquo; for {{ d.scope_name }} on cvENGINE ({{ d.instance }}).</p>
+      <p class="soft" style="margin:0 0 6px 0;font:400 12.5px/1.6 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#68686f">{% if unsubscribe_url %}<a class="plain" href="{{ unsubscribe_url }}" style="color:#68686f">Unsubscribe</a> &middot; {% endif %}<a class="plain" href="{{ d.links.manage }}" style="color:#68686f">Manage email reports</a></p>
+      <p class="soft" style="margin:0 0 4px 0;font:400 12px/1.6 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#8e8e98">Counts reflect what scans identified up to {{ d.as_of }}.</p>
+      <p class="soft" style="margin:0;font:400 12px/1.6 -apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#8e8e98">Sent by cvENGINE &middot; {{ d.instance }}</p>
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>

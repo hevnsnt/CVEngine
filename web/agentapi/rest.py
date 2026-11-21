@@ -15,6 +15,7 @@ from agentapi import db_timeout, storage_safe
 from agentapi import host_manage as hosts
 from agentapi import host_export
 from agentapi import host_review_api as hostreview
+from agentapi import report_subscriptions as subscriptions
 from agentapi import saved_search as saved
 from agentapi import inventory
 from agentapi import sentinel_broker as sentinels
@@ -517,6 +518,24 @@ ROUTES = [
      lambda r, c, org, token, **k: reports.report_download(c, None, token, org=org)),
     ('GET', r'reporting/scopes', 'What the Reporting page offers: every organization and project you can report on ({kind, slug, name, projects, whole for an organization; org, role for a project}, each with can_subscribe and can_view_subscriptions), your account email, whether outgoing mail is set up (mail_ready) and the email report limits',
      lambda r, c, **k: reports.list_report_scopes(c, r.GET)),
+    ('GET', r'report-subscriptions', 'Email reports you can see, optionally for one scope (?project=slug or ?org=slug): name, scope, recipients, schedule, next send, last result. With a scope named, can_create says whether you may add one. Also the limits and whether outgoing mail is set up',
+     lambda r, c, **k: subscriptions.list_subscriptions(c, r.GET)),
+    ('POST', r'report-subscriptions', 'Create an email report of a project (project) or a whole organization (org): {name, recipients (1 to 10), cadence: weekly|monthly, weekday 0-6, day_of_month 1-28, send_time HH:MM on the quarter hour, timezone, attach: none|pdf|csv, enabled}. A project needs a write role; an organization an Org Admin or App Admin',
+     lambda r, c, **k: subscriptions.create_subscription(c, _body(r))),
+    ('GET', r'report-subscriptions/(?P<subscription_id>\d+)', 'One email report',
+     lambda r, c, subscription_id, **k: subscriptions.get_subscription(c, int(subscription_id))),
+    ('PATCH', r'report-subscriptions/(?P<subscription_id>\d+)', 'Change an email report (any subset of the create fields except the scope; enabled false pauses it; confirm_opted_out adds back an address that unsubscribed). Saving makes you the owner: it then runs with your access',
+     lambda r, c, subscription_id, **k: subscriptions.update_subscription(c, int(subscription_id), _body(r))),
+    ('DELETE', r'report-subscriptions/(?P<subscription_id>\d+)', 'Delete an email report and its delivery history',
+     lambda r, c, subscription_id, **k: subscriptions.delete_subscription(c, int(subscription_id))),
+    ('POST', r'report-subscriptions/(?P<subscription_id>\d+)/test', 'Queue one test email of the report to your own address (at most one a minute per report and ten an hour); 409 when outgoing mail is not set up',
+     lambda r, c, subscription_id, **k: subscriptions.test_subscription(c, int(subscription_id))),
+    ('GET', r'report-subscriptions/(?P<subscription_id>\d+)/preview', 'The email as it would be made now (?format=html, text or json): html is a page with its own policy for framing; text and json give {subject, text, digest}',
+     lambda r, c, subscription_id, **k: subscriptions.preview_subscription(c, int(subscription_id), r.GET)),
+    ('GET', r'report-subscriptions/(?P<subscription_id>\d+)/deliveries', 'The last 20 emails of the report: period, status, per-recipient result, attachment',
+     lambda r, c, subscription_id, **k: subscriptions.list_deliveries(c, int(subscription_id))),
+    ('GET', r'reporting/digest-preview', 'The email for unsaved settings: ?project= or ?org=, ?cadence=weekly|monthly, ?timezone=, ?format=html|text|json',
+     lambda r, c, **k: subscriptions.digest_preview(c, r.GET)),
     ('GET', r'reporting/reports', 'The reports you asked for that have not expired, newest first (at most 20), each as the state of GET projects/{slug}/reports/{id}',
      lambda r, c, **k: reports.list_my_reports(c, r.GET)),
     ('GET', r'projects/(?P<slug>[-\w]+)/settings', "The project's settings: sla_days (days to fix per severity: critical, high, medium, low) and the defaults",

@@ -1,6 +1,6 @@
 """Outgoing mail: the SMTP server an App Admin sets under Settings, Email, and the messages cvENGINE sends through it.
 
-Today that is the onboarding email (a new person's username and a link to choose their password) and a test message. Sending is
+Today that is the onboarding email (a new person's username and a link to choose their password), a test message and the email reports. Sending is
 best effort and never raises: every sender returns ``(ok, error)``, where ``error`` is a short sentence safe to show an
 administrator. It never contains the server password, and the stored password never leaves the server.
 """
@@ -120,6 +120,54 @@ def _message(cfg, to, subject, text, html):
     message.extra_headers['Message-ID'] = make_msgid(domain=cfg.from_address.rsplit('@', 1)[-1])
     message.extra_headers['X-Auto-Response-Suppress'] = 'All'
     return message
+
+
+def digest_message(cfg, to, subject, text, html, unsubscribe_url, list_id, attachment=None):
+    """An email report for one recipient: the message of ``_message`` with the headers that let a mail program offer its own Unsubscribe (RFC 2369,
+    and the one-click form of RFC 8058) and mark it as automatic. ``attachment`` is ``(filename, bytes, mimetype)`` or None."""
+    message = _message(cfg, to, subject, text, html)
+    message.extra_headers.update({
+        'List-Unsubscribe': f'<{unsubscribe_url}>', 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        'List-Id': list_id, 'Auto-Submitted': 'auto-generated'})
+    if attachment:
+        message.attach(*attachment)
+    return message
+
+
+def _permanent(exc):
+    """True when retrying cannot help: the server refused the address or the sender, not the connection."""
+    return isinstance(exc, (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused))
+
+
+def send_many(messages, cfg=None):
+    """Send each message of ``messages`` over one connection. Returns ``[(ok, error, transient)]``, one per message, in order: ``transient`` is False for a
+    refused recipient or sender (never retried) and True for a connection, time-out, authentication or TLS failure. Never raises, and no error holds the
+    password."""
+    cfg = cfg or row()
+    if not ready(cfg):
+        return [(False, 'outgoing mail is not set up (Settings, Email)', False) for _ in messages]
+    out = []
+    try:
+        connection = _connection(cfg)
+        connection.open()
+    except Exception as exc:  # noqa: BLE001 - every message reports the same failure
+        logger.warning('mail connection failed (%s)', type(exc).__name__)
+        return [(False, explain(exc), True) for _ in messages]
+    try:
+        for message in messages:
+            try:
+                message.connection = connection
+                message.send(fail_silently=False)
+                out.append((True, '', False))
+            except Exception as exc:  # noqa: BLE001 - one recipient's failure never stops the others
+                logger.warning('mail send failed (%s)', type(exc).__name__)
+                out.append((False, explain(exc), not _permanent(exc)))
+    finally:
+        try:
+            connection.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return out
 
 
 def _instance(cfg):
