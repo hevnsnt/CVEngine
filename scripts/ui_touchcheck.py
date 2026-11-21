@@ -8,7 +8,8 @@ EXE = os.environ.get('CHROMIUM') or (glob.glob(os.path.expanduser('~/.cache/ms-p
 PAGES = {'dashboard': '/cve/?project=%s&skip=1' % S, 'settings-ai': '/cve/settings/#ai', 'settings-alerts': '/cve/settings/#alerts',
          'settings-updates': '/cve/settings/#updates', 'settings-scan_policy': '/cve/settings/#scan_policy', 'settings-autotune': '/cve/settings/#configmaxxing/autotune', 'targets': '/cve/%s/targets/' % S,
          'hosts': '/cve/%s/hosts/' % S, 'findings': '/cve/%s/vulns/' % S, 'scans': '/cve/%s/scans/' % S, 'sentinels': '/cve/sentinels/',
-         'cve-explorer': '/cve/cves/', 'secrets': '/cve/%s/secrets/' % S, 'matches': '/cve/%s/matches/' % S, 'bounty': '/cve/bounty/?project=%s' % S}
+         'cve-explorer': '/cve/cves/', 'secrets': '/cve/%s/secrets/' % S, 'matches': '/cve/%s/matches/' % S, 'bounty': '/cve/bounty/?project=%s' % S,
+         'reporting': '/cve/reports/?project=%s' % S}
 JS = r"""() => {
   const sel = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=tab],[role=menuitem],[tabindex]:not([tabindex="-1"])';
   const out = [];

@@ -57,6 +57,7 @@ PAGES = {
     'hosts': (f'{PROJECT}/hosts/', '.host-rows .host-row'),
     'targets': (f'{PROJECT}/targets/', 'main tbody tr'),
     'activity': (f'{PROJECT}/activity/', 'main tbody tr'),
+    'reporting': (f'reports/?project={PROJECT}', None),
 }
 # text a person must never read on a page: an object printed as text, a missing value, a bare question mark standing for "unknown"
 BAD_TEXT = re.compile(r'\[object|\bundefined\b|\bnull\b|\bNaN\b|(?:^|[\s(:>])\?(?:$|[\s),.:])', re.M)

@@ -2985,3 +2985,16 @@ a.hr-name{text-underline-offset:2px}
 .map[data-tier="mini"] .hx .hx-owner:not(:empty){margin-top:0;line-height:1.25}
 /* a long "Org / Project" ends in an ellipsis inside the tile instead of running past its edge and being cut mid-letter */
 .map[data-size="xl"] .hx .hx-owner{max-width:100%}
+/* Reporting page: the scope picker, a report card per tab and the list of recent reports */
+.reports-scope{margin-bottom:var(--s-4);max-width:560px}
+.reports-scope select{width:100%;margin-top:var(--s-2)}
+.reports-includes{margin:var(--s-2) 0 0;overflow-wrap:anywhere}
+.report-card,.report-recent{margin-bottom:var(--s-4);max-width:760px}
+.report-card h2,.report-recent h2{margin-bottom:var(--s-2)}
+.report-generate{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2) var(--s-3);margin-top:var(--s-3)}
+.report-row{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s-2) var(--s-3);padding:var(--s-3) 0;border-top:1px solid var(--line)}
+.report-row:first-child{border-top:0}
+.report-what{display:flex;flex-direction:column;gap:2px;flex:1 1 240px;min-width:0}
+.report-what .note{overflow-wrap:anywhere}
+.report-error{flex-basis:100%}
+@media (max-width:619px){.report-generate .btn,.report-row .btn{min-height:44px}.report-row{align-items:flex-start}}

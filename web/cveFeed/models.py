@@ -2078,14 +2078,20 @@ class AuthCredential(models.Model):
 
 
 class ReportExport(models.Model):
-    """One requested PDF report (cveFeed.report_export): who asked for what, how it went, and the random file name it was written to.
+    """One requested report (cveFeed.report_export): who asked for what, how it went, and the random file name it was written to.
 
-    The file lives under the report directory and is served only by an authenticated view to the user who asked, until ``expires_at``.
-    ``token`` is the id a client sees; ``filename`` is a second random value that never leaves the server."""
+    A report is of one project or of an organization (``org`` is set and ``project`` is empty: the organization's projects the person can read),
+    a findings report or a hosts report, as a PDF or a CSV file. The file lives under the report directory and is served only by an authenticated
+    view to the user who asked, until ``expires_at``. ``token`` is the id a client sees; ``filename`` is a second random value that never leaves the server."""
 
     STATUSES = ("queued", "running", "done", "failed")
+    KINDS = ("findings", "hosts")
+    FORMATS = ("pdf", "csv")
     token = models.CharField(max_length=64, unique=True)
-    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, related_name="+")
+    project = models.ForeignKey("dashboard.Project", on_delete=models.CASCADE, null=True, blank=True, related_name="+")
+    org = models.ForeignKey("dashboard.Org", on_delete=models.CASCADE, null=True, blank=True, related_name="+")  # set only for an organization report
+    kind = models.CharField(max_length=10, default="findings", db_default="findings")  # findings | hosts
+    format = models.CharField(max_length=4, default="pdf", db_default="pdf")  # pdf | csv
     requested_by = models.ForeignKey("auth.User", on_delete=models.CASCADE, related_name="+")
     host = models.CharField(max_length=500, blank=True, default="")  # empty: the whole project
     include_closed = models.BooleanField(default=False)  # also list fixed and accepted-risk findings
@@ -2103,10 +2109,12 @@ class ReportExport(models.Model):
     class Meta:
         indexes = [models.Index(fields=["status", "expires_at"], name="reportexport_status_exp_idx"),
                    models.Index(fields=["requested_by", "created_at"], name="reportexport_user_created_idx")]
+        constraints = [models.CheckConstraint(condition=models.Q(project__isnull=False, org__isnull=True) | models.Q(project__isnull=True, org__isnull=False),
+                                              name="reportexport_one_scope")]
         ordering = ["-id"]
 
     def __str__(self):
-        return f"report {self.pk} {self.project_id} {self.host or 'project'} [{self.status}]"
+        return f"report {self.pk} {self.project_id or 'org ' + str(self.org_id)} {self.kind} {self.format} {self.host or 'scope'} [{self.status}]"
 
 
 class OpenvasSettings(models.Model):

@@ -497,7 +497,7 @@ class PageTests(Seeded):
 		self.assertIn('<h1>Situations</h1>', html)
 		block = html[html.index('aria-label="Sections"'):html.index('<details class="acct">')]
 		entries = [(m.group(1), 'aria-current="page"' in m.group(0)) for m in re.finditer(r'<a data-nav="([^"]+)" href="[^"]+"[^>]*>', block)]
-		self.assertEqual([k for k, _ in entries if k != 'Bug bounty'], ['Overview', 'Findings', 'Hygiene', 'Hosts', 'Suppliers', 'Scans', 'Scanners'])
+		self.assertEqual([k for k, _ in entries if k != 'Bug bounty'], ['Overview', 'Findings', 'Hygiene', 'Hosts', 'Suppliers', 'Scans', 'Reporting', 'Scanners'])
 		self.assertEqual([k for k, current in entries if current], ['Overview'])  # exactly one entry is current: the Overview
 		tabs = re.search(r'<nav class="pagetabs"[^>]*>(.*?)</nav>', html, re.S).group(1)
 		self.assertEqual(re.findall(r'<a [^>]*>([^<]+)</a>', tabs), ['Overview', 'Situations'])
