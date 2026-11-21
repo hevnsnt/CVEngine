@@ -41,10 +41,23 @@ export function kpiHref(key, slug) {
   return { exposed: `${base}/hosts/?exposed=1`, needs: `${base}/matches/`, critical: `${base}/vulns/?severity=critical`, mttf: `${base}/vulns/?status=fixed` }[key] || "";
 }
 
-// The hosts of a threat card: the Hosts page with the group's own search (a CVE id, or the product).
+// The hosts of a threat card: the Hosts page with the group's own search (a CVE id, or the product). Only the fallback for a summary built before the exact
+// links below existed (the server keeps its digest for ten minutes).
 export function hostsHref(slug, group) {
   if (!SLUG.test(slug || "") || !group || !group.hosts_query) return "";
   return `/cve/${slug}/hosts/?q=${encodeURIComponent(group.hosts_query)}`;
+}
+
+// A count of a threat card links to the Hosts page of a project (or _all) that lists exactly the hosts it counts (cveFeed/overview.py, host_links): the server
+// builds the link, this accepts it only as a same-origin path to a Hosts page with a percent-encoded query (the server encodes every value), else nothing.
+const HOSTS_LINK = /^\/cve\/[-\w]+\/hosts\/\?[-\w=%.&~]*$/;
+export const hostsLinkHref = (href) => (typeof href === "string" && HOSTS_LINK.test(href) ? href : "");
+const bucketHref = (g, bucket) => hostsLinkHref(g && g.links && g.links[bucket] ? g.links[bucket].href : "");
+
+// "See the N hosts": the same exact link as the big number beside it (the hosts that match by version when there are any, else the version-unknown ones).
+export function seeHostsHref(slug, group) {
+  const g = group || {};
+  return bucketHref(g, g.matched ? "matched" : "product_only") || hostsHref(slug, g);
 }
 
 // A card's second link: the Zero Wire briefing when it is one (only an address on radar.cloudflare.com/zero-wire/ is used), else the CVE catalog entry of the first CVE.
@@ -55,22 +68,32 @@ export function readLink(group) {
   return { href: `/cve/cves/?id=${encodeURIComponent(ids[0])}`, label: ids.length === 1 ? `Read ${ids[0]}` : `Read ${ids[0]} and ${ids.length - 1} more`, external: false };
 }
 
-const breakdown = (rows) => (rows || []).filter((r) => r.n > 0).map((r) => `${r.n} ${r.project}`);
+const rowsOf = (rows) => (rows || []).filter((r) => r && r.n > 0);
+const link = (r, text) => ({ text, href: hostsLinkHref(r.href) });
+// "(2 Marino, 1 Trifident)" as parts, each project's part a link to that project's hosts
+const projectParts = (rows) => rows.flatMap((r, i) => [...(i ? [", "] : []), link(r, `${r.n} ${r.project}`)]);
+const textOf = (parts) => parts.map((p) => (typeof p === "string" ? p : p.text)).join("");
 
-// The impact panel of a card: {matched: {big, text} | null, unknown: {big, text} | null}. In the all-projects view the hosts are split by project.
+// The impact panel of a card: {matched: row | null, unknown: row | null}, a row being {big, href, text, parts}: the big number and the link to exactly the hosts
+// it counts (or ""), the sentence under it, and the same sentence as parts, each a string or {text, href}, so a project's share of the hosts links to that
+// project's hosts (an href that does not pass hostsLinkHref is ""). In the all-projects view the hosts are split by project.
 export function impactPanel(group) {
   const g = group || {};
   const by = g.by_project || null;
   const out = { matched: null, unknown: null };
   if (g.matched) {
-    const where = by ? breakdown(by.matched) : [];
-    const all = where.length === 1 ? `, all in ${by.matched[0].project}` : where.length > 1 ? ` (${where.join(", ")})` : "";
-    out.matched = { big: plural(g.matched, "host", "hosts"), text: `${g.matched === 1 ? "matches" : "match"} by version${all}${g.confirmed ? `, ${g.confirmed} confirmed by a check` : ""}` };
+    const rows = by ? rowsOf(by.matched) : [];
+    const parts = [`${g.matched === 1 ? "matches" : "match"} by version`];
+    if (rows.length === 1) parts.push(", ", link(rows[0], `all in ${rows[0].project}`));
+    else if (rows.length > 1) parts.push(" (", ...projectParts(rows), ")");
+    if (g.confirmed) parts.push(`, ${g.confirmed} confirmed by a check`);
+    out.matched = { big: plural(g.matched, "host", "hosts"), href: bucketHref(g, "matched"), text: textOf(parts), parts };
   }
   if (g.product_only) {
-    const where = by ? breakdown(by.product_only) : [];
-    const name = g.product || "the product";
-    out.unknown = { big: `${g.matched ? "+" : ""}${plural(g.product_only, "host", "hosts")}`, text: `${g.product_only === 1 ? "runs" : "run"} ${name}, version unknown${where.length ? ` (${where.join(", ")})` : ""}` };
+    const rows = by ? rowsOf(by.product_only) : [];
+    const parts = [`${g.product_only === 1 ? "runs" : "run"} ${g.product || "the product"}, version unknown`];
+    if (rows.length) parts.push(" (", ...projectParts(rows), ")");
+    out.unknown = { big: `${g.matched ? "+" : ""}${plural(g.product_only, "host", "hosts")}`, href: bucketHref(g, "product_only"), text: textOf(parts), parts };
   }
   return out;
 }

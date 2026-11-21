@@ -7,7 +7,7 @@ import { renderKeepingState } from "/staticfiles/cve/keep-state.js";
 import { fmtTime } from "/staticfiles/cve/prefs.js";
 import { createGet, createPace, every } from "/staticfiles/cve/poll.js";
 import {
-  allHostsText, changesHref, foldedTitle, hostsHref, impactPanel, kpiHref, pillClass, readLink, rowHref, seeHostsText, sentinelText, sparkLabel, sparkPoints, toneClass,
+  allHostsText, changesHref, foldedTitle, impactPanel, kpiHref, pillClass, readLink, rowHref, seeHostsHref, seeHostsText, sentinelText, sparkLabel, sparkPoints, toneClass,
 } from "/staticfiles/cve/overview-logic.js";
 
 const root = document.getElementById("ov");
@@ -109,18 +109,19 @@ if (root) {
     if (g.cve_ids && g.cve_ids.length) main.append(el("p", "ov-cves", g.cve_ids.join(" · ")));
     const side = el("div", "ov-impact");
     const panel = impactPanel(g);
-    if (panel.matched) {
+    // a count is a link to exactly the hosts it counts, and so is each project's share in the sentence under it (overview-logic.js checked every href)
+    const impactRow = (row, cls) => {
       const d = el("div", "ov-impact-row");
-      d.append(el("span", "ov-impact-big hot", panel.matched.big), el("span", "ov-impact-text", panel.matched.text));
-      side.append(d);
-    }
-    if (panel.unknown) {
-      const d = el("div", "ov-impact-row");
-      d.append(el("span", `ov-impact-big${panel.matched ? " small" : " hot"}`, panel.unknown.big), el("span", "ov-impact-text", panel.unknown.text));
-      side.append(d);
-    }
+      d.append(row.href ? el("a", cls, row.big, { href: row.href }) : el("span", cls, row.big));
+      const text = el("span", "ov-impact-text");
+      row.parts.forEach((p) => text.append(typeof p === "string" ? p : p.href ? el("a", "ov-impact-link", p.text, { href: p.href }) : p.text));
+      d.append(text);
+      return d;
+    };
+    if (panel.matched) side.append(impactRow(panel.matched, "ov-impact-big hot"));
+    if (panel.unknown) side.append(impactRow(panel.unknown, `ov-impact-big${panel.matched ? " small" : " hot"}`));
     const actions = el("div", "ov-actions-row");
-    const hosts = hostsHref(slug, g);
+    const hosts = seeHostsHref(slug, g);
     const n = g.matched || g.product_only;
     if (hosts && n) actions.append(el("a", "btn sm", seeHostsText(n), { href: hosts }));
     const link = readLink(g);

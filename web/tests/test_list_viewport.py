@@ -30,8 +30,8 @@ class ListViewportTests(SimpleTestCase):
 		self.assertIn('cvengine.filters.', head)
 		# the findings page puts every filter node it was given into the head: the search line or the panel, none dropped
 		self.assertIn('lead: cfg.filters.filter(isSearch), panelNodes: cfg.filters.filter((n) => !isSearch(n))', APP)
-		# hosts: views, saved searches, heat chips and scope chips are in the panel, the sort too
-		self.assertIn('lead: [q], panelNodes: [sortBy, views.node, ...(searches ? [searches.node] : []), heatChips, scopeChips]', APP)
+		# hosts: views, saved searches, the Overview's host list, heat chips and scope chips are in the panel, the sort too
+		self.assertIn('lead: [q], panelNodes: [sortBy, views.node, ...(searches ? [searches.node] : []), namesPick, heatChips, scopeChips]', APP)
 
 	def test_the_rows_are_not_a_scroll_box_inside_the_column(self):
 		self.assertIn('.split>.split-list>.host-rows{max-height:none;overflow:visible;flex:none}', CSS)

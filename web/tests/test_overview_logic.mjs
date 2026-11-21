@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 
-import {allHostsText, changesHref, foldedTitle, hostsHref, impactPanel, kpiHref, pillClass, readLink, rowHref, seeHostsText, sparkLabel, sparkPoints, toneClass} from '../static/cve/overview-logic.js';
+import {allHostsText, changesHref, foldedTitle, hostsHref, hostsLinkHref, impactPanel, kpiHref, pillClass, readLink, rowHref, seeHostsHref, seeHostsText, sparkLabel, sparkPoints, toneClass} from '../static/cve/overview-logic.js';
 
 test('a sparkline puts the lowest value at the bottom and the newest at the right', () => {
   const pts = sparkPoints([1, 2, 3]).split(' ').map((p) => p.split(',').map(Number));
@@ -59,12 +59,52 @@ test('the second link is the Zero Wire briefing only when it is on radar.cloudfl
 });
 
 test('the impact panel names the hosts, splits them by project in the all-projects view and drops what is zero', () => {
-  const g = {matched: 3, confirmed: 0, product_only: 4, product: 'PHP', by_project: {matched: [{project: 'Marino Management', n: 3}], product_only: [{project: 'Marino Management', n: 2}, {project: 'Trifident', n: 2}]}};
-  assert.deepEqual(impactPanel(g), {matched: {big: '3 hosts', text: 'match by version, all in Marino Management'},
-    unknown: {big: '+4 hosts', text: 'run PHP, version unknown (2 Marino Management, 2 Trifident)'}});
-  assert.deepEqual(impactPanel({matched: 1, confirmed: 1, product_only: 0, product: 'PHP', by_project: null}), {matched: {big: '1 host', text: 'matches by version, 1 confirmed by a check'}, unknown: null});
-  assert.deepEqual(impactPanel({matched: 0, product_only: 1, product: '', by_project: null}).unknown, {big: '1 host', text: 'runs the product, version unknown'});
+  const g = {matched: 3, confirmed: 0, product_only: 4, product: 'PHP', by_project: {matched: [{project: 'Marino Management', n: 3}], product_only: [{project: 'Marino Management', n: 2}, {project: 'Trifident', n: 2}, {project: 'Empty', n: 0}]}};
+  const p = impactPanel(g);
+  assert.deepEqual([p.matched.big, p.matched.text, p.matched.href], ['3 hosts', 'match by version, all in Marino Management', '']);
+  assert.deepEqual([p.unknown.big, p.unknown.text], ['+4 hosts', 'run PHP, version unknown (2 Marino Management, 2 Trifident)']);
+  const one = impactPanel({matched: 1, confirmed: 1, product_only: 0, product: 'PHP', by_project: null});
+  assert.deepEqual([one.matched.big, one.matched.text, one.matched.parts, one.unknown], ['1 host', 'matches by version, 1 confirmed by a check', ['matches by version', ', 1 confirmed by a check'], null]);
+  const unknown = impactPanel({matched: 0, product_only: 1, product: '', by_project: null}).unknown;
+  assert.deepEqual([unknown.big, unknown.text], ['1 host', 'runs the product, version unknown']);
   assert.deepEqual(impactPanel(null), {matched: null, unknown: null});
+});
+
+const LINK = (names) => `/cve/acme/hosts/?names=${names}&label=PHP%3A%20two%20flaws`;
+const linked = {
+  matched: 2, confirmed: 0, product_only: 2, product: 'PHP', hosts_query: 'tech:"PHP"',
+  links: {matched: {href: '/cve/oceanx/hosts/?names=a.example%2Cb.example&label=x', n: 2, exact: true}, product_only: {href: '/cve/_all/hosts/?names=dalio%2Fc.example%2Cmarino%2Fd.example', n: 2, exact: true}},
+  by_project: {
+    matched: [{project: 'OceanX', n: 2, slug: 'oceanx', href: '/cve/oceanx/hosts/?names=a.example%2Cb.example&label=x'}],
+    product_only: [{project: 'DalioPhilantropies', n: 1, slug: 'dalio', href: LINK('c.example')}, {project: 'MarinoMgmt', n: 1, slug: 'marino', href: 'javascript:alert(1)'}],
+  },
+};
+
+test('each count and each project share of it links to exactly those hosts', () => {
+  const p = impactPanel(linked);
+  assert.equal(p.matched.href, '/cve/oceanx/hosts/?names=a.example%2Cb.example&label=x');
+  assert.equal(p.unknown.href, '/cve/_all/hosts/?names=dalio%2Fc.example%2Cmarino%2Fd.example');
+  assert.deepEqual(p.matched.parts, ['match by version', ', ', {text: 'all in OceanX', href: '/cve/oceanx/hosts/?names=a.example%2Cb.example&label=x'}]);
+  assert.deepEqual(p.unknown.parts, ['run PHP, version unknown', ' (', {text: '1 DalioPhilantropies', href: LINK('c.example')}, ', ', {text: '1 MarinoMgmt', href: ''}, ')']);
+  assert.equal(p.unknown.text, 'run PHP, version unknown (1 DalioPhilantropies, 1 MarinoMgmt)');
+});
+
+test('"See the N hosts" opens the same hosts as the big number: matched first, else the version-unknown ones, else the old search', () => {
+  assert.equal(seeHostsHref('acme', linked), linked.links.matched.href);
+  assert.equal(seeHostsHref('acme', {...linked, matched: 0}), linked.links.product_only.href);
+  assert.equal(seeHostsHref('acme', {...linked, links: null}), '/cve/acme/hosts/?q=tech%3A%22PHP%22');  // a summary from before the links
+  assert.equal(seeHostsHref('acme', {...linked, links: {matched: {href: 'https://evil.example/cve/acme/hosts/?q=x'}}}), '/cve/acme/hosts/?q=tech%3A%22PHP%22');
+  assert.equal(seeHostsHref('acme', null), '');
+});
+
+test('a count link may only open a Hosts page of this site with an encoded query', () => {
+  for (const ok of ['/cve/acme/hosts/?names=a.example', '/cve/_all/hosts/?names=acme%2Fa.example%2Cb%2Fc.example&label=PHP%3A%20x', '/cve/acme/hosts/?q=cve%3ACVE-2026-1']) {
+    assert.equal(hostsLinkHref(ok), ok);
+  }
+  for (const bad of ['//evil.example/cve/acme/hosts/?names=a', 'https://evil.example/cve/acme/hosts/?names=a', 'javascript:alert(1)', '/cve/acme/vulns/?names=a',
+    '/cve/acme/hosts/?names=a"><script>', '/cve/acme/hosts/?names=a b', '/cve/../admin/hosts/?x=1', '/cve/acme/hosts/', null, undefined, 42, {href: '/cve/acme/hosts/?x=1'}]) {
+    assert.equal(hostsLinkHref(bad), '', String(bad));
+  }
 });
 
 test('the small words', () => {

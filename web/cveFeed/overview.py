@@ -9,7 +9,8 @@
 - ``kpis``: four tiles (exposed hosts, needs action, critical findings open, mean time to fix) with a 7-day change and a 14-day series. Exposed hosts is the live
   count when the caller passes it (``live``); the others are the daily snapshots' (``StatsSnapshot``: counting them live is the walk over every finding that
   once overloaded the server), each saying which day it is as of;
-- ``threats``: this week's digest, grouped by product, with the hosts counted over the whole group (the same hosts in four CVEs are four hosts, not sixteen);
+- ``threats``: this week's digest, grouped by product, with the hosts counted over the whole group (the same hosts in four CVEs are four hosts, not sixteen), and
+  for each count a link to the Hosts page that lists exactly the hosts it counts (``host_links``: their names, never a looser search unless they are too many);
 - ``fix_first``: the first situations of the ranking (``situations.listing``, at most ``FIX_FIRST_SITUATIONS`` read), the ones in one project that share a first action
   folded into one row;
 - ``what_changed``: the week's changes of the inventory (new exposure, personal data on pages, certificates, hosts found and retired);
@@ -25,8 +26,10 @@ import logging
 import re
 from datetime import date, timedelta
 from types import SimpleNamespace
+from urllib.parse import quote, urlencode
 
 from django.utils import timezone
+from tenancy.roles import ALL_PROJECTS
 
 from cveFeed import report_threats, situations, snapshot_cache
 from cveFeed.report_data import clean
@@ -44,6 +47,12 @@ SENTINEL_SECONDS = 30
 STALE_SCAN_DAYS = 7  # no finished scan for this long is said in words
 NAMES_SHOWN = 3  # host names listed in a folded row
 FOLDED_TITLE = 70
+LINK_NAMES = 200  # the most hosts one exact link names (the Hosts page's ``names`` takes as many: agentapi.services.MAX_HOST_NAMES)
+LINK_CHARS = 3500  # the longest link: the page's request line, and its search's, must stay under the 4 KB a gunicorn worker reads (limit_request_line)
+LINK_LABEL = 120
+LINK_CVES = 12  # a fallback search names the group's CVEs when there are at most this many (a search term holds 200 characters)
+_BUCKETS = (('matched', 'version match'), ('product_only', 'version unknown'))
+_LINKABLE = re.compile(r'^[^\s,/]+$')  # a name a ``names`` list can carry as it is (comma separates the names, slash a project from its name)
 
 _WORDS = ('zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten')
 _FIXES = re.compile(r'\s*\(fixes [^)]*\)\s*$')
@@ -319,13 +328,18 @@ def _item_line(entry):
     return f"{why} · {plural(n, 'host', 'hosts')}"
 
 
+def _project_of(key):
+    return int(str(key).split(':', 1)[0])
+
+
 def _project_breakdown(keys, names):
-    """``[{'project', 'n'}]`` of host keys (their first part is the project id), biggest first."""
+    """``[{'project', 'n'}]`` of host keys (their first part is the project id), biggest first. Each row also holds ``_pid`` until ``threat_groups`` is done
+    (``host_links`` reads it to link the row; it is never sent)."""
     by = {}
     for key in keys:
-        pid = int(str(key).split(':', 1)[0])
+        pid = _project_of(key)
         by[pid] = by.get(pid, 0) + 1
-    return [{'project': names.get(pid, ''), 'n': n} for pid, n in sorted(by.items(), key=lambda kv: (-kv[1], names.get(kv[0], '')))]
+    return [{'project': names.get(pid, ''), 'n': n, '_pid': pid} for pid, n in sorted(by.items(), key=lambda kv: (-kv[1], names.get(kv[0], '')))]
 
 
 def _group_title(product, entries):
@@ -399,10 +413,11 @@ def _group(product_key, entries, names, many_projects):
         'key': product_key or (cve_ids[0] if cve_ids else first['title'][:40]), 'product': product, 'title': _group_title(product, entries), 'summary': summary, 'fix': fix,
         'cve_ids': cve_ids[:12], 'badges': badges, 'items': len(entries), 'matched': len(matched), 'confirmed': len(confirmed), 'product_only': len(unknown),
         'hosts': named, 'fixed_in': fixed[:6], 'by_project': {'matched': _project_breakdown(matched, names), 'product_only': _project_breakdown(unknown, names)} if many_projects else None,
-        'hosts_query': hosts_query, 'link': zero['link'] if zero else None, 'link_label': 'Read the Zero Wire briefing' if zero else '',
+        'hosts_query': hosts_query, 'links': None, 'link': zero['link'] if zero else None, 'link_label': 'Read the Zero Wire briefing' if zero else '',
         'all_kev': all(e.get('kev_added') or 'CISA KEV' in ' '.join(e.get('badges') or []) for e in entries),
         'all_critical': bool(cvss) and len(cvss) == len(entries) and all(c >= 9.0 for c in cvss),
         'lines': [{'product': e.get('product') or '', 'title': _short_title(e), 'detail': _item_line(e)} for e in entries],
+        '_keys': {'matched': matched, 'product_only': unknown, 'cve_ids': cve_ids},
     }
 
 
@@ -410,9 +425,10 @@ def _or_list(items):
     return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} or {items[-1]}"
 
 
-def threat_groups(entries, names, many_projects):
+def threat_groups(entries, names, many_projects, links=None):
     """``(groups, folded)`` from digest entries (with ``_hosts``): entries of one product are one group, a group that reaches a host first (most hosts first), then the
-    rest in the digest's order; a group that reaches no host is folded into ``folded`` as one line per entry."""
+    rest in the digest's order; a group that reaches no host is folded into ``folded`` as one line per entry. ``links``: a function given the groups that reach a
+    host while they still hold their host keys (``host_links``, which gives each its links to the Hosts page); without it ``links`` stays None."""
     order, by = [], {}
     for e in entries:
         key = _product_key(e) or f"entry:{e.get('title')}"
@@ -424,10 +440,93 @@ def threat_groups(entries, names, many_projects):
     live = [g for g in groups if g['matched'] or g['product_only']]
     live.sort(key=lambda g: (not g['matched'], -g['matched'], -g['product_only']))  # a stable sort: the digest's order breaks ties
     folded = [line for g in groups if not (g['matched'] or g['product_only']) for line in g['lines']]
+    if links and live:
+        links(live)
+    for g in groups:  # the host keys and project ids are internal: never serialised
+        g.pop('_keys', None)
+        for row in [r for rows in (g['by_project'] or {}).values() for r in rows]:
+            row.pop('_pid', None)
     return live, folded
 
 
-def _threats(ids, label, names, now):
+def hosts_href(slug, **params):
+    """A link to the Hosts page of ``slug`` with ``params`` (empty ones left out), every value percent-encoded: only letters, digits and ``-_.~%=&`` follow the ``?``,
+    the characters the page's link check accepts (static/cve/overview-logic.js, ``hostsLinkHref``)."""
+    return f"/cve/{slug}/hosts/?{urlencode({k: v for k, v in params.items() if v}, quote_via=quote, safe='')}"
+
+
+def _by_project(keys):
+    by = {}
+    for key in keys:
+        by.setdefault(_project_of(key), set()).add(key)
+    return by
+
+
+def bucket_link(keys, labels, slugs, label, fallback_q):
+    """``{'href', 'n', 'exact'}``: the Hosts page listing exactly the hosts ``keys`` name, or None. ``labels`` (``report_threats.host_labels(..., raw=True)``) gives each
+    key its stored name; ``slugs`` the slug of each project the viewer reads. One project's hosts are listed on that project's page by name
+    (``?names=a.example,b.example``), hosts of several on the all-projects page by project and name (``?names=acme/a.example,widgets/b.example``), so a name two
+    projects share is never two hosts. ``label`` is what the page shows as the filter's chip. A key of a project not in ``slugs`` gives no link at all. More hosts
+    than LINK_NAMES, a link longer than LINK_CHARS, or a host whose name cannot be listed fall back to the search ``fallback_q`` (``exact`` False), and the chip
+    says so; with no search either, None."""
+    if not keys:
+        return None
+    pids = sorted({_project_of(k) for k in keys})
+    if any(p not in slugs for p in pids):
+        return None
+    one = len(pids) == 1
+    slug = slugs[pids[0]] if one else ALL_PROJECTS
+    if len(keys) <= LINK_NAMES and all(k in labels and _LINKABLE.match(labels[k]['name']) for k in keys):
+        listed = sorted({labels[k]['name'] if one else f"{slugs[_project_of(k)]}/{labels[k]['name']}" for k in keys})
+        href = hosts_href(slug, names=','.join(listed), label=label)
+        if len(href) <= LINK_CHARS:
+            return {'href': href, 'n': len(keys), 'exact': True}
+    if not fallback_q:
+        return None
+    broad = clean(f'{label} · {len(keys):,} hosts, too many to list one by one: a broader search', LINK_LABEL + 80)
+    return {'href': hosts_href(slug, q=fallback_q, label=broad), 'n': len(keys), 'exact': False}
+
+
+def _fallback_q(g, bucket):
+    """The search a link falls back to when its hosts cannot be listed: the group's CVEs for the hosts that match by version, the product for the others."""
+    cves = g['_keys']['cve_ids']
+    if bucket == 'matched' and 0 < len(cves) <= LINK_CVES:
+        return f"cve:{','.join(cves)}"
+    if g['product']:
+        return f'tech:"{g["product"]}"'
+    return g['hosts_query']
+
+
+def host_links(groups, ids, slugs, labels_of=None):
+    """Give each group ``links``: ``{'matched': link | None, 'product_only': link | None}`` (``bucket_link``) for the hosts that match by version and the hosts that
+    run the product with no version read, the very sets the card counts; and each row of ``by_project`` its ``slug`` and ``href`` (that project's hosts of the
+    bucket). Only hosts of ``ids``, the projects the summary is built for, are ever named: the keys come from the digest of those ids, ``report_threats.host_labels``
+    labels no key of another project, and a key of a project without a slug here gives no link. The names are read once for every group (two queries), and
+    only for the parts small enough to be listed."""
+    labels_of = labels_of or (lambda keys: report_threats.host_labels(ids, keys, raw=True))
+    wanted = set()
+    for g in groups:
+        for bucket, _ in _BUCKETS:
+            for part in _by_project(g['_keys'][bucket]).values():
+                if len(part) <= LINK_NAMES:
+                    wanted |= part
+    labels = labels_of(wanted) if wanted else {}
+    for g in groups:
+        links = {}
+        for bucket, words in _BUCKETS:
+            keys = g['_keys'][bucket]
+            label = clean(f"{g['title']}, {words}", LINK_LABEL)
+            fallback = _fallback_q(g, bucket)
+            links[bucket] = bucket_link(keys, labels, slugs, label, fallback)
+            parts = _by_project(keys)
+            for row in (g['by_project'] or {}).get(bucket) or []:
+                pid = row.get('_pid')
+                link = bucket_link(parts.get(pid, set()), labels, slugs, clean(f"{g['title']}, {words}, {row['project']}", LINK_LABEL), fallback)
+                row['slug'], row['href'] = (slugs.get(pid, ''), link['href']) if link else ('', '')
+        g['links'] = links
+
+
+def _threats(ids, label, names, now, slugs=None):
     """The digest of the week, grouped (cached ``THREATS_SECONDS``, see the module text)."""
     start, end = now - timedelta(days=WINDOW_DAYS), now
     scope = SimpleNamespace(ids=list(ids), label=label)
@@ -436,16 +535,22 @@ def _threats(ids, label, names, now):
     except Exception:  # noqa: BLE001 - the section is a bonus: a failure in it never stops the page (as in the email)
         logger.warning('could not build the threats of the week', exc_info=True)
         return {'groups': [], 'folded': [], 'folded_note': '', 'period': f'{day_text(start.date())} – {day_text(end.date())}', 'note': '', 'empty': '', 'failed': True}
-    groups, folded = threat_groups(entries, names, len(ids) > 1)
+
+    def links(live):
+        try:
+            host_links(live, ids, slugs or {})
+        except Exception:  # the cards still show their counts: a count without its link is drawn as plain text
+            logger.warning('could not link the threats of the week to their hosts', exc_info=True)
+    groups, folded = threat_groups(entries, names, len(ids) > 1, links=links)
     all_kev = bool(folded) and all('KEV' in f['detail'] for f in folded)
     return {'groups': groups, 'folded': folded, 'folded_note': 'all added to CISA KEV this week' if all_kev else '',
             'period': f'{day_text(start.date())} – {day_text(end.date())}', 'note': note,
             'empty': '' if (groups or folded) else 'No new KEV or critical CVEs this week.'}
 
 
-def _cached_threats(ids, label, names, now):
+def _cached_threats(ids, label, names, now, slugs=None):
     scope = snapshot_cache.scope_hash('overview-threats', list(ids))
-    return snapshot_cache.snapshot('overview-threats', scope, lambda: _threats(ids, label, names, now), THREATS_SECONDS)['payload']
+    return snapshot_cache.snapshot('overview-threats', scope, lambda: _threats(ids, label, names, now, slugs), THREATS_SECONDS)['payload']
 
 
 # ------------------------------------------------------------------------------------------------------------------------ fix first
@@ -629,11 +734,13 @@ def build(ids, live=None, now=None, label=''):
     from dashboard.models import Project
     ids = sorted(set(ids))
     now = now or timezone.now()
-    names = {p['id']: p['name'] for p in Project._base_manager.filter(id__in=ids).values('id', 'name')}
+    projects = list(Project._base_manager.filter(id__in=ids).values('id', 'name', 'slug'))
+    names = {p['id']: p['name'] for p in projects}
+    slugs = {p['id']: p['slug'] for p in projects}
     label = label or (names[ids[0]] if len(ids) == 1 and ids[0] in names else 'your projects')
     groups, hosts = situations.ranked(ids)
     tiles = kpis(ids, live, now)
-    threats = _cached_threats(ids, label, names, now)
+    threats = _cached_threats(ids, label, names, now, slugs)
     counts = host_counts(groups)
     status = status_block(hosts, counts, situations.last_scan(ids) if hosts else None, now, next((g for g in threats['groups'] if g['matched']), None),
                           next(k for k in tiles if k['key'] == 'exposed'))

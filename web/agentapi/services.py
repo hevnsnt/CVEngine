@@ -3118,7 +3118,9 @@ def _cached_facets(project, qs, terms, params, facet_names, facet_size, with_uns
                 'unscannable': _unscannable_facet(qs, by_id) if with_unscannable else None,
                 'facets': _search_facets(by_id.keys(), facet_names, facet_size) if facet_names else {}}
     ids = sorted(project.ids) if _is_all(project) else [project.pk]
-    scope = snapshot_cache.scope_hash('search-facets', ids, [list(t) for t in terms], str(params.get('internal', '')).strip().lower(), facet_names, facet_size, with_unscannable)
+    # every parameter that narrows ``qs`` is part of the key: the names filter and the exposed filter as much as the terms
+    narrowing = [str(params.get('internal', '')).strip().lower(), str(params.get('names') or '').strip().lower(), str(params.get('exposed') or '').strip().lower() in ('1', 'true', 'yes')]
+    scope = snapshot_cache.scope_hash('search-facets', ids, [list(t) for t in terms], *narrowing, facet_names, facet_size, with_unscannable)
     cost_key = f'cve:snap:search-facets:cost:{scope}'
     try:
         fresh = facet_freshness(cache.get(cost_key))
@@ -3222,9 +3224,58 @@ def _host_has(q):
     return found
 
 
-def search_host_rows(project, terms):
-    """One Subdomain row per host that matches ``terms``: what the interactive search lists and a saved search counts."""
-    return _one_per_host(_search_matches(project, terms), per_project=_is_all(project))
+def search_host_rows(project, terms, names=None):
+    """One Subdomain row per host that matches ``terms``: what the interactive search lists and a saved search counts. ``names`` (``_host_names_q``) keeps
+    only the rows of those hosts, before the rows are folded into one per host, so a host listed by any of its names is found whichever name it is shown under."""
+    rows = _search_matches(project, terms)
+    if names is not None:
+        from django.db.models.functions import Lower
+        rows = rows.alias(_lname=Lower('name')).filter(names)
+    return _one_per_host(rows, per_project=_is_all(project))
+
+
+MAX_HOST_NAMES = 200  # the names one ``names`` filter may list (the Overview's links name at most as many: cveFeed.overview.LINK_NAMES)
+_NAME_SLUG = re.compile(r'^[-\w]+$')
+
+
+def _host_names_q(project, raw):
+    """The Q of ``names``: a comma-separated list of exact host names (case-insensitive, never a part of a name as ``host:`` is), each either a bare name or
+    ``<project slug>/<name>`` for the host of that project only. A bare name matches the host of that name in every project of the view; a project the caller
+    cannot read, or (in a one-project view) any other project, matches nothing, so the list never reaches past what the caller may see. At most MAX_HOST_NAMES
+    names. None when ``raw`` is empty (no filter); a list of names that are all out of scope is a filter that keeps nothing. Needs ``_lname`` (see
+    ``search_host_rows``)."""
+    from django.db.models import Q
+    if raw in (None, ''):
+        return None
+    if not isinstance(raw, str):
+        raise ApiError(400, 'names must be text: host names separated by commas')
+    parts = [p.strip() for p in raw.split(',') if p.strip()]
+    if not parts:
+        return None
+    if len(parts) > MAX_HOST_NAMES:
+        raise ApiError(400, f'names may list at most {MAX_HOST_NAMES} hosts')
+    bare, by_slug = set(), {}
+    for part in parts:
+        slug, sep, name = part.partition('/')
+        if not sep:
+            slug, name = '', part
+        if len(name) > 255 or not name or (sep and not _NAME_SLUG.match(slug)):
+            raise ApiError(400, f'names: "{part[:80]}" is not a host name (or project/host name)')
+        if sep:
+            by_slug.setdefault(slug, set()).add(name.lower())
+        else:
+            bare.add(name.lower())
+    q = Q(_lname__in=sorted(bare)) if bare else Q(pk__in=[])
+    if by_slug:
+        from dashboard.models import Project
+        if _is_all(project):
+            ids = dict(Project.objects.filter(slug__in=list(by_slug), id__in=list(project.ids)).values_list('slug', 'id'))
+        else:
+            ids = {project.slug: project.pk} if project.slug in by_slug else {}
+        for slug, wanted in by_slug.items():
+            if slug in ids:
+                q |= Q(target_domain__project_id=ids[slug], _lname__in=sorted(wanted))
+    return q
 
 
 def check_search(query):
@@ -3259,7 +3310,8 @@ def search_hosts(ctx, slug, params):
     then null), and ``page_size=0`` answers with ``count`` alone (no rows, no facets): the cheap modes for a poll, a palette or a badge.
     ``facets`` (comma-separated, among port|product|tech|os|country) adds the same whole-match counting for those fields,
     each up to ``facet_size`` values (default 10, max 50), highest count first. Each result says what matched. No ``q`` lists every
-    host. Highest score first; ``sort=name`` for names."""
+    host. ``names`` keeps only the hosts it lists by exact name (``_host_names_q``: ``a.example,b.example``, or ``acme/a.example`` for one project's host),
+    ANDed with ``q``: the Overview links a threat's host count to exactly the hosts it counts this way. Highest score first; ``sort=name`` for names."""
     from startScan.models import Subdomain
     project, _ = get_project(ctx, slug)
     heat = params.get('heat') or ''
@@ -3274,7 +3326,8 @@ def search_hosts(ctx, slug, params):
     except (TypeError, ValueError, OverflowError):
         raise ApiError(400, 'facet_size must be an integer')
     terms = parse_search(params.get('q'))
-    qs = _internal_filter(search_host_rows(project, terms), params)
+    names = _host_names_q(project, params.get('names'))
+    qs = _internal_filter(search_host_rows(project, terms, names), params)
     counts_only = page_args(params, zero_ok=True)[1] == 0
     if not (counts_only and not heat):
         # the collapse once: the facets' walk, the exposed filter and the page all read its ids (it ran once for the facets and again for the page)
