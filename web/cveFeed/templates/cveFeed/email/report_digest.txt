@@ -2,26 +2,35 @@
 {{ d.period.label }}{% if d.scope_kind == 'org' %} - {{ d.project_names|length }} project{{ d.project_names|length|pluralize }}{% elif d.org_name %} - {{ d.org_name }}{% endif %}
 
 AT A GLANCE
-{% for t in tiles %}- {{ t.label }}: {{ t.value }}{% if t.delta %} ({{ t.delta }}){% endif %}
-{% endfor %}- CVE matches by heat: Fire {{ fire }}, Smoke {{ smoke }}, Ice {{ ice }}
+{{ d.status.headline }}{% if d.status.sub %} {{ d.status.sub }}{% endif %}
+
+{% for t in tiles %}- {{ t.label }}: {{ t.value }}{% if t.delta %} ({{ t.delta }}){% elif t.note %} ({{ t.note }}){% endif %}
+{% endfor %}{% if totals_line %}{{ totals_line }}
+{% endif %}{% for h in heat_line %}{{ h.text }}{% if h.gloss %} {{ h.gloss }}{% endif %}{% if not forloop.last %}. {% endif %}{% endfor %} (CVE matches by heat)
 {% if not d.headline.compared %}{{ d.headline.compared_note }}
 {% endif %}{% if d.threats or d.threats_empty %}
 THIS {{ period_word|upper }}'S MOST IMPORTANT VULNERABILITIES
 {% for t in d.threats %}- {{ t.title }}{% if t.badges %} [{{ t.badges|join:", " }}]{% endif %}
-{% if t.cve_ids %}  {{ t.cve_ids|join:", " }}
+{% if t.cves and t.cves|length > 1 %}  {{ t.cve_ids|join:", " }}
 {% endif %}{% if t.summary %}  {{ t.summary }}
 {% endif %}{% if t.fixed_in %}  Fixed in {{ t.fixed_in|join:", " }}
-{% endif %}{% if t.impact_line %}  {{ t.impact_line }}
-{% endif %}  {{ t.link }}
-{% empty %}{{ d.threats_empty }}
-{% endfor %}{% if d.threats_note %}{{ d.threats_note }}
+{% endif %}  Found on {{ t.hosts_total }} of your hosts:
+{% for h in t.hosts %}    {{ h.host }} - {{ h.project }}
+{% endfor %}{% if t.hosts_more %}    +{{ t.hosts_more }} more host{{ t.hosts_more|pluralize }}
+{% endif %}{% if t.unknown %}  Version unknown on {{ t.unknown }} more host{{ t.unknown|pluralize }}.
+{% endif %}{% if t.link %}  {{ t.link }}
+{% endif %}{% empty %}{{ d.threats_empty }}
+{% endfor %}{% if d.threats_more %}plus {{ d.threats_more }} more in cvENGINE: {{ d.links.overview }}
+{% endif %}{% if d.threats_note %}{{ d.threats_note }}
 {% endif %}{% endif %}
 TOP FINDINGS
-{% for f in d.top_findings %}- [{{ f.heat|upper }}] {{ f.title }}
+{% for f in d.top_findings %}- [{{ f.heat|upper }}] {{ f.title }}{% if f.count > 1 %}: {{ f.count }} hosts{% if f.project %} in {{ f.project }}{% endif %}
+  {{ f.hosts|join:", " }}{% if f.more %}, +{{ f.more }} more{% endif %}
+{% else %}
   {{ f.host }}{% if f.project %} in {{ f.project }}{% endif %}{% if f.age_days is not None %}, open {{ f.age_days }} day{{ f.age_days|pluralize }}{% endif %}, {{ f.status }}
-  {{ f.link }}
+{% endif %}  {{ f.link }}
 {% empty %}No open findings. Nothing needs action right now.
-{% endfor %}{% if d.top_findings %}See all {{ d.headline.open_findings }} open finding{{ d.headline.open_findings|pluralize }}: {{ d.links.findings }}
+{% endfor %}{% if d.top_findings %}Browse all findings in cvENGINE: {{ d.links.findings }}
 {% endif %}
 NEW HOSTS
 {% if d.new_hosts.count %}{{ d.new_hosts.count }} new host{{ d.new_hosts.count|pluralize }} this {{ period_word }}: {% for n in d.new_hosts.names %}{{ n.host }}{% if n.project %} ({{ n.project }}){% endif %}{% if not forloop.last %}, {% endif %}{% endfor %}{% if d.new_hosts.more %} and {{ d.new_hosts.more }} more{% endif %}.{% else %}No new hosts this {{ period_word }}.{% endif %}{% if d.new_hosts.gone %} {{ d.new_hosts.gone }} host{{ d.new_hosts.gone|pluralize }} went away.{% endif %}

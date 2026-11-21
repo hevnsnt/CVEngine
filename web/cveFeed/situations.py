@@ -637,6 +637,18 @@ def one(ids, host):
     return None
 
 
+def new_worth_a_look(ids, start, end):
+    """How many items first seen in ``[start, end)`` are in the proven, likely or high-hygiene tiers (a CVE match, a scanner finding or a hygiene finding): what is
+    new and worth a person's look, not every new low-level item. The sets are the ranking's own (same tiers, same closed rules)."""
+    ids = list(ids)
+    if not ids:
+        return 0
+    total = 0
+    for qs in (_matches(ids)[0], _vulns(ids)[0], _hygiene(ids)):
+        total += qs.filter(tier__gte=HYGIENE, first__gte=start, first__lt=end).count()
+    return total
+
+
 def last_scan(ids):
     """When the newest finished scan of these projects started (``None`` when none has finished): the Overview says when nothing was scanned lately."""
     return _last_scan(list(ids))

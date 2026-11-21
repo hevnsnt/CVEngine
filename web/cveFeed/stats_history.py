@@ -2,9 +2,12 @@
 written once a day by the ``snapshot_daily_stats`` beat task. Nothing else in the schema keeps a past: every other
 number CVEngine shows (cveFeed.counts) is derived live from current rows, so a trend chart (exposure over time,
 mean time-to-fix) has nothing to plot without one of these per day."""
+import logging
+
 from django.db.models import Count
 from django.utils import timezone
 
+logger = logging.getLogger(__name__)
 OPEN_FINDING_BANDS = ('critical', 'high', 'medium', 'low', 'info')
 CVE_MATCH_HEATS = ('fire', 'smoke', 'ice')
 
@@ -130,6 +133,11 @@ def snapshot_all_projects(date=None):
     saved = 0
     for project in Project.objects.all():
         data = compute_snapshot(project, date=date)
+        try:
+            from cveFeed import overview
+            data['needs_hosts'] = overview.needs_hosts([project.id])  # the email report's "needs attention" figure, so it can say up or down
+        except Exception:  # noqa: BLE001 - a figure of the email: never stops the day's snapshot
+            logger.warning('could not count the hosts that need attention for project %s', project.pk, exc_info=True)
         StatsSnapshot.objects.update_or_create(
             project=project, date=date, defaults={k: v for k, v in data.items() if k != 'date'})
         saved += 1

@@ -49,17 +49,17 @@ class StatusTests(SimpleTestCase):
 
     def test_proven_and_likely(self):
         s = self.status(counts(proven=1, likely=26))
-        self.assertEqual(s['headline'], '1 host has a flaw a check proved, and 26 more have findings that look real.')
+        self.assertEqual(s['headline'], '1 host has a confirmed vulnerability, and 26 more have likely ones to review.')
         self.assertEqual((s['tone'], s['pill']), ('fire', 'Needs you now'))
 
     def test_plural_and_singular(self):
-        self.assertEqual(self.status(counts(proven=3, likely=1))['headline'], '3 hosts have a flaw a check proved, and 1 more has a finding that looks real.')
-        self.assertEqual(self.status(counts(proven=2))['headline'], '2 hosts have a flaw a check proved.')
-        self.assertEqual(self.status(counts(proven=1))['headline'], '1 host has a flaw a check proved.')
+        self.assertEqual(self.status(counts(proven=3, likely=1))['headline'], '3 hosts have a confirmed vulnerability, and 1 more has a likely one to review.')
+        self.assertEqual(self.status(counts(proven=2))['headline'], '2 hosts have a confirmed vulnerability.')
+        self.assertEqual(self.status(counts(proven=1))['headline'], '1 host has a confirmed vulnerability.')
 
     def test_nothing_proven_leads_with_the_likely_ones(self):
-        self.assertEqual(self.status(counts(likely=26))['headline'], '26 hosts have findings that look real, and no check has proved one yet.')
-        self.assertEqual(self.status(counts(likely=1))['headline'], '1 host has a finding that looks real, and no check has proved one yet.')
+        self.assertEqual(self.status(counts(likely=26))['headline'], '26 hosts have likely vulnerabilities to review, none confirmed yet.')
+        self.assertEqual(self.status(counts(likely=1))['headline'], '1 host has a likely vulnerability to review, not confirmed yet.')
 
     def test_high_hygiene_alone_needs_you(self):
         s = self.status(counts(hygiene=5))
@@ -384,7 +384,7 @@ class SummaryTests(Fixture):
         cert = next(r for r in ff['rows'] if r['title'] == 'cert.sa.test')
         self.assertEqual((cert['chip'], cert['action']), ('Hygiene · high', 'Renew the certificate'))
         self.assertLess([r['title'] for r in ff['rows']].index('2 A hosts'), [r['title'] for r in ff['rows']].index('cert.sa.test'))  # likely and known exploited, then the hygiene slip
-        self.assertEqual(data['status']['headline'], '1 host has a flaw a check proved, and 2 more have findings that look real.')
+        self.assertEqual(data['status']['headline'], '1 host has a confirmed vulnerability, and 2 more have likely ones to review.')
         self.assertEqual(data['status']['pill'], 'Needs you now')
         self.assertEqual(ff['total'], len(situations.ranked([self.pa.pk])[0]))
 
